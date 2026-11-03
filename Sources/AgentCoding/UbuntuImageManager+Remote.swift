@@ -44,6 +44,15 @@ extension UbuntuImageManager {
     /// `createBaseImage`'s crash-safety: everything lands in .partial
     /// files, the live image is only touched by the final atomic swap.
     ///
+    /// Two stages, with a checkpoint between them: the image plus the
+    /// catalog's steps become `stock.img`, and base.img is a clone of it
+    /// with the user's customize script run on top. When the catalog still
+    /// names the image the stock one came from, the download and the agent
+    /// installs are skipped (only steps published since are applied) — so
+    /// a failed or revised customize script costs one short boot, not a
+    /// full re-download. `fresh` discards the checkpoint (e.g. to pick up
+    /// newer agent releases the unchanged steps would install).
+    ///
     /// The download is retried (with a fresh catalog fetch in between) up
     /// to 3 times: the weekly publish deletes the previous build's objects
     /// right after the new catalog goes live, so a client that fetched the
@@ -51,6 +60,7 @@ extension UbuntuImageManager {
     /// the refetch lands on the new build.
     public func downloadBaseImage(
         catalogStore: ImageCatalogStore = .shared,
+        fresh: Bool = false,
         progress: @escaping (String) -> Void,
         output: @escaping (String) -> Void = { _ in }
     ) async throws {
@@ -60,6 +70,7 @@ extension UbuntuImageManager {
                                          minimumFreeBytes: Self.minimumBuildFreeBytes)
 
         let scratchGz = storageDir.appendingPathComponent("base.img.gz.partial")
+        let scratchStock = storageDir.appendingPathComponent("stock.img.partial")
         let scratchDisk = storageDir.appendingPathComponent("base.img.partial")
         let scratchEFI = storageDir.appendingPathComponent("efivars.partial")
 
@@ -68,8 +79,10 @@ extension UbuntuImageManager {
         let priorStamp = installedImageVersion
 
         do {
-            // 1. Catalog + image, with the delete-race retry loop.
+            // 1. Catalog, then either the saved stock image (same published
+            //    image) or a download, with the delete-race retry loop.
             var catalog: ImageCatalog?
+            var reusedStockMissing: [PostinstallStep]?
             var lastError: Error = ImageFetchError.catalogUnavailable
             for attempt in 1...3 {
                 if attempt > 1 { progress("Retrying download (attempt \(attempt)/3)…") }
@@ -80,51 +93,95 @@ extension UbuntuImageManager {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
+                if !fresh, let missing = Self.stockMissingSteps(
+                    stock: loadStockState(), imageUUID: image.uuid, steps: fetched.sortedSteps) {
+                    catalog = fetched
+                    reusedStockMissing = missing
+                    break
+                }
+                // Stale (or discarded) checkpoint: drop it now so its space
+                // is free for the download.
+                try? fm.removeItem(at: stockStateURL)
+                try? fm.removeItem(at: stockDiskURL)
                 do {
                     try await fetchAndExpand(image: image, gz: scratchGz,
-                                             disk: scratchDisk, progress: progress)
+                                             disk: scratchStock, progress: progress)
                     catalog = fetched
                     break
                 } catch {
                     lastError = error
                     try? fm.removeItem(at: scratchGz)
-                    try? fm.removeItem(at: scratchDisk)
+                    try? fm.removeItem(at: scratchStock)
                 }
             }
             guard let catalog, let image = catalog.image else { throw lastError }
+            let steps = catalog.sortedSteps
 
             // 1b. The self-contained provisioner published with the image,
-            //     so the postinstall boot below needs nothing from the
+            //     so the postinstall boots below need nothing from the
             //     Alpine CDN. Non-fatal: without it runPostinstall falls
-            //     back to the netboot.
-            await Provisioner.fetch(from: image,
-                                    kernelDest: provisionerKernelURL,
-                                    initrdDest: provisionerInitrdURL,
-                                    progress: progress)
+            //     back to the netboot. A reused stock image already
+            //     fetched it, unless it went missing since.
+            if reusedStockMissing == nil || !hasProvisioner {
+                await Provisioner.fetch(from: image,
+                                        kernelDest: provisionerKernelURL,
+                                        initrdDest: provisionerInitrdURL,
+                                        progress: progress)
+            }
 
-            // 2. Postinstall: every catalog step, unprompted — the setup
-            //    screen the user clicked through is the consent for the
-            //    initial set. Runs even with zero steps: the postinstall
-            //    boot also restores resolv.conf and e2fsck-gates the
-            //    downloaded image before promotion.
-            let steps = catalog.sortedSteps
-            progress(steps.isEmpty
-                ? "Finalizing image…"
-                : "Installing recommended packages (\(steps.count) step(s), ~2-5 min)…")
-            try await runPostinstall(
-                steps: steps,
-                targetDisk: scratchDisk,
-                customize: true,
-                progress: progress,
-                output: output
-            )
+            // 2. The stock image: every catalog step, unprompted — the
+            //    setup screen the user clicked through is the consent for
+            //    the initial set. A fresh download runs the postinstall
+            //    boot even with zero steps: it also restores resolv.conf
+            //    and e2fsck-gates the downloaded image before promotion.
+            //    A reused one only needs the steps published since.
+            var stockChanged = true
+            if let missing = reusedStockMissing {
+                progress("Reusing the saved \(image.description) image — no download needed.")
+                if missing.isEmpty {
+                    stockChanged = false
+                } else {
+                    try? fm.removeItem(at: scratchStock)
+                    try Self.cloneFile(stockDiskURL, to: scratchStock)
+                    progress("Installing recommended packages (\(missing.count) step(s))…")
+                    try await runPostinstall(steps: missing, targetDisk: scratchStock,
+                                             progress: progress, output: output)
+                }
+            } else {
+                progress(steps.isEmpty
+                    ? "Finalizing image…"
+                    : "Installing recommended packages (\(steps.count) step(s), ~2-5 min)…")
+                try await runPostinstall(steps: steps, targetDisk: scratchStock,
+                                         progress: progress, output: output)
+            }
+            if stockChanged {
+                // State first, so a crash can't pair it with another disk.
+                try? fm.removeItem(at: stockStateURL)
+                try? fm.removeItem(at: stockDiskURL)
+                try fm.moveItem(at: scratchStock, to: stockDiskURL)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(BaseImageState(imageUUID: image.uuid, version: image.version,
+                                                  appliedStepUUIDs: steps.map(\.uuid)))
+                    .write(to: stockStateURL, options: .atomic)
+            }
 
-            // 3. Fresh EFI variable store — GRUB is installed in removable
+            // 3. base.img = the stock image + the user's customize script.
+            //    A failing script leaves the stock image in place, so the
+            //    retry starts here.
+            try? fm.removeItem(at: scratchDisk)
+            try Self.cloneFile(stockDiskURL, to: scratchDisk)
+            if customizeScript != nil {
+                try await runPostinstall(steps: [], targetDisk: scratchDisk, customize: true,
+                                         progress: progress, output: output)
+            }
+
+            // 4. Fresh EFI variable store — GRUB is installed in removable
             //    mode, so no NVRAM entries need to ship with the image.
             try? fm.removeItem(at: scratchEFI)
             _ = try VZEFIVariableStore(creatingVariableStoreAt: scratchEFI, options: [])
 
-            // 4. Promote. A re-download at the same major bumps the
+            // 5. Promote. A re-download at the same major bumps the
             //    dot-revision so existing workspaces detect drift and get
             //    offered a reset (same semantics as a local rebuild).
             let newStamp = Self.nextStamp(priorStamp: priorStamp,
@@ -142,6 +199,7 @@ extension UbuntuImageManager {
             progress("Base image ready at \(baseDiskURL.path) (v\(newStamp), \(image.description))")
         } catch {
             try? fm.removeItem(at: scratchGz)
+            try? fm.removeItem(at: scratchStock)
             try? fm.removeItem(at: scratchDisk)
             try? fm.removeItem(at: scratchEFI)
             if !hadCompletePriorImage {
@@ -151,6 +209,13 @@ extension UbuntuImageManager {
                 try? fm.removeItem(at: imageStateURL)
             }
             throw error
+        }
+    }
+
+    /// clonefile(2): instant CoW copy; only diverged blocks cost space.
+    static func cloneFile(_ src: URL, to dst: URL) throws {
+        if clonefile(src.path, dst.path, 0) != 0 {
+            try FileManager.default.copyItem(at: src, to: dst)  // non-APFS fallback
         }
     }
 
@@ -174,10 +239,7 @@ extension UbuntuImageManager {
 
         let scratchDisk = storageDir.appendingPathComponent("base.img.partial")
         try? fm.removeItem(at: scratchDisk)
-        // clonefile(2): instant CoW copy; only diverged blocks cost space.
-        if clonefile(baseDiskURL.path, scratchDisk.path, 0) != 0 {
-            try fm.copyItem(at: baseDiskURL, to: scratchDisk)  // non-APFS fallback
-        }
+        try Self.cloneFile(baseDiskURL, to: scratchDisk)
 
         do {
             progress("Installing recommended packages (\(steps.count) step(s))…")

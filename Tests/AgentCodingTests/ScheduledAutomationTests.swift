@@ -89,6 +89,35 @@ struct ScheduledAutomationTests {
         #expect(!s.contains("!"))
     }
 
+    /// Finding (CWE-706): "Same-minute runs share a slug, so a refusal fails
+    /// the newest run and leaves the other looking finished".
+    @Test("Two fires in one minute get different slugs; a refusal fails the one it names")
+    @MainActor func sameMinuteSlugs() {
+        let at = date(2026, 10, 21, 18, 23)
+        let fixed = ScheduledAutomationEngine.branchSlug(for: "Nightly review", at: at, tag: "rab1")
+        #expect(fixed.hasPrefix("nightly-review-") && fixed.hasSuffix("-rab1") && fixed.count == "nightly-review-261021-1823-rab1".count)
+        let tags = (0..<200).map { _ in ScheduledAutomationEngine.runTag() }
+        #expect(tags.allSatisfy { $0.count == 4 && $0.first!.isLetter && Int($0) == nil
+                                  && $0.allSatisfy { $0.isLowercase || $0.isNumber } })
+        let a1 = ScheduledAutomationEngine.branchSlug(for: "Review", at: at)
+        let a2 = ScheduledAutomationEngine.branchSlug(for: "Review", at: at)
+        #expect(a1 != a2)
+        #expect(CodingTaskEngine.taskTranscriptCommand(branch: "wt/" + a1) != nil)   // still a valid slug
+
+        let store = ScheduledAutomationStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("auto-\(UUID().uuidString).json"))
+        let pid = UUID()
+        let auto = ScheduledAutomation(profileID: pid, trigger: .schedule)
+        store.upsert(auto)
+        let older = AutomationRunRecord(automationID: auto.id, firedAt: at, outcome: .launched, detail: a1, branchSlug: a1)
+        let newer = AutomationRunRecord(automationID: auto.id, firedAt: at, outcome: .launched, detail: a2, branchSlug: a2)
+        store.record(older); store.record(newer)                     // newest first
+        let engine = ScheduledAutomationEngine(store: store, delegate: nil)
+        engine.runRefused(profileID: pid, slug: a1, reason: "base not found", liveBranches: [])
+        #expect(store.runs.first { $0.id == older.id }?.outcome == .failed)
+        #expect(store.runs.first { $0.id == newer.id }?.outcome == .launched)
+    }
+
     @Test("Empty name still yields a usable slug")
     func slugEmpty() {
         let s = ScheduledAutomationEngine.branchSlug(for: "  ", at: date(2026, 7, 8, 9, 5))

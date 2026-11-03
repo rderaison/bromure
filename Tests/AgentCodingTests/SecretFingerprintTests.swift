@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Secret fingerprints (no secret characters on disk)")
 struct SecretFingerprintTests {
-    let secret = "sk-ant-api03-Zq8xVbN4mT1pLw7KcR2yHs6dFg9jA0eUkUyU"
+    let secret = "sk-ant-api03-Zq8xVbN4mT1pLw7KcR2yHs6dFg9jA0eUkUyU"   // ggignore: made-up test key
 
     @Test("A label carries the kind and a stable keyed fingerprint, never secret characters")
     func label() {

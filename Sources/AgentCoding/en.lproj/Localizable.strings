@@ -1195,6 +1195,20 @@
 "Couldn't start the network tunnel" = "Couldn't start the network tunnel";
 "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps.";
 "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again.";
+"The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed)." = "The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed).";
+"The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy." = "The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy.";
+"The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items." = "The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items.";
+"The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items." = "The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items.";
+"The helper isn't running yet, so its socket isn't there." = "The helper isn't running yet, so its socket isn't there.";
+"The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items." = "The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items.";
+"The helper didn't accept the connection." = "The helper didn't accept the connection.";
+"The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items." = "The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.";
+"This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@";
+"The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "The network helper only serves the user logged in at the screen.\n\nHelper: %@";
+"The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "The network helper couldn't create the tunnel interface.\n\nHelper: %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@";
 "The network helper couldn't create the tunnel interface." = "The network helper couldn't create the tunnel interface.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -1580,6 +1594,7 @@
 "Credential brokering" = "Credential brokering";
 "Supply chain" = "Supply chain";
 "Firewall" = "Firewall";
+"Sandbox Policy" = "Sandbox Policy";
 "Credential used" = "Credential used";
 "Upstream TLS" = "Upstream TLS";
 "Prompt injection" = "Prompt injection";
@@ -1861,6 +1876,9 @@
 "Another sign-in is already in progress." = "Another sign-in is already in progress.";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "The Bromure proxy isn't running, so the sign-in can't be captured.";
 "Couldn't start the sign-in machine." = "Couldn't start the sign-in machine.";
+"The sign-in was cancelled." = "The sign-in was cancelled.";
+"The sign-in window was closed." = "The sign-in window was closed.";
+"The sign-in machine stopped." = "The sign-in machine stopped.";
 "Finish signing in in your browser…" = "Finish signing in in your browser…";
 "Almost there — your browser will open in a moment…" = "Almost there — your browser will open in a moment…";
 "Sign in to %@…" = "Sign in to %@…";
@@ -2100,8 +2118,8 @@
 "VMs" = "VMs";
 "New automation…" = "New automation…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "“%@” runs %@, which doesn't report finishing, so this chain will never fire.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open.";
 "The image catalog could not be downloaded." = "The image catalog could not be downloaded.";
 "Unsupported image compression: %@" = "Unsupported image compression: %@";
 "Could not expand the downloaded image: %@" = "Could not expand the downloaded image: %@";
@@ -2236,8 +2254,6 @@
 "The planning session failed: %@" = "The planning session failed: %@";
 "No git identity or credentials found." = "No git identity or credentials found.";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@";
-"an unverified package" = "an unverified package";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?";
 "to authenticate with the API server at %@" = "to authenticate with the API server at %@";
 "Activity only" = "Activity only";
 "AI request details" = "AI request details";
@@ -2430,7 +2446,6 @@
 "sign-in expired" = "sign-in expired";
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models.";
-
 
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d model(s)";
@@ -2900,6 +2915,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model.";
 "%d sessions whose machine or folder is gone" = "%d sessions whose machine or folder is gone";
 "(empty)" = "(empty)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.";
+"Restore these workspaces and their sessions at next start" = "Restore these workspaces and their sessions at next start";
+"Restoring your workspaces" = "Restoring your workspaces";
+"Restoring Workspaces" = "Restoring Workspaces";
+"Stop Restoring" = "Stop Restoring";
+"Starting “%@”…" = "Starting “%@”…";
+"%1$d of %2$d" = "%1$d of %2$d";
+"did not start in time" = "did not start in time";
+/* VM dashboard: workspace notes */
+"Notes" = "Notes";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return saves · Shift-Return adds a line · Esc cancels";
+"Save the notes (Return)" = "Save the notes (Return)";
+"Edit the notes as markdown" = "Edit the notes as markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3153,6 +3181,7 @@
 "Erasing and restoring storage is done on the server Mac." = "Erasing and restoring storage is done on the server Mac.";
 "Home folder size" = "Home folder size";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.";
 "Queued — sent when the agent is done" = "Queued — sent when the agent is done";
 "Queued — sent when %@ is done" = "Queued — sent when %@ is done";
 "Queued — the agent reads it next" = "Queued — the agent reads it next";
@@ -3599,6 +3628,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "The latest published image, then the recommended packages. A few minutes.";
 "Recommended" = "Recommended";
 "Rebuild locally" = "Rebuild locally";
+"Re-download and reinstall the agents" = "Re-download and reinstall the agents";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Built from scratch on this Mac with the full installer. About 10 minutes.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.";
 "Download & Update" = "Download & Update";
@@ -4143,3 +4174,214 @@
 "Show the findings for %@" = "Show the findings for %@";
 "Sent to %@ to fix" = "Sent to %@ to fix";
 "Sent to %@ — it works on the fix in its own session." = "Sent to %@ — it works on the fix in its own session.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "The repository has no remote to push to — merge it without pushing.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Merged into %@, but couldn't reach the workspace to push it — is it running?";
+"Merge & Push" = "Merge & Push";
+"Push %1$@ to %2$@" = "Push %1$@ to %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Couldn't send it to %1$@: %2$@";
+"that session is gone" = "that session is gone";
+"the server didn't answer" = "the server didn't answer";
+"the server runs an older Bromure — update it to hand findings to a session" = "the server runs an older Bromure — update it to hand findings to a session";
+"the server refused it" = "the server refused it";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "Couldn't hand it to %1$@: %2$@";
+"a menu or dialog stayed open in that session" = "a menu or dialog stayed open in that session";
+"something else was typed in that session's input box" = "something else was typed in that session's input box";
+"Couldn't hand it to the Switchboard: %@" = "Couldn't hand it to the Switchboard: %@";
+"the Switchboard session is gone" = "the Switchboard session is gone";
+"the message couldn't be typed into the Switchboard" = "the message couldn't be typed into the Switchboard";
+"the Switchboard's agent never started" = "the Switchboard's agent never started";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent";
+"Hand It Over Anyway" = "Hand It Over Anyway";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over.";
+"Couldn't start the fix: %@" = "Couldn't start the fix: %@";
+"Couldn't ask the Switchboard: %@" = "Couldn't ask the Switchboard: %@";
+"that finding is gone" = "that finding is gone";
+"couldn't start the fix" = "couldn't start the fix";
+"no Switchboard could be started" = "no Switchboard could be started";
+
+/* Automations: runs at a time */
+"Runs at a time" = "Runs at a time";
+"No limit" = "No limit";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "A burst of events waits its turn, oldest first: the next one starts when a run finishes.";
+"Reviews at a time" = "Reviews at a time";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once.";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "Delete workspace “%@”?";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Removes its disk, settings, and SSH key. The mounted host folder is untouched.";
+"Couldn't delete “%@”" = "Couldn't delete “%@”";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "“%@” wasn't upgraded";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.";
+
+/* automation editor */
+"This workspace has no github.com token." = "This workspace has no github.com token.";
+
+/* automation editor */
+"This workspace has no Linear key." = "This workspace has no Linear key.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "The host couldn't list them (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "The branch is still being recorded — try again in a moment.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Looking for the worktree…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "Git status failed here — changed files aren't marked";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git couldn't read the changes";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal.";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "Sending %d…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "Sending…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "Still sending to the host — the link is slow";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ here)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (the host's time)";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Each run starts here, on a fresh branch: pick the workspace's clone of %@.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "This window can't read the workspace's GitHub token — type the repository as owner/repo.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}.";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Trim the noise out of command output before the model reads it";
+"Saved so far" = "Saved so far";
+"%@ saved" = "%@ saved";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch trims the noise out of command output before the model reads it — click for what it saved";
+"Squelch is off on this machine — click to trim the noise out of command output" = "Squelch is off on this machine — click to trim the noise out of command output";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay.";
+"Inspired by" = "Inspired by";
+"Tokens are estimated as characters ÷ 4." = "Tokens are estimated as characters ÷ 4.";
+"Trim command output on “%@”" = "Trim command output on “%@”";
+"Off on “%@”: its agents' models read every command's output as printed." = "Off on “%@”: its agents' models read every command's output as printed.";
+"This conversation" = "This conversation";
+"All of “%@”" = "All of “%@”";
+"Where it came from" = "Where it came from";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens saved";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ of %@ tokens of command output · %d outputs, %d trimmed";
+"Last two weeks" = "Last two weeks";
+"%@: %@ tokens saved" = "%@: %@ tokens saved";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev didn't answer.";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings.";
+"socket.dev is rate-limiting this API key." = "socket.dev is rate-limiting this API key.";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev hasn't finished analysing this version yet.";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev doesn't know this version (it may be very new).";
+"socket.dev's reply couldn't be read." = "socket.dev's reply couldn't be read.";
+"socket.dev answered HTTP %d." = "socket.dev answered HTTP %d.";
+"the OSV vulnerability database didn't answer." = "the OSV vulnerability database didn't answer.";
+"Install %@ from workspace “%@” without a reputation check?" = "Install %@ from workspace “%@” without a reputation check?";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources.";
+"%d more unverified packages are waiting for an answer." = "%d more unverified packages are waiting for an answer.";
+"Allow all unverified packages for 15 minutes" = "Allow all unverified packages for 15 minutes";
+"Don't allow unverified packages for the rest of the session" = "Don't allow unverified packages for the rest of the session";
+"Don't allow %@" = "Don't allow %@";
+"all unverified packages" = "all unverified packages";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "The agent asked a new question since you wrote this. Change your answer to send it.";
+"The agent asked a new question before your answer went. Read it and answer again." = "The agent asked a new question before your answer went. Read it and answer again.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "The answer couldn't be sent.";
+"Your answer is already on its way." = "Your answer is already on its way.";
+"“%@” wasn't wiped" = "“%@” wasn't wiped";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it.";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "Install %@ from workspace “%@” despite its supply-chain warning?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher.";
+"Allow %@ for this session" = "Allow %@ for this session";
+"Always allow %@ in this workspace" = "Always allow %@ in this workspace";
+"Don't allow %@, and don't ask again this session" = "Don't allow %@, and don't ask again this session";
+"downloaded — allowed by you despite: %@" = "downloaded — allowed by you despite: %@";
+"Trusted packages" = "Trusted packages";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden.";
+"Install despite reputation warnings (format: `npm:workerd`)" = "Install despite reputation warnings (format: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "Always Allow %@ in This Workspace";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "Change this workspace's trusted packages in its settings on the Mac that runs it.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Shut the workspace down first: its disk is in use.";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again.";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk.";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "It was already wiped: its disk and home were erased, and it boots fresh next time.";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk.";
+"Wipe “%@”?" = "Wipe “%@”?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time.";
+"Wipe" = "Wipe";
+"Clear the compromised mark on “%@”?" = "Clear the compromised mark on “%@”?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event.";
+"Clear Mark" = "Clear Mark";
+"Couldn't wipe “%@”" = "Couldn't wipe “%@”";
+"Couldn't clear the mark on “%@”" = "Couldn't clear the mark on “%@”";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm.";
+"Wipe and Restore…" = "Wipe and Restore…";
+"Clear Compromised Mark…" = "Clear Compromised Mark…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "Add a rule for this host and port";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "Add a rule for this host and port, for %@";
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "“%@” no longer exists: another Bromure process deleted it.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "for %@ (SigV4 signing on the host)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "The workspace is open in the other Bromure process, which runs this automation there";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Unread";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "Open a Page from the Workspace?";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.";
+
+/* guest URL open prompt */
+"Open in Browser" = "Open in Browser";

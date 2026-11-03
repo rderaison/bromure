@@ -29,7 +29,28 @@ final class RepoWatchEngine {
         t.tolerance = 3
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        refreshEventAutomations()
         tick()
+    }
+
+    /// Bring each watch's event automations in line with this build: their
+    /// prompt is stored, and one written by an older build may review what
+    /// no longer fires (each commit of a merged branch). A rewrite
+    /// re-baselines their polling, which with the backlog ignored fires
+    /// nothing old. The scheduled review writes its prompt as it fires.
+    func refreshEventAutomations() {
+        guard let delegate else { return }
+        let autoStore = delegate.scheduledAutomationStore
+        for w in store.watches {
+            for scan in [WatchedRepo.Scan.commits, .pullRequests] {
+                guard let id = w.automationID(for: scan), let current = autoStore.automation(id) else { continue }
+                let desired = Self.automation(for: scan, of: w, id: id, createdAt: current.createdAt)
+                if current != desired {
+                    BACDebug.log("watch", "\(w.repo): \(scan.rawValue) automation refreshed")
+                    delegate.saveAutomation(desired)
+                }
+            }
+        }
     }
 
     /// Follow the fix tasks.
@@ -52,20 +73,12 @@ final class RepoWatchEngine {
         // not wind the mark back.
         if let current = store.watch(w.id) { w.reviewedThrough = current.reviewedThrough }
         let autoStore = delegate.scheduledAutomationStore
+        let plan = Self.automations(for: w) { autoStore.automation($0) }
         for scan in WatchedRepo.Scan.allCases {
-            let wanted = scan == .fullScan || w.scans.contains(scan)
-            let existingID = w.automationID(for: scan)
-            guard wanted else {
-                if let id = existingID {
-                    autoStore.remove(id)
-                    w.automationIDs[scan.rawValue] = nil
-                }
+            guard let desired = plan[scan] else {
+                w.automationIDs[scan.rawValue] = nil
                 continue
             }
-            let desired = Self.automation(for: scan, of: w,
-                                          id: existingID ?? UUID(),
-                                          createdAt: existingID
-                                            .flatMap { autoStore.automation($0)?.createdAt })
             // Only write when something changed: an upsert re-baselines the
             // event trigger's polling.
             if autoStore.automation(desired.id) != desired {
@@ -80,6 +93,25 @@ final class RepoWatchEngine {
         }
         BACDebug.log("watch", "saved watch on \(w.repo) — scans: \(w.scans.map(\.rawValue))")
         return w
+    }
+
+    /// Each scan kind's automation once `w` is saved. The full scan always
+    /// has one (disabled when its schedule is off) so "Scan now" works; a
+    /// scan switched off keeps its automation, disabled — removing it took
+    /// every past run with it (the record that the code WAS reviewed), and
+    /// switching the scan back on picks it up again. A scan never on has
+    /// none. Pure.
+    nonisolated static func automations(for w: WatchedRepo,
+                                        existing: (UUID) -> ScheduledAutomation?)
+        -> [WatchedRepo.Scan: ScheduledAutomation] {
+        var out: [WatchedRepo.Scan: ScheduledAutomation] = [:]
+        for scan in WatchedRepo.Scan.allCases {
+            let existingID = w.automationID(for: scan).flatMap { existing($0) != nil ? $0 : nil }
+            guard scan == .fullScan || w.scans.contains(scan) || existingID != nil else { continue }
+            out[scan] = automation(for: scan, of: w, id: existingID ?? UUID(),
+                                   createdAt: existingID.flatMap { existing($0)?.createdAt })
+        }
+        return out
     }
 
     /// The automation behind one scan kind of a watch. Pure.
@@ -100,6 +132,7 @@ final class RepoWatchEngine {
             cloneWorkspaceFirst: false,
             watchID: w.id,
             cloneURL: w.cloneURL,
+            maxParallelRuns: w.maxParallelScans,
             createdAt: createdAt ?? w.createdAt)
         switch scan {
         case .fullScan:
@@ -194,7 +227,7 @@ final class RepoWatchEngine {
     func runs(for w: WatchedRepo) -> [AutomationRunRecord] {
         guard let autoStore = delegate?.scheduledAutomationStore else { return [] }
         let ids = Set(w.automationIDs.values)
-        return autoStore.runs.filter { ids.contains($0.automationID) }
+        return autoStore.runs.filter { ids.contains($0.automationID) && !$0.isBacklogSeed }
     }
 
     // MARK: Reporting (from the MCP)
@@ -208,14 +241,10 @@ final class RepoWatchEngine {
 
     func binding(profileID: UUID, branch: String?) -> Binding {
         guard let delegate, let branch, branch.hasPrefix("wt/") else { return Binding() }
-        let slugPart = String(branch.dropFirst(3))
         let autoStore = delegate.scheduledAutomationStore
-        guard let run = autoStore.runs.first(where: { run in
-            guard run.outcome == .launched, let slug = run.branchSlug else { return false }
-            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
-                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
-        }), let automation = autoStore.automation(run.automationID),
-              (run.runProfileID ?? automation.profileID) == profileID
+        // Same lookup as the automation engine's: launched runs only.
+        guard let run = autoStore.runForBranch(branch, profileID: profileID),
+              let automation = autoStore.automation(run.automationID)
         else { return Binding() }
         let watch = automation.watchID.flatMap { store.watch($0) }
         return Binding(run: run, watch: watch)
@@ -310,16 +339,7 @@ final class RepoWatchEngine {
             }
             return tid
         }
-        let watch = f.watchID.flatMap { store.watch($0) }
-        let brief = RepoWatchPrompts.fixTask(f)
-        let task = CodingTask(
-            title: brief.title,
-            details: brief.details,
-            profileID: watch?.profileID ?? f.profileID,
-            repoPath: watch?.repoPath ?? WatchedRepo.defaultRepoPath(for: f.repo),
-            tool: watch?.tool ?? delegate.profile(for: f.profileID)?.tool ?? .claude,
-            stage: .backlog,
-            cloneURL: "https://github.com/\(f.repo).git")
+        let task = fixTask(f, delegate: delegate)
         delegate.codingTaskStore.upsert(task)
         store.mutate(findingID) {
             $0.taskID = task.id
@@ -328,6 +348,48 @@ final class RepoWatchEngine {
         delegate.codingTaskEngine.start(task.id)
         BACDebug.log("watch", "fix started for “\(f.title)” → task \(task.id)")
         return task.id
+    }
+
+    /// "Ask @foo to fix it": the fix as a backlog task queued for that
+    /// session — on the board like any task (its progress, review and
+    /// landing), picked up as soon as the session has no board task in
+    /// progress. A finding whose task hasn't started yet is re-queued for
+    /// it; one already under way stays where it is. Returns the task id.
+    @discardableResult
+    func fix(_ findingID: UUID, by session: AgentSession) -> UUID? {
+        guard let delegate, let f = store.finding(findingID) else { return nil }
+        let assignee = TaskAssignment(kind: .session, id: session.id,
+                                      label: delegate.delegationEngine.label(session))
+        if let tid = f.taskID, let existing = delegate.codingTaskStore.task(tid), existing.stage != .done {
+            guard existing.stage == .backlog || existing.stage == .planning else { return tid }
+            delegate.taskDispatcher.assign(tid, to: assignee)
+            store.mutate(findingID) { $0.status = .inProgress }
+            return tid
+        }
+        var task = fixTask(f, delegate: delegate)
+        task.assignment = assignee
+        delegate.codingTaskStore.upsert(task)
+        store.mutate(findingID) {
+            $0.taskID = task.id
+            $0.status = .inProgress
+        }
+        delegate.taskDispatcher.assign(task.id, to: assignee)
+        BACDebug.log("watch", "fix of “\(f.title)” queued for \(assignee.label) → task \(task.id)")
+        return task.id
+    }
+
+    /// The coding task that fixes `f`, in Backlog.
+    private func fixTask(_ f: RepoFinding, delegate: ACAppDelegate) -> CodingTask {
+        let watch = f.watchID.flatMap { store.watch($0) }
+        let brief = RepoWatchPrompts.fixTask(f)
+        return CodingTask(
+            title: brief.title,
+            details: brief.details,
+            profileID: watch?.profileID ?? f.profileID,
+            repoPath: watch?.repoPath ?? WatchedRepo.defaultRepoPath(for: f.repo),
+            tool: watch?.tool ?? delegate.profile(for: f.profileID)?.tool ?? .claude,
+            stage: .backlog,
+            cloneURL: "https://github.com/\(f.repo).git")
     }
 
     private func autoFix(_ w: WatchedRepo, candidates: [RepoFinding]) {

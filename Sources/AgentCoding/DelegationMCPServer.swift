@@ -357,7 +357,7 @@ final class DelegationMCPServer: MCPLineHandler {
                 }
                 // The branch and checkout are known once its tab reports in.
                 let deadline = Date().addingTimeInterval(45)
-                while Date() < deadline {
+                while Date() < deadline, !Task.isCancelled {
                     if let s = engine.sessions.session(sid), s.worktreeBranch != nil || s.lastError != nil { break }
                     try? await Task.sleep(nanoseconds: 500_000_000)
                 }
@@ -431,7 +431,7 @@ final class DelegationMCPServer: MCPLineHandler {
                     if let why = r.json["error"] as? String { return errorResult(why) }
                     // The mirror carries the request on its next poll.
                     let deadline = Date().addingTimeInterval(5)
-                    while Date() < deadline, engine.sessions.session(target.id)?.branchMerge == nil {
+                    while Date() < deadline, !Task.isCancelled, engine.sessions.session(target.id)?.branchMerge == nil {
                         try? await Task.sleep(nanoseconds: 250_000_000)
                     }
                 } else if let why = await engine.sessionEngine.requestMerge(

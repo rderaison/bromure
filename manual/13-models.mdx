@@ -214,7 +214,7 @@ The on-device engine runs open-weight coding models on your Mac's GPU with Apple
 
 ### The engine process
 
-The MLX engine runs as a **supervised child process** of the app's own binary (`bromure-cli model _mlx-engine`), not inside the app. Loading a model too large for the Mac's memory kills only the engine child, never the app or its running VMs. The app restarts a crashed engine automatically, up to three times; after that it gives up with the log line `engine child crashed repeatedly — giving up (a model likely OOMs this Mac)`. The child is killed when the app quits, and an orphan left by a hard crash is reaped at the next launch.
+The MLX engine runs as a **supervised child process** of the app's own binary (`bromure-ac model _mlx-engine`), not inside the app. Loading a model too large for the Mac's memory kills only the engine child, never the app or its running VMs. The app restarts a crashed engine automatically, up to three times; after that it gives up with the log line `engine child crashed repeatedly — giving up (a model likely OOMs this Mac)`. The child is killed when the app quits, and an orphan left by a hard crash is reaped at the next launch.
 
 One engine serves every machine. It binds a kernel-assigned loopback port on `127.0.0.1` — never `0.0.0.0`, and never Ollama's conventional `11434`, so a separate Ollama or LM Studio install keeps working. It can hold several models under a memory budget (the Mac's unified memory minus some headroom), loading each on first use and evicting the least-recently-used one when memory is tight.
 

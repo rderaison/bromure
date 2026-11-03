@@ -593,6 +593,12 @@ struct MediaView: View {
     @Environment(\.displayFileReader) private var reader
     @State private var image: PlatformImage?
     @State private var videoURL: URL?
+    #if canImport(AVKit)
+    /// The one player for `videoURL`. Built in `body`, every re-render (the
+    /// chat redraws on each transcript poll, 0.4-1.2 s) made a new one: a
+    /// playing video went back to the start, paused.
+    @State private var player: AVPlayer?
+    #endif
     @State private var loading = false
     @State private var failure: String?
     /// No machine to read from (a paused session) and nothing cached.
@@ -624,9 +630,9 @@ struct MediaView: View {
                     .frame(maxWidth: .infinity, minHeight: 60)
             } else if let image {
                 imageView(image)
-            } else if let videoURL {
+            } else if videoURL != nil {
                 #if canImport(AVKit)
-                VideoPlayer(player: AVPlayer(url: videoURL))
+                VideoPlayer(player: player)
                     .frame(minHeight: expanded ? 300 : 240, maxHeight: expanded ? .infinity : 360)
                 #endif
             } else if kind == .video && !loading {
@@ -649,7 +655,7 @@ struct MediaView: View {
                 if let d = DisplayMediaCache.image(anyScopeFor: path), let img = PlatformImage(data: d) {
                     image = img
                 } else if let u = DisplayMediaCache.video(anyScopeFor: path) {
-                    videoURL = u
+                    showVideo(u)
                 } else if kind != nil {
                     offline = true
                 } else {
@@ -660,9 +666,21 @@ struct MediaView: View {
             offline = false
             let key = reader.cacheKey(path)
             if let d = DisplayMediaCache.image(key), let img = PlatformImage(data: d) { image = img; return }
-            if let u = DisplayMediaCache.video(key) { videoURL = u; return }
+            if let u = DisplayMediaCache.video(key) { showVideo(u); return }
             if kind == .image || expanded { load() }   // a video waits for a tap inline
         }
+    }
+
+    /// Show the video at `url`: its player is made once, and again only for
+    /// another file.
+    private func showVideo(_ url: URL) {
+        #if canImport(AVKit)
+        if url != videoURL || player == nil {
+            player?.pause()   // another file: the one it played stops now
+            player = AVPlayer(url: url)
+        }
+        #endif
+        videoURL = url
     }
 
     @ViewBuilder
@@ -704,7 +722,7 @@ struct MediaView: View {
             case .video:
                 if let url = DisplayMediaCache.store(video: data, for: key,
                                                      ext: (path as NSString).pathExtension.lowercased()) {
-                    videoURL = url
+                    showVideo(url)
                 } else {
                     failure = NSLocalizedString("Couldn't prepare the video.", comment: "display card")
                 }

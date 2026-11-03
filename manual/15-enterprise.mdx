@@ -93,7 +93,7 @@ Enrolled, non-private sessions stream structured [cloud events](18-glossary.mdx)
 | `supply_chain.fetch` | Ecosystem, package, version, request kind, outcome, and reason. |
 | `vm.disk_reset` | The reason and the base-image versions involved. |
 | `prompt_injection.detection` | Detector, method, action, host, source, score, signals, tool-use id, and the whole flagged snippet (up to 20,000 characters). |
-| `egress.firewall` | One event per [egress-firewall](07-settings/guardrails.mdx#outbound-connections-egress-firewall) verdict: host, port, protocol, the action taken, and the rule that decided it (`rule`, empty when the default action did). `layer` says where it was decided (`l4`/`sni` for direct connections, `proxy` for those made through the proxy settings); `hostnames` lists the destination's other DNS names. An open connection cut because the rules changed carries `closed: true` and the rule that had allowed it (`previous_rule`). Allowed connections are sent only for machines that log them (Firewall › **Log allowed connections**). |
+| `egress.firewall` | One event per [egress-firewall](07-settings/sandbox-policy.mdx#outbound-rules) verdict: host, port, protocol, the action taken, and the rule that decided it (`rule`, empty when the default action did). `layer` says where it was decided (`l4`/`sni` for direct connections, `proxy` for those made through the proxy settings); `hostnames` lists the destination's other DNS names. An open connection cut because the rules changed carries `closed: true` and the rule that had allowed it (`previous_rule`). Allowed connections are sent only for machines that log them (Firewall › **Log allowed connections**). |
 | `credential.exfiltration` | The compromise detector caught a fake credential leaving the VM for a host outside its scope — credential name, declared and observed hosts, previews only. |
 | `credential.exfiltration_allowed` | You answered **Allow** on a compromise alert: the observed host, allowed for the rest of that session only. |
 | `guardrails.block` | A [guardrail](07-settings/guardrails.mdx) blocked a request: host, method, path, and the reason. |
@@ -101,6 +101,9 @@ Enrolled, non-private sessions stream structured [cloud events](18-glossary.mdx)
 | `tls.insecure_bypass` | A request asked to skip upstream certificate validation (no real credentials are injected into such a request): the host. |
 | `privacy.pii_swap` | [PII protection](10a-pii.mdx) replaced personal data in an AI request: the host, the number of replacements per category, and the latency — never the personal data itself. |
 | `agent.delegation` | A message between [agents working together](06d-delegation.mdx): the delegation's title, the message kind, sender and recipient, whether it was delivered or withheld, and the message text shortened to 200 characters (plus the flagged snippet, same length, when the prompt-injection scan withheld it). |
+| `net.flow` | On a machine with the [kernel sentry](10b-sandbox-policy.mdx#the-kernel-sentry): one connection, with its process chain (redacted arguments), the tool call behind it and the host's decision — the [network lineage](11a-security-timeline.mdx#network-lineage). |
+| `agent.reasoning` | **Only when your organization opts in** (see [Managed sandbox policies](#managed-sandbox-policies)): what the agent wrote before a tool call — its reasoning (up to 2,000 characters), stated intent, and the prompt. |
+| Guest sandbox, kernel sentry and watchdog events | What the [guest sandbox](10b-sandbox-policy.mdx#the-guest-sandbox) refused, package requests, sentry state and tampering alarms, credentials blocked by strict mode, advisor proposals, and [agent watchdog](07-settings/guardrails.mdx#agent-watchdog) findings and quarantines. |
 | Detailed HTTP logs | Per-request metadata from the transparent interception layer (method, host, path, status, sizes), giving admins the workspace's outbound HTTP surface beyond its AI traffic. |
 
 The security-relevant events (blocks, credential brokering, supply chain, PII, delegation and the like) also appear in this Mac's own [Security Timeline](11a-security-timeline.mdx), enrolled or not.
@@ -109,13 +112,14 @@ The security-relevant events (blocks, credential brokering, supply chain, PII, d
 
 This is the part to be precise about. The stream is metadata; the content of your work stays local. Bromure **never** uploads:
 
-- **Raw user prompts** or **model response bodies.**
+- **Raw user prompts** or **model response bodies** — unless your organization opts in to `agent.reasoning`.
+- **Secrets in command lines.** Process arguments and commands in every event are [redacted](11-tracing.mdx#command-lines-are-redacted) before upload.
 - **Secret values.** Credential events carry masked previews or fingerprints only — real key bytes never leave the Mac.
 - **Anything from a private-mode workspace** (see below), and **anything at all when un-enrolled.**
 
 Buffered events are held in memory only; a hard quit discards any not yet flushed, and there is no disk-backed retry queue. That is accepted by design — telemetry is best-effort, never at the expense of your work.
 
-> **Warning:** There are two deliberate exceptions to the metadata-only rule. `prompt_injection.detection` uploads the **whole flagged snippet** (up to 20,000 characters), so an administrator can see exactly what the agent was about to read — a prompt-injection attempt is precisely the thing security teams need to inspect verbatim. And `agent.delegation` carries the first 200 characters of each message agents send each other. Everything else remains previews, paths, counts, and masks. See [Prompt-Injection Protection](10-prompt-injection.mdx) for what triggers a detection.
+> **Warning:** There are two deliberate exceptions to the metadata-only rule. `prompt_injection.detection` uploads the **whole flagged snippet** (up to 20,000 characters), so an administrator can see exactly what the agent was about to read — a prompt-injection attempt is precisely the thing security teams need to inspect verbatim. And `agent.delegation` carries the first 200 characters of each message agents send each other. A third is opt-in: with `capture_agent_reasoning`, `agent.reasoning` uploads what the agent wrote before each tool call, and the prompt. Everything else remains previews, paths, counts, and masks. See [Prompt-Injection Protection](10-prompt-injection.mdx) for what triggers a detection.
 
 ### Batching and delivery
 
@@ -149,6 +153,17 @@ Two of the streamed event types are what make enterprise-tier reporting useful a
 
 - **Supply-chain inventory.** Every metadata and artifact fetch emits a `supply_chain.fetch` event carrying the ecosystem, package, version, request kind, outcome (`allowed`, `rewritten`, `blocked`, or `stripped`), and reason. Enrollment alone gives administrators an organization-wide inventory of every package every agent pulled in — even on workspaces with every supply-chain enforcement layer switched off, since observation is decoupled from enforcement. The enforcement side of this is documented in [Supply-Chain Protection](09-supply-chain.mdx).
 - **Token-usage rollups.** Every `llm.request` event carries the model, input and output token counts, and cache-creation and cache-read counts. Aggregated across a fleet, these become per-user, per-workspace, and per-model spend reports without any prompt or response content ever being uploaded. The local counterpart — per-request token accounting you can read on your own Mac — is in [Tracing](11-tracing.mdx).
+
+## Managed sandbox policies
+
+An organization can manage the [OpenShell side of Sandbox Policy](10b-sandbox-policy.mdx) for every enrolled Mac. The managed policy is fetched at launch and with each ten-minute heartbeat, and cached so it applies offline. Removing it on the server clears it on the Mac. It can carry:
+
+- an **organization boundary** — the most any machine's OpenShell policy may allow. Every save is checked against it, and the Sandbox Policy pane shows **Set by your organization (bromure.io)**;
+- the **default policy** a machine gets when it switches to OpenShell;
+- a requirement for **Enforce binaries** or **strict credential mode** — the switches then read "Required by your organization." and can't be turned off;
+- a **minimum kernel sentry mode** — **Best effort** or **Required**;
+- a **maximum policy advisor mode** — for example, no automatic approvals;
+- `capture_agent_reasoning` — upload `agent.reasoning` events with network lineage. Off unless set.
 
 ## The fleet view
 

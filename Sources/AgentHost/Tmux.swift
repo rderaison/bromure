@@ -100,6 +100,8 @@ enum Tmux {
         var worktree = ""
         var parentBranch = ""
         var rootRepo = ""
+        /// When the hook last saw the agent's turn end or a question (epoch).
+        var activeAt: Date?
         /// Display name when set by us, else tmux's window name.
         var title: String { display.isEmpty ? name : display }
     }
@@ -111,6 +113,7 @@ enum Tmux {
         "window_index", "window_name", "@display", "pane_current_path", "pane_tty",
         "pane_id", "pane_pid", "window_active", "@bromure_status", "@bromure_session",
         "@bromure_transcript", "@bromure_agent_session", "@worktree", "@parent_branch", "@root_repo",
+        "@bromure_active_at",
     ]
 
     static func listWindows() -> [Window]? {
@@ -123,7 +126,8 @@ enum Tmux {
             return Window(index: idx, name: f[1], display: f[2], cwd: f[3], tty: f[4],
                           paneID: f[5], panePID: Int32(f[6]) ?? 0, active: f[7] == "1",
                           status: f[8], sessionID: f[9], transcriptPath: f[10], agentSessionID: f[11],
-                          worktree: f[12], parentBranch: f[13], rootRepo: f[14])
+                          worktree: f[12], parentBranch: f[13], rootRepo: f[14],
+                          activeAt: TimeInterval(f[15]).map(Date.init(timeIntervalSince1970:)))
         }
     }
 

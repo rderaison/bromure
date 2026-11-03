@@ -399,6 +399,9 @@ struct SessionStageActions {
     /// The machine's settings (the workspace editor), by profile id — from
     /// a session's right-click, its ⋯ menu, its sidebar row.
     var editMachine: (UUID) -> Void = { _ in }
+    /// Squelch on or off for a machine, by profile id; nil where it can't
+    /// be changed from here.
+    var setSquelch: ((UUID, Bool) -> Void)? = nil
     /// The session's Linux terminal (its tmux tab), by session id.
     var openLinux: (UUID) -> Void = { _ in }
 
@@ -549,6 +552,8 @@ struct SessionHeaderView: View {
     /// The session whose flamegraph popover is open (the stopwatch).
     @State private var flameFor: UUID?
     #endif
+    /// The session whose Squelch popover is open.
+    @State private var squelchFor: UUID?
     @State private var nicknameSheet = false
 
     private var session: AgentSession? { model.selectedSessionID.flatMap { store.session($0) } }
@@ -771,6 +776,10 @@ struct SessionHeaderView: View {
                              TranscriptSearchIndex.compact(t.output)))
             }
             #endif
+            if detail >= 4, let row = model.profileRows.first(where: { $0.id == s.profileID }),
+               !model.machineIDs.contains(s.profileID) {
+                squelchItem(s, row: row)
+            }
         }
         .font(.system(size: 12))
         .foregroundStyle(.secondary)
@@ -939,6 +948,35 @@ struct SessionHeaderView: View {
         }
     }
 
+    /// Squelch in the header: what it saved in this conversation (a dim
+    /// icon while it's off), and a click away, its switch and its numbers.
+    @ViewBuilder
+    private func squelchItem(_ s: AgentSession, row: SessionListModel.ProfileRow) -> some View {
+        let tally = SquelchHome.tally(for: s)
+        metaDot
+        Button { squelchFor = s.id } label: {
+            HStack(spacing: 4) {
+                Image(systemName: row.squelch ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 10.5))
+                if let t = tally, t.savedTokens > 0 {
+                    Text(String(format: NSLocalizedString("%@ saved", comment: "session header: tokens Squelch kept from the model"),
+                                SquelchFormat.tokens(t.savedTokens)))
+                        .monospacedDigit()
+                }
+            }
+            .opacity(row.squelch ? 1 : 0.55)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(row.squelch
+              ? NSLocalizedString("Squelch trims the noise out of command output before the model reads it — click for what it saved", comment: "session header")
+              : NSLocalizedString("Squelch is off on this machine — click to trim the noise out of command output", comment: "session header"))
+        .popover(isPresented: Binding(get: { squelchFor == s.id }, set: { if !$0 { squelchFor = nil } })) {
+            SquelchPopover(machine: row.name, enabled: row.squelch, session: tally, summary: row.squelchSummary,
+                           setEnabled: actions.setSquelch.map { set in { set(s.profileID, $0) } })
+        }
+    }
+
     private var metaDot: some View {
         Text("·").foregroundStyle(.tertiary)
     }
@@ -956,7 +994,7 @@ struct SessionHeaderView: View {
         let detail: String?
         switch bucket {
         case .working: detail = nil
-        case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
+        case .idle:    detail = SessionHome.elapsed(since: SessionHome.lastActivity(s))
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             // "3 min ago" — but never "just now ago".
             $0 == NSLocalizedString("just now", comment: "elapsed")

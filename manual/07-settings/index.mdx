@@ -47,20 +47,20 @@ The groups and panes, in sidebar order:
 | Group | Panes |
 |---|---|
 | **Workspace** | General, Appearance |
-| **Models** | Models, Fusion |
+| **Models** | Models, Fusion, Squelch |
 | **Machine** | Folders, Environment, MCP, Browser, Resources |
-| **Security** | Credentials, Tracing, Guardrails, Supply Chain, Prompt Injection, PII Protection |
+| **Security** | Credentials, Tracing, Guardrails, Sandbox Policy, Supply Chain, Prompt Injection, PII Protection |
 | **App** | Automation (Preferences only) |
 
-**Search settings** filters the sidebar as you type. It matches pane names, group names, and a few keywords per pane — for example `firewall` finds **Guardrails**, `ram` finds **Resources**, `api key` finds **Models**, `gdpr` finds **PII Protection**. Every word you type must match. If the selected pane is filtered out, the editor jumps to the first match.
+**Search settings** filters the sidebar as you type. It matches pane names, group names, and a few keywords per pane — for example `firewall` or `openshell` finds **Sandbox Policy**, `ram` finds **Resources**, `api key` finds **Models**, `gdpr` finds **PII Protection**. Every word you type must match. If the selected pane is filtered out, the editor jumps to the first match.
 
 ## What saves live, and what waits for Save
 
 Edits in the editor are a draft until you click **Save**. What happens next depends on whether the machine is running.
 
-**Applied to a running machine at Save, without a restart:** environment variables, credentials (git tokens, API keys, DigitalOcean, Linear, Twilio, container registries, databases), git identity, guardrail write policies and ask-before-use gates, the egress firewall, transparent interception, the insecure-bypass and exfiltration-alert switches, supply-chain policy, prompt-injection policy, PII protection, the trace level, the workspace's model override, terminal font, colors, cursor and opacity, and the machine's name and color.
+**Applied to a running machine at Save, without a restart:** environment variables, credentials (git tokens, API keys, DigitalOcean, Linear, Twilio, container registries, databases), git identity, guardrail write policies and ask-before-use gates, the firewall rules and the OpenShell network policy (both apply as you edit them), telling the agent, the agent watchdog, strict credentials, transparent interception, the insecure-bypass and exfiltration-alert switches, supply-chain policy, prompt-injection policy, PII protection, the trace level, the workspace's model override, terminal font, colors, cursor and opacity, and the machine's name and color.
 
-**Needs a restart:** VM memory, network mode, shared folders, SSH keys (the workspace key and imported keys), Kubernetes contexts, and AWS credentials. When you save one of these while the machine runs, the app asks **Restart “*name*” to apply these changes?**, lists them, and offers **Restart Now…** or **Later**.
+**Needs a restart:** VM memory, network mode, shared folders, SSH keys (the workspace key and imported keys), Kubernetes contexts, AWS credentials, and — under the OpenShell engine — **Enforce binaries** (the strict sandbox), the filesystem / process sandbox and the kernel sentry mode. When you save one of these while the machine runs, the app asks **Restart “*name*” to apply these changes?**, lists them, and offers **Restart Now…** or **Later**.
 
 Two edits ask before saving:
 
@@ -118,7 +118,7 @@ The iPhone, iPad and Vision Pro client uses the same editor to change a machine 
 - **iPhone** — a Settings-style list: the grouped panes are the first screen and each pushes its own page. **Cancel** and **Save** sit in the navigation bar. There is no search field.
 - **iPad and Apple Vision Pro** — the sidebar-and-detail layout of the Mac, with **Search settings**, and **Cancel** / **Save** along the bottom.
 
-Everything in the editor applies on the server. The mobile editor leaves out what only makes sense on the Mac running the machines: the **Models** and **Automation** panes, the browser-image section, the egress-firewall rule table, and the bridged-interface picker. A few fields change shape: **Add folder…** asks for the folder's absolute path on the server, and AWS SSO takes the profile name as typed.
+Everything in the editor applies on the server. The mobile editor leaves out what only makes sense on the Mac running the machines: the **Models** and **Automation** panes, the browser-image section, the firewall rule table and OpenShell policy editor, and the bridged-interface picker. A few fields change shape: **Add folder…** asks for the folder's absolute path on the server, and AWS SSO takes the profile name as typed.
 
 ## The panes
 
@@ -128,6 +128,7 @@ Everything in the editor applies on the server. The mobile editor leaves out wha
 | [Appearance](appearance.mdx) | Terminal font, cursor, colors, and opacity. |
 | [Models](models.mdx) | This machine's override of the global model settings. |
 | [Fusion](fusion.mdx) | Multi-model answer synthesis (BETA): which models to fuse and which one judges. |
+| [Squelch](squelch.mdx) | Noise cut out of command output before the model reads it, and what it saved. |
 | [Folders](folders.mdx) | Mac folders shared into the VM (up to 8), and config files imported at setup. |
 | [Environment](environment.mdx) | Plain `KEY=VALUE` variables exported into every shell. |
 | [MCP](mcp.mdx) | Your own MCP servers, next to the built-in `bromure-*` ones. |
@@ -135,7 +136,8 @@ Everything in the editor applies on the server. The mobile editor leaves out wha
 | [Resources](resources.mdx) | Storage layers, memory, and NAT or bridged networking. |
 | [Credentials](credentials.mdx) | Git identity and every secret the agent may use — held on the Mac, swapped on the wire. |
 | [Tracing](tracing.mdx) | How much traffic is recorded, private mode, subscription token swap. |
-| [Guardrails](guardrails.mdx) | Ask-before-use, write policies, the egress firewall, and the interception escape hatches. |
+| [Guardrails](guardrails.mdx) | Ask-before-use, write policies, and the protections shared by both sandbox engines: telling the agent, the watchdog, strict credentials, and the interception escape hatches. |
+| [Sandbox Policy](sandbox-policy.mdx) | The sandbox engine: the Bromure Firewall's outbound rules, or an OpenShell policy with the guest sandbox, the kernel sentry, the policy advisor, and governance. |
 | [Supply Chain](supply-chain.mdx) | Package age gate, OSV, socket.dev or Depi, install scripts, lockfile prompts. |
 | [Prompt Injection](prompt-injection.mdx) | On-device detectors for injected instructions, and what happens on a hit. |
 | [PII Protection](pii-protection.mdx) | Personal data swapped for stand-ins before it reaches the model. |

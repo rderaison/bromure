@@ -17,6 +17,10 @@ struct SecurityPosture: Identifiable {
     let guardrails: Bool
     let promptInjection: Bool
     var pii: Bool = false
+    /// The guest is confined: its OpenShell policy has a filesystem_policy
+    /// or process section, or the guest reported its filesystem sandbox
+    /// enforced (`confinesGuest(_:)`).
+    var sandbox: Bool = false
 }
 
 extension SecurityPosture {
@@ -29,12 +33,27 @@ extension SecurityPosture {
         var credentialsOnly = p
         credentialsOnly.egressRules = ""
         let ruleset = p.egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An OpenShell policy denies by default: that's a firewall too.
         self.init(id: p.id, name: p.name, colorHex: p.color.hexInUI,
-                  firewall: !ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false),
+                  firewall: p.usesOpenShellPolicy
+                      || (!ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false)),
                   supplyChain: p.supplyChain.isActive,
                   guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
                   promptInjection: p.promptInjection.isActive,
-                  pii: p.pii.isActive)
+                  pii: p.pii.isActive,
+                  sandbox: Self.confinesGuest(p))
+    }
+
+    /// Finding (CWE-451): "Security Overview marks Sandbox on for a
+    /// network-only OpenShell policy" — the column was lit by any OpenShell
+    /// document, which is the Firewall's default deny, not confinement.
+    static func confinesGuest(_ p: Profile,
+                              reported: GuestSandboxStatusStore.Status? = nil) -> Bool {
+        if p.usesOpenShellPolicy,
+           OpenShellSandboxSpec(policyYAML: p.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off").confinesGuest {
+            return true
+        }
+        return (reported ?? GuestSandboxStatusStore.shared.status(for: p.id))?.filesystem == "enforced"
     }
 }
 
@@ -45,6 +64,39 @@ extension SecurityTimeline.Event {
     var repeats: Int? {
         guard coalesceKey != nil, let n = count, n > 1 else { return nil }
         return n
+    }
+
+    /// How many occurrences the row counts for in a total: its folded
+    /// denials (guest sandbox), else its coalesced repeats, else one.
+    var occurrences: Int { denials ?? max(1, repeats ?? 1) }
+}
+
+/// What the Overview opens the Timeline on. Each click replaces every filter.
+struct SecurityTimelineFilter {
+    var engine: String? = nil
+    var outcome: SecurityTimeline.Decision? = nil
+    var workspace: UUID? = nil
+    var query = ""
+    /// One block, exactly (`SecurityOverview.blockKey`): what a Latest
+    /// blocks row opens. The search box shows its key; editing the search
+    /// drops back to an ordinary search.
+    var block: String? = nil
+}
+
+extension SecurityTimeline.Event {
+    /// The words that find every instance of this event in the Timeline's
+    /// search: the condition without what changes each time (a pid, a
+    /// repeat count). A guest-sandbox row (`bash (pid 12) — exec /opt/x`)
+    /// is searched by what was tried.
+    var searchKey: String {
+        var c = condition
+        if let r = c.range(of: #" \(pid \d+\)"#, options: .regularExpression) { c.removeSubrange(r) }
+        if let r = c.range(of: #" — ×\d+.*$|\s×\d+$"#, options: .regularExpression) { c.removeSubrange(r) }
+        if engine == NSLocalizedString("Guest sandbox", comment: "Security Timeline engine"),
+           let dash = c.range(of: " — ") {
+            return String(c[dash.upperBound...])
+        }
+        return c
     }
 }
 
@@ -69,11 +121,21 @@ struct SecurityTimelineView: View {
 
     private enum Tab: String { case overview, timeline }
     @State private var tab: Tab = .overview
+    @AppStorage(OCSFExporter.enabledKey) private var ocsfEnabled = false
+    @AppStorage(OCSFExporter.schemaVersionKey) private var ocsfSchema = OCSFExporter.currentSchema
 
     @State private var query = ""
     @State private var engineFilter: String?
+    /// One workspace's events only (nil = all).
+    @State private var workspaceFilter: UUID?
+    /// The time range shown, in hours (0 = all); starts on the default from
+    /// Preferences › Tracing.
+    @State private var rangeHours = SecurityTimeline.defaultRangeHours
     /// The Overview's Blocked / Allowed tiles narrow by outcome.
     @State private var outcomeFilter: SecurityTimeline.Decision?
+    /// Latest blocks' row: this block only, matched whole (not a substring
+    /// of every column), while the search box still shows its key.
+    @State private var blockFilter: (key: String, query: String)?
     /// "" = this Mac; a host's name = that mirrored host; nil = all.
     @State private var machineFilter: String?
     /// Selected rows (the context menu acts on the clicked one).
@@ -82,6 +144,8 @@ struct SecurityTimelineView: View {
     /// rows re-evaluate "Allowed now" / "Blocked now" against the new rules
     /// while the window stays open.
     @State private var rulesGeneration = 0
+    /// The row whose lineage is open (double-click a Network row).
+    @State private var lineage: SecurityTimeline.Event?
 
     private var machines: [String] { timeline.remote.keys.sorted() }
 
@@ -89,12 +153,38 @@ struct SecurityTimelineView: View {
         Array(Set(timeline.allEvents.map(\.engine))).sorted()
     }
 
+    /// Every workspace with events, by name (this Mac's and mirrored ones).
+    private var workspaces: [(id: UUID, name: String)] {
+        var names: [UUID: String] = [:]
+        for e in timeline.allEvents { names[e.profileID] = e.workspace ?? names[e.profileID] }
+        for p in postures() { names[p.id] = p.name }
+        return names.map { ($0.key, $0.value ?? "—") }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func open(_ f: SecurityTimelineFilter) {
+        engineFilter = f.engine
+        outcomeFilter = f.outcome
+        workspaceFilter = f.workspace
+        machineFilter = nil
+        query = f.query
+        blockFilter = f.block.map { ($0, f.query) }
+        tab = .timeline
+    }
+
     private var rows: [SecurityTimeline.Event] {
         var e = timeline.allEvents
+        if rangeHours > 0 {
+            let since = Date().addingTimeInterval(-Double(rangeHours) * 3600)
+            e = e.filter { $0.time >= since }
+        }
+        if let workspaceFilter { e = e.filter { $0.profileID == workspaceFilter } }
         if let machineFilter { e = e.filter { ($0.machine ?? "") == machineFilter } }
         if let engineFilter { e = e.filter { $0.engine == engineFilter } }
         if let outcomeFilter { e = e.filter { $0.kind == outcomeFilter } }
-        if !query.isEmpty {
+        if let blockFilter, blockFilter.query == query {
+            e = e.filter { SecurityOverview.blockKey($0) == blockFilter.key }
+        } else if !query.isEmpty {
             let q = query.lowercased()
             e = e.filter {
                 $0.engine.lowercased().contains(q)
@@ -113,10 +203,10 @@ struct SecurityTimelineView: View {
             Divider()
             if tab == .overview {
                 SecurityOverview(timeline: timeline, postures: postures(),
-                                 showTimeline: { engine, outcome in
-                                     engineFilter = engine
-                                     outcomeFilter = outcome
-                                     tab = .timeline
+                                 rangeHours: SecurityTimeline.defaultRangeHours,
+                                 showTimeline: { f in
+                                     open(f)
+                                     rangeHours = SecurityTimeline.defaultRangeHours
                                  })
             } else if rows.isEmpty {
                 ContentUnavailableView(
@@ -134,11 +224,17 @@ struct SecurityTimelineView: View {
         }
         .frame(minWidth: 760, minHeight: 400)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(item: $lineage) { e in
+            NetworkLineageView(timeline: timeline, focus: e, onClose: { lineage = nil })
+        }
         .onAppear { if startOnTimeline { tab = .timeline } }
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
             rulesGeneration &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallRulesChanged)) { _ in
+            rulesGeneration &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bromureSupplyChainAllowlistChanged)) { _ in
             rulesGeneration &+= 1
         }
         .onDisappear(perform: onClose)
@@ -195,6 +291,7 @@ struct SecurityTimelineView: View {
         .fixedSize()
         .disabled(timeline.allEvents.isEmpty)
         .help(NSLocalizedString("Save the events (with any filter applied) as a CSV file", comment: "security timeline"))
+        ocsfMenu
         if tab == .timeline {
             Button(NSLocalizedString("Clear", comment: "")) { timeline.clear() }
                 .controlSize(.small)
@@ -226,6 +323,21 @@ struct SecurityTimelineView: View {
                 .fixedSize()
             }
 
+            Picker("", selection: $workspaceFilter) {
+                Text(NSLocalizedString("All workspaces", comment: "security timeline")).tag(UUID?.none)
+                ForEach(workspaces, id: \.id) { w in Text(w.name).tag(UUID?.some(w.id)) }
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            Picker("", selection: $rangeHours) {
+                ForEach(SecurityTimeline.rangeChoices, id: \.self) { h in
+                    Text(SecurityTimeline.rangeTitle(hours: h)).tag(h)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+
             Picker("", selection: $engineFilter) {
                 Text(NSLocalizedString("All engines", comment: "")).tag(String?.none)
                 ForEach(engines, id: \.self) { Text($0).tag(String?.some($0)) }
@@ -241,6 +353,30 @@ struct SecurityTimelineView: View {
             .labelsHidden()
             .fixedSize()
         }
+    }
+
+    /// Continuous OCSF JSONL export for a SIEM (the format NVIDIA OpenShell
+    /// sandboxes write), with a schema downgrade for older consumers.
+    private var ocsfMenu: some View {
+        Menu {
+            Toggle(NSLocalizedString("Write OCSF JSON logs", comment: "security timeline"), isOn: $ocsfEnabled)
+            Picker(NSLocalizedString("Schema", comment: "security timeline OCSF"), selection: $ocsfSchema) {
+                Text("OCSF 1.8.0").tag("1.8.0")
+                Text(NSLocalizedString("OCSF 1.3.0 (Security Lake, Splunk, CrowdStrike)", comment: "security timeline OCSF"))
+                    .tag("1.3.0")
+            }
+            Divider()
+            Button(NSLocalizedString("Show OCSF Logs in Finder", comment: "security timeline")) {
+                let dir = OCSFExporter.shared.directory
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                NSWorkspace.shared.activateFileViewerSelecting([dir])
+            }
+        } label: {
+            Label("OCSF", systemImage: ocsfEnabled ? "dot.radiowaves.left.and.right" : "doc.badge.gearshape")
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .help(NSLocalizedString("Stream every security event as OCSF JSON (one file per day) for a SIEM", comment: "security timeline"))
     }
 
     /// CSV of what the Timeline shows (filters applied), oldest first.
@@ -294,11 +430,21 @@ struct SecurityTimelineView: View {
             TableColumn(NSLocalizedString("Condition", comment: "")) { e in
                 // The hover area is the whole cell (not just the glyphs), so
                 // a truncated host:port shows in full in the tooltip.
-                Text(e.condition)
-                    .lineLimit(1).truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .help(Self.conditionHelp(e))
+                HStack(spacing: 6) {
+                    Text(e.condition)
+                        .lineLimit(1).truncationMode(.middle)
+                        .textSelection(.enabled)
+                    if e.detail != nil {
+                        Spacer(minLength: 4)
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .help(e.detail != nil
+                      ? Self.conditionHelp(e) + "\n" + NSLocalizedString("Double-click to see the whole chain", comment: "security timeline")
+                      : Self.conditionHelp(e))
             }
             .width(min: 140, ideal: 240)
 
@@ -326,17 +472,34 @@ struct SecurityTimelineView: View {
             // Firewall rows: allow a block / block an allow / switch the
             // deciding rule off — applied live to the running workspace.
             TableColumn("") { e in
-                FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
+                if e.package != nil {
+                    SupplyChainRowActionButton(event: e, generation: rulesGeneration)
+                } else {
+                    FirewallRowActionButton(event: e, rulesGeneration: rulesGeneration)
+                }
             }
             .width(min: 64, ideal: 80, max: 110)
         }
         .contextMenu(forSelectionType: SecurityTimeline.Event.ID.self) { ids in
-            if let id = ids.first, let e = rows.first(where: { $0.id == id }), e.firewall != nil {
+            if let e = event(ids), e.detail != nil {
+                Button(NSLocalizedString("Show the Whole Chain", comment: "security timeline")) { lineage = e }
+            }
+            if let e = event(ids), e.firewall != nil {
                 FirewallRowMenuItems(event: e, rulesGeneration: rulesGeneration)
             }
+            if let e = event(ids), let ctx = SupplyChainRowContext(e), !ctx.isRemote, ctx.profile != nil, !ctx.allowedNow {
+                Button(ctx.allowTitle) { ctx.allow(); rulesGeneration &+= 1 }
+            }
+        } primaryAction: { ids in
+            // Double-click (or Return): open a flow's lineage.
+            if let e = event(ids), e.detail != nil { lineage = e }
         }
     }
 
+    private func event(_ ids: Set<SecurityTimeline.Event.ID>) -> SecurityTimeline.Event? {
+        guard let id = ids.first else { return nil }
+        return rows.first { $0.id == id }
+    }
     /// The condition in full, plus — for a firewall row — the destination's
     /// other names (CDN / server names the quick actions don't offer).
     static func conditionHelp(_ e: SecurityTimeline.Event) -> String {
@@ -364,6 +527,10 @@ struct SecurityTimelineView: View {
         case "Supply chain":         return "shippingbox"
         case "Prompt injection":     return "exclamationmark.shield"
         case "Agent delegation":     return "arrow.triangle.branch"
+        case "Network":              return "point.3.connected.trianglepath.dotted"
+        case "Agent reasoning":      return "brain.head.profile"
+        case "Kernel sentry":        return "cpu"
+        case "Guest sandbox":        return "square.dashed.inset.filled"
         default:                     return "shield"
         }
     }
@@ -593,17 +760,121 @@ private struct FirewallRowActionButton: View {
     }
 }
 
+/// A blocked package's row, and what its quick action can do: add it to
+/// the workspace's reputation allowlist (GitHub issue #54).
+@MainActor
+struct SupplyChainRowContext {
+    let event: SecurityTimeline.Event
+    let package: SecurityTimeline.PackageRef
+    /// nil: a mirrored (remote) host's row, or a workspace that's gone.
+    let profile: Profile?
+
+    init?(_ e: SecurityTimeline.Event, profiles: [Profile]? = nil) {
+        guard let pk = e.package else { return nil }
+        event = e
+        package = pk
+        let all = profiles ?? (NSApp.delegate as? ACAppDelegate)?.profiles ?? []
+        profile = e.machine == nil ? all.first(where: { $0.id == e.profileID }) : nil
+    }
+
+    var isRemote: Bool { event.machine != nil }
+
+    /// On the workspace's list already (allowed since this row).
+    var allowedNow: Bool {
+        profile?.supplyChain.reputationAllows(ecosystem: package.ecosystem, name: package.name) ?? false
+    }
+
+    var allowTitle: String {
+        String(format: NSLocalizedString("Always Allow %@ in This Workspace",
+                                         comment: "security timeline: supply-chain row action; %@ = package"), package.name)
+    }
+
+    func allow() {
+        guard let profile else { return }
+        (NSApp.delegate as? ACAppDelegate)?.allowSupplyChainPackage(package.allowlistEntry, profileID: profile.id)
+    }
+}
+
+/// The inline quick action on a blocked package's row.
+@MainActor
+private struct SupplyChainRowActionButton: View {
+    let event: SecurityTimeline.Event
+    /// Bumped when an allowlist changes: re-evaluates "Allowed now".
+    var generation = 0
+
+    var body: some View {
+        if let ctx = SupplyChainRowContext(event) {
+            if ctx.allowedNow {
+                Text(NSLocalizedString("Allowed now", comment: "security timeline: package row whose package is allowlisted since"))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if ctx.isRemote {
+                Text(NSLocalizedString("Allow…", comment: "security timeline: supply-chain quick action button"))
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .help(NSLocalizedString("Change this workspace's trusted packages in its settings on the Mac that runs it.",
+                                            comment: "security timeline: supply-chain quick action, remote row"))
+            } else if ctx.profile != nil {
+                Menu {
+                    Button(ctx.allowTitle) { ctx.allow() }
+                } label: {
+                    Text(NSLocalizedString("Allow…", comment: "security timeline: supply-chain quick action button")).font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(NSLocalizedString("Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it",
+                                        comment: "security timeline: supply-chain quick action help"))
+            }
+        }
+    }
+}
+
 /// The Overview tab: what the engines did in the last 24 hours, each
 /// workspace's protections, and the latest blocks.
-private struct SecurityOverview: View {
+struct SecurityOverview: View {
     var timeline: SecurityTimeline
     let postures: [SecurityPosture]
-    /// Open the Timeline filtered by engine and/or outcome.
-    let showTimeline: (_ engine: String?, _ outcome: SecurityTimeline.Decision?) -> Void
+    /// The range counted, in hours (0 = all history).
+    var rangeHours = 24
+    /// Open the Timeline with these filters.
+    let showTimeline: (SecurityTimelineFilter) -> Void
 
     private var recent: [SecurityTimeline.Event] {
-        let since = Date().addingTimeInterval(-86400)
+        guard rangeHours > 0 else { return timeline.allEvents }
+        let since = Date().addingTimeInterval(-Double(rangeHours) * 3600)
         return timeline.allEvents.filter { $0.time >= since }
+    }
+
+    /// The latest blocks, one row per distinct block: repeats fold into a
+    /// count, so one noisy block can't push the others out of view.
+    struct BlockGroup: Identifiable {
+        var id: String { key }
+        let key: String
+        var latest: SecurityTimeline.Event
+        var count: Int
+        var workspaces: Set<UUID>
+    }
+
+    /// What makes two blocked rows the same block: their engine and the
+    /// condition without what changes each time. Grouped by it, and matched
+    /// by it — whole — when a row is opened in the Timeline.
+    static func blockKey(_ e: SecurityTimeline.Event) -> String { e.engine + "|" + e.searchKey }
+
+    static func blockGroups(_ events: [SecurityTimeline.Event], limit: Int = 8) -> [BlockGroup] {
+        var groups: [String: BlockGroup] = [:]
+        var order: [String] = []
+        for e in events where e.kind == .blocked {
+            let key = blockKey(e)
+            let n = e.occurrences
+            if var g = groups[key] {
+                g.count += n
+                g.workspaces.insert(e.profileID)
+                if e.time > g.latest.time { g.latest = e }
+                groups[key] = g
+            } else {
+                groups[key] = BlockGroup(key: key, latest: e, count: n, workspaces: [e.profileID])
+                order.append(key)
+            }
+        }
+        return order.compactMap { groups[$0] }.sorted { $0.latest.time > $1.latest.time }.prefix(limit).map { $0 }
     }
 
     var body: some View {
@@ -611,15 +882,15 @@ private struct SecurityOverview: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(NSLocalizedString("Last 24 hours", comment: "security overview"))
+                    Text(SecurityTimeline.rangeTitle(hours: rangeHours))
                         .font(.system(size: 20, weight: .semibold))
                     Text(NSLocalizedString("What Bromure's security engines decided for your agents.", comment: "security overview"))
                         .foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.count,
+                    tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
                          "hand.raised.fill", .red, engine: nil, outcome: .blocked)
-                    tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.count,
+                    tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.reduce(0) { $0 + $1.occurrences },
                          "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
                     // Tiles carry the engine names the Protections columns use.
                     // Swaps, not rows: a coalesced row carries its repeat count.
@@ -638,6 +909,13 @@ private struct SecurityOverview: View {
                              .reduce(0) { $0 + ($1.count ?? 1) },
                          "person.crop.circle.badge.checkmark", .purple,
                          engine: NSLocalizedString("PII protection", comment: "Security Timeline engine"))
+                    // OpenShell workspaces: what the guest sandbox refused.
+                    let sandboxEngine = NSLocalizedString("Guest sandbox", comment: "Security Timeline engine")
+                    if postures.contains(where: \.sandbox) || recent.contains(where: { $0.engine == sandboxEngine }) {
+                        tile(sandboxEngine,
+                             recent.filter { $0.engine == sandboxEngine && $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
+                             "square.dashed.inset.filled", .teal, engine: sandboxEngine, outcome: .blocked)
+                    }
                 }
 
                 if !postures.isEmpty {
@@ -645,7 +923,7 @@ private struct SecurityOverview: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(NSLocalizedString("Protections", comment: "security overview"))
                                 .font(.system(size: 15, weight: .semibold))
-                            Text(NSLocalizedString("Click a protection that's off to turn it on in that workspace's settings.", comment: "security overview"))
+                            Text(NSLocalizedString("Click a workspace to see its events, or a protection that's off to turn it on.", comment: "security overview"))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         VStack(spacing: 0) {
@@ -662,27 +940,17 @@ private struct SecurityOverview: View {
                     }
                 }
 
-                let blocks = recent.filter { $0.kind == .blocked }.suffix(8).reversed()
-                if !blocks.isEmpty {
+                let groups = Self.blockGroups(recent)
+                if !groups.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(NSLocalizedString("Latest blocks", comment: "security overview"))
-                            .font(.system(size: 15, weight: .semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("Latest blocks", comment: "security overview"))
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(NSLocalizedString("Click one to find every time it happened, in every workspace.", comment: "security overview"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         VStack(spacing: 6) {
-                            ForEach(Array(blocks)) { e in
-                                HStack(spacing: 10) {
-                                    Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(e.condition).lineLimit(1).truncationMode(.tail)
-                                        Text("\(e.engine) · \(e.decision)")
-                                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer(minLength: 8)
-                                    Text(e.time.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))).font(.caption).foregroundStyle(.tertiary)
-                                }
-                                .padding(10)
-                                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.red.opacity(0.09)))
-                            }
+                            ForEach(groups) { g in BlockRow(group: g) { showTimeline(.init(outcome: .blocked, query: g.latest.searchKey, block: Self.blockKey(g.latest))) } }
                         }
                     }
                 }
@@ -695,7 +963,7 @@ private struct SecurityOverview: View {
 
     private func tile(_ title: String, _ n: Int, _ icon: String, _ tint: Color, engine: String?,
                       outcome: SecurityTimeline.Decision? = nil) -> some View {
-        Button { showTimeline(engine, outcome) } label: {
+        Button { showTimeline(.init(engine: engine, outcome: outcome)) } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: icon)
@@ -729,17 +997,18 @@ private struct SecurityOverview: View {
                                   NSLocalizedString("Guardrails", comment: "Security Timeline engine"),
                                   NSLocalizedString("Prompt injection", comment: "Security Timeline engine"),
                                   NSLocalizedString("PII protection", comment: "Security Timeline engine"),
-                                  NSLocalizedString("Credential brokering", comment: "Security Timeline engine")]
+                                  NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                                  NSLocalizedString("Sandbox", comment: "security overview: the OpenShell engine column")]
     /// The editor pane behind each column, in `columns` order.
     private static let columnCategories: [EditorCategory] =
-        [.firewall, .supplyChain, .guardrails, .promptInjection, .pii, .credentials]
+        [.firewall, .supplyChain, .guardrails, .promptInjection, .pii, .credentials, .firewall]
 
     private var postureHeader: some View {
         HStack(spacing: 0) {
             Text(NSLocalizedString("Workspace", comment: "security timeline"))
                 .frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Self.columns, id: \.self) { c in
-                Text(c).multilineTextAlignment(.center).frame(width: 96)
+                Text(c).multilineTextAlignment(.center).frame(width: 84)
             }
         }
         .font(.system(size: 11, weight: .semibold))
@@ -749,21 +1018,90 @@ private struct SecurityOverview: View {
 
     private func postureRow(_ p: SecurityPosture) -> some View {
         HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(Color(hex: p.colorHex).gradient)
-                    .frame(width: 10, height: 10)
-                Text(p.name).lineLimit(1)
+            WorkspaceNameButton(name: p.name, colorHex: p.colorHex) {
+                showTimeline(.init(workspace: p.id))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true].enumerated()), id: \.offset) { i, on in
+            ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true, p.sandbox].enumerated()), id: \.offset) { i, on in
                 PostureCell(on: on, workspace: p.name, column: Self.columns[i]) {
                     SecurityEditorLauncher.open(profileID: p.id, category: Self.columnCategories[i])
                 }
-                .frame(width: 96)
+                .frame(width: 84)
             }
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+}
+
+/// A workspace's name in the Protections table: a link to its events.
+private struct WorkspaceNameButton: View {
+    let name: String
+    let colorHex: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(Color(hex: colorHex).gradient)
+                    .frame(width: 10, height: 10)
+                Text(name).lineLimit(1).underline(hover)
+                if hover {
+                    Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(String(format: NSLocalizedString("Show %@'s events in the timeline", comment: "security overview: workspace link; %@ = workspace"), name))
+    }
+}
+
+/// One row of Latest blocks: the block, how many times, the last time; a
+/// click searches the Timeline for every instance.
+struct BlockRow: View {
+    let group: SecurityOverview.BlockGroup
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        let e = group.latest
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(e.condition).lineLimit(1).truncationMode(.tail)
+                    Text(verbatim: [e.engine, e.decision,
+                                    group.workspaces.count > 1
+                                        ? String(format: NSLocalizedString("%d workspaces", comment: "security overview: a block seen in several workspaces"), group.workspaces.count)
+                                        : (e.workspace ?? "")]
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if group.count > 1 {
+                    Text(verbatim: group.count > 999 ? "999+" : "\(group.count)")
+                        .font(.caption.weight(.semibold)).monospacedDigit()
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.red.opacity(0.14)))
+                        .help(String(format: NSLocalizedString("Blocked %d times; the last one is shown", comment: "security overview"), group.count))
+                }
+                Text(e.time.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
+                    .font(.caption).foregroundStyle(.tertiary)
+                Image(systemName: "magnifyingglass").font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary).opacity(hover ? 1 : 0)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.red.opacity(hover ? 0.14 : 0.09)))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(NSLocalizedString("Find every instance in the timeline", comment: "security overview"))
     }
 }
 

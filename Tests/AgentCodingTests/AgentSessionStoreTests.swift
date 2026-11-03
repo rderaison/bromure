@@ -25,6 +25,48 @@ struct AgentSessionStoreTests {
         return SessionListModel.VMEntry(id: id, name: "ws", accentHex: "#000000", model: model)
     }
 
+    /// Finding (CWE-670): archive and delete ended a tab by its index only
+    /// once the probe had seen the agent there — a tab bound moments ago (the
+    /// probe is throttled) wasn't closed, the reaper could never prove it (no
+    /// window id is stamped once it's put away) and let it go, and the agent
+    /// still running was adopted back as a new session. A binding made from
+    /// the live roster this run is closable now; one read from disk, or held
+    /// while its machine was away, still waits for the probe's proof.
+    @Test("a tab bound this run is closable on archive before the first probe; an inherited index isn't")
+    func boundThisRunIsClosable() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sessions-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = AgentSessionStore(fileURL: url)
+        let engine = AgentSessionEngine(store: store, delegate: nil)
+        let ws = UUID()
+        let s = AgentSession(profileID: ws, tool: .claude, title: "t", cwd: "~", windowIndex: 3)
+        store.upsert(s)
+        var now = try! #require(store.session(s.id))
+        #expect(now.agentAlive == nil && now.windowID == nil)
+        #expect(engine.tabClosableNow(now))               // on screen, not probed yet
+
+        // Stamped: the reaper can prove it — and the probe's verdict decides.
+        store.checkWindow(s.id, windowID: "@7")
+        now = try! #require(store.session(s.id))
+        #expect(!store.boundThisRun(now))
+
+        // Read back from disk unstamped: the guest may have rebooted since.
+        var loose = AgentSession(profileID: ws, tool: .claude, title: "u", cwd: "~", windowIndex: 4)
+        store.upsert(loose)
+        let relaunched = AgentSessionStore(fileURL: url)
+        loose = try! #require(relaunched.session(loose.id))
+        #expect(!relaunched.boundThisRun(loose))
+        #expect(!AgentSessionEngine(store: relaunched, delegate: nil).tabClosableNow(loose))
+        // Bound again this run, elsewhere: closable.
+        relaunched.mutate(loose.id) { $0.windowIndex = 5 }
+        #expect(relaunched.boundThisRun(try! #require(relaunched.session(loose.id))))
+
+        // Held while its machine was away: not closable on its return.
+        relaunched.clearLiveness(outside: [])
+        #expect(!relaunched.boundThisRun(try! #require(relaunched.session(loose.id))))
+    }
+
     @Test("a rehydrated roster (labels only, all at index 0) adopts nothing")
     func rehydratedRosterIsIgnored() {
         let store = tempStore()

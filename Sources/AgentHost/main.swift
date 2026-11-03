@@ -94,6 +94,19 @@ if args.count >= 2 {
     }
 }
 
+// The menu-bar app runs the long-lived services — the control and
+// delegation sockets, the embedded SSH server, the machine links, the P2P
+// relay pumps — much of it the same code as Bromure AC, whose raw socket
+// writes count on SIGPIPE being ignored (Bromure AC ignores it at launch).
+// Here it wasn't: one write to a connection the far end had just closed (a
+// link dropped after a garbled request, a relay leg gone) killed the app,
+// with no crash report and nothing in its log. Ignored, the write returns
+// EPIPE and that one connection ends. (Not for the subcommands above: a
+// `find` shim piped into `head` should still stop when the pipe closes. An
+// ignored signal survives exec, so what this process spawns in a terminal
+// gets the default back: `PTYSpawn`.)
+signal(SIGPIPE, SIG_IGN)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AgentHostApp()

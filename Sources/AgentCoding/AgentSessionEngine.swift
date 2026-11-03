@@ -528,10 +528,29 @@ final class AgentSessionEngine {
     /// Where text typed for session `s` may go: its window (by the id the
     /// probe stamped, else its index), still carrying the name we launched
     /// it under, with — by default — an agent in the foreground.
-    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent) -> PaneTarget? {
+    /// `onMachine`: the session runs on an attached Bromure Sidecar (nil:
+    /// ask the machine hub).
+    static func paneTarget(_ s: AgentSession, foreground: PaneTarget.Foreground = .agent,
+                           onMachine: Bool? = nil) -> PaneTarget? {
         guard let w = s.windowIndex else { return nil }
         var t = PaneTarget(ref: s.windowID.map { .windowID($0) } ?? .index(w), foreground: foreground)
         t.expectDisplay = s.launchDisplay
+        // A renamed Bromure Sidecar session's tab shows its current title,
+        // not the launch one: without it every typed notice, Switchboard
+        // message and finding hand-over was refused as another's tab.
+        // Only there, and only pinned to the window the probe stamped: on a
+        // VM the tab keeps its launch name, and the title is whatever the
+        // agent's terminal title says — not unique, the agent's to choose.
+        // Accepted by index (a rebind clears the id), it let another tab
+        // wearing that title take the notice, the resume text or the
+        // relaunch line (finding: typing guard accepts the session title
+        // as tab identity on VMs).
+        let machine = onMachine ?? (MachineLinkHub.shared.name(s.profileID) != nil)
+        if machine, let id = s.windowID, PaneTypeGuard.isWindowID(id),
+           let d = s.launchDisplay, !d.isEmpty, !s.title.isEmpty, s.title != d {
+            t.expectDisplayAlt = s.title
+            t.expectWindowID = id
+        }
         return t
     }
 
@@ -558,7 +577,7 @@ final class AgentSessionEngine {
     func archive(_ id: UUID) {
         guard let s = store.session(id) else { return }
         BACDebug.log("sessions", "archive “\(s.title)”")
-        if s.windowIndex != nil, delegate?.pane(for: s.profileID) != nil { close(id) }
+        if tabClosableNow(s), delegate?.pane(for: s.profileID) != nil { close(id) }
         store.mutate(id) { $0.launchingSince = nil }
         store.setArchived(id, true)
     }
@@ -586,7 +605,26 @@ final class AgentSessionEngine {
             return
         }
         store.setDeleted(id)
-        killTabIfShown(store.session(id) ?? s)
+        if tabClosableNow(s) { killTabIfShown(store.session(id) ?? s) }
+    }
+
+    /// Whether a session's tab may be ended by its stored index right now:
+    /// only when the liveness probe has seen this agent there (the same bar
+    /// a notice is typed at). An index from before a reboot or a machine's
+    /// return — a delegate retired the moment its Mac reconnects — may name
+    /// somebody else's tab; that one is left to `reapArchived`, which ends a
+    /// tab only once the probe proves it's this session's (boot, window id).
+    nonisolated static func tabProvenHere(_ s: AgentSession) -> Bool {
+        s.windowIndex != nil && s.agentAlive == true
+    }
+
+    /// `tabProvenHere`, or a tab bound from the live roster this run and not
+    /// stamped yet (the probe is throttled, so Archive right after a launch
+    /// lands before it): left to `reapArchived`, that one could never be
+    /// proven — no window id is stamped once it's put away — so it was let
+    /// go with its agent running, and adopted back as a new session.
+    func tabClosableNow(_ s: AgentSession) -> Bool {
+        Self.tabProvenHere(s) || store.boundThisRun(s)
     }
 
     /// Kill a deleted session's tab when its workspace is up — once per
@@ -1811,7 +1849,7 @@ final class AgentSessionEngine {
             let q = "'" + t.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
             let epoch = Int(t.since.timeIntervalSince1970)
             return "p=\(q); if git -C \"$p\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
-                + "r=$(git -C \"$p\" status --porcelain -- . 2>/dev/null | head -c1); else "
+                + "r=$( { \(RepoGitPrograms.off("\"$p\""))git -C \"$p\" status --porcelain --ignore-submodules=dirty -- . 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules("\"$p\"")) } | head -c1); else "
                 + "r=$(timeout 8 find \"$p\" -mindepth 1 \\( -name '.*' -o -name node_modules \\) -prune "
                 + "-o -type f -newermt '@\(epoch)' -print -quit 2>/dev/null); fi; "
                 + "printf '%s\\t%s\\n' '\(t.key)' \"${r:+1}\""
@@ -1837,6 +1875,14 @@ final class AgentSessionEngine {
     /// `remotely` for a fat client's click: the start's prompts go to that
     /// client (`PendingPromptBroker`), never a modal on this Mac. Time the
     /// client spends on such a prompt doesn't count against the boot.
+    /// Whether a boot wait goes on: within its deadline; past it, while the
+    /// guest's sentry was loading within `settleGrace`, up to the cap.
+    static func bootGoesOn(now: Date, deadline: Date, sentryCap: Date, lastLoading: Date?) -> Bool {
+        if now < deadline { return true }
+        guard now < sentryCap, let last = lastLoading else { return false }
+        return now < last.addingTimeInterval(BootBudget.settleGrace)
+    }
+
     func ensureUp(_ profileID: UUID, quietly: Bool = false, remotely: Bool = false) async -> Bool {
         guard let delegate else { return false }
         if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
@@ -1854,7 +1900,20 @@ final class AgentSessionEngine {
         }
         defer { pendingBoots.remove(profileID) }
         var deadline = Date().addingTimeInterval(Self.bootTimeout)
-        while Date() < deadline {
+        // A guest still loading a required kernel sentry is still booting:
+        // waited out up to the sentry's worst case (BootBudget.workspace).
+        let sentryCap = Date().addingTimeInterval(Self.bootTimeout + KernelSentryService.loadBudget)
+        // Cancelled, the sleep throws at once: without this check the loop
+        // execs into the machine back to back until the boot timeout.
+        // When the guest last said its sentry was loading: past the deadline
+        // the boot goes on while it does, and `settleGrace` after (the server
+        // it then starts) — as BootBudget, sampled every turn.
+        var lastLoading: Date?
+        while !Task.isCancelled {
+            let now = Date()
+            if BootBudget.sentryLoading(profileID) { lastLoading = now }
+            guard Self.bootGoesOn(now: now, deadline: deadline, sentryCap: sentryCap, lastLoading: lastLoading)
+            else { break }
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if remotely, PendingPromptBroker.shared.hasPending(profileID: profileID) {
                 deadline = Date().addingTimeInterval(Self.bootTimeout)

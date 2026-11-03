@@ -24,6 +24,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Agent session** — See *Session*.
 
+**Agent watchdog** — A protection in **Guardrails › Protections** that scores a session's behaviour from outside the VM — blocks, foreign credentials, tampering, new destinations, unusual volume — and, past a threshold within a minute, records a finding (**Alert**) or cuts the network and pauses the VM (**Quarantine**). See [Guardrails](07-settings/guardrails.mdx#agent-watchdog).
+
 **Agentic browser pane** — The right-hand split (⌃⌘B) showing a Chromium browser that runs in its own disposable VM. You and the agent can both use it; the agent drives it through the built-in browser MCP server. See [The Embedded Browser](06g-browser.mdx).
 
 **Allowlist entry format** — The `ecosystem:name` syntax (for example `npm:axios`, `pypi:requests`) used by the age-gate exemption list and the install-script allowlist; a bare `name` matches the package in every ecosystem. Matching ignores case. See [Supply-Chain Protection](09-supply-chain.mdx).
@@ -116,7 +118,9 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## E
 
-**Egress firewall** — A machine's ordered list of rules allowing or denying the connections its VM opens — by host, IP range, protocol, port and, for web traffic, HTTP method — with a default for anything unmatched. It is enforced on the Mac, where the agent can't reach it. See [Guardrails settings](07-settings/guardrails.mdx).
+**Egress firewall** — The Bromure Firewall: a machine's ordered list of rules allowing or denying the connections its VM opens — by host, IP range, protocol, port and, for web traffic, HTTP method — with a default for anything unmatched. It is enforced on the Mac, where the agent can't reach it. See [Sandbox Policy settings](07-settings/sandbox-policy.mdx).
+
+**Enforce binaries** — The strict sandbox of the OpenShell engine: a root-owned attestor in the VM names the program behind every connection, policy rules apply only to the programs they list, and the agent loses sudo and Docker. See [Sandbox Policy](10b-sandbox-policy.mdx#the-guest-sandbox).
 
 **Enrollment code** — A six-word code (for example `bromure-cli enroll --code acid-aloe-arson-bench-cat-drum`) that links a Mac to an organization on bromure.io. See [Enterprise](15-enterprise.mdx).
 
@@ -141,6 +145,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Grid** — A view, under **Virtual Machines**, showing several machine terminals side by side. **Add Terminal to Grid** (⌘D) adds the current one. See [Machines](06f-machines.mdx).
 
 **Guardrails** — The host-side rules that limit what an agent can change through your credentials, with four modes: **Off**, **Prompt before write**, **Block destructive**, and **Read-only**. A blocked call reaches the agent as an ordinary `403` error. See [Guardrails settings](07-settings/guardrails.mdx).
+
+**Guest sandbox** — The confinement the OpenShell engine applies inside the VM, from the policy's `filesystem_policy`, `landlock` and `process` sections: Landlock file rules even root can't lift, a non-root account, and **Enforce binaries**. See [Sandbox Policy](10b-sandbox-policy.mdx#the-guest-sandbox).
 
 ## H
 
@@ -181,6 +187,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Judge** — In Fusion, the model that reads the other models' answers and writes the final one. See [Fusion — the Multi-Model Panel](12-fusion.mdx).
 
 ## K
+
+**Kernel sentry** — A kernel module in the VM that reports program launches, connections, privilege changes and sandbox refusals to the Mac, where the agent can't silence it, and locks the kernel once loaded. Modes **Best effort** and **Required**; modules are fetched signed from `dl.bromure.io` for each Ubuntu kernel. See [Sandbox Policy](10b-sandbox-policy.mdx#the-kernel-sentry).
 
 **Kubernetes cluster** — A small k3s cluster Bromure runs on your Mac, made of sibling VMs ("nodes") listed under **Virtual Machines › Kubernetes**. Machines on its access list get it in `~/.kube/config`. Separate from the Kubernetes *credentials* you can add to a machine for outside clusters. See [Kubernetes Clusters & Registries](13a-kubernetes.mdx).
 
@@ -238,9 +246,13 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Native terminal** — A machine's terminal tab drawn by the Mac (with the Ghostty engine) and connected to the VM's tmux, rather than a picture of the VM's screen. See [Machines](06f-machines.mdx).
 
+**Network lineage** — The chain behind one connection out of a VM — your prompt, the agent's reasoning and stated intent, the tool call, the process chain, the flow, and the host's decision — shown by double-clicking a **Network** row in the Security window. Needs the kernel sentry. See [Security Overview & Timeline](11a-security-timeline.mdx#network-lineage).
+
 **Nickname (@nickname)** — A short, unique name you give a session with **Nickname…**. Other agents can ask it for help with `@name`, and you can address it with `@name` in any composer. See [Agents Working Together](06d-delegation.mdx).
 
 ## O
+
+**OCSF export** — Writing every security event as OCSF JSON (1.8.0, or 1.3.0 for Security Lake, Splunk and CrowdStrike), one file per day, for a SIEM — the **OCSF** menu in the Security window. See [Security Overview & Timeline](11a-security-timeline.mdx#ocsf-logs-for-a-siem).
 
 **Oh My Pi (omp)** — One of the five bundled agents. It works with several providers but only with API keys, not subscriptions. See [Models & Providers](13-models.mdx).
 
@@ -250,7 +262,11 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **OpenRouter** — A provider in **Models** that gives access to many models with one API key. Claude Code reaches it directly; other agents go through Bromure's translation. See [Models & Providers](13-models.mdx).
 
+**OpenShell policy** — An NVIDIA OpenShell sandbox policy (YAML, schema v1) — network rules with request inspection, plus filesystem and process sections — that a machine can use instead of the Bromure Firewall. Bromure enforces it on the Mac and in the VM. See [Sandbox Policy, the Guest Sandbox & the Kernel Sentry](10b-sandbox-policy.mdx).
+
 **Org CA** — The organization's certificate authority on bromure.io, which issues each enrolled Mac's certificate. See [Enterprise](15-enterprise.mdx).
+
+**Organization boundary** — The most any machine's OpenShell policy may allow, set by an organization through bromure.io or from a file on the Mac. Every policy save is checked against it. See [Sandbox Policy](10b-sandbox-policy.mdx#organization-boundary).
 
 **OSV** — The Open Source Vulnerabilities database (osv.dev), a free collection of known package vulnerabilities that Bromure checks each package version against. See [Supply-Chain Protection](09-supply-chain.mdx).
 
@@ -263,6 +279,10 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Pending decision prompt** — A question Bromure would normally ask in an alert — a base-image upgrade, a disk repair, a compromise — sent instead to a connected rich client when nobody is at the Mac. If nobody answers in time, the safe choice is taken. See [CLI, API & MCP](16-automation-cli.mdx#answering-pending-prompts).
 
 **PII protection** — An optional per-machine feature (off by default) that replaces personal data — names, emails and phone numbers, card and bank numbers, ID numbers, street addresses — with realistic stand-ins before a conversation leaves the Mac, and puts the real values back in the replies. See [PII Protection](10a-pii.mdx).
+
+**Policy advisor** — OpenShell's advisor API at `http://policy.local`, through which a blocked agent proposes the narrow rule it needs; you approve or reject it in the Sandbox drawer, or let **Approve if risk-free** approve safe ones. See [Sandbox Policy](10b-sandbox-policy.mdx#the-policy-advisor).
+
+**Policy steering** — Telling an agent, in its conversation, that the machine's policy blocked what it tried and why, so it asks you instead of working around it — **Tell the agent when policy blocks it** in Guardrails. See [Sandbox Policy](10b-sandbox-policy.mdx#telling-the-agent-policy-steering).
 
 **Pop out / re-dock** — Moving a machine's terminal into its own window (**Pop Out to Its Own Window**) and back into the main window. The VM keeps running either way. See [Machines](06f-machines.mdx).
 
@@ -332,13 +352,17 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 ## S
 
+**Sandbox drawer** — The panel a machine's window slides over its stage (shield button, ⌃⌘N) listing what its sandbox blocked — connections, files, package requests, advisor proposals, temporary rules — each ready to allow. See [Sandbox Policy](10b-sandbox-policy.mdx#the-sandbox-drawer).
+
+**Sandbox engine** — A machine's choice, in **Settings › Sandbox Policy**, between the **Bromure Firewall** (an allow/deny rule table) and **OpenShell + Sentry** (an OpenShell policy with the guest sandbox and the kernel sentry). See [Sandbox Policy](07-settings/sandbox-policy.mdx).
+
 **Scheduled automation** — A recurring, unattended agent run tied to one machine, started by a schedule or an event (a GitHub pull request, issue or commit, a Linear issue, or another automation). Each run happens in its own git worktree. See [Automations](06h-automations.mdx).
 
 **Secrets vault master key** — The key, kept in the macOS Keychain, that encrypts every secret and captured trace Bromure stores. See [Credentials & the Wire Boundary](08-credentials.mdx).
 
-**Security Overview** — The first tab of the Security Timeline window: the last 24 hours at a glance (**Blocked**, **Allowed**, **Credentials brokered**, **Packages checked**, **PII swapped**), each machine's protections, and the latest blocks. See [Security Overview & Timeline](11a-security-timeline.mdx).
+**Security Overview** — The first tab of the Security window: a recent period at a glance (**Blocked**, **Allowed**, **Credential brokering**, **Supply chain**, **PII protection**, and **Guest sandbox** when used), each machine's protections, and the latest blocks. See [Security Overview & Timeline](11a-security-timeline.mdx).
 
-**Security Timeline** — The window (**Window › Security Timeline…**) listing every decision Bromure's security engines made, which you can filter and export to CSV. Always recorded and kept 90 days. See [Security Overview & Timeline](11a-security-timeline.mdx).
+**Security Timeline** — The window (**Window › Security…**) listing every decision Bromure's security engines made, which you can filter and export to CSV. Always recorded; kept 90 days by default (**Preferences › Tracing › Security history**). See [Security Overview & Timeline](11a-security-timeline.mdx).
 
 **Session** — One conversation with one agent, in one folder, on one machine. Sessions are the main list in the sidebar; each has a title the agent sets, a status, and a chat. A session keeps its conversation when it ends and can be picked back up with a new message. (In the CLI and the control API, "session" can also mean a machine's window — see [CLI, API & MCP](16-automation-cli.mdx).) See [The Sessions Home](05-sessions-home.mdx).
 
@@ -352,6 +376,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Sparkle** — The auto-update system built into the app, behind **Check for Updates…**. See [Installation & First Run](02-installation.mdx).
 
+**Squelch** — An optional per-machine feature (off by default) that cuts the noise out of command output — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it, and counts the tokens it saved per session. Modelled on rtk. See [Squelch — Less Noise, Fewer Tokens](12a-squelch.mdx).
+
 **SSH front door** — Bromure's own optional SSH server (not macOS's). Off by default; when on, it carries remote logins and rich-client connections. See [Remote Access & Clients](14-remote-access.mdx).
 
 **ssh-agent bridge** — The SSH agent Bromure offers the VM. The VM can ask it to sign with a key but can never read the key itself. See [Credentials & the Wire Boundary](08-credentials.mdx).
@@ -363,6 +389,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 **Status dot** — The small dot on a session's avatar in the sidebar that shows its state at a glance, for example whether it is working or needs you. See [The Sessions Home](05-sessions-home.mdx).
 
 **Streaming indicator** — A pulsing red dot in a popped-out machine window's toolbar, shown when that machine's activity is being sent to bromure.io (enrolled Macs, machines not in Private mode). See [Enterprise](15-enterprise.mdx).
+
+**Strict credential mode** — **Only allow credentials Bromure injects (strict mode)** in Guardrails: a request carrying a credential Bromure didn't issue is blocked with the compromise alert. See [Guardrails](07-settings/guardrails.mdx#only-allow-credentials-bromure-injects-strict-mode).
 
 **Subscription mode** — Using an agent through your account's subscription (Claude, ChatGPT, Grok, Kimi) instead of an API key. The sign-in is kept on the Mac, which refreshes it; the VM only ever sees a stand-in key. See [Models & Providers](13-models.mdx).
 

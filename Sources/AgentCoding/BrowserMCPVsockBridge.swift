@@ -269,7 +269,7 @@ struct BrowserMCPRelayIDMap {
 }
 
 @MainActor
-private final class RelayMux {
+final class RelayMux {
     private let remoteFd: Int32
     private let writeLock = NSLock()
     private var ids = BrowserMCPRelayIDMap()
@@ -282,7 +282,13 @@ private final class RelayMux {
         self.remoteFd = remoteFd
         self.onDrop = onDrop
         let fd = remoteFd
-        Thread.detachNewThread { [weak self] in
+        // Strong on purpose: the reader is what closes the fd once it has
+        // left. The bridge lets go of a relay as it closes it (a client's new
+        // dial, a detach, a drop) — held weakly, the mux was gone by then and
+        // the fd stayed open for good: one socketpair end per browser-MCP
+        // dial ("->(none)" unix sockets piling up on the server while a fat
+        // client stayed connected).
+        Thread.detachNewThread { [self] in
             var buf = [UInt8](repeating: 0, count: 65536)
             var pendingBytes = Data()
             while true {
@@ -296,12 +302,12 @@ private final class RelayMux {
                         pendingBytes = Data(pendingBytes[(nl + 1)...])
                         guard !lineData.isEmpty,
                               let line = String(data: lineData, encoding: .utf8) else { continue }
-                        DispatchQueue.main.async { MainActor.assumeIsolated { self?.route(line) } }
+                        DispatchQueue.main.async { MainActor.assumeIsolated { self.route(line) } }
                     }
                 }
                 if pendingBytes.count > 16 * 1024 * 1024 { break }   // pathological
             }
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.readerExited() } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.readerExited() } }
         }
     }
 

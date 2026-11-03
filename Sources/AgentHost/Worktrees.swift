@@ -84,7 +84,9 @@ enum Worktrees {
             .first { $0.hasPrefix("worktree ") }.map { String($0.dropFirst("worktree ".count)) } ?? dir
         var start = parent
         if let base, !base.isEmpty {
-            guard sh("git -C \(d) rev-parse --verify --quiet \(q(base + "^{commit}"))") != nil else {
+            // It becomes the branch's parent, the merge's target: a name git
+            // would read as an option never gets that far.
+            guard !base.hasPrefix("-"), sh("git -C \(d) rev-parse --verify --quiet \(q(base + "^{commit}"))") != nil else {
                 return .failure(.bad("No branch or commit “\(base)” to start from"))
             }
             start = base
@@ -129,6 +131,7 @@ enum Worktrees {
 
     /// Remove the checkout and the branch (agentd's `_worktree_remove`).
     static func remove(root: String, branch: String) {
+        guard BranchMergeCommands.isSafeBranchName(branch) else { return }
         let r = q(root)
         let dir = (sh("git -C \(r) worktree list --porcelain") ?? "")
             .components(separatedBy: "\n\n").first { $0.contains("branch refs/heads/\(branch)") }?
@@ -175,11 +178,13 @@ enum Worktrees {
     /// probe); nil when the checkout is gone.
     static func probe(dir: String, parent: String?) -> (info: [String: Any], root: String, parent: String)? {
         guard FileManager.default.fileExists(atPath: dir) else { return nil }
-        let script = "cd \(q(dir)) || exit 1; r=$(git worktree list --porcelain | head -1 | cut -c10-); "
+        // Nothing the repository's config names runs here, on the Mac
+        // (RepoGitPrograms): `git status` ran its clean filters.
+        let script = "cd \(q(dir)) || exit 1; \(RepoGitPrograms.off("."))r=$(git worktree list --porcelain | head -1 | cut -c10-); "
             + "p=\(q(parent ?? "")); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD); "
             + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
             + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-            + "c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
+            + "c=$( { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | wc -l | tr -d ' '); echo \"$a $b $c|$r|$p\""
         guard let out = sh(script) else { return nil }
         let f = out.split(separator: "|").map(String.init)
         guard f.count == 3 else { return nil }
@@ -193,35 +198,26 @@ enum Worktrees {
 
     enum MergeOutcome { case merged, dirty, elsewhere, conflict }
 
-    /// The fast path: a clean branch merges on its own (SessionBranches'
-    /// mergeBranch script, run here).
+    /// The fast path: a clean branch merges on its own (the script a VM's
+    /// sessions run, `BranchMergeCommands`, run here).
     static func tryMerge(root: String, branch: String, into target: String, source dir: String,
                          squash: Bool) -> MergeOutcome {
-        let r = q(root), b = q(branch), t = q(target)
-        let tdir = "t=$(git -C \(r) worktree list --porcelain | awk -v want=\"branch refs/heads/\"\(t) "
-            + "'/^worktree /{w=substr($0,10)} $0==want{print w}'); [ -n \"$t\" ] || t=\(r); "
-        let who = "who=; git -C \"$t\" config user.email >/dev/null || who='-c user.name=Bromure -c user.email=bromure@localhost'; "
-        let mergeCmd = squash
-            ? "git $who -C \"$t\" merge --squash \(b) >/dev/null 2>&1 && git $who -C \"$t\" commit -q -m \"Squash-merge \(branch)\" >/dev/null 2>&1"
-            : "git $who -C \"$t\" merge --no-edit \(b) >/dev/null 2>&1"
-        let script = tdir + who
-            + "if [ \"$(git -C \"$t\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" != \(t) ]; then echo elsewhere; "
-            + "elif [ -n \"$(git -C \(q(dir)) status --porcelain 2>/dev/null)\" ]; then echo dirty; "
-            + "elif \(mergeCmd); then echo merged; "
-            + "else git -C \"$t\" merge --abort >/dev/null 2>&1; git -C \"$t\" reset -q --merge >/dev/null 2>&1; echo conflict; fi"
-        switch sh(script) ?? "" {
-        case let o where o.hasSuffix("merged"): return .merged
-        case let o where o.hasSuffix("dirty"): return .dirty
-        case let o where o.hasSuffix("elsewhere"): return .elsewhere
-        default: return .conflict
+        let out = sh(BranchMergeCommands.mergeScript(root: root, branch: branch, into: target,
+                                                     sourceDir: dir, squash: squash)) ?? ""
+        if out.hasSuffix("merged") { return .merged }
+        switch BranchMergeCommands.why(out) {
+        case .dirty: return .dirty
+        case .elsewhere: return .elsewhere
+        case .conflict: return .conflict
         }
     }
 
     /// Has the branch landed in the target (a merge, or a squash's content)?
     static func landed(root: String, branch: String, target: String, squash: Bool) -> Bool {
+        guard BranchMergeCommands.unsafeBranch(branch, target) == nil else { return false }
         let r = q(root), b = q(branch), t = q(target)
         let check = squash
-            ? "[ -z \"$(git -C \(r) diff \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
+            ? "[ -z \"$(git -C \(r) diff \(RepoGitPrograms.diffFlags) \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
             : "git -C \(r) merge-base --is-ancestor \(b) \(t) 2>/dev/null && echo merged"
         return (sh(check + "; true") ?? "").contains("merged")
     }
@@ -229,32 +225,11 @@ enum Worktrees {
     /// What the session's agent is told when the merge needs it (the same
     /// words bromure-ac uses for a VM's branch).
     static func mergePrompt(branch: String, into: String, squash: Bool, why outcome: MergeOutcome) -> String {
-        let why: String
-        switch outcome {
-        case .dirty: why = "This worktree has uncommitted changes."
-        case .elsewhere: why = "'\(into)' isn't checked out anywhere, so it can't be merged into directly — check it out (in the main checkout, if that is free) first."
-        default: why = "Merging it straight away hit a conflict (or the target checkout has uncommitted changes)."
-        }
-        let step = squash
-            ? "`git -C \"$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0==\"branch refs/heads/\(into)\"{print w}')\" merge --squash \(branch)`, then commit it there as \"Squash-merge \(branch)\""
-            : "`git merge --no-edit \(branch)` in the checkout of '\(into)' (`git worktree list` shows where it is)"
-        return """
-            The user asked to \(squash ? "squash-merge" : "merge") this branch ('\(branch)') into '\(into)'. \(why)
-            1. Commit all the intended work on this branch with clear commit messages (leave out build artifacts and scratch files).
-            2. Then run \(step).
-            3. If it conflicts, resolve every conflicted file keeping both sides' intent, stage the resolutions and complete the merge commit.
-            4. Reply with one line saying what landed in '\(into)'.
-            If git has no identity configured here, commit with `git -c user.name=Bromure -c user.email=bromure@localhost` rather than stopping to ask.
-            """
+        BranchMergeCommands.mergePrompt(branch: branch, into: into, squash: squash,
+                                        why: outcome == .dirty ? .dirty : outcome == .elsewhere ? .elsewhere : .conflict)
     }
 
     static func pullRequestPrompt(branch: String, into: String) -> String {
-        """
-        Open a pull request for this branch ('\(branch)') into '\(into)':
-        1. Review the changes and commit anything outstanding with clear messages.
-        2. Push the branch: `git push -u origin \(branch)`.
-        3. Create the PR with `gh pr create --base \(into)` — a concise title, and a body that explains what changed and why, and how it was tested.
-        4. Reply with the PR's URL.
-        """
+        BranchMergeCommands.pullRequestPrompt(branch: branch, into: into)
     }
 }

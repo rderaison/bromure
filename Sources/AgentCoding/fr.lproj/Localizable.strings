@@ -1194,6 +1194,20 @@
 "Couldn't start the network tunnel" = "Impossible de démarrer le tunnel réseau";
 "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure continue de fonctionner via son tunnel intégré par application — cet assistant n'ajoute que l'accès direct aux VM distantes depuis d'autres applications locales.";
 "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "L'assistant réseau privilégié est injoignable. Vérifiez que « Bromure Agentic Coding » est autorisé dans Réglages Système › Général › Ouverture, puis réessayez.";
+"The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed)." = "L’assistant tourne, mais son socket n’accepte que l’utilisateur %d, pas vous (%d). Les anciennes versions de l’assistant attribuent le socket à la personne connectée à son démarrage — et il démarre avec le Mac, avant toute ouverture de session. Redémarrez-le : dans Réglages Système › Général › Ouverture, désactivez puis réactivez « Bromure Agentic Coding » (ou redémarrez le Mac une fois cette version installée).";
+"The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy." = "L’assistant ne tourne pas. macOS l’a enregistré depuis une autre copie de l’app (%@) — c’est là qu’il a été autorisé, et cette copie a été déplacée, remplacée ou supprimée. Désactivez « Bromure Agentic Coding » dans Ouverture, puis réactivez le tunnel ici pour enregistrer cette copie.";
+"The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items." = "L’assistant ne tourne pas : macOS le lance et il s’arrête aussitôt (dernière sortie : %@). En général, l’app a été recompilée ou mise à jour avec une signature différente de celle que vous avez autorisée. Désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.";
+"The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items." = "L’assistant n’est pas chargé dans launchd, bien qu’Ouverture l’affiche. Désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.";
+"The helper isn't running yet, so its socket isn't there." = "L’assistant ne tourne pas encore, son socket n’existe donc pas.";
+"The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items." = "Le socket de l’assistant existe mais personne ne répond : l’assistant s’est arrêté. Désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.";
+"The helper didn't accept the connection." = "L’assistant n’a pas accepté la connexion.";
+"The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items." = "L’assistant réseau a fermé la connexion sans répondre. Si vous venez de mettre l’app à jour, redémarrez l’assistant : désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.";
+"This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "Ce Mac route déjà %@ ailleurs — en général vers ses propres espaces de travail, qui utilisent le même sous-réseau que ceux du distant. Le tunnel ne peut pas le reprendre.\n\nAssistant : %@";
+"The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "L’assistant réseau ne sert que l’utilisateur connecté à l’écran.\n\nAssistant : %@";
+"The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "L’assistant réseau n’a pas pu créer l’interface du tunnel.\n\nAssistant : %@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "L’assistant réseau ne route qu’un réseau privé /24 (dans 10/8, 172.16/12, 192.168/16 ou 100.64/10), et le sous-réseau %@ du système distant n’en est pas un.\n\nAssistant : %@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "L’assistant réseau ne sert que la copie de Bromure Agentic Coding depuis laquelle il a été installé, signée de la même façon. Si vous venez de mettre à jour ou de recompiler l’app, redémarrez l’assistant : désactivez puis réactivez « Bromure Agentic Coding » dans Ouverture.\n\nAssistant : %@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "L’assistant réseau tient déjà %d tunnels, sa limite. Fermez la fenêtre d’un système distant que vous n’utilisez pas, ou quittez et rouvrez l’app.\n\nAssistant : %@";
 "The network helper couldn't create the tunnel interface." = "L'assistant réseau n'a pas pu créer l'interface du tunnel.";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -1579,6 +1593,7 @@
 "Credential brokering" = "Courtage d’identifiants";
 "Supply chain" = "Chaîne d’approvisionnement";
 "Firewall" = "Pare-feu";
+"Sandbox Policy" = "Politique du bac à sable";
 "Credential used" = "Identifiant utilisé";
 "Upstream TLS" = "TLS amont";
 "Prompt injection" = "Injection de prompt";
@@ -1847,6 +1862,9 @@
 "Another sign-in is already in progress." = "Une autre connexion est déjà en cours.";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Le proxy Bromure ne tourne pas, la connexion ne peut donc pas être capturée.";
 "Couldn't start the sign-in machine." = "Impossible de démarrer la machine de connexion.";
+"The sign-in was cancelled." = "La connexion a été annulée.";
+"The sign-in window was closed." = "La fenêtre de connexion a été fermée.";
+"The sign-in machine stopped." = "La machine de connexion s’est arrêtée.";
 "Finish signing in in your browser…" = "Terminez la connexion dans votre navigateur…";
 "Almost there — your browser will open in a moment…" = "Presque prêt — votre navigateur va s’ouvrir dans un instant…";
 "Sign in to %@…" = "Se connecter à %@…";
@@ -2066,8 +2084,8 @@
 "VMs" = "VM";
 "New automation…" = "Nouvelle automatisation…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "« %@ » exécute %@, qui ne signale pas sa fin, cette chaîne ne se déclenchera donc jamais.";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "Les exécutions clonées requièrent un agent qui signale son achèvement (Claude Code ou Kimi Code) — c’est ce signal qui démonte le clone.";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "Seuls les agents qui signalent leur achèvement par un hook (Claude Code, Kimi Code) peuvent fermer leur onglet ; les onglets des autres agents restent ouverts.";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "Les exécutions clonées requièrent un agent qui signale son achèvement (Claude Code, Codex, Grok ou Kimi Code) — c’est ce signal qui démonte le clone.";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "Seuls les agents qui signalent leur achèvement par un hook (Claude Code, Codex, Grok, Kimi Code) peuvent fermer leur onglet ; les onglets des autres agents restent ouverts.";
 "The image catalog could not be downloaded." = "Le catalogue d’images n’a pas pu être téléchargé.";
 "Unsupported image compression: %@" = "Compression d’image non prise en charge : %@";
 "Could not expand the downloaded image: %@" = "Impossible de décompresser l’image téléchargée : %@";
@@ -2202,8 +2220,6 @@
 "The planning session failed: %@" = "La session de planification a échoué : %@";
 "No git identity or credentials found." = "Aucune identité ni identifiant git trouvés.";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure a signalé du contenu que l’agent s’apprête à envoyer au modèle (provenant de %@). Le laisser passer, ou bloquer cette requête ?\n\n%@";
-"an unverified package" = "un paquet non vérifié";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure n’a pas pu joindre %@ pour vérifier %@ %@@%@. L’installer revient à accepter un paquet qui n’a pas été contrôlé auprès des sources de réputation configurées.\n\nAutoriser quand même cette installation ?";
 "to authenticate with the API server at %@" = "pour s’authentifier auprès du serveur d’API à %@";
 "Activity only" = "Activité seulement";
 "AI request details" = "Détails des requêtes IA";
@@ -2396,7 +2412,6 @@
 "sign-in expired" = "connexion expirée";
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "Enregistrez une source à gauche. Chaque agent utilise le modèle par défaut de son fournisseur, sauf si vous en choisissez un à droite.";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "Connectez-vous aux fournisseurs que vous voulez utiliser, ou collez des clés d’API. Chaque agent utilise alors le modèle par défaut de son fournisseur — choisissez-en un précis à droite si vous le souhaitez, maintenant ou plus tard dans Préférences → Modèles.";
-
 
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d modèle(s)";
@@ -2866,6 +2881,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ ne peut pas utiliser les modèles %2$@ ; il utilise donc son propre fournisseur. Choisissez un autre modèle.";
 "%d sessions whose machine or folder is gone" = "%d sessions dont la machine ou le dossier n’existe plus";
 "(empty)" = "(vide)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "La page de connexion ouverte par l’agent pointe vers ce Mac ou son réseau local : Bromure ne l’a pas ouverte.";
+"Restore these workspaces and their sessions at next start" = "Restaurer ces espaces de travail et leurs sessions au prochain démarrage";
+"Restoring your workspaces" = "Restauration de vos espaces de travail";
+"Restoring Workspaces" = "Restauration des espaces de travail";
+"Stop Restoring" = "Arrêter la restauration";
+"Starting “%@”…" = "Démarrage de « %@ »…";
+"%1$d of %2$d" = "%1$d sur %2$d";
+"did not start in time" = "n’a pas démarré à temps";
+/* VM dashboard: workspace notes */
+"Notes" = "Notes";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Retour enregistre · Maj-Retour ajoute une ligne · Échap annule";
+"Save the notes (Return)" = "Enregistrer les notes (Retour)";
+"Edit the notes as markdown" = "Modifier les notes en markdown";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3119,6 +3147,7 @@
 "Erasing and restoring storage is done on the server Mac." = "L’effacement et la restauration du stockage se font sur le Mac serveur.";
 "Home folder size" = "Taille du dossier personnel";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "De %d Go (sa taille actuelle — un dossier personnel ne peut pas rétrécir) à 1024 Go. Un dossier plus grand prend effet au prochain démarrage de l’espace de travail. L’image disque n’occupe que la place utilisée par ses fichiers.";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "De %d Go à 1024 Go. Le dossier personnel est créé à cette taille au premier démarrage de l’espace de travail ; ensuite, il peut grandir mais pas rétrécir. L’image disque n’occupe que la place utilisée par ses fichiers.";
 "Queued — sent when the agent is done" = "En attente — envoyé quand l’agent aura fini";
 "Queued — sent when %@ is done" = "En attente — envoyé quand %@ aura fini";
 "Queued — the agent reads it next" = "En attente — l’agent le lira ensuite";
@@ -3565,6 +3594,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "La dernière image publiée, puis les paquets recommandés. Quelques minutes.";
 "Recommended" = "Recommandé";
 "Rebuild locally" = "Reconstruire localement";
+"Re-download and reinstall the agents" = "Retélécharger et réinstaller les agents";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "Sinon, tant que l'image publiée n'a pas changé, la copie enregistrée est réutilisée : seuls les nouveaux paquets et votre script de personnalisation s'exécutent.";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "Construite de zéro sur ce Mac avec l’installateur complet. Environ 10 minutes.";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "Vos espaces de travail ne sont pas modifiés — chacun propose de se réinitialiser sur la nouvelle image à son prochain démarrage.";
 "Download & Update" = "Télécharger et mettre à jour";
@@ -4109,3 +4140,214 @@
 "Show the findings for %@" = "Afficher les constats de %@";
 "Sent to %@ to fix" = "Envoyé à %@ pour correction";
 "Sent to %@ — it works on the fix in its own session." = "Envoyé à %@ — la correction se fait dans sa propre session.";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "Le dépôt n’a aucun remote où pousser — fusionnez sans pousser.";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "Fusionné dans %@, mais impossible de joindre l’espace de travail pour pousser — est-il démarré ?";
+"Merge & Push" = "Fusionner et pousser";
+"Push %1$@ to %2$@" = "Pousser %1$@ vers %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "Terminé quand %1$@/%2$@ l’a. Si %1$@ a avancé, %3$@ tire, résout les conflits et pousse.";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "Impossible de l’envoyer à %1$@ : %2$@";
+"that session is gone" = "cette session n’existe plus";
+"the server didn't answer" = "le serveur n’a pas répondu";
+"the server runs an older Bromure — update it to hand findings to a session" = "le serveur exécute une ancienne version de Bromure — mettez-le à jour pour confier des constats à une session";
+"the server refused it" = "le serveur l’a refusé";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "Impossible de le confier à %1$@ : %2$@";
+"a menu or dialog stayed open in that session" = "un menu ou une boîte de dialogue est resté ouvert dans cette session";
+"something else was typed in that session's input box" = "autre chose était saisi dans la zone de saisie de cette session";
+"Couldn't hand it to the Switchboard: %@" = "Impossible de le confier au Standard : %@";
+"the Switchboard session is gone" = "la session du Standard n’existe plus";
+"the message couldn't be typed into the Switchboard" = "le message n’a pas pu être saisi dans le Standard";
+"the Switchboard's agent never started" = "l’agent du Standard n’a jamais démarré";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "son texte a été signalé par le filtre d’injection de prompt (%@) — confirmez-le avant de le confier à un agent";
+"Hand It Over Anyway" = "Le confier quand même";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "Le filtre d’injection de prompt l’a signalé (%@). Il provient d’un agent qui lisait le contenu du dépôt, et l’agent à qui vous le confiez le lirait aussi. Vérifiez-le avant de le confier.";
+"Couldn't start the fix: %@" = "Impossible de lancer le correctif : %@";
+"Couldn't ask the Switchboard: %@" = "Impossible de demander au Standard : %@";
+"that finding is gone" = "ce constat n’existe plus";
+"couldn't start the fix" = "impossible de lancer le correctif";
+"no Switchboard could be started" = "aucun Standard n’a pu être démarré";
+
+/* Automations: runs at a time */
+"Runs at a time" = "Exécutions simultanées";
+"No limit" = "Sans limite";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "Une rafale d’événements attend son tour, du plus ancien au plus récent : le suivant démarre quand une exécution se termine.";
+"Reviews at a time" = "Revues simultanées";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "Les commits et pull requests arrivés ensemble attendent leur tour, du plus ancien au plus récent, au lieu d’être tous examinés en même temps.";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "Supprimer l’espace de travail « %@ » ?";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "Supprime son disque, ses réglages et sa clé SSH. Le dossier de l’hôte monté n’est pas modifié.";
+"Couldn't delete “%@”" = "Impossible de supprimer « %@ »";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "« %@ » n’a pas été mis à niveau";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "Il a démarré sur son disque actuel pendant que la question était affichée (une automatisation l’a lancé). Arrêtez-le puis redémarrez-le pour que la question vous soit reposée.";
+
+/* automation editor */
+"This workspace has no github.com token." = "Cet espace de travail n’a pas de jeton github.com.";
+
+/* automation editor */
+"This workspace has no Linear key." = "Cet espace de travail n’a pas de clé Linear.";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "L’hôte n’a pas pu les lister (HTTP %d).";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "La branche est en cours d’enregistrement — réessayez dans un instant.";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "Recherche du worktree…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "Git ne peut pas lire l’extraction de la tâche sans exécuter le programme de filtre propre au dépôt : Bromure ne peut donc pas savoir si elle est propre. Fusionnez-la vous-même, puis marquez la tâche comme terminée.";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "Échec de git status ici — les fichiers modifiés ne sont pas signalés";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git n’a pas pu lire les modifications";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "Git échoue dans cette extraction sans le programme de filtre propre au dépôt, que Bromure n’exécute pas. Examinez-la dans un terminal.";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "Envoi de %d…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "Envoi…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "Envoi à l’hôte en cours — la liaison est lente";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@ (%3$@ %4$@ ici)";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@ (l’heure de l’hôte)";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "Chaque exécution démarre ici, sur une nouvelle branche : choisissez le clone, dans l’espace de travail, du dépôt que surveille le déclencheur.";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "Chaque exécution démarre ici, sur une nouvelle branche : choisissez le clone de %@ dans l’espace de travail.";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "Cette fenêtre ne peut pas lire le jeton GitHub de l’espace de travail — saisissez le dépôt sous la forme propriétaire/dépôt.";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "Une branche fusionnée déclenche une seule fois, pour son commit de fusion — pas pour chacun de ses commits. Comparez un commit à son premier parent pour voir ce qu’il apporte : git diff {{commit.key}}^1 {{commit.key}}.";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "Les modifications s’appliquent à un espace de travail en cours d’exécution au fur et à mesure, sans redémarrage ni enregistrement ; Annuler remet les règles telles qu’elles étaient. Décochez une règle pour la désactiver sans la supprimer, ou utilisez son menu horloge pour l’activer pour une durée limitée.";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "Retirer le bruit de la sortie des commandes avant que le modèle ne la lise";
+"Saved so far" = "Économisé jusqu’ici";
+"%@ saved" = "%@ économisés";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch retire le bruit de la sortie des commandes avant que le modèle ne la lise — cliquez pour voir ce qu’il a économisé";
+"Squelch is off on this machine — click to trim the noise out of command output" = "Squelch est désactivé sur cette machine — cliquez pour retirer le bruit de la sortie des commandes";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "Retire les tests réussis, les barres de progression et les lignes répétées de la sortie des commandes avant que le modèle ne la lise. Les erreurs et les avertissements restent.";
+"Inspired by" = "Inspiré de";
+"Tokens are estimated as characters ÷ 4." = "Les tokens sont estimés à caractères ÷ 4.";
+"Trim command output on “%@”" = "Alléger la sortie des commandes sur « %@ »";
+"Off on “%@”: its agents' models read every command's output as printed." = "Désactivé sur « %@ » : les modèles de ses agents lisent la sortie de chaque commande telle qu’elle a été affichée.";
+"This conversation" = "Cette conversation";
+"All of “%@”" = "Tout « %@ »";
+"Where it came from" = "D’où ça vient";
+"%@ tokens · %@" = "%@ tokens · %@";
+"~%@ tokens saved" = "~%@ tokens économisés";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "%@ de %@ tokens de sortie de commandes · %d sorties, %d allégées";
+"Last two weeks" = "Deux dernières semaines";
+"%@: %@ tokens saved" = "%@ : %@ tokens économisés";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev n'a pas répondu.";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev a refusé la clé d'API (HTTP %d) — vérifiez-la dans les réglages Chaîne d'approvisionnement de l'espace de travail.";
+"socket.dev is rate-limiting this API key." = "socket.dev limite le débit de cette clé d'API.";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev n'a pas encore fini d'analyser cette version.";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev ne connaît pas cette version (elle est peut-être toute récente).";
+"socket.dev's reply couldn't be read." = "La réponse de socket.dev est illisible.";
+"socket.dev answered HTTP %d." = "socket.dev a répondu HTTP %d.";
+"the OSV vulnerability database didn't answer." = "la base de vulnérabilités OSV n'a pas répondu.";
+"Install %@ from workspace “%@” without a reputation check?" = "Installer %@ depuis l'espace de travail « %@ » sans vérification de réputation ?";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure n'a pas pu vérifier le paquet %@ %@ : %@ L'installer revient à accepter un paquet qui n'a pas été contrôlé auprès de vos sources de réputation.";
+"%d more unverified packages are waiting for an answer." = "%d autres paquets non vérifiés attendent une réponse.";
+"Allow all unverified packages for 15 minutes" = "Autoriser tous les paquets non vérifiés pendant 15 minutes";
+"Don't allow unverified packages for the rest of the session" = "Refuser les paquets non vérifiés pour le reste de la session";
+"Don't allow %@" = "Ne pas autoriser %@";
+"all unverified packages" = "tous les paquets non vérifiés";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "L'agent a posé une nouvelle question depuis que vous avez écrit ceci. Modifiez votre réponse pour l'envoyer.";
+"The agent asked a new question before your answer went. Read it and answer again." = "L'agent a posé une nouvelle question avant l'envoi de votre réponse. Lisez-la et répondez à nouveau.";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "La réponse n'a pas pu être envoyée.";
+"Your answer is already on its way." = "Votre réponse est déjà en cours d'envoi.";
+"“%@” wasn't wiped" = "« %@ » n’a pas été effacé";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "Il a démarré sur son disque actuel pendant que la question était affichée (une automatisation l’a lancé) : rien n’a été effacé et il est toujours marqué comme compromis. Arrêtez-le puis redémarrez-le pour l’effacer.";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "Impossible de savoir quel programme a essayé, et avec « Enforce binaries » une règle doit en nommer un. Réessayez la connexion, puis autorisez-la.";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "Installer %@ depuis l’espace de travail « %@ » malgré son avertissement de chaîne d’approvisionnement ?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure a bloqué %1$@ %2$@ %3$@ : %4$@\n\nNe l’installez quand même que si vous faites confiance à ce paquet et à son éditeur.";
+"Allow %@ for this session" = "Autoriser %@ pour cette session";
+"Always allow %@ in this workspace" = "Toujours autoriser %@ dans cet espace de travail";
+"Don't allow %@, and don't ask again this session" = "Ne pas autoriser %@, et ne plus demander pendant cette session";
+"downloaded — allowed by you despite: %@" = "téléchargé — autorisé par vous malgré : %@";
+"Trusted packages" = "Paquets de confiance";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "Quand OSV ou socket.dev bloque un paquet, Bromure vous demande s’il faut l’installer quand même (pour cette session, ou toujours). Les paquets toujours autorisés sont listés ici ; leurs téléchargements échappent à ces vérifications. Un verdict de logiciel malveillant de socket.dev n’est jamais contourné.";
+"Install despite reputation warnings (format: `npm:workerd`)" = "Installer malgré les avertissements de réputation (format : `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "Toujours autoriser %@ dans cet espace de travail";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "Faire confiance à ce paquet malgré son avertissement de réputation — ses prochains téléchargements dans cet espace de travail ne sont plus bloqués par celui-ci";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "Modifiez les paquets de confiance de cet espace de travail dans ses réglages, sur le Mac qui l’exécute.";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "Arrêtez d’abord l’espace de travail : son disque est utilisé.";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "Certains de ses fichiers n’ont pas pu être effacés (%@) : il est toujours marqué comme compromis. Arrêtez-le puis réessayez.";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "Sa marque de compromission a été levée entre-temps : rien n’a été effacé, il démarre sur son disque actuel.";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "Il a déjà été effacé : son disque et son dossier personnel ont été supprimés, et il démarrera à neuf la prochaine fois.";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "Sa marque de compromission a été levée comme fausse alerte pendant que la question était affichée : rien n’a été effacé et il n’a pas démarré. Relancez-le pour le démarrer sur son disque actuel.";
+"Wipe “%@”?" = "Effacer « %@ » ?";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "Son disque système, son dossier personnel et son état enregistré sont effacés ; ses réglages et identifiants sont conservés, tout comme les dossiers de projet qu’il monte. Il n’est plus marqué comme compromis et démarre à neuf la prochaine fois.";
+"Wipe" = "Effacer";
+"Clear the compromised mark on “%@”?" = "Retirer la marque « compromis » de « %@ » ?";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "Uniquement en cas de fausse alerte : l’espace de travail démarre sur son disque et son dossier personnel actuels, sans effacement, comme si de rien n’était. La fuite a été bloquée dans tous les cas ; la Chronologie de sécurité conserve l’événement.";
+"Clear Mark" = "Retirer la marque";
+"Couldn't wipe “%@”" = "Impossible d’effacer « %@ »";
+"Couldn't clear the mark on “%@”" = "Impossible de retirer la marque de « %@ »";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "Marqué comme compromis : Bromure a vu cet espace de travail envoyer un identifiant là où il ne devait pas (la requête a été bloquée). Au démarrage, il propose d’abord d’effacer son disque et son dossier personnel. Clic droit pour l’effacer maintenant, ou pour retirer la marque s’il s’agissait d’une fausse alerte.";
+"Wipe and Restore…" = "Effacer et restaurer…";
+"Clear Compromised Mark…" = "Retirer la marque « compromis »…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "Ajouter une règle pour cet hôte et ce port";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "Ajouter une règle pour cet hôte et ce port, pour %@";
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "« %@ » n’existe plus : un autre processus Bromure l’a supprimé.";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "pour %@ (signature SigV4 sur l'hôte)";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "« %@ » est ouvert dans l’autre processus Bromure (l’app ou son agent de connexion). Utilisez-le là-bas, ou éteignez-le d’abord là-bas.";
+"The workspace is open in the other Bromure process, which runs this automation there" = "L’espace de travail est ouvert dans l’autre processus Bromure, qui y exécute cette automatisation";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "Non lu";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "Connexion non ouverte : le port %d est utilisé par une autre connexion. Terminez-la ou annulez-la, puis réessayez.";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "Ouvrir une page de l’espace de travail ?";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Quelque chose dans « %1$@ » veut ouvrir cette page dans votre navigateur :\n\n%2$@\n\nNe l’ouvrez que si vous vous y attendez : une page peut mener votre navigateur vers des services de ce Mac ou de votre réseau.";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "Quelque chose dans un espace de travail veut ouvrir cette page dans votre navigateur :\n\n%@\n\nNe l’ouvrez que si vous vous y attendez : une page peut mener votre navigateur vers des services de ce Mac ou de votre réseau.";
+
+/* guest URL open prompt */
+"Open in Browser" = "Ouvrir dans le navigateur";

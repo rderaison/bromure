@@ -553,7 +553,7 @@ extension LinuxImageManager {
         var alpineRepoBase: String?
         if let host = guestProxyHost {
             do {
-                try proxy.start()
+                try proxy.start(guestGateway: host)
                 alpineRepoBase = proxy.guestBase(host: host)?.absoluteString
             } catch {
                 print("[postinstall] Alpine package proxy failed to start (\(error)) — guest fetches go direct")

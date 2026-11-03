@@ -330,6 +330,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// from the guest over the shell vsock (see FileExplorer.swift).
     let fileExplorerModel = FileExplorerModel()
     private var filePaneHost: NonMovableHostingView<FileExplorerPane>!
+    /// The Sandbox drawer, floating over the stage's right edge.
+    private var policyDrawerHost: NSView?
+    private var policyDrawerTrailing: NSLayoutConstraint?
     private var filePaneWidthConstraint: NSLayoutConstraint?
     private var filePaneResizeHandle: SidebarResizeHandle?
     private(set) var filePaneOpen = false
@@ -482,6 +485,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onDuplicate: { [weak self] id in self?.acDelegate?.sidebarDuplicateProfile(id) },
             onReset:     { [weak self] id in self?.acDelegate?.sidebarResetProfile(id) },
             onDelete:    { [weak self] id in self?.acDelegate?.sidebarDeleteProfile(id) },
+            onCompromise: { [weak self] id, action in self?.acDelegate?.sidebarCompromise(id, action) },
             // Option-click runs the credential wizard first (same as the
             // Workspaces menu's alternate item), so the new workspace starts
             // pre-filled from this Mac's config files.
@@ -913,6 +917,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleFusion: { [weak self] id, on in if let p = self?.pane(id) { self?.acDelegate?.setFusionEngaged(on, for: p.profile) } },
             onToggleFilePane: { [weak self] in self?.toggleFilePane(nil) },
             onToggleBrowser: { [weak self] in self?.toggleBrowserPane(nil) },
+            onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer(nil) },
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showVMDashboard(id) },
@@ -988,6 +993,61 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// ⌃⌘E / the toolbar's sidebar.right button.
     @objc func toggleFilePane(_ sender: Any?) {
         setFilePaneOpen(!filePaneOpen, animated: true)
+    }
+
+    // MARK: Sandbox drawer
+
+    /// ⌃⌘N / the toolbar's shield button.
+    @objc func togglePolicyDrawer(_ sender: Any?) {
+        setPolicyDrawerOpen(!listModel.policyDrawerOpen)
+    }
+
+    func setPolicyDrawerOpen(_ open: Bool) {
+        let host = ensurePolicyDrawer()
+        listModel.policyDrawerOpen = open
+        if open { host.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            policyDrawerTrailing?.animator().constant = open ? -10 : 400
+            host.animator().alphaValue = open ? 1 : 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.listModel.policyDrawerOpen else { return }
+                self.policyDrawerHost?.isHidden = true
+            }
+        })
+    }
+
+    /// Built on first open, on top of everything on the stage.
+    private func ensurePolicyDrawer() -> NSView {
+        if let h = policyDrawerHost { return h }
+        let drawer = PolicyDrawer(
+            list: listModel,
+            onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
+            onOpenSettings: { [weak self] id in
+                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
+                self?.acDelegate?.sidebarEditProfile(id)
+            })
+        let host = NSHostingView(rootView: drawer)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.wantsLayer = true
+        host.alphaValue = 0
+        host.isHidden = true
+        stage.addSubview(host, positioned: .above, relativeTo: nil)
+        let trailing = host.trailingAnchor.constraint(equalTo: stage.trailingAnchor, constant: 400)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: stage.topAnchor, constant: 10),
+            host.bottomAnchor.constraint(equalTo: stage.bottomAnchor, constant: -10),
+            host.widthAnchor.constraint(equalToConstant: 368),
+            trailing,
+        ])
+        stage.layoutSubtreeIfNeeded()
+        policyDrawerHost = host
+        policyDrawerTrailing = trailing
+        return host
     }
 
     /// Open/close the right file pane. Closed = width 0 and hidden (no rail);
@@ -1757,6 +1817,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.selectSession(id)
             },
             editMachine: { [weak self] pid in self?.acDelegate?.sidebarEditProfile(pid) },
+            setSquelch: { [weak self] pid, on in self?.acDelegate?.setSquelch(pid, on) },
             openLinux: { [weak self] sid in self?.showLinux(for: sid) },
             openRoom: { [weak self] id in self?.showRoom(id) },
             newRoom: { [weak self] name, sid in
@@ -1830,6 +1891,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     func debugToast(_ text: String) { toasts.show(text) {} }
+    /// A passing notice at the bottom of the window (no Undo).
+    func showNotice(_ text: String) { toasts.show(text, undo: nil) }
     func debugBranchAction(_ action: String, _ id: UUID) {
         let a = sessionStageActions
         switch action {
@@ -2031,7 +2094,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 }
                 var req = req
                 if let room { req.roomID = room }
-                let id = delegate.agentSessionEngine.start(req)
+                // The same start asked for again within seconds (Send
+                // clicked twice): the one already started.
+                let r = SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                    ["ok": true, "id": delegate.agentSessionEngine.start(req).uuidString]
+                }
+                guard let id = (r["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
                 // Started from a room: back to its grid, where it launches.
                 if let room, delegate.agentRoomStore.room(room) != nil {
                     self.showRoom(room)
@@ -2054,10 +2122,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 await delegate?.listGuestFolders(profileID: pid, path: path)
             },
             readyTools: { [weak delegate] p in
-                // A plain Mac runs whatever agent its user installed.
-                if delegate?.attachedMachines[p.id] != nil { return Set(Profile.Tool.allCases) }
-                return p.agentsReadyToStart(ModelSettingsStore.shared.effective(for: p),
-                                     subscribed: delegate?.subscribedProviders(for: p) ?? [])
+                Set((delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool))
             },
             peerMentions: { [weak delegate] pid in
                 delegate?.peerMentions(forWorkspace: pid, excluding: nil) ?? []
@@ -2084,6 +2149,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if selectedSessionID == id, !listModel.newSessionSelected {
             presentSession(s)
             makeKeyAndOrderFront(nil)
+            delegate.markSessionRead(id)
             return
         }
         guard clearAutomationEditor() else { return }   // dirty draft kept
@@ -2104,6 +2170,21 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sessionPresentationKey = nil   // a fresh surface on an explicit pick
         presentSession(s)
         makeKeyAndOrderFront(nil)
+        delegate.markSessionRead(id)
+    }
+
+    /// The sessions whose chats this window's stage shows: the selected one,
+    /// or a room's page (its zoomed cell).
+    var sessionsOnStage: [UUID] {
+        if listModel.newSessionSelected { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return listModel.selectedSessionID.map { [$0] } ?? []
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        for id in sessionsOnStage { acDelegate?.markSessionRead(id) }
     }
 
     /// The session behind a workspace's tmux window (a kanban run's tab, an
@@ -2316,13 +2397,41 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if let m = req.openingMessage, !m.isEmpty { body["message"] = m }
         let wire = req.attachments.filter { $0.folder == nil }.map(\.wireDictionary)
         if !wire.isEmpty { body["attachments"] = wire }
+        // Send clicked again while the machine starts it: one session.
+        let key = SessionStartCoalescer.machineKey(req, machine: machine.id, room: room)
         Task { @MainActor [weak self, weak machine] in
-            guard let machine,
-                  let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60),
-                  let id = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+            // The same start under way (a click before, or a client's through
+            // the hub): wait for it, then open its session — dropping this
+            // click left the window on the new-session screen.
+            var claim = SessionStartCoalescer.shared.claim(key)
+            let giveUp = Date().addingTimeInterval(SessionStartCoalescer.pendingWait)
+            while case .underWay = claim, Date() < giveUp {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                claim = SessionStartCoalescer.shared.claim(key)
+            }
+            let id: UUID
+            switch claim {
+            case .underWay:
+                // The other start never answered: say so, as a failed one does.
                 NSSound.beep()
                 return
+            case .done(let reply):
+                guard let started = (reply["id"] as? String).flatMap(UUID.init(uuidString:)) else { return }
+                id = started
+            case .mine(let token):
+                guard let machine,
+                      let r = await machine.control("POST", "/agent-sessions/start", body, timeout: 60,
+                                                    total: SessionStartCoalescer.machineStartBudget),
+                      let started = (r.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+                    SessionStartCoalescer.shared.finish(key, token: token, reply: nil)
+                    NSSound.beep()
+                    return
+                }
+                id = started
+                // The id too: a client's same start through this host gets it.
+                SessionStartCoalescer.shared.finish(key, token: token, reply: ["ok": true, "id": id.uuidString])
             }
+            guard let machine else { return }
             // Started from a room ("Add to Room"): into it, and back to its grid.
             if let room, let delegate = self?.acDelegate, delegate.agentRoomStore.room(room) != nil {
                 delegate.assignMachineRoom(id, room)
@@ -2341,11 +2450,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// terminal) — not started.
     private func makeMachineChatModel(_ machine: AttachedMachine, window w: Int,
                                       session s: AgentSession) -> BeautifiedSessionModel {
-        let provider = MachineTranscriptProvider(machine: machine, window: w,
+        let provider = MachineTranscriptProvider(machine: machine, window: w, sessionID: s.id,
                                                  accent: Color(hex: machine.accentHex))
         let m = BeautifiedSessionModel(provider: provider)
         let mid = machine.id
-        m.draftKey = "machine:\(mid.uuidString):\(w)"
+        m.draftKey = "machine:\(mid.uuidString):\(w):\(s.id.uuidString)"
         m.cachedTranscript = SessionTranscriptCache.loadDetached
         m.delegationStore = acDelegate?.delegationStore
         m.sessionStore = acDelegate?.homeSessionStore
@@ -2699,9 +2808,29 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             self?.roomController?.refresh()
         }
         roomController = controller
+        // The chats on show are read, and so is each page, zoom, dock or tab
+        // shown next. Wired BEFORE the view goes in (its appear and initial
+        // onChange fire during showSessionOverlay's layout), marked at once
+        // with the set that changed, and called once after the room opens:
+        // the controller already knows what the stage opens on. A window
+        // that isn't key reads them when it becomes key (`becomeKey`) --
+        // opening a room in the window already focused got no becomeKey and
+        // the assign-after-show missed the appear, so nothing was read
+        // (Finding CWE-670, "Opening a room in the focused window never
+        // marks the chats on screen").
+        // The set is taken now, the store written a turn later: this runs
+        // inside the view's onAppear/onChange too, mid view update.
+        controller.onShownChanged = { [weak self, weak controller] in
+            guard let ids = controller?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }   // else becomeKey reads them
+                for sid in ids { delegate.markSessionRead(sid) }
+            }
+        }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: controller))
         makeKeyAndOrderFront(nil)
+        controller.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).
@@ -3100,7 +3229,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Show the workspace VM dashboard (vitals + config) over the framebuffer.
     /// Shown for any run state: a running VM gets live vitals; a suspended/off
     /// one shows the spec + config (more useful than a black framebuffer).
-    func showVMDashboard(_ id: Profile.ID) {
+    func showVMDashboard(_ id: Profile.ID, editingNotes: Bool = false) {
         guard let profile = acDelegate?.profile(for: id) else { return }
         guard clearAutomationEditor() else { return }   // dirty draft kept
         clearAutomationBoard()
@@ -3116,8 +3245,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let info = acDelegate?.vmDashboardData(for: id)
         let view = VMDashboardView(
             model: p?.model,
-            profile: p?.profile ?? profile,
-            accentHex: (p?.profile ?? profile).color.hexInUI,
+            // The saved copy: the pane's is the one it booted with (its
+            // notes from before a dashboard save).
+            profile: profile,
+            accentHex: profile.color.hexInUI,
             state: state,
             vCPUs: UbuntuSandboxVM.runtimeCPUs,
             diskAllocatedBytes: info?.diskAllocated ?? 0,
@@ -3127,7 +3258,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onSuspend:     { [weak self] in self?.acDelegate?.suspendProfile(id) },
             onReboot:      { [weak self] in self?.acDelegate?.restartProfile(id) },
             onShutdown:    { [weak self] in self?.acDelegate?.shutdownProfile(id) },
-            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() })
+            onResume:      { [weak self] in self?.acDelegate?.startProfile(id); self?.clearVMDashboard() },
+            onSaveNotes:   { [weak self] text, base in self?.acDelegate?.setNotes(id, text, ifStill: base) ?? .failed },
+            startsEditingNotes: editingNotes)
         let host = NonMovableHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         vmDashboardSlot.addSubview(host)
@@ -3139,6 +3272,22 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         ])
         vmDashboardHosting = host
         updateVMOverlay()
+    }
+
+    /// The shown workspace's profile changed (a settings save, the sidebar
+    /// refresh): the dashboard shows the new copy — notes, name, color —
+    /// without being rebuilt, so its vitals history keeps.
+    func refreshVMDashboard() {
+        // The saved copy, never the pane's: a pane keeps the profile it
+        // booted with, and would turn a running workspace's dashboard back
+        // to its notes from before the save.
+        guard let id = vmDashboardSelectedID, let host = vmDashboardHosting,
+              let profile = acDelegate?.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
     }
 
     func clearVMDashboard() {
@@ -3186,6 +3335,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let view = AutomationEditorView(
             store: delegate.scheduledAutomationStore,
             profiles: delegate.profiles,
+            toolSpecs: { [weak delegate] p in delegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
+            listFolders: { [weak delegate] pid, path in await delegate?.listGuestFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -3301,13 +3452,42 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     scanBaseline: { [weak self] id in
                         self?.acDelegate?.repoWatchEngine.scanNow(id, baseline: true)
                     },
-                    fix: { [weak self] id in self?.acDelegate?.repoWatchEngine.fix(id) },
-                    routeToSwitchboard: { [weak self] id, room in
-                        self?.acDelegate?.routeFindingToSwitchboard(id, room: room)
+                    fix: { [weak self] id, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.repoWatchEngine.fix(id) == nil
+                             ? .failed(NSLocalizedString("couldn't start the fix", comment: "finding hand-over failure"))
+                             : .done)
+                    },
+                    routeToSwitchboard: { [weak self] id, room, confirmed, done in
+                        guard let d = self?.acDelegate, let f = d.findingStore.finding(id) else {
+                            done(.failed(NSLocalizedString("that finding is gone", comment: "finding hand-over failure")))
+                            return
+                        }
+                        if f.handOverRefusal(confirmed: confirmed) != nil {
+                            done(.flagged(warning: f.screenWarning ?? "")); return
+                        }
+                        done(d.routeFindingToSwitchboard(id, room: room, confirmed: confirmed)
+                             ? .done
+                             : .failed(NSLocalizedString("no Switchboard could be started", comment: "finding hand-over failure")))
                     },
                     switchboardRooms: { [weak self] in self?.acDelegate?.switchboardRoomChoices() ?? [] },
-                    askSession: { [weak self] id, sid in
-                        self?.acDelegate?.routeFindingToSession(id, session: sid)
+                    askSession: { [weak self] id, sid, confirmed, done in
+                        Task { @MainActor in
+                            guard let d = self?.acDelegate else {
+                                done(.failed(NSLocalizedString("that session is gone", comment: "finding → session failure")))
+                                return
+                            }
+                            if let f = d.findingStore.finding(id), f.handOverRefusal(confirmed: confirmed) != nil {
+                                done(.flagged(warning: f.screenWarning ?? "")); return
+                            }
+                            done(await d.routeFindingToSession(id, session: sid, confirmed: confirmed).map { .failed($0) } ?? .done)
+                        }
                     },
                     sessionChoices: { [weak self] in self?.acDelegate?.findingSessionChoices() ?? [] },
                     openTask: { [weak self] id in self?.acDelegate?.openFixTask(id) },
@@ -3370,6 +3550,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 store: delegate.codingTaskStore,
                 model: listModel,
                 profilesProvider: { [weak self] in self?.acDelegate?.profiles ?? [] },
+                toolSpecs: { [weak self] p in self?.acDelegate?.readyToolSpecs(for: p) ?? p.allToolSpecs },
                 actions: CodingKanbanView.Actions(
                     start: { [weak self] id in self?.acDelegate?.codingTaskEngine.start(id) },
                     plan: { [weak self] id in
@@ -3403,6 +3584,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                         // The review window, on its Merge confirmation.
                         self?.acDelegate?.taskReviewWindows.open(taskID: id, confirm: .merge)
                     },
+                    mergeBatch: { [weak self] ids, push in
+                        self?.acDelegate?.codingTaskEngine.landBatch(ids, push: push)
+                    },
                     closeNoMerge: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.closeWithoutMerge(id)
                     },
@@ -3414,6 +3598,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     startOver: { [weak self] id in
                         self?.acDelegate?.codingTaskEngine.startOver(id)
+                    },
+                    reorder: { [weak self] id, rank in
+                        self?.acDelegate?.codingTaskStore.mutate(id) { $0.queueRank = rank }
                     },
                     delete: { [weak self] id in
                         self?.acDelegate?.codingTaskStore.remove(id)
@@ -3441,8 +3628,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                     },
                     assignees: { [weak self] in self?.acDelegate?.taskDispatcher.choices() ?? TaskAssigneeChoices() },
                     assign: { [weak self] id, a in self?.acDelegate?.taskDispatcher.assign(id, to: a) },
-                    answer: { [weak self] id, text in
-                        Task { @MainActor in _ = await self?.acDelegate?.taskDispatcher.answer(id, text: text) }
+                    answer: { [weak self] id, ask, text in
+                        await self?.acDelegate?.taskDispatcher.answer(id, askID: ask, text: text) ?? false
                     },
                     recall: { [weak self] id in self?.acDelegate?.taskDispatcher.recall(id) },
                     openAssignee: { [weak self] task in
@@ -3803,9 +3990,12 @@ struct SessionSidebar: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    /// A workspace marked compromised: wipe it, or clear a false alarm.
+    /// nil where the host has no route for it.
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onNewProfile: () -> Void
     /// Scheduled automations — the third sidebar group, after the
     /// workspace rows.
@@ -3951,8 +4141,8 @@ struct SessionSidebar: View {
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
     }
 
-    /// Sessions-first: the search field, the new-session button, one
-    /// Sessions list, the Kanban and Automations rows, and the machines
+    /// Sessions-first: the search field, the new-session button, the
+    /// Coding Tasks and Automations rows, one Sessions list, and the machines
     /// folded away at the bottom.
     @ViewBuilder
     private func sessionsFirstContent(_ sessionStore: AgentSessionStore, _ taskStore: CodingTaskStore) -> some View {
@@ -3988,12 +4178,8 @@ struct SessionSidebar: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 3) {
-                SessionSectionsView(store: sessionStore, model: model,
-                                    filter: sessionFilter, onSelect: onSelectSession,
-                                    actions: sessionActions,
-                                    rooms: roomStore?.rooms ?? [],
-                                    contentSearch: contentSearch,
-                                    lastReply: lastReply)
+                // The boards first, right under New session — then the
+                // sessions.
                 CodingTasksSection(
                     store: taskStore,
                     model: model,
@@ -4006,6 +4192,12 @@ struct SessionSidebar: View {
                     openFindings: openFindingCount,
                     onNew: onNewAutomation,
                     onShowBoard: onShowAutomationBoard)
+                SessionSectionsView(store: sessionStore, model: model,
+                                    filter: sessionFilter, onSelect: onSelectSession,
+                                    actions: sessionActions,
+                                    rooms: roomStore?.rooms ?? [],
+                                    contentSearch: contentSearch,
+                                    lastReply: lastReply)
                 machinesSection
                 nativeSection
             }
@@ -4128,6 +4320,7 @@ struct SessionSidebar: View {
                 onDuplicate: onDuplicate,
                 onReset: onReset,
                 onDelete: onDelete,
+                onCompromise: onCompromise,
                 onAddAllToGrid: onAddAllToGrid,
                 onRewindHome: onRewindHome,
                 sessionStore: model.sessionsFirst ? sessionStore : nil)
@@ -4185,6 +4378,7 @@ private struct CompactRail: View {
                             accentHex: model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888",
                             isActive: model.selectedSessionID == s.id
                                 && !model.gridSelected && !model.newSessionSelected,
+                            unread: SessionHome.showsUnread(s, in: model),
                             onSelect: { onSelectSession(s.id) })
                     }
                     Divider().padding(.horizontal, 10)
@@ -4271,6 +4465,7 @@ private struct RailSessionButton: View {
     let statusLine: String
     let accentHex: String
     let isActive: Bool
+    var unread = false
     let onSelect: () -> Void
     @State private var hovering = false
 
@@ -4287,6 +4482,9 @@ private struct RailSessionButton: View {
         Button(action: onSelect) {
             AgentAvatar(tool: session.tool, size: 22, status: dot)
                 .opacity(bucket == .ended || bucket == .asleep ? 0.55 : 1)
+                .overlay(alignment: .topTrailing) {
+                    if unread { UnreadMark(size: 7).offset(x: 3, y: -2) }
+                }
                 .frame(width: 30, height: 26)
                 .background(RoundedRectangle(cornerRadius: 6)
                     .fill(isActive ? Color(hex: accentHex).opacity(0.16)
@@ -4789,9 +4987,10 @@ private struct VMSection: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
     /// Sessions-first: a tab whose session the user renamed shows that name.
@@ -4823,6 +5022,15 @@ private struct VMSection: View {
         }
     }
 
+    private func controlMenu(items: Bool = false) -> ControlMenu {
+        ControlMenu(row: row,
+                    onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
+                    onEdit: onEdit, onDuplicate: onDuplicate,
+                    onReset: onReset, onDelete: onDelete, onCompromise: onCompromise,
+                    onAddAllToGrid: onAddAllToGrid, onRewindHome: onRewindHome,
+                    itemsOnly: items)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             // Profile header
@@ -4834,10 +5042,12 @@ private struct VMSection: View {
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                             .foregroundStyle(isSelected ? .primary : .secondary)
+                            .help(row.notesExcerpt)   // its notes' opening; none: no tooltip
                         if row.compromised {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 9))
                                 .foregroundStyle(.red)
+                                .help(CompromiseRemedy.badgeHelp)
                         }
                     }
                     if let stateLabel {
@@ -4858,11 +5068,7 @@ private struct VMSection: View {
                 if isLive {
                     IconButton(system: "plus", help: "New tab (⌘T)") { onNewTab(row.id) }
                 }
-                ControlMenu(row: row,
-                            onStart: onStart, onShutdown: onShutdown, onSuspend: onSuspend, onRestart: onRestart,
-                            onEdit: onEdit, onDuplicate: onDuplicate,
-                            onReset: onReset, onDelete: onDelete,
-                            onAddAllToGrid: onAddAllToGrid, onRewindHome: onRewindHome)
+                controlMenu()
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -4880,6 +5086,8 @@ private struct VMSection: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(row.id) }
+            // Right-click: the same verbs as the "…" menu.
+            .contextMenu { controlMenu(items: true) }
 
             // Nested rows for a running, attached VM: top-level tabs (attach
             // tabs are nested under their container instead), then the always-on
@@ -4952,6 +5160,17 @@ private struct VMSection: View {
 
 /// State-aware "⋯" control menu for a profile row: start/stop/restart plus
 /// edit / duplicate / reset / delete.
+typealias CompromiseRemedy = SessionDisk.CompromiseRemedy
+
+extension SessionDisk.CompromiseRemedy {
+    /// The red triangle by a workspace's name.
+    static var badgeHelp: String {
+        NSLocalizedString(
+            "Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm.",
+            comment: "compromised workspace badge")
+    }
+}
+
 private struct ControlMenu: View {
     let row: SessionListModel.ProfileRow
     let onStart: (Profile.ID) -> Void
@@ -4959,14 +5178,46 @@ private struct ControlMenu: View {
     let onSuspend: (Profile.ID) -> Void
     let onRestart: (Profile.ID) -> Void
     let onEdit: (Profile.ID) -> Void
-    let onDuplicate: (Profile.ID) -> Void
-    let onReset: (Profile.ID) -> Void
+    let onDuplicate: ((Profile.ID) -> Void)?
+    let onReset: ((Profile.ID) -> Void)?
     let onDelete: (Profile.ID) -> Void
+    var onCompromise: ((Profile.ID, CompromiseRemedy) -> Void)? = nil
     let onAddAllToGrid: (Profile.ID) -> Void
     let onRewindHome: (Profile.ID) -> Void
 
+    /// The items alone (a right-click menu), not the "…" button.
+    var itemsOnly = false
+
     var body: some View {
-        Menu {
+        if itemsOnly {
+            items
+        } else {
+            Menu { items } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder private var items: some View {
+            // A running or booting VM has the disk open: shut it down first
+            // (the host refuses too).
+            let inUse = row.state == .running || row.state == .booting
+            if row.compromised, let onCompromise {
+                Button(NSLocalizedString("Wipe and Restore…", comment: "compromised workspace")) {
+                    onCompromise(row.id, .wipe)
+                }.disabled(inUse)
+                Button(NSLocalizedString("Clear Compromised Mark…", comment: "compromised workspace")) {
+                    onCompromise(row.id, .clear)
+                }
+                Divider()
+            }
             switch row.state {
             case .off:
                 Button("Start") { onStart(row.id) }
@@ -4983,21 +5234,12 @@ private struct ControlMenu: View {
             }
             Divider()
             Button("Edit…") { onEdit(row.id) }
-            Button("Duplicate") { onDuplicate(row.id) }
+            // nil on a fat client: the server has no route for it.
+            if let onDuplicate { Button("Duplicate") { onDuplicate(row.id) } }
             Button(NSLocalizedString("Rewind home…", comment: "machine menu")) { onRewindHome(row.id) }
             Divider()
-            Button("Reset disk", role: .destructive) { onReset(row.id) }
-            Button("Delete workspace", role: .destructive) { onDelete(row.id) }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: 20)
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+            if let onReset { Button("Reset disk", role: .destructive) { onReset(row.id) }.disabled(inUse) }
+            Button("Delete workspace", role: .destructive) { onDelete(row.id) }.disabled(inUse)
     }
 }
 
@@ -5552,6 +5794,7 @@ struct UnifiedToolbarBar: View {
     let onToggleFusion: (Profile.ID, Bool) -> Void
     let onToggleFilePane: () -> Void
     let onToggleBrowser: () -> Void
+    var onTogglePolicyDrawer: () -> Void = {}
     let onToggleBeautified: (Profile.ID) -> Void
     /// Sessions-first: the Linux pill — a session's terminal tab, and from
     /// that tab the session again.
@@ -5660,6 +5903,7 @@ struct UnifiedToolbarBar: View {
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
+                PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 // The one Files view: the folder's files, git changes, drag

@@ -137,7 +137,7 @@ struct WorktreeEntry: Identifiable, Equatable, Sendable {
     && disp=$(awk -F"$(printf '\\037')" -v b="$b" '$1==b{print $3}' "$reg" | tail -1); \
     [ -n "$p" ] || p=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null); \
     a=$(git rev-list --count "$p..HEAD" 2>/dev/null || echo 0); \
-    c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); \
+    c=$( { \(RepoGitPrograms.off("."))git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | wc -l | tr -d ' '); \
     t=$(git log -1 --format=%ct 2>/dev/null || echo 0); \
     printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$d" "$r" "$b" "$p" "$a" "$c" "$t" "$disp"; \
     done; true
@@ -251,7 +251,12 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var launchingSince: Date?
     var launchBaselineIndex: Int?
     var endedAt: Date?
+    /// When a roster pass last found the session's tab — every pass while
+    /// the tab is there, idle or not: liveness, never activity.
     var lastSeenAt: Date?
+    /// When the agent last finished a turn or stopped to ask (`noteReply`):
+    /// what the card's "3m" and the stage's "Idle · 3 min" count from.
+    var activeAt: Date?
     var lastError: String?
     /// When an agent was last seen RUNNING in the tab. A tab that is a bare
     /// shell only counts as "the agent exited" once it has run here before
@@ -296,6 +301,13 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// beautified view. Its hooks still say "done", so without this the
     /// sidebar read "Ready" while the chat said the agent was asking.
     var awaitingAnswer: Bool?
+    /// How many times the agent finished a turn or stopped to ask -- counted
+    /// on the server, where the hooks land. `readReplies` is how far anyone
+    /// has read: the session shows unread on every client while it's behind
+    /// (a count, not a date, so no client's clock or the wire's whole-second
+    /// dates can make a reply look read).
+    var replies: Int?
+    var readReplies: Int?
     /// The user put the conversation away: it leaves the session list for
     /// the Archived fold, still readable, and comes back the moment it is
     /// resumed. Archiving ends the agent (a running one, or one found
@@ -359,6 +371,10 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     /// Added to the agent's system prompt on every launch, resumes
     /// included (picked on the New session screen). nil = none.
     var instructions: String?
+    /// What Squelch saved in this conversation, as the host counted it.
+    /// Only on the wire: a host fills it in for its fat clients (its own
+    /// numbers live in `SquelchLedger`); nothing local sets or stores it.
+    var squelch: SquelchTally?
 
     init(id: UUID = UUID(), profileID: UUID, tool: Profile.Tool, title: String,
          cwd: String = "~", cloneURL: String? = nil, openingMessage: String? = nil,
@@ -379,6 +395,8 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 
     var isLaunching: Bool { launchingSince != nil }
     var hasEnded: Bool { endedAt != nil && windowIndex == nil }
+    /// A reply nobody has read yet (see `replies`).
+    var isUnread: Bool { (replies ?? 0) > (readReplies ?? 0) }
     var isArchived: Bool { archivedAt != nil }
     var isDeleted: Bool { deletedAt != nil }
     /// A session the store made from a tab it found (no launch of ours, no
@@ -597,6 +615,37 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
 @Observable
 final class AgentSessionStore {
     private(set) var sessions: [AgentSession] = []
+    /// Per workspace, the tabs a launch of the host's own opened (reconcile
+    /// step 2, past the launch baseline) → once a probe has read the tab,
+    /// "<boot id>|<tmux window id>". Kept on the tab, not on a session:
+    /// reconcile moves a tab between sessions on guest-settable options
+    /// (@display, @label), and the store adopts any guest window labelled
+    /// as an agent, so neither a session nor its options can say a tab is
+    /// the host's (Finding CWE-807, "Guest-adopted tmux windows are spared
+    /// from pid-pin eviction, so a guest can still fill every slot").
+    /// Dropped once the index leaves the live roster, a probe reads another
+    /// window or boot there, or the machine reboots. At most one per launch.
+    private(set) var hostLaunchedTabs: [UUID: [Int: String?]] = [:]
+    private var hostTabMissingSince: [UUID: [Int: Date]] = [:]
+
+    /// The windows of the tabs the host launched in `profileID` that are
+    /// still open.
+    func hostLaunchedWindows(profileID: UUID) -> Set<Int> {
+        Set(hostLaunchedTabs[profileID]?.keys.map { $0 } ?? [])
+    }
+
+    /// A probe read the window and boot at a session's index: seal an
+    /// unsealed host tab there, or drop a sealed one it contradicts.
+    private func noteProbedTab(_ s: AgentSession) {
+        guard let w = s.windowIndex, let boot = s.bootID, let wid = s.windowID,
+              let entry = hostLaunchedTabs[s.profileID]?[w] else { return }
+        let seen = boot + "|" + wid
+        if let sealed = entry {
+            if sealed != seen { hostLaunchedTabs[s.profileID]?[w] = nil }
+        } else {
+            hostLaunchedTabs[s.profileID]?[w] = .some(seen)
+        }
+    }
     private let fileURL: URL
     /// Sessions whose tab was never found are given up after this long.
     static let launchTimeout: TimeInterval = 180
@@ -699,6 +748,40 @@ final class AgentSessionStore {
         return false
     }
 
+    /// The agent finished a turn, or stopped to ask: one more reply to read.
+    func noteReply(_ id: UUID) {
+        guard !isMirror, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].replies = (sessions[i].replies ?? 0) + 1
+        sessions[i].activeAt = Date()
+        save()
+        onReply?(id)
+    }
+
+    /// The agent did something that counts as activity without being a
+    /// reply to read (a hook-less agent's turn ending): the card's time.
+    func noteActive(_ id: UUID, at now: Date = Date()) {
+        guard !isMirror, let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].activeAt = now
+        save()
+    }
+
+    /// Told after each `noteReply` (the app reads it at once if the session
+    /// is on screen, and tells its clients).
+    var onReply: ((UUID) -> Void)?
+
+    /// Someone read the session, up to `seen` replies (what their screen
+    /// showed; nil: all of them). Never goes back, never past the count.
+    /// False when nothing changed.
+    @discardableResult
+    func markRead(_ id: UUID, upTo seen: Int? = nil) -> Bool {
+        guard let i = sessions.firstIndex(where: { $0.id == id }), let n = sessions[i].replies else { return false }
+        let upTo = min(seen ?? n, n)
+        guard upTo > (sessions[i].readReplies ?? 0) else { return false }
+        sessions[i].readReplies = upTo
+        save()
+        return true
+    }
+
     func mutate(_ id: UUID, _ change: (inout AgentSession) -> Void) {
         guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
         change(&sessions[i])
@@ -732,6 +815,11 @@ final class AgentSessionStore {
     /// machine is back, decides again.
     func clearLiveness(outside attached: Set<UUID>) {
         var changed = false
+        // An index the probe never stamped, its machine gone meanwhile: it
+        // may be anyone's tab when the machine is back.
+        for s in sessions where !attached.contains(s.profileID) && s.windowID == nil {
+            if let w = s.windowIndex { inheritedIndex[s.id] = w }
+        }
         for i in sessions.indices where sessions[i].agentAlive != nil
             && !attached.contains(sessions[i].profileID) {
             sessions[i].agentAlive = nil
@@ -1005,10 +1093,13 @@ final class AgentSessionStore {
               sessions[i].windowIndex != nil else { return false }
         if sessions[i].bootID == nil {
             sessions[i].bootID = bootID
+            noteProbedTab(sessions[i])
             save()
             return true
         }
         guard sessions[i].bootID != bootID else { return true }
+        hostLaunchedTabs[sessions[i].profileID] = nil   // a reboot: indices start over
+        hostTabMissingSince[sessions[i].profileID] = nil
         sessions[i].windowIndex = nil
         sessions[i].bootID = nil
         if !sessions[i].isLaunching { sessions[i].endedAt = now }
@@ -1031,6 +1122,7 @@ final class AgentSessionStore {
         if sessions[i].windowID == nil {
             if sessions[i].isArchived || sessions[i].isDeleted { return false }
             sessions[i].windowID = windowID
+            noteProbedTab(sessions[i])
             save()
             return true
         }
@@ -1196,6 +1288,20 @@ final class AgentSessionStore {
     private var deadSince: [UUID: Date] = [:]
     private var missingSince: [UUID: Date] = [:]
 
+    /// Unstamped bindings this run can't vouch for: read from disk (the
+    /// guest may have rebooted since), or held while their machine was
+    /// away. Anything else unstamped was bound from the live roster in this
+    /// run — reconcile just saw that tab at that index.
+    private var inheritedIndex: [UUID: Int] = [:]
+
+    /// A binding reconcile made from the live roster in this run and the
+    /// probe hasn't stamped yet (no window id, so `reapArchived` could never
+    /// prove it): its index is this session's tab, closable now.
+    func boundThisRun(_ s: AgentSession) -> Bool {
+        guard let w = s.windowIndex, s.windowID == nil else { return false }
+        return inheritedIndex[s.id] != w
+    }
+
     /// The session bound to a workspace's tmux window, if any.
     /// A live (not archived, not deleted) one first: an archived session can
     /// still hold the index a newcomer just took, until the probe lets go.
@@ -1223,6 +1329,22 @@ final class AgentSessionStore {
             // saved pill. Only the guest's own roster counts.
             guard !tabs.isEmpty, entry.model.rosterLive else { continue }
             let indices = Set(tabs.map(\.index))
+            // A host tab that closed: its index may go to anyone next. Not
+            // on one roster without it (a refresh mid-way, a window moved
+            // out and back): only once it's been gone `missingGrace`, as a
+            // session's binding is.
+            if let held = hostLaunchedTabs[entry.id] {
+                for w in held.keys {
+                    if indices.contains(w) { hostTabMissingSince[entry.id]?[w] = nil; continue }
+                    let first = hostTabMissingSince[entry.id]?[w] ?? now
+                    hostTabMissingSince[entry.id, default: [:]][w] = first
+                    if now.timeIntervalSince(first) >= Self.missingGrace {
+                        hostLaunchedTabs[entry.id]?[w] = nil
+                        hostTabMissingSince[entry.id]?[w] = nil
+                        changed = true
+                    }
+                }
+            }
             // 0. Stale bindings: after a reboot the window indices start over,
             // so a session's index may now be another tab (one we opened
             // under a different name). Unbind first, so the launch waiting
@@ -1299,6 +1421,7 @@ final class AgentSessionStore {
                     }
                     if let tab = Self.launchTab(for: s, in: candidates, soleLaunch: soleLaunch) {
                         s.windowIndex = tab.index
+                        hostLaunchedTabs[entry.id, default: [:]][tab.index] = .some(nil)   // sealed once probed
                         s.bootID = nil   // stamped by the next probe
                         s.launchingSince = nil
                         s.launchBaselineIndex = nil
@@ -1519,11 +1642,14 @@ final class AgentSessionStore {
 
     /// The beautified view's verdict on whether the agent's screen shows a
     /// dialog waiting on the user. Persisted only on change.
-    func setAwaitingAnswer(_ id: UUID, _ waiting: Bool) {
+    /// True when it changed.
+    @discardableResult
+    func setAwaitingAnswer(_ id: UUID, _ waiting: Bool) -> Bool {
         guard let i = sessions.firstIndex(where: { $0.id == id }),
-              (sessions[i].awaitingAnswer == true) != waiting else { return }
+              (sessions[i].awaitingAnswer == true) != waiting else { return false }
         sessions[i].awaitingAnswer = waiting ? true : nil
         save()
+        return true
     }
 
     /// The agent named its session (its terminal title, read by the
@@ -1541,13 +1667,23 @@ final class AgentSessionStore {
 
     // MARK: Persistence
 
-    private struct FilePayload: Codable { var sessions: [AgentSession] }
+    private struct FilePayload: Codable {
+        var sessions: [AgentSession]
+        /// Sealed host tabs only ("<boot>|<window id>"): an unsealed one has
+        /// nothing to check a restored roster against.
+        var hostLaunchedTabs: [String: [String: String]]? = nil
+    }
 
     private func load() {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: fileURL),
               let payload = try? d.decode(FilePayload.self, from: data) else { return }
+        for (pid, held) in payload.hostLaunchedTabs ?? [:] {
+            guard let id = UUID(uuidString: pid) else { continue }
+            let tabs = Dictionary(uniqueKeysWithValues: held.compactMap { w, v in Int(w).map { ($0, Optional(v)) } })
+            if !tabs.isEmpty { hostLaunchedTabs[id] = tabs }
+        }
         // A launch can't survive a restart; whatever it made is adopted. A
         // liveness verdict is only as fresh as the last probe.
         sessions = payload.sessions.map { s in
@@ -1574,6 +1710,9 @@ final class AgentSessionStore {
             }
             return s
         }
+        for s in sessions where s.windowID == nil {
+            if let w = s.windowIndex { inheritedIndex[s.id] = w }
+        }
         // Twins an earlier build left behind go now, before anything shows;
         // so does anything deleted whose tab is gone.
         let tidied = dedupeTwins()
@@ -1592,7 +1731,11 @@ final class AgentSessionStore {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? e.encode(FilePayload(sessions: sessions)) else { return }
+        let tabs = Dictionary(uniqueKeysWithValues: hostLaunchedTabs.map { pid, held in
+            (pid.uuidString, Dictionary(uniqueKeysWithValues: held.compactMap { w, v in v.map { (String(w), $0) } }))
+        }.filter { !$0.1.isEmpty })
+        guard let data = try? e.encode(FilePayload(sessions: sessions, hostLaunchedTabs: tabs.isEmpty ? nil : tabs))
+        else { return }
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: fileURL, options: .atomic)
@@ -1887,6 +2030,18 @@ enum SessionHome {
         }
     }
 
+    /// The card's unread mark: a reply not yet read, while the agent isn't
+    /// working on the next one (a new turn hides it; it comes back when
+    /// that turn's reply does). Archived and ended sessions don't nag.
+    @MainActor
+    static func showsUnread(_ s: AgentSession, in model: SessionListModel) -> Bool {
+        guard s.isUnread, !s.isArchived else { return false }
+        switch bucket(for: s, in: model) {
+        case .idle, .needsYou, .asleep: return true
+        case .working, .ended: return false
+        }
+    }
+
     @MainActor
     static func dot(for s: AgentSession, in model: SessionListModel) -> AgentStatus? {
         switch bucket(for: s, in: model) {
@@ -2142,9 +2297,20 @@ enum SessionHome {
         return String(format: NSLocalizedString("%dd", comment: "elapsed compact"), s / 86400)
     }
 
-    /// When the session last did something — what the row's timestamp shows.
+    /// When the session last did something: its agent's last reply, its
+    /// end, its last resume, its start — the latest. Not `lastSeenAt`: the
+    /// roster stamps that on every pass while the tab is up, so every live
+    /// session read "now", idle for hours or not.
     static func lastActivity(_ s: AgentSession) -> Date {
-        s.lastSeenAt ?? s.endedAt ?? s.resumedAt ?? s.createdAt
+        [s.activeAt, s.endedAt, s.resumedAt].compactMap { $0 }.reduce(s.createdAt) { max($0, $1) }
+    }
+
+    /// The row's trailing timestamp: "now" while the agent works, else how
+    /// long since it last did something; nothing while it starts.
+    @MainActor
+    static func rowWhen(_ s: AgentSession, in model: SessionListModel, now: Date = Date()) -> String? {
+        if s.isLaunching { return nil }
+        return elapsedCompact(since: bucket(for: s, in: model) == .working ? now : lastActivity(s), now: now)
     }
 
     @MainActor
@@ -2970,6 +3136,8 @@ struct SessionRowView: View {
     /// Runs on a native machine (not sandboxed): its ring is dashed orange,
     /// with the badge.
     var native = false
+    /// The agent said something nobody has read (`SessionHome.showsUnread`).
+    var unread = false
     @State private var hovering = false
 
     private var mergeTint: Color? {
@@ -3013,7 +3181,7 @@ struct SessionRowView: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title ?? session.title)
-                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                        .font(.system(size: 13, weight: selected || unread ? .semibold : .medium))
                         .foregroundStyle(session.hasEnded && !selected ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -3026,10 +3194,15 @@ struct SessionRowView: View {
                             .background(RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.12)))
                     } else if let when {
                         Text(when)
-                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 10.5, weight: unread ? .semibold : .medium).monospacedDigit())
+                            .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    }
+                    if unread && shortcut == nil {
+                        UnreadMark()
+                            .transition(.scale(scale: 0.2).combined(with: .opacity))
                     }
                 }
+                .animation(.spring(response: 0.35, dampingFraction: 0.7), value: unread)
                 HStack(spacing: 5) {
                     if let nick = session.nickname, !nick.isEmpty {
                         Text("@" + nick)
@@ -3536,7 +3709,7 @@ struct SessionSectionsView: View {
             accentHex: accentHex(s.profileID),
             dot: SessionHome.dot(for: s, in: model),
             statusLine: SessionHome.statusLine(for: s, in: model),
-            when: s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s)),
+            when: SessionHome.rowWhen(s, in: model),
             gone: gone,
             depth: depth,
             selected: model.selectedSessionID == s.id,
@@ -3554,7 +3727,8 @@ struct SessionSectionsView: View {
             shortcut: model.commandHeld ? shortcutNumbers[s.id] : nil,
             snippet: filter.isEmpty || s.title.localizedCaseInsensitiveContains(filter) ? nil : contentHits[s.id],
             preview: lastReply(s.id),
-            native: model.machineIDs.contains(s.profileID))
+            native: model.machineIDs.contains(s.profileID),
+            unread: SessionHome.showsUnread(s, in: model))
         .overlay {
             if dropSession == s.id {
                 RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 2)

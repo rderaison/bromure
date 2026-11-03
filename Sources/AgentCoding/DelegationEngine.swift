@@ -189,6 +189,10 @@ final class DelegationEngine {
     static let boardLabel = "the Coding Tasks board"
     /// A message for the board (an ask, a report, a delivery, a host note).
     var onBoardMessage: (@MainActor (Delegation, DelegationMessage) -> Void)?
+    /// Whether the board still wants this delegation of its own back when its
+    /// session returns — not when the card was deleted or is done meanwhile
+    /// (the board's sync then cancels or closes it).
+    var boardWantsRevival: (@MainActor (Delegation) -> Bool)?
 
     /// A child may delegate in turn, this deep.
     static let maxDepth = 3
@@ -976,7 +980,11 @@ final class DelegationEngine {
     /// open one the session is the child of.
     func childDelegation(_ key: String?, for sessionID: UUID) throws -> Delegation {
         if let key, !key.isEmpty { return try delegation(key, as: .child, for: sessionID) }
+        // A delegation failed only for this session's absence is still its
+        // own: the session back and calling without an id (one delegation:
+        // the id is optional) revives it in `post`, not "nobody to answer".
         let open = store.openAsChild(sessionID)
+            + store.delegations(child: sessionID).filter { $0.goneFrom != nil }
         // One still waiting on a delivery is the one meant; a delivered
         // one only when it's the only one left (a follow-up after a steer).
         let undelivered = open.filter { $0.status != .delivered }
@@ -999,10 +1007,21 @@ final class DelegationEngine {
     func post(_ delegationID: UUID, from: DelegationMessage.Party, kind: DelegationMessage.Kind,
               text: String, answering: UUID? = nil, files: [String] = [],
               landed: [String] = []) async throws -> DelegationMessage {
-        guard let d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
+        guard var d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DelegationRefusal("Nothing to say.") }
-        guard d.status.isOpen || kind == .note else {
+        // Failed only for being out of view, and its session speaks: it's
+        // back (a delivery after a Sidecar restart was refused as "failed").
+        if from == .child, d.goneFrom != nil, sessions.session(d.childSessionID)?.isDeleted != true {
+            revive(d)
+            if let fresh = store.delegation(delegationID) { d = fresh }
+        }
+        // Still failed for its absence (its session put away as it came
+        // back): its delivery lands all the same — delivered stays open on
+        // an archived session, and the parent closes it.
+        let deliversBack = from == .child && kind == .deliver && d.goneFrom != nil
+            && sessions.session(d.childSessionID)?.isDeleted != true
+        guard d.status.isOpen || kind == .note || deliversBack else {
             throw DelegationRefusal("Delegation “\(d.title)” is \(d.status.rawValue).")
         }
         let to: DelegationMessage.Party
@@ -1043,6 +1062,12 @@ final class DelegationEngine {
         }
         // Files a remote parent already landed here for this message.
         if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+        // Cancelled or closed while the scan or the copy ran: it stays so —
+        // a deliver recorded now made it delivered again.
+        if kind != .note, let now = store.delegation(delegationID),
+           !(now.status.isOpen || (deliversBack && now.goneFrom != nil)) {
+            throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+        }
         store.mutate(delegationID) { d in
             // A child that speaks has read its brief (a request's, typed as a
             // notice) — it mustn't come back out of its inbox as news.
@@ -1055,7 +1080,7 @@ final class DelegationEngine {
             switch kind {
             case .ask: d.status = .waitingForParent
             case .answer, .steer: if d.status == .waitingForParent || d.status == .starting { d.status = .working }
-            case .deliver: d.status = .delivered
+            case .deliver: d.status = .delivered; d.goneFrom = nil; d.failure = nil
             case .cancel: d.status = .cancelled
             case .report: if d.status == .starting { d.status = .working }
             case .brief, .note: break
@@ -1113,6 +1138,35 @@ final class DelegationEngine {
         BACDebug.log("delegation", "\(action) on “\(d.title)” at “\(link.hostName)”")
     }
 
+    /// The parent's own words riding on a cancel or a close — typed into a
+    /// peer's prompt like any message: scanned as `post` scans one, and a
+    /// hit withheld the same way (recorded blocked, audited, refused), before
+    /// anything is stored or sent. A close's note skipped it, so text a
+    /// steer would have withheld reached the peer as a host notice.
+    private func screen(_ text: String, on d: Delegation, kind: DelegationMessage.Kind,
+                        from party: DelegationMessage.Party) async throws {
+        guard party != .host, !text.isEmpty, let snippet = await scan(text) else { return }
+        var m = DelegationMessage(kind: kind, from: party, to: .child, text: text)
+        m.blocked = snippet
+        m.readAt = m.at
+        store.mutate(d.id) { $0.messages.append(m) }
+        audit(d.profileID, auditData(title: d.title, kind: kind, from: party, to: .child, text: text, blocked: snippet))
+        BACDebug.log("delegation", "withheld a \(kind.rawValue) from \(party.rawValue) on “\(d.title)”")
+        throw DelegationRefusal("Your message was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Rephrase it as plain facts about the work.")
+    }
+
+    /// Still open (or failed only for its session's absence) after the scan
+    /// — which leaves the main actor, so the ticker, a deliver or another
+    /// cancel/close can end it meanwhile: then nothing is recorded or sent
+    /// (the last one in overwrote the ending, and typed a close notice
+    /// after a recall, or over a failure).
+    private func stillEndable(_ d: Delegation) throws {
+        guard let now = store.delegation(d.id) else { throw DelegationRefusal("Unknown delegation.") }
+        guard now.status.isOpen || now.goneFrom != nil else {
+            throw DelegationRefusal("Delegation “\(d.title)” is already \(now.status.rawValue).")
+        }
+    }
+
     /// Stop the child: the record says why; a delegate's session is put
     /// away (a peer's is its own business).
     func cancel(from parentID: UUID, delegationKey: String, reason: String,
@@ -1123,12 +1177,16 @@ final class DelegationEngine {
             link.remoteDelegations.mutate(d.id) { $0.status = .cancelled }
             return
         }
-        guard d.status.isOpen else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
+        // A delegation failed only for its session's absence can still be
+        // cancelled — else its revival undid a cancel the parent was told of.
+        guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await screen(trimmedReason, on: d, kind: .cancel, from: party)
+        try stillEndable(d)
         let why = trimmedReason.isEmpty ? "no longer needed" : trimmedReason
         var m = DelegationMessage(kind: .cancel, from: party, to: .child, text: why)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .cancelled; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .cancel, from: party, to: .child, text: why))
         wake(d.childSessionID)
         if d.isRequest {
@@ -1155,16 +1213,27 @@ final class DelegationEngine {
             link.remoteDelegations.mutate(d.id) { $0.status = .done; $0.verdict = verdict.lowercased() == "rejected" ? "rejected" : "accepted" }
             return
         }
-        guard d.status.isOpen else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
+        guard d.status.isOpen || d.goneFrom != nil else { throw DelegationRefusal("Delegation “\(d.title)” is already \(d.status.rawValue).") }
         let v = verdict.lowercased() == "rejected" ? "rejected" : "accepted"
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        try await screen(trimmedNote, on: d, kind: .note, from: party)
+        try stillEndable(d)
         let text = (d.isRequest ? "Request closed (\(v))." : "Delivery \(v).") + (trimmedNote.isEmpty ? "" : " " + trimmedNote)
         var m = DelegationMessage(kind: .note, from: party, to: .child, text: text)
         m.readAt = m.at
-        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v }
+        store.mutate(d.id) { $0.messages.append(m); $0.status = .done; $0.verdict = v; $0.goneFrom = nil; $0.failure = nil }
         audit(d.profileID, auditData(title: d.title, kind: .note, from: party, to: .child, text: text))
         wake(d.childSessionID)
-        if !d.isRequest { retireChild(d) }
+        if d.isRequest {
+            // The peer hears it ended (now, or when its session is back),
+            // as a cancelled request's does.
+            if let fresh = store.delegation(d.id) {
+                store.mutate(d.id) { $0.messages[$0.messages.count - 1].readAt = nil }
+                notify(d.childSessionID, fresh, m)
+            }
+        } else {
+            retireChild(d)
+        }
         BACDebug.log("delegation", "“\(d.title)” closed: \(v)")
     }
 
@@ -1174,11 +1243,42 @@ final class DelegationEngine {
     /// keeps its checkout and branch, but the machine stops reopening it
     /// at boot — else every closed delegation comes back as a live agent
     /// tab after a reboot (a resume opens it again).
+    /// Out of view (its Mac asleep, reconnecting): done when it's back.
     private func retireChild(_ d: Delegation) {
-        guard !d.isRequest,
-              let child = sessions.session(d.childSessionID), !child.isDeleted, !child.isArchived else { return }
+        guard !d.isRequest else { return }
+        // What it was still owed (a steer typed nowhere while its Mac was
+        // away) is moot now: left owed, the next notice pass resumed the
+        // session with it — relaunching a delegate that was being put away.
+        if let fresh = store.delegation(d.id) {
+            let owed = fresh.messages.filter { $0.to == .child && ($0.readAt == nil || $0.noticedAt == nil) }.map(\.id)
+            if !owed.isEmpty { store.markNoticed(owed); store.markRead(owed) }
+        }
+        guard let child = sessions.session(d.childSessionID) else {
+            store.mutate(d.id) { $0.retireWhenBack = true }
+            return
+        }
+        guard !child.isDeleted, !child.isArchived else { return }
         if child.worktreeBranch != nil { keepBranchQuietly(d.childSessionID) }
         archive(d.childSessionID)
+        endOthers(on: d.childSessionID, except: d.id)
+    }
+
+    /// Bromure just put this session away, its delegation over: a request
+    /// another session had on it can't go on (nothing may reach it now),
+    /// so it ends here, its parent told — rather than waiting for ever.
+    /// Only here: a session the user archives (Undo, or a message brings
+    /// it back) or the 3-day sweep puts away is a pause, not an end — its
+    /// delegations stay open, the "bring it back first" refusal holds, and
+    /// the work carries on once it's back.
+    private func endOthers(on childID: UUID, except id: UUID) {
+        for o in store.delegations where o.childSessionID == childID && o.id != id {
+            let why = o.isRequest ? "the peer's session was put away" : "the delegate's session was put away"
+            if o.goneFrom != nil {
+                endGone(o, why)          // waiting for it to come back: it won't
+            } else if o.status.isOpen, o.status != .delivered {
+                fail(o, why)
+            }
+        }
     }
 
     // MARK: Inbox
@@ -1470,6 +1570,9 @@ final class DelegationEngine {
         // and is never typed in or resumed for.
         guard !items.isEmpty, let s = sessions.session(sessionID), delegate != nil, !s.isDeleted, !s.isArchived
         else { return }
+        // About to be put away (a delegate over while its Mac was away, back
+        // now): never resumed or typed into first.
+        if store.delegations.contains(where: { $0.childSessionID == sessionID && $0.retireWhenBack == true }) { return }
         if s.isLaunching { return }
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)
@@ -1568,7 +1671,7 @@ final class DelegationEngine {
         let now = Date()
         for d in store.delegations {
             for m in d.messages
-            where DelegationStore.owesNotice(m, interrupts: DelegationNotice.interrupts(m.kind, request: d.isRequest), now: now) {
+            where DelegationStore.owesNotice(m, in: d, interrupts: DelegationNotice.interrupts(m.kind, request: d.isRequest), now: now) {
                 out.insert(m.to == .parent ? d.parentSessionID : d.childSessionID)
             }
         }
@@ -1590,12 +1693,62 @@ final class DelegationEngine {
     /// peer is nobody's to watch: it lives its own life.
     /// Open delegations whose other session hasn't been found since when.
     private var missingSince: [UUID: Date] = [:]
+    /// Gone delegations whose child is still absent although where it lived
+    /// is reachable: since when (a machine just back lists its sessions on
+    /// its next poll, not at once).
+    private var vanishedSince: [UUID: Date] = [:]
+    /// How long a reachable child's absence lasts before it reads as deleted.
+    var vanishGrace: TimeInterval = 30
     /// How long a session may be out of view (its Mac restarting, asleep,
     /// reconnecting) before its delegations end.
     static let missingGrace: TimeInterval = 300
+    /// `missingGrace`, for this engine (tests shorten it).
+    var absenceGrace = DelegationEngine.missingGrace
 
     private func watchChildren() {
         let now = Date()
+        // Over while its session was out of view, and back: put away now.
+        var retiring = Set<UUID>()
+        for d in store.delegations where d.retireWhenBack == true {
+            guard sessions.session(d.childSessionID) != nil else { continue }
+            store.mutate(d.id) { $0.retireWhenBack = nil }
+            retiring.insert(d.childSessionID)
+            if let fresh = store.delegation(d.id) { retireChild(fresh) }
+        }
+        // Gone too long, and back: on with it where it was. Back deleted:
+        // that's the end (failed, as a deleted session's always is).
+        for d in store.delegations where d.goneFrom != nil {
+            let deleted = d.isRequest ? "the peer's session was deleted" : "the delegate's session was deleted"
+            guard let child = sessions.session(d.childSessionID) else {
+                // Not listed although where it lived answers (this Mac, or
+                // its machine connected again): deleted there — a Sidecar's
+                // /state simply drops the id, it never lists it deleted.
+                guard Self.childHostReachable(d.childHost, sessions) else { vanishedSince[d.id] = nil; continue }
+                let since = vanishedSince[d.id] ?? now
+                vanishedSince[d.id] = since
+                if now.timeIntervalSince(since) > vanishGrace { endGone(d, deleted) }
+                continue
+            }
+            vanishedSince[d.id] = nil
+            if child.isDeleted {
+                endGone(d, deleted)
+            } else if retiring.contains(child.id) || Self.putAwayForGood(child) {
+                // Put away this very tick for another of its delegations (on
+                // an attached Mac the archive is only queued, the mirror still
+                // shows it live), or landed, its checkout gone: not back to work.
+                // A delivery stands, though: the parent still closes it.
+                if d.goneFrom == .delivered { keepDelivery(d) } else {
+                    endGone(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                }
+            } else if child.isArchived {
+                // Archived by the user (or the 3-day sweep) while gone: still
+                // waiting — it revives once the session is brought back. A
+                // delivery is the parent's to close now.
+                if d.goneFrom == .delivered { keepDelivery(d) }
+            } else {
+                revive(d)
+            }
+        }
         for d in store.delegations where d.status.isOpen {
             if let child = sessions.session(d.childSessionID), child.isDeleted {
                 missingSince[d.id] = nil
@@ -1607,13 +1760,26 @@ final class DelegationEngine {
                 // moment. Only a long absence ends the delegation.
                 let since = missingSince[d.id] ?? now
                 missingSince[d.id] = since
-                if now.timeIntervalSince(since) > Self.missingGrace {
+                if now.timeIntervalSince(since) > absenceGrace {
                     missingSince[d.id] = nil
-                    fail(d, d.isRequest ? "the peer's session is gone" : "the delegate's session is gone")
+                    markGone(d)
                 }
                 continue
             }
             missingSince[d.id] = nil
+            if d.childHost == nil, let host = Self.childHost(of: child.id, sessions) {
+                store.mutate(d.id) { $0.childHost = host }
+            }
+            // Landed — archived with its checkout removed — can't be
+            // resumed: nothing it was asked will be done.
+            if Self.putAwayForGood(child), d.status != .delivered {
+                fail(d, d.isRequest ? "the peer's session was put away" : "the delegate's session was put away")
+                continue
+            }
+            // Archived: paused, not over — Bromure's own put-away already
+            // ended what it had to (`endOthers`); the user's archive, Undo
+            // and the 3-day sweep only wait for the session to come back.
+            if child.isArchived { continue }
             if d.isRequest { continue }
             if d.status == .starting {
                 if child.windowIndex != nil, !child.isLaunching {
@@ -1633,6 +1799,100 @@ final class DelegationEngine {
                                           text: "the delegate's agent ended without delivering — steer it (it picks the work back up) or cancel")
             }
         }
+    }
+
+    nonisolated static let localChildHost = "local"
+
+    /// Whether the place a gone child lived lists sessions now: this Mac's
+    /// store always does; an attached machine only while connected. Unknown
+    /// (a record from before `childHost`): no — it keeps waiting.
+    static func childHostReachable(_ host: String?, _ sessions: DelegationSessions) -> Bool {
+        guard let host else { return false }
+        if host == localChildHost { return true }
+        return sessions.hosts.contains { $0.agentHostID?.uuidString == host }
+    }
+
+    /// Where a visible session lives: "local" only when this Mac's own store
+    /// holds it; else the link that lists it (an attached machine, a mirrored
+    /// host — whose sessions keep their own workspace ids, so a profile
+    /// lookup read them as local and ended them while the host was away).
+    /// nil when the link has no identity: unknown, it keeps waiting.
+    static func childHost(of sessionID: UUID, _ sessions: DelegationSessions) -> String? {
+        if sessions.local.session(sessionID) != nil { return localChildHost }
+        return sessions.hosts.first { $0.hostSessions.session(sessionID) != nil }?.agentHostID?.uuidString
+    }
+
+    /// A gone delegation whose session won't come back: failed for good, and
+    /// the other end hears it (the card said it would carry on).
+    private func endGone(_ d: Delegation, _ why: String) {
+        vanishedSince[d.id] = nil
+        store.mutate(d.id) { $0.goneFrom = nil; $0.failure = why }
+        Task { [weak self] in
+            _ = try? await self?.post(d.id, from: .host, kind: .note, text: "failed — \(why)")
+        }
+    }
+
+    nonisolated static func goneText(_ d: Delegation) -> String {
+        d.isRequest ? "the peer's session is gone" : "the delegate's session is gone"
+    }
+
+    /// Out of view past `missingGrace`: failed, but not over — its session
+    /// isn't put away, and coming back revives it (`revive`).
+    private func markGone(_ d: Delegation) {
+        let why = Self.goneText(d)
+        // A new absence: its "vanished" grace starts now, not at a date left
+        // from an earlier one (revived, or delivered, by a message before the
+        // roster caught up) — that ended it as deleted on the next tick.
+        vanishedSince[d.id] = nil
+        store.mutate(d.id) { $0.goneFrom = $0.status; $0.status = .failed; $0.failure = why }
+        BACDebug.log("delegation", "“\(d.title)” failed: \(why) (revived if it comes back)")
+        Task { [weak self] in
+            guard let self, let fresh = self.store.delegation(d.id) else { return }
+            _ = try? await self.post(fresh.id, from: .host, kind: .note,
+                                     text: "failed — \(why); it carries on if the session comes back")
+        }
+    }
+
+    /// A delegation failed for its session's absence, the session back:
+    /// its status before, and the other end hears it.
+    func revive(_ d: Delegation) {
+        guard let was = store.delegation(d.id)?.goneFrom else { return }
+        // Put away meanwhile (archived, or queued to be): it isn't back —
+        // but a delivery stands (the parent still closes it).
+        if sessions.session(d.childSessionID)?.isArchived == true
+            || store.delegations.contains(where: { $0.childSessionID == d.childSessionID && $0.retireWhenBack == true }) {
+            if was == .delivered { keepDelivery(d) }
+            return
+        }
+        // A board task deleted or finished during the outage: no "the work
+        // carries on" (which cleared the card's error), no tools again.
+        if d.parentSessionID == Self.boardSessionID, let wants = boardWantsRevival, !wants(d) { return }
+        store.mutate(d.id) { $0.status = was; $0.failure = nil; $0.goneFrom = nil }
+        missingSince[d.id] = nil
+        vanishedSince[d.id] = nil
+        BACDebug.log("delegation", "“\(d.title)”: its session is back — \(was.rawValue) again")
+        Task { [weak self] in
+            _ = try? await self?.post(d.id, from: .host, kind: .note, text: Self.backText)
+        }
+    }
+
+    /// Archived with no folder to resume in (a landed branch session, its
+    /// checkout removed): unlike the user's archive, there's no way back.
+    nonisolated static func putAwayForGood(_ s: AgentSession) -> Bool {
+        s.isArchived && s.folderMissing == true
+    }
+
+    nonisolated static let backText = "the session is back — the work carries on"
+
+    /// A delivered delegation failed for its session's absence, the session
+    /// put away since: delivered again, for the parent to close with its
+    /// verdict (an archived child's delivery is never failed). The work
+    /// doesn't carry on, so no "back" note.
+    private func keepDelivery(_ d: Delegation) {
+        vanishedSince[d.id] = nil
+        missingSince[d.id] = nil
+        store.mutate(d.id) { $0.status = .delivered; $0.failure = nil; $0.goneFrom = nil }
+        BACDebug.log("delegation", "“\(d.title)”: its session was put away — its delivery stands")
     }
 
     private func fail(_ d: Delegation, _ why: String) {

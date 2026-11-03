@@ -442,7 +442,10 @@ struct OnboardingWizardView: View {
                                  onCancel: onCancelSignIn,
                                  onDismiss: onDismissSignIn,
                                  onOpenURL: { url in
-                                     if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+                                     // Only an agent's own sign-in page leaves for the browser.
+                                     guard AgentScreen.isSignInURL(url, agent: nil),
+                                           let u = URL(string: url) else { return }
+                                     NSWorkspace.shared.open(u)
                                  })
                     .padding(.horizontal, 28)
                     .padding(.top, 10)
@@ -578,7 +581,9 @@ private struct WizardSignInCard: View {
                     }
                     if let url = signIn.authURL {
                         Button { onOpenURL(url) } label: {
-                            Label(NSLocalizedString("Open sign-in page", comment: "wizard sign-in"),
+                            Label(AgentScreen.signInHost(url).map {
+                                String(format: NSLocalizedString("Open %@", comment: "login: the sign-in page's host"), $0)
+                            } ?? NSLocalizedString("Open sign-in page", comment: "wizard sign-in"),
                                   systemImage: "arrow.up.right.square.fill")
                         }
                         .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)

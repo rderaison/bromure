@@ -1,4 +1,5 @@
 import Darwin
+import SandboxEngine
 import Foundation
 import Testing
 @testable import bromure_ac
@@ -217,6 +218,187 @@ struct WebSocketTransformTests {
         #expect(json(msg.payload)["type"] as? String == "response.create")
         #expect(out.contains(#""tools":[{"type":"function","name":"shell"}]"#))
         #expect(rec.events.contains { $0.hasPrefix("pii:") })
+    }
+
+    @Test("Squelch alone: a Codex turn goes out with the command noise trimmed, and is counted")
+    func squelchOut() throws {
+        let rec = Recorder()
+        let g = makeGuard(pii: false, injection: nil, vault: PIIVault(secret: secret), recorder: rec)
+        g.squelch = { SquelchPolicy(enabled: true) }
+        g.conversation = "019a0000-aaaa-7bbb-8ccc-dddddddddddd"
+        let ledger = SquelchLedger(file: nil)
+        g.squelchLedger = ledger
+        let h = WSHarness(guard: g)
+        defer { h.close() }
+        let noisy = (0..<120).map { "tests/test_api.py::test_\($0) PASSED" }.joined(separator: "\n")
+            + "\nFAILED tests/test_api.py::test_retry - assert 2 == 3\n1 failed, 120 passed in 3.1s\n"
+        let create: [String: Any] = ["type": "response.create", "model": "gpt-5-codex", "input": [
+            ["type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": #"{"cmd":"pytest -v"}"#],
+            ["type": "function_call_output", "call_id": "c1",
+             "output": "Chunk ID: 1\nWall time: 3.1 seconds\nProcess exited with code 1\nOutput:\n" + noisy],
+        ]]
+        let payload = String(decoding: try JSONSerialization.data(withJSONObject: create), as: UTF8.self)
+        h.guestSend(frame(0x1, payload, masked: true))
+        let up = h.serverFrames(1)
+        let msg = try #require(up.first)
+        let input = try #require(json(msg.payload)["input"] as? [[String: Any]])
+        let out = try #require(input[1]["output"] as? String)
+        #expect(out.hasPrefix("Chunk ID: 1\n") && out.contains("FAILED tests/test_api.py::test_retry"))
+        #expect(!out.contains("test_5 PASSED"))
+        let ws = try #require(ledger.workspace(g.profileID))
+        #expect(ws.total.trimmed == 1 && ws.total.savedBytes > 3000)
+        #expect(ledger.conversation(g.profileID, "019a0000-aaaa-7bbb-8ccc-dddddddddddd")?.trimmed == 1)
+        #expect(rec.events.isEmpty)
+    }
+
+    @Test("Squelch on a chained turn: the call the server announced trims its bare result next turn")
+    func squelchChained() throws {
+        let rec = Recorder()
+        let g = makeGuard(pii: false, injection: nil, vault: PIIVault(secret: secret), recorder: rec)
+        g.squelch = { SquelchPolicy(enabled: true) }
+        g.squelchLedger = SquelchLedger(file: nil)
+        let h = WSHarness(guard: g)
+        defer { h.close() }
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_w","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        h.serverSend(frame(0x1, done, masked: false))
+        #expect(h.guestFrames(1).count == 1)
+        let noisy = (0..<120).map { "tests/t.py::test_\($0) PASSED" }.joined(separator: "\n") + "\nFAILED tests/t.py::test_x\n"
+        let create: [String: Any] = ["type": "response.create", "previous_response_id": "resp_1",
+                                     "input": [["type": "function_call_output", "call_id": "call_w", "output": noisy]]]
+        h.guestSend(frame(0x1, String(decoding: try JSONSerialization.data(withJSONObject: create), as: UTF8.self), masked: true))
+        let msg = try #require(h.serverFrames(1).first)
+        let out = try #require((json(msg.payload)["input"] as? [[String: Any]])?.first?["output"] as? String)
+        #expect(!out.contains("test_5 PASSED") && out.contains("FAILED tests/t.py::test_x"))
+    }
+
+    /// Finding (CWE-670): "OpenShell WebSocket policy or rewrite skips
+    /// Squelch for the whole socket". A socket with an OpenShell message
+    /// policy or rewrite runs on the per-message pump, with no guard — and
+    /// Squelch ran only in the guard.
+    @Test("On the OpenShell pump: Squelch trims client text ahead of the rewrite, and server calls are learned")
+    func squelchOnPolicyPump() throws {
+        let pid = UUID()
+        let saved = HTTPMitmConnection.squelchPolicyProvider
+        defer { HTTPMitmConnection.squelchPolicyProvider = saved }
+        HTTPMitmConnection.squelchPolicyProvider = { $0 == pid ? SquelchPolicy(enabled: true) : nil }
+        #expect(WSContentGuard.squelchApplies(host: "chatgpt.com", profileID: pid))
+        #expect(!WSContentGuard.squelchApplies(host: "example.com", profileID: pid))
+
+        // The server announces the call (a chained turn's bare result needs it):
+        // read by a parser that keeps nothing, as the pump does.
+        let learner = WSTraceCollector(direction: .upstreamToClient, retainsMessages: false)
+        learner.onMessage = { msg in
+            if msg.kind == .text { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_p","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        learner.feed(frame(0x1, done, masked: false))
+        #expect(learner.messages.isEmpty)
+
+        // The OpenShell credential rewrite runs after the trim, on its output.
+        final class Seen: @unchecked Sendable { var text = "" }
+        let seen = Seen()
+        let rewrite: (String) -> OpenShellWebSocket.MessageTransform = { t in
+            seen.text = t
+            return t.contains("PLACEHOLDER") ? .replaced(t.replacingOccurrences(of: "PLACEHOLDER", with: "real")) : .unchanged
+        }
+        let ledger = SquelchLedger(file: nil)
+        let transform = WSContentGuard.squelchingTransform(then: rewrite, profileID: pid, conversation: nil, ledger: ledger)
+        let noisy = (0..<120).map { "tests/t.py::test_\($0) PASSED" }.joined(separator: "\n") + "\nFAILED tests/t.py::test_x\n"
+        let create: [String: Any] = ["type": "response.create", "previous_response_id": "resp_1", "metadata": ["k": "PLACEHOLDER"],
+                                     "input": [["type": "function_call_output", "call_id": "call_p", "output": noisy]]]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: create), as: UTF8.self)
+        guard case .replaced(let out) = transform(text) else { Issue.record("not rewritten"); return }
+        #expect(!out.contains("test_5 PASSED") && out.contains("FAILED tests/t.py::test_x"))
+        #expect(out.contains("\"real\"") && !out.contains("PLACEHOLDER"))
+        #expect(!seen.text.contains("test_5 PASSED"))                     // the rewrite saw the trimmed text
+        #expect(ledger.workspace(pid)?.total.trimmed == 1)
+        // A rewrite's failure still fails the message.
+        let failing = WSContentGuard.squelchingTransform(then: { _ in .failed("nope", failOpen: false) },
+                                                        profileID: pid, conversation: nil, ledger: ledger)
+        guard case .failed = failing("{}") else { Issue.record("failure lost"); return }
+    }
+
+    /// Finding (CWE-670): "Squelch misses a tool call whose server event the
+    /// trace preview cut at 1MB". A deflated event's `truncated` compared the
+    /// COMPRESSED length with the 1 MB preview, and Squelch learned from that
+    /// preview: a call whose arguments ran past 1 MB was never registered.
+    @Test("A deflated server event past 1 MB reaches Squelch whole; the trace keeps 1 MB, marked truncated")
+    func bigDeflatedCallLearned() throws {
+        let pid = UUID()
+        let body = String(repeating: "print('hello')\n", count: 100_000)          // ~1.5 MB of arguments
+        let item: [String: Any] = ["type": "function_call", "call_id": "call_big", "name": "exec_command",
+                                   "arguments": try String(decoding: JSONSerialization.data(withJSONObject: ["cmd": body]), as: UTF8.self)]
+        let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "output_index": 0, "item": item])
+        #expect(event.count > WSTraceCollector.perMessageCap)
+        // permessage-deflate: raw DEFLATE, one frame with RSV1 set.
+        let deflated = try (event as NSData).compressed(using: .zlib) as Data
+        #expect(deflated.count < WSTraceCollector.perMessageCap)
+        var wire = Data([0xC1])                                                       // FIN | RSV1 | text
+        if deflated.count < 126 { wire.append(UInt8(deflated.count)) }
+        else if deflated.count < 65536 { wire.append(126); wire.append(UInt8(deflated.count >> 8)); wire.append(UInt8(deflated.count & 0xFF)) }
+        else { wire.append(127); for i in (0..<8).reversed() { wire.append(UInt8((UInt64(deflated.count) >> (8 * UInt64(i))) & 0xFF)) } }
+        wire.append(deflated)
+
+        final class Got: @unchecked Sendable { var msgs: [WSMessage] = [] }
+        // Squelch's reader: the whole message, not cut, and the call learned.
+        let got = Got()
+        let whole = WSTraceCollector(direction: .upstreamToClient, inflater: WSInflater(noContextTakeover: true),
+                                     deliverCap: WSMessageAssembler.maxMessage)
+        whole.onMessage = { msg in
+            got.msgs.append(msg)
+            if msg.kind == .text, !msg.truncated { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        whole.feed(wire)
+        let m = try #require(got.msgs.first)
+        #expect(!m.truncated && m.payload == event && m.totalBytes == event.count)
+        #expect(SquelchCallRegistry.shared.call(pid, "call_big")?.name == "exec_command")
+        // …while the transcript keeps its 1 MB preview, and says it's cut.
+        let kept = try #require(whole.messages.first)
+        #expect(kept.payload.count == WSTraceCollector.perMessageCap && kept.truncated && kept.totalBytes == event.count)
+
+        // A reader at the default cap is told the message was cut (it was
+        // "not truncated" by the compressed length).
+        let preview = Got()
+        let trace = WSTraceCollector(direction: .upstreamToClient, inflater: WSInflater(noContextTakeover: true))
+        trace.onMessage = { preview.msgs.append($0) }
+        trace.feed(wire)
+        let p = try #require(preview.msgs.first)
+        #expect(p.truncated && p.payload.count == WSTraceCollector.perMessageCap && p.totalBytes == event.count)
+    }
+
+    /// Finding (CWE-670): "Squelch stops learning tool calls once a traced
+    /// OpenShell WebSocket passes 4096 server messages". Past the trace cap
+    /// `feed` parsed one frame per chunk and left the rest of it queued, so a
+    /// call announced in a multi-frame read went unlearned while the guest
+    /// already had it. The cap now only stops the keeping.
+    @Test("A traced socket past the message cap still hands every frame to onMessage, and learns its calls")
+    func traceCapKeepsLearning() {
+        let pid = UUID()
+        final class Count: @unchecked Sendable { var n = 0 }
+        let seen = Count()
+        let collector = WSTraceCollector(direction: .upstreamToClient)
+        collector.onMessage = { msg in
+            seen.n += 1
+            if msg.kind == .text { SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid) }
+        }
+        let delta = #"{"type":"response.output_text.delta","delta":"x"}"#
+        var filler = Data()
+        for _ in 0..<WSTraceCollector.maxMessages { filler.append(frame(0x1, delta, masked: false)) }
+        collector.feed(filler)
+        #expect(collector.messages.count == WSTraceCollector.maxMessages && seen.n == WSTraceCollector.maxMessages)
+
+        // One read past the cap: deltas, then the call — all of it handled now.
+        let done = #"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_cap","name":"exec_command","arguments":"{\"cmd\":\"pytest -v\"}"}}"#
+        var chunk = Data()
+        for _ in 0..<5 { chunk.append(frame(0x1, delta, masked: false)) }
+        chunk.append(frame(0x1, done, masked: false))
+        collector.feed(chunk)
+        #expect(seen.n == WSTraceCollector.maxMessages + 6)
+        #expect(SquelchCallRegistry.shared.call(pid, "call_cap")?.name == "exec_command")
+        #expect(collector.messages.count == WSTraceCollector.maxMessages && collector.droppedMessages == 6)
+        let transcript = String(decoding: WSTranscriptRenderer.render(c2u: WSTraceCollector(direction: .clientToUpstream), u2c: collector),
+                                as: UTF8.self)
+        #expect(transcript.contains("(6 later messages not kept: 4096 per direction)"))
     }
 
     @Test("Stand-ins split across delta messages come back whole; full texts restored")

@@ -177,6 +177,24 @@ struct TaskTypingGuardTests {
         #expect(v(probeWid: nil) == .wait)
     }
 
+    /// Finding (CWE-670): archiving a delegate the moment its Mac came back
+    /// closed whatever tab now sat at its stored index (close-tab, no boot or
+    /// window check) — an index from before the reconnect names somebody
+    /// else's tab. Archive and delete end a tab by its index only once the
+    /// probe has seen this agent there; else the reaper's verdict decides.
+    @Test("archive/delete close a tab by its stored index only when the probe has seen the agent there")
+    func tabProvenHere() {
+        var s = AgentSession(profileID: UUID(), tool: .claude, title: "t", cwd: "~", windowIndex: 3)
+        s.agentAlive = nil      // just back: not probed yet
+        #expect(!AgentSessionEngine.tabProvenHere(s))
+        s.agentAlive = false
+        #expect(!AgentSessionEngine.tabProvenHere(s))
+        s.agentAlive = true
+        #expect(AgentSessionEngine.tabProvenHere(s))
+        s.windowIndex = nil
+        #expect(!AgentSessionEngine.tabProvenHere(s))
+    }
+
     @Test("A live task owns its tab by branch; a done or stopped one doesn't")
     func taskOwnership() {
         let ws = UUID()

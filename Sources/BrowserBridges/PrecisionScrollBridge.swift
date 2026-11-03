@@ -206,7 +206,7 @@ public final class PrecisionScrollBridge {
                         _ = Darwin.write(conn.fileDescriptor, base, buf.count)
                     }
                 }
-                Darwin.close(conn.fileDescriptor)
+                conn.close()   // VZ owns the fd: closing it here closed it twice
                 ok = true
             }
             DispatchQueue.main.async { self?.cdpSendFinished(ok: ok) }
@@ -256,7 +256,7 @@ public final class PrecisionScrollBridge {
                 self.cdpProbeScheduled = false
                 switch result {
                 case .success(let conn):
-                    Darwin.close(conn.fileDescriptor)
+                    conn.close()   // VZ owns the fd: closing it here closed it twice
                     self.cdpReady = true
                     self.cdpConnectFailures = 0
                     sbLog("[ScrollBridge] CDP input agent ready")

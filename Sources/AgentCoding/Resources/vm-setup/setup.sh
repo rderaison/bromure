@@ -796,7 +796,7 @@ ConditionPathExists=/mnt/bromure-meta/bromure-agentd.py
 [Service]
 Type=simple
 User=ubuntu
-ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+ExecStart=/usr/bin/python3 -s /mnt/bromure-meta/bromure-agentd.py
 Restart=always
 RestartSec=1
 KillMode=process

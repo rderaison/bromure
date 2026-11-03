@@ -15,6 +15,7 @@ import json
 import os
 import re
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -780,13 +781,47 @@ def ikev2_squid_peer_snippet(host, port, user, password):
     return peer + "never_direct allow all\n"
 
 
-def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"):
+def _private_dir(path):
+    """A root-only (0700) directory at ``path``, never a symlink.
+
+    The IKEv2 files root's updown script trusts used to live in
+    /tmp/bromure, which is mode 777 with no sticky bit: any guest uid
+    could swap them for a symlink (root then copied a 0600 key into the
+    world-readable squid.conf) or for its own squid directives.
+    """
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError("refusing IKEv2 state path that is not a directory: %s" % path)
+    if os.geteuid() == 0 and st.st_uid != 0:
+        raise OSError("refusing IKEv2 state directory not owned by root: %s" % path)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _write_private(path, data):
+    """Write ``data`` (bytes) to a fresh 0600 file at ``path``, replacing
+    whatever is there without following a symlink."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir=None):
     """Write strongSwan swanctl.conf for IKEv2 VPN.
 
     ``swanctl_dir`` and ``state_dir`` exist so tests can point the same
-    writer at a temporary directory. Production callers use the defaults,
-    which are the guest paths strongSwan and the updown script share.
+    writer at a temporary directory. ``state_dir`` holds what the root
+    updown script trusts (the squid peer lines, the saved gateway, the
+    dnsmasq backup) and the PKCS#12 while it is unpacked: a root-only
+    directory under ``swanctl_dir`` by default — never /tmp/bromure.
     """
+    if state_dir is None:
+        state_dir = os.path.join(swanctl_dir, "bromure-state")
     server = cfg.get("ikev2Server", "") or ""
     remote_id = cfg.get("ikev2RemoteID", server)
     if remote_id is None:
@@ -889,7 +924,7 @@ def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"
 }}
 """.format(psk=q_psk)
 
-    os.makedirs(state_dir, exist_ok=True)
+    _private_dir(state_dir)
     conf_dir = os.path.join(swanctl_dir, "conf.d")
     os.makedirs(conf_dir, exist_ok=True)
     conf_path = os.path.join(conf_dir, "bromure.conf")
@@ -908,9 +943,7 @@ def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"
             import base64
             p12_data = base64.b64decode(cert_b64)
             p12_path = os.path.join(state_dir, "client.p12")
-            with open(p12_path, "wb") as f:
-                f.write(p12_data)
-            os.chmod(p12_path, 0o600)
+            _write_private(p12_path, p12_data)
 
             cert_out = os.path.join(swanctl_dir, "x509", "client.crt")
             key_out = os.path.join(swanctl_dir, "private", "client.key")
@@ -945,9 +978,7 @@ def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"
         cfg.get("ikev2ProxyPassword", ""),
     )
     if snippet:
-        with open(snippet_path, "w") as f:
-            f.write(snippet)
-        os.chmod(snippet_path, 0o600)
+        _write_private(snippet_path, snippet.encode())
     else:
         if cfg.get("ikev2ProxyHost"):
             print("config-agent: refusing IKEv2 proxy settings that cannot "
@@ -963,8 +994,11 @@ def write_ikev2_config(cfg, swanctl_dir="/etc/swanctl", state_dir="/tmp/bromure"
 # strongSwan updown script — handles routing + DNS for Bromure IKEv2
 USE_DNS={use_dns}
 DNSMASQ_UPSTREAM="/etc/dnsmasq.d/upstream.conf"
-DNSMASQ_UPSTREAM_BACKUP="/tmp/bromure/upstream.conf.ikev2-backup"
-GW_FILE="/tmp/bromure/ikev2-orig-gw"
+# Root-only state (config-agent's 0700 directory): never /tmp/bromure,
+# which any guest uid can write.
+STATE_DIR={state_dir}
+DNSMASQ_UPSTREAM_BACKUP="$STATE_DIR/upstream.conf.ikev2-backup"
+GW_FILE="$STATE_DIR/ikev2-orig-gw"
 
 case "$PLUTO_VERB" in
     up-client)
@@ -975,7 +1009,8 @@ case "$PLUTO_VERB" in
 
         # Save original default gateway
         ORIG_GW=$(ip route show default | head -1)
-        echo "$ORIG_GW" > "$GW_FILE"
+        rm -f "$GW_FILE"
+        (umask 077; echo "$ORIG_GW" > "$GW_FILE")
 
         # Route to the VPN server via the original gateway (so ESP packets aren't looped)
         if [ -n "$PLUTO_PEER" ]; then
@@ -1012,7 +1047,9 @@ case "$PLUTO_VERB" in
         # the file's contents are never parsed as shell.
         PROXY_SNIPPET=${{IKEV2_PROXY_SNIPPET:-{snippet}}}
         SQUID_CONF=${{IKEV2_SQUID_CONF:-/etc/squid/squid.conf}}
-        if [ -f "$PROXY_SNIPPET" ]; then
+        # A regular file only: a symlink would have root copy whatever it
+        # points at into squid.conf.
+        if [ -f "$PROXY_SNIPPET" ] && [ ! -L "$PROXY_SNIPPET" ]; then
             sed -i '/^cache_peer /d' "$SQUID_CONF"
             sed -i '/^never_direct /d' "$SQUID_CONF"
             cat "$PROXY_SNIPPET" >> "$SQUID_CONF"
@@ -1030,7 +1067,7 @@ case "$PLUTO_VERB" in
         # just restarted above, so rewrite that instead.
         if [ "$USE_DNS" = "true" ] && [ -n "$PLUTO_DNS" ]; then
             if pgrep -x dnsmasq >/dev/null 2>&1; then
-                [ -f "$DNSMASQ_UPSTREAM_BACKUP" ] || cp "$DNSMASQ_UPSTREAM" "$DNSMASQ_UPSTREAM_BACKUP" 2>/dev/null
+                [ -f "$DNSMASQ_UPSTREAM_BACKUP" ] || (umask 077; cp "$DNSMASQ_UPSTREAM" "$DNSMASQ_UPSTREAM_BACKUP" 2>/dev/null)
                 : > "$DNSMASQ_UPSTREAM"
                 for dns in $PLUTO_DNS; do
                     echo "nameserver $dns" >> "$DNSMASQ_UPSTREAM"
@@ -1047,7 +1084,7 @@ case "$PLUTO_VERB" in
         ;;
     down-client)
         # Restore routes
-        if [ -f "$GW_FILE" ]; then
+        if [ -f "$GW_FILE" ] && [ ! -L "$GW_FILE" ]; then
             ORIG_GW=$(cat "$GW_FILE")
             if [ "$PLUTO_PEER_CLIENT" = "0.0.0.0/0" ] && [ -n "$ORIG_GW" ]; then
                 # Full tunnel — restore default route
@@ -1077,7 +1114,7 @@ case "$PLUTO_VERB" in
         pkill -f "squid -N" 2>/dev/null
 
         # Restore DNS
-        if [ -f "$DNSMASQ_UPSTREAM_BACKUP" ]; then
+        if [ -f "$DNSMASQ_UPSTREAM_BACKUP" ] && [ ! -L "$DNSMASQ_UPSTREAM_BACKUP" ]; then
             mv "$DNSMASQ_UPSTREAM_BACKUP" "$DNSMASQ_UPSTREAM"
             pkill -HUP -x dnsmasq 2>/dev/null
         fi
@@ -1086,7 +1123,7 @@ case "$PLUTO_VERB" in
         fi
         ;;
 esac
-""".format(use_dns=use_dns_sh, snippet=sh_escape(snippet_path))
+""".format(use_dns=use_dns_sh, snippet=sh_escape(snippet_path), state_dir=sh_escape(state_dir))
     os.makedirs(swanctl_dir, exist_ok=True)
     with open(updown_path, "w") as f:
         f.write(updown_script)
@@ -1097,6 +1134,252 @@ OPENVPN_CONFIG_PATH = "/etc/openvpn/bromure.conf"
 OPENVPN_AUTH_PATH = "/etc/openvpn/bromure-auth.txt"
 
 
+# Directives an imported .ovpn may not carry: OpenVPN runs as root, and
+# these run code (script hooks, plugins, the ip binary it calls), open a
+# control socket, pull in other files, or write and chdir anywhere. The
+# config is VPN data the user downloaded or pasted, not a root script.
+OPENVPN_FORBIDDEN = frozenset({
+    "script-security", "up", "down", "route-up", "route-pre-down", "ipchange",
+    "tls-verify", "tls-crypt-v2-verify", "auth-user-pass-verify",
+    "client-connect", "client-disconnect", "learn-address",
+    "plugin", "iproute", "ifconfig-noexec-cmd", "dns-updown",
+    # Load a shared library, by path, into the root process (an OpenSSL
+    # engine or provider, a PKCS#11 module) — `--script-security` doesn't
+    # cover these. The other pkcs11-* options only serve such a module.
+    "engine", "providers", "pkcs11-providers", "show-pkcs11-ids",
+    "management", "management-client", "management-client-auth",
+    "management-hold", "management-query-passwords", "management-forget-disconnect",
+    "management-external-key", "management-external-cert",
+    "config", "cd", "chroot", "tmp-dir", "daemon", "writepid",
+    # Write a file of the config's choosing, as root.
+    "log", "log-append", "status", "replay-persist", "tls-export-cert",
+    "ifconfig-pool-persist", "genkey", "memstats",
+    # One-shot modes instead of a tunnel: create or delete a tun device
+    # (another VPN's), a crypto self-test.
+    "mktun", "rmtun", "test-crypto",
+    "auth-user-pass",
+})
+
+def _sends_a_file(name, tokens):
+    """The option reads a FILE the profile names and sends its contents to
+    a host the profile names: a proxy's username/password file —
+    `http-proxy host port <file>`, `socks-proxy host port <file>`,
+    `http-proxy-user-pass <file>` (only its inline block is the profile's
+    own text). Root reads any file, so that was /etc/shadow to the proxy."""
+    if name == "http-proxy":
+        return len(tokens) > 3 and tokens[3] not in ("auto", "auto-nct")
+    if name == "socks-proxy":
+        return len(tokens) > 3
+    return name == "http-proxy-user-pass"
+
+
+# OpenVPN reads its config with fgets() into a 257-byte buffer (an inline
+# block's lines into 256): a longer line is read as several, the part past
+# the cut parsed as a line of its own. Kept lines stay below both. A
+# <connection> body is reparsed with buf_parse() into 256 bytes, which keeps
+# a 255-byte line whole and splits (and loses a byte of) a longer one.
+OPENVPN_LINE_MAX = 255
+
+_C_SPACE = " \t\n\v\f\r"
+
+
+def openvpn_parse_line(line):
+    """The tokens OpenVPN's parse_line() (2.6, options.c) makes of
+    ``line``, or None where it refuses the line (and ignores it): quotes
+    and backslashes are undone the same way, so ``"log"``, ``'log'`` and
+    ``l\\og`` all read as ``log``. A comment ends the line where a token
+    would start."""
+    INITIAL, QUOTED, UNQUOTED, SQUOTED = 0, 1, 2, 4
+    tokens, parm = [], []
+    state, backslash = INITIAL, False
+    for ch in line + "\0":
+        out = None
+        if not backslash and ch == "\\" and state != SQUOTED:
+            backslash = True
+        else:
+            space = ch == "\0" or ch in _C_SPACE
+            done = False
+            if state == INITIAL:
+                if not space:
+                    if ch in ";#":
+                        break
+                    if not backslash and ch == '"':
+                        state = QUOTED
+                    elif not backslash and ch == "'":
+                        state = SQUOTED
+                    else:
+                        out, state = ch, UNQUOTED
+            elif state == UNQUOTED:
+                if not backslash and space:
+                    done = True
+                else:
+                    out = ch
+            elif state == QUOTED:
+                if not backslash and ch == '"':
+                    done = True
+                else:
+                    out = ch
+            elif state == SQUOTED:
+                if ch == "'":
+                    done = True
+                else:
+                    out = ch
+            if done:
+                tokens.append("".join(parm))
+                parm, state = [], INITIAL
+            if backslash and out is not None and not (out in '\\"' or out == "\0" or out in _C_SPACE):
+                return None          # "Bad backslash usage": the line is ignored
+            backslash = False
+        if out is not None:
+            if out == "\0":
+                break
+            parm.append(out)
+        if ch == "\0":
+            break
+    if state != INITIAL:
+        return None                  # an unclosed quote: ignored
+    return tokens
+
+
+def _inline_piece_ends_block(line, close):
+    """Whether any piece OpenVPN's read_inline_file reads of ``line``
+    (fgets into 256 bytes: at most 255, the newline counted) starts, leading
+    spaces off, with ``close``."""
+    data = (line + "\n").encode("utf-8")
+    tag = close.encode("utf-8")
+    space = _C_SPACE.encode("ascii")
+    for i in range(0, len(data), OPENVPN_LINE_MAX):
+        if data[i:i + OPENVPN_LINE_MAX].lstrip(space).startswith(tag):
+            return True
+    return False
+
+
+# Inline blocks whose content is base64 or hex (a key, a certificate): a
+# line can be split anywhere without changing what it decodes to. Not
+# <http-proxy-user-pass> or <auth-user-pass>, whose lines are records (a
+# username, then a password) that a split would cut in two.
+OPENVPN_SPLITTABLE_BLOCKS = {
+    "ca", "cert", "extra-certs", "key", "dh", "pkcs12", "crl-verify",
+    "tls-auth", "tls-crypt", "tls-crypt-v2", "secret",
+}
+
+
+def _split_utf8(line, limit):
+    """``line`` cut into pieces of at most ``limit`` UTF-8 bytes, never
+    inside a character."""
+    pieces, cur = [], ""
+    for ch in line:
+        if len((cur + ch).encode("utf-8")) > limit:
+            pieces.append(cur)
+            cur = ""
+        cur += ch
+    return pieces + [cur]
+
+
+def sanitize_ovpn(text, connection_body=False):
+    """``text`` without the forbidden directives, read the way OpenVPN 2.6
+    reads them (``up x``, ``--up x``, ``"up" x``, ``u\\p x`` alike), inline
+    blocks (<ca>…</ca>) kept as they are and ended where OpenVPN ends them.
+    Lines OpenVPN would split or ignore are dropped, so every line written
+    is parsed by OpenVPN exactly as here. Returns (lines, dropped names).
+    ``connection_body``: ``text`` is a <connection> block's body, which
+    OpenVPN reads with buf_parse (see OPENVPN_LINE_MAX)."""
+    out, dropped = [], []
+    close, keep = None, True        # inside an inline block: its close tag
+    block = None                    # a <connection> block's lines, sanitized on close
+    lines = text.splitlines()
+    block_name = None               # the inline block `close` ends, lowercased
+    for i, line in enumerate(lines):
+        if i == 0 and line.startswith("\ufeff"):
+            line = line[1:]
+        if "\0" in line:
+            dropped.append("(a binary line)")
+            continue
+        size = len(line.encode("utf-8"))
+        if connection_body or block is not None:
+            # buf_parse: up to 255 bytes is one line, longer is split.
+            if size > OPENVPN_LINE_MAX:
+                dropped.append("(an overlong line)")
+                continue
+        elif size >= OPENVPN_LINE_MAX:
+            # Inside a certificate or key block OpenVPN reads a long line in
+            # pieces and joins them again: kept — unless one of the pieces
+            # would end the block, and the rest of the line be read as
+            # options. Anywhere else, the cut-off part would be an option.
+            if close is None or not keep \
+                    or _inline_piece_ends_block(line, close):
+                dropped.append("(an overlong line)")
+                continue
+            out.append(line)
+            continue
+        if close is not None:
+            # OpenVPN ends the block at the first line that, leading
+            # spaces off, STARTS with the close tag.
+            ends = line.lstrip(_C_SPACE).startswith(close)
+            if block is not None and not ends:
+                block.append(line)
+                continue
+            if block is not None:
+                # A <connection> block holds options too (OpenVPN parses it
+                # like a config: proxies, remotes) — sanitized the same way.
+                inner, more = sanitize_ovpn("\n".join(block), connection_body=True)
+                out.extend(inner)
+                dropped.extend(more)
+                block = None
+            nxt = lines[i + 1] if i + 1 < len(lines) else None
+            if keep and connection_body and not ends and size == OPENVPN_LINE_MAX \
+                    and block_name in OPENVPN_SPLITTABLE_BLOCKS \
+                    and nxt is not None and not nxt.lstrip(_C_SPACE).startswith(close):
+                # A block nested in <connection> is read back (in_src_get)
+                # into 256 bytes, which gives a 255-byte line no newline: the
+                # next line (a key or certificate footer) is glued onto it.
+                # Two lines, each short enough to get its newline back.
+                out.extend(_split_utf8(line, OPENVPN_LINE_MAX - 1))
+                continue
+            if keep:
+                out.append(line)
+            if ends:
+                close = None
+            continue
+        tokens = openvpn_parse_line(line)
+        if not tokens:
+            if tokens is None:
+                dropped.append("(a line OpenVPN can't parse)")
+            else:
+                out.append(line)     # blank, or a comment
+            continue
+        name = tokens[0]
+        if len(name) >= 3 and name.startswith("--"):
+            name = name[2:]
+        # Whether the line opens an inline block is decided BEFORE the
+        # unwrap below (check_inline_file runs first): `setenv opt <ca>`
+        # opens none, and the lines after it are options.
+        opens_block = len(tokens) == 1
+        # OpenVPN runs `setenv opt <directive> …` as `<directive> …` (only
+        # an unknown name is then forgiven): the directive is what's checked.
+        # Repeated, and with `--` stripped, past what OpenVPN itself does.
+        while name.lower() == "setenv" and len(tokens) >= 3 and tokens[1].lower() == "opt":
+            tokens = tokens[2:]
+            name = tokens[0]
+            if len(name) >= 3 and name.startswith("--"):
+                name = name[2:]
+        inline = opens_block and len(name) >= 2 and name[0] == "<" and name[-1] == ">"
+        if inline:
+            name = name[1:-1]
+            close = "</%s>" % name
+            block_name = name.lower()
+        keep = name.lower() not in OPENVPN_FORBIDDEN and not name.lower().startswith("pkcs11-")
+        if keep and not inline and _sends_a_file(name.lower(), tokens):
+            keep = False
+        if keep:
+            out.append(line)
+            if inline and name.lower() == "connection":
+                block = []
+        else:
+            dropped.append(name.lower())   # an inline one: the whole block
+    return out, dropped
+
+
 def write_openvpn_config(cfg, ovpn_config):
     """Write the user's .ovpn plus a credentials file when username/password
     auth is configured. openvpn-agent runs the client against this config."""
@@ -1105,14 +1388,15 @@ def write_openvpn_config(cfg, ovpn_config):
     username = (cfg.get("openVPNUsername") or "").strip()
     password = cfg.get("openVPNPassword") or ""
 
-    # Drop any auth-user-pass directive the user pasted (with or without a
-    # file argument) — we re-point it at our own credentials file so the
-    # client never blocks on an interactive prompt. Keep every other line
-    # verbatim, including inline <ca>/<cert>/<key> blocks.
-    cleaned = [
-        line for line in ovpn_config.splitlines()
-        if not line.strip().lower().startswith("auth-user-pass")
-    ]
+    # Drop what may not run as root (OPENVPN_FORBIDDEN), and any
+    # auth-user-pass the user pasted — re-pointed at our own credentials
+    # file so the client never blocks on a prompt. Every other line stays
+    # verbatim, inline <ca>/<cert>/<key> blocks included.
+    cleaned, dropped = sanitize_ovpn(ovpn_config)
+    dropped = sorted(set(dropped) - {"auth-user-pass"})
+    if dropped:
+        print("config-agent: dropped OpenVPN directives that would run as root: %s"
+              % ", ".join(dropped), file=sys.stderr)
     if username:
         cleaned.append(f"auth-user-pass {OPENVPN_AUTH_PATH}")
 

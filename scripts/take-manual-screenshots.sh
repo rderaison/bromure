@@ -184,9 +184,9 @@ for entry in "${ALL_LOCALES[@]}"; do
     # 3. Settings: the workspace editor's panes, then Preferences › Models.
     editor open '"profile":"Web app"' >/dev/null; sleep 1.5
     # category key : file name (the manual's historical names)
-    for pair in general:general appearance:appearance models:models fusion:fusion folders:folders \
+    for pair in general:general appearance:appearance models:models fusion:fusion squelch:squelch folders:folders \
                 environment:environment mcp:mcp browser:browser resources:resources \
-                credentials:credentials tracing:tracing guardrails:guardrails \
+                credentials:credentials tracing:tracing guardrails:guardrails sandboxpolicy:sandbox-policy \
                 supplychain:supply-chain promptinjection:prompt-injection piiprotection:pii-protection; do
         cat="${pair%%:*}"; name="editor-${pair##*:}"
         want "$name" || continue
@@ -194,6 +194,13 @@ for entry in "${ALL_LOCALES[@]}"; do
         shoot editor "$name" "$sfx" 1
     done
     editor close >/dev/null; sleep 1
+    # The same pane on a workspace whose firewall is an OpenShell policy.
+    if want editor-sandbox-policy-openshell; then
+        editor open '"profile":"Payments API"' >/dev/null; sleep 1.5
+        editor category '"category":"sandboxpolicy"' >/dev/null; sleep 1
+        shoot editor editor-sandbox-policy-openshell "$sfx" 1
+        editor close >/dev/null; sleep 1
+    fi
     if want preferences-models || want preferences-automation; then
         shoot preferences preferences-models "$sfx" 2 >/dev/null   # opens it
         editor category '"category":"models"' >/dev/null; sleep 1.5
@@ -204,6 +211,8 @@ for entry in "${ALL_LOCALES[@]}"; do
 
     # Self-rendered views (no app window needed).
     offline security-timeline "$sfx" "$loc" timeline
+    offline network-lineage   "$sfx" "$loc" lineage
+    offline sandbox-drawer    "$sfx" "$loc" policy-drawer-openshell
 done
 
 echo "Done: $(ls "$OUT"/*.jpg 2>/dev/null | wc -l | tr -d ' ') images in manual/images"

@@ -9,7 +9,7 @@ order: 7.1
 The **General** category ("Basic profile settings") holds a profile's identity and the one choice that shapes everything else: whether the profile keeps its browsing data. It is the category the settings window opens on.
 
 <p align="center">
-  <img src="../images/profile-general.en.jpg" width="600" alt="The Profile Settings — Work window on its General category (the sidebar lists General, Performance, Media, File Transfer, Host Isolation, Network Isolation, Privacy & Safety, Extensions, VPN & Ads, Enterprise and Advanced; Cancel and Save at the bottom): Profile Name Work, Browser Chromium, Retain Browsing Data checked, and Window Color Blue, with the Home Page setting starting below" />
+  <img src="../images/profile-general.en.jpg" width="600" alt="The Profile Settings — Work window on its General category (the sidebar lists General, Performance, Media, File Transfer, Host Isolation, Network Isolation, Privacy & Safety, Extensions, VPN & Ads, Enterprise and Advanced; Cancel and Save at the bottom): Profile Name Work, Default Profile unchecked, Browser Chromium, Retain Browsing Data checked, and Window Color Blue, with the Home Page setting starting below" />
 </p>
 
 ## Settings
@@ -17,6 +17,7 @@ The **General** category ("Basic profile settings") holds a profile's identity a
 | Setting | Description |
 |---|---|
 | **Profile Name** | The name shown in the profile chip, the **File** menu, the window title (**Bromure — *name***) and the settings window's title. |
+| **Default Profile** | "Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." Only one profile can be the default: turning it on here moves it from any other. It applies at once (no need to **Save**) and is the same setting as [Settings › General › Open New Windows With](../08-app-settings/general.mdx#open-new-windows-with) and the profile chip's **Open New Windows with “*name*”**. Default: off (the last-used profile opens). |
 | **Browser** | Which browser the session runs: **Chromium** (default) or **Google Chrome**. Locked once the profile has saved browsing data (see below). |
 | **Retain Browsing Data** | Keeps bookmarks, history, cookies and passwords between sessions on a disk of the profile's own. Off: everything is erased when you close the window. Default: off for a profile with factory settings, but on for profiles you create with **File › New Profile…**; off for the built-in **Private Browsing** profile. |
 | **Delete Browsing Data…** | Permanently erases the profile's saved data. Shown only when **Retain Browsing Data** is on and the profile has saved data. |

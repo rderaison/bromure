@@ -184,8 +184,12 @@ struct AutomationsSection: View {
         }
         if let next = store.automations.filter(\.enabled)
             .compactMap({ store.nextFire(for: $0.id) }).min() {
+            // Local time — with its zone named when the schedules run on
+            // another clock (the host's): "16:00" alone read as the host's.
+            let zone = AutomationDescriber.differs(store.scheduleTimeZone, .current, at: next)
+                ? " " + AutomationDescriber.zoneName(.current, at: next) : ""
             parts.append(String(format: NSLocalizedString("next %@", comment: ""),
-                                Self.fireFormatter.string(from: next)))
+                                Self.fireFormatter.string(from: next) + zone))
         }
         if !parts.isEmpty { return parts.joined(separator: " · ") }
         // Name the destination, not a "board" the hub never calls itself.
@@ -231,8 +235,9 @@ struct AutomationsSection: View {
 }
 
 /// "Weekdays 9:00" / "Fri 17:00" / "PR · owner/repo" — the row's one-line
-/// trigger summary.
-func scheduleSummary(_ a: ScheduledAutomation) -> String {
+/// trigger summary. The time is the host's (`timeZone`): named when the
+/// viewer is elsewhere ("Daily 3:00 EDT").
+func scheduleSummary(_ a: ScheduledAutomation, timeZone: TimeZone = .current) -> String {
     switch a.trigger {
     case .githubPullRequest, .githubIssue:
         let kind = a.trigger == .githubIssue ? "Issue" : "PR"
@@ -253,7 +258,10 @@ func scheduleSummary(_ a: ScheduledAutomation) -> String {
     case .schedule:
         break
     }
-    let time = String(format: "%d:%02d", a.hour, a.minute)
+    let now = Date()
+    let zone = AutomationDescriber.differs(timeZone, .current, at: now)
+        ? " " + AutomationDescriber.zoneName(timeZone, at: now) : ""
+    let time = String(format: "%d:%02d", a.hour, a.minute) + zone
     switch a.frequency {
     case .interval:
         let m = max(5, a.intervalMinutes)
@@ -311,6 +319,50 @@ struct AutomationPrefill: Sendable {
 /// are available), Trigger, Task, unattended-run warnings, recent runs.
 /// Guardrail overrides and macOS notifications are follow-ups — the
 /// permissions section links to the workspace's settings instead.
+/// The lists a workspace's GitHub token or Linear key can see, for an
+/// editor that doesn't hold them: a fat client mirrors workspaces without
+/// their credentials, so it asks its host (`POST /automation-sources`).
+/// Without this the editor knew the token existed, never fetched, and
+/// spun on "loading repositories…" for good.
+struct AutomationSources {
+    /// {profile, kind, repo?, branch?} → the host's reply.
+    var call: (_ body: [String: Any]) async throws -> [String: Any]
+
+    private func items(_ profileID: UUID, _ kind: String, _ extra: [String: Any] = [:]) async throws -> [String: Any] {
+        var body = extra
+        body["profile"] = profileID.uuidString
+        body["kind"] = kind
+        let reply = try await call(body)
+        // The asking view moved on while the host looked (a fat client's
+        // read can't be interrupted): never its answer.
+        try Task.checkCancellation()
+        return reply
+    }
+    func repos(_ pid: UUID) async throws -> [String] {
+        try await items(pid, "repos")["items"] as? [String] ?? []
+    }
+    func branches(_ pid: UUID, repo: String) async throws -> [String] {
+        try await items(pid, "branches", ["repo": repo])["items"] as? [String] ?? []
+    }
+    /// nil: the tree was too big to list (free text), as locally.
+    func directories(_ pid: UUID, repo: String, branch: String) async throws -> [String]? {
+        let r = try await items(pid, "dirs", ["repo": repo, "branch": branch])
+        return r["truncated"] as? Bool == true ? nil : (r["items"] as? [String] ?? [])
+    }
+    func teams(_ pid: UUID) async throws -> [LinearPoller.LinearTeam] {
+        ((try await items(pid, "teams")["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let k = $0["key"] as? String, let n = $0["name"] as? String else { return nil }
+            return LinearPoller.LinearTeam(key: k, name: n)
+        }
+    }
+    func projects(_ pid: UUID) async throws -> [LinearPoller.LinearProject] {
+        ((try await items(pid, "projects")["items"] as? [[String: Any]]) ?? []).compactMap {
+            guard let i = $0["id"] as? String, let n = $0["name"] as? String else { return nil }
+            return LinearPoller.LinearProject(id: i, name: n)
+        }
+    }
+}
+
 struct AutomationEditorView: View {
     var store: ScheduledAutomationStore
     /// Snapshot of the delegate's profiles at presentation time.
@@ -319,6 +371,16 @@ struct AutomationEditorView: View {
     /// client mirrors workspaces without their credentials). nil, or nil
     /// for a workspace: read the profile.
     let credentials: ((UUID) -> (github: Bool, linear: Bool)?)?
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    let toolSpecs: ((Profile) -> [Profile.ToolSpec])?
+    /// Where the token-backed lists come from when `profiles` has no token
+    /// (a fat client). nil: fetched here with the profile's token.
+    let sources: AutomationSources?
+    /// The workspace's folders, for "Choose…" by the folder field (the
+    /// new-session browser's source): nil hides the button.
+    let listFolders: ((UUID, String) async -> [String]?)?
+    @State private var folderPicker = false
     let onSave: (ScheduledAutomation) -> Void
     let onRunNow: (ScheduledAutomation) -> Void
     let onDelete: (UUID) -> Void
@@ -423,6 +485,9 @@ struct AutomationEditorView: View {
     init(store: ScheduledAutomationStore,
          profiles: [Profile],
          credentials: ((UUID) -> (github: Bool, linear: Bool)?)? = nil,
+         toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil,
+         sources: AutomationSources? = nil,
+         listFolders: ((UUID, String) async -> [String]?)? = nil,
          editing id: UUID?,
          prefill: AutomationPrefill? = nil,
          initialTrigger: ScheduledAutomation.TriggerKind? = nil,
@@ -435,6 +500,9 @@ struct AutomationEditorView: View {
         self.store = store
         self.profiles = profiles
         self.credentials = credentials
+        self.toolSpecs = toolSpecs
+        self.sources = sources
+        self.listFolders = listFolders
         self.onSave = onSave
         self.onRunNow = onRunNow
         self.onDelete = onDelete
@@ -485,9 +553,11 @@ struct AutomationEditorView: View {
         profiles.first { $0.id == draft.profileID }
     }
 
-    /// Agents this workspace has configured — the only ones offerable.
+    /// Agents this workspace can run — set up in it, or through the Models
+    /// settings or a shared sign-in, as a new session counts them.
     private var toolChoices: [Profile.ToolSpec] {
-        selectedProfile?.allToolSpecs ?? []
+        guard let p = selectedProfile else { return [] }
+        return toolSpecs?(p) ?? p.allToolSpecs
     }
 
     private var selectedSpec: Profile.ToolSpec? {
@@ -575,7 +645,7 @@ struct AutomationEditorView: View {
     /// current draft, exactly as the engine will compute it on save.
     private var nextFirePreview: Date? {
         guard draft.trigger == .schedule, draft.enabled else { return nil }
-        return AutomationSchedule.nextFire(for: draft, after: Date())
+        return AutomationSchedule.nextFire(for: draft, after: Date(), calendar: store.scheduleCalendar)
     }
 
     /// Comma-separated text ↔ the label list.
@@ -650,12 +720,14 @@ struct AutomationEditorView: View {
 
     private var timeBinding: Binding<Date> {
         Binding(
+            // On the schedules' clock (the host's): the picker shows, and
+            // sets, the time there.
             get: {
-                Calendar.current.date(bySettingHour: draft.hour, minute: draft.minute,
-                                      second: 0, of: Date()) ?? Date()
+                store.scheduleCalendar.date(bySettingHour: draft.hour, minute: draft.minute,
+                                            second: 0, of: Date()) ?? Date()
             },
             set: { date in
-                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                let c = store.scheduleCalendar.dateComponents([.hour, .minute], from: date)
                 draft.hour = c.hour ?? 9
                 draft.minute = c.minute ?? 0
             })
@@ -687,8 +759,10 @@ struct AutomationEditorView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 summaryStrip
-                triggerSection
+                // The workspace first: the trigger's repositories, branches
+                // and Linear teams are the ones its tokens can see.
                 workspaceSection
+                triggerSection
                 taskSection
                 finishSection
                 if !askLabels.isEmpty { unattendedWarning }
@@ -705,7 +779,19 @@ struct AutomationEditorView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { footerBar }
         // Reload the repo/team dropdowns whenever the workspace (and so the
         // tokens) changes. Doubles as a live token check.
-        .task(id: draft.profileID) { await loadTriggerSources() }
+        // Keyed on the tokens too: a fat client learns which the workspace
+        // holds from the host's state, after this view is up — keyed on the
+        // workspace alone, the first look (no token yet) never fetched again
+        // and "loading repositories…" spun for good.
+        .task(id: sourcesKey) { await loadTriggerSources() }
+        .sheet(isPresented: $folderPicker) {
+            GuestFolderPickerView(
+                profileID: draft.profileID,
+                machineName: selectedProfile?.name ?? "",
+                start: draft.repoPath.trimmingCharacters(in: .whitespaces),
+                listFolders: listFolders ?? { _, _ in nil },
+                onPick: { draft.repoPath = $0 })
+        }
         // Branches + directories depend on the chosen repo AND branch.
         .task(id: repoBranchKey) { await loadRepoDetails() }
         // Tell the host when the draft diverges from (or returns to) what's
@@ -727,7 +813,7 @@ struct AutomationEditorView: View {
         let upstream = draft.chainedAutomationID.flatMap { store.automation($0)?.name }
         let steps: [(String, String, String)] = [
             ("bolt.fill", NSLocalizedString("When", comment: "automation summary"),
-             AutomationDescriber.when(draft, upstreamName: upstream)),
+             AutomationDescriber.when(draft, upstreamName: upstream, timeZone: store.scheduleTimeZone)),
             ("terminal.fill", NSLocalizedString("What", comment: "automation summary"),
              AutomationDescriber.what(draft, workspace: selectedProfile?.name ?? "?")),
             ("tray.full.fill", NSLocalizedString("Then", comment: "automation summary"),
@@ -805,14 +891,35 @@ struct AutomationEditorView: View {
 
     /// Refetch branches/dirs when the repo or the commit branch changes.
     private var repoBranchKey: String { draft.githubRepo + "\u{1}" + draft.filters.commitBranch }
+    private var sourcesKey: String {
+        "\(draft.profileID.uuidString)|\(hasGitHubToken)|\(hasLinearToken)|\(githubToken?.isEmpty == false)"
+    }
 
     private func loadTriggerSources() async {
         repoChoices = nil; repoLoadError = nil
         teamChoices = nil; teamLoadError = nil
         guard let profile = selectedProfile else { return }
-        if let token = githubToken, !token.isEmpty {
+        // Every write waits for the lookup and is skipped once this task is
+        // cancelled (another workspace picked): a late reply — a slow link,
+        // a bigger account — filled the new workspace's lists with the old
+        // one's, and could copy one of its repositories into the draft.
+        let localToken = githubToken.flatMap { $0.isEmpty ? nil : $0 }
+        if localToken == nil, sources == nil, hasGitHubToken {
+            // Said to hold a token nothing here can use: say so, never spin.
+            repoLoadError = NSLocalizedString(
+                "This window can't read the workspace's GitHub token — type the repository as owner/repo.",
+                comment: "automation editor")
+        }
+        if localToken != nil || (sources != nil && hasGitHubToken) {
             do {
-                repoChoices = try await GitHubPRPoller.fetchRepos(token: token)
+                var repos: [String]?
+                if let localToken {
+                    repos = try await GitHubPRPoller.fetchRepos(token: localToken)
+                } else if let sources {
+                    repos = try await sources.repos(profile.id)
+                }
+                guard !Task.isCancelled else { return }
+                repoChoices = repos
                 // Prefilled from a terminal tab: if the folder name matches
                 // one of the token's repos, preselect it.
                 if draft.githubRepo.isEmpty {
@@ -824,31 +931,68 @@ struct AutomationEditorView: View {
                         draft.githubRepo = match
                     }
                 }
-            } catch { repoLoadError = error.localizedDescription }
+            } catch {
+                guard !Task.isCancelled else { return }
+                repoLoadError = error.localizedDescription
+            }
         }
         if !profile.linearToken.isEmpty {
-            do { teamChoices = try await LinearPoller.fetchTeams(token: profile.linearToken) }
-            catch { teamLoadError = error.localizedDescription }
-            projectChoices = try? await LinearPoller.fetchProjects(token: profile.linearToken)
+            let teams: Result<[LinearPoller.LinearTeam], Error>
+            do { teams = .success(try await LinearPoller.fetchTeams(token: profile.linearToken)) }
+            catch { teams = .failure(error) }
+            let projects = try? await LinearPoller.fetchProjects(token: profile.linearToken)
+            guard !Task.isCancelled else { return }
+            applyTeams(teams, projects)
+        } else if let sources, hasLinearToken {
+            let teams: Result<[LinearPoller.LinearTeam], Error>
+            do { teams = .success(try await sources.teams(profile.id)) }
+            catch { teams = .failure(error) }
+            let projects = try? await sources.projects(profile.id)
+            guard !Task.isCancelled else { return }
+            applyTeams(teams, projects)
         }
     }
 
+    private func applyTeams(_ teams: Result<[LinearPoller.LinearTeam], Error>,
+                            _ projects: [LinearPoller.LinearProject]?) {
+        switch teams {
+        case .success(let t): teamChoices = t
+        case .failure(let e): teamLoadError = e.localizedDescription
+        }
+        projectChoices = projects
+    }
+
     /// Branch list (always) + directory list (commit trigger) for the current
-    /// repo. Both degrade to free-text fields on any failure.
+    /// repo. Both degrade to free-text fields on any failure. Written only
+    /// while this repo / branch is still the one asked about (a cancelled
+    /// lookup's late reply was the previous repository's branches).
     private func loadRepoDetails() async {
         branchChoices = nil; dirChoices = nil
         guard draft.trigger.isGitHub,
-              GitHubPRPoller.isValidRepoSlug(draft.githubRepo),
-              let token = githubToken, !token.isEmpty else { return }
-        branchChoices = (try? await GitHubPRPoller.fetchBranches(
-            repo: draft.githubRepo, token: token)) ?? []
-        if draft.trigger == .githubCommit {
-            // nil result (tree truncated) or a throw → empty, which the
-            // subfolder field reads as "fall back to free text".
-            dirChoices = ((try? await GitHubPRPoller.fetchDirectories(
-                repo: draft.githubRepo, token: token,
-                branch: draft.filters.commitBranch)) ?? nil) ?? []
+              GitHubPRPoller.isValidRepoSlug(draft.githubRepo) else { return }
+        let repo = draft.githubRepo, branch = draft.filters.commitBranch
+        let wantDirs = draft.trigger == .githubCommit
+        var branches: [String] = []
+        var dirs: [String]?
+        if let token = githubToken, !token.isEmpty {
+            branches = (try? await GitHubPRPoller.fetchBranches(repo: repo, token: token)) ?? []
+            if wantDirs {
+                // nil result (tree truncated) or a throw → empty, which the
+                // subfolder field reads as "fall back to free text".
+                dirs = ((try? await GitHubPRPoller.fetchDirectories(
+                    repo: repo, token: token, branch: branch)) ?? nil) ?? []
+            }
+        } else if let sources, hasGitHubToken, let pid = selectedProfile?.id {
+            branches = (try? await sources.branches(pid, repo: repo)) ?? []
+            if wantDirs {
+                dirs = ((try? await sources.directories(pid, repo: repo, branch: branch)) ?? nil) ?? []
+            }
+        } else {
+            return
         }
+        guard !Task.isCancelled else { return }
+        branchChoices = branches
+        if wantDirs { dirChoices = dirs }
     }
 
     private var header: some View {
@@ -1085,6 +1229,14 @@ struct AutomationEditorView: View {
                            displayedComponents: .hourAndMinute)
                     .labelsHidden()
                     .frame(width: 110)
+                    .environment(\.timeZone, store.scheduleTimeZone)
+                if AutomationDescriber.differs(store.scheduleTimeZone, .current, at: Date()) {
+                    // The host's clock, named: "3:00" alone read as local.
+                    Text(String(format: NSLocalizedString("%@ (the host's time)", comment: "automation editor: time zone"),
+                                AutomationDescriber.zoneName(store.scheduleTimeZone, at: Date())))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         // An explicit caption so the question shows on iOS too (a bare Picker
@@ -1099,7 +1251,7 @@ struct AutomationEditorView: View {
         }
         if let next = nextFirePreview {
             Label(String(format: NSLocalizedString("Next run: %@", comment: ""),
-                         next.formatted(date: .abbreviated, time: .shortened)),
+                         AutomationDescriber.moment(next, scheduleTimeZone: store.scheduleTimeZone)),
                   systemImage: "clock")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -1164,6 +1316,12 @@ struct AutomationEditorView: View {
         Text(NSLocalizedString(
             "Fires for each commit on the branch touching the subfolder (whole repo if blank), once each, checked every 3 minutes. The prompt can use {{commit.title}}, {{commit.body}}, {{commit.author}}, {{commit.url}}, {{commit.key}} (short SHA); without them the commit's details are appended automatically.",
             comment: ""))
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        Text(NSLocalizedString(
+            "A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}.",
+            comment: "commit trigger help: what fires for a merged branch"))
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -1266,6 +1424,17 @@ struct AutomationEditorView: View {
              : NSLocalizedString(
                 "The existing open backlog is processed once, too, then new items as they appear.",
                 comment: ""))
+        Picker(NSLocalizedString("Runs at a time", comment: "automation editor: event triggers' parallelism"),
+               selection: $draft.maxParallelRuns) {
+            ForEach(ScheduledAutomation.parallelRunChoices, id: \.self) { n in
+                Text(n == 0 ? NSLocalizedString("No limit", comment: "automation editor: runs at a time")
+                            : String(n)).tag(n)
+            }
+        }
+        .fixedSize()
+        hint(NSLocalizedString(
+            "A burst of events waits its turn, oldest first: the next one starts when a run finishes.",
+            comment: "automation editor: runs at a time"))
     }
 
     @ViewBuilder
@@ -1380,7 +1549,7 @@ struct AutomationEditorView: View {
                     .disabled(!draft.tool.hasReliableDoneSignal)
                 hint(!draft.tool.hasReliableDoneSignal
                      ? NSLocalizedString(
-                        "Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down.",
+                        "Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down.",
                         comment: "")
                      : (draft.cloneWorkspaceFirst
                         ? NSLocalizedString(
@@ -1414,7 +1583,25 @@ struct AutomationEditorView: View {
                 captioned(NSLocalizedString(
                     "Start the agent in — a folder inside the workspace (\"~\" is home)",
                     comment: "automation editor")) {
-                    TextField("", text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                    HStack(spacing: 6) {
+                        TextField("", text: $draft.repoPath, prompt: Text(verbatim: "~/my-repo"))
+                        if listFolders != nil {
+                            Button(NSLocalizedString("Choose…", comment: "automation editor: pick the folder")) {
+                                folderPicker = true
+                            }
+                        }
+                    }
+                }
+                if draft.trigger.isGitHub {
+                    // Which checkout the run works in: this folder — the
+                    // repository it watches is only what fires it.
+                    hint(draft.githubRepo.isEmpty
+                         ? NSLocalizedString(
+                            "Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches.",
+                            comment: "automation editor")
+                         : String(format: NSLocalizedString(
+                            "Each run starts here, on a fresh branch: pick the workspace's clone of %@.",
+                            comment: "automation editor: %@ is owner/repo"), draft.githubRepo))
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text(NSLocalizedString("Prompt", comment: ""))
@@ -1484,7 +1671,7 @@ struct AutomationEditorView: View {
                         "The transcript is saved first — readable any time from the run's card on the automation board. Turn off to leave the session up for inspection.",
                         comment: "")
                      : NSLocalizedString(
-                        "Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open.",
+                        "Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open.",
                         comment: ""))
             }
         }
@@ -1527,7 +1714,7 @@ struct AutomationEditorView: View {
     private var runsSection: some View {
         editorCard(NSLocalizedString("Recent runs", comment: "automation editor"),
                    "clock.arrow.circlepath") {
-            let recent = Array(store.runs(for: draft.id).prefix(8))
+            let recent = Array(store.runs(for: draft.id).filter { !$0.isBacklogSeed }.prefix(8))
             VStack(alignment: .leading, spacing: 7) {
                 if recent.isEmpty {
                     hint(NSLocalizedString("No runs yet.", comment: ""))

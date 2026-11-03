@@ -804,3 +804,7 @@
 "The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "El perfil que Bromure abre al iniciarlo, al hacer clic en su icono del Dock o al pulsar \U2318N sin ninguna ventana del navegador delante. \U201C\U00DAltimo perfil usado\U201D elige el que us\U00F3 m\U00E1s recientemente. Tambi\U00E9n puede ajustarlo desde el men\U00FA de perfil de cualquier ventana.";
 "Last Used Profile" = "\U00DAltimo perfil usado";
 "Open New Windows with \U201C%@\U201D" = "Abrir ventanas nuevas con \U201C%@\U201D";
+
+/* Profile settings › General: the profile Bromure opens at launch */
+"Default Profile" = "Perfil predeterminado";
+"Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "Bromure abre este perfil al iniciarlo, al hacer clic en su icono del Dock o al pulsar ⌘N sin ninguna ventana del navegador delante, en lugar del que usaste por última vez.";

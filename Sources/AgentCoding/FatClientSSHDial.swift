@@ -661,6 +661,9 @@ final class SSHConnection: @unchecked Sendable {
             _ = ch.pipeline.removeHandler(name: Self.watchdogName)
             FatClientLog.log("nio-conn: handshake+auth OK \(host.connectLabel)")
             child.close(promise: nil)
+            // A dropped connection (peer reset, server exit) never goes
+            // through close(): its spare control channel's fd goes here.
+            ch.closeFuture.whenComplete { [weak self] _ in self?.releaseSpare() }
         } catch {
             let flagged = outcome.get()
             channel.close(promise: nil)
@@ -672,18 +675,105 @@ final class SSHConnection: @unchecked Sendable {
         }
     }
 
+    /// A control channel opened ahead of need, its exec already sent: the
+    /// next control request rides it at once instead of paying the
+    /// channel-open round trip (~170 ms each way across the Pacific). The
+    /// server's control bridge waits for a request without a timeout, so an
+    /// idle spare costs nothing but a parked socket; one per connection
+    /// (= per lane).
+    private let spareLock = NSLock()
+    private var spareControlFD: Int32?
+    /// When the spare was opened: one older than `spareMaxAge` is replaced,
+    /// well before the server stops waiting for its request.
+    private var spareOpenedAt = Date.distantPast
+    /// Set once the connection is gone: a spare opened after that (a refill
+    /// racing the drop) is closed instead of kept.
+    private var spareReleased = false
+
     /// Open an exec child channel for `verb`, bridge it to a socketpair, and
-    /// return the caller's fd immediately (bytes the caller writes sit in the
-    /// socketpair buffer until the exec is accepted — same as writing into a
-    /// still-handshaking `ssh` process's stdin). Nil if the socketpair or the
-    /// child-channel open fails outright.
+    /// return the caller's fd. The control verb is served from the spare when
+    /// there is a live one, and a new spare is opened behind it.
     func openVerbChannel(_ verb: String) -> Int32? {
+        guard verb == FatClient.controlVerb, !Self.noPrewarm else { return openFreshChannel(verb) }
+        spareLock.lock()
+        let spare = spareControlFD
+        let fresh = Date().timeIntervalSince(spareOpenedAt) < Self.spareMaxAge
+        spareControlFD = nil
+        spareLock.unlock()
+        let fd: Int32?
+        if let spare, fresh, Self.spareIsUsable(spare) {
+            fd = spare
+        } else {
+            if let spare { Darwin.close(spare) }
+            fd = openFreshChannel(verb)
+        }
+        if fd != nil { refillSpare() }
+        return fd
+    }
+
+    private func refillSpare() {
+        guard isAlive, let fd = openFreshChannel(FatClient.controlVerb) else { return }
+        spareLock.lock()
+        let released = spareReleased
+        let old = released ? nil : spareControlFD
+        if !released { spareControlFD = fd; spareOpenedAt = Date() }
+        spareLock.unlock()
+        if let old { Darwin.close(old) }
+        if released { Darwin.close(fd) }
+    }
+
+    /// Close the spare control channel's fd, for good: from close(), the
+    /// pool's closeFuture handler (a dropped connection), and deinit.
+    func releaseSpare() {
+        spareLock.lock()
+        let spare = spareControlFD
+        spareControlFD = nil
+        spareReleased = true
+        spareLock.unlock()
+        if let spare { Darwin.close(spare) }
+    }
+
+    /// Oldest spare handed out: the server waits `ACAutomationServer
+    /// .firstByteTimeout` for a connection's request, then hangs up.
+    static let spareMaxAge: TimeInterval = 300
+
+    /// Spare fds currently held (tests).
+    var heldSpareCount: Int {
+        spareLock.lock()
+        defer { spareLock.unlock() }
+        return spareControlFD == nil ? 0 : 1
+    }
+
+    deinit { releaseSpare() }
+
+    /// Test knobs (A/B on a simulated link): no spare channel / no pipelining.
+    static let noPrewarm = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_NO_PREWARM"] != nil
+    static let noPipeline = ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_NO_PIPELINE"] != nil
+
+    /// A spare is usable while nothing is waiting to be read on it: the
+    /// control bridge never speaks first, so readable = EOF (its channel
+    /// failed to open, or the connection went away).
+    static func spareIsUsable(_ fd: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let r = poll(&p, 1, 0)
+        return r == 0
+    }
+
+    /// Open an exec child channel for `verb`, bridge it to a socketpair, and
+    /// return the caller's fd immediately (bytes the caller writes are sent
+    /// right behind the exec — the server buffers them until its bridge is
+    /// up). Nil if the socketpair or the child-channel open fails outright.
+    private func openFreshChannel(_ verb: String) -> Int32? {
         var fds: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
             FatClientLog.log("nio-dial: socketpair FAILED errno=\(errno)")
             return nil
         }
         let appFD = fds[0], pumpFD = fds[1]
+        // Never inherited by a spawned child (forkpty, Process): a child
+        // holding either end would keep the bridge — and its channel — open.
+        _ = fcntl(appFD, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(pumpFD, F_SETFD, FD_CLOEXEC)
         // Without NOSIGPIPE a peer-closed write raises SIGPIPE and kills the
         // process (no ssh child process to absorb it in this transport).
         var one: Int32 = 1
@@ -694,10 +784,16 @@ final class SSHConnection: @unchecked Sendable {
         let ch = channel
         // Close the pump side exactly once — from whichever fires first, the
         // channel-open failure or the timeout below. Both run on `ch.eventLoop`,
-        // so a plain flag is race-free.
+        // so a plain flag is race-free. Once the child's handler holds the fd
+        // (its initializer runs at creation, BEFORE the open is confirmed) it
+        // is the handler's to close, when the channel goes: closing it here
+        // too closed the number twice — the second time someone else's,
+        // reused in between, and two links ended up reading one stream (a
+        // Sidecar slot seeing `POST …` where its verb should be).
         var pumpClosed = false
+        var handlerOwnsPump = false
         func closePump() {
-            guard !pumpClosed else { return }
+            guard !pumpClosed, !handlerOwnsPump else { return }
             pumpClosed = true
             Darwin.shutdown(pumpFD, SHUT_RDWR)
             Darwin.close(pumpFD)
@@ -748,8 +844,15 @@ final class SSHConnection: @unchecked Sendable {
                 let handler = try ch.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
                 handler.createChannel(promise, channelType: .session) { child, _ in
                     child.eventLoop.makeCompletedFuture {
+                        // The open timed out first and closed the pump end:
+                        // its number may already be someone else's socket.
+                        // A handler on it read (and later closed) that
+                        // stream — two links on one, a Sidecar slot seeing
+                        // `POST …` for its verb. This channel is dropped.
+                        guard !pumpClosed else { throw ChannelError.ioOnClosedChannel }
                         try child.pipeline.syncOperations.addHandler(
                             ExecFDPumpHandler(command: verb, fd: pumpFD))
+                        handlerOwnsPump = true
                     }
                 }
             } catch {
@@ -766,6 +869,7 @@ final class SSHConnection: @unchecked Sendable {
     }
 
     func close() {
+        releaseSpare()
         channel.close(promise: nil)
     }
 
@@ -862,7 +966,7 @@ private final class TOFUHostKeyDelegate: NIOSSHClientServerAuthenticationDelegat
 /// Bridges one exec child channel to the pump side of a socketpair:
 /// channel bytes → fd, fd bytes → channel, EOF/close in both directions.
 /// Owns (and eventually closes) `fd`.
-private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable {
+final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable {
     typealias InboundIn = SSHChannelData
     typealias OutboundIn = Never
     typealias OutboundOut = SSHChannelData
@@ -874,8 +978,11 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     /// reads are re-armed only after the previous buffer landed on the fd.
     private let writeQueue: DispatchQueue
     private var readSource: DispatchSourceRead?
-    private var execAccepted = false
+    /// The fd reader is suspended until the channel takes its last chunk
+    /// (under stateLock, like every suspend/resume of `readSource`).
+    private var readPaused = false
     private var fdClosed = false
+    private var readerStarted = false
     private let stateLock = NSLock()
 
     init(command: String, fd: Int32) {
@@ -889,20 +996,33 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
         // the write queue), so a fast producer can't balloon memory.
         _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
         _ = context.channel.setOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+        // A child channel of a connection that drops doesn't reliably get
+        // channelInactive (see SSHPTYSessionHandler): closeFuture always
+        // fires. Strong capture on purpose, like teardownFD's; it's idempotent.
+        context.channel.closeFuture.whenComplete { [self] _ in teardownFD() }
     }
 
     func channelActive(context: ChannelHandlerContext) {
         let exec = SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true)
         context.triggerUserOutboundEvent(exec, promise: nil)
         context.fireChannelActive()
+        if SSHConnection.noPipeline { return }   // wait for the exec's acceptance
+        // Pipelined: the caller's bytes follow the exec at once rather than
+        // a round trip later, after its acceptance. Every Bromure server
+        // buffers bytes that beat its bridge (RemoteSSHHandlers'
+        // pendingInbound, since the first fat client); a refused exec
+        // closes the channel and they're dropped with it.
+        startFDReader(context: context)
+        context.read()
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
-        case is ChannelSuccessEvent where !execAccepted:
-            execAccepted = true
-            startFDReader(context: context)
-            context.read()
+        case is ChannelSuccessEvent:
+            if SSHConnection.noPipeline, !readerStarted {
+                startFDReader(context: context)
+                context.read()
+            }
         case is ChannelFailureEvent:
             context.close(promise: nil)
         case is ChannelEvent where (event as? ChannelEvent) == .inputClosed:
@@ -950,6 +1070,7 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
     // MARK: fd → channel
 
     private func startFDReader(context: ChannelHandlerContext) {
+        readerStarted = true
         let channel = context.channel
         let loop = context.eventLoop
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: writeQueue)
@@ -961,8 +1082,14 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
                 var bb = channel.allocator.buffer(capacity: n)
                 bb.writeBytes(buf[0..<n])
                 let data = SSHChannelData(type: .channel, data: .byteBuffer(bb))
+                // Backpressure: one chunk in flight. Without it a fast app
+                // queued its whole output in the channel (and the loop's task
+                // queue) whenever the far end stopped taking it.
+                self.pauseFDReader()
                 loop.execute {
-                    channel.writeAndFlush(data, promise: nil)
+                    channel.writeAndFlush(data).whenComplete { _ in
+                        if channel.isWritable { self.resumeFDReader() }
+                    }
                 }
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR) {
                 // App closed its end (or hard error): stop reading and send
@@ -984,8 +1111,27 @@ private final class ExecFDPumpHandler: ChannelDuplexHandler, @unchecked Sendable
         stateLock.lock()
         let src = readSource
         readSource = nil
+        // A suspended source must be resumed before it's cancelled.
+        if readPaused { readPaused = false; src?.resume() }
         stateLock.unlock()
         src?.cancel()
+    }
+
+    private func pauseFDReader() {
+        stateLock.lock()
+        if !readPaused, let src = readSource { readPaused = true; src.suspend() }
+        stateLock.unlock()
+    }
+
+    private func resumeFDReader() {
+        stateLock.lock()
+        if readPaused, let src = readSource { readPaused = false; src.resume() }
+        stateLock.unlock()
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable { resumeFDReader() }
+        context.fireChannelWritabilityChanged()
     }
 
     private func writeAllToFD(_ bytes: [UInt8]) {

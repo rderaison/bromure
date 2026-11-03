@@ -62,6 +62,18 @@ public enum SubscriptionRegistrationScope: Sendable {
 
 enum ClaudeRegistrationTeardownReason {
     case success, cancelled, failure, timeout, windowClosed
+
+    /// What a run that ended this way says when its caller had nothing more
+    /// specific: a fat client's Register button only hears this sentence.
+    var endedMessage: String? {
+        switch self {
+        case .success: return nil
+        case .cancelled: return NSLocalizedString("The sign-in was cancelled.", comment: "sign-in")
+        case .windowClosed: return NSLocalizedString("The sign-in window was closed.", comment: "sign-in")
+        case .failure, .timeout:
+            return NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+        }
+    }
 }
 
 /// Transient state for one in-flight registration. Retained by the app delegate
@@ -78,6 +90,9 @@ final class ClaudeRegistrationState {
     var window: TabbedSessionWindow?
     var pollTask: Task<Void, Never>?
     var finished = false
+    /// The credential is saved: an end during the linger before teardown
+    /// (the VM stopping, the window closing) is still a success.
+    var captured = false
     /// True once the host has kicked (or confirmed) the agent launch in the
     /// guest's tmux window, so the roster ticks don't retry it.
     var agentLaunchStarted = false
@@ -113,6 +128,8 @@ final class RemoteRegistrationBroker {
     static let shared = RemoteRegistrationBroker()
 
     struct Pending {
+        /// Names this run, so a client can tell its own end from another's.
+        let id = UUID()
         let provider: String
         /// The provider's sign-in URL, for the client's browser.
         var url: String?
@@ -127,21 +144,69 @@ final class RemoteRegistrationBroker {
 
     private(set) var pending: Pending?
 
-    func begin(provider: String) { pending = Pending(provider: provider) }
+    /// How the last run ended, kept a while after `pending` is gone: the
+    /// client polls, and a run refused within a poll would otherwise just
+    /// vanish from /state with no reason given.
+    struct Ended: Equatable {
+        let id: UUID
+        let success: Bool
+        let message: String?
+        let at: Date
+    }
+    /// The recent ends, oldest first: one slot let the next run's end
+    /// overwrite one a client hadn't read yet (asleep, link down).
+    private(set) var endedRuns: [Ended] = []
+    var ended: Ended? { endedRuns.last }
+    /// Longer than a fat client's whole wait for a run
+    /// (`RemoteHostController.registrationWaitBudget`).
+    static let endedKeptFor: TimeInterval = 15 * 60
+    static let endedKeptMax = 16
+
+    @discardableResult
+    func begin(provider: String) -> UUID {
+        let p = Pending(provider: provider)
+        pending = p
+        return p.id
+    }
     func publish(url: String, callbackPort: Int) {
         pending?.url = url
         pending?.callbackPort = callbackPort
     }
     func publish(vmIP: String) { pending?.vmIP = vmIP }
-    func finish() { pending?.finished = true; pending = nil }
+    func finish(success: Bool = false, message: String? = nil, now: Date = Date()) {
+        if let p = pending {
+            endedRuns.removeAll { now.timeIntervalSince($0.at) >= Self.endedKeptFor }
+            endedRuns.append(Ended(id: p.id, success: success, message: message, at: now))
+            if endedRuns.count > Self.endedKeptMax { endedRuns.removeFirst(endedRuns.count - Self.endedKeptMax) }
+        }
+        pending = nil
+    }
 
     /// `/state` payload — nil until a remote registration is in flight.
     func stateDict() -> [String: Any]? {
         guard let p = pending else { return nil }
-        var d: [String: Any] = ["provider": p.provider]
+        var d: [String: Any] = ["id": p.id.uuidString, "provider": p.provider]
         if let u = p.url { d["url"] = u }
         if let ip = p.vmIP { d["vmIP"] = ip }
         if let port = p.callbackPort { d["callbackPort"] = port }
+        return d
+    }
+
+    /// `/state`'s `registrationEnded`: the last run's outcome, for a while.
+    func endedDict(now: Date = Date()) -> [String: Any]? {
+        guard let e = ended, now.timeIntervalSince(e.at) < Self.endedKeptFor else { return nil }
+        return Self.dict(e)
+    }
+
+    /// `/state`'s `registrationsEnded`: every recent run's outcome, so a
+    /// client that missed a few polls still finds its own.
+    func endedList(now: Date = Date()) -> [[String: Any]] {
+        endedRuns.filter { now.timeIntervalSince($0.at) < Self.endedKeptFor }.map(Self.dict)
+    }
+
+    private static func dict(_ e: Ended) -> [String: Any] {
+        var d: [String: Any] = ["id": e.id.uuidString, "success": e.success]
+        if let m = e.message { d["message"] = m }
         return d
     }
 }
@@ -306,14 +371,15 @@ extension ACAppDelegate {
                         title: NSLocalizedString("Couldn't start the registration VM.", comment: ""),
                         text: error.localizedDescription)
                 }
-                state.onEvent?(.finished(success: false, message: NSLocalizedString(
-                    "Couldn't start the sign-in machine.", comment: "sign-in")))
+                let message = NSLocalizedString("Couldn't start the sign-in machine.", comment: "sign-in")
+                state.onEvent?(.finished(success: false, message: message))
                 state.onEvent = nil
-                self.teardownClaudeRegistration(reason: .failure)
+                self.teardownClaudeRegistration(reason: .failure, message: message)
                 return
             }
             guard let dev = sandbox.socketDevice else {
-                self.teardownClaudeRegistration(reason: .failure)
+                self.teardownClaudeRegistration(reason: .failure, message: NSLocalizedString(
+                    "Couldn't start the sign-in machine.", comment: "sign-in"))
                 return
             }
             // Proxy listeners for egress — but deliberately NO swapper.setMap,
@@ -346,7 +412,10 @@ extension ACAppDelegate {
     private func wireRegistrationSandbox(_ sandbox: UbuntuSandboxVM,
                                          window: TabbedSessionWindow) {
         sandbox.onStopped = { [weak self] _ in
-            Task { @MainActor in self?.teardownClaudeRegistration(reason: .windowClosed) }
+            Task { @MainActor in
+                self?.teardownClaudeRegistration(reason: .windowClosed, message: NSLocalizedString(
+                    "The sign-in machine stopped.", comment: "sign-in: the throwaway VM stopped on its own"))
+            }
         }
         // Record the guest's vmnet IP (published to the outbox every ~5s).
         // Normal sessions get this via wireSandboxCallbacks, which this flow
@@ -379,8 +448,23 @@ extension ACAppDelegate {
         let providerName = self.claudeRegistration?.provider.displayName ?? "your account"
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                guard let self else { return }
                 // The CLI got as far as its sign-in URL: it is running.
-                self?.claudeRegistration?.agentLaunchConfirmed = true
+                self.claudeRegistration?.agentLaunchConfirmed = true
+                // A page on this Mac's loopback or its network opens nowhere,
+                // here or on a fat client (whose user's browser would reach
+                // the client Mac's own). Refused, the sign-in ends: the
+                // outbox file is gone, the URL never comes again, and a
+                // registration left in flight held the next attempt off for
+                // the whole credential poll.
+                guard ACAppDelegate.opensInRealBrowser(url) else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] refused guest sign-in URL with local/private host: \(url.host ?? "?")\n".utf8))
+                    self.failClaudeRegistration(NSLocalizedString(
+                        "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.",
+                        comment: "sign-in refused: the guest's sign-in URL has a local or private host"))
+                    return
+                }
                 // Remote-initiated: the human is at the fat client, so hand
                 // it the URL + the VM's loopback port and let it open the page
                 // and tunnel the callback. Opening here would sign in on the
@@ -392,30 +476,43 @@ extension ACAppDelegate {
                     let port = ACAppDelegate.loopbackCallbackPort(from: url)
                     RemoteRegistrationBroker.shared.publish(
                         url: url.absoluteString, callbackPort: Int(port ?? 0))
-                    if let pid = self?.claudeRegistration?.scratchProfile.id,
-                       let ip = self?.runningSessions[pid]?.lastIP {
+                    if let pid = self.claudeRegistration?.scratchProfile.id,
+                       let ip = self.runningSessions[pid]?.lastIP {
                         RemoteRegistrationBroker.shared.publish(vmIP: ip)
                     }
                     return
                 }
-                if let self, let sandbox,
-                   let port = ACAppDelegate.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   // Registration answers the browser itself with a clean
-                   // success page — the CLI callback servers otherwise leave
-                   // Safari on an error even though login succeeded.
-                   let fwd = LoopbackCallbackForwarder(
-                        port: port, socketDevice: dev,
-                        browserResponse: LoopbackCallbackForwarder
-                            .registrationSuccessResponse(provider: providerName)) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
+                // Registration answers the browser itself with a clean
+                // success page — the CLI callback servers otherwise leave
+                // Safari on an error even though login succeeded. A port
+                // another sign-in holds: the page is never opened (its
+                // redirect would go to that one), the registration fails.
+                if let refused = self.loopbackCallbackRefusal(
+                    for: url, device: sandbox?.socketDevice,
+                    browserResponse: LoopbackCallbackForwarder.registrationSuccessResponse(provider: providerName)) {
+                    self.failClaudeRegistration(refused)
+                    return
                 }
-                self?.claudeRegistration?.onEvent?(.status(NSLocalizedString(
+                self.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
                 ACAppDelegate.openGuestRelayedURL(url)
             }
         }
+    }
+
+    /// End a sign-in that can't go on, saying why: to the card that started
+    /// it, else as a notice. A fat client's run also hears it through
+    /// /state's `registrationEnded` (the notice stays for an older client,
+    /// which doesn't read that). Teardown finishes a fat client's relay,
+    /// stops the credential poll and the scratch VM.
+    func failClaudeRegistration(_ message: String) {
+        if let ev = claudeRegistration?.onEvent {
+            ev(.finished(success: false, message: message))
+            claudeRegistration?.onEvent = nil
+        } else {
+            unifiedWindow?.showNotice(message)
+        }
+        teardownClaudeRegistration(reason: .failure, message: message)
     }
 
     /// Make sure the login CLI actually runs in the scratch VM's tmux window,
@@ -482,7 +579,7 @@ extension ACAppDelegate {
         if remote || state.quiet || headless {
             state.onEvent?(.finished(success: false, message: message))
             state.onEvent = nil
-            teardownClaudeRegistration(reason: .failure)
+            teardownClaudeRegistration(reason: .failure, message: message)
             return
         }
         let alert = NSAlert()
@@ -563,18 +660,16 @@ extension ACAppDelegate {
             // freeze the control loop until it's answered. Teardown clears the
             // relay so the client learns the sign-in didn't land. Only show the
             // alert when a local user started the registration.
-            state.onEvent?(.finished(success: false, message: String(format: NSLocalizedString(
+            let late = String(format: NSLocalizedString(
                 "Bromure didn't receive a %@ sign-in in time. You can try again.",
-                comment: ""), state.provider.displayName)))
+                comment: ""), state.provider.displayName)
+            state.onEvent?(.finished(success: false, message: late))
             state.onEvent = nil
             if RemoteRegistrationBroker.shared.pending == nil, !state.quiet {
                 self.registrationAlert(
-                    title: NSLocalizedString("Registration timed out", comment: ""),
-                    text: String(format: NSLocalizedString(
-                        "Bromure didn't receive a %@ sign-in in time. You can try again.",
-                        comment: ""), state.provider.displayName))
+                    title: NSLocalizedString("Registration timed out", comment: ""), text: late)
             }
-            self.teardownClaudeRegistration(reason: .timeout)
+            self.teardownClaudeRegistration(reason: .timeout, message: late)
         }
     }
 
@@ -705,7 +800,8 @@ extension ACAppDelegate {
     private func finishClaudeRegistration(state: ClaudeRegistrationState,
                                           record captured: CapturedSubscription) async {
         guard !state.finished, let engine = mitmEngine else {
-            teardownClaudeRegistration(reason: .failure)
+            teardownClaudeRegistration(reason: .failure, message: NSLocalizedString(
+                "The Bromure proxy isn't running, so the sign-in can't be captured.", comment: "sign-in"))
             return
         }
         // distantPast expiry → the proxy refreshes on first use, which both
@@ -792,6 +888,7 @@ extension ACAppDelegate {
         let providerName = state.provider.displayName
         // Let any open profile editor flip its inline Register → Re-register.
         NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+        state.captured = true
         // The sign-in card: done — it restarts the agent on the stand-in key.
         state.onEvent?(.finished(success: true, message: nil))
         state.onEvent = nil
@@ -830,21 +927,27 @@ extension ACAppDelegate {
     /// Idempotent teardown: stop polling + bridge, kill + delete the VM, close
     /// the window. Safe to call from the window-close handler, the poll task,
     /// or the success path.
-    func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason) {
+    func teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String? = nil) {
         guard let state = claudeRegistration, !state.finished else { return }
         state.finished = true
+        // Once the credential is saved, whatever ends the run is a success.
+        let ended = state.captured ? .success : reason
+        // Every end but success says why, so a remote Register button that
+        // only hears `registrationEnded` never ends silently.
+        let message = ended == .success ? nil : (message ?? ended.endedMessage)
         // A card still listening only hears from here when the flow died
         // (cancelled, window closed, failure): success reported itself.
-        if reason != .success, let ev = state.onEvent {
-            ev(.finished(success: false, message: nil))
+        if ended != .success, let ev = state.onEvent {
+            ev(.finished(success: false, message: message))
             state.onEvent = nil
         }
 
         // Clear the remote-registration relay so a fat client's /state stops
         // advertising this flow and tears down its sign-in page + callback
-        // tunnel. No-op for a local flow (no pending). (Previously never called,
-        // so the relay lingered after every remote registration.)
-        RemoteRegistrationBroker.shared.finish()
+        // tunnel, and hears how it ended. No-op for a local flow (no
+        // pending). (Previously never called, so the relay lingered after
+        // every remote registration.)
+        RemoteRegistrationBroker.shared.finish(success: ended == .success, message: message)
 
         state.pollTask?.cancel()
         state.launchTask?.cancel()

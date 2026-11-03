@@ -1,0 +1,79 @@
+---
+title: "Squelch — Less Noise, Fewer Tokens"
+description: "How Squelch trims the noise out of command output — passing tests, download and build progress, transfer counters, repeated log lines — before the agent's model reads it, and how to see what it saved."
+order: 12.5
+---
+
+# Squelch — Less Noise, Fewer Tokens
+
+Most of what a coding agent reads is command output, and most command output is noise: hundreds of `PASSED` lines around the one test that failed, a progress bar for every package an install downloads, a `Compiling` line for every file of a build, git's object counters. The model reads all of it, every turn, and it all counts toward the context window and the bill.
+
+**Squelch** cuts that noise out before the model reads it. It keeps what the agent acts on — errors, failures, warnings, summaries — and leaves out the rest. It works for every agent (Claude Code, Codex, Kimi Code, Grok, omp) with nothing installed in the machine: the proxy on your Mac trims the command results each request carries, the same way [PII Protection](10a-pii.mdx) swaps personal data. Squelch is set per machine (a workspace, in the settings editor) and is **off** by default; the field reference is in [Settings → Squelch](07-settings/squelch.mdx).
+
+> **Credit:** Squelch is modelled on **rtk** (Rust Token Killer, [github.com/rtk-ai/rtk](https://github.com/rtk-ai/rtk), Apache-2.0), which does the same by rewriting the agent's shell commands on your machine. The idea, its per-family filtering strategies and its "tokens saved" report (`rtk gain`) come from rtk; Bromure's filters are its own and run in the proxy instead, so they reach every agent without hooks.
+
+## Turning it on
+
+Two ways, both immediate — the agents' next request is trimmed, nothing restarts:
+
+- In a session's header, click the Squelch icon (three narrowing lines, after the token count) and flip the switch in the popover.
+- In the machine's settings, select **Squelch** under **Models** and tick **Trim the noise out of command output before the model reads it**, then click **Save**.
+
+To make it the default for new machines, turn it on in **Bromure → Preferences…** (the Defaults template).
+
+## What it trims
+
+Squelch looks at the command an output came from — the last command of a chain that does the work, through `sudo`, `timeout`, `env` and `VAR=value` prefixes — and applies that family's filter:
+
+| Family | Commands (examples) | Left out | Always kept |
+|---|---|---|---|
+| Tests | `pytest`, `jest`, `vitest`, `mocha`, `go test`, `cargo test`, `swift test`, `xcodebuild test`, `npm test`, `dotnet test`, `rspec`, `phpunit` | One line per passing test, progress dots, compile progress | Failures, tracebacks, assertion diffs, the summary |
+| Installs | `npm`/`pnpm`/`yarn`/`bun install`, `pip`/`uv`/`poetry`, `apt`, `brew`, `cargo fetch`, `go mod download`, `docker pull` | Download, unpack and "already satisfied" lines, progress bars, deprecation notices | Errors, conflicts, the result line |
+| Builds | `cargo build`, `swift build`, `xcodebuild`, `make`, `cmake`, `gradle`, `mvn`, `tsc`, `docker build` | Per-file compile lines, xcodebuild's step blocks, `make` directory chatter, the same warning printed again | Every error and warning, with its source excerpt |
+| git | `git push`, `pull`, `fetch`, `clone`, `status`, `commit` | Object counters, `(use "git add"…)` hints, long `create mode` lists | Branches, refs, conflicts, the files |
+| Logs | `docker logs`, `kubectl logs`, `journalctl` | Runs of lines that differ only in their numbers (timestamps, ids) — the first is kept, with a count | Anything that differs |
+| Search | `grep`, `rg`, `ag`, `git grep` | The tail of very long lines (minified files) | Every match and its location |
+| Everything else | — | Terminal escapes, redrawn progress lines, progress bars, the same line six or more times in a row | The rest |
+
+A line that names an error, a failure, a warning, a panic or a timeout is never left out, whatever pattern it matches.
+
+An uninstall (`pip uninstall`, `uv pip uninstall`, `npm remove`, `brew uninstall`, `apt remove`…) isn't an install: what it prints is the list of what went, so it only gets the generic cleaning of "everything else".
+
+Some output is never touched, because the agent reads it as the thing itself — usually to copy from it into an edit: `cat`, `head`, `tail`, `sed`, `less`, `jq`, `awk`, `diff`, `git diff`, `git show`, `git log`, `git blame` (whatever options come first: `git --no-pager diff`, `git -C repo log`), `gh pr diff`, `gh api`, `hg diff`, `curl`, `python -c` and the like. Neither is a pipeline the agent shaped itself (`pytest -v | tail -40`): it already chose what to see. Results of the agents' own file tools (Read, Edit, Grep tools) are never touched either — only shell commands.
+
+Output under about 300 bytes, or that would shrink by less than 10%, goes through unchanged.
+
+## What the model sees
+
+A trimmed output ends with one line saying what was left out and how to get it all:
+
+```
+FAILED tests/test_api.py::test_retry_budget - assert 2 == 3
+========================= 1 failed, 120 passed in 4.12s =========================
+[Bromure Squelch left out 120 noise lines (passing tests 120). Run the command again prefixed with BROMURE_FULL_OUTPUT=1 to see all of it.]
+```
+
+When the agent needs the full output, it runs the command again with `BROMURE_FULL_OUTPUT=1` in front — harmless to the shell, and Squelch passes that command's output through whole.
+
+Only the agent's model sees the trimmed text. The agent's own transcript, the chat view and your terminal keep the full output. Squelch changes the request string by string and leaves every other byte as the agent sent it, and the same output is always trimmed the same way, so a conversation resent turn after turn keeps its prompt cache. (Turning Squelch on or off mid-conversation changes earlier turns once, so the next request is a cache miss.)
+
+## Seeing what it saved
+
+Each session's header shows what Squelch saved in that conversation (**12K saved**). Click it for the popover:
+
+- **This conversation** — tokens saved, the share of the command output that was left out, how many command outputs the model was sent and how many were trimmed.
+- **All of the machine** — the same, for every conversation on the machine.
+- **Where it came from** — the commands that saved the most (`pytest`, `npm install`, …).
+- **Last two weeks** — tokens saved per day.
+
+The machine's **Squelch** settings pane shows the full list of commands and the same chart.
+
+Tokens are estimated as characters ÷ 4, as rtk does — there is no tokenizer in the loop, so the share saved is reliable and the absolute count approximate. Each command output counts once, the first time a request carries it, even though the agent resends the whole conversation every turn — the real savings on a long session are larger than the number shown.
+
+Savings are kept per machine in `~/Library/Application Support/BromureAC/squelch/ledger.json` (by conversation, command, family and day, for the last 90 days). On a fat client (a Mac, iPhone or iPad connected to another Mac), the numbers come from the server running the machine, and the popover's switch turns Squelch on or off there.
+
+## Limits
+
+- **Machines only.** Squelch lives in the proxy that every machine's AI traffic goes through. A native machine (a Mac running Bromure Sidecar) sends its agents' traffic straight to the provider, so Squelch doesn't apply there.
+- **Patterns, not judgment.** The filters recognise the output formats of the common tools. An unusual test runner or a custom build script gets only the generic cleaning (escapes, progress bars, repeated lines).
+- **A command the request doesn't name.** When a Codex turn continues an earlier one on the server, a result can arrive without the call that produced it. Squelch matches it with the call the model announced in its reply; a result whose call it never saw — after a restart of Bromure, say — is left as it is, since its text alone can't tell a test run from a `cat` of a test log.

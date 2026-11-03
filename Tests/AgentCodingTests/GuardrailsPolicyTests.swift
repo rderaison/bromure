@@ -370,3 +370,22 @@ struct GuardrailsInsecureBypassTests {
         #expect(onBack.guardrails.allowInsecureBypass)
     }
 }
+
+@Suite("OpenShell L7 denial body")
+struct OpenShellDeniedBodyTests {
+    @Test("Matches OpenShell's policy_denied shape")
+    func shape() throws {
+        let body = HTTPMitmConnection.openShellDeniedBody(
+            policy: "github", reason: "POST /repos/x blocked by deny rule",
+            method: "POST", path: "/repos/x", host: "api.github.com", port: 443)
+        let obj = try #require(try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        #expect(obj["error"] as? String == "policy_denied")
+        #expect(obj["policy"] as? String == "github")
+        #expect(obj["rule"] as? String == "POST /repos/x")
+        #expect(obj["layer"] as? String == "l7")
+        #expect(obj["port"] as? Int == 443)
+        let missing = try #require(obj["rule_missing"] as? [String: Any])
+        #expect(missing["type"] as? String == "rest_allow")
+        #expect(missing["host"] as? String == "api.github.com")
+    }
+}

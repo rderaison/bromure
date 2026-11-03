@@ -338,3 +338,25 @@ struct P2PResponseTests {
         #expect(obj["timeToConnectedMs"] == nil)
     }
 }
+
+/// A frame whose payload / connection is a bare value (string, number, null)
+/// used to reach data(withJSONObject:) unwrapped — an NSException `try?`
+/// doesn't catch. Now it decodes leniently like any other malformed field.
+@Suite("P2P signaling: bare-value fields don't raise")
+struct P2PSignalingBareValueTests {
+    @Test("a signal with a scalar payload gets an empty payload; a scalar connection is unknown")
+    func bareValues() {
+        for bare in ["\"x\"", "42", "null", "true"] {
+            let signal = Data(#"{"type":"signal","connectionId":"c","seq":1,"kind":"offer","from":"p","payload":\#(bare)}"#.utf8)
+            guard case .signal(_, _, _, _, let payload)? = IncomingServerFrame.decode(signal) else {
+                Issue.record("signal with payload \(bare) didn't decode"); continue
+            }
+            #expect(payload == P2PSignalPayload())
+            let conn = Data(#"{"type":"connection","connection":\#(bare)}"#.utf8)
+            guard case .unknown(let t)? = IncomingServerFrame.decode(conn) else {
+                Issue.record("connection \(bare) wasn't unknown"); continue
+            }
+            #expect(t == "connection")
+        }
+    }
+}

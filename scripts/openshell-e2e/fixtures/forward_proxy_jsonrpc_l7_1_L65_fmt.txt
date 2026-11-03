@@ -1,0 +1,53 @@
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  test_jsonrpc_l7:
+    name: test_jsonrpc_l7
+    endpoints:
+      - host: __HOST__
+        port: __PORT__
+        path: /rpc
+        protocol: json-rpc
+        enforcement: enforce
+        allowed_ips:
+          - "10.0.0.0/8"
+          - "172.0.0.0/8"
+          - "192.168.0.0/16"
+          - "fc00::/7"
+        json_rpc:
+          max_body_bytes: 65536
+        rules:
+          - allow:
+              method: initialize
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
+        deny_rules:
+          - method: tools/delete
+    binaries:
+      - path: /usr/bin/python*
+      - path: /usr/local/bin/python*
+      - path: /sandbox/.uv/python/*/bin/python*

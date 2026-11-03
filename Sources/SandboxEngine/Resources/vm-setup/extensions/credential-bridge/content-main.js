@@ -306,8 +306,9 @@
   }
 
   function fillCredential(usernameField, passwordField, credential) {
-    // If this is an iCloud credential without a password, fetch it first
-    if (credential.source === "icloud" && !credential.password) {
+    // The host hands out usernames only; a password is fetched for the one
+    // picked, once the user approves it on the host.
+    if (!credential.password) {
       const requestId = crypto.randomUUID();
       sendRequest({
         requestId: requestId,

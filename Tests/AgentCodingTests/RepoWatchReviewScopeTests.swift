@@ -109,14 +109,14 @@ struct RepoWatchReviewScopeTests {
         var w = WatchedRepo(repo: "acme/api", profileID: UUID(), commitBranch: "main",
                             instructions: "Ignore vendor/.")
         let range = RepoWatchPrompts.scheduledReview(w, plan: .range(base: shaA, head: shaB), tool: .claude)
-        #expect(range.contains("git log --oneline \(shaA)..\(shaB)"))
+        #expect(range.contains("git log --oneline --first-parent \(shaA)..\(shaB)"))
         #expect(range.contains("git merge-base --is-ancestor \(shaA) \(shaB)"))
         #expect(range.contains("git reset --hard \(shaB)"))
         #expect(range.contains("findings_report") && range.contains("findings_done"))
         #expect(range.hasSuffix("Ignore vendor/."))
 
         let recent = RepoWatchPrompts.scheduledReview(w, plan: .recent(count: 20, head: nil), tool: .claude)
-        #expect(recent.contains("git log --oneline -20 origin/main"))
+        #expect(recent.contains("git log --oneline --first-parent -20 origin/main"))
         #expect(recent.contains("git fetch origin"))
 
         w.commitBranch = ""
@@ -365,9 +365,10 @@ struct ReviewRunAgentdTests {
         #expect(out.contains("claude FLAGS '--dangerously-skip-permissions'"), Comment(rawValue: out))
         #expect(out.contains("codex FLAGS '--dangerously-bypass-approvals-and-sandbox'"), Comment(rawValue: out))
         #expect(out.contains("omp FLAGS '--auto-approve'"), Comment(rawValue: out))
-        // Kimi's one-shot --prompt refuses --yolo/--auto; Grok has none.
+        // Kimi's one-shot --prompt refuses --yolo/--auto; Grok's would
+        // otherwise ask before every command.
         #expect(out.contains("kimi FLAGS ''"), Comment(rawValue: out))
-        #expect(out.contains("grok FLAGS ''"), Comment(rawValue: out))
+        #expect(out.contains("grok FLAGS '--always-approve'"), Comment(rawValue: out))
         for tool in ["claude", "codex", "grok", "kimi", "omp"] {
             #expect(out.contains("\(tool) TOOL True"), Comment(rawValue: out))
             #expect(out.contains("\(tool) PINNED True"), Comment(rawValue: out))
@@ -387,17 +388,22 @@ struct ReviewRunAgentdTests {
         }
     }
 
-    @Test("A review base the checkout lacks falls back to HEAD instead of failing the run",
+    @Test("A review base the checkout lacks refuses the run instead of reviewing HEAD",
           .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
     func baseFallback() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = try run(Self.setup + """
+            errors = []
+            m.worktree_err = errors.append
             print('KNOWN', m._resolve_run_base(repo, first) == first)
             print('BRANCH', m._resolve_run_base(repo, 'main') == 'main')
-            print('UNKNOWN', m._resolve_run_base(repo, 'f' * 40) == '')
-            print('OPTION', m._resolve_run_base(repo, '--upload-pack=x') == '')
-            print('EMPTY', m._resolve_run_base(repo, '') == '')
+            print('UNKNOWN', m._resolve_run_base(repo, 'f' * 40) is None)
+            print('OPTION', m._resolve_run_base(repo, '--upload-pack=x') is None)
+            print('EMPTY', m._resolve_run_base(repo, '') is None)
+            # A review asked for a base that isn't there: refused, said so, nothing launched.
+            m._automation_run(repo, 'gone', 'x', 'grok', '-', 'review', 'f' * 40)
+            print('REFUSED', not launched and len(errors) == 1 and 'f' * 40 in errors[0])
             # Old-style run (no mode, no base): a plain worktree at HEAD, no findings declaration.
             m._automation_run(repo, 'plain', 'x', 'grok', '-')
             import time
@@ -409,7 +415,225 @@ struct ReviewRunAgentdTests {
             cfg = os.path.join(wt, '.grok', 'config.toml')
             print('PLAIN_NO_FINDINGS', not os.path.exists(cfg) or 'automations' not in open(cfg).read())
             """, dir: dir)
-        for key in ["KNOWN", "BRANCH", "UNKNOWN", "OPTION", "EMPTY", "PLAIN_HEAD", "PLAIN_NO_FINDINGS"] {
+        for key in ["KNOWN", "BRANCH", "UNKNOWN", "OPTION", "EMPTY", "REFUSED", "PLAIN_HEAD", "PLAIN_NO_FINDINGS"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// Finding (CWE-78): "Review fetch allows a repo uploadpack and cannot
+    /// fetch https remotes". The fetch's protocol whitelist kept `file`, which
+    /// overrides protocol.file.allow=never: a repository's own
+    /// remote.origin.uploadpack (or an insteadOf rewrite onto file://) ran a
+    /// program of its choosing.
+    @Test("The review fetch never runs a repository's upload pack, and keeps only network transports",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func fetchRunsNoRepoProgram() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            marker = d + '/ran'
+            evil = d + '/uploadpack'
+            open(evil, 'w').write('#!/bin/sh\\necho "$@" > %s\\nexec git-upload-pack "$@"\\n' % marker)
+            os.chmod(evil, 0o755)
+            # A file origin that has a commit the checkout lacks.
+            up = d + '/up'
+            subprocess.run(['git', 'clone', '-q', '--bare', repo, up], check=True)
+            other = d + '/other'
+            subprocess.run(['git', 'clone', '-q', up, other], check=True)
+            subprocess.run(['git', '-C', other, '-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                            'commit', '-q', '--allow-empty', '-m', 'three'], check=True)
+            subprocess.run(['git', '-C', other, 'push', '-q', 'origin', 'main'], check=True)
+            ahead = subprocess.run(['git', '-C', other, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+            g('remote', 'add', 'origin', 'file://' + up)
+            g('config', 'remote.origin.uploadpack', evil)
+            print('FILE_ORIGIN', m._resolve_run_base(repo, ahead) is None and not os.path.exists(marker))
+            # An https origin rewritten onto that file one by the repo's config.
+            g('remote', 'set-url', 'origin', 'https://example.invalid/up.git')
+            g('config', 'url.file://%s.insteadOf' % up, 'https://example.invalid/up.git')
+            print('REWRITE', m._resolve_run_base(repo, ahead) is None and not os.path.exists(marker))
+            # What the fetch is run with: network transports only, agentd's GIT_* left behind.
+            seen = []
+            real = subprocess.run
+            def spy(args, **kw):
+                if 'fetch' not in args: return real(args, **kw)
+                seen.append((list(args), kw.get('env') or {}))
+                return real(['true'])
+            m.subprocess.run = spy
+            os.environ['GIT_SSH_COMMAND'] = 'touch ' + marker
+            m._resolve_run_base(repo, 'e' * 40)
+            m.subprocess.run = real
+            argv, env = seen[0]
+            print('PROTOCOLS', env.get('GIT_ALLOW_PROTOCOL') == 'https:ssh')
+            print('NO_AGENTD_GIT_ENV', env.get('GIT_SSH_COMMAND') == m._FETCH_SSH_COMMAND)
+            print('PINNED_PACK', '--upload-pack=git-upload-pack' in argv)
+            try:
+                m._ws_run(['git', 'fetch'], git_protocols='file:https'); print('NO_FILE', False)
+            except ValueError:
+                print('NO_FILE', True)
+            """, dir: dir)
+        for key in ["FILE_ORIGIN", "REWRITE", "PROTOCOLS", "NO_AGENTD_GIT_ENV", "PINNED_PACK", "NO_FILE"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// Finding (CWE-670): "SSH origin fetch still runs /bin/false, so
+    /// automation bases stay on HEAD". Every git call is hardened with
+    /// core.sshCommand=/bin/false, so the base fetch from an ssh origin ran
+    /// /bin/false and quietly exited 128.
+    @Test("The base fetch from an ssh origin runs a config-less ssh, not /bin/false or the environment's",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sshOriginFetch() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            trace = d + '/trace'
+            g('remote', 'add', 'origin', 'ssh://git@127.0.0.1:1/nope.git')   # refused at once
+            os.environ['GIT_TRACE'] = trace
+            # The fetch keeps only an allowlist of agentd's environment: let the trace through.
+            m._GIT_NETWORK_ENV_KEEP = m._GIT_NETWORK_ENV_KEEP | {'GIT_TRACE'}
+            os.environ['GIT_SSH_COMMAND'] = 'touch ' + d + '/hijacked'
+            m._resolve_run_base(repo, 'f' * 40)
+            t = open(trace).read() if os.path.exists(trace) else ''
+            print('SSH', '/usr/bin/ssh -F /dev/null -o BatchMode=yes' in t)
+            print('NOT_FALSE', '/bin/false' not in t)
+            print('NOT_ENV', not os.path.exists(d + '/hijacked'))
+            """, dir: dir)
+        for key in ["SSH", "NOT_FALSE", "NOT_ENV"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// Finding (CWE-670): "A review whose base cannot be fetched is recorded
+    /// as a successful launch" — the refusal now names its run.
+    @Test("A run refused for its base names its slug in worktree-error.txt",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func refusalNamesRun() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            published = []
+            m._atomic_publish = lambda tmp, name, text: published.append((name, text))
+            m._resolve_run_base = lambda cwd, base: None
+            m._automation_run(repo, 'review-dead', 'Review', 'claude', '', mode='review', base='d' * 40)
+            name, text = published[-1]
+            print('NAMED', name.startswith('worktree-error-') and name.endswith('.txt')
+                  and text.startswith('run-slug: review-dead\\n'))
+            # Outside a run, an error carries no slug (merge, pr, …).
+            m.worktree_err('merge: conflicts')
+            print('PLAIN', published[-1][1] == 'merge: conflicts')
+            """, dir: dir)
+        for key in ["NAMED", "PLAIN"] { #expect(out.contains("\(key) True"), Comment(rawValue: out)) }
+    }
+
+    /// Finding (CWE-362): "Concurrent guest refusals share one worktree-error
+    /// file, so one run stays a finished review". Every refusal replaced one
+    /// worktree-error.txt (through one shared temp name), so of two reviews
+    /// refused together only one reached the host; the other stayed launched.
+    @Test("Refusals published together each get their own file, whole",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func concurrentRefusalsEachLand() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            import threading
+            outbox = d + '/outbox'; os.makedirs(outbox); m.OUTBOX = outbox
+            go = threading.Barrier(8)
+            def refuse(slug):
+                m._RUN_CTX.slug = slug
+                go.wait()
+                for i in range(25):
+                    m.worktree_err('base %s %d: cannot fetch origin' % (slug, i) + ' x' * 2000)
+            ts = [threading.Thread(target=refuse, args=('review-%d' % n,)) for n in range(8)]
+            for t in ts: t.start()
+            for t in ts: t.join()
+            names = [n for n in os.listdir(outbox) if not n.startswith('.')]
+            bodies = [open(os.path.join(outbox, n)).read() for n in names]
+            print('ALL', len(names) == 200 and all(n.startswith('worktree-error-') and n.endswith('.txt') for n in names))
+            slugs = sorted(set(b.split('\\n', 1)[0] for b in bodies))
+            print('SLUGS', slugs == sorted('run-slug: review-%d' % n for n in range(8)))
+            print('WHOLE', all(b.split('\\n', 1)[1].startswith('base ' + b.split('\\n', 1)[0][10:] + ' ') for b in bodies))
+            print('NO_TMP', not [n for n in os.listdir(outbox) if n.startswith('.')])
+            m.docker_err('pull failed'); m.docker_err('pull failed again')
+            print('DOCKER', len([n for n in os.listdir(outbox) if n.startswith('docker-error-')]) == 2)
+            """, dir: dir)
+        for key in ["ALL", "SLUGS", "WHOLE", "NO_TMP", "DOCKER"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+        // The host takes each of them (and a legacy single file), nothing else.
+        #expect(UbuntuSandboxVM.isOneShot("worktree-error-1729-12-0.txt", stem: "worktree-error"))
+        #expect(UbuntuSandboxVM.isOneShot("worktree-error.txt", stem: "worktree-error"))
+        #expect(!UbuntuSandboxVM.isOneShot(".worktree-error.tmp.12.34", stem: "worktree-error"))
+        #expect(!UbuntuSandboxVM.isOneShot("docker-errors.txt", stem: "docker-error"))
+    }
+
+    /// Finding (CWE-670): "SSH origin fetch has no agent socket, so
+    /// automation bases stay on HEAD". The VM's only key is the host's,
+    /// through agentd's ssh-agent bridge; SSH_AUTH_SOCK comes from proxy.env,
+    /// which agentd (a systemd service) never sources.
+    @Test("The base fetch carries the bridged agent socket, not whatever agentd's environment has",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sshFetchHasAgentSocket() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            g('remote', 'add', 'origin', 'ssh://git@127.0.0.1:1/nope.git')
+            seen = []
+            real = subprocess.run
+            def spy(args, **kw):
+                if 'fetch' not in args: return real(args, **kw)
+                seen.append(kw.get('env') or {})
+                return real(['true'])
+            m.subprocess.run = spy
+            os.environ.pop('SSH_AUTH_SOCK', None)          # agentd's own environment
+            m._resolve_run_base(repo, 'e' * 40)
+            print('SOCK', bool(seen) and seen[0].get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
+            os.environ['SSH_AUTH_SOCK'] = d + '/elsewhere.sock'
+            m._resolve_run_base(repo, 'e' * 40)
+            print('NOT_ENV', seen[-1].get('SSH_AUTH_SOCK') == m.SSH_AGENT_UNIX_PATH)
+            print('STILL_FIXED', seen[-1].get('GIT_SSH_COMMAND') == m._FETCH_SSH_COMMAND)
+            """, dir: dir)
+        for key in ["SOCK", "NOT_ENV", "STILL_FIXED"] {
+            #expect(out.contains("\(key) True"), Comment(rawValue: out))
+        }
+    }
+
+    /// The same fetch inside a sandbox goes through the supervisor's exec:
+    /// `_DEVNULL` used to be `os.dup`ed (EBADF) before the supervisor was
+    /// asked, killing the automation thread. And the cooperative proxy's
+    /// variables come from proxy.env, which agentd never sources.
+    @Test("Sandboxed, the fetch reaches the supervisor with the agent socket and the proxy",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func sandboxedFetchReachesSupervisor() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = try run(Self.setup + """
+            meta = d + '/meta'; os.makedirs(meta)
+            open(meta + '/proxy.env', 'w').write(
+                'export HTTPS_PROXY=http://127.0.0.1:3128\\nexport NO_PROXY=localhost,127.0.0.1\\n'
+                'export OPENAI_API_KEY=sk-not-for-git\\n'
+                "export HTTPS_PROXY='http://127.0.0.1:3129'\\n")      # a profile's own, shell-quoted: it wins
+            m.META = meta
+            calls = []
+            def fake_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
+                calls.append((list(argv), dict(env or {}), [os.fstat(f).st_mode for f in fds]))
+                return {'ok': True, 'exit': 1}            # the commit isn't there
+            m._sandbox_exec = fake_exec
+            m._SANDBOX['control_socket'] = d + '/ctl.sock'
+            os.environ.pop('SSH_AUTH_SOCK', None)
+            try:
+                m._resolve_run_base(repo, 'e' * 40)
+                print('NO_CRASH', True)
+            except OSError as e:
+                print('NO_CRASH', False, e)
+            fetch = [c for c in calls if 'fetch' in c[0]]
+            env = fetch[0][1] if fetch else {}
+            print('FETCHED', bool(fetch))
+            print('SOCK', env.get('SSH_AUTH_SOCK') == '/tmp/bromure-agent.sock')
+            print('PROXY', env.get('HTTPS_PROXY') == 'http://127.0.0.1:3129' and env.get('NO_PROXY') == 'localhost,127.0.0.1')
+            print('ONLY_PROXY', 'OPENAI_API_KEY' not in env)
+            print('FDS', bool(fetch) and len(fetch[0][2]) == 3)
+            """, dir: dir)
+        for key in ["NO_CRASH", "FETCHED", "SOCK", "PROXY", "ONLY_PROXY", "FDS"] {
             #expect(out.contains("\(key) True"), Comment(rawValue: out))
         }
     }

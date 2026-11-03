@@ -16,6 +16,10 @@ struct HostSession: Codable, Equatable {
     var launchingSince: Date?
     var endedAt: Date?
     var lastSeenAt: Date?
+    /// When the agent last finished a turn or asked (the window's hook
+    /// stamp): what a client's session card counts from. `lastSeenAt` moves
+    /// on every roster pass while the window is there.
+    var activeAt: Date?
     var agentSeenAt: Date?
     var agentAlive: Bool?
     var resumedAt: Date?
@@ -173,6 +177,7 @@ final class SessionEngine: @unchecked Sendable {
                 if tool != nil { s.agentSeenAt = now; s.launchingSince = nil }
                 if !w.agentSessionID.isEmpty { s.agentTranscriptID = w.agentSessionID }
                 if !w.transcriptPath.isEmpty { s.transcriptPath = w.transcriptPath }
+                if let a = w.activeAt, a > (s.activeAt ?? .distantPast) { s.activeAt = a }
                 if s.launchDisplay == nil { s.launchDisplay = w.title }
                 // Renamed (or resumed) by an older build, which rewrote the
                 // tab's @display but kept the old launchDisplay: clients
@@ -205,6 +210,7 @@ final class SessionEngine: @unchecked Sendable {
             s.agentAlive = true
             s.agentSeenAt = now
             s.lastSeenAt = now
+            s.activeAt = w.activeAt
             s.launchDisplay = w.title
             Tmux.setWindowOption(w.index, "@bromure_session", s.id.uuidString)
             sessions.append(s)
@@ -414,13 +420,16 @@ final class SessionEngine: @unchecked Sendable {
             if let p = s.branchMerge?.phase, p == "merging" || p == "conflicts" {
                 return .failure(.bad("a merge is already under way"))
             }
-            s.branchMerge = BranchMerge(target: (body["into"] as? String) ?? s.branchParent ?? "main",
+            let target = (body["into"] as? String) ?? s.branchParent ?? "main"
+            if let bad = BranchMergeCommands.unsafeBranch(s.worktreeBranch, target) { return .failure(.bad(Self.unsafeBranchWhy(bad))) }
+            s.branchMerge = BranchMerge(target: target,
                                         squash: body["squash"] as? Bool ?? false, removeAfter: true,
                                         startedAt: Date(), phase: "requested",
                                         askedBy: (body["askedBy"] as? String).flatMap(UUID.init(uuidString:)))
         case "branch-merge":
             guard s.worktreeBranch != nil else { return .failure(.bad("not a branch session")) }
             let into = (body["into"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? s.branchMerge?.target ?? s.branchParent ?? "main"
+            if let bad = BranchMergeCommands.unsafeBranch(s.worktreeBranch, into) { return .failure(.bad(Self.unsafeBranchWhy(bad))) }
             s.branchMerge = BranchMerge(target: into, squash: body["squash"] as? Bool ?? false,
                                         removeAfter: body["removeAfter"] as? Bool ?? true,
                                         startedAt: Date(), phase: "merging", askedBy: s.branchMerge?.askedBy)
@@ -435,6 +444,7 @@ final class SessionEngine: @unchecked Sendable {
         case "branch-pr":
             guard let branch = s.worktreeBranch else { return .failure(.bad("not a branch session")) }
             let into = (body["into"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? s.branchParent ?? "main"
+            if let bad = BranchMergeCommands.unsafeBranch(branch, into) { return .failure(.bad(Self.unsafeBranchWhy(bad))) }
             let msg = Worktrees.pullRequestPrompt(branch: branch, into: into)
             DispatchQueue.global().async { _ = self.command(id, "resume", ["message": msg]) }
         case "branch-discard":
@@ -646,6 +656,12 @@ final class SessionEngine: @unchecked Sendable {
             if sessions[i] != before { saveLocked() }
         }
         notify()
+    }
+
+    /// Both names reach git — from the merge script and from the agent's
+    /// brief — so a name git would read as an option is refused up front.
+    static func unsafeBranchWhy(_ name: String) -> String {
+        "“\(name)” isn't a plain branch name — git would read it as an option. Rename the branch, then retry."
     }
 
     /// The merge the user asked for: on its own when the branch is clean,

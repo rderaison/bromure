@@ -145,7 +145,7 @@ struct CredentialApprovalsView: View {
     }
 
     private func remainingLabel(for entry: ConsentBroker.LiveEntry) -> String {
-        if entry.kind == .allow && entry.isSessionScoped {
+        if entry.isSessionScoped {
             return NSLocalizedString("rest of session", comment: "")
         }
         let secs = max(0, Int(entry.expiration.timeIntervalSinceNow))

@@ -611,7 +611,8 @@ final class CDPWSConnection: @unchecked Sendable {
                 acc.append(contentsOf: buf[0..<n])
                 while let (payload, consumed) = Self.parseWSFrame(acc) {
                     acc = Data(acc.dropFirst(consumed))
-                    handleMessage(payload)
+                    // This GCD block never returns, so its pool never drains.
+                    autoreleasepool { handleMessage(payload) }
                 }
                 continue
             }

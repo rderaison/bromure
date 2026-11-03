@@ -46,6 +46,10 @@ A task in the Backlog offers two buttons:
 
 Each Backlog task also shows who picks it up: **Assign** opens the choice (a new agent, the Switchboard, a session, or a room) and the task then reads **Assigned to *name***; **Unassign** takes it off that queue. **New tasks: Unassigned** at the top of the board sets who new tasks are assigned to as you create them.
 
+When the session working on an assigned task asks you something, its card turns red with a **Question** pill, shows the start of the question, and offers **Answer…**. The answer opens in a sheet (full-height on iPhone): "*name* asks", the whole question rendered as Markdown, which you can scroll and select, and a **Your answer** field below it. **Send** (⌘↩) delivers it. **Cancel** (Esc) closes the sheet and keeps your draft for the next **Answer…**.
+
+Your text stays in the sheet until the board has taken it. If it can't be delivered — the agent asked something else in the meantime, or the answer was withheld by the prompt-injection screen — the sheet keeps it and says why, and sending again never posts it twice. If the agent asked a new question since you wrote your draft, the sheet says so ("The agent asked a new question since you wrote this. Change your answer to send it."), so an answer meant for one question never goes to the next.
+
 ## Planning
 
 **Plan First** launches a *visible, interactive* planning session and opens its window — a native conversation view, no terminal required. The session opens on **your task**; the agent explores the repository read-only, narrates what it finds, and asks questions when the task leaves real choices open.

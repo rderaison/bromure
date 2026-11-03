@@ -1,0 +1,25 @@
+---
+title: "Squelch"
+description: "Trim the noise out of command output — passing tests, download and build progress, transfer counters, repeated log lines — before a machine's agents' models read it."
+order: 7.45
+---
+
+# Squelch
+
+Coding agents read a lot of command output, and most of it is noise. The **Squelch** pane makes the proxy on your Mac cut that noise out of the command results the machine's agents send their model — passing tests, download and build progress, git's transfer counters, repeated log lines — while keeping errors, failures, warnings and summaries.
+
+The setting belongs to one machine (a workspace, in the settings editor). It is in the editor's **Models** group. The feature itself — what each family of commands loses, what the model sees, how the savings are counted — is explained in [Squelch — Less Noise, Fewer Tokens](../12a-squelch.mdx).
+
+## Squelch
+
+**Trim the noise out of command output before the model reads it** turns the feature on for this machine. It is **off** by default. It applies from the agents' next request — no restart — and to every agent on the machine.
+
+The same switch is in each session's header: click the Squelch icon after the token count.
+
+What each family of commands loses is in the [table in the chapter](../12a-squelch.mdx#what-it-trims).
+
+## Saved so far
+
+Once the machine's agents have run commands, the pane shows what Squelch saved: the tokens saved, the share of command output left out, the number of outputs sent and trimmed, the commands that saved the most, and a chart of the last two weeks. Tokens are estimated as characters ÷ 4.
+
+The pane ends with a link to **rtk — Rust Token Killer (rtk-ai), Apache-2.0**, which Squelch is modelled on.

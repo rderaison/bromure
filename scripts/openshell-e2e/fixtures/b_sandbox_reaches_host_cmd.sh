@@ -1,0 +1,1 @@
+exec 3<>/dev/tcp/host.openshell.internal/@@PORT@@; printf 'GET / HTTP/1.1\r\nHost: host.openshell.internal:@@PORT@@\r\nConnection: close\r\n\r\n' >&3; while IFS= read -r line <&3 || [[ -n $line ]]; do printf '%s\n' "$line"; done

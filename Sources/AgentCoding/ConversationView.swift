@@ -43,7 +43,13 @@ struct Conversation {
 
     enum Block {
         case text(String)
-        case toolUse(name: String, input: String)
+        /// `id`: the provider's tool-call id (Anthropic `tool_use.id`, OpenAI
+        /// `call_id`): what ties the call to its result, and to the
+        /// processes and network flows it caused (NETWORK_LINEAGE.md).
+        case toolUse(name: String, input: String, id: String? = nil)
+        /// The model's reasoning (Anthropic `thinking`, OpenAI reasoning
+        /// summaries), when the provider sends it.
+        case thinking(String)
         case toolResult(toolUseId: String?, content: String, isError: Bool)
         case image(mediaType: String)  // not rendered, just noted
     }
@@ -236,6 +242,7 @@ enum ConversationParser {
         var pendingText = ""
         var pendingTools: [String: (name: String, args: String)] = [:]
         var pendingToolOrder: [String] = []
+        var pendingCallIDs: [String: String] = [:]   // item id → call_id
         var emitted = Set<String>()  // input-item fingerprints already rendered
         var firstClientObj: [String: Any]?
 
@@ -244,7 +251,7 @@ enum ConversationParser {
             if !pendingText.isEmpty { blocks.append(.text(pendingText)) }
             for id in pendingToolOrder {
                 if let t = pendingTools[id] {
-                    blocks.append(.toolUse(name: t.name, input: t.args))
+                    blocks.append(.toolUse(name: t.name, input: t.args, id: pendingCallIDs[id] ?? id))
                 }
             }
             if !blocks.isEmpty {
@@ -253,6 +260,7 @@ enum ConversationParser {
             }
             pendingText = ""
             pendingTools.removeAll()
+            pendingCallIDs.removeAll()
             pendingToolOrder.removeAll()
         }
 
@@ -324,6 +332,7 @@ enum ConversationParser {
                        let name = item["name"] as? String {
                         let id = (item["id"] as? String)
                             ?? (item["call_id"] as? String) ?? name
+                        if let call = item["call_id"] as? String { pendingCallIDs[id] = call }
                         if pendingTools[id] == nil {
                             pendingTools[id] = (name: name, args: "")
                             pendingToolOrder.append(id)
@@ -561,7 +570,10 @@ enum ConversationParser {
                 .flatMap { try? JSONSerialization.data(withJSONObject: $0,
                                                        options: [.prettyPrinted, .sortedKeys]) }
                 .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            return .toolUse(name: name, input: input)
+            return .toolUse(name: name, input: input, id: b["id"] as? String)
+        case "thinking":
+            let t = (b["thinking"] as? String) ?? ""
+            return t.isEmpty ? nil : .thinking(t)
         case "tool_result":
             let id = b["tool_use_id"] as? String
             let isError = (b["is_error"] as? Bool) ?? false
@@ -593,6 +605,7 @@ enum ConversationParser {
             var text: String = ""
             var toolName: String = ""
             var toolJSON: String = ""
+            var toolID: String?
         }
         var blocksByIndex: [Int: Accum] = [:]
         var maxIndex = -1
@@ -615,6 +628,7 @@ enum ConversationParser {
                     a.type = (block["type"] as? String) ?? "text"
                     if a.type == "tool_use" {
                         a.toolName = (block["name"] as? String) ?? "tool"
+                        a.toolID = block["id"] as? String
                     }
                     blocksByIndex[idx] = a
                     maxIndex = max(maxIndex, idx)
@@ -624,6 +638,7 @@ enum ConversationParser {
                       let delta = obj["delta"] as? [String: Any] else { break }
                 var a = blocksByIndex[idx] ?? Accum()
                 if let t = delta["text"] as? String { a.text += t }
+                if let t = delta["thinking"] as? String { a.text += t }
                 if let pj = delta["partial_json"] as? String { a.toolJSON += pj }
                 blocksByIndex[idx] = a
                 maxIndex = max(maxIndex, idx)
@@ -637,7 +652,9 @@ enum ConversationParser {
             guard let a = blocksByIndex[i] else { continue }
             switch a.type {
             case "tool_use":
-                blocks.append(.toolUse(name: a.toolName, input: a.toolJSON))
+                blocks.append(.toolUse(name: a.toolName, input: a.toolJSON, id: a.toolID))
+            case "thinking":
+                if !a.text.isEmpty { blocks.append(.thinking(a.text)) }
             default:
                 if !a.text.isEmpty { blocks.append(.text(a.text)) }
             }
@@ -873,7 +890,7 @@ enum ConversationParser {
                 } else {
                     argsString = ""
                 }
-                return [.toolUse(name: name, input: argsString)]
+                return [.toolUse(name: name, input: argsString, id: item["call_id"] as? String)]
             case "custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call",
                  "computer_call":
                 // Codex's freeform tools (code-mode `exec`, `apply_patch`) carry
@@ -882,12 +899,14 @@ enum ConversationParser {
                 let input = (item["input"] as? String)
                     ?? (item["action"] ?? item["operation"]).flatMap { prettyJSONString($0) }
                     ?? ""
-                return [.toolUse(name: name, input: input)]
+                return [.toolUse(name: name, input: input,
+                                 id: (item["call_id"] ?? item["id"]) as? String)]
             case "mcp_call":
                 // A hosted MCP call carries its own result (or error) inline.
                 let name = (item["name"] as? String) ?? "mcp"
                 var blocks: [Conversation.Block] = [
-                    .toolUse(name: name, input: (item["arguments"] as? String) ?? ""),
+                    .toolUse(name: name, input: (item["arguments"] as? String) ?? "",
+                             id: item["id"] as? String),
                 ]
                 let out = responsesOutputText(item["output"])
                 let err = responsesOutputText(item["error"])
@@ -980,6 +999,7 @@ enum ConversationParser {
         var combined = ""
         var toolByItem: [String: (name: String, args: String)] = [:]
         var toolOrder: [String] = []
+        var callIDByItem: [String: String] = [:]
 
         for chunk in text.components(separatedBy: "\n\n") {
             var event = ""
@@ -1015,6 +1035,7 @@ enum ConversationParser {
                    (item["type"] as? String) == "function_call",
                    let id = item["id"] as? String,
                    let name = item["name"] as? String {
+                    if let call = item["call_id"] as? String { callIDByItem[id] = call }
                     if toolByItem[id] != nil {
                         toolByItem[id]?.name = name
                     } else {
@@ -1031,7 +1052,7 @@ enum ConversationParser {
         if !combined.isEmpty { blocks.append(.text(combined)) }
         for id in toolOrder {
             if let t = toolByItem[id] {
-                blocks.append(.toolUse(name: t.name, input: t.args))
+                blocks.append(.toolUse(name: t.name, input: t.args, id: callIDByItem[id] ?? id))
             }
         }
         return Conversation.Message(role: .assistant, content: blocks)
@@ -1360,7 +1381,13 @@ private struct BlockView: View {
                 .font(.callout)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        case .toolUse(let name, let input):
+        case .thinking(let s):
+            Text(prettyText(s))
+                .font(.callout.italic())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .toolUse(let name, let input, _):
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Image(systemName: "wrench.and.screwdriver.fill")

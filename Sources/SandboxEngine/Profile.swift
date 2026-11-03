@@ -357,10 +357,9 @@ public struct ProfileSettings: Codable, Equatable {
 
     // Printing: when on, ⌘P in the browser captures the active tab as a
     // PDF (via CDP Page.printToPDF) and hands it to macOS's print system.
-    // Off by default — host clipboard, print dialogs, etc. all reach
-    // outside the VM, so it stays opt-in even though the file flow stays
-    // RAM-only.
-    public var allowPrinting: Bool = false
+    // On for new profiles (the file flow stays RAM-only); a profile saved
+    // before the setting existed keeps it off (see init(from:)).
+    public var allowPrinting: Bool = true
 
     // Trace
     public var traceLevel: TraceLevel = .disabled
@@ -479,7 +478,7 @@ public struct ProfileSettings: Codable, Equatable {
         persistent = try c.decodeIfPresent(Bool.self, forKey: .persistent) ?? defaults.persistent
         encryptOnDisk = try c.decodeIfPresent(Bool.self, forKey: .encryptOnDisk) ?? defaults.encryptOnDisk
         nativeChrome = try c.decodeIfPresent(Bool.self, forKey: .nativeChrome) ?? defaults.nativeChrome
-        allowPrinting = try c.decodeIfPresent(Bool.self, forKey: .allowPrinting) ?? defaults.allowPrinting
+        allowPrinting = try c.decodeIfPresent(Bool.self, forKey: .allowPrinting) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {

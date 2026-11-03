@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 // MARK: - Model
 
@@ -15,6 +16,15 @@ import Observation
 /// already owns the bare `Automation*` prefix (AutomationServer, the
 /// `automation.*` defaults keys).
 struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
+    /// Whether `other` polls the same events as this one: same trigger, repo
+    /// or team, assignment and filters. An edit that keeps them keeps the
+    /// poll state (high-water mark, commit tip).
+    func pollsSameSource(as other: ScheduledAutomation) -> Bool {
+        trigger == other.trigger && githubRepo == other.githubRepo
+            && linearTeam == other.linearTeam && assignmentFilter == other.assignmentFilter
+            && filters == other.filters
+    }
+
     /// What starts a run. Schedules fire on the host clock; the GitHub
     /// triggers poll the repo from the host with the workspace's github.com
     /// token (never a webhook — no inbound network surface).
@@ -214,6 +224,13 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
     /// `git clone` this into `repoPath` before a run when the folder isn't a
     /// repository yet (watch-owned automations — the checkout is theirs).
     var cloneURL: String?
+    /// Event triggers: at most this many runs at once (0 = no limit). A
+    /// burst — 20 commits pushed at once — is taken oldest first, the next
+    /// one when a run finishes, instead of 20 agents side by side.
+    var maxParallelRuns: Int
+
+    /// The choices the editors offer (0 = no limit).
+    static let parallelRunChoices = [1, 2, 3, 5, 10, 0]
 
     var createdAt: Date
 
@@ -242,6 +259,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
          chainedAutomationID: UUID? = nil,
          watchID: UUID? = nil,
          cloneURL: String? = nil,
+         maxParallelRuns: Int = 1,
          createdAt: Date = Date()) {
         self.id = id
         self.name = name
@@ -268,6 +286,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         self.chainedAutomationID = chainedAutomationID
         self.watchID = watchID
         self.cloneURL = cloneURL
+        self.maxParallelRuns = max(0, maxParallelRuns)
         self.createdAt = createdAt
     }
 
@@ -277,7 +296,7 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         case frequency, weekday, hour, minute, intervalMinutes
         case missedRunPolicy, tool, prompt, repoPath, closeWhenDone, createdAt
         case startWorkspaceIfNeeded, cloneWorkspaceFirst, chainedAutomationID
-        case watchID, cloneURL
+        case watchID, cloneURL, maxParallelRuns
     }
 
     init(from decoder: Decoder) throws {
@@ -311,6 +330,9 @@ struct ScheduledAutomation: Codable, Identifiable, Equatable, Sendable {
         chainedAutomationID = try c.decodeIfPresent(UUID.self, forKey: .chainedAutomationID)
         watchID         = try c.decodeIfPresent(UUID.self, forKey: .watchID)
         cloneURL        = try c.decodeIfPresent(String.self, forKey: .cloneURL)
+        // One at a time unless the user chose otherwise — also for event
+        // automations saved before the choice existed.
+        maxParallelRuns = max(0, try c.decodeIfPresent(Int.self, forKey: .maxParallelRuns) ?? 1)
         createdAt       = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 
@@ -343,6 +365,15 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var automationID: UUID
     var firedAt: Date
     var outcome: Outcome
+
+    /// Ends the detail of an event that was already open when the trigger
+    /// started watching ("ignore backlog").
+    static let backlogMarker = "(pre-existing)"
+    /// That baseline record: kept as the event's dedup key, never a run —
+    /// the run lists leave it out.
+    var isBacklogSeed: Bool {
+        outcome == .skipped && itemKey != nil && detail.hasSuffix(Self.backlogMarker)
+    }
     /// Human-readable summary ("PR #12: fix leak", a skip reason, …).
     var detail: String
     /// The worktree branch slug a launched run was created under. Persisted
@@ -352,7 +383,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     /// Stable identity of the event this run handled ("pr:123",
     /// "issue:45", "commit:abc1234", "linear:ENG-1"). An event with a
     /// `launched` or `blocked` record here is considered processed and never
-    /// fires again — this is the dedup key. nil for schedule runs.
+    /// fires again — this is the dedup key (but for a run the guest refused:
+    /// `handledItemKeys`). nil for schedule runs.
     var itemKey: String?
     /// The workspace the run actually executed in, when it differs from the
     /// automation's own — i.e. the disposable clone of a clone-first run.
@@ -371,6 +403,18 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
     var tool: Profile.Tool?
     /// A repository watch's scheduled review: what it covered.
     var review: ReviewInfo?
+    /// When the run was queued in the guest, if later than `firedAt` (a
+    /// clone or a boot came first): its tab's grace starts here.
+    var queuedAt: Date?
+    /// Failed only because the guest said it refused the run (its outbox,
+    /// which any process there can write), not by anything the host saw.
+    /// Nothing from the guest brings it back (`runForBranch`); its event
+    /// fires again instead (`requeueRefused`).
+    var refusedByGuest: Bool?
+    /// A refusal the guest reported before the run's tab could be listed
+    /// (inside `tabAppearGrace`): held, not applied, until the tab shows up
+    /// (dropped) or the grace runs out without it (the run fails then).
+    var pendingRefusal: String?
 
     /// What a repository-watch review run covered, kept on the run so its
     /// completion can move the watch's "reviewed through" mark.
@@ -391,7 +435,8 @@ struct AutomationRunRecord: Codable, Identifiable, Equatable, Sendable {
          outcome: Outcome, detail: String, branchSlug: String? = nil,
          itemKey: String? = nil, runProfileID: UUID? = nil,
          completedAt: Date? = nil, acknowledgedAt: Date? = nil,
-         tool: Profile.Tool? = nil, review: ReviewInfo? = nil) {
+         tool: Profile.Tool? = nil, review: ReviewInfo? = nil, queuedAt: Date? = nil) {
+        self.queuedAt = queuedAt
         self.id = id
         self.automationID = automationID
         self.firedAt = firedAt
@@ -475,6 +520,14 @@ final class ScheduledAutomationStore {
         var lastError: String?
         /// Open items seen on the last successful poll (editor status line).
         var lastOpenCount: Int?
+        /// Commit trigger: the branch tip the last successful poll walked
+        /// back from — the next poll walks the branch's first-parent chain
+        /// down to it, so each landing is seen once whatever it touched.
+        var tipSHA: String?
+        /// Commit trigger: the tip each dispatched commit's poll walked down
+        /// from ("commit:<sha7>" → sha), so a run the guest refuses can be
+        /// walked again (`requeueRefused`).
+        var commitBases: [String: String]?
     }
 
     private let fileURL: URL
@@ -508,16 +561,24 @@ final class ScheduledAutomationStore {
     /// Insert or replace. Any recorded next fire is dropped — the engine
     /// reschedules from the (possibly changed) recurrence on its next tick.
     func upsert(_ automation: ScheduledAutomation) {
+        let previous = automations.first { $0.id == automation.id }
         if let i = automations.firstIndex(where: { $0.id == automation.id }) {
             automations[i] = automation
         } else {
             automations.append(automation)
         }
         nextFires[automation.id.uuidString] = nil
-        // Re-baseline PR polling too: an edit may have pointed the trigger
-        // at a different repo, and a stale high-water mark from the old one
-        // could replay or swallow events.
-        pollStates[automation.id.uuidString] = nil
+        // Re-baseline event polling when an edit pointed the trigger
+        // elsewhere (another repo, branch, filter): a stale high-water mark
+        // or tip from the old source could replay or swallow events. An
+        // edit that leaves the source alone (a watch's focus, agent,
+        // prompt) keeps it — a re-baseline swallowed what landed since the
+        // last poll and listed every commit back as a skipped backlog item.
+        // Switched back on, it starts afresh: what landed while it was off
+        // isn't reviewed after the fact.
+        if previous.map({ !$0.pollsSameSource(as: automation) || (!$0.enabled && automation.enabled) }) ?? true {
+            pollStates[automation.id.uuidString] = nil
+        }
         save()
     }
 
@@ -562,6 +623,68 @@ final class ScheduledAutomationStore {
         save()
     }
 
+    /// The launched run behind a worktree branch (`wt/<slug>`, or with the
+    /// guest's -N dedup suffix) whose session runs in `profileID`, newest
+    /// first. A run the guest reported refused isn't one: the branch is what
+    /// a guest vsock client said in its hello, and every sign that run is up
+    /// after all (its done, its findings, its tab in the roster) comes from
+    /// the guest too, so taking one back let any process finish a review
+    /// that never ran, advance `lastReviewed` and fire the chain (Finding
+    /// CWE-807, "Any guest vsock client can finish a refused run and move the
+    /// review mark"). It stays failed; the next tick tries again.
+    func runForBranch(_ branch: String, profileID: UUID) -> AutomationRunRecord? {
+        guard branch.hasPrefix("wt/") else { return nil }
+        let slugPart = String(branch.dropFirst(3))
+        guard let run = runs.first(where: { run in
+            guard run.outcome == .launched, let slug = run.branchSlug else { return false }
+            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
+                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
+        }), let automation = automation(run.automationID),
+              (run.runProfileID ?? automation.profileID) == profileID
+        else { return nil }
+        return run
+    }
+
+    /// Hold (or drop, nil) a refusal reported before the run's tab could
+    /// be listed.
+    func setPendingRefusal(_ runID: UUID, _ reason: String?) {
+        guard let i = runs.firstIndex(where: { $0.id == runID }), runs[i].pendingRefusal != reason else { return }
+        runs[i].pendingRefusal = reason
+        save()
+    }
+
+    /// The events this automation has handled: every run's `itemKey` but a
+    /// refused one's. A refusal is the guest's word only, and nothing from
+    /// the guest completes that run (`runForBranch`), so its event fires
+    /// again on the next poll (Finding CWE-670, "A guest refusal
+    /// permanently drops a commit, PR, or issue scan"). A run still
+    /// launched keeps its key: a live run never fires twice.
+    func handledItemKeys(for automationID: UUID) -> Set<String> {
+        Set(runs(for: automationID).filter { $0.refusedByGuest != true }.compactMap(\.itemKey))
+    }
+
+    /// `markFailed`, for a refusal the guest reported.
+    func markRefused(_ runID: UUID, reason: String) -> Bool {
+        guard markFailed(runID, reason: reason),
+              let i = runs.firstIndex(where: { $0.id == runID }) else { return false }
+        runs[i].refusedByGuest = true
+        save()
+        return true
+    }
+
+    /// A launched run the guest refused to start (its base couldn't be
+    /// fetched, its checkout is gone, no tab opened): failed, with why —
+    /// not a green "launched" in Done. Only a run still launched and not done.
+    @discardableResult
+    func markFailed(_ runID: UUID, reason: String) -> Bool {
+        guard let i = runs.firstIndex(where: { $0.id == runID }),
+              runs[i].outcome == .launched, runs[i].completedAt == nil else { return false }
+        runs[i].outcome = .failed
+        runs[i].detail = reason
+        save()
+        return true
+    }
+
     /// A review run whose head commit wasn't known at fire time learns it
     /// from the agent (findings_done). Never overwrites a known head.
     func setReviewHead(_ runID: UUID, sha: String) {
@@ -586,10 +709,59 @@ final class ScheduledAutomationStore {
     /// mirrored board/sidebar can show "next …" like the host does.
     func mirror(automations newAutomations: [ScheduledAutomation],
                 runs newRuns: [AutomationRunRecord],
-                nextFires newNextFires: [String: Date]? = nil) {
+                nextFires newNextFires: [String: Date]? = nil,
+                timeZone newTimeZone: TimeZone? = nil) {
         if automations != newAutomations { automations = newAutomations }
         if runs != newRuns { runs = newRuns }
         if let newNextFires, nextFires != newNextFires { nextFires = newNextFires }
+        if let newTimeZone, mirroredTimeZone != newTimeZone { mirroredTimeZone = newTimeZone }
+    }
+
+    /// The clock the schedules run on: this Mac's, or — mirrored — the
+    /// host's. "Every day at 3:00" means 3:00 there; a client elsewhere
+    /// reads it with that zone named, and its local equivalent. This Mac's
+    /// is read live: stored at launch, it stayed put when the Mac changed
+    /// zone, and the editor set hours on a clock the engine no longer used.
+    var scheduleTimeZone: TimeZone {
+        _ = systemZoneChanges
+        return mirroredTimeZone ?? .current
+    }
+    /// The host's zone, as its /state names it (fat client). nil: this Mac's.
+    private var mirroredTimeZone: TimeZone?
+    /// Bumped when this Mac changes zone: views showing the schedules' clock
+    /// redraw.
+    private var systemZoneChanges = 0
+
+    /// This Mac changed time zone: drop the system zone Foundation cached,
+    /// and replan what was planted on the old clock.
+    func systemTimeZoneChanged(now: Date = Date()) {
+        NSTimeZone.resetSystemTimeZone()
+        systemZoneChanges += 1
+        replanWallClockFires(now: now)
+    }
+
+    /// Drop the planned fires of wall-clock schedules (daily, weekdays,
+    /// weekly) still ahead — planted on whatever clock was current then (a
+    /// zone change while running, or while the app was quit) — so the engine
+    /// plants them again on this one: "9:00" is 9:00 here now. Unchanged
+    /// zone: the same instant comes back. A fire already due stays, to run
+    /// or be skipped as missed; an interval keeps its phase (it's no clock
+    /// hour). A mirror's are the host's business.
+    func replanWallClockFires(now: Date = Date()) {
+        guard mirroredTimeZone == nil else { return }
+        let ahead = automations.filter { $0.trigger == .schedule && $0.frequency != .interval }
+            .map(\.id.uuidString)
+            .filter { (nextFires[$0] ?? .distantPast) > now }
+        guard !ahead.isEmpty else { return }
+        for k in ahead { nextFires[k] = nil }
+        save()
+    }
+
+    /// A calendar on the schedules' clock.
+    var scheduleCalendar: Calendar {
+        var c = Calendar.current
+        c.timeZone = scheduleTimeZone
+        return c
     }
 
     /// Every planned next fire, keyed by automation id — the /state payload
@@ -865,41 +1037,205 @@ enum GitHubPRPoller {
             struct Sig: Decodable { var name: String?; var date: Date }
             var message: String
             var author: Sig?
+            var committer: Sig?
         }
         struct User: Decodable { var login: String; var type: String? }
+        struct Parent: Decodable { var sha: String }
         var sha: String
         var html_url: String
         var commit: Commit
         var author: User?
+        var parents: [Parent]?
     }
 
-    /// New commits on `branch` (or the default branch) touching `subfolder`
-    /// (repo-relative; empty = whole repo). GitHub's `path` query does the
-    /// subfolder filtering server-side. Newest first, page of 30.
-    nonisolated static func fetchCommits(repo: String, token: String,
-                                         branch: String, subfolder: String)
-        async throws -> [TriggerItem] {
-        var query = [URLQueryItem(name: "per_page", value: "30")]
-        let b = branch.trimmingCharacters(in: .whitespaces)
-        if !b.isEmpty { query.append(URLQueryItem(name: "sha", value: b)) }
-        let path = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
-        if !path.isEmpty { query.append(URLQueryItem(name: "path", value: path)) }
-        var comps = URLComponents(string: "https://api.github.com/repos/\(repo)/commits")!
-        comps.queryItems = query
-        let data = try await get(comps.url!, token: token)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([APICommit].self, from: data).map { c in
-            let short = String(c.sha.prefix(7))
-            let subject = c.commit.message.split(whereSeparator: \.isNewline).first
-                .map(String.init) ?? c.commit.message
-            return TriggerItem(
-                number: 0, title: subject, url: c.html_url, branch: b,
-                author: c.author?.login ?? c.commit.author?.name ?? "",
-                body: c.commit.message, createdAt: c.commit.author?.date ?? Date(),
-                identifier: short,
-                isBot: c.author?.type == "Bot" || (c.author?.login.hasSuffix("[bot]") ?? false))
+    /// One commit of a branch's history, as the commit trigger walks it.
+    struct BranchCommit: Equatable, Sendable {
+        var sha: String
+        var parents: [String]
+        var message: String
+        var author: String
+        var url: String
+        var date: Date
+        var isBot: Bool = false
+
+        var item: TriggerItem {
+            let subject = message.split(whereSeparator: \.isNewline).first
+                .map(String.init) ?? message
+            return TriggerItem(number: 0, title: subject, url: url, branch: "",
+                               author: author, body: message, createdAt: date,
+                               identifier: String(sha.prefix(7)), isBot: isBot)
         }
+    }
+
+    /// The most commits a walk with no tip to reach takes: a first poll's
+    /// backlog, or the newest of a history that lost its tip.
+    nonisolated static let landedCommitLimit = 30
+    /// How far a walk looks for its tip before deciding the history was
+    /// rewritten under it.
+    nonisolated static let landedCommitSearch = 500
+
+    /// What landed on a branch since `since`, oldest first: its first-parent
+    /// chain from `head` back to `since` (or to a commit `isKnown` says was
+    /// handled), at most `limit` deep — and whether it got there. A merged
+    /// branch is one entry, its merge commit: a branch's own commits are not
+    /// the branch's history — an early one may hold a bug a later one
+    /// fixed, and reviewing it reports what never reached the branch. Pure.
+    nonisolated static func landedCommits(
+        head: String, since: String?, limit: Int = landedCommitLimit,
+        isKnown: (String) -> Bool = { _ in false },
+        lookup: (String) async throws -> BranchCommit) async throws
+        -> (commits: [BranchCommit], reached: Bool) {
+        var walked: [BranchCommit] = []
+        var sha: String? = head
+        while let at = sha, at != since, !isKnown(at) {
+            guard walked.count < limit else { break }
+            let c = try await lookup(at)
+            walked.append(c)
+            sha = c.parents.first   // nil: the root
+        }
+        let reached = sha.map { $0 == since || isKnown($0) } ?? false
+        return (walked.reversed(), reached)
+    }
+
+    /// The tip the next poll walks back to: past every landed commit, oldest
+    /// first, that is `settled` (handled, or nothing to fire), up to the
+    /// first that isn't — one waiting for a run slot, or whose launch
+    /// failed, is walked again. Pure.
+    nonisolated static func settledTip(after landed: [LandedCommit], from previous: String?,
+                                       settled: (LandedCommit) -> Bool) -> String? {
+        var tip = previous
+        for c in landed {
+            guard settled(c) else { break }
+            tip = c.sha
+        }
+        return tip
+    }
+
+    /// Whether a change touches `subfolder`, from the paths it changes
+    /// (GitHub lists at most 300: a fuller list counts as touching it).
+    nonisolated static func touches(_ paths: [String], subfolder: String, listCapped: Bool) -> Bool {
+        let dir = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
+        if dir.isEmpty || listCapped { return true }
+        return paths.contains { $0 == dir || $0.hasPrefix(dir + "/") }
+    }
+
+    /// One commit that landed on the watched branch.
+    struct LandedCommit: Equatable, Sendable {
+        var sha: String
+        var item: TriggerItem
+        /// Its change — against its first parent, a merge's whole branch —
+        /// touches the trigger's subfolder (always, with none).
+        var touchesSubfolder: Bool
+        /// A merge: the tip of the branch it merged.
+        var mergedTip: String? = nil
+
+        /// A merge whose branch the old per-commit listing already
+        /// reviewed: it fired for that branch's tip.
+        func reviewedBefore(_ known: (String) -> Bool) -> Bool {
+            mergedTip.map(known) ?? false
+        }
+    }
+
+    /// Whether a commit's change touches a subfolder, by "repo sha folder":
+    /// a fact that never changes, asked again on every poll while an older
+    /// commit waits.
+    private static let touchCache = OSAllocatedUnfairLock(initialState: [String: Bool]())
+
+    /// The commits that landed on `branch` (or the default branch) since
+    /// `since`, oldest first; the tip walked from; and the commit they sit
+    /// on. Listing `/commits`
+    /// instead returns every commit reachable from the tip — a merged
+    /// branch's own commits included — and its `path` filter drops a merge
+    /// whose branch touched the folder.
+    nonisolated static func fetchLandedCommits(repo: String, token: String,
+                                               branch: String, subfolder: String,
+                                               since: String?,
+                                               isKnown: (String) -> Bool = { _ in false })
+        async throws -> (landed: [LandedCommit], head: String, base: String?) {
+        let branch = branch.trimmingCharacters(in: .whitespaces)
+        let folder = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
+        var cache: [String: BranchCommit] = [:]
+        // A page of history from `ref`, the commit itself first.
+        func page(_ ref: String) async throws -> [BranchCommit] {
+            var comps = URLComponents(string: "https://api.github.com/repos/\(repo)/commits")!
+            comps.queryItems = [URLQueryItem(name: "per_page", value: "100")]
+                + (ref.isEmpty ? [] : [URLQueryItem(name: "sha", value: ref)])
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let page = try decoder.decode([APICommit].self, from: try await get(comps.url!, token: token))
+                .map { c in
+                    BranchCommit(sha: c.sha, parents: (c.parents ?? []).map(\.sha),
+                                 message: c.commit.message,
+                                 author: c.author?.login ?? c.commit.author?.name ?? "",
+                                 url: c.html_url,
+                                 date: c.commit.committer?.date ?? c.commit.author?.date ?? Date(),
+                                 isBot: c.author?.type == "Bot"
+                                    || (c.author?.login.hasSuffix("[bot]") ?? false))
+                }
+            for c in page { cache[c.sha] = c }
+            return page
+        }
+        func lookup(_ sha: String) async throws -> BranchCommit {
+            if let c = cache[sha] { return c }
+            // Past the pages read so far (a long branch's commits came first).
+            guard let c = try await page(sha).first, c.sha == sha else {
+                throw URLError(.badServerResponse)
+            }
+            return c
+        }
+        guard let head = try await page(branch).first?.sha else {
+            throw URLError(.badServerResponse)
+        }
+        let walk = try await landedCommits(
+            head: head, since: since,
+            limit: since == nil ? landedCommitLimit : landedCommitSearch,
+            isKnown: isKnown, lookup: lookup)
+        // A tip the walk never reached: rewritten history (or a burst past
+        // the search) — the newest landings, as a first poll takes them.
+        let commits = since == nil || walk.reached
+            ? walk.commits : Array(walk.commits.suffix(landedCommitLimit))
+        if since != nil, !walk.reached {
+            BACDebug.log("automation", "\(repo): \(String(since!.prefix(7))) is no longer behind \(String(head.prefix(7))) — reviewing the newest \(commits.count) landing(s)")
+        }
+        var landed: [LandedCommit] = []
+        for c in commits {
+            var item = c.item
+            item.branch = branch
+            var touched = true
+            if !folder.isEmpty, let parent = c.parents.first {
+                let key = "\(repo) \(c.sha) \(folder)"
+                if let known = touchCache.withLock({ $0[key] }) {
+                    touched = known
+                } else {
+                    let (paths, capped) = try await changedPaths(repo: repo, token: token,
+                                                                 from: parent, to: c.sha)
+                    let found = touches(paths, subfolder: folder, listCapped: capped)
+                    touchCache.withLock { $0[key] = found }
+                    touched = found
+                }
+            }
+            landed.append(LandedCommit(sha: c.sha, item: item, touchesSubfolder: touched,
+                                       mergedTip: c.parents.count > 1 ? c.parents[1] : nil))
+        }
+        // What the landings sit on: where the walk stopped (nil: the root).
+        let base: String? = commits.isEmpty ? head : commits[0].parents.first
+        return (landed, head, base)
+    }
+
+    /// The paths a change from `from` to `to` touches (renames: both
+    /// names), and whether GitHub's list stopped at its 300-file cap.
+    private nonisolated static func changedPaths(repo: String, token: String,
+                                                 from: String, to: String)
+        async throws -> (paths: [String], capped: Bool) {
+        struct Compare: Decodable {
+            struct File: Decodable { var filename: String; var previous_filename: String? }
+            var files: [File]?
+        }
+        let data = try await get(URL(string: "https://api.github.com/repos/\(repo)/compare/\(from)...\(to)")!,
+                                 token: token)
+        let files = try JSONDecoder().decode(Compare.self, from: data).files ?? []
+        return (files.flatMap { [$0.filename] + ($0.previous_filename.map { [$0] } ?? []) },
+                files.count >= 300)
     }
 
     /// The commit at the tip of `branch` (empty = the default branch) — what
@@ -1192,8 +1528,34 @@ final class ScheduledAutomationEngine {
     /// Profiles this engine has asked to boot and is still waiting on, so two
     /// automations due on the same workspace don't race a double launch.
     private var pendingBoots: Set<UUID> = []
+    /// Launches on their way — a clone, a boot, a workspace copy before the
+    /// run is queued and recorded: automation → event key (or a token) →
+    /// since when. They hold a slot of the automation's runs-at-a-time and
+    /// their event isn't fired again meanwhile: the poll that fired them
+    /// has long returned, and the next one would find no record yet.
+    private var launching: [UUID: [String: Date]] = [:]
+
+    func holdLaunch(_ automationID: UUID, _ itemKey: String?) -> String {
+        let token = itemKey ?? "run:" + UUID().uuidString
+        launching[automationID, default: [:]][token] = Date()
+        return token
+    }
+
+    func releaseLaunch(_ automationID: UUID, _ token: String) {
+        launching[automationID]?[token] = nil
+        if launching[automationID]?.isEmpty == true { launching[automationID] = nil }
+    }
+
+    /// The events (or tokens) of `automationID` still on their way.
+    func launchesUnderWay(_ automationID: UUID) -> Set<String> {
+        Set(launching[automationID]?.keys.map { $0 } ?? [])
+    }
     /// Automations with a GitHub poll in flight — one at a time per automation.
     private var pollsInFlight: Set<UUID> = []
+    /// Event automations `repollSoon` asked to poll early since their poll
+    /// last started. A poll keeps the cleared `lastPolledAt` only for one
+    /// asked for while it ran; one that started from it saves its own time.
+    private var repollRequested: Set<UUID> = []
     /// Branches already told to finish this session — avoids resending on
     /// repeated .done flips. (The authoritative watch lives in the run
     /// records' branchSlug, which survives app restarts.)
@@ -1202,6 +1564,7 @@ final class ScheduledAutomationEngine {
     /// A fire more than this far past its time means the Mac was asleep or
     /// the app wasn't running — not merely a slow tick.
     static let lateGrace: TimeInterval = 180
+    /// Awake time a start waits for its workspace (see `BootBudget`).
     private static let bootTimeout: TimeInterval = 180
     private static let bootPollInterval: UInt64 = 5_000_000_000  // 5s in ns
     /// GitHub PR polling cadence. Generous for the API quota, and PR-review
@@ -1212,6 +1575,8 @@ final class ScheduledAutomationEngine {
         self.store = store
         self.delegate = delegate
     }
+
+    private var zoneObserver: NSObjectProtocol?
 
     /// A launched run's agent reported done (after the quiet settle) — the
     /// repository watches count a scan's findings off this.
@@ -1236,8 +1601,9 @@ final class ScheduledAutomationEngine {
     var prepareWatchRun: ((ScheduledAutomation, _ forceBaseline: Bool) async -> WatchRunPreparation?)?
 
     /// How long a run whose agent DECLARED itself done (findings_done) but
-    /// has no transcript the quiet probe can read gets to finish its last
-    /// message before its tab is closed.
+    /// has no transcript the quiet probe could read gets to finish its last
+    /// message before its tab is closed. Whether the probe read one is the
+    /// probe's answer (`waitForSessionQuiet`), not the tool's hook support.
     static let declaredDoneGrace: UInt64 = 45_000_000_000
 
     func start() {
@@ -1248,16 +1614,34 @@ final class ScheduledAutomationEngine {
         t.tolerance = 5
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        zoneObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                BACDebug.log("automation", "time zone is now \(TimeZone.current.identifier) — replanning")
+                self.store.systemTimeZoneChanged()
+                self.tick()
+            }
+        }
         BACDebug.log("automation", "engine started — \(store.automations.count) automation(s)")
+        // The zone may have changed while the app was quit.
+        store.replanWallClockFires()
         tick()   // catch up fires missed while the app was quit
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        if let zoneObserver { NotificationCenter.default.removeObserver(zoneObserver) }
+        zoneObserver = nil
     }
 
     func tick(now: Date = Date()) {
+        if let delegate {
+            let live = { (pid: UUID) in delegate.openWorktreeBranches(profileID: pid) }
+            settlePendingRefusals(now: now, liveBranches: live)
+            delegate.codingTaskEngine.settlePendingRefusals(now: now, liveBranches: live)
+        }
         for a in store.automations where a.enabled {
             switch a.trigger {
             case .schedule:
@@ -1273,7 +1657,7 @@ final class ScheduledAutomationEngine {
     private func scheduleTick(_ a: ScheduledAutomation, now: Date) {
         guard let due = store.nextFire(for: a.id) else {
             // New, edited, or first-seen automation: plant the next fire.
-            let next = AutomationSchedule.nextFire(for: a, after: now)
+            let next = AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar)
             BACDebug.log("automation", "planted next fire for “\(a.name)” at \(next)")
             store.setNextFire(next, for: a.id)
             return
@@ -1290,7 +1674,7 @@ final class ScheduledAutomationEngine {
         } else {
             fire(a, now: now)
         }
-        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now), for: a.id)
+        store.setNextFire(AutomationSchedule.nextFire(for: a, after: now, calendar: store.scheduleCalendar), for: a.id)
     }
 
     private func eventTick(_ a: ScheduledAutomation, now: Date) {
@@ -1311,8 +1695,22 @@ final class ScheduledAutomationEngine {
     private func pollEvents(_ a: ScheduledAutomation, now: Date) async {
         let previous = store.pollState(for: a.id)
         var next = ScheduledAutomationStore.PRPollState(
-            lastPolledAt: now, highWater: previous?.highWater)
-        defer { store.setPollState(next, for: a.id) }
+            lastPolledAt: now, highWater: previous?.highWater, tipSHA: previous?.tipSHA)
+        next.commitBases = previous?.commitBases
+        repollRequested.remove(a.id)
+        defer {
+            // A refusal while this poll ran rewound the tip or asked for a
+            // poll soon (`requeueRefused`): this poll's view is older. A nil
+            // `lastPolledAt` this poll started from is answered by it --
+            // keeping it would poll every tick, backoff gone (Finding
+            // CWE-670, "Event automations poll every tick once an early poll
+            // has been requested").
+            if let current = store.pollState(for: a.id) {
+                if current.tipSHA != previous?.tipSHA { next.tipSHA = current.tipSHA }
+            }
+            if repollRequested.contains(a.id) { next.lastPolledAt = nil }
+            store.setPollState(next, for: a.id)
+        }
 
         guard let delegate,
               let profile = delegate.profile(for: a.profileID) else {
@@ -1322,6 +1720,10 @@ final class ScheduledAutomationEngine {
         }
 
         let items: [TriggerItem]
+        var landed: [GitHubPRPoller.LandedCommit] = []
+        var reviewedBefore: (GitHubPRPoller.LandedCommit) -> Bool = { _ in false }
+        /// The commit the walk stopped above (the oldest landed's parent).
+        var walkBase: String?
         let scope: String
         do {
             switch a.trigger {
@@ -1343,10 +1745,27 @@ final class ScheduledAutomationEngine {
                 }
                 scope = a.githubRepo
                 if a.trigger == .githubCommit {
-                    items = try await GitHubPRPoller.fetchCommits(
+                    // What landed since the settled tip — a merged branch
+                    // once, as its merge. A poll state from before tips were
+                    // kept walks back to the newest commit it fired, and
+                    // skips a merge whose branch the old listing reviewed
+                    // commit by commit.
+                    let upgraded = previous?.highWater != nil && previous?.tipSHA == nil
+                    let known = upgraded ? store.handledItemKeys(for: a.id) : []
+                    let isKnown = { (sha: String) in known.contains("commit:\(sha.prefix(7))") }
+                    let walk = try await GitHubPRPoller.fetchLandedCommits(
                         repo: a.githubRepo, token: token,
                         branch: a.filters.commitBranch,
-                        subfolder: a.filters.commitSubfolder)
+                        subfolder: a.filters.commitSubfolder,
+                        since: previous?.tipSHA, isKnown: isKnown)
+                    landed = walk.landed
+                    walkBase = walk.base
+                    if upgraded {
+                        // Once: from here on the tip is where this walk stopped.
+                        next.tipSHA = walk.base
+                        reviewedBefore = { $0.reviewedBefore(isKnown) }
+                    }
+                    items = landed.filter { $0.touchesSubfolder && !reviewedBefore($0) }.map(\.item)
                 } else {
                     items = try await GitHubPRPoller.fetchOpenItems(
                         kind: a.trigger, repo: a.githubRepo, token: token,
@@ -1380,11 +1799,13 @@ final class ScheduledAutomationEngine {
         // An event is "processed" once a run record carries its itemKey —
         // written at DISPATCH for launched runs, and also for blocked and
         // backlog-seeded (.skipped) items. Failed-to-launch runs carry NO
-        // itemKey, so they retry on the next poll. This is why "processed"
+        // itemKey, and a guest-refused run's key doesn't count, so they
+        // retry on the next poll. This is why "processed"
         // means dispatched, not "Claude finished": polls recur every few
         // minutes, so completion-gating would relaunch an item while its
         // first run is still working.
-        let processed = Set(store.runs(for: a.id).compactMap { $0.itemKey })
+        let processed = store.handledItemKeys(for: a.id)
+            .union(launchesUnderWay(a.id))
 
         let firstPoll = previous?.highWater == nil
         if firstPoll { next.highWater = now }
@@ -1393,21 +1814,51 @@ final class ScheduledAutomationEngine {
         // with everything currently open — recorded as .skipped so it's
         // visible and never fires — then fire nothing this round.
         if firstPoll && a.ignoreBacklog {
-            for item in items {
+            // The commit trigger's baseline is its tip, set below: the
+            // commits already there need no record (they listed as a run of
+            // skipped commits — noise beside the reviews).
+            for item in items where a.trigger != .githubCommit {
                 store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .skipped,
-                    detail: "\(label) \(item.displayKey): \(item.title) (pre-existing)",
+                    detail: "\(label) \(item.displayKey): \(item.title) \(AutomationRunRecord.backlogMarker)",
                     itemKey: GitHubPRPoller.eventKey(item, kind: a.trigger)))
             }
             BACDebug.log("automation", "“\(a.name)”: baseline of \(scope) — seeded \(items.count) backlog item(s), firing none")
+            if a.trigger == .githubCommit { next.tipSHA = landed.last?.sha ?? next.tipSHA }
             return
         }
 
-        // Fire order: oldest first, so a burst is handled in creation order.
-        for item in items.sorted(by: { $0.createdAt < $1.createdAt })
+        // Fire order: oldest first, so a burst is handled in creation order —
+        // as many at once as the automation allows. The rest have no run
+        // record yet, so the next poll finds them again (sooner once a run
+        // finishes: finishRun re-polls).
+        var slots = a.maxParallelRuns == 0 ? Int.max
+            : max(0, a.maxParallelRuns - Self.activeRunCount(
+                store.runs, automationID: a.id, profileID: a.profileID, now: Date(),
+                liveBranches: { delegate.liveWorktreeBranches(profileID: $0) })
+                - (launching[a.id]?.count ?? 0))
+        // Commits come in the order they landed already: dates can lie.
+        let ordered = a.trigger == .githubCommit
+            ? items : items.sorted(by: { $0.createdAt < $1.createdAt })
+        // The commit trigger walks back to the newest commit everything
+        // up to which is handled — whatever happens to this round's.
+        defer {
+            if a.trigger == .githubCommit {
+                next.tipSHA = GitHubPRPoller.settledTip(after: landed, from: next.tipSHA) { c in
+                    !c.touchesSubfolder || reviewedBefore(c)
+                        || !a.filters.matches(c.item, kind: a.trigger)
+                        || processed.contains(GitHubPRPoller.eventKey(c.item, kind: a.trigger))
+                }
+            }
+        }
+        for item in ordered
         where a.filters.matches(item, kind: a.trigger) {
             let key = GitHubPRPoller.eventKey(item, kind: a.trigger)
             if processed.contains(key) { continue }   // already dispatched/blocked
+            guard slots > 0 else {
+                BACDebug.log("automation", "“\(a.name)”: \(a.maxParallelRuns) run(s) at a time — the rest wait for one to finish")
+                break
+            }
 
             // Enrich with comments (third-party text) BEFORE screening, so
             // the agent sees the discussion and the screen covers it too.
@@ -1435,6 +1886,20 @@ final class ScheduledAutomationEngine {
                 continue
             }
             BACDebug.log("automation", "“\(a.name)”: firing for \(label) \(enriched.displayKey)")
+            slots -= 1
+            if a.trigger == .githubCommit {
+                // Where to walk from again should the guest refuse it: the
+                // commit before it on the branch, or this poll's own tip —
+                // or, with none yet, where the walk stopped (its parent).
+                let at = landed.firstIndex { GitHubPRPoller.eventKey($0.item, kind: a.trigger) == key }
+                if let base = at.flatMap({ $0 > 0 ? landed[$0 - 1].sha : next.tipSHA ?? walkBase }) {
+                    var bases = next.commitBases ?? [:]
+                    bases[key] = base
+                    next.commitBases = Self.trimmedCommitBases(
+                        bases, runs: store.runs(for: a.id), handled: store.handledItemKeys(for: a.id),
+                        underWay: launchesUnderWay(a.id), firing: key)
+                }
+            }
             fire(a, now: Date(),
                  promptOverride: GitHubPRPoller.substitute(a.prompt, item: enriched,
                                                            kind: a.trigger),
@@ -1442,6 +1907,26 @@ final class ScheduledAutomationEngine {
                  slugSuffix: Self.slugSuffix(for: enriched, kind: a.trigger),
                  itemKey: key)
         }
+    }
+
+    /// `commitBases` past `limit` entries keeps the bases a refusal can
+    /// still rewind to: runs not done yet, refused runs not fired again,
+    /// launches still on their way (a clone, checkout or boot records its
+    /// run only after an await -- an earlier commit of this same poll isn't
+    /// in `runs` yet), and the one firing now. A done run can't be refused
+    /// any more (Finding CWE-670, "A commit's rewind base is dropped before
+    /// an async launch is recorded").
+    nonisolated static func trimmedCommitBases(_ bases: [String: String], runs: [AutomationRunRecord],
+                                               handled: Set<String>, underWay: Set<String>,
+                                               firing key: String, limit: Int = 200) -> [String: String] {
+        guard bases.count > limit else { return bases }
+        var keep = underWay.union([key])
+        for r in runs {
+            guard let k = r.itemKey else { continue }
+            if r.outcome == .launched, r.completedAt == nil { keep.insert(k) }
+            if r.refusedByGuest == true, !handled.contains(k) { keep.insert(k) }
+        }
+        return bases.filter { keep.contains($0.key) }
     }
 
     /// The github.com token for comment enrichment (GitHub triggers only).
@@ -1483,6 +1968,36 @@ final class ScheduledAutomationEngine {
         return nil
     }
 
+    /// How long a launched run that never reported done still holds a slot.
+    nonisolated static let activeRunLimit: TimeInterval = 6 * 3600
+    /// A run's tab may take this long to appear after its launch.
+    nonisolated static let tabAppearGrace: TimeInterval = 10 * 60
+
+    /// Runs of `automationID` still working: launched, not done, and — when
+    /// the workspace's tabs are known — with its tab still up (a closed or
+    /// crashed one frees its slot). `liveBranches`: the worktree branches of
+    /// a workspace's open tabs, nil when that can't be told.
+    nonisolated static func activeRunCount(_ runs: [AutomationRunRecord], automationID: UUID, profileID: UUID,
+                                           now: Date, liveBranches: (UUID) -> [String]?) -> Int {
+        runs.filter { run in
+            guard run.automationID == automationID, run.outcome == .launched, run.completedAt == nil,
+                  now.timeIntervalSince(run.firedAt) < activeRunLimit else { return false }
+            if now.timeIntervalSince(run.queuedAt ?? run.firedAt) < tabAppearGrace { return true }
+            guard let slug = run.branchSlug, let pid = Optional(run.runProfileID ?? profileID),
+                  let live = liveBranches(pid) else { return true }
+            return live.contains { AutomationBoard.branchMatches($0, slug: slug) }
+        }.count
+    }
+
+    /// Next tick polls this event automation (a run of it finished).
+    private func repollSoon(_ automationID: UUID) {
+        guard let a = store.automation(automationID), a.trigger != .schedule, a.trigger != .afterAutomation,
+              var state = store.pollState(for: automationID) else { return }
+        state.lastPolledAt = nil
+        store.setPollState(state, for: automationID)
+        repollRequested.insert(automationID)
+    }
+
     /// Manual "Run now" — the same path as a scheduled fire; the schedule is
     /// left untouched.
     func runNow(_ automation: ScheduledAutomation, forceBaseline: Bool = false) {
@@ -1499,6 +2014,12 @@ final class ScheduledAutomationEngine {
                       forceBaseline: Bool = false,
                       prepared: WatchRunPreparation? = nil) {
         guard let delegate else { return }
+        // Held from now until the run is recorded: a path that goes async
+        // (a clone, a boot) takes the hold over and lets it go when it
+        // records; every other path lets it go on return.
+        let hold = holdLaunch(a.id, itemKey)
+        var handedOver = false
+        defer { if !handedOver { releaseLaunch(a.id, hold) } }
         guard delegate.profile(for: a.profileID) != nil else {
             store.record(AutomationRunRecord(
                 automationID: a.id, firedAt: now, outcome: .failed,
@@ -1513,9 +2034,11 @@ final class ScheduledAutomationEngine {
         // last review, the branch tip — not when the watch was saved.
         if prepared == nil, promptOverride == nil, a.watchID != nil,
            a.trigger == .schedule, let prepare = prepareWatchRun {
+            handedOver = true
             Task { [weak self] in
                 let prep = await prepare(a, forceBaseline)
                 guard let self else { return }
+                defer { self.releaseLaunch(a.id, hold) }
                 guard let prep else {
                     self.fire(a, now: now, promptOverride: a.prompt, itemKey: itemKey)
                     return
@@ -1555,8 +2078,9 @@ final class ScheduledAutomationEngine {
         // the workspace itself. Restricted to the agents with a real done
         // signal — the teardown rides on it (see `hasReliableDoneSignal`).
         if a.cloneWorkspaceFirst && a.tool.hasReliableDoneSignal {
+            handedOver = true
             fireInClone(a, slug: slug, detail: detail, args: args,
-                        now: now, itemKey: itemKey, review: review)
+                        now: now, itemKey: itemKey, review: review, hold: hold)
             return
         }
 
@@ -1564,8 +2088,9 @@ final class ScheduledAutomationEngine {
         // when it isn't there yet — the whole launch goes async for that.
         if let url = a.cloneURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            !url.isEmpty {
+            handedOver = true
             fireWithCheckout(a, cloneURL: url, slug: slug, detail: detail,
-                             args: args, now: now, itemKey: itemKey, review: review)
+                             args: args, now: now, itemKey: itemKey, review: review, hold: hold)
             return
         }
 
@@ -1578,6 +2103,20 @@ final class ScheduledAutomationEngine {
                 automationID: a.id, firedAt: now, outcome: .launched,
                 detail: detail, branchSlug: slug, itemKey: itemKey,
                 tool: a.tool, review: review))
+            return
+        }
+
+        // Running in the other Bromure process (the app, or its login
+        // agent), whose engine fires this automation into it: booting it
+        // here would start a second VM from this process's stale copy.
+        if delegate.workspaceOpenElsewhere(a.profileID) {
+            BACDebug.log("automation", "skipping “\(a.name)” — workspace open in the other Bromure process")
+            store.record(AutomationRunRecord(
+                automationID: a.id, firedAt: now, outcome: .skipped,
+                detail: NSLocalizedString(
+                    "The workspace is open in the other Bromure process, which runs this automation there",
+                    comment: "skipped automation run"),
+                itemKey: itemKey))
             return
         }
 
@@ -1602,11 +2141,13 @@ final class ScheduledAutomationEngine {
             pendingBoots.insert(a.profileID)
             delegate.startProfileForAutomation(a.profileID)
         }
-        let deadline = now.addingTimeInterval(Self.bootTimeout)
+        let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+        handedOver = true
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             var why = NSLocalizedString("The workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let self, let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
@@ -1616,7 +2157,7 @@ final class ScheduledAutomationEngine {
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
                         detail: detail, branchSlug: slug, itemKey: itemKey,
-                        tool: a.tool, review: review))
+                        tool: a.tool, review: review, queuedAt: Date()))
                     return
                 }
                 // The start was refused (nobody to answer its prompt): say
@@ -1644,11 +2185,14 @@ final class ScheduledAutomationEngine {
     /// Clone the automation's repository into place if needed, then queue
     /// the run. Unreachable = try again later (boot in progress).
     private func launchWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
-                                    args: [String]) async -> CheckoutLaunch {
+                                    args: [String], booted: BootBudget? = nil) async -> CheckoutLaunch {
         guard let delegate else { return .unreachable }
         guard (try? await delegate.guestExec(profileID: a.profileID,
                                               command: "true", timeout: 5)) != nil
         else { return .unreachable }
+        // The workspace is up: the clone (up to 15 min) isn't its boot, and
+        // doesn't keep the Mac awake.
+        booted?.release()
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let path = Self.guestPath(a.repoPath)
         do {
@@ -1674,15 +2218,16 @@ final class ScheduledAutomationEngine {
     private func fireWithCheckout(_ a: ScheduledAutomation, cloneURL: String,
                                   slug: String, detail: String, args: [String],
                                   now: Date, itemKey: String?,
-                                  review: AutomationRunRecord.ReviewInfo? = nil) {
+                                  review: AutomationRunRecord.ReviewInfo? = nil, hold: String) {
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             guard let self else { return }
             @MainActor func launched() {
                 BACDebug.log("automation", "launched “\(a.name)” → \(slug)")
                 self.store.record(AutomationRunRecord(
                     automationID: a.id, firedAt: now, outcome: .launched,
                     detail: detail, branchSlug: slug, itemKey: itemKey,
-                    tool: a.tool, review: review))
+                    tool: a.tool, review: review, queuedAt: Date()))
             }
             @MainActor func failed(_ why: String) {
                 BACDebug.log("automation", "“\(a.name)”: \(why)")
@@ -1709,10 +2254,10 @@ final class ScheduledAutomationEngine {
                 self.delegate?.startProfileForAutomation(a.profileID)
             }
             defer { self.pendingBoots.remove(a.profileID) }
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
-            while Date() < deadline {
+            let budget = BootBudget.workspace(a.profileID, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s workspace")
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
-                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args) {
+                switch await self.launchWithCheckout(a, cloneURL: cloneURL, args: args, booted: budget) {
                 case .launched: launched(); return
                 case .failed(let why): failed(why); return
                 case .unreachable: break
@@ -1733,8 +2278,9 @@ final class ScheduledAutomationEngine {
     /// deliberately kept for inspection.
     private func fireInClone(_ a: ScheduledAutomation, slug: String, detail: String,
                              args: [String], now: Date, itemKey: String?,
-                             review: AutomationRunRecord.ReviewInfo? = nil) {
+                             review: AutomationRunRecord.ReviewInfo? = nil, hold: String) {
         Task { [weak self] in
+            defer { self?.releaseLaunch(a.id, hold) }
             guard let self, let delegate = self.delegate else { return }
             // The delegate syncs a running source's page cache before the
             // CoW copy, so the clone is as fresh as a live source allows.
@@ -1749,10 +2295,10 @@ final class ScheduledAutomationEngine {
             }
             BACDebug.log("automation", "“\(a.name)”: cloned workspace → “\(clone.name)” — booting")
             delegate.startProfileForAutomation(clone.id)
-            let deadline = now.addingTimeInterval(Self.bootTimeout)
+            let budget = BootBudget.workspace(clone.id, seconds: Self.bootTimeout, reason: "Starting “\(a.name)”’s cloned workspace")
             var why = NSLocalizedString("The cloned workspace did not boot in time",
                                         comment: "failed automation run")
-            while Date() < deadline {
+            while budget.remains {
                 try? await Task.sleep(nanoseconds: Self.bootPollInterval)
                 guard let delegate = self.delegate else { return }
                 if delegate.automationWorktreeCommand(
@@ -1761,7 +2307,7 @@ final class ScheduledAutomationEngine {
                     self.store.record(AutomationRunRecord(
                         automationID: a.id, firedAt: now, outcome: .launched,
                         detail: detail, branchSlug: slug, itemKey: itemKey,
-                        runProfileID: clone.id, tool: a.tool, review: review))
+                        runProfileID: clone.id, tool: a.tool, review: review, queuedAt: Date()))
                     return
                 }
                 if let refusal = delegate.unattendedLaunchRefusal(clone.id) {
@@ -1781,17 +2327,16 @@ final class ScheduledAutomationEngine {
     /// Delegate callback: a Claude tab flipped to .done. If its branch maps
     /// back to a launched automation run (persisted branchSlug — survives
     /// app restarts), ask the guest to save the transcript into the worktree
-    /// and close the tab. Claude only: its per-window Stop hook is the one
-    /// reliable "done" signal — the Codex/Grok proxy heuristic can report
-    /// .done during a long silent stretch, and closing a tab on a false
+    /// and close the tab. Only an agent whose own per-window Stop hook says
+    /// so (`Profile.Tool.hasReliableDoneSignal`): closing a tab on a false
     /// positive would kill live work. Runs that pause on .needsInput finish
     /// whenever the user unblocks them and the next .done arrives.
     func agentFinished(profileID: UUID, worktreeBranch: String?) {
         guard let branch = worktreeBranch,
               let found = launchedRun(profileID: profileID, branch: branch),
-              // Only a hook-driven done is trustworthy — the Codex/Grok proxy
-              // heuristic can flip .done during a long silent stretch.
-              found.automation.tool.hasReliableDoneSignal
+              // The agent the run was launched with (the automation may have
+              // been switched to another since).
+              (found.run.tool ?? found.automation.tool).hasReliableDoneSignal
         else { return }
         finishRun(found.run, found.automation, profileID: profileID, branch: branch, declared: false)
     }
@@ -1804,8 +2349,11 @@ final class ScheduledAutomationEngine {
         guard let branch = worktreeBranch,
               let found = launchedRun(profileID: profileID, branch: branch)
         else { return false }
+        // Declared whatever the agent: a findings_done is a tool call inside
+        // the turn, not its end. finishRun holds it on the transcript, or on
+        // the grace when there's none to watch.
         finishRun(found.run, found.automation, profileID: profileID, branch: branch,
-                  declared: !found.automation.tool.hasReliableDoneSignal)
+                  declared: true)
         return true
     }
 
@@ -1814,22 +2362,122 @@ final class ScheduledAutomationEngine {
     /// `profileID` (a clone-first run's clone, else the automation's own).
     private func launchedRun(profileID: UUID, branch: String)
         -> (run: AutomationRunRecord, automation: ScheduledAutomation)? {
-        guard branch.hasPrefix("wt/"), !finishSent.contains(branch) else { return nil }
-        let slugPart = String(branch.dropFirst(3))
-        guard let run = store.runs.first(where: { run in
-            guard run.outcome == .launched, let slug = run.branchSlug else { return false }
-            return slugPart == slug || (slugPart.hasPrefix(slug + "-")
-                && Int(slugPart.dropFirst(slug.count + 1)) != nil)
-        }),
-            let automation = store.automation(run.automationID),
-            (run.runProfileID ?? automation.profileID) == profileID
-        else { return nil }
+        guard !finishSent.contains(branch),
+              let run = store.runForBranch(branch, profileID: profileID),
+              let automation = store.automation(run.automationID) else { return nil }
         return (run: run, automation: automation)
     }
 
+    /// The guest refused to start run `slug` (`worktree-error.txt` named it):
+    /// that run failed. Never chains, never stamps completion — so a watch's
+    /// `lastReviewed` doesn't move and the next tick tries again.
+    ///
+    /// The report comes through the outbox, which any process in the guest
+    /// can write (Finding CWE-807, "A guest process can fail any in-flight
+    /// run by writing worktree-error.txt"), so it is a claim, not a fact: a
+    /// run whose tab is up (`liveBranches`, the workspace's open worktree
+    /// tabs) isn't failed, and the text is shown as what the workspace said.
+    /// One failed this way stays failed (see `runForBranch`): a wrong report
+    /// costs a retry, never a review recorded as done.
+    ///
+    /// Before its tab could be listed (`tabAppearGrace`, as `activeRunCount`
+    /// counts it), no tab says nothing: the refusal is held, the run keeps
+    /// its slot, and `settlePendingRefusals` applies it only if the grace
+    /// runs out with no tab (Finding CWE-807, "A guest worktree-error before
+    /// the tab is listed still fails Codex, Grok, and omp runs for good").
+    /// What a guest refusal did to the run (or task) it named: the host's
+    /// "Worktree action failed" sheet is for `.applied` only -- a held or
+    /// ignored claim isn't a failure yet, and may never be (Finding
+    /// CWE-670, "Worktree failure sheet still fires while the refusal is
+    /// only held").
+    enum RefusalOutcome: Equatable { case noRun, ignored, held, applied }
+
+    @discardableResult
+    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
+                    now: Date = Date()) -> RefusalOutcome {
+        guard let run = store.runs.first(where: { r in
+            r.outcome == .launched && r.completedAt == nil && r.branchSlug == slug
+                && (r.runProfileID ?? store.automation(r.automationID)?.profileID) == profileID
+        }) else { return .noRun }
+        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true {
+            BACDebug.log("automation", "run \(slug): refusal ignored, its tab is live")
+            return .ignored
+        }
+        if now.timeIntervalSince(run.queuedAt ?? run.firedAt) < Self.tabAppearGrace {
+            BACDebug.log("automation", "run \(slug): refusal held until its tab can be listed")
+            store.setPendingRefusal(run.id, Self.guestReported(reason))
+            return .held
+        }
+        guard store.markRefused(run.id, reason: Self.guestReported(reason)) else { return .ignored }
+        BACDebug.log("automation", "run \(slug) refused by the guest: \(reason)")
+        requeueRefused(run.automationID)
+        return .applied
+    }
+
+    /// Whether the host shows its failure sheet for a guest worktree error:
+    /// one naming no run (an action of the user's own), or a refusal one of
+    /// the engines applied -- not one held for the tab grace, or ignored.
+    nonisolated static func showsWorktreeFailure(_ outcomes: [RefusalOutcome]) -> Bool {
+        outcomes.contains(.applied) || outcomes.allSatisfy { $0 == .noRun }
+    }
+
+    /// A refused run's event fires again (it no longer counts as handled:
+    /// `handledItemKeys`). A commit watch also walks back to before the
+    /// oldest refused commit not yet fired again — its poll tip had moved
+    /// past it, so it would never be listed. Then a poll soon.
+    func requeueRefused(_ automationID: UUID) {
+        guard let a = store.automation(automationID) else { return }
+        if a.trigger == .githubCommit, var state = store.pollState(for: automationID),
+           let bases = state.commitBases {
+            let handled = store.handledItemKeys(for: automationID)
+            let oldest = store.runs(for: automationID)
+                .filter { $0.refusedByGuest == true }
+                .compactMap { r in r.itemKey.flatMap { k in handled.contains(k) ? nil : bases[k].map { (r.firedAt, $0) } } }
+                .min { $0.0 < $1.0 }
+            if let base = oldest?.1, state.tipSHA != base {
+                state.tipSHA = base
+                store.setPollState(state, for: automationID)
+            }
+        }
+        repollSoon(automationID)
+    }
+
+    /// Held refusals: dropped once the run's tab is listed (or the run is
+    /// over), applied once `tabAppearGrace` ran out with no tab.
+    /// `liveBranches`: a workspace's open worktree tabs.
+    func settlePendingRefusals(now: Date = Date(), liveBranches: (UUID) -> [String]) {
+        for run in store.runs where run.pendingRefusal != nil {
+            guard let reason = run.pendingRefusal else { continue }
+            guard run.outcome == .launched, run.completedAt == nil, let slug = run.branchSlug,
+                  let pid = run.runProfileID ?? store.automation(run.automationID)?.profileID else {
+                store.setPendingRefusal(run.id, nil)
+                continue
+            }
+            if liveBranches(pid).contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) {
+                BACDebug.log("automation", "run \(slug): its tab is up, the held refusal is dropped")
+                store.setPendingRefusal(run.id, nil)
+            } else if now.timeIntervalSince(run.queuedAt ?? run.firedAt) >= Self.tabAppearGrace {
+                store.setPendingRefusal(run.id, nil)
+                guard store.markRefused(run.id, reason: reason) else { continue }
+                BACDebug.log("automation", "run \(slug) refused by the guest (no tab came up)")
+                requeueRefused(run.automationID)
+            }
+        }
+    }
+
+    /// A reason the guest wrote, as data: one line, no control characters,
+    /// bounded, and said to come from the workspace.
+    nonisolated static func guestReported(_ text: String) -> String {
+        let flat = String(text.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : Character($0) })
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let bounded = flat.count > 300 ? String(flat.prefix(300)) + "…" : flat
+        return String(format: NSLocalizedString("The workspace reported: %@", comment: "a run the guest refused"), bounded)
+    }
+
     /// Stamp, chain, archive the transcript and (closeWhenDone) close the
-    /// run's tab. `declared`: the agent has no transcript the quiet probe
-    /// can read — give its closing message a fixed grace instead.
+    /// run's tab. `declared`: the agent said so mid-turn (findings_done) —
+    /// its closing message is still coming: held on the transcript going
+    /// quiet, or, when the probe read none, a fixed grace.
     private func finishRun(_ run: AutomationRunRecord, _ automation: ScheduledAutomation,
                            profileID: UUID, branch: String, declared: Bool) {
         finishSent.insert(branch)
@@ -1841,14 +2489,17 @@ final class ScheduledAutomationEngine {
         let automationID = automation.id
         let tool = run.tool ?? automation.tool
         Task { [weak self] in
-            if declared {
-                try? await Task.sleep(nanoseconds: Self.declaredDoneGrace)
-            }
             // A done with background subagents still running isn't done —
             // settle on transcript quiescence before stamping, chaining,
             // and tearing the session down.
-            await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                      branch: branch)
+            let watched = await self?.delegate?.waitForSessionQuiet(profileID: profileID,
+                                                                    branch: branch, tool: tool) ?? false
+            // A declared done comes mid-turn (the agent goes on to write its
+            // closing message): with no transcript the probe could watch, a
+            // fixed grace stands in for it.
+            if declared && !watched {
+                try? await Task.sleep(nanoseconds: Self.declaredDoneGrace)
+            }
             guard let self else { return }
 
             // The run is over — stamp it (the kanban board's In Progress →
@@ -1857,6 +2508,9 @@ final class ScheduledAutomationEngine {
             if let done = self.store.runs.first(where: { $0.id == runID }) {
                 self.onRunCompleted?(done)
             }
+            // A slot is free: an event automation looks for what waits on
+            // the next tick, not a whole poll interval later.
+            self.repollSoon(automationID)
 
             // Chained automations fire on the finish itself, independent of
             // closeWhenDone (leaving the tab open for inspection shouldn't
@@ -1983,11 +2637,20 @@ final class ScheduledAutomationEngine {
         }
     }
 
-    /// A filesystem/branch-safe slug from the automation name, timestamped so
-    /// repeated fires don't collide on the branch name. ASCII only (accents
-    /// folded): the worktree folder is named after it, and agents' stores
-    /// mangle other scripts (`AgentSession.worktreeSlug`).
-    nonisolated static func branchSlug(for name: String, at date: Date) -> String {
+    /// A filesystem/branch-safe slug from the automation name, timestamped and
+    /// tagged so repeated fires don't collide. ASCII only (accents folded):
+    /// the worktree folder is named after it, and agents' stores mangle other
+    /// scripts (`AgentSession.worktreeSlug`).
+    ///
+    /// The slug is the run's identity everywhere (the guest's refusal echoes
+    /// it, the binding and completion match it), so the minute alone wasn't
+    /// enough: two fires in one minute (Run now while a review still
+    /// fetches) shared it, and a refusal failed the newest while the one that
+    /// failed looked finished (Finding CWE-706, "Same-minute runs share a
+    /// slug, so a refusal fails the newest run and leaves the other looking
+    /// finished"). `tag` starts with a letter, so it never reads as the
+    /// guest's own `-N` worktree suffix.
+    nonisolated static func branchSlug(for name: String, at date: Date, tag: String = runTag()) -> String {
         var out = ""
         var lastDash = false
         for ch in AgentSession.asciiFolded(name).lowercased() {
@@ -2002,7 +2665,13 @@ final class ScheduledAutomationEngine {
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyMMdd-HHmm"
         let stamp = fmt.string(from: date)
-        return (base.isEmpty ? "automation" : String(base)) + "-" + stamp
+        return (base.isEmpty ? "automation" : String(base)) + "-" + stamp + "-" + tag
+    }
+
+    /// Four random characters: a letter, then letters or digits.
+    nonisolated static func runTag() -> String {
+        let letters = Array("abcdefghijklmnopqrstuvwxyz"), alnum = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        return String(letters.randomElement()!) + String((0..<3).map { _ in alnum.randomElement()! })
     }
 
     /// Expand the user's repo path to an absolute guest path. The guest home
@@ -2071,15 +2740,84 @@ enum AutomationDescriber {
         return a.trigger == .schedule ? .scheduled : .event
     }
 
-    static func time(_ a: ScheduledAutomation) -> String {
-        var c = DateComponents()
-        c.hour = a.hour; c.minute = a.minute
-        let date = Calendar.current.date(from: c) ?? Date()
-        return date.formatted(date: .omitted, time: .shortened)
+    /// The schedule's time of day — on the clock it runs on (`timeZone`, the
+    /// host's). Seen from another zone, that zone is named and the time here
+    /// follows: "3:00 AM EDT (4:00 PM JST here)". The sidebar showed the next
+    /// run in local time and the editor the host's wall time, unlabeled.
+    ///
+    /// The host's weekday doesn't carry over: 6:00 PM EDT is 7:00 AM JST the
+    /// next day, so a weekly run names the day it falls on here ("Sunday
+    /// 6:00 PM EDT (Monday 7:00 AM JST here)") and a weekday one the days
+    /// ("Tue–Sat 7:00 AM JST here").
+    static func time(_ a: ScheduledAutomation, timeZone: TimeZone = .current,
+                     viewer: TimeZone = .current, now: Date = Date()) -> String {
+        var cal = Calendar.current
+        cal.timeZone = timeZone
+        var date = cal.date(bySettingHour: a.hour, minute: a.minute, second: 0, of: now) ?? now
+        if a.frequency == .weekly {
+            let match = DateComponents(hour: a.hour, minute: a.minute, weekday: min(max(a.weekday, 1), 7))
+            date = cal.nextDate(after: now, matching: match, matchingPolicy: .nextTime) ?? date
+        }
+        let there = clock(date, in: timeZone)
+        guard differs(timeZone, viewer, at: date) else { return there }
+        var here = clock(date, in: viewer)
+        var local = Calendar.current
+        local.timeZone = viewer
+        let hostDay = cal.component(.weekday, from: date), localDay = local.component(.weekday, from: date)
+        if hostDay != localDay {
+            // How far the run moves on the calendar here: a day either way —
+            // two between zones more than a day apart (UTC+14 and UTC−11).
+            let raw = (localDay - hostDay + 7) % 7
+            let shift = raw <= 3 ? raw : raw - 7
+            func day(_ w: Int) -> Int { (w - 1 + shift + 7) % 7 }   // 0-based symbol index
+            switch a.frequency {
+            case .weekly:
+                here = Calendar.current.weekdaySymbols[day(min(max(a.weekday, 1), 7))] + " " + here
+            case .weekdays:
+                let symbols = Calendar.current.shortWeekdaySymbols
+                here = symbols[day(2)] + "–" + symbols[day(6)] + " " + here   // Monday…Friday there
+            case .daily, .interval:
+                break   // every day there is every day here
+            }
+        }
+        return String(format: NSLocalizedString("%1$@ %2$@ (%3$@ %4$@ here)",
+                                                comment: "describer: host time, host zone, local time, local zone"),
+                      there, zoneName(timeZone, at: date), here, zoneName(viewer, at: date))
+    }
+
+    /// A moment (a next run) in the viewer's time, its zone named when the
+    /// schedules run on another clock.
+    static func moment(_ date: Date, scheduleTimeZone: TimeZone, viewer: TimeZone = .current,
+                       withDate: Bool = true) -> String {
+        let f = DateFormatter()
+        f.timeZone = viewer
+        f.dateStyle = withDate ? .medium : .none
+        f.timeStyle = .short
+        f.doesRelativeDateFormatting = withDate
+        let s = f.string(from: date)
+        return differs(scheduleTimeZone, viewer, at: date) ? s + " " + zoneName(viewer, at: date) : s
+    }
+
+    static func differs(_ a: TimeZone, _ b: TimeZone, at date: Date) -> Bool {
+        a.secondsFromGMT(for: date) != b.secondsFromGMT(for: date)
+    }
+
+    static func zoneName(_ tz: TimeZone, at date: Date) -> String {
+        tz.abbreviation(for: date) ?? tz.identifier
+    }
+
+    private static func clock(_ date: Date, in tz: TimeZone) -> String {
+        let f = DateFormatter()
+        f.timeZone = tz
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
     }
 
     /// "Every weekday at 9:00 AM", "When a pull request is opened on acme/api", …
-    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil) -> String {
+    static func when(_ a: ScheduledAutomation, upstreamName: String? = nil,
+                     timeZone: TimeZone = .current) -> String {
+        func time(_ a: ScheduledAutomation) -> String { Self.time(a, timeZone: timeZone) }
         let repo = a.githubRepo.isEmpty ? NSLocalizedString("a repository", comment: "describer") : a.githubRepo
         switch a.trigger {
         case .schedule:
@@ -2152,3 +2890,19 @@ enum AutomationDescriber {
         return NSLocalizedString("The session stays open for you to check", comment: "describer")
     }
 }
+
+#if os(macOS)
+extension ACAppDelegate {
+    /// `worktree-error.txt`: the run it belongs to (`run-slug: <slug>` on the
+    /// first line, from an automation run), and the message to show.
+    nonisolated static func splitWorktreeError(_ raw: String) -> (slug: String?, message: String) {
+        let prefix = "run-slug: "
+        guard raw.hasPrefix(prefix) else { return (nil, raw) }
+        let rest = raw.dropFirst(prefix.count)
+        let line = rest.prefix { $0 != "\n" }
+        let slug = line.trimmingCharacters(in: .whitespaces)
+        let message = rest.dropFirst(line.count).drop { $0 == "\n" }
+        return (slug.isEmpty ? nil : slug, String(message))
+    }
+}
+#endif

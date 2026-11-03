@@ -96,6 +96,7 @@ final class BromureACDeleteProfileCommand: NSScriptCommand {
             guard let d = NSApp.delegate as? ACAppDelegate else { return "error: app not ready" as Any }
             let key = directParameter as? String ?? ""
             guard let profile = findProfile(key) else { return "error: profile not found" as Any }
+            guard !d.diskInUse(profile.id) else { return "error: the workspace is running — stop it first" as Any }
             try? d.store.delete(profile)
             d.profiles = d.store.loadAll()
             return "ok" as Any
@@ -247,7 +248,10 @@ final class BromureACSetProfileJSONCommand: NSScriptCommand {
                 var incomingCopy = incoming
                 merged.overlay(with: ProfileSecrets.extract(stripping: &incomingCopy))
                 merged.apply(to: &incoming)
-                try d.store.save(incoming)
+                // Minted credentials are the VM's, not the blob's: keep the
+                // stored ones (secrets included) whatever the blob carries.
+                incoming.mintedCredentials = existing.mintedCredentials
+                try d.store.update(incoming)
                 d.profiles = d.store.loadAll()
                 // Apply live to a running session (no reboot) — matching the
                 // GUI/automation save path. Without this an external edit via
@@ -333,7 +337,7 @@ final class BromureACSetProfileSettingCommand: NSScriptCommand {
                 return "error: unknown key '\(k)'" as Any
             }
             do {
-                try d.store.save(p)
+                try d.store.update(p)
                 d.profiles = d.store.loadAll()
                 d.applyLiveEditToRunningSession(p)   // live-apply (no reboot)
                 return "ok" as Any

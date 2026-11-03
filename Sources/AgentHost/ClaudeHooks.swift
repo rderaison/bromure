@@ -18,9 +18,16 @@ enum ClaudeHooks {
         var pqPost = pqClear
         pqPost["matcher"] = "AskUserQuestion"
         let settings: [String: Any] = [
-            // Agent-to-agent traffic never waits on a permission prompt (the
-            // rule bromure-ac seeds in its workspaces).
-            "permissions": ["allow": ["mcp__delegation"]],
+            // Agent-to-agent traffic never waits on a permission prompt. The
+            // files other agents hand over do: unlike a workspace VM, this
+            // Mac's home (and its ~/.bromure/inbox) is shared by every session
+            // here, every Bromure linked to it and the user's own tools, so an
+            // unprompted Read or Edit of the inbox would open files staged for
+            // someone else (CWE-732). Opening one goes through the approval
+            // mode like any file outside the session's folder.
+            "permissions": [
+                "allow": ["mcp__delegation"],
+            ],
             "hooks": [
                 "SessionStart": [hook("done")],
                 "UserPromptSubmit": [hook("working")],
@@ -47,6 +54,12 @@ enum ClaudeHooks {
     /// reported on stdin, and pin the transcript where a fat client's chat
     /// view looks for it (`~/.bromure/transcript-<idx>.path`: the path, then
     /// "<pane id> <boot id>" — no boot id on macOS, so it's empty there too).
+    /// A status change that is the agent's last activity: into done (a turn
+    /// ended, or the agent started) or needsInput (it asks).
+    static func marksActivity(from current: String, to state: String) -> Bool {
+        (state == "done" || state == "needsInput") && current != state
+    }
+
     static func runHook(state: String) -> Int32 {
         let env = ProcessInfo.processInfo.environment
         guard let pane = env["TMUX_PANE"], !pane.isEmpty else { return 0 }
@@ -69,6 +82,16 @@ enum ClaudeHooks {
         let agentSession = json["session_id"] as? String ?? ""
 
         var args = ["set-option", "-w", "-t", pane, "@bromure_status", state]
+        // The turn ended or the agent asks: when it last did something (what
+        // the session cards count from). Only on a change of status, so a
+        // repeat (an idle_prompt read as done) leaves the time where it was.
+        // (Read only then: working hooks fire on every tool call.)
+        if state == "done" || state == "needsInput",
+           Self.marksActivity(from: Tmux.run(["display-message", "-p", "-t", pane, "#{@bromure_status}"], timeout: 5)
+                                .out.trimmingCharacters(in: .whitespacesAndNewlines), to: state) {
+            args += [";", "set-option", "-w", "-t", pane, "@bromure_active_at",
+                     String(Int(Date().timeIntervalSince1970))]
+        }
         if !transcript.isEmpty {
             args += [";", "set-option", "-w", "-t", pane, "@bromure_transcript", transcript]
         }

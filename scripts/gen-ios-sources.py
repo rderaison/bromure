@@ -31,6 +31,7 @@ SHARED = [
     "FatClientFleet.swift",
     "FatClientPAC.swift",
     "ControlClient.swift",
+    "RequestLedger.swift",
     # Models + stores (the mirror reconciles /state into these)
     "SessionModels.swift",
     "KubeCluster.swift",        # Kubernetes cluster records/status + mirror store
@@ -42,8 +43,11 @@ SHARED = [
     "Mitm/TraceRecord.swift",
     "Mitm/PromptInjectionPolicy.swift",
     "Mitm/PIIPolicy.swift",
+    "Mitm/SquelchPolicy.swift",
     "Mitm/SupplyChainPolicy.swift",
     "Mitm/GuardrailsPolicy.swift",
+    "Mitm/AWSHosts.swift",          # the AWS host test GuardrailsPolicy shares with the resigner
+    "Mitm/MintedCredential.swift",  # the record Profile.swift stores (the mint engine stays mac-only)
     "Mitm/SecretsVault.swift",
     "Mitm/SessionTokenPlan.swift",
     "SubscriptionTokenSwapState.swift",
@@ -54,10 +58,12 @@ SHARED = [
     "Terminal/TerminalImagePaste.swift",  # pure upload core (AppKit parts #if'd out)
     # Controller + connect flow (models; iOS provides the views)
     "FatClientController.swift",
+    "GuestURLGate.swift",  # the guest-URL host gate (FatClientController opens a published sign-in URL)
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store + shared row/section views (sessions home)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
     "AgentDelegation.swift",    # delegation records + store + notice text (the engine/MCP stay macOS-only)
+    "SquelchViews.swift",       # Squelch header popover (numbers from the host)
     "SessionStageViews.swift",  # header / launch / rest / new-session screens (AppKit bits #if'd)
     "ConsolePresence.swift",  # console-seat arbitration; AppKit monitor #if'd out, iOS reports always-active
     # Workspace editor (ProfileEditorView) + its data-only helpers. The panes
@@ -93,6 +99,8 @@ SHARED = [
     "DockerDashboard.swift",
     "KubeDashboard.swift",      # cluster dashboard + creation sheet (AppKit-only styles #if'd)
     "TaskReviewWindow.swift",
+    "RepoGitPrograms.swift",    # the git TaskLitter runs switches the repository's programs off
+    "BranchMergeCommands.swift",  # isSafeBranchName: a task's landing target (CodingTasks)
     "TaskTranscriptWindow.swift",
     "TaskTranscriptArchive.swift",
     # P2P client transport (reach a NAT'd server) — all Darwin/URLSession/Crypto

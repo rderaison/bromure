@@ -107,6 +107,7 @@ struct AutomationsHomeTab: View {
             workspace: model.profileRows.first { $0.id == a.profileID },
             upstreamName: upstream,
             nextFire: automationStore.nextFire(for: a.id),
+            scheduleTimeZone: automationStore.scheduleTimeZone,
             lastRun: runs.first { $0.outcome != .skipped || $0.itemKey == nil },
             pollState: automationStore.pollState(for: a.id),
             runningCount: running,
@@ -217,6 +218,8 @@ struct AutomationListRow: View {
     let workspace: SessionListModel.ProfileRow?
     let upstreamName: String?
     let nextFire: Date?
+    /// The clock the schedule runs on (the host's, mirrored).
+    var scheduleTimeZone: TimeZone = .current
     let lastRun: AutomationRunRecord?
     let pollState: ScheduledAutomationStore.PRPollState?
     let runningCount: Int
@@ -256,7 +259,8 @@ struct AutomationListRow: View {
                             .background(Color.secondary.opacity(0.15), in: Capsule())
                     }
                 }
-                Text(AutomationDescriber.when(automation, upstreamName: upstreamName))
+                Text(AutomationDescriber.when(automation, upstreamName: upstreamName,
+                                              timeZone: scheduleTimeZone))
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.8))
                     .lineLimit(1)
@@ -390,10 +394,14 @@ struct WatchSummaryRow: View {
         var parts: [String] = []
         if watch.scans.contains(.fullScan) {
             let day = Calendar.current.shortWeekdaySymbols[min(max(watch.fullScanWeekday, 1), 7) - 1]
+            // The hour is the host's: named when this viewer is elsewhere.
+            let tz = automationStore.scheduleTimeZone, now = Date()
+            let zone = AutomationDescriber.differs(tz, .current, at: now)
+                ? " " + AutomationDescriber.zoneName(tz, at: now) : ""
             parts.append(String(format: watch.scheduledScope == .newCommits
                 ? NSLocalizedString("New commits %1$@ %2$02d:00", comment: "watch row: weekly review of what landed since the last one — weekday, hour")
                 : NSLocalizedString("Full scan %1$@ %2$02d:00", comment: "watch row: weekday, hour"),
-                                day, watch.fullScanHour))
+                                day, watch.fullScanHour) + zone)
         }
         if watch.scans.contains(.commits) { parts.append(NSLocalizedString("every commit", comment: "watch row")) }
         if watch.scans.contains(.pullRequests) { parts.append(NSLocalizedString("every pull request", comment: "watch row")) }

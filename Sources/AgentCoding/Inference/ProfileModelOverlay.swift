@@ -310,6 +310,19 @@ public extension Profile {
     /// provider), plus any agent the workspace itself configured. Reading only
     /// the saved tool list is wrong now that models are global: a workspace
     /// that names Claude Code alone still runs omp on the global z.ai key.
+    /// The agents a run can start here, as an agent picker lists them:
+    /// each one `agentsReadyToStart` counts (set up in the workspace, or
+    /// reachable through the Models settings or a shared sign-in), with the
+    /// auth it will launch on — the workspace's own primary first. The
+    /// workspace's stored list alone missed every agent set up only in the
+    /// Models settings (a Grok subscription the workspace never listed).
+    func readyToolSpecs(_ settings: ModelSettings,
+                        subscribed: Set<ModelProvider> = []) -> [ToolSpec] {
+        let ready = agentsReadyToStart(settings, subscribed: subscribed)
+        return overlaidWithGlobalModels(settings, subscribed: subscribed)
+            .allToolSpecs.filter { ready.contains($0.tool) }
+    }
+
     func agentsReadyToStart(_ settings: ModelSettings,
                             subscribed: Set<ModelProvider> = []) -> Set<Tool> {
         var ready = Set(allToolSpecs.map(\.tool))

@@ -12,6 +12,11 @@ struct EgressRulesEditor: View {
     var profileID: UUID? = nil
     /// The workspace's "Log allowed connections" choice (nil: automatic).
     var logAllowed: Binding<Bool?>? = nil
+    /// The table changed (a rule added, edited, switched, timed, moved):
+    /// the host puts it in force now. nil: the rules apply on Save.
+    var onEdited: ((String) -> Void)? = nil
+    /// False inside a card that already names the rules.
+    var showsHeader = true
 
     @State private var rows: [EgressPolicy.EditRow] = []
     @State private var defaultAllow = true
@@ -65,11 +70,19 @@ struct EgressRulesEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Outbound connections").font(.headline)
-            Text("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Timeline, and enforcement is host-side so a compromised agent can't bypass it.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Text("Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if showsHeader { HStack(spacing: 4) {
+                Text("Outbound connections").font(.headline)
+                InfoTip("Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins. Use the **web** protocol to control HTTP methods on a host: `allow web api.example.com GET,POST` permits only those verbs, `deny web api.example.com PUT,DELETE` blocks those. Every decision is recorded in the Security Timeline, and enforcement is host-side so a compromised agent can't bypass it.")
+            } }
+            HStack(spacing: 4) {
+                Text(onEdited != nil
+                     ? LocalizedStringKey("Rules apply as you edit them; Cancel puts them back.")
+                     : LocalizedStringKey("Rules apply when you save, without a restart."))
+                    .font(.caption).foregroundStyle(.secondary)
+                InfoTip(onEdited != nil
+                        ? LocalizedStringKey("Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time.")
+                        : LocalizedStringKey("Changes apply to a running workspace as soon as you save — no restart. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time."))
+            }
 
             Picker("Unmatched traffic", selection: $defaultAllow) {
                 Text("Allow").tag(true)
@@ -80,7 +93,7 @@ struct EgressRulesEditor: View {
             .accessibilityLabel(Text("Unmatched traffic"))
 
             if let logAllowed {
-                VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
                     // AppKit checkbox (like the rule checkboxes): its title is
                     // the AX name out-of-process tools see — SwiftUI's Toggle
                     // exposed none.
@@ -90,9 +103,8 @@ struct EgressRulesEditor: View {
                                  help: NSLocalizedString("List allowed connections in the Security Timeline too", comment: "firewall pane: Log allowed connections tooltip"),
                                  title: NSLocalizedString("Log allowed connections", comment: "firewall pane toggle"))
                         .fixedSize()
-                    Text(NSLocalizedString("Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules.",
-                                           comment: "firewall pane: Log allowed connections explanation"))
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    InfoTip(verbatim: NSLocalizedString("Lists the connections the firewall lets through in the Security Timeline too — one row per destination, repeats folded in — so you can block a host from there. Off: only blocked connections are listed. Until you choose, it's on while the workspace has rules.",
+                                                        comment: "firewall pane: Log allowed connections explanation"))
                 }
             }
 
@@ -400,6 +412,7 @@ struct EgressRulesEditor: View {
 
     private func syncToText() {
         pfText = EgressPolicy.pfText(rows: rows, defaultAllow: defaultAllow)
+        onEdited?(pfText)
     }
 
     /// Hint text for the Methods field — only meaningful for `web` rules, and
@@ -419,7 +432,7 @@ struct EgressRulesEditor: View {
 
 /// The rule on/off checkbox, in AppKit: an NSButton checkbox whose
 /// accessibility label (the rule) reaches assistive tools as AXDescription.
-private struct RuleCheckbox: NSViewRepresentable {
+struct RuleCheckbox: NSViewRepresentable {
     @Binding var isOn: Bool
     let label: String
     let help: String

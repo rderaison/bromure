@@ -1,0 +1,11 @@
+network_middlewares:
+  regex-redactor:
+    name: Redact API tokens
+    middleware: openshell/regex
+    order: 10
+    config:
+      mode: redact
+    on_error: @@ON_ERROR@@
+    endpoints:
+      include: ["@@HOST@@"]
+      exclude: []

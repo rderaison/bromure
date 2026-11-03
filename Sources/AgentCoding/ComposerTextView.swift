@@ -24,6 +24,9 @@ struct ComposerTextView: NSViewRepresentable {
     /// more specific than an ancestor holds it (a search field elsewhere
     /// in the window keeps it).
     var autofocus = false
+    /// Take the keyboard when the view lands in its window, whatever holds
+    /// it: an editor the user just asked for (the dashboard's notes).
+    var takesFocus = false
     @Binding var height: CGFloat
     @Binding var focused: Bool
     var onKey: ((ComposerKey) -> Bool)? = nil
@@ -44,7 +47,8 @@ struct ComposerTextView: NSViewRepresentable {
         coordinator.shown = text
         let scroll = ComposerScrollView()
         scroll.documentView = textView
-        scroll.hasVerticalScroller = true
+        // Only once the text passes `maxLines` (see `remeasure`).
+        scroll.hasVerticalScroller = false
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
@@ -55,6 +59,7 @@ struct ComposerTextView: NSViewRepresentable {
         scroll.onLayout = { [weak coordinator] in coordinator?.remeasure() }
         scroll.onAttach = { [weak coordinator] in coordinator?.focusIfFree() }
         coordinator.textView = textView
+        coordinator.scrollView = scroll
         return scroll
     }
 
@@ -78,6 +83,7 @@ struct ComposerTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
         weak var textView: ComposerNSTextView?
+        weak var scrollView: NSScrollView?
         /// Set while the typed text is pushed to the binding, so the update
         /// pass that follows doesn't write it back into the view.
         var pushingText = false
@@ -122,8 +128,10 @@ struct ComposerTextView: NSViewRepresentable {
         /// unless a view that isn't one of our ancestors has it. Deferred a
         /// turn so the host's own first-responder pass has run.
         func focusIfFree() {
-            guard parent.autofocus, !focusedOnAttach, let textView, textView.window != nil else { return }
+            guard parent.autofocus || parent.takesFocus, !focusedOnAttach,
+                  let textView, textView.window != nil else { return }
             focusedOnAttach = true
+            let takes = parent.takesFocus
             DispatchQueue.main.async { [weak textView] in
                 guard let textView, let window = textView.window else { return }
                 let free: Bool
@@ -133,21 +141,34 @@ struct ComposerTextView: NSViewRepresentable {
                 case let v as NSView: free = textView.isDescendant(of: v)
                 default: free = false
                 }
-                if free { window.makeFirstResponder(textView) }
+                if free || takes { window.makeFirstResponder(textView) }
             }
         }
 
         /// The height the text wants at the current width: one line at
         /// least, `maxLines` at most. Pushed to the binding when it moves —
         /// off the current pass, since layout can land mid-update.
+        ///
+        /// The scroller is there only past `maxLines`. A legacy scroller
+        /// (scroll bars shown "Always", or a mouse attached) takes width
+        /// from the text: kept on below the cap, any overflow brought it
+        /// up, the narrower text wanted a line more, the taller frame sent
+        /// it away, the wider text wanted a line less — the box flipped
+        /// between two heights on every layout pass (issue #52). Shown
+        /// only once the frame is capped, a narrower text only wants more
+        /// lines, so it stays capped and the scroller stays.
         func remeasure() {
             guard let textView, let layout = textView.layoutManager,
                   let container = textView.textContainer else { return }
             layout.ensureLayout(for: container)
             let line = layout.defaultLineHeight(for: parent.font) + parent.lineSpacing
             let used = layout.usedRect(for: container).height
-            let wanted = ceil(min(max(used, line), line * CGFloat(parent.maxLines))
-                              + textView.textContainerInset.height * 2)
+            let cap = line * CGFloat(parent.maxLines)
+            let wanted = ceil(min(max(used, line), cap) + textView.textContainerInset.height * 2)
+            let scrolls = used > cap + 0.5
+            if let scrollView, scrollView.hasVerticalScroller != scrolls {
+                DispatchQueue.main.async { [weak scrollView] in scrollView?.hasVerticalScroller = scrolls }
+            }
             guard abs(wanted - parent.height) > 0.5 else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, abs(wanted - self.parent.height) > 0.5 else { return }
@@ -183,6 +204,21 @@ enum ComposerText {
 
 /// The scroll view around the composer's text: tells the coordinator when
 /// it was laid out, which is when its width may have changed.
+extension View {
+    /// Shift-Return inserts a newline in a vertical `TextField`. SwiftUI's
+    /// field binds Return to submit and Option-Return to a newline, and
+    /// drops Shift-Return; the key reaches `onKeyPress` before the field
+    /// editor, which inserts the newline the way Option-Return does.
+    func shiftReturnInsertsNewline() -> some View {
+        onKeyPress(keys: [.return]) { press in
+            guard press.modifiers.contains(.shift),
+                  let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return .ignored }
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return .handled
+        }
+    }
+}
+
 final class ComposerScrollView: NSScrollView {
     var onLayout: () -> Void = {}
     var onAttach: () -> Void = {}

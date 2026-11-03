@@ -18,8 +18,17 @@ enum TaskLitter {
     /// `git status --porcelain` in `dir` (already shell-quoted), litter out.
     /// Untracked folders are listed file by file: a folder holding only
     /// `__pycache__/` would otherwise show (and count) as one new folder.
+    /// Runs nothing the repository's config names (`RepoGitPrograms`): a
+    /// clean filter there ran on every dirty check.
+    /// A status that fails says so (`RepoGitPrograms.statusFailed`): it
+    /// isn't a clean tree. A folder that's gone reads as clean, as before.
+    /// Starts with a space: every caller wraps it in `$(…)`, and `$((` is
+    /// ARITHMETIC to dash -- the guest's /bin/sh -- so each landing check,
+    /// review count and empty-branch test was a syntax error there (exit 2,
+    /// read as "couldn't reach the workspace"). bash and zsh guess a
+    /// subshell, which is why it passed on the Mac.
     static func status(_ quotedDir: String) -> String {
-        "git -C \(quotedDir) status --porcelain --untracked-files=all 2>/dev/null | \(statusFilter)"
+        " ( [ -d \(quotedDir) ] || exit 0; \(RepoGitPrograms.off(quotedDir))git -C \(quotedDir) status --porcelain --untracked-files=all --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(quotedDir)) ) | \(statusFilter)"
     }
 }
 
@@ -32,6 +41,13 @@ enum TaskLitter {
 struct TaskReviewData: Equatable, Sendable {
     var logLines: [String] = []
     var statusLines: [String] = []
+    /// The checkout's `git status` failed (`RepoGitPrograms.failedStatus`) —
+    /// and with it the whole-tree diff: an empty diff isn't "No changes".
+    var statusFailed: Bool { statusLines.contains(RepoGitPrograms.statusFailedLine) }
+    /// The diff itself failed: what's in `files` (untracked files at most)
+    /// isn't the change set.
+    var diffFailed = false
+    static let diffFailedLine = "!! (git diff failed)"
     var files: [TaskDiffFile] = []
 
     /// What a session's review compares against.
@@ -85,15 +101,41 @@ struct TaskReviewData: Equatable, Sendable {
             setBase = "b=$(git rev-list -1 --before=@\(Int(t.timeIntervalSince1970)) HEAD 2>/dev/null); "
                 + "[ -n \"$b\" ] || b=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         }
+        // No such commit (no commits yet, or the root's parent): against the
+        // empty tree, as `.since` does — not a failed diff.
+        let emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        let fallback: String
+        switch base {
+        case .uncommitted, .lastCommit:
+            fallback = "; git rev-parse -q --verify \"$b^{tree}\" >/dev/null 2>&1 || b=\(emptyTree)"
+        default:
+            fallback = ""
+        }
+        let df = RepoGitPrograms.diffFlags
+        // A diff that fails on revisions that exist (a filter git can't run
+        // safely) says so, and the untracked files aren't listed after it:
+        // shown alone, they read as the whole change set. A missing base (a
+        // branch gone) is no such failure: the untracked files still show.
+        let exists = { (rev: String) in "git rev-parse -q --verify \"\(rev)^{tree}\" >/dev/null 2>&1" }
+        // The failure is noted beside the capped stream and said after it:
+        // a diff that fails after 600 KB of output had its marker cut off,
+        // and the cut-off part read as the whole change set. The rest is
+        // drained so git runs to its end (a pipe closed at the cap killed
+        // it first, and a failure further on was never seen).
+        let failed = "echo 1 > \"$dfail\""
+        let untracked = "git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
+            + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
+            + "&& git diff \(df) --no-index -- /dev/null \"$f\"; done"
         let diff = withWorktree
-            ? "{ git diff \"$b\" -- 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | \(TaskLitter.pathFilter) | head -n 40 "
-                + "| while IFS= read -r f; do [ \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" -lt 204800 ] "
-                + "&& git diff --no-index -- /dev/null \"$f\"; done; }"
-            : "git diff \"$b\" HEAD -- 2>/dev/null"
-        return "\(enter); \(setBase); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
+            ? "{ if git diff \(df) \"$b\" -- 2>/dev/null; then \(untracked); elif \(exists("$b")); then \(failed); else \(untracked); fi; }"
+            : "{ git diff \(df) \"$b\" HEAD -- 2>/dev/null || { \(exists("$b")) && \(exists("HEAD")) && \(failed); }; }"
+        // What the repository's config names never runs (RepoGitPrograms).
+        return "\(enter); \(RepoGitPrograms.off("."))\(setBase)\(fallback); echo ===BASE===; git rev-parse --short \"$b\" 2>/dev/null; "
             + "echo ===LOG===; [ \"$b\" = HEAD ] || git log --oneline \"$b..HEAD\" 2>/dev/null | head -50; "
-            + "echo ===STATUS===; git status --porcelain 2>/dev/null | \(TaskLitter.statusFilter) | head -100; "
-            + "echo ===DIFF===; \(diff) | head -c 600000; true"
+            + "echo ===STATUS===; { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | \(TaskLitter.statusFilter) | head -100; "
+            + "echo ===DIFF===; dfail=$(mktemp 2>/dev/null) || dfail=/tmp/bromure-review.$$; : > \"$dfail\"; "
+            + "\(diff) | { head -c 600000; cat >/dev/null; }; "
+            + "[ -s \"$dfail\" ] && printf '\\n%s\\n' '\(TaskReviewData.diffFailedLine)'; rm -f \"$dfail\"; true"
     }
 
     /// A stable fingerprint of a file's diff — "viewed" holds while it
@@ -129,11 +171,13 @@ struct TaskReviewData: Equatable, Sendable {
             case "status":
                 if !line.isEmpty { out.statusLines.append(String(line)) }
             case "diff":
-                diffLines.append(String(line))
+                if line == Self.diffFailedLine { out.diffFailed = true } else { diffLines.append(String(line)) }
             default: break
             }
         }
-        out.files = TaskDiffParser.parse(diffLines.joined(separator: "\n"))
+        // A failed diff's body is whatever git wrote before it stopped:
+        // never shown as the change set.
+        out.files = out.diffFailed ? [] : TaskDiffParser.parse(diffLines.joined(separator: "\n"))
         return out
     }
 }
@@ -172,21 +216,23 @@ struct TaskReviewSummary: Equatable, Sendable {
 
     static func command(root: String, worktreeDir: String?, branch: String, target: String) -> String {
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        var cmd = "r=\(q(root)); "
+        var cmd = "r=\(q(root)); " + RepoGitPrograms.off("\"$r\"")
             + "echo \"AB $(git -C \"$r\" rev-list --left-right --count \(q(target + "..." + branch)) 2>/dev/null)\"; "
         if let wt = worktreeDir, !wt.isEmpty {
             cmd += "w=\(q(wt)); "
                 + "m=$(git -C \"$w\" merge-base \(q(target)) HEAD 2>/dev/null); "
-                + "echo \"SS $(git -C \"$w\" diff --shortstat \"$m\" 2>/dev/null)\"; "
+                + "echo \"SS $(git -C \"$w\" diff \(RepoGitPrograms.diffFlags) --shortstat \"$m\" 2>/dev/null)\"; "
                 + "echo \"UC $(\(TaskLitter.status("\"$w\"")) | wc -l | tr -d ' ')\"; "
         } else {
             cmd += "echo \"SS $(git -C \"$r\" diff --shortstat \(q(target + "..." + branch)) 2>/dev/null)\"; echo 'UC 0'; "
         }
         cmd += "d=$(git -C \"$r\" worktree list --porcelain 2>/dev/null | awk -v want=\(q("branch refs/heads/" + target)) "
             + "'/^worktree /{w=substr($0,10)} $0==want{print w; exit}'); echo \"TD $d\"; "
-            + "[ -n \"$d\" ] && echo \"TC $(git -C \"$d\" status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-            + "rm=$(git -C \"$r\" remote 2>/dev/null | head -1); echo \"RM $rm\"; "
-            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url \"$rm\" 2>/dev/null)\"; true"
+            + "[ -n \"$d\" ] && echo \"TC $(\(TaskLitter.status("\"$d\"")) | wc -l | tr -d ' ')\"; "
+            // The remote a push would go to — the landing's own pick, so a
+            // name that's really an option is never shown, nor used.
+            + "rm=$(\(BranchMergeCommands.pickRemoteShell(repo: "\"$r\""))); echo \"RM $rm\"; "
+            + "[ -n \"$rm\" ] && echo \"RU $(git -C \"$r\" remote get-url -- \"$rm\" 2>/dev/null)\"; true"
         return cmd
     }
 
@@ -213,7 +259,7 @@ struct TaskReviewSummary: Equatable, Sendable {
             case "UC": s.uncommitted = Int(rest) ?? 0
             case "TD": s.targetDir = rest
             case "TC": s.targetDirty = Int(rest)
-            case "RM": s.remote = rest.isEmpty ? nil : rest
+            case "RM": s.remote = BranchMergeCommands.safeRemote(rest.isEmpty ? nil : rest)
             case "RU": s.remoteURL = rest.isEmpty ? nil : rest
             default: break
             }
@@ -281,7 +327,8 @@ final class TaskReviewWindowManager {
         /// In Progress.
         var sendBack: (UUID) -> Void
         /// Land it: merge / squash / pull request into `target` (nil = parent).
-        var land: (_ taskID: UUID, _ mode: TaskLanding.Mode, _ target: String?, _ keepBranch: Bool) -> Void
+        var land: (_ taskID: UUID, _ mode: TaskLanding.Mode, _ target: String?, _ keepBranch: Bool,
+                   _ push: Bool) -> Void
         var retryLanding: (UUID) -> Void
         var cancelLanding: (UUID) -> Void
         /// Review → Done as it stands, nothing merged or removed.
@@ -298,6 +345,9 @@ final class TaskReviewWindowManager {
                          _ line: Int?) -> Void
         var removeComment: (_ taskID: UUID, _ commentID: UUID) -> Void
         var setViewed: (_ taskID: UUID, _ path: String, _ fingerprint: String?) -> Void
+        /// A delivered card without a worktree (`awaitsRelocation`): look
+        /// for it again. True once the card points at one.
+        var relocate: (CodingTask) async -> Bool = { _ in false }
     }
 
     private let context: Context
@@ -305,9 +355,44 @@ final class TaskReviewWindowManager {
     /// Per task: the landing confirm to open as soon as the window shows
     /// (a card's context-menu Merge).
     private var pendingConfirm: [UUID: ReviewLandingRequest] = [:]
+    /// Per task: when the window last looked for a missing worktree — the
+    /// window's quick second try after a failed read doesn't look again.
+    private var relocateTried: [UUID: Date] = [:]
 
     init(context: Context) {
         self.context = context
+    }
+
+    /// Per task: the last reload — the fetch and the banner may both ask
+    /// for one when the card gains its worktree; one does.
+    private var reloadedAt: [UUID: Date] = [:]
+
+    /// Load the open window again on its default base (now `.branch(parent)`).
+    func reload(_ id: UUID) {
+        if let at = reloadedAt[id], Date().timeIntervalSince(at) < 1 { return }
+        reloadedAt[id] = Date()
+        host.reload(id)
+    }
+
+    /// Ask for the look (`relocate`) and wait for it, counted in
+    /// `request.relocating` until it is over. Its own task: a re-open
+    /// cancels this load, and a fat client's wait for the host's stamp then
+    /// gave up at once — the count dropped while the host was still looking,
+    /// and the next load read "no code", then "Can't reach the machine".
+    static func look(for task: CodingTask, request: ReviewLandingRequest,
+                     relocate: @escaping (CodingTask) async -> Bool) async {
+        await MainActor.run { request.relocating += 1 }
+        let look = Task {
+            _ = await relocate(task)
+            await MainActor.run { request.relocating -= 1 }
+        }
+        await look.value
+    }
+
+    private func mayTryRelocate(_ id: UUID) -> Bool {
+        if let at = relocateTried[id], Date().timeIntervalSince(at) < 15 { return false }
+        relocateTried[id] = Date()
+        return true
     }
 
     /// The open window for a task, if any — the E2E ui-shot hook renders it.
@@ -321,6 +406,10 @@ final class TaskReviewWindowManager {
         let request = pendingConfirm[id] ?? ReviewLandingRequest()
         pendingConfirm[id] = request
         if let confirm { request.mode = confirm; request.generation += 1 }
+        // A card that may yet be found is looked for from the first paint:
+        // the host's stamp (`locatingSince`) reaches a fat client a round
+        // trip later, and until then the window offered one-click Mark Done.
+        if task.awaitsRelocation { request.openedLooking = true }
         host.open(id, title: task.title) {
             ReviewSource(
                 title: { t()?.title ?? "" },
@@ -336,12 +425,43 @@ final class TaskReviewWindowManager {
                     guard let task = t(), let text = task.mergeReport ?? task.deliverySummary else { return nil }
                     return (task.assignment?.label ?? NSLocalizedString("The agent", comment: "review"), text)
                 },
-                noCode: { t()?.isNoCode == true },
-                fetch: { base, _ in
+                noCode: { !request.looking && t()?.isNoCode == true },
+                fetch: { [weak self] base, _ in
                     guard let task = t() else { return nil }
                     // A refresh (↻) re-reads the summary banner too.
                     await MainActor.run { request.reloads += 1 }
-                    return await c.fetchReview(task, base)
+                    // Delivered while the assignee's machine was out of
+                    // reach: look for the worktree now. Found, the window
+                    // loads again on the base it would have opened on.
+                    // Whoever found it — this look, a delivery that came in
+                    // meanwhile — the card pointing at a worktree now is what
+                    // counts (the banner also reloads when it gains one later,
+                    // e.g. the host's search outlasting a fat client's wait).
+                    if task.awaitsRelocation {
+                        // One count per fetch: a refresh (⌘R) while the first
+                        // one still waits doesn't end "looking" under it.
+                        await MainActor.run { request.lookers += 1; request.openedLooking = false }
+                        if await MainActor.run(body: { self?.mayTryRelocate(id) ?? false }) {
+                            await Self.look(for: task, request: request, relocate: c.relocate)
+                        }
+                        // Another look may still be under way (a second
+                        // window's, the host's for a fat client — or an
+                        // earlier fetch of this window still asking, before
+                        // the host's stamp shows here): its outcome is this
+                        // load's — not "can't reach the machine".
+                        let deadline = Date().addingTimeInterval(CodingTask.locateWindow)
+                        while await MainActor.run(body: { request.othersLooking(isLocating: t()?.isLocating == true) }),
+                              Date() < deadline, !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                        }
+                        await MainActor.run { request.lookers -= 1 }
+                        if let now = t(), !(now.worktreeDir ?? "").isEmpty {
+                            await MainActor.run { self?.reload(id) }
+                            return nil
+                        }
+                    }
+                    // The card as it is now, not as it was before any wait.
+                    return await c.fetchReview(t() ?? task, base)
                 },
                 addComment: { text, file, line in c.addComment(id, text, file, line) },
                 removeComment: { c.removeComment(id, $0) },
@@ -360,7 +480,8 @@ final class TaskReviewWindowManager {
                 banner: { [weak self] in
                     AnyView(TaskReviewBanner(
                         task: t, context: c, request: request,
-                        close: { self?.host.close(id) }))
+                        close: { self?.host.close(id) },
+                        reload: { self?.reload(id) }))
                 })
         }
     }
@@ -374,6 +495,23 @@ final class ReviewLandingRequest {
     var generation = 0
     /// Bumped on every diff (re)load — the banner re-reads its summary.
     var reloads = 0
+    /// This window's look for a delivered card's worktree is under way —
+    /// before the host's `locatingSince` reaches it (a fat client's round
+    /// trip): not "no code" yet, and Mark Done asks first. From the first
+    /// paint (`openedLooking`) until every fetch's look has settled.
+    var looking: Bool { openedLooking || lookers > 0 }
+    var openedLooking = false
+    var lookers = 0
+    /// Fetches still inside their own `relocate` call. On a fat client the
+    /// host's `locatingSince` shows only after that call's round trip, so a
+    /// refresh then saw nothing locating, read no worktree as unreachable,
+    /// and painted "Can't reach the machine" under "Looking for the
+    /// worktree…".
+    var relocating = 0
+
+    /// Whether a fetch past its own look still waits for someone else's: a
+    /// fetch asking right now, or the card's locating stamp.
+    func othersLooking(isLocating: Bool) -> Bool { relocating > 0 || isLocating }
 }
 
 /// Under the review header: where the branch stands, and the ways out —
@@ -385,6 +523,8 @@ struct TaskReviewBanner: View {
     let context: TaskReviewWindowManager.Context
     let request: ReviewLandingRequest
     let close: () -> Void
+    /// The window loads again from scratch (its default base re-read).
+    var reload: () -> Void = {}
 
     @State private var summary: TaskReviewSummary?
     @State private var summaryFailed = false
@@ -408,8 +548,20 @@ struct TaskReviewBanner: View {
 
     private var noCode: Bool {
         guard let t = task() else { return false }
-        if t.isNoCode { return true }
-        return summary?.isNoCode ?? false
+        return Self.offersNoCode(t, looking: request.looking, summaryNoCode: summary?.isNoCode ?? false)
+    }
+
+    /// "No code" — the report and a one-click Mark Done (⌘⏎) — never while
+    /// the window's own look for the worktree is under way.
+    static func offersNoCode(_ t: CodingTask, looking: Bool, summaryNoCode: Bool) -> Bool {
+        guard !looking else { return false }
+        return t.isNoCode || summaryNoCode
+    }
+
+    /// The locating state (spinner, Mark Done that asks first): the host's
+    /// stamp, or this window's look before that stamp has reached it.
+    static func showsLocating(_ t: CodingTask, looking: Bool) -> Bool {
+        t.isLocating || (looking && t.awaitsRelocation)
     }
 
     var body: some View {
@@ -435,6 +587,12 @@ struct TaskReviewBanner: View {
             .overlay(alignment: .bottom) { Divider() }
             .task(id: t.id.uuidString + (t.landingTarget ?? "") + "#\(request.reloads)") { await load(t) }
             .onChange(of: request.generation) { _, _ in consumeRequest() }
+            .onChange(of: t.worktreeDir ?? "") { old, new in
+                // A delivered card found its worktree while open (however it
+                // was found): the window opened on "Uncommitted" with no
+                // parent — load the branch's diff now.
+                if old.isEmpty, !new.isEmpty { reload() }
+            }
             .onChange(of: t.stage) { old, new in
                 // Landed (or sent back, marked done elsewhere): the window's
                 // job is over — close it, as Mark Done does.
@@ -469,10 +627,17 @@ struct TaskReviewBanner: View {
         }
     }
 
+    /// A load the window's `.task` dropped (the task, its target or a
+    /// reload changed) writes nothing: its late answer would land over the
+    /// newer one's.
     private func load(_ t: CodingTask) async {
         await refreshSummary(t)
-        if noCode, report == nil { report = await context.fetchFinalReport(t) }
-        branches = await context.fetchBranches(t)
+        if noCode, report == nil {
+            let r = await context.fetchFinalReport(t)
+            if !Task.isCancelled { report = r }
+        }
+        let b = await context.fetchBranches(t)
+        if !Task.isCancelled { branches = b }
     }
 
     /// Re-read where the branch stands (on open, on ↻, and right before a
@@ -483,7 +648,9 @@ struct TaskReviewBanner: View {
             summaryFailed = summary == nil
             return
         }
-        if let s = await context.fetchSummary(t, target) {
+        let fetched = await context.fetchSummary(t, target)
+        guard !Task.isCancelled else { return }
+        if let s = fetched {
             summary = s; summaryFailed = false
             context.setCodeChanges(t.id, s.files + s.uncommitted)
         } else {
@@ -647,7 +814,14 @@ struct TaskReviewBanner: View {
 
     @ViewBuilder private func actions(_ t: CodingTask) -> some View {
         let landing = t.landing != nil && t.landing?.phase != .needsYou
-        if noCode {
+        if Self.showsLocating(t, looking: request.looking) {
+            // Still looking for the worktree: nothing to merge yet, and not
+            // "no code" either — Mark Done asks first.
+            ProgressView().controlSize(.small)
+            Text(CodingTask.locatingText)
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            markDoneButton(t)
+        } else if noCode {
             Button { markDone(t) } label: {
                 Label(NSLocalizedString("Mark Done", comment: "review"), systemImage: "checkmark.circle.fill")
             }
@@ -783,9 +957,9 @@ struct TaskReviewBanner: View {
             confirm: c, task: t, summary: summary, agentName: agentName,
             branches: branches.filter { $0 != t.branch && !$0.hasPrefix("wt/") },
             onCancel: { confirming = nil },
-            onConfirm: { target, keep in
+            onConfirm: { target, keep, push in
                 confirming = nil
-                context.land(t.id, c.mode, target.isEmpty ? nil : target, keep)
+                context.land(t.id, c.mode, target.isEmpty ? nil : target, keep, push)
             })
     }
 }
@@ -798,13 +972,20 @@ struct LandingConfirmSheet: View {
     let agentName: String
     let branches: [String]
     let onCancel: () -> Void
-    let onConfirm: (_ target: String, _ keepBranch: Bool) -> Void
+    let onConfirm: (_ target: String, _ keepBranch: Bool, _ push: Bool) -> Void
 
     @State private var target = ""
     @State private var keepBranch = false
+    /// Push the target afterwards — remembered between landings.
+    @AppStorage("tasks.landing.push") private var push = false
+
+    /// The remote a merge can push to (none known: no option).
+    private var pushRemote: String? { confirm.mode == .pr ? nil : summary?.remote }
 
     private var confirmTitle: String {
-        confirm.mode == .pr ? NSLocalizedString("Open Pull Request", comment: "review")
+        if confirm.mode == .pr { return NSLocalizedString("Open Pull Request", comment: "review") }
+        return pushRemote != nil && push
+            ? NSLocalizedString("Merge & Push", comment: "landing confirm")
             : NSLocalizedString("Merge", comment: "landing confirm")
     }
 
@@ -923,6 +1104,20 @@ struct LandingConfirmSheet: View {
                 Toggle(NSLocalizedString("Keep branch", comment: "landing confirm"), isOn: $keepBranch)
                     .toggleStyle(.checkbox)
             }
+            if let remote = pushRemote {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle(String(format: NSLocalizedString("Push %1$@ to %2$@", comment: "landing confirm: target, remote"),
+                                  target, remote), isOn: $push)
+                        .toggleStyle(.checkbox)
+                    if push {
+                        Text(String(format: NSLocalizedString(
+                            "Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes.",
+                            comment: "landing confirm: remote, target, agent"), remote, target, agentName))
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             HStack {
                 Spacer()
                 Button(NSLocalizedString("Cancel", comment: ""), action: onCancel)
@@ -930,7 +1125,7 @@ struct LandingConfirmSheet: View {
                     .accessibilityLabel(NSLocalizedString("Cancel", comment: ""))
                     .accessibilityHint(NSLocalizedString("Close without landing", comment: "landing confirm"))
                 Button(confirmTitle) {
-                    onConfirm(target, keepBranch)
+                    onConfirm(target, keepBranch, pushRemote != nil && push)
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(target.isEmpty)

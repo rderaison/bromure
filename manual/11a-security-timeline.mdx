@@ -1,64 +1,70 @@
 ---
 title: "Security Overview & Timeline"
-description: "The Security Timeline window: a 24-hour overview of what Bromure's security engines decided, and a filterable, exportable record of every decision, kept for 90 days."
+description: "The Security window: an overview of what Bromure's security engines decided, a filterable, exportable record of every decision, network lineage from a prompt to a packet, and OCSF export for a SIEM."
 order: 11.5
 ---
 
 # Security Overview & Timeline
 
-Bromure's protections all run on the host, inside the proxy and the virtual network switch: the credential swap, the egress firewall, Guardrails, the supply-chain checks, prompt-injection detection and PII Protection. Every time one of them makes a decision — swaps a credential, blocks a connection, checks a package, withholds a message — it records it. The **Security Timeline** window shows those decisions: an **Overview** of the last 24 hours, and a **Timeline** of every event.
+Bromure's protections all run on the host, inside the proxy and the virtual network switch, plus, under the OpenShell engine, the guest sandbox and the kernel sentry. They are the credential swap, the firewall or OpenShell policy, Guardrails, the supply-chain checks, prompt-injection detection and PII Protection. Every time one of them makes a decision — swaps a credential, blocks a connection, checks a package, refuses a file, withholds a message — it records it. The **Security** window shows those decisions: an **Overview** of a recent period, and a **Timeline** of every event.
 
-It answers a different question from [tracing](11-tracing.mdx). A trace records the traffic itself — "what did the agent send?" — and only when you turn tracing on. The Security Timeline records what the security engines *decided* about that traffic, and it is always on: every machine, enrolled or not, private mode or not, with nothing to configure.
+It answers a different question from [tracing](11-tracing.mdx). A trace records the traffic itself — "what did the agent send?" — and only when you turn tracing on. The Security window records what the security engines *decided* about that traffic, and it is always on: every machine, enrolled or not, private mode or not, with nothing to configure.
 
 ## Opening the window
 
-Choose **Window** → **Security Timeline…**, or press ⌘K and pick **Security Timeline**. The window opens on the **Overview** tab; the segmented control at the top left switches between **Overview** and **Timeline**. There is one window for the whole app; choosing the menu item again brings it forward.
+Choose **Window** → **Security…**, or press ⌘K and pick **Security**. The window opens on the **Overview** tab; the segmented control at the top left switches between **Overview** and **Timeline**. There is one window for the whole app; choosing the menu item again brings it forward.
+
+The period the window opens on is a setting: **Preferences › Tracing › Security history › Security window opens on** (**Last 24 hours** by default). See [Storage and retention](#storage-and-retention).
 
 ## The Overview tab
 
 <p align="center">
-  <img src="images/security-overview.en.jpg" width="700" alt="The Security Timeline window on its Overview tab: 'Last 24 hours' with five tiles (4 Blocked, 5 Allowed, 2 Credentials brokered, 2 Packages checked, 0 PII swapped), a Protections table with a row for each of Payments API, Web app and Data pipeline and columns Firewall, Supply chain, Guardrails, Prompt injection, PII protection and Credential brokering, and a Latest blocks list with a firewall block, a Guardrails block and a prompt-injection block" />
+  <img src="images/security-overview.en.jpg" width="700" alt="The Security window on its Overview tab: 'Last 24 hours' with tiles for Blocked, Allowed, Credential brokering, Supply chain and PII protection, a Protections table with a row for each of Payments API, Web app and Data pipeline and columns Firewall, Supply chain, Guardrails, Prompt injection, PII protection, Credential brokering and Sandbox, and a Latest blocks list" />
 </p>
 
-The Overview is headed **Last 24 hours** — "What Bromure's security engines decided for your agents." It has three parts.
+The Overview is headed with its period — **Last 24 hours** by default — and "What Bromure's security engines decided for your agents." It has three parts.
 
 ### Tiles
 
-Five tiles count the last 24 hours of events:
+The tiles count the events of the period:
 
 | Tile | Counts |
 |---|---|
-| **Blocked** | Every event whose decision was a block (red in the Timeline), from any engine. |
-| **Allowed** | Every event whose decision was to let something through (green in the Timeline), from any engine. |
-| **Credentials brokered** | **Credential brokering** events: credential swaps, blocked exfiltration attempts, and hosts you allowed from the compromise alert. |
-| **Packages checked** | **Supply chain** events: every package fetch the proxy saw. |
-| **PII swapped** | The number of personal-data **values** [PII Protection](10a-pii.mdx) swapped for stand-ins — values, not requests. |
+| **Blocked** | Every event whose decision was a block (red in the Timeline), from any engine. A folded row counts every time it happened, not once. |
+| **Allowed** | Every event whose decision was to let something through (green in the Timeline), from any engine, counted the same way. |
+| **Credential brokering** | Credential swaps, blocked exfiltration attempts, and hosts you allowed from the compromise alert — swaps, not rows. |
+| **Supply chain** | Every package fetch the proxy saw. |
+| **PII protection** | The number of personal-data **values** [PII Protection](10a-pii.mdx) swapped for stand-ins — values, not requests. |
+| **Guest sandbox** | What the guest sandbox refused. Shown when a machine has the sandbox on, or the period has sandbox events. |
 
-Click a tile to jump to the **Timeline** tab. **Credentials brokered**, **Packages checked** and **PII swapped** open it filtered on their engine; **Blocked** and **Allowed** open it on all engines, filtered on that outcome.
+Click a tile ("Show these in the timeline") to jump to the **Timeline** tab, filtered on its engine, or on all engines with that outcome for **Blocked** and **Allowed**.
 
 ### Protections
 
-The **Protections** table lists each machine on this Mac, with its colour, and shows which protections it has on — a green check for on, a grey dash for off:
+"Click a workspace to see its events, or a protection that's off to turn it on." The **Protections** table lists each machine on this Mac, with its colour, and shows which protections it has on — a green check for on, a grey dash for off:
 
 | Column | Checked when |
 |---|---|
-| **Firewall** | The machine has outbound-connection rules in its Guardrails pane, or denies unmatched traffic. |
+| **Firewall** | The machine uses an OpenShell policy (it denies by default), or its Bromure Firewall rules restrict something (a rule, or unmatched traffic denied). |
 | **Supply chain** | At least one supply-chain layer is on (the age gate, OSV, socket.dev, script stripping or the lockfile prompt). |
-| **Guardrails** | Guardrails actually restrict something: a service with a write policy other than **Off**, a database guardrail, an outbound-connection rule, or any credential set to **Ask before use**. The per-request insecure bypass (X-bromure-insecure) doesn't count, since it relaxes rather than restricts. |
+| **Guardrails** | Guardrails restrict a credential: a service with a write policy other than **Off**, a database guardrail, or any credential set to **Ask before use**. |
 | **Prompt injection** | At least one prompt-injection detector is on. |
 | **PII protection** | PII Protection's master switch is on with at least one category. |
 | **Credential brokering** | Always: the credential swap can't be turned off. |
+| **Sandbox** | The guest is confined: the OpenShell policy has a `filesystem_policy` or `process` section, or the VM reported its filesystem sandbox enforced. A network-only policy doesn't count. |
 
-Use it to spot a machine that runs with fewer protections than the others. To change one, open that machine's settings (see [Settings Reference](07-settings/index.mdx)).
+The cells are buttons. Click a check to change that protection, or hover over a dash and click **Turn on…**: the machine's settings open on the matching pane (**Sandbox** opens [Sandbox Policy](07-settings/sandbox-policy.mdx)). Click a machine's name ("Show *machine*'s events in the timeline") to open the Timeline on that machine.
 
 ### Latest blocks
 
-**Latest blocks** lists the most recent blocks of the last 24 hours, newest first, up to eight: what was blocked, the engine and decision, and how long ago. The list is hidden when nothing was blocked.
+"Click one to find every time it happened, in every workspace." **Latest blocks** lists the most recent blocks of the period, newest first, up to eight. Repeats fold into one row, so one noisy block can't hide the others. A row shows what was blocked, the engine and decision, the machine — or "*N* workspaces" when the same block happened in several — a red count pill when it happened more than once, and how long ago. The list is hidden when nothing was blocked.
+
+Clicking a row opens the Timeline on **Blocked**, searching for every instance of that block in every machine. Sandbox refusals are matched on what was tried ("exec /opt/grok/bin/grok"), not on the process id, which changes every time.
 
 ## The Timeline tab
 
 <p align="center">
-  <img src="images/security-timeline.en.jpg" width="700" alt="The Security Timeline window on its Timeline tab: a Filter events… field, the All engines pop-up, '8 events', Export… and Clear buttons, and a table with Time, Workspace, Engine, Condition and Decision columns listing PII protection, Prompt injection, Supply chain, Firewall and Credential brokering rows, colour-coded blue, red and green" />
+  <img src="images/security-timeline.en.jpg" width="700" alt="The Security window on its Timeline tab: a Filter events… field, the All workspaces, time range, All engines and All outcomes pop-ups, the event count, Export…, OCSF and Clear buttons, and a table with Time, Workspace, Engine, Condition and Decision columns, colour-coded blue, red and green" />
 </p>
 
 The Timeline is one table of every event, newest first:
@@ -68,43 +74,71 @@ The Timeline is one table of every event, newest first:
 | **Time** | Date and time of the decision. |
 | **Workspace** | The machine it happened on. When you mirror remote Macs, it reads *Mac* · *machine*. |
 | **Engine** | Which engine decided, with its icon. |
-| **Condition** | What the engine saw: the host, package, snippet, key… Hover for the full text; the text can be selected and copied. |
-| **Decision** | What it decided, colour-coded. |
-| (last column) | For firewall rows, a quick-action button: **Allow…**, **Block…** or **Rule…** — see [Firewall quick actions](#firewall-quick-actions). |
+| **Condition** | What the engine saw: the host, package, snippet, key, program… Hover for the full text; the text can be selected and copied. A chain glyph marks a row with a [network lineage](#network-lineage). |
+| **Decision** | What it decided, colour-coded. A grey **×N** marks a row standing for *N* identical events, the last one shown. |
+| (last column) | For firewall rows, a quick-action button: **Allow…**, **Block…** or **Rule…** — see [Firewall quick actions](#firewall-quick-actions). For a package OSV or socket.dev blocked, **Allow…** → **Always Allow … in This Workspace** adds it to the workspace's trusted packages (**Allowed now** once it is) — see [Trusting a blocked package](09-supply-chain.mdx#trusting-a-blocked-package). |
 
 Colours read the same way everywhere in the window:
 
 - **Green** — allowed: let through, passed, signed.
-- **Red** — blocked: denied, refused, withheld.
-- **Blue** — informational: a transformation that is neither a pass nor a block, such as a credential swap, an age-gated version list or stripped install scripts.
+- **Red** — blocked: denied, refused, withheld, and signs of tampering.
+- **Blue** — informational: a transformation that is neither a pass nor a block, such as a credential swap, an age-gated version list, stripped install scripts, or an OpenShell `audit` verdict.
 
-The toolbar above the table filters it:
+The toolbar above the table filters it (on a narrow window, the filters wrap onto a second row):
 
 - **Filter events…** matches text in the engine, condition, decision, machine and Mac names.
+- When you mirror at least one remote Mac, a pop-up chooses **All machines**, **This Mac**, or one remote Mac.
+- The workspace pop-up (**All workspaces** by default) narrows the table to one machine.
+- The time-range pop-up: **Last hour**, **Last 24 hours**, **Last 7 days**, **Last 30 days** or **All history**. It starts on the period set in Preferences, and returns to it when you jump in from the Overview.
 - The engine pop-up (**All engines** by default) lists the engines that have events.
 - The outcome pop-up (**All outcomes** by default) narrows the table to **Blocked** or **Allowed** events.
-- When you mirror at least one remote Mac, a machine pop-up appears: **All machines**, **This Mac**, or one remote Mac.
 - The event count ("8 events") reflects the filters.
 
-**Clear** empties the window. It only hides events: they stay on disk, but cleared events don't come back when the app restarts. **Export…** is described [below](#exporting-events).
+**Clear** empties the window. It only hides events: they stay on disk, but cleared events don't come back when the app restarts. **Export…** and **OCSF** are described [below](#exporting-events).
 
 ## The engines
 
 | Engine | What its rows record | Example decisions |
 |---|---|---|
-| **Credential brokering** | Credential swaps on the wire ([Credentials](08-credentials.mdx)), exfiltration attempts, and hosts allowed from the compromise alert. | "swapped in sk-a…9f" (blue); "blocked — exfiltration attempt, VM paused" (red), or "blocked — exfiltration attempt (alerts off, VM not paused)" when the machine has exfiltration alerts turned off; "allowed by user for this session" (green) |
+| **Credential brokering** | Credential swaps on the wire ([Credentials](08-credentials.mdx)), exfiltration attempts, hosts allowed from the compromise alert, and — in strict credential mode — credentials Bromure didn't issue. | "swapped in sk-a…9f" (blue); "blocked — exfiltration attempt, VM paused" (red), or "blocked — exfiltration attempt (alerts off, VM not paused)" when the machine has exfiltration alerts turned off; "blocked — credential not issued by Bromure, VM paused" (red); "allowed by user for this session" (green) |
+| **Credential approval** | Your answers to ask-before-use prompts ([Guardrails](07-settings/guardrails.mdx)). | "allowed for 1 hour" (green); "denied by you", "denied — no answer in time; the next request asks again" (red) |
 | **Credential used** | SSH signatures and AWS SigV4 signings the host performed for the agent. | "signed" (green) |
-| **Firewall** | Egress-firewall verdicts, per host, port and protocol, with the rule that decided — or "default policy" when no rule matched — for direct connections and for those made through the proxy settings alike. The host is the name the program asked for (`www.wikipedia.org`), not the CDN name it resolves to. A destination is reported again only once a minute has passed since its last report, or at once after the rules change; allowed connections are listed only when the machine [logs them](07-settings/guardrails.mdx#logging-allowed-connections), and their repeats fold into one row with a count. An open connection cut because the rules changed gets its own row. | "allow — allow tcp github.com:443" (green); "deny — default policy" (red); "connection closed — “allow tcp github.com:443” no longer allows it" (red); "deny" (red) for connections dropped regardless of rules (IPv6, QUIC, IP fragments) |
+| **Firewall** | Firewall and OpenShell network verdicts, per host, port and protocol, with the rule that decided — or "default policy" when no rule matched — for direct connections and for those made through the proxy settings alike. The host is the name the program asked for (`www.wikipedia.org`), not the CDN name it resolves to. A destination is reported again only once a minute has passed since its last report, or at once after the rules change; allowed connections are listed only when the machine [logs them](07-settings/sandbox-policy.mdx#log-allowed-connections), and their repeats fold into one row with a count. An open connection cut because the rules changed gets its own row, and so does each [policy advisor](10b-sandbox-policy.mdx#the-policy-advisor) proposal. | "allow — allow tcp github.com:443" (green); "deny — default policy" (red); "connection closed (proxy) — “allow tcp github.com:443” no longer allows it" (red); "deny" (red) for connections dropped regardless of rules (IPv6, QUIC, IP fragments); "audit" (blue) |
+| **Network** | Each connection the [kernel sentry](10b-sandbox-policy.mdx#the-kernel-sentry) saw, with the tool call and process chain behind it: `Tool `npm install`: claude → bash → node → TCP registry.npmjs.org:443`. Raw packet sockets read "raw frames on eth0". Double-click for its [lineage](#network-lineage). | "allowed" (green); "denied — …" (red); "audited", "passed (not filtered)", "raw socket", "seen" (blue) |
+| **Agent reasoning** | What the agent wrote before a tool call — its reasoning, stated intent, or the prompt — shown in the lineage of the flows that call made. | "before the tool call" (blue) |
+| **Guest sandbox** | What the [guest sandbox](10b-sandbox-policy.mdx#the-guest-sandbox) refused — the program, the operation and the path, or the system call: `bash (pid 12) — exec /opt/grok/bin/grok`. Identical refusals are folded across processes for a minute ("— ×12 more in the last minute, from 3 processes"). Also the sandbox's state at boot, package requests, and an alarm when one program hits its limits 20 times in a minute. | "denied" (red); "probing its limits" (red); "enforced" (green); "not applied yet" (blue); "asked for approval" (blue), "installed" (green), "rejected" (red) |
+| **Kernel sentry** | The sentry's connection state and the events it reports: privilege changes, module and BPF loads, and signs of tampering — a gap in its stream, a disarmed probe, a long silence. | "connected" (green); "tampering suspected" (red); "warning" (blue) |
+| **Agent watchdog** | A session whose behaviour scored past the [watchdog](07-settings/guardrails.mdx#protections)'s threshold within a minute. | "drift detected" (blue); "quarantined — network cut, VM paused" (red) |
 | **Guardrails** | Write-policy blocks ([Guardrails](07-settings/guardrails.mdx)), with the method and path. | "blocked — …" (red) |
-| **Supply chain** | Every package fetch, including `apt` `.deb` downloads ([Supply-Chain Protection](09-supply-chain.mdx)). | "checked", "downloaded" (green); "checked — versions newer than the cooldown hidden", "install scripts stripped" (blue); "blocked — …" (red) |
-| **Prompt injection** | Detector hits, with the detector, the source and a short snippet ([Prompt-Injection Detection](10-prompt-injection.mdx)). | "log", "allowed" (green); "blocked" (red) |
+| **Supply chain** | Every package fetch, including `apt` `.deb` downloads ([Supply-Chain Protection](09-supply-chain.mdx)). | "checked", "downloaded" (green); "checked — versions newer than the cooldown hidden", "install scripts stripped", "downloaded — allowed by you despite: …" (blue); "blocked — …" (red) |
+| **Prompt injection** | Detector hits, with the detector, the source and a short snippet ([Prompt-Injection Detection](10-prompt-injection.mdx)). | "log", "allowed" (green); "blocked" (red); "not scanned — …" (blue) |
 | **PII protection** | Requests in which personal data was swapped, with counts by kind and the host — never the values ([PII Protection](10a-pii.mdx)) — and requests whose scan ran out of model budget. | "swapped for stand-ins" (blue); "partial — model budget reached; pattern rules only" (blue) |
 | **Agent delegation** | Each message one agent sent another through [delegation](06d-delegation.mdx). | "relayed" (blue); "withheld — prompt injection" (red) |
 | **Upstream TLS** | Upstream certificates the host refused to trust, and uses of the per-request insecure bypass. | "blocked — …" (red); "allowed — certificate validation skipped (X-bromure-insecure); no credentials injected" (green) |
 
+Command lines in these events — process arguments, tool commands, tool-input summaries — have their secrets taken out before they're recorded: see [Command lines are redacted](11-tracing.mdx#command-lines-are-redacted).
+
+## Network lineage
+
+<p align="center">
+  <img src="images/network-lineage.en.jpg" width="640" alt="The network lineage sheet for a blocked connection to telemetry.example.net:443: cards joined by a rail — Why, with the prompt, the reasoning and the stated intent Install axios; Tool call · Bash, exact match, npm install axios; Processes · 5, from claude through bash and npm to the node postinstall script; Network flow; and Decision, Blocked by the request policy (L7) — then Other flows from this tool call, listing registry.npmjs.org:443" />
+</p>
+
+On a machine with the [kernel sentry](10b-sandbox-policy.mdx#the-kernel-sentry), every connection out of the VM can be explained end to end. Double-click a **Network** row (or select it and press Return, or right-click › **Show the Whole Chain**) to open its lineage:
+
+1. **Why** — the **Prompt** you gave, the agent's **Reasoning** before the call, and its **Stated intent**. "Not traced to an agent's tool call." when the connection didn't come from one.
+2. **Tool call** — the tool and its command, with how sure the match is: **exact match** (the shell ran the call's command, word for word), **likely match** (the same, but a short command), or **fuzzy** (timing and the agent's process only). A process the agent didn't start reads "Started outside any tool call the AI proxy saw".
+3. **Processes** — the chain from the agent down to the program that connected, with each one's arguments (redacted).
+4. **Network flow** — protocol, destination, address, source port, and **via proxy** when it went through the proxy settings.
+5. **Decision** — what the host decided, at which layer: **firewall (L4)**, **request policy (L7)**, **binary identity** or **proxy**, with the reason.
+
+**Other flows from this tool call** lists every other connection the same tool call made; click one to follow it. A connection through the proxy is matched to the proxy's request-level decision; if that decision never arrives, the flow reads "seen", never a guessed allow.
+
+The agent's reasoning is always shown on this Mac. It is uploaded to an organization only when the organization asks for it (see [Enterprise](15-enterprise.mdx)).
+
 ## Firewall quick actions
 
-Firewall rows can change the machine's [outbound-connection rules](07-settings/guardrails.mdx#outbound-connections-egress-firewall) on the spot. Use the button in the row's last column, or right-click the row. The change is saved to the machine and applies to it immediately if it's running — no restart.
+Firewall rows can change the machine's [outbound rules](07-settings/sandbox-policy.mdx#outbound-rules) on the spot. Use the button in the row's last column, or right-click the row. The change is saved to the machine and applies to it immediately if it's running — no restart. (A machine's own window offers the same through the [Sandbox drawer](10b-sandbox-policy.mdx#the-sandbox-drawer).)
 
 - **A blocked connection** — **Allow** *host:port* adds an allow rule for exactly that host, protocol and port, placed first so it wins over the rule that blocked it. When the host is a subdomain, **Allow all of** *domain:port* is offered too (for example `github.com` for `api.github.com`), which covers every subdomain — except under CDN and shared-hosting domains (`cloudflare.net`, `cloudfront.net`, `amazonaws.com`, `github.io`, `herokuapp.com`…), where "all of" would mean every customer of that provider. The other names the host resolved through (its CDN aliases) are offered as exact hosts after it. Each offers **Always**, **For 15 minutes**, **For 1 hour** or **Until the workspace stops**; a timed rule switches itself off when the time is up. If the same rule already exists, the menu first says how it stands (switched off, or on until when), so re-allowing never silently shortens it. If a deny rule blocked it, that rule can also be switched off or removed.
 - **A connection allowed by a rule** — **Switch off rule** keeps the rule but stops it matching (tick it again in the editor to bring it back); **Remove rule** deletes it. Connections the change now denies are cut.
@@ -114,7 +148,7 @@ Rules made here use the name the program asked for, the same name the proxy chec
 
 When the rules have changed since the row was recorded — a blocked host allowed since, or the reverse — the button reads **Allowed now** or **Blocked now** and its menu names the rule (or default policy) that decides now, instead of offering the same change again.
 
-Quick actions appear only for rows that a rule change can affect: not for IPv6, QUIC or fragment drops, and not for HTTP-method blocks from `web` rules. On a remote Mac's rows the button is greyed out: change that machine's rules in its settings on the Mac that runs it.
+Quick actions appear only for rows that a rule change can affect: not for IPv6, QUIC or fragment drops, and not for HTTP-method blocks from `web` rules. On a remote Mac's rows the button is greyed out: change that machine's rules in its settings on the Mac that runs it. On a machine using an OpenShell policy, allow a blocked connection from its [Sandbox drawer](10b-sandbox-policy.mdx#the-sandbox-drawer).
 
 > **Note:** If the machine's settings are open, the rule table picks up the change. Unsaved edits are kept: the change is merged into them rule by rule, and a note above the table says so. If your edits can't be merged (a rule that doesn't parse yet), the note offers **Reload** (take the saved rules) or **Keep my edits**.
 
@@ -124,17 +158,36 @@ The Timeline records security decisions only. File reads, commands, tool calls a
 
 **Export…** (in the toolbar on both tabs) saves events as a CSV file, named `bromure-security-<date>.csv` by default. From the **Timeline** tab it saves exactly what the table shows, with the filters applied; from the **Overview** tab it saves every event in the window. Rows are oldest first, with the columns `time` (ISO 8601), `machine` ("This Mac" or the remote Mac's name), `workspace`, `engine`, `condition`, `decision` and `outcome` (`allowed`, `blocked` or `info`).
 
+### OCSF logs for a SIEM
+
+The **OCSF** menu in the toolbar streams every security event to disk as [OCSF](https://ocsf.io) JSON, one file per day, for a SIEM to collect:
+
+- **Write OCSF JSON logs** — off by default. Turn it on and every event from then on is written as it happens.
+- **Schema** — **OCSF 1.8.0** (the default, the same shape NVIDIA OpenShell writes) or **OCSF 1.3.0 (Security Lake, Splunk, CrowdStrike)**.
+- **Show OCSF Logs in Finder**.
+
+Files are `~/Library/Application Support/BromureAC/ocsf/bromure-ocsf.<yyyy-MM-dd>.jsonl` (local dates), one event per line, readable only by you, and kept 7 days. Each event carries the machine's id and name, and the original event under `unmapped`. The export is local: it doesn't depend on enrollment or private mode, and it gets the same redacted command lines as the window. To set it up without the window:
+
+```
+defaults write io.bromure.agentic-coding ocsf.jsonExport -bool true
+defaults write io.bromure.agentic-coding ocsf.schemaVersion 1.3.0     # optional
+defaults write io.bromure.agentic-coding ocsf.retentionDays -int 30   # optional, default 7
+defaults write io.bromure.agentic-coding ocsf.directory "~/Logs/ocsf" # optional
+```
+
 ## Storage and retention
 
 - Every event is appended to a daily file in `~/Library/Application Support/BromureAC/security-timeline/`, one JSON line per event, named `<yyyy-MM-dd>.jsonl` (UTC dates).
-- Files older than **90 days** are deleted.
-- At launch the window reloads the most recent **5,000** events, and holds at most 5,000 in memory; older events stay in the files.
-- Events hold previews only: token previews like `sk-a…f9q3`, snippet previews, PII counts. No secret or personal value is written.
+- **Preferences › Tracing › Security history** (this Mac's own Preferences only):
+  - **Keep events for** — **7 days**, **30 days**, **90 days** (default), **180 days**, **1 year** or **Forever**. "Events older than this are deleted from this Mac." A change applies at once.
+  - **Security window opens on** — **Last hour**, **Last 24 hours** (default), **Last 7 days**, **Last 30 days** or **All history**. The Overview counts this period, and the Timeline opens on it.
+- The window holds the newest **5,000** events; older events stay in the files.
+- Events hold previews only: token previews like `sk-a…f9q3`, snippet previews, PII counts, redacted command lines. No secret or personal value is written.
 
 ## Remote Macs
 
-The engines run on the Mac that hosts the machines. When a [remote client](14-remote-access.mdx) mirrors another Mac, it receives that Mac's most recent events and shows them in its own Security Timeline window, alongside its local ones. Each mirrored Mac's events are kept apart from this Mac's, so the machine pop-up can separate them and the **Workspace** column names the Mac.
+The engines run on the Mac that hosts the machines. When a [remote client](14-remote-access.mdx) mirrors another Mac, it receives that Mac's most recent events and shows them in its own Security window, alongside its local ones. Each mirrored Mac's events are kept apart from this Mac's, so the machine pop-up can separate them and the **Workspace** column names the Mac.
 
 ## Relation to enterprise telemetry
 
-On a Mac enrolled with bromure.io, the same engine events are also sent to the organization as cloud events (`credential.token_swap`, `egress.firewall`, `supply_chain.fetch`, `prompt_injection.detection`, `privacy.pii_swap` and others), unless the machine is in **Private mode**. The local Security Timeline is independent of that: it records every event whether or not the Mac is enrolled and whether or not private mode is on. See [Tracing & Audit](11-tracing.mdx#private-mode-and-enterprise-telemetry) and [Enterprise](15-enterprise.mdx).
+On a Mac enrolled with bromure.io, the same engine events are also sent to the organization as cloud events (`credential.token_swap`, `egress.firewall`, `supply_chain.fetch`, `prompt_injection.detection`, `privacy.pii_swap`, `net.flow` and others), unless the machine is in **Private mode**. The local Security window is independent of that: it records every event whether or not the Mac is enrolled and whether or not private mode is on. See [Tracing & Audit](11-tracing.mdx#private-mode-and-enterprise-telemetry) and [Enterprise](15-enterprise.mdx).

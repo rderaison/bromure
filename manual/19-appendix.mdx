@@ -322,7 +322,7 @@ Persistent settings in the `io.bromure.agentic-coding` domain. Most have UI equi
 | `vmnet.useRandom172` | Put machines on a private random subnet in `172.16.0.0/12` (**Preferences › Resources › Workspace subnet**). | `true` on fresh installs |
 | `proxy.noMitmDomains` | Extra domains whose HTTPS is passed through without interception (**Remote Access…** › **Don't intercept (no-MITM domains)**). | empty |
 | `p2p.udpRelay.enabled` | Prefer the experimental UDP relay for remote connections (**Preferences › Resources**). | `false` |
-| `vm.homeImageGB` | Apparent size of a new ext4 home image, in GiB (8–1024; sparse). | `64` |
+| `vm.homeImageGB` | Apparent size of a new ext4 home image, in GiB (8–1024; sparse). | `16` |
 | `vm.mtu` | Guest NIC MTU clamp — lower it on VPN hosts that black-hole downloads. | `1280` |
 | `vm.networkMode`, `vm.bridgedInterface`, `vm.dnsServers` | Browser-VM network mode, bridged interface, and DNS override. | mode NAT; others unset |
 | `vm.extraChromeFlags`, `vm.chromeEnvExtra` | Developer knobs appended to the browser VM's Chromium launch. | unset |

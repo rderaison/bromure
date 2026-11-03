@@ -167,8 +167,10 @@ onboarding += [assistant(text("I shortened every onboarding screen to one senten
 
 spec = {
     "workspaces": [
-        {"name": "Web app", "color": "blue", "running": True},
-        {"name": "Payments API", "color": "green", "running": True},
+        {"name": "Web app", "color": "blue", "running": True,
+         "egressRules": "allow tcp github.com:443\nallow web api.stripe.com GET,POST\ndeny tcp 10.0.0.0/8\n"},
+        {"name": "Payments API", "color": "green", "running": True,
+         "networkPolicy": "starter", "kernelSentry": "best_effort"},
         {"name": "Data pipeline", "color": "purple"},
     ],
     "rooms": [{"name": "Checkout revamp", "layout": "2x2"}],

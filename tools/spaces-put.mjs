@@ -21,7 +21,7 @@
  *        node tools/spaces-put.mjs img-catalog.json images/img-catalog.json \
  *             application/json "public, max-age=1, must-revalidate"
  */
-import { createReadStream, statSync } from "node:fs";
+import { constants, createReadStream, fstatSync, openSync } from "node:fs";
 import { basename } from "node:path";
 
 function env(name) {
@@ -35,6 +35,21 @@ if (!LOCAL || !KEY) {
   console.error("usage: node tools/spaces-put.mjs <localPath> <key> [contentType] [cacheControl]");
   process.exit(2);
 }
+
+// Publish the file named, never what a symlink there points at (everything
+// uploaded is public-read): open without following a final link, and read
+// size and bytes from that one descriptor.
+let fd;
+try {
+  fd = openSync(LOCAL, constants.O_RDONLY | constants.O_NOFOLLOW);
+} catch (e) {
+  console.error(e.code === "ELOOP" ? `spaces-put: ${LOCAL} is a symlink — refusing to upload it`
+                                   : `spaces-put: ${LOCAL}: ${e.message}`);
+  process.exit(1);
+}
+const st = fstatSync(fd);
+if (!st.isFile()) { console.error(`spaces-put: ${LOCAL} isn't a regular file`); process.exit(1); }
+const totalBytes = st.size;
 
 const DO_SPACES_KEY = env("DO_SPACES_KEY");
 const DO_SPACES_SECRET = env("DO_SPACES_SECRET");
@@ -77,13 +92,13 @@ const client = new S3Client({
   forcePathStyle: false,
 });
 
-const totalBytes = statSync(LOCAL).size;
+
 const upload = new Upload({
   client,
   params: {
     Bucket: DO_SPACES_BUCKET,
     Key: KEY,
-    Body: createReadStream(LOCAL),
+    Body: createReadStream(null, { fd }),
     ContentType: CONTENT_TYPE || guessType(LOCAL),
     ACL: "public-read",
     CacheControl: CACHE_CONTROL || cacheControlFor(KEY),

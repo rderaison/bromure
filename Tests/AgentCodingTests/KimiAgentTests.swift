@@ -279,8 +279,21 @@ struct KimiAgentTests {
     func doneSignalCapability() {
         #expect(Profile.Tool.claude.hasReliableDoneSignal)
         #expect(Profile.Tool.kimi.hasReliableDoneSignal)
-        #expect(!Profile.Tool.codex.hasReliableDoneSignal)
-        #expect(!Profile.Tool.grok.hasReliableDoneSignal)
+        #expect(Profile.Tool.codex.hasReliableDoneSignal)
+        #expect(Profile.Tool.grok.hasReliableDoneSignal)
+        // omp's turn hook isn't trusted for teardown yet.
+        #expect(!Profile.Tool.omp.hasReliableDoneSignal)
+    }
+
+    /// An agent whose tab status comes from its hooks gets no proxy-silence
+    /// .done either, so if it can't complete a run its run never ends: a
+    /// Codex automation read "running" for days (its tab never closed).
+    @Test("Every hook-driven agent but omp completes an automation run")
+    @MainActor
+    func hookDrivenAgentsCompleteRuns() {
+        for tool in Profile.Tool.allCases where ACAppDelegate.hookDrivenAgents.contains(tool.rawValue) {
+            #expect(tool.hasReliableDoneSignal == (tool != .omp), "\(tool.rawValue)")
+        }
     }
 
     // MARK: - International region (kimi.ai, not the China-only kimi.com)

@@ -71,10 +71,16 @@ public enum RemoteConsent {
     /// attach / dismissed / timeout — the caller treats as deny). Blocking; call
     /// off the main actor.
     public static func choose(profileID: UUID, title: String, message: String,
-                              choices: [String], timeoutSeconds: TimeInterval = 120) -> Int? {
+                              choices: [String], timeoutSeconds: TimeInterval = 120,
+                              token: UUID = UUID()) -> Int? {
         let prompt = message.isEmpty ? title : title + "\n\n" + message
         return ACAutomationServer.presentConsentViaPump(
             profileID: profileID.uuidString, prompt: prompt,
-            choices: choices, timeoutSeconds: timeoutSeconds)
+            choices: choices, timeoutSeconds: timeoutSeconds, token: token)
+    }
+
+    /// Take back the terminal prompt asked with `token`: `choose` returns nil.
+    public static func withdraw(token: UUID) {
+        ACAutomationServer.withdrawConsentViaPump(token: token)
     }
 }

@@ -1436,7 +1436,7 @@ private final class RejectListenerDelegate: NSObject, VZVirtioSocketListenerDele
         from socketDevice: VZVirtioSocketDevice
     ) -> Bool {
         // Close the fd immediately so the guest agent gets EOF and exits.
-        Darwin.close(conn.fileDescriptor)
+        conn.close()   // VZ owns the fd: closing it here closed it twice
         return true
     }
 }

@@ -22,7 +22,7 @@ Everything below depends on the SSH front door being enabled (it is off by defau
 | **The `bromure-cli remote` CLI** | You, on the host itself | Manage the front door: enable/disable, keys, status. See [Enabling remote access on the host](#enabling-remote-access-on-the-host). |
 | **The rich client** | Another Mac running the app, or Bromure Remote on iOS / iPadOS / visionOS | A live [mirror](#mirroring-a-remote-with-the-rich-client) of the remote instance, with bidirectional edits — reached [by address](#by-address-same-network) on a LAN or [through a bromure.io account](#through-a-bromureio-account-from-anywhere) from anywhere. |
 
-The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who launched `bromure-cli`, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the rich client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
+The server is *embedded* — it is Apple's swift-nio-ssh library built into the app, not macOS's own `sshd`. That distinction matters: because the app runs its own server, it can verify your macOS account password through OpenDirectory without you ever enabling **Remote Login** in System Settings and without administrator rights. It listens only for the exact macOS user who runs the app, and it forces every interactive login into the remote menu. The only machine-facing exceptions are four whitelisted commands the rich client uses (`bromure-fatclient/1 control`, `forward <ip> <port>`, `forward-udp <ip>`, and `browser-mcp <vm>`); anything else a human types behaves like a login and drops into the menu.
 
 > **Note:** The Remote Access window describes the server as "an app-owned instance of the system SSH server." It is more precisely an embedded swift-nio-ssh server, deliberately *not* macOS's `sshd` — that is exactly what lets it work without Remote Login or admin rights.
 
@@ -44,7 +44,7 @@ Open **Bromure Agentic Coding** (the app-name menu) → **Remote Access…**. Th
 | **Server host key** | fingerprint | The server's own ed25519 host-key fingerprint, for out-of-band verification. Reads **(generated on first enable)** until first use. | — |
 | **Authorized public keys** | list | Enrolled `ssh-ed25519` / `ecdsa` public keys. Add by pasting a key line; remove with the trash icon. Reads **No keys enrolled.** when empty. | empty |
 
-Edit **Bind IP** or **Port** and press Return to apply the change live. The **Authentication** section notes **Verified against `<user>` — the user running bromure-cli.** so it is clear whose password unlocks the door.
+Edit **Bind IP** or **Port** and press Return to apply the change live. The **Authentication** section notes **Verified against `<user>` — the user running bromure-ac.** so it is clear whose password unlocks the door.
 
 > **Warning:** At least one authentication method must stay enabled — you cannot switch off both password and public-key auth. Pasting an invalid key is rejected with **Not a valid public key**. Adding or removing an authorized key restarts the listener, which drops any live connections.
 
@@ -61,7 +61,7 @@ The CLI talks to the running app over its owner-only control socket, so the app 
 | `bromure-cli remote key ls` | Lists authorized keys with a 1-based index, fingerprint, and comment. |
 | `bromure-cli remote key rm <index\|fingerprint>` | Removes a key by index or by a fingerprint substring. |
 
-`remote enable` refuses if you pass both `--no-password` and `--no-pubkey`, and it errors while a base image is missing or installing. When the app is not running, `status`, `disable`, and `key ls` print **No bromure-cli agent running.**
+`remote enable` refuses if you pass both `--no-password` and `--no-pubkey`, and it errors while a base image is missing or installing. When the app is not running, `status`, `disable`, and `key ls` print **No bromure-ac agent running.**
 
 > **Note:** The server will not start while the base image is absent or still installing — enabling then returns an actionable error rather than a silent no-op. This is true both at launch and when you flip the toggle. Install or finish installing the base image first.
 
@@ -75,7 +75,7 @@ Password attempts are throttled per source IP by a token bucket: five attempts a
 
 ## Signing in over plain SSH
 
-Any terminal can reach the host with `ssh -p 2222 <user>@<mac>`. Instead of a shell, the connection lands in the **remote menu** — a curses-style TUI (internally `bromure-cli __remote-menu`) forced onto every human login. A raw shell is never reachable through it.
+Any terminal can reach the host with `ssh -p 2222 <user>@<mac>`. Instead of a shell, the connection lands in the **remote menu** — a curses-style TUI (internally `bromure-ac __remote-menu`) forced onto every human login. A raw shell is never reachable through it.
 
 The menu predates the sessions-first redesign and is organized around machines: a **Workspaces** list with live state glyphs (● running, ◌ booting, ⏸ suspended, ○ off), plus **Models** (the installed models and the on-device catalog) and **Trace** (summaries, host names, leaks) sections. From it you can:
 
@@ -200,6 +200,10 @@ Bromure Remote is a client-only mirror, reached exactly the same way (sign in an
 
 - **iPhone** — a **Sessions** list with a count of sessions that need you, a new-session screen ("What can I help you with?"), and a screen per session: its chat, a **Linux** button for its terminal, and a menu with **Resume**, **Rename…**, **New worktree…**, the machine's settings, **Archive** (or **End & Archive**), **End session** and **Delete session**. A room opens as a tab per session, swiping between them, with the room's Switchboard.
 - **iPad** — a persistent sidebar with sessions, rooms and machines; a room shows its grid of chats like the Mac.
+
+On both, the list is ordered as on the Mac's sidebar: **New session** first, **Coding Tasks** and **Automations** right under it, then the sessions. Machines are split into **Virtual Machines** (with the Grid) and **Native Machines** — the Sidecar Macs the remote has attached, shown only when there is one; a native machine offers **New Terminal**. On iPad, **New Session** stays visible above the foldable Sessions section.
+
+When a remote refuses to start a session (on a Sidecar Mac without that agent, for example), the client shows the remote's reason instead of doing nothing.
 - **Apple Vision Pro** — the iPad layout, plus spatial windows: pin any terminal as its own window anywhere in the room, open the Grid as a dedicated stage window, or turn the whole grid into floating windows with **Pin All as Windows**.
 
 In a room, one composer at the bottom has a **To** picker — the room's Switchboard or any session in it — and an attach menu (**Photo Library**, **Choose Files**, **Paste Image**); attachments are uploaded into the target's machine when you send. On iPhone and iPad, a session that needs your input can reach you as a push notification while the app is in the background; tapping it opens that session. The Models board isn't available on these devices; change models from a Mac.

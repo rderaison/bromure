@@ -289,6 +289,17 @@ final class ControlServer: @unchecked Sendable {
     /// device, a Bromure AC's Native Machines): the user's choice, else the
     /// Mac's name with `-native` — so it never reads as the Bromure AC of the
     /// same Mac ("macdev" vs "macdev-native").
+    /// This Mac's boot, on its own clock (kern.boottime): fixed for the
+    /// whole boot, sleep included — a client tells a reboot by it changing.
+    static let machineBootedAt: Double = {
+        var tv = timeval(), size = MemoryLayout<timeval>.size
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        guard sysctl(&mib, 2, &tv, &size, nil, 0) == 0 else {
+            return Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+        }
+        return Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000
+    }()
+
     static let machineNameKey = "machineName"
     static var defaultMachineName: String {
         (Host.current().localizedName ?? "mac") + "-native"
@@ -351,6 +362,7 @@ final class ControlServer: @unchecked Sendable {
             "ip": "",
             // Monotonic, like a VM's: the machine's own uptime.
             "uptimeSeconds": Int(ProcessInfo.processInfo.systemUptime),
+            "bootedAt": Self.machineBootedAt,
             "mounts": [],
             "tabs": tabs,
             "hostKind": "agent-host",

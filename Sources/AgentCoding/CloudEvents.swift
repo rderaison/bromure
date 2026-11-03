@@ -194,11 +194,61 @@ public final class BACEventEmitter: @unchecked Sendable {
     public func emit(profileID: UUID,
                      eventType: String,
                      eventData: [String: AnyJSON]) async {
+        // Command lines (a flow's argv, a tool's command) lose their secrets
+        // before they're recorded or uploaded: both stores outlive the VM.
+        let eventData = CommandLineRedactor.scrub(eventData)
         // Local Security Timeline — ALWAYS, before either gate below. It's an
         // on-device view of what the engines did on the user's own machine,
         // independent of the enrolled-only, cloud-bound telemetry.
+        #if os(macOS)
+        // Tell the agent its action was refused by policy (on by default
+        // under an OpenShell policy), so it asks instead of routing around.
+        // FIRST: the note races the agent's own PostToolUse hook, so it
+        // mustn't wait behind the timeline's main-actor record.
+        PolicySteering.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
+        #endif
         await SecurityTimeline.shared.record(profileID: profileID,
                                              eventType: eventType, eventData: eventData)
+        #if os(macOS)
+        // OpenShell policy advisor: every firewall denial is evidence for the
+        // agent (`/v1/denials`) and may become a drafted proposal.
+        if eventType == "egress.firewall", case .string(let action)? = eventData["action"], action == "deny" {
+            func s(_ k: String) -> String? { if case .string(let v)? = eventData[k] { return v }; return nil }
+            var port = 0
+            if case .int(let p)? = eventData["port"] { port = p }
+            OpenShellAdvisor.shared.recordDenial(
+                profileID: profileID, layer: s("layer") ?? "l4", host: s("host") ?? s("ip") ?? "?",
+                port: port, method: s("method"), path: s("path"), reason: s("reason") ?? "no matching network policy",
+                ip: s("ip") ?? s("dst_ip"), exe: s("exe"))
+        }
+        // Network lineage: every host decision about a flow (switch L4, MITM
+        // L7, binary identity) joins the flow the sentry reports.
+        // An event without an action decides nothing (never a guessed allow).
+        if eventType == "egress.firewall", case .string(let action)? = eventData["action"] {
+            func s(_ k: String) -> String? { if case .string(let v)? = eventData[k] { return v }; return nil }
+            var port = 0
+            if case .int(let p)? = eventData["port"] { port = p }
+            let layer = s("layer") ?? "l4"
+            let dst = s("ip") ?? s("host").map { "host:\($0)" } ?? "?"
+            NetworkLineage.shared.noteDecision(
+                profileID: profileID, proto: s("proto") ?? "tcp", dst: dst, dport: port,
+                action: action, layer: layer, reason: s("reason"), host: s("host"))
+        }
+        // The agent watchdog judges the session as a whole (off by default).
+        AgentWatchdog.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
+        // OCSF JSONL export (SIEM) — local like the timeline; off by default.
+        if OCSFExporter.shared.isEnabled {
+            let workspace = await MainActor.run { SecurityTimeline.shared.workspaceName(profileID) }
+            OCSFExporter.shared.record(profileID: profileID, workspace: workspace,
+                                       eventType: eventType, eventData: eventData)
+        }
+        #endif
+
+        // The agent's reasoning stays on this Mac unless the organization
+        // opted in: "what the AI did, never what it said" is the default.
+        #if os(macOS)
+        if eventType == "agent.reasoning", OpenShellGovernance.shared.managed?.captureAgentReasoning != true { return }
+        #endif
 
         // Hard gate: no install identity → nothing to authenticate
         // as, nothing to upload.

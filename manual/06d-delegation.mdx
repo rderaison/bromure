@@ -110,6 +110,13 @@ Machines share no filesystem, so files named in a message are copied by the host
 
 Paths are resolved relative to the sender's folder, and `~` is the sender's home. Between two sessions on the same machine, the copy is local.
 
+What an agent may do with its inbox without asking depends on where it runs:
+
+- **In a machine**, Claude Code may read files in `~/.bromure/inbox` without a prompt (the machine's home is its own). Changing or unpacking them goes through the agent's approval mode, so one session can't quietly rewrite files handed to another.
+- **On a Sidecar Mac**, the home folder is shared by every session there and by your own tools, so nothing in the inbox is pre-approved: opening a file goes through the approval mode like any file outside the session's folder. Only the delegation tools themselves are pre-allowed.
+
+Running a delivered script always goes through the agent's approval mode.
+
 ## Screening and audit
 
 Every brief, request, question, answer, report, delivery and steer is scanned by the on-device [prompt-injection detector](10-prompt-injection.mdx) before it is relayed.

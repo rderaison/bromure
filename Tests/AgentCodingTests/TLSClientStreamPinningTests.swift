@@ -202,7 +202,7 @@ struct TLSClientStreamPinningTests {
         let ca = ClusterCATrustRegistry()
         let profile = UUID()
         ca.setCA(pem: pki.caPEM, host: "localhost", profileID: profile)
-        let anchor = try #require(ca.ca(for: "localhost", profileID: profile))
+        let anchor = try #require(ca.ca(for: "localhost", port: 443, profileID: profile))
 
         let fd = try Self.connectTCP(port: server.port)
         defer { close(fd) }
@@ -223,7 +223,7 @@ struct TLSClientStreamPinningTests {
         let ca = ClusterCATrustRegistry()
         let profile = UUID()
         ca.setCA(pem: pki.caPEM, host: "localhost", profileID: profile)
-        let anchor = try #require(ca.ca(for: "localhost", profileID: profile))
+        let anchor = try #require(ca.ca(for: "localhost", port: 443, profileID: profile))
         let identity = try Self.loadIdentity(p12: pki.clientP12)
 
         let fd = try Self.connectTCP(port: server.port)
@@ -253,7 +253,7 @@ struct TLSClientStreamPinningTests {
         let ca = ClusterCATrustRegistry()
         let profile = UUID()
         ca.setCA(pem: unrelated.caPEM, host: "localhost", profileID: profile)
-        let anchor = try #require(ca.ca(for: "localhost", profileID: profile))
+        let anchor = try #require(ca.ca(for: "localhost", port: 443, profileID: profile))
 
         let fd = try Self.connectTCP(port: server.port)
         defer { close(fd) }

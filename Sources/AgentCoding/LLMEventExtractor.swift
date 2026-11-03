@@ -80,8 +80,25 @@ enum LLMEventExtractor {
                          "tools walk done host=\(host) took=\(BACDebug.ms(toolsT0))")
         }
 
+        // The reasoning behind each call: the thinking and text the model
+        // produced in this turn since the previous call (NETWORK_LINEAGE.md).
+        // Often empty: models may go straight to the call, and some return
+        // their thinking opaque (a signature, no text). So the prompt that led
+        // here and the call's own stated intent travel with it too.
+        var reasoning = ""
+        let prompt = Self.latestUserPrompt(conversation)
         for block in assistant.content {
-            guard case .toolUse(let name, let input) = block else { continue }
+            switch block {
+            case .thinking(let t), .text(let t):
+                reasoning += (reasoning.isEmpty ? "" : "\n") + t
+                continue
+            default: break
+            }
+            guard case .toolUse(let name, let input, let toolUseID) = block else { continue }
+            let why = reasoning
+            reasoning = ""
+            var ids: [String: AnyJSON] = [:]
+            if let toolUseID { ids["tool_use_id"] = .string(String(toolUseID.prefix(128))) }
             let toolT0 = Date()
             BACDebug.log("[ac/llm]",
                          "tool.use emit name=\(name) inputBytes=\(input.utf8.count)")
@@ -94,7 +111,25 @@ enum LLMEventExtractor {
                 eventData: [
                     "tool_name": .string(name),
                     "input_summary": .string(summarize(input: input, max: 240)),
-                ])
+                ].merging(ids) { a, _ in a })
+            if let toolUseID {
+                let isNew = NetworkLineage.shared.noteToolCall(
+                    profileID: profileID, id: toolUseID, tool: name,
+                    command: Self.isCommandTool(name) ? Self.extractCommand(from: input, max: 4000) : nil,
+                    reasoning: why)
+                let intent = Self.statedIntent(from: input)
+                if isNew && !(why.isEmpty && prompt == nil && intent == nil) {
+                    // Shown on the user's own timeline always; uploaded only
+                    // when the organization opts in (BACEventEmitter gate).
+                    let capped = String(why.prefix(2000))
+                    var d: [String: AnyJSON] = [
+                        "tool_use_id": .string(String(toolUseID.prefix(128))), "tool": .string(name),
+                        "text": .string(capped), "truncated": .bool(capped.count < why.count)]
+                    if let prompt { d["prompt"] = .string(String(prompt.prefix(2000))) }
+                    if let intent { d["intent"] = .string(String(intent.prefix(500))) }
+                    BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "agent.reasoning", eventData: d)
+                }
+            }
             defer {
                 BACDebug.log("[ac/llm]",
                              "tool.use done name=\(name) took=\(BACDebug.ms(toolT0))")
@@ -109,7 +144,7 @@ enum LLMEventExtractor {
                     BACEventEmitter.shared.emitDetached(
                         profileID: profileID,
                         eventType: "file.read",
-                        eventData: ["path": .string(p), "tool": .string(name)])
+                        eventData: ["path": .string(p), "tool": .string(name)].merging(ids) { a, _ in a })
                 } else {
                     BACDebug.log("[ac/llm]",
                                  "no path extracted name=\(name) inputBytes=\(input.utf8.count)")
@@ -119,7 +154,7 @@ enum LLMEventExtractor {
                     BACEventEmitter.shared.emitDetached(
                         profileID: profileID,
                         eventType: "file.write",
-                        eventData: ["path": .string(p), "tool": .string(name)])
+                        eventData: ["path": .string(p), "tool": .string(name)].merging(ids) { a, _ in a })
                 } else {
                     BACDebug.log("[ac/llm]",
                                  "no path extracted name=\(name) inputBytes=\(input.utf8.count)")
@@ -132,7 +167,7 @@ enum LLMEventExtractor {
                         eventData: [
                             "command": .string(cmd),
                             "tool": .string(name),
-                        ])
+                        ].merging(ids) { a, _ in a })
                 } else {
                     BACDebug.log("[ac/llm]",
                                  "no command extracted name=\(name) inputBytes=\(input.utf8.count)")
@@ -142,6 +177,31 @@ enum LLMEventExtractor {
                              "unknown tool name=\(name) inputBytes=\(input.utf8.count) — only generic tool.use emitted")
             }
         }
+    }
+
+    /// The user's most recent message in the request: what the agent was
+    /// asked to do. Harness-injected blocks (Claude Code's `<system-reminder>`)
+    /// and tool results aren't the user's words and are skipped.
+    static func latestUserPrompt(_ c: Conversation) -> String? {
+        for m in c.messages.reversed() where m.role == .user {
+            let texts = m.content.compactMap { b -> String? in
+                guard case .text(let t) = b else { return nil }
+                let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                return s.isEmpty || s.hasPrefix("<system-reminder>") ? nil : s
+            }
+            if !texts.isEmpty { return texts.joined(separator: "\n") }
+        }
+        return nil
+    }
+
+    /// The call's own one-line reason, when the tool has one (Claude Code's
+    /// Bash requires a `description`; others use `justification` / `reason`).
+    static func statedIntent(from input: String) -> String? {
+        guard let d = parseInputJSON(input) else { return nil }
+        for key in ["description", "justification", "reason"] {
+            if let s = d[key] as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty { return s }
+        }
+        return nil
     }
 
     // MARK: - Tool-name classification
@@ -197,11 +257,11 @@ enum LLMEventExtractor {
         return nil
     }
 
-    static func extractCommand(from input: String) -> String? {
+    static func extractCommand(from input: String, max: Int = 500) -> String? {
         guard let dict = parseInputJSON(input) else { return nil }
         for key in ["command", "cmd", "script"] {
             if let s = dict[key] as? String, !s.isEmpty {
-                return summarize(input: s, max: 500)
+                return summarize(input: s, max: max)
             }
             // Codex `shell` passes command as ["bash","-lc","<cmd>"].
             // Pull the actual shell payload when we recognise that
@@ -212,10 +272,10 @@ enum LLMEventExtractor {
                 if strs.count >= 3,
                    ["bash", "/bin/bash", "sh", "/bin/sh", "zsh"].contains(strs[0]),
                    strs[1].hasPrefix("-") {
-                    return summarize(input: strs[2], max: 500)
+                    return summarize(input: strs[2], max: max)
                 }
                 let joined = strs.joined(separator: " ")
-                if !joined.isEmpty { return summarize(input: joined, max: 500) }
+                if !joined.isEmpty { return summarize(input: joined, max: max) }
             }
         }
         return nil

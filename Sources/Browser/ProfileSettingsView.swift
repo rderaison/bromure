@@ -383,6 +383,15 @@ struct ProfileSettingsView: View {
     // MARK: - General
 
     @AppStorage("automation.enabled") private var automationEnabled = false
+    /// Shared with Settings › General and every window's profile menu.
+    @AppStorage(AppState.launchProfileKey) private var launchProfileID = ""
+
+    /// This profile is the one Bromure opens at launch (unchecking returns
+    /// to the last-used profile). Applies at once, like the profile menu's.
+    private var isDefaultProfile: Binding<Bool> {
+        Binding(get: { launchProfileID == draft.id.uuidString },
+                set: { on in launchProfileID = on ? draft.id.uuidString : "" })
+    }
 
     private var generalView: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -394,6 +403,14 @@ struct ProfileSettingsView: View {
                 TextField("Name", text: $draft.name)
                     .textFieldStyle(.roundedBorder)
             }
+
+            settingsDivider
+
+            settingToggle(
+                "Default Profile",
+                description: "Bromure opens this profile when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front \u{2014} instead of the one you used last.",
+                isOn: isDefaultProfile
+            )
 
             settingsDivider
 

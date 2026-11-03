@@ -147,6 +147,12 @@ final class InitProgressModel {
             bumpProgress(to: 0.60 + 0.20 * (Self.trailingPercent(of: m) ?? 0.0))
             return
         }
+        // A download that reuses the saved stock image skips straight
+        // past the download + expansion phases.
+        if m.hasPrefix("reusing the saved") {
+            bumpProgress(to: 0.80)
+            return
+        }
         // "Installing recommended packages (4 step(s)…" — anchor the
         // final segment at the bar's current position; each guest-side
         // "END   step" line (spotted by appendLog) advances it.

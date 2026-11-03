@@ -23,6 +23,9 @@ final class AutomationMCPServer: MCPLineHandler {
     private let runNow: (UUID) -> Void
     /// The repository watches' engine — the findings tools.
     private let watches: () -> RepoWatchEngine?
+    /// The agents the workspace can run (its Models settings and sign-ins
+    /// included), as the editor offers them.
+    private let readyTools: (Profile) -> [Profile.Tool]
 
     init(profileID: Profile.ID,
          store: @escaping () -> ScheduledAutomationStore?,
@@ -30,7 +33,8 @@ final class AutomationMCPServer: MCPLineHandler {
          save: @escaping (ScheduledAutomation) -> Void,
          remove: @escaping (UUID) -> Void,
          runNow: @escaping (UUID) -> Void,
-         watches: @escaping () -> RepoWatchEngine? = { nil }) {
+         watches: @escaping () -> RepoWatchEngine? = { nil },
+         readyTools: @escaping (Profile) -> [Profile.Tool] = { $0.allToolSpecs.map(\.tool) }) {
         self.profileID = profileID
         self.store = store
         self.profile = profile
@@ -38,6 +42,7 @@ final class AutomationMCPServer: MCPLineHandler {
         self.remove = remove
         self.runNow = runNow
         self.watches = watches
+        self.readyTools = readyTools
     }
 
     // MARK: JSON-RPC
@@ -116,6 +121,7 @@ final class AutomationMCPServer: MCPLineHandler {
         "assignmentFilter": ["type": "string", "enum": ["unassigned", "assignedToMe"],
                              "description": "linearIssue: which issues fire (default unassigned)."],
         "ignoreBacklog": ["type": "boolean", "description": "Event triggers: skip items that already exist when the watch starts (default true)."],
+        "maxParallelRuns": ["type": "integer", "description": "Event triggers: at most this many runs at once; the rest wait, oldest first (default 1, 0 = no limit)."],
         "filters": ["type": "object", "description": "Event triggers: labels (array), titleContains, excludeDrafts, ignoreBots, baseBranch, commitBranch, commitSubfolder.",
                     "properties": [
                         "labels": ["type": "array", "items": ["type": "string"]],
@@ -446,7 +452,7 @@ final class AutomationMCPServer: MCPLineHandler {
         }
         if let v = args["tool"] as? String {
             guard let t = Profile.Tool(rawValue: v) else { return "unknown tool \(v)" }
-            let configured = profile.allToolSpecs.map(\.tool)
+            let configured = readyTools(profile)
             guard configured.contains(t) else {
                 return "\(t.displayName) isn't set up on this machine (available: "
                     + configured.map(\.rawValue).joined(separator: ", ") + ")"
@@ -466,6 +472,7 @@ final class AutomationMCPServer: MCPLineHandler {
             a.assignmentFilter = f
         }
         if let v = args["ignoreBacklog"] as? Bool { a.ignoreBacklog = v }
+        if let v = args["maxParallelRuns"] as? Int { a.maxParallelRuns = max(0, v) }
         if let f = args["filters"] as? [String: Any] {
             if let v = f["labels"] as? [String] { a.filters.labels = v }
             if let v = f["titleContains"] as? String { a.filters.titleContains = v }
@@ -538,6 +545,7 @@ final class AutomationMCPServer: MCPLineHandler {
         }
         if a.trigger != .schedule, a.trigger != .afterAutomation {
             d["ignoreBacklog"] = a.ignoreBacklog
+            d["maxParallelRuns"] = a.maxParallelRuns
             var f: [String: Any] = [
                 "excludeDrafts": a.filters.excludeDrafts, "ignoreBots": a.filters.ignoreBots,
             ]

@@ -130,13 +130,15 @@ final class MLXServer: @unchecked Sendable {
 
     private func handle(clientFD: Int32) {
         defer { close(clientFD) }
-        while let req = InferenceRepairProxy.readRequest(fd: clientFD) {
+        // One pool per request: a raw Thread never drains its implicit pool.
+        while autoreleasepool(invoking: { () -> Bool in
+            guard let req = InferenceRepairProxy.readRequest(fd: clientFD) else { return false }
             guard let resp = respond(to: req, streamFD: clientFD) else {
-                break   // streamed directly on the socket (Connection: close)
+                return false   // streamed directly on the socket (Connection: close)
             }
-            if !Self.writeAll(clientFD, resp) { break }
-            if req.headerValue("connection")?.lowercased() == "close" { break }
-        }
+            if !Self.writeAll(clientFD, resp) { return false }
+            return req.headerValue("connection")?.lowercased() != "close"
+        }) {}
     }
 
     private func respond(to req: Request, streamFD: Int32? = nil) -> Data? {

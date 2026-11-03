@@ -25,7 +25,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     public enum DefaultAction: String, Sendable, Equatable, Codable { case allow, deny }
 
     /// What a matched flow is permitted to do at the connection layer.
-    public enum Verdict: Sendable, Equatable { case allow, deny, mitm }
+    /// `splice` relays without terminating TLS (an OpenShell `tls: skip`
+    /// endpoint) even for a host the MiTM would otherwise intercept.
+    public enum Verdict: Sendable, Equatable { case allow, deny, mitm, splice }
 
     /// A rule target: any, a hostname (suffix-matched), or an IPv4 host/CIDR.
     public enum Target: Sendable, Equatable, Codable {
@@ -41,7 +43,12 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
             case .any:
                 return true
             case .cidr(let net, let mask):
-                guard let ip else { return false }
+                // Proxy-layer callers (CONNECT 192.0.2.10:6443) pass no IP, only
+                // the target as a hostname — an IP literal there is the address.
+                // Canonical dotted decimal only (`parseIPv4`): any other
+                // spelling is denied before rules are read (`verdict`).
+                guard let ip = ip ?? hostnames.lazy.compactMap(EgressPolicy.parseIPv4).first
+                else { return false }
                 return (ip & mask) == (net & mask)
             case .host(let domain, let apex):
                 for h in hostnames {
@@ -182,9 +189,30 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// setting carried alongside the rules to the switch and the proxy.
     public var logsAllowed: Bool? = nil
 
+    /// An OpenShell sandbox policy that replaces the pf rules for this
+    /// workspace. When set, `rules` / `defaultAction` are ignored: every
+    /// connection verdict comes from it (default deny), and inspected requests
+    /// are checked with `OpenShellPolicy.evaluateRequest` in the MiTM.
+    public var openShell: OpenShellPolicy? {
+        didSet { inspectedPorts = openShell?.inspectedPorts ?? [] }
+    }
+
+    /// OpenShell `binaries` are enforced: the workspace runs a strict sandbox
+    /// whose root attestor reports each connection's executable. Rules then
+    /// apply only to their listed binaries; a connection with no attested
+    /// identity matches only Bromure's provider rules.
+    public var enforceBinaries: Bool = false
+
     public init(defaultAction: DefaultAction = .allow, rules: [Rule] = []) {
         self.defaultAction = defaultAction
         self.rules = rules
+    }
+
+    public init(openShell: OpenShellPolicy) {
+        self.defaultAction = .deny
+        self.rules = []
+        self.openShell = openShell
+        self.inspectedPorts = openShell.inspectedPorts
     }
 
     /// Whether connections this policy allows are logged (see `logsAllowed`).
@@ -194,7 +222,37 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// rules configured.
     public static let allowAll = EgressPolicy(defaultAction: .allow, rules: [])
 
-    public var isActive: Bool { defaultAction == .deny || !rules.isEmpty }
+    public var isActive: Bool { openShell != nil || defaultAction == .deny || !rules.isEmpty }
+
+    /// Whether a flow with no identifiable hostname at L4 should be handed to
+    /// the MiTM (on an intercepted port) rather than decided at the switch:
+    /// OpenShell rules are keyed by hostname, which the SNI / Host header
+    /// supplies authoritatively once the flow reaches the MiTM.
+    public var defersToInterception: Bool { openShell != nil }
+
+    /// Where `policy.local` (the OpenShell policy advisor) lives inside a
+    /// workspace: the guest maps the name to this reserved TEST-NET-1 address,
+    /// the switch always diverts :80 to it into the interception layer, and
+    /// the MiTM answers it itself. Never routed anywhere.
+    public static let advisorAddress: UInt32 = (192 << 24) | (0 << 16) | (2 << 8) | 254
+    public static let advisorAddressString = "192.0.2.254"
+
+    /// TCP ports beyond 80/443 whose flows must reach the interception layer:
+    /// OpenShell applies its L7 rules (and middlewares) on any port, so every
+    /// port of an inspected endpoint is diverted. Plain L4 endpoints are left
+    /// on the native path (a server-speaks-first protocol would stall behind a
+    /// client-first peek).
+    /// (Cached: the switch reads it per packet.)
+    public private(set) var inspectedPorts: Set<UInt16> = []
+
+    /// Whether an address-level deny on this TCP port should be handed to the
+    /// interception layer, which re-decides with the TLS SNI / HTTP Host.
+    /// Only when some endpoint names a hostname on this port can that change
+    /// the verdict; otherwise the deny is final and the connect is refused at
+    /// the SYN, as OpenShell fails the connect instead of accepting it.
+    public func defersToInterception(port: UInt16) -> Bool {
+        openShell?.hostnameEndpointCovers(port: port) ?? false
+    }
 
     // MARK: - Temporary rules
 
@@ -265,7 +323,29 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// passthrough logic still applies at the SNI layer). Used by both the switch
     /// (IP/snoop) and the MiTM (SNI).
     public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16,
+                        identity: OpenShellPolicy.BinaryIdentity? = nil,
                         now: Date = Date()) -> Verdict {
+        // No resolved address (a proxy's CONNECT or Host): a target the
+        // resolver reads as an IPv4 address spelled any other way than
+        // a.b.c.d — 167772163, 10.1, 0x0a.1.2.3, 010.1.2.3, ::ffff:10.0.0.1 —
+        // dials an address the rules never saw (no CIDR matched it: a `deny
+        // 10.0.0.0/8` under `default allow` let it through), or, read
+        // differently by the dialer, another one than the rule matched.
+        if ip == nil, hostnames.contains(where: Self.isNonCanonicalIPv4Literal) { return .deny }
+        if let openShell {
+            // OpenShell endpoints are TCP-only: any other transport is denied.
+            guard proto != .udp else { return .deny }
+            // A connection straight to an address (no hostname known for it)
+            // is a connection to that IP literal: an endpoint whose host is
+            // that literal matches, as in OpenShell.
+            let hosts = hostnames.isEmpty ? (ip.map { [Self.ipv4String($0)] } ?? []) : hostnames
+            switch openShell.evaluateConnect(hostnames: hosts, ip: ip, port: port,
+                                             identity: identity, enforceBinaries: enforceBinaries) {
+            case .deny: return .deny
+            case .allow(_, let inspect, let tlsSkip):
+                return tlsSkip ? .splice : (inspect ? .mitm : .allow)
+            }
+        }
         guard let rule = firstMatch(ip: ip, hostnames: hostnames, proto: proto, port: port, now: now) else {
             return defaultAction == .deny ? .deny : .allow
         }
@@ -288,6 +368,9 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// else permits — connection deny is handled at the connection layer.
     public func permitsMethod(hostnames: [String], port: UInt16, method: String,
                               now: Date = Date()) -> Bool {
+        // OpenShell request rules are evaluated on the full request (method,
+        // path, query) by `OpenShellPolicy.evaluateRequest`, not here.
+        if openShell != nil { return true }
         guard let rule = firstMatch(ip: nil, hostnames: hostnames, proto: .tcp, port: port, now: now) else { return true }
         return rule.methodAllowed(method)
     }
@@ -408,10 +491,12 @@ extension EgressPolicy {
     // MARK: parse helpers
 
     private static func parseTarget(_ token: String, line: Int) throws -> (Target, PortSet) {
-        // Split host-part from an optional :ports suffix (IPv4/CIDR carry no ':').
+        // Split host-part from an optional :ports suffix (IPv4/CIDR carry no
+        // ':', so `10.0.0.0/8:636` is a CIDR with ports — the form
+        // `targetString` serializes).
         var hostPart = token
         var ports = PortSet()
-        if let colon = token.lastIndex(of: ":"), !token.contains("/") {
+        if let colon = token.lastIndex(of: ":") {
             hostPart = String(token[..<colon])
             ports = try parsePorts(String(token[token.index(after: colon)...]), line: line)
         }
@@ -421,7 +506,7 @@ extension EgressPolicy {
             target = .any
         } else if hostPart.contains("/") {
             target = try parseCIDR(hostPart, line: line)
-        } else if let ip = parseIPv4(hostPart) {
+        } else if let ip = parseRuleIPv4(hostPart) {
             target = .cidr(net: ip, mask: 0xFFFF_FFFF)          // bare IP = /32
         } else if lp.hasPrefix("*.") {
             target = .host(domain: String(lp.dropFirst(2)), includeApex: false)
@@ -468,7 +553,7 @@ extension EgressPolicy {
 
     private static func parseCIDR(_ s: String, line: Int) throws -> Target {
         let parts = s.split(separator: "/")
-        guard parts.count == 2, let ip = parseIPv4(String(parts[0])),
+        guard parts.count == 2, let ip = parseRuleIPv4(String(parts[0])),
               let bits = UInt8(parts[1]), bits <= 32 else {
             throw ParseError(line: line, message: "bad CIDR '\(s)'")
         }
@@ -476,7 +561,30 @@ extension EgressPolicy {
         return .cidr(net: ip, mask: mask)
     }
 
+    /// Public dotted-quad parser for callers outside SandboxEngine.
+    public static func parseIPv4Address(_ s: String) -> UInt32? { parseIPv4(s) }
+
+    /// Canonical dotted decimal only: four octets, each 0–255 in decimal
+    /// digits, no leading zero. "010" read as 10 here is 8 to an inet_aton
+    /// reader — the policy and the dialer must agree on the address.
     public static func parseIPv4(_ s: String) -> UInt32? {
+        let octets = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var v: UInt32 = 0
+        for o in octets {
+            guard !o.isEmpty, o.count <= 3, o.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                  o.count == 1 || o.first != "0",
+                  let n = UInt16(o), n <= 255 else { return nil }
+            v = (v << 8) | UInt32(n)
+        }
+        return v
+    }
+
+    /// An address in a rule, as it always read: decimal octets, a leading zero
+    /// allowed ("010.0.0.0/8" is 10.0.0.0/8). Never an error — a document
+    /// that fails to parse enforces nothing at all. (A flow's target is
+    /// matched canonical-only: `parseIPv4`.)
+    static func parseRuleIPv4(_ s: String) -> UInt32? {
         let octets = s.split(separator: ".", omittingEmptySubsequences: false)
         guard octets.count == 4 else { return nil }
         var v: UInt32 = 0
@@ -485,6 +593,44 @@ extension EgressPolicy {
             v = (v << 8) | UInt32(n)
         }
         return v
+    }
+
+    /// A target the system reads as an IPv4 address without asking DNS, but
+    /// not spelled as canonical a.b.c.d: what getaddrinfo or inet_aton take
+    /// as a number (hex, octal, a single integer, a short form), or an IPv6
+    /// literal carrying an IPv4 address (::ffff:a.b.c.d, ::a.b.c.d).
+    /// An IPv6 authority comes bracketed (`CONNECT [::ffff:10.0.0.1]:443`)
+    /// and is dialed unbracketed: the brackets are looked through.
+    public static func isNonCanonicalIPv4Literal(_ target: String) -> Bool {
+        var host = target
+        if host.hasPrefix("["), host.hasSuffix("]"), host.count > 2 {
+            host = String(host.dropFirst().dropLast())
+        }
+        guard parseIPv4(host) == nil, !host.isEmpty else { return false }
+        var a = in_addr()
+        if inet_aton(host, &a) != 0 { return true }
+        var hints = addrinfo()
+        hints.ai_flags = AI_NUMERICHOST
+        hints.ai_family = AF_UNSPEC
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &res) == 0, let r = res else { return false }
+        defer { freeaddrinfo(res) }
+        switch r.pointee.ai_family {
+        case AF_INET:
+            return true
+        case AF_INET6:
+            let b = r.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { p in
+                withUnsafeBytes(of: p.pointee.sin6_addr) { Array($0) }
+            }
+            let zero10 = b[0..<10].allSatisfy { $0 == 0 }
+            let mapped = zero10 && b[10] == 0xFF && b[11] == 0xFF
+            // ::a.b.c.d (deprecated IPv4-compatible) — not :: or ::1.
+            let compatible = zero10 && b[10] == 0 && b[11] == 0 && b[12..<16].contains { $0 != 0 }
+                && !(b[12] == 0 && b[13] == 0 && b[14] == 0)
+            return mapped || compatible
+        default:
+            return false
+        }
     }
 
     // MARK: serialize helpers

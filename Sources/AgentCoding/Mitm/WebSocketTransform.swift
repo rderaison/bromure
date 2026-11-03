@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SandboxEngine
 
 // WebSocket content protection.
 //
@@ -374,6 +375,12 @@ final class WSContentGuard: @unchecked Sendable {
     var recordInjection: @Sendable (PromptInjectionFlag, String) -> Void
     var recordSwaps: @Sendable (PIIRewriter.Outcome, Double) -> Void
 
+    /// Squelch for this socket's turns, and the conversation the upgrade
+    /// named (Codex's `session_id` header) — where its savings are counted.
+    var squelch: @Sendable () -> SquelchPolicy? = { nil }
+    var conversation: String?
+    var squelchLedger: SquelchLedger = .shared
+
     private let restorer: PIIResponseRestorer
 
     init(host: String, path: String, profileID: UUID, vault: PIIVault,
@@ -404,21 +411,60 @@ final class WSContentGuard: @unchecked Sendable {
 
     /// The guard for an upgrade, or nil when the socket should stay an
     /// opaque (compressed) pipe: not a model provider, or neither engine on.
-    static func make(host: String, path: String, profileID: UUID) -> WSContentGuard? {
+    /// A model provider's socket, which these engines read.
+    static func isModelSocket(host: String, profileID: UUID) -> Bool {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this Mac
         // (a custom server elsewhere) — the on-device engine is exempt.
-        guard HTTPMitmConnection.isAIHost(h), !h.contains("huggingface.co"),
-              h != InferenceService.localMitmHost
-                || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil else { return nil }
+        return HTTPMitmConnection.isAIHost(h) && !h.contains("huggingface.co")
+            && (h != InferenceService.localMitmHost || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil)
+    }
+
+    /// Squelch is on for this socket.
+    static func squelchApplies(host: String, profileID: UUID) -> Bool {
+        isModelSocket(host: host, profileID: profileID)
+            && (HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled ?? false)
+    }
+
+    /// Squelch as an OpenShell message transform, for a socket on the
+    /// per-message pump (a policy or rewrite is installed, so there is no
+    /// guard): client text is trimmed first, then `then` runs on it.
+    static func squelchingTransform(then: ((String) -> OpenShellWebSocket.MessageTransform)?, profileID: UUID,
+                                    conversation: String?, ledger: SquelchLedger = .shared)
+        -> (String) -> OpenShellWebSocket.MessageTransform {
+        { text in
+            var current = text
+            var changed = false
+            let data = Data(text.utf8)
+            if HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled == true,
+               SquelchRewriter.mayCarryToolOutput(data) {
+                let o = SquelchRewriter.rewrite(data, priorCall: { SquelchCallRegistry.shared.call(profileID, $0) })
+                ledger.record(o, profileID: profileID, conversation: conversation ?? o.conversation)
+                if o.body != data { current = String(decoding: o.body, as: UTF8.self); changed = true }
+            }
+            switch then?(current) ?? .unchanged {
+            case .unchanged: break
+            case .replaced(let t): current = t; changed = true
+            case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
+            }
+            return changed ? .replaced(current) : .unchanged
+        }
+    }
+
+    static func make(host: String, path: String, profileID: UUID, conversation: String? = nil) -> WSContentGuard? {
+        guard isModelSocket(host: host, profileID: profileID) else { return nil }
         let piiOn = HTTPMitmConnection.piiPolicyProvider?(profileID)?.isActive ?? false
         let piOn = HTTPMitmConnection.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
-        guard piiOn || piOn else { return nil }
+        let squelchOn = HTTPMitmConnection.squelchPolicyProvider?(profileID)?.enabled ?? false
+        guard piiOn || piOn || squelchOn else { return nil }
         let pid = profileID
-        return WSContentGuard(
+        let g = WSContentGuard(
             host: host, path: path, profileID: profileID, vault: PIIVault.forProfile(profileID),
             piiPolicy: { HTTPMitmConnection.piiPolicyProvider?(pid) },
             injectionPolicy: { HTTPMitmConnection.promptInjectionPolicyProvider?(pid) })
+        g.squelch = { HTTPMitmConnection.squelchPolicyProvider?(pid) }
+        g.conversation = conversation
+        return g
     }
 
     // MARK: Client → model
@@ -427,12 +473,23 @@ final class WSContentGuard: @unchecked Sendable {
         guard payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return .forward(nil) }
         let pi = injectionPolicy().flatMap { $0.isActive ? $0 : nil }
         let pii = piiPolicy().flatMap { $0.isActive ? $0 : nil }
-        guard pi != nil || pii != nil else { return .forward(nil) }
+        let squelchOn = squelch()?.enabled ?? false
+        guard pi != nil || pii != nil || squelchOn else { return .forward(nil) }
         let type = Self.messageType(payload)
         // Tool output the user already blocked goes out as a placeholder
         // (the conversation is resent every turn), so the session goes on.
         var payload = payload
+        // "Changed": what goes out isn't what the client sent.
         var redacted = false
+        // Squelch, before the scans: they read what the model will.
+        if squelchOn, SquelchRewriter.mayCarryToolOutput(payload) {
+            let pid = profileID
+            let o = SquelchRewriter.rewrite(payload, priorCall: { SquelchCallRegistry.shared.call(pid, $0) })
+            squelchLedger.record(o, profileID: profileID,
+                                        conversation: conversation ?? o.conversation)
+            if o.body != payload { payload = o.body; redacted = true }
+        }
+        guard pi != nil || pii != nil else { return .forward(redacted ? payload : nil) }
         if pi != nil, pi?.onDetection != .log,
            let r = PromptInjectionRedactions.shared.redact(payload, profileID: profileID) {
             payload = r.body
@@ -508,6 +565,11 @@ final class WSContentGuard: @unchecked Sendable {
     /// split across deltas — which may turn one message into none (held) or
     /// several (a released tail ahead of the closing event).
     func server(_ payload: Data) -> [Data]? {
+        // The calls the model makes: what a chained turn's bare results are
+        // matched with (Squelch).
+        if squelch()?.enabled == true {
+            SquelchCallRegistry.shared.learn(fromServerEvent: payload, profileID: profileID)
+        }
         guard !vault.isEmpty,
               payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return nil }
         var compact = payload
@@ -650,75 +712,81 @@ enum WSTransformRelay {
         var eof = false
         var skippedReported = 0
         while true {
-            if Task.isCancelled { return }
-            if !eof {
-                drain: while true {
-                    let outcome: StreamReadOutcome
-                    do { outcome = try client.readNB() } catch { return }
-                    switch outcome {
-                    case .bytes(let d): onChunk(d); reader.feed(d)
-                    case .wouldBlock: break drain
-                    case .eof: eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                if !eof {
+                    drain: while true {
+                        let outcome: StreamReadOutcome
+                        do { outcome = try client.readNB() } catch { return false }
+                        switch outcome {
+                        case .bytes(let d): onChunk(d); reader.feed(d)
+                        case .wouldBlock: break drain
+                        case .eof: eof = true; break drain
+                        }
                     }
                 }
-            }
-            while let f = reader.next() {
-                if f.isControl {
-                    // Close waits behind held messages; ping/pong may go
-                    // between them (RFC 6455 §5.4 lets control frames
-                    // interleave with a message's fragments).
-                    if f.opcode == WSFrame.close { queue.append(.raw(f.raw)) } else { out.append(f.raw) }
-                    continue
-                }
-                switch assembler.add(f) {
-                case .incomplete: break
-                case .passthrough(let raw): queue.append(.raw(raw))
-                case .complete(let op, let payload, let raw):
-                    queue.append(f.rsv == 0 ? .message(opcode: op, payload: payload, raw: raw) : .raw(raw))
-                case .protocolError:
-                    FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad client framing — closing\n".utf8))
-                    return
-                }
-            }
-            if reader.failed { return }
-            if assembler.oversized > skippedReported {
-                skippedReported = assembler.oversized
-                HTTPMitmConnection.recordScanSkipped(
-                    host: g.host, path: g.path, engines: ["pii", "prompt_injection"],
-                    reason: "WebSocket message too large to scan", profileID: g.profileID)
-            }
-            while let first = queue.first {
-                if let inf = inflight {
-                    guard let verdict = inf.box.take() else { break }
-                    inflight = nil
-                    queue.removeFirst()
-                    guard case .message(let op, _, let raw) = first else { continue }
-                    switch verdict {
-                    case .forward(nil): out.append(raw)
-                    case .forward(let p?): out.append(WSFrame.encode(opcode: op, payload: p, masked: true))
-                    case .block(let reply):
-                        inject.push(WSFrame.encode(opcode: WSFrame.text, payload: reply, masked: false))
+                while let f = reader.next() {
+                    if f.isControl {
+                        // Close waits behind held messages; ping/pong may go
+                        // between them (RFC 6455 §5.4 lets control frames
+                        // interleave with a message's fragments).
+                        if f.opcode == WSFrame.close { queue.append(.raw(f.raw)) } else { out.append(f.raw) }
+                        continue
                     }
-                    continue
+                    switch assembler.add(f) {
+                    case .incomplete: break
+                    case .passthrough(let raw): queue.append(.raw(raw))
+                    case .complete(let op, let payload, let raw):
+                        queue.append(f.rsv == 0 ? .message(opcode: op, payload: payload, raw: raw) : .raw(raw))
+                    case .protocolError:
+                        FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad client framing — closing\n".utf8))
+                        return false
+                    }
                 }
-                switch first {
-                case .raw(let r):
-                    out.append(r)
-                    queue.removeFirst()
-                case .message(_, let payload, _):
-                    let box = Box<WSContentGuard.ClientVerdict>()
-                    let task = Task.detached { box.set(await g.client(payload)) }
-                    inflight = (box, task)
+                if reader.failed { return false }
+                if assembler.oversized > skippedReported {
+                    skippedReported = assembler.oversized
+                    HTTPMitmConnection.recordScanSkipped(
+                        host: g.host, path: g.path, engines: ["pii", "prompt_injection"],
+                        reason: "WebSocket message too large to scan", profileID: g.profileID)
                 }
+                while let first = queue.first {
+                    if let inf = inflight {
+                        guard let verdict = inf.box.take() else { break }
+                        inflight = nil
+                        queue.removeFirst()
+                        guard case .message(let op, _, let raw) = first else { continue }
+                        switch verdict {
+                        case .forward(nil): out.append(raw)
+                        case .forward(let p?): out.append(WSFrame.encode(opcode: op, payload: p, masked: true))
+                        case .block(let reply):
+                            inject.push(WSFrame.encode(opcode: WSFrame.text, payload: reply, masked: false))
+                        }
+                        continue
+                    }
+                    switch first {
+                    case .raw(let r):
+                        out.append(r)
+                        queue.removeFirst()
+                    case .message(_, let payload, _):
+                        let box = Box<WSContentGuard.ClientVerdict>()
+                        let task = Task.detached { box.set(await g.client(payload)) }
+                        inflight = (box, task)
+                    }
+                }
+                if !flush(&out, to: upstream) { return false }
+                if eof && queue.isEmpty && inflight == nil { return false }
+                if eof {
+                    usleep(20_000)   // only a scan left to finish
+                    return true
+                }
+                var pfd = pollfd(fd: client.fd, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, inflight == nil ? 250 : 20) < 0 && errno != EINTR { return false }
+                return true
             }
-            if !flush(&out, to: upstream) { return }
-            if eof && queue.isEmpty && inflight == nil { return }
-            if eof {
-                usleep(20_000)   // only a scan left to finish
-                continue
-            }
-            var pfd = pollfd(fd: client.fd, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, inflight == nil ? 250 : 20) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 
@@ -728,48 +796,54 @@ enum WSTransformRelay {
         var assembler = WSMessageAssembler()
         var out = Data()
         while true {
-            if Task.isCancelled { return }
-            var eof = false
-            drain: while true {
-                let outcome: StreamReadOutcome
-                do { outcome = try upstream.readNB() } catch { return }
-                switch outcome {
-                case .bytes(let d): onChunk(d); reader.feed(d)
-                case .wouldBlock: break drain
-                case .eof: eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                var eof = false
+                drain: while true {
+                    let outcome: StreamReadOutcome
+                    do { outcome = try upstream.readNB() } catch { return false }
+                    switch outcome {
+                    case .bytes(let d): onChunk(d); reader.feed(d)
+                    case .wouldBlock: break drain
+                    case .eof: eof = true; break drain
+                    }
                 }
-            }
-            while let f = reader.next() {
-                if f.isControl {
-                    if f.opcode == WSFrame.close {
-                        for p in g.serverFinish() {
-                            out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false))
+                while let f = reader.next() {
+                    if f.isControl {
+                        if f.opcode == WSFrame.close {
+                            for p in g.serverFinish() {
+                                out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false))
+                            }
                         }
+                        out.append(f.raw)
+                        continue
                     }
-                    out.append(f.raw)
-                    continue
-                }
-                switch assembler.add(f) {
-                case .incomplete: break
-                case .passthrough(let raw): out.append(raw)
-                case .complete(let op, let payload, let raw):
-                    if f.rsv == 0, let restored = g.server(payload) {
-                        for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
-                    } else {
-                        out.append(raw)
+                    switch assembler.add(f) {
+                    case .incomplete: break
+                    case .passthrough(let raw): out.append(raw)
+                    case .complete(let op, let payload, let raw):
+                        if f.rsv == 0, let restored = g.server(payload) {
+                            for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
+                        } else {
+                            out.append(raw)
+                        }
+                    case .protocolError:
+                        FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad server framing — closing\n".utf8))
+                        return false
                     }
-                case .protocolError:
-                    FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad server framing — closing\n".utf8))
-                    return
                 }
+                if reader.failed { return false }
+                for d in inject.drain() { out.append(d) }
+                if !out.isEmpty { onOut(out) }
+                if !flush(&out, to: client) { return false }
+                if eof { return false }
+                var pfd = pollfd(fd: upstream.fd, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, 100) < 0 && errno != EINTR { return false }
+                return true
             }
-            if reader.failed { return }
-            for d in inject.drain() { out.append(d) }
-            if !out.isEmpty { onOut(out) }
-            if !flush(&out, to: client) { return }
-            if eof { return }
-            var pfd = pollfd(fd: upstream.fd, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, 100) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 

@@ -378,14 +378,25 @@ struct FileExplorerPane: View {
         .padding(.horizontal, 16)
     }
 
+    static let statusFailedText = "Git status failed here — changed files aren't marked"
+
+    /// The changed-files list with nothing in it: "No changes" only when git
+    /// could say so.
+    static func changedEmptyText(statusFailed: Bool) -> String {
+        statusFailed ? statusFailedText : "No changes"
+    }
+
     private var tree: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 1) {
                 if model.changedOnly {
                     let changed = model.statuses.keys.sorted()
                     if changed.isEmpty {
-                        Text("No changes")
-                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        // A status that failed marks nothing: that isn't "no
+                        // changes" — say what it is, as the list's headline.
+                        Text(LocalizedStringKey(Self.changedEmptyText(statusFailed: model.statusFailed)))
+                            .font(.system(size: 11))
+                            .foregroundStyle(model.statusFailed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                             .padding(8)
                     }
                     ForEach(changed, id: \.self) { path in
@@ -427,6 +438,12 @@ struct FileExplorerPane: View {
                                     ? { model.saveToDownloads(item.node.path) } : nil,
                                 onCopyPath: { copyPath(item.node.path) })
                     }
+                }
+                // (Already the headline of an empty changed-files list.)
+                if model.statusFailed, !(model.changedOnly && model.statuses.isEmpty) {
+                    Text(LocalizedStringKey(Self.statusFailedText))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(8)
                 }
                 if model.truncated {
                     Text("Tree truncated — repo has too many files to list")

@@ -1,18 +1,18 @@
 ---
 title: "Guardrails"
-description: "Ask-before-use and write policies for a machine's credentials, the per-machine egress firewall, and the escape hatches for traffic interception and exfiltration alerts."
+description: "Ask-before-use and write policies for a machine's credentials, and the protections shared by both sandbox engines: telling the agent, the agent watchdog, strict credentials, and the escape hatches for traffic interception and exfiltration alerts."
 order: 7.12
 ---
 
 # Guardrails
 
-[Guardrails](../18-glossary.mdx) control how a machine's credentials may be used (a machine is a workspace, in the settings editor), which connections its VM may open, and how strictly its traffic is intercepted. In the pane's own words: "Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here."
+[Guardrails](../18-glossary.mdx) control how a machine's credentials may be used (a machine is a workspace, in the settings editor), how the machine reacts when an agent hits a wall or behaves oddly, and how strictly its traffic is intercepted. The connections its VM may open are set in [Sandbox Policy](sandbox-policy.mdx). In the pane's own words: "Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here."
 
 <p align="center">
-  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the machine Web app: the explanation of ask-before-use and write policies, an empty state reading No credentials to guard, then the Outbound connections section with its explanation, an Unmatched traffic control set to Allow, an Add rule button and a pf format disclosure" />
+  <img src="../images/editor-guardrails.en.jpg" width="600" alt="The Guardrails pane of the machine Web app: the explanation of ask-before-use and write policies, an empty state reading No credentials to guard, then Don't alert on credential exfiltration and the Protections section: Tell the agent when policy blocks it, Agent watchdog, strict credential mode, Disable transparent interception and the per-request insecure bypass" />
 </p>
 
-The pane has three parts: one row per credential, the **Outbound connections** firewall, and three switches at the bottom. Everything in it applies to a running machine as soon as you click **Save** — no restart. The deeper mechanics are in [Prompt-Injection Detection & Guardrails](../10-prompt-injection.mdx).
+The pane has two parts: one row per credential, then **Protections** — the settings shared by both [sandbox engines](sandbox-policy.mdx). (The outbound-connection rules that used to sit here moved to **Sandbox Policy** in 5.4.) Everything in it applies to a running machine as soon as you click **Save** — no restart. The deeper mechanics are in [Prompt-Injection Detection & Guardrails](../10-prompt-injection.mdx).
 
 ## Credential rows
 
@@ -21,6 +21,8 @@ The pane lists every credential configured in [Credentials](credentials.mdx), in
 ### Require approval to use (ask before use)
 
 Off by default. When on, the first time the credential is used in a session the proxy pauses the request and asks, offering **Allow for 5 minutes**, **Allow for 1 hour**, **Allow for the rest of the session**, or **Don't allow**. Grants live in memory and end with the session; **Window › Credential Approvals…** lists the current ones. See [Credentials & the Wire Boundary](../08-credentials.mdx).
+
+While a credential has a live grant, its row shows how long is left next to the checkbox — an orange countdown (`4m`, then `45s`) for a timed grant, **allowed this session** for a rest-of-session one, and a red **denied** countdown (or **denied this session**) while a deny is in force. Right-click the row to **Allow for 5 minutes**, **Allow for 1 hour** or **Allow for the rest of the session**, to **Deny for 5 minutes**, **Deny for 1 hour** or **Deny for the rest of the session** (refused without asking), or **Revoke — ask next time** to clear either so the next use prompts again. A timed allow or deny starts from now, so a grant that's running low gets a fresh 5 minutes. These act on the running session at once; there's nothing to save. (The countdown appears in the workspace's own settings on the Mac running it, not in Preferences or on a remote client.)
 
 > **Note:** An automation that uses a credential with approval on can't run fully unattended: it pauses at the dialog until you answer on the Mac. The automation editor warns about this.
 
@@ -79,90 +81,57 @@ In **Prompt before write**, a write pauses for **Allow write on "*scope*" from w
 
 Grants are per machine and per scope: one Kubernetes API server, AWS as a whole, one registry, each forge, or one database host. Identical concurrent writes share one dialog. When the machine is used headless over SSH or the CLI, the same choices are asked inside the machine's tmux; no answer means deny.
 
-## Outbound connections (egress firewall)
-
-"Allow or deny the VM's connections by host, IP/CIDR, protocol and port — matched top to bottom, first match wins." Rules cover any protocol and any destination, not just the services above. **Unmatched traffic** sets what happens to a connection no rule matches: **Allow** (default) or **Deny** for an allow-list setup. **Add rule** appends a row.
-
-| Column | Values | Meaning |
-|---|---|---|
-| (checkbox) | on / off | Untick a rule to switch it off without deleting it. A switched-off rule is kept, dimmed, and ignored until you tick it again. |
-| **Action** | `allow` / `deny` | What happens to a match. |
-| **Proto** | `tcp` / `udp` / `web` / `any` | `web` is HTTP(S), the only protocol whose rules can also restrict methods. |
-| **Host / CIDR** | `any`, a hostname, or an IPv4 CIDR | `example.com` covers the domain and all subdomains; `*.example.com` subdomains only. A bare IP is a /32. |
-| **Ports** | `any`, a port, a range (`8000-8999`) or a list | Empty means any. |
-| **Methods** | HTTP verbs, `web` rules only | With `allow`, only these verbs pass (`GET,POST`); with `deny`, these verbs are refused (`PUT,DELETE`). `read-only` means GET/HEAD/OPTIONS. |
-| **Time limit** | clock menu | Turn the rule on for a limited time: **On for 15 minutes**, **On for 1 hour** or **On until the workspace stops**; **Make permanent** removes the limit. A timed rule shows its time left ("14m"), an until-stop rule shows "until stop". |
-
-### Changing rules on a running machine
-
-Rule changes apply to a running machine as soon as you click **Save** — no restart, and they never appear in the restart prompt. New connections follow the new rules at once, and so do the ones already open: switching a rule off, removing it, adding a deny rule, a time limit running out, or an until-stop rule ending all re-check every open connection of the machine, and the ones the new rules deny are cut on both sides. So switching off a temporary allow really ends the access, rather than leaving an open download running to completion.
-
-- Connections made through the proxy settings (`HTTPS_PROXY` — curl, git, npm and the agents use them by default) are cut by the proxy itself: it closes the VM's side and cancels the request to the server, WebSockets included. The Security Timeline records each one as *connection closed — “allow tcp …” no longer allows it*.
-- Direct connections are cut by the virtual switch on their next packet: it drops it and sends the VM a TCP reset, and for intercepted HTTP(S) traffic the proxy's connection to the server is closed too.
-
-A timed rule is switched off at the very second its time is up, and the connections it allowed are cut then.
-
-### Temporary rules
-
-Some rules are only needed for a moment — reaching GitHub or the npm registry long enough to upgrade dependencies, for example. Rather than adding the rule and remembering to delete it, set a time limit with the rule's clock menu:
-
-- **On for 15 minutes** / **On for 1 hour** — the rule stops matching the moment the time is up, even if Bromure is busy; shortly after, it is switched off and saved that way, so it stays in the list for next time.
-- **On until the workspace stops** — the rule is switched off when the machine stops (or restarts), and at the next launch of Bromure if it was still running when the app quit.
-
-To use the rule again later, tick it or pick a new time limit.
-
-The quickest way to allow something that was just blocked is from the [Security Timeline](../11a-security-timeline.mdx#firewall-quick-actions): **Allow…** on the blocked row offers **Always**, **For 15 minutes**, **For 1 hour** and **Until the workspace stops**.
-
-The **pf format** disclosure shows the same rules as text — one per line, ending in `default allow` or `default deny` — which is how they are stored and what the CLI and managed profiles use:
-
-```
-allow tcp api.github.com:443
-allow web api.example.com GET,POST     # only these verbs reach the site
-deny  web api.internal PUT,DELETE      # block these verbs, allow the rest
-deny  udp any:53
-deny  any 10.0.0.0/8
-default deny
-```
-
-Switched-off and temporary rules carry a short note in a comment, so the text stays plain pf:
-
-```
-#@off allow tcp registry.npmjs.org:443          # switched off
-allow tcp github.com:443 #@until=1767225600      # on until this time (Unix seconds)
-allow tcp pypi.org:443 #@until=stop              # on until the machine stops
-```
-
-Enforcement happens on the Mac, in two layers: the virtual network switch checks every connection by destination IP and by the hostname seen in DNS (all protocols), and the proxy checks again by TLS server name and, for `web` rules, by HTTP method. That is what lets a machine read an API it may not write to: `allow web api.example.com GET,POST` gives the agent queries without changes, whatever tool it uses.
-
-Every decision is recorded in the [Security Timeline](../11a-security-timeline.mdx), with the rule that decided it, and on enrolled Macs sent to your organization.
-
-### Logging allowed connections
-
-Blocked connections are always recorded. **Log allowed connections**, under the **Unmatched traffic** choice, decides whether the connections the firewall lets through are recorded too — which is what gives their rows the **Block…** and **Rule…** quick actions. Until you choose, it is on while the machine has rules (or denies unmatched traffic) and off for a machine with no firewall, so a machine without rules doesn't fill the Timeline with "allowed" rows. Turn it on there to see where the agent connects and block a host from the Timeline; turn it off on a ruled machine to list blocks only.
-
-Allowed connections stay low-noise either way: one row per destination (host, port and protocol — a host behind several addresses is one row) at most once a minute, and repeats fold into the previous row with a count. The on-Mac local-models endpoint is never listed.
-
-> **Note:** Local models are always reachable: an allow rule for the on-Mac inference endpoint is placed ahead of your rules, so even `default deny` can't cut agents off from an on-device model.
-
-## Disable transparent interception
-
-By default, the virtual switch diverts the VM's HTTP and HTTPS connections (ports 80 and 443) into Bromure's proxy at the network layer, so the proxy sees them even when a program ignores the proxy settings.
-
-Turning on **Disable transparent interception** stops only that forced diversion. Programs that open raw connections, and apps that pin certificates, then reach the network — and the real server certificate — directly. The proxy itself stays on: `HTTP_PROXY` / `HTTPS_PROXY` remain set, so proxy-aware tools (apt, git, pip, curl, node…) and the agents' own API calls still go through Bromure and keep credential swapping, tracing and guardrails. Applies live, no restart.
-
-Use it for a machine with a client that breaks under interception. While it is on, traffic from programs that bypass the proxy settings is not seen by the firewall's `web` rules or the write policies.
-
-## Allow per-request insecure bypass (X-bromure-insecure)
-
-A narrower escape hatch for self-signed or private-CA servers. When a request to such a host fails certificate validation, the agent can retry it with the header `X-bromure-insecure: yes`, and Bromure skips validating that server's certificate for that request. Interception, tracing and the leak guard stay on, and Bromure puts no real credential into such a request — only the VM's stand-ins go out. Every use is recorded in the Security Timeline.
-
-On by default: it only acts when the VM explicitly sends the header. Turn it off to refuse the header outright.
-
 ## Don't alert on credential exfiltration
 
 When a credential is seen heading to a host it doesn't belong to, Bromure blocks the request, pauses the VM, and shows a compromise alert with **Shut down**, **Block**, **Allow**, and **Save for Investigation**. **Allow** trusts that destination for the rest of the session. See [Credentials & the Wire Boundary](../08-credentials.mdx).
 
 **Don't alert on credential exfiltration** turns off that alert for this machine. The leak is still blocked and still recorded in the Security Timeline, as "blocked — exfiltration attempt (alerts off, VM not paused)" — only the interruption goes away. Applies live, no restart. Default: off.
+
+## Protections
+
+The **Protections** section holds the settings that apply to a machine whichever [sandbox engine](sandbox-policy.mdx) it uses. Each applies to a running machine at once.
+
+### Tell the agent when policy blocks it
+
+"The agent asks you instead of retrying or finding a way round." When the firewall, the OpenShell policy, the guest sandbox or a guardrail refuses something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or "permission denied" and may keep trying. Claude Code reads the note right after the command that hit the block. Codex, Grok, Kimi and Oh My Pi get it typed in when their turn ends. Until you choose, it is on while the machine uses an OpenShell policy. See [Telling the agent](../10b-sandbox-policy.mdx#telling-the-agent-policy-steering).
+
+### Agent watchdog
+
+"Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it." The watchdog watches the session as a whole from outside the VM:
+
+- bursts of blocked requests;
+- credentials that don't belong;
+- signs of tampering;
+- new destinations once the session has settled;
+- outbound volume far above the session's own baseline (counted at the network switch, independently of the proxy).
+
+| Mode | When the session scores past the threshold within a minute |
+|---|---|
+| **Off** (default) | Nothing. |
+| **Alert** | An **Agent watchdog** row in the [Security Timeline](../11a-security-timeline.mdx) ("drift detected"), also sent to your organization on an enrolled Mac. |
+| **Quarantine** | The VM's network is cut and the VM paused within milliseconds. An alert, **The agent watchdog quarantined this workspace**, then lists what it saw. **Shut down** stops the machine; **Keep quarantined** resumes it with its network still cut, so you can look inside; **Release** restores the network. |
+
+When the alert can't be shown on this Mac (a headless Mac, or a machine mirrored by a remote client), the question goes to the remote client, and no answer within three minutes counts as **Keep quarantined**.
+
+### Only allow credentials Bromure injects (strict mode)
+
+"Blocks any credential Bromure didn't put there itself." With strict mode on, a request carrying a credential Bromure didn't inject is blocked and raises the [compromise alert](../08-credentials.mdx); that covers a key the agent found in a file, copied from a log, or brought in. **Allow** in the alert approves that credential for the session. Tokens a site issues inside the VM (a session cookie after a sign-in, for example) can still go back to that site.
+
+Strict mode forces transparent interception and ignores the no-interception list. Raw TCP traffic can't be inspected. Every credential the machine configures needs a host filter first; the pane names the ones that don't have one. Off by default; your organization can require it.
+
+### Disable transparent interception
+
+By default, the virtual switch diverts the VM's HTTP and HTTPS connections (ports 80 and 443) into Bromure's proxy at the network layer, so the proxy sees them even when a program ignores the proxy settings.
+
+Turning on **Disable transparent interception** stops only that forced diversion. Programs that open raw connections, and apps that pin certificates, then reach the network — and the real server certificate — directly. The proxy itself stays on: `HTTP_PROXY` / `HTTPS_PROXY` remain set, so proxy-aware tools (apt, git, pip, curl, node…) and the agents' own API calls still go through Bromure and keep credential swapping, tracing and guardrails. Applies live, no restart. Not available while strict mode is on.
+
+Use it for a machine with a client that breaks under interception. While it is on, traffic from programs that bypass the proxy settings is not seen by the firewall's `web` rules or the write policies.
+
+### Allow per-request insecure bypass (X-bromure-insecure)
+
+A narrower escape hatch for self-signed or private-CA servers. When a request to such a host fails certificate validation, the agent can retry it with the header `X-bromure-insecure: yes`, and Bromure skips validating that server's certificate for that request. Interception, tracing and the leak guard stay on, and Bromure puts no real credential into such a request — only the VM's stand-ins go out. Every use is recorded in the Security Timeline.
+
+On by default: it only acts when the VM explicitly sends the header. Turn it off to refuse the header outright.
 
 ## What the agent sees when a call is blocked
 
@@ -172,8 +141,7 @@ A blocked call returns an ordinary error in the service's own format — a Kuber
 
 - A force-push looks like a normal push on the wire, so **Block destructive** doesn't stop it; **Read-only** and **Prompt before write** do gate pushes. Deletions through the forge's REST API are caught.
 - Kubernetes and registry policies only cover hosts from this machine's kubeconfigs and registries; a database policy needs the endpoint's host.
-- Other hosts are governed by the firewall's host, port and method rules, not by service-level classification.
-- The rule table is not shown in the iPhone, iPad or Vision Pro client; rules set on the Mac still apply.
+- Other hosts are governed by the [Sandbox Policy](sandbox-policy.mdx)'s host, port and method rules, not by service-level classification.
 
 ## Settings reference
 
@@ -181,15 +149,17 @@ A blocked call returns an ordinary error in the service's own format — a Kuber
 |---|---|---|
 | **Require approval to use** | Checkbox per credential | Off |
 | Write policy | **Off** / **Prompt before write** / **Block destructive** / **Read-only**, per service | **Prompt before write** for new machines |
-| **Unmatched traffic** | **Allow** / **Deny** | Allow |
-| Rules | Ordered table (**Add rule**), also shown as **pf format** | None |
+| **Don't alert on credential exfiltration** | Toggle | Off |
+| **Tell the agent when policy blocks it** | Toggle | On while the machine uses an OpenShell policy |
+| **Agent watchdog** | **Off** / **Alert** / **Quarantine** | Off |
+| **Only allow credentials Bromure injects (strict mode)** | Toggle | Off |
 | **Disable transparent interception** | Toggle | Off |
 | **Allow per-request insecure bypass (X-bromure-insecure)** | Toggle | On |
-| **Don't alert on credential exfiltration** | Toggle | Off |
 
 ## Related chapters
 
 - [Credentials](credentials.mdx) — the credentials these rows govern.
+- [Sandbox Policy](sandbox-policy.mdx) — the machine's outbound rules or OpenShell policy.
 - [Prompt-Injection Detection & Guardrails](../10-prompt-injection.mdx) — enforcement in depth.
 - [Security Overview & Timeline](../11a-security-timeline.mdx) — every block and allow, per machine.
 - [Settings Reference](index.mdx) — all panes at a glance.

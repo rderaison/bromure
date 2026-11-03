@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(SandboxEngine)
+import SandboxEngine
+#endif
 
 /// Per-profile fake→real token map. Built each time a session is
 /// launched from the profile's saved tools + git creds + (later)
@@ -50,12 +53,29 @@ public struct TokenMap: Sendable {
         /// never be injected into a `lambda` call.
         public let acceptSiblings: Bool
 
+        /// Request-path selectors (OpenShell endpoint `path` syntax) the swap
+        /// is limited to; empty = any path. A fake on a bound host but another
+        /// path goes out unswapped (the upstream sees a useless placeholder),
+        /// exactly like an OpenShell placeholder outside its endpoint binding.
+        public let paths: [String]
+
+        /// The 1Password reference `real` was resolved from (the refresher
+        /// sets it; on a blank too, which `isPlaceholder` still marks as
+        /// unresolved), nil for a value given as is. A live refresh carries a
+        /// resolved secret only to the same reference: a placeholder fake
+        /// (`openshell:resolve:env:VAR`) stays the same whatever the secret.
+        public let resolvedFrom: String?
+
         public init(fake: String, real: String, host: String? = nil,
                     header: Header = .authorization,
                     body: Bool = false,
                     acceptSiblings: Bool = false,
                     consentCredentialID: String? = nil,
-                    consentDisplayName: String? = nil) {
+                    consentDisplayName: String? = nil,
+                    paths: [String] = [],
+                    resolvedFrom: String? = nil) {
+            self.resolvedFrom = resolvedFrom
+            self.paths = paths
             self.fake = fake
             self.real = real
             self.host = host
@@ -65,9 +85,57 @@ public struct TokenMap: Sendable {
             self.consentCredentialID = consentCredentialID
             self.consentDisplayName = consentDisplayName
         }
+
+        /// This entry with another real value (resolved from `resolvedFrom`,
+        /// if a 1Password reference), everything else kept.
+        public func withReal(_ real: String, resolvedFrom: String? = nil) -> Entry {
+            Entry(fake: fake, real: real, host: host, header: header, body: body,
+                  acceptSiblings: acceptSiblings, consentCredentialID: consentCredentialID,
+                  consentDisplayName: consentDisplayName, paths: paths, resolvedFrom: resolvedFrom)
+        }
+
+        /// A real value a refresher fills in later: an exec plugin's
+        /// (empty until it first runs) or a 1Password reference.
+        var isPlaceholder: Bool { real.isEmpty || OnePasswordCLI.reference(in: real) != nil }
     }
 
     public var entries: [Entry]
+
+    /// A live refresh's map: `fresh` (re-minted from the profile) merged
+    /// over `current` (what the proxy holds). A fresh entry whose real is
+    /// still a placeholder takes the real value `current` already has for
+    /// that fake and host -- the exec poller or 1Password loop resolved it
+    /// -- instead of publishing the placeholder: an empty bearer to the
+    /// cluster (or the `op://` literal) until the refresher next ran
+    /// (Finding CWE-670, "Live refresh publishes an empty Kubernetes exec
+    /// token before the plugin runs"). Its consent metadata is the fresh
+    /// one's. Entries whose fakes weren't reissued stay, so a process still
+    /// holding an old fake finishes its work.
+    /// A 1Password reference takes only the secret resolved from that same
+    /// reference: a fake that doesn't change with the secret (an OpenShell
+    /// placeholder) kept the old secret when the credential became a new
+    /// `op://` value (Finding CWE-670, "Live merge keeps the previous secret
+    /// when a credential becomes an op:// reference"). An exec placeholder's
+    /// fake is reused only for the same plugin and host, so it carries.
+    public static func liveMerge(fresh: [Entry], current: [Entry]) -> TokenMap {
+        let freshFakes = Set(fresh.map(\.fake))
+        let carried = fresh.map { e -> Entry in
+            guard e.isPlaceholder else { return e }
+            if let ref = OnePasswordCLI.reference(in: e.real) {
+                // This reference's own resolved secret, not the first entry
+                // that shares the fake (another credential's, under an
+                // OpenShell placeholder).
+                guard let held = current.first(where: {
+                    $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder && $0.resolvedFrom == ref
+                }) else { return e }
+                return e.withReal(held.real, resolvedFrom: ref)
+            }
+            guard let held = current.first(where: { $0.fake == e.fake && $0.host == e.host && !$0.isPlaceholder })
+            else { return e }
+            return e.withReal(held.real, resolvedFrom: held.resolvedFrom)
+        }
+        return TokenMap(entries: carried + current.filter { !freshFakes.contains($0.fake) })
+    }
 
     public init(entries: [Entry] = []) {
         self.entries = entries
@@ -165,6 +233,13 @@ public final class TokenSwapper: @unchecked Sendable {
         self.compromiseHandler = handler
     }
 
+    /// Raise the compromise alert for an event detected outside the swap map
+    /// (strict credential mode).
+    public func raiseCompromise(_ event: CompromiseEvent) {
+        lock.lock(); let handler = compromiseHandler; lock.unlock()
+        handler?(event)
+    }
+
     /// Snapshot of the current entries for a profile. Used by the
     /// exec-credential poller to mutate a single entry without
     /// rebuilding the whole map from scratch.
@@ -187,7 +262,10 @@ public final class TokenSwapper: @unchecked Sendable {
     /// Async because entries flagged for user approval await the
     /// consent broker before substitution; the proxy hot path holds
     /// the connection until the user (or a live grant) decides.
-    public func swap(rawRequest: Data, host: String, profileID: UUID) async -> SwapResult {
+    static let openShellPlaceholderPrefix = "openshell:resolve:env:"
+
+    public func swap(rawRequest: Data, host: String, port: Int? = nil, profileID: UUID,
+                     placeholderBody: Bool = false) async -> SwapResult {
         // Read the map through a non-async helper so NSLock never sits
         // across an `await` (Swift 6 forbids it).
         let map = snapshotMap(for: profileID)
@@ -219,19 +297,34 @@ public final class TokenSwapper: @unchecked Sendable {
             if let h = entry.host, !h.isEmpty {
                 let matched = entry.acceptSiblings
                     ? Self.hostMatchesScopeFamily(host: host, scope: h)
-                    : Self.hostMatchesScope(host: host, scope: h)
+                    : Self.hostMatchesScope(host: host, port: port, scope: h)
                 if !matched && !sessionAllowed { continue }
             }
 
+            if !entry.paths.isEmpty {
+                #if canImport(SandboxEngine)
+                let target = headerStr.prefix { $0 != "\r" }.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                guard let path = OpenShellPolicy.canonicalPath(ofTarget: target),
+                      entry.paths.contains(where: { OpenShellPolicy.pathSelector($0, matches: path) }) else { continue }
+                #endif
+            }
+
             let inHeader = (headerStr.range(of: entry.fake) != nil)
+            // `curl -u user:$SECRET` (any HTTP Basic client) sends the fake
+            // base64-encoded: look inside the Basic credentials too.
+            let inBasic = !inHeader && Self.basicCredentialsContain(headerStr, entry.fake)
             // Body sweep is only attempted for entries that opted in
             // (refresh tokens, etc.). Cheap pre-check on raw bytes so
             // we don't run the consent broker for non-matching entries.
             let fakeData = Data(entry.fake.utf8)
-            let inBody: Bool = entry.body
+            // OpenShell credential placeholders are resolved in a body only
+            // where the policy endpoint opts in (`request_body_credential_rewrite`).
+            let bodySweep = entry.body
+                || (placeholderBody && entry.fake.hasPrefix(Self.openShellPlaceholderPrefix))
+            let inBody: Bool = bodySweep
                 ? (newBody.range(of: fakeData) != nil)
                 : false
-            guard inHeader || inBody else { continue }
+            guard inHeader || inBasic || inBody else { continue }
 
             // Gate on consent if the entry is flagged. An entry is flagged
             // (consentCredentialID set) exactly when the user opted into
@@ -266,6 +359,14 @@ public final class TokenSwapper: @unchecked Sendable {
                 ))
             }
 
+            for _ in 0..<Self.swapBasicCredentials(&headerStr, fake: entry.fake, real: entry.real) {
+                swaps.append(SwapRecord(
+                    fakePreview: Self.preview(entry.fake),
+                    realPreview: Self.preview(entry.real),
+                    host: host
+                ))
+            }
+
             if inBody {
                 let realData = Data(entry.real.utf8)
                 while let r = newBody.range(of: fakeData) {
@@ -289,9 +390,8 @@ public final class TokenSwapper: @unchecked Sendable {
         // header was present; a stale length truncates the upstream's
         // view of the body and breaks JSON parsing on the OAuth
         // endpoint. We re-derive the length unconditionally when the
-        // body changed; otherwise the original request bytes are
-        // shipped verbatim (header-only swaps preserve length because
-        // fake and real are length-matched).
+        // body changed. A header-only swap (one inside Basic credentials
+        // included) may change the header's length, never the body's.
         if bodyDirty {
             headerStr = Self.replaceContentLength(headerStr, newLength: newBody.count)
         }
@@ -301,6 +401,75 @@ public final class TokenSwapper: @unchecked Sendable {
         out.append(headerBytes)
         out.append(newBody)
         return SwapResult(modified: out, swaps: swaps)
+    }
+
+    /// The `Authorization` / `Proxy-Authorization` header lines carrying
+    /// HTTP Basic credentials: (line range, decoded `user:password` bytes).
+    private static func basicCredentialLines(_ headerStr: String) -> [(Range<String.Index>, Data)] {
+        var out: [(Range<String.Index>, Data)] = []
+        var lineStart = headerStr.startIndex
+        while lineStart < headerStr.endIndex {
+            // ("\r\n" is ONE Character in Swift: step past its range.)
+            let crlf = headerStr.range(of: "\r\n", range: lineStart..<headerStr.endIndex)
+            let lineEnd = crlf?.lowerBound ?? headerStr.endIndex
+            let line = headerStr[lineStart..<lineEnd]
+            if let colon = line.firstIndex(of: ":") {
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                let parts = value.split(separator: " ", maxSplits: 1)
+                if name == "authorization" || name == "proxy-authorization",
+                   parts.count == 2, parts[0].lowercased() == "basic",
+                   let decoded = decodeBase64(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    out.append((lineStart..<lineEnd, decoded))
+                }
+            }
+            lineStart = crlf?.upperBound ?? headerStr.endIndex
+        }
+        return out
+    }
+
+    /// Decoded Basic credentials of a header block (compromise scan).
+    static func basicCredentials(in headerStr: String) -> [Data] {
+        basicCredentialLines(headerStr).map(\.1)
+    }
+
+    static func basicCredentialsContain(_ headerStr: String, _ fake: String) -> Bool {
+        let f = Data(fake.utf8)
+        return basicCredentialLines(headerStr).contains { $0.1.range(of: f) != nil }
+    }
+
+    /// Swap `fake` for `real` inside every Basic credential that holds
+    /// it, re-encoded; the header keeps its name and scheme. Returns the
+    /// number of substitutions.
+    static func swapBasicCredentials(_ headerStr: inout String, fake: String, real: String) -> Int {
+        let f = Data(fake.utf8), r = Data(real.utf8)
+        var count = 0
+        // Last line first: earlier ranges stay valid while later ones change.
+        for (range, decoded) in basicCredentialLines(headerStr).reversed() {
+            var creds = decoded
+            var n = 0
+            var from = creds.startIndex
+            while let hit = creds.range(of: f, in: from..<creds.endIndex) {
+                creds.replaceSubrange(hit, with: r)
+                from = hit.lowerBound + r.count
+                n += 1
+            }
+            guard n > 0 else { continue }
+            let line = headerStr[range]
+            let name = line[..<line.firstIndex(of: ":")!]
+            let scheme = line[line.index(after: line.firstIndex(of: ":")!)...]
+                .trimmingCharacters(in: .whitespaces).split(separator: " ").first ?? "Basic"
+            headerStr.replaceSubrange(range, with: "\(name): \(scheme) \(creds.base64EncodedString())")
+            count += n
+        }
+        return count
+    }
+
+    /// Standard base64, padding optional (some clients drop it).
+    private static func decodeBase64(_ s: String) -> Data? {
+        guard !s.isEmpty else { return nil }
+        let padded = s + String(repeating: "=", count: (4 - s.count % 4) % 4)
+        return Data(base64Encoded: padded)
     }
 
     /// Patch the `Content-Length` header in a CRLF-delimited HTTP
@@ -438,7 +607,16 @@ public final class TokenSwapper: @unchecked Sendable {
             return []
         }
 
-        let matches = scanner.scan(rawRequest)
+        // A fake inside Basic credentials is base64 on the wire: scan the
+        // decoded credentials as well.
+        var scanned = rawRequest
+        if let end = rawRequest.range(of: Data("\r\n\r\n".utf8))?.lowerBound,
+           let head = String(data: rawRequest.subdata(in: 0..<end), encoding: .isoLatin1) {
+            for decoded in Self.basicCredentials(in: head) {
+                scanned.append(Data("\n".utf8)); scanned.append(decoded)
+            }
+        }
+        let matches = scanner.scan(scanned)
         if matches.isEmpty { return [] }
 
         // The user authorized this host for the session via the alert's
@@ -460,9 +638,12 @@ public final class TokenSwapper: @unchecked Sendable {
             // family match so a token minted for `api.anthropic.com`
             // doesn't trip a compromise alert when it appears on
             // `mcp-tools.anthropic.com`. Everything else stays strict.
+            // A port-scoped fake (a kube API on :6443) on its own host but
+            // another port goes out unswapped: useless there, not a leak.
+            let scopeHost = Self.splitScope(scope).host
             let matched = entry.acceptSiblings
-                ? Self.hostMatchesScopeFamily(host: host, scope: scope)
-                : Self.hostMatchesScope(host: host, scope: scope)
+                ? Self.hostMatchesScopeFamily(host: host, scope: scopeHost)
+                : Self.hostMatchesScope(host: host, scope: scopeHost)
             if matched { continue }
             leaks.append(CompromiseLeak(
                 fakeTokenPreview: Self.preview(entry.fake),
@@ -504,9 +685,45 @@ public final class TokenSwapper: @unchecked Sendable {
     /// Case-insensitive. Substring matching is intentionally NOT used —
     /// see the security note on `TokenMap.Entry.host`.
     static func hostMatchesScope(host: String, scope: String) -> Bool {
-        let h = host.lowercased()
-        let s = scope.lowercased()
+        // An IPv6 literal compares unbracketed: CONNECT's authority gives
+        // `[2001:db8::1]`, a URL's host and a peer address `2001:db8::1`.
+        let h = HostAuthority.bare(host)
+        let s = HostAuthority.bare(scope)
         return h == s || h.hasSuffix("." + s)
+    }
+
+
+    /// The swap's match: a `host:port` scope (a kubeconfig server, a docker
+    /// registry) names its host and the port the connection must be dialed
+    /// on -- the proxy's host is a bare name (CONNECT's host before the port,
+    /// or the SNI), so comparing it with the whole scope never matched and
+    /// the fake went upstream (Finding CWE-670, "Kube bearer and exec tokens
+    /// are scoped to host:port, so the proxy never injects them"). Two
+    /// contexts on one name and different ports keep their own tokens. An
+    /// unknown port matches no port-scoped entry; a bare scope, any port.
+    static func hostMatchesScope(host: String, port: Int?, scope: String) -> Bool {
+        let (scopeHost, scopePort) = splitScope(scope)
+        if let scopePort, scopePort != port { return false }
+        return hostMatchesScope(host: host, scope: scopeHost)
+    }
+
+    /// `host:port` → (host, port); a bare host, or an IPv6 literal's colons,
+    /// → (scope, nil). A bracketed IPv6 authority (`[2001:db8::1]:6443`, what
+    /// `KubeconfigEntry.tokenScope` writes) → its literal, unbracketed, and
+    /// its port; a bracketed literal alone → (literal, nil).
+    static func splitScope(_ scope: String) -> (host: String, port: Int?) {
+        if scope.hasPrefix("["), let close = scope.firstIndex(of: "]") {
+            let literal = String(scope[scope.index(after: scope.startIndex)..<close])
+            let rest = scope[scope.index(after: close)...]
+            if rest.isEmpty { return (literal, nil) }
+            guard rest.hasPrefix(":"), let port = Int(rest.dropFirst()), (1...65535).contains(port)
+            else { return (scope, nil) }
+            return (literal, port)
+        }
+        guard let colon = scope.lastIndex(of: ":"), !scope[..<colon].contains(":"),
+              let port = Int(scope[scope.index(after: colon)...]), (1...65535).contains(port)
+        else { return (scope, nil) }
+        return (String(scope[..<colon]), port)
     }
 
     /// Relaxed `hostMatchesScope` for compromise detection only.

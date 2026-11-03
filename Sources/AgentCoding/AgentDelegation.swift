@@ -148,6 +148,18 @@ struct Delegation: Identifiable, Codable, Equatable, Sendable {
     /// "accepted" / "rejected" once the parent closed it.
     var verdict: String?
     var failure: String?
+    /// Failed only because its other session was out of view too long (its
+    /// Mac rebooting, the Sidecar restarting): the status it had then. The
+    /// session coming back — seen again, or speaking — picks it up there.
+    var goneFrom: Status?
+    /// Over (cancelled, closed) while its delegate's session was out of
+    /// view: that session is put away when it comes back — else it showed
+    /// up active again, its agent still at work on a cancelled task.
+    var retireWhenBack: Bool?
+    /// Where the child session lives, as last seen: "local", or the attached
+    /// machine's id. Tells "gone because its machine is away" (wait) from
+    /// "gone from a machine that's back" (deleted: the end).
+    var childHost: String?
     /// The parent was told the delegate's agent ended without delivering
     /// (once per ending — the delegation stays open, a steer resumes it).
     var childEndedNotedAt: Date?
@@ -330,6 +342,18 @@ final class DelegationStore {
         return (m.noticeCount ?? 1) < maxNotices && now.timeIntervalSince(last) >= renoticeAfter
     }
 
+    /// …and within its delegation: a repeat is only for a recipient that
+    /// hasn't acted. Once the delegation is over, or the recipient has
+    /// posted anything since (a delivery, an answer, a report), it heard —
+    /// an agent that replied without a read_inbox was otherwise re-told an
+    /// approval it had already carried out, up to `maxNotices` times, even
+    /// after the board closed the task.
+    static func owesNotice(_ m: DelegationMessage, in d: Delegation, interrupts: Bool, now: Date = Date()) -> Bool {
+        guard owesNotice(m, interrupts: interrupts, now: now) else { return false }
+        guard m.noticedAt != nil else { return true }
+        return d.status.isOpen && !d.messages.contains { $0.from == m.to && $0.at > m.at }
+    }
+
     /// Delivered messages for a session the host owes a notice of, oldest
     /// first: never noticed, or noticed but still unread long enough for a
     /// repeat (see `owesNotice`). `interrupts` says which kinds a fresh
@@ -341,7 +365,7 @@ final class DelegationStore {
         for d in delegations(involving: sessionID) {
             guard let party = d.party(of: sessionID) else { continue }
             for m in d.messages
-            where m.to == party && Self.owesNotice(m, interrupts: interrupts(m.kind, d.isRequest), now: now) {
+            where m.to == party && Self.owesNotice(m, in: d, interrupts: interrupts(m.kind, d.isRequest), now: now) {
                 out.append((d, m))
             }
         }

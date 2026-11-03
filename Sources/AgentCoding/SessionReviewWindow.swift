@@ -112,6 +112,12 @@ final class ReviewWindowHost {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Load an open window again from scratch (its default base re-read).
+    func reload(_ id: UUID) {
+        guard windows[id] != nil else { return }
+        focus[id]?.generation += 1
+    }
+
     func close(_ id: UUID) {
         windows[id]?.close()
         windows[id] = nil
@@ -209,6 +215,9 @@ struct ReviewView: View {
     @State private var data: TaskReviewData?
     @State private var loading = false
     @State private var loadFailed = false
+    /// Which load may still publish: each one takes the next; a later
+    /// click, refresh or re-aim supersedes the ones before it.
+    @State private var loadTicket = 0
     @State private var showAll = false
     @State private var selectedFile: String?
     @State private var draft = ""
@@ -259,13 +268,38 @@ struct ReviewView: View {
     // MARK: Loading
 
     private func load(quiet: Bool = false) async {
+        loadTicket += 1
+        let ticket = loadTicket
         if !quiet { loading = true; loadFailed = false }
-        // A turn's files: review the checkout they were edited in.
-        let fetched = await source.fetch(base, focus.files ?? [])
-        loading = false
-        if let fetched { data = fetched; loadFailed = false }
-        else if !quiet { data = nil; loadFailed = true }
+        // A turn's files: review the checkout they were edited in. The read
+        // changes nothing, so one that fails is tried again before the
+        // window says the machine is out of reach: the first call of a
+        // while can land on a link that just went away (a fresh one is
+        // dialed behind it), and a click again then always worked.
+        var fetched = await source.fetch(base, focus.files ?? [])
+        if fetched == nil, !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if !Task.isCancelled { fetched = await source.fetch(base, focus.files ?? []) }
+        }
+        guard Self.settle(fetched, quiet: quiet, ticket: ticket, current: loadTicket,
+                          cancelled: Task.isCancelled,
+                          data: &data, loading: &loading, failed: &loadFailed) else { return }
         if let sel = selectedFile, !(visibleFiles.contains { $0.path == sel }) { selectedFile = nil }
+    }
+
+    /// A finished load's result, published only while it is still the
+    /// latest and wasn't cancelled: a second "Changed N files" click
+    /// re-aims the window, cancelling the load under way — whose failure
+    /// (or nothing at all) then painted "Can't reach the machine" over
+    /// the new read, or cleared the diff it had already shown. false =
+    /// superseded, nothing written.
+    static func settle(_ fetched: TaskReviewData?, quiet: Bool, ticket: Int, current: Int, cancelled: Bool,
+                       data: inout TaskReviewData?, loading: inout Bool, failed: inout Bool) -> Bool {
+        guard !cancelled, ticket == current else { return false }
+        loading = false
+        if let fetched { data = fetched; failed = false }
+        else if !quiet { data = nil; failed = true }
+        return true
     }
 
     /// Files in the review, narrowed to the turn's when asked.
@@ -509,7 +543,8 @@ struct ReviewView: View {
         // (the spinner stayed up for a task with no code at all).
         if let data, !(loading && visibleFiles.isEmpty && !data.files.isEmpty) {
             let files = visibleFiles
-            if files.isEmpty {
+            // A diff that failed shows that, not what little it collected.
+            if files.isEmpty || data.diffFailed {
                 emptyState(data)
             } else {
                 ScrollViewReader { proxy in
@@ -628,19 +663,28 @@ struct ReviewView: View {
     @ViewBuilder private func emptyState(_ data: TaskReviewData) -> some View {
         let turnHidden = !showAll && focus.files != nil && !data.files.isEmpty
         VStack(spacing: 12) {
-            ContentUnavailableView(
-                turnHidden ? NSLocalizedString("This turn's files have no changes here", comment: "review")
-                           : NSLocalizedString("No changes", comment: "review"),
-                systemImage: "checkmark.seal",
-                description: Text(emptyExplanation(turnHidden: turnHidden)))
-            HStack {
-                if turnHidden {
-                    Button(NSLocalizedString("Show All Changes", comment: "review")) { showAll = true }
-                }
-                if base == .uncommitted {
-                    Button(NSLocalizedString("Show the Last Commit", comment: "review")) {
-                        base = .lastCommit; baseChosen = true
-                        Task { await load() }
+            if data.diffFailed || (data.statusFailed && data.files.isEmpty) {
+                ContentUnavailableView(
+                    NSLocalizedString("Git couldn't read the changes", comment: "review: git status/diff failed"),
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(NSLocalizedString(
+                        "Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal.",
+                        comment: "review: git status/diff failed")))
+            } else {
+                ContentUnavailableView(
+                    turnHidden ? NSLocalizedString("This turn's files have no changes here", comment: "review")
+                               : NSLocalizedString("No changes", comment: "review"),
+                    systemImage: "checkmark.seal",
+                    description: Text(emptyExplanation(turnHidden: turnHidden)))
+                HStack {
+                    if turnHidden {
+                        Button(NSLocalizedString("Show All Changes", comment: "review")) { showAll = true }
+                    }
+                    if base == .uncommitted {
+                        Button(NSLocalizedString("Show the Last Commit", comment: "review")) {
+                            base = .lastCommit; baseChosen = true
+                            Task { await load() }
+                        }
                     }
                 }
             }

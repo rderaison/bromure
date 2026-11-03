@@ -1,0 +1,9 @@
+[package]
+name = "oracle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tower-mcp-types = "=0.22.2"
+serde_json = { version = "1", features = ["preserve_order"] }
+serde = "1"

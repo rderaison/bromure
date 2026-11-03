@@ -1,0 +1,48 @@
+Round 24 guest tree.
+
+Hashes (sha256, first 12 hex) a workspace running THIS tree reports in
+`status.build`:
+
+    sandboxd   681719850197    bromure-sandboxd
+    openshell  63572143fc92    bromure_openshell.py
+    idmap      57eaaf0acd79    bromure_idmap.py
+    status     24cc2e74d12a    bromure_sandbox_status.py
+    sentryd    289d9b8bc6fc    bromure-sentryd
+    strict     9a19675b9e36    bromure-strict.py
+    agentd     ce0b0340a004    patched/bromure-agentd.py
+    attestd    911a27f81159    patched/bromure-attestd.py
+
+`agentd` and `attestd` are reported from $META (where the host stages them);
+everything else from the directory bromure-sandboxd runs out of.
+
+Verify the scripts with:
+
+    for f in bromure-sandboxd bromure_openshell.py bromure_idmap.py \
+             bromure_sandbox_status.py bromure-sentryd bromure-strict.py \
+             patched/bromure-agentd.py patched/bromure-attestd.py; do
+        printf '%s  %s\n' "$(sha256sum "$f" | cut -c1-12)" "$f"
+    done
+
+Round 23: the modules are no longer in this tree. sentry-dist/*.ko are gone
+from git (CI builds them, the host fetches and stages them); sentry-dist/src/
+stays for the guest rebuild fallback. The module SOURCE is unchanged from
+round 22.
+
+sourceHash over Makefile + bromure_sentry.c + bromure_sentry.h, as
+`name\n<len>\n<bytes>` sorted by name:
+
+    a7557baec4b6da68eb29e7d3c0bcc3adab387d9ac479f23bc1e54c9a8bdce1b0
+
+Greps:
+
+    bromure_sandbox_status.py:  def installed_kernels
+    bromure-sentryd:            def host_unavailable_marker   (round 24)
+    bromure-sentryd:            def wait_for_host_module
+    bromure-sentryd:            --await-module
+
+
+HOST DEPENDENCIES (unchanged)
+  * /mnt/bromure-meta/advisor.json, and `network_policies` in the spec.
+
+`differential/target/` is omitted: 59 MB of rebuildable cargo output. Rebuild with
+`(cd differential && cargo build --release)` before `tests/run_all.sh`.

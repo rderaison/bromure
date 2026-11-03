@@ -48,6 +48,13 @@ The bottom layer is the shared base image — "Ubuntu Noble + Node, Claude Code,
 
 > **Note:** **Erase home…**, **Restore home…**, **Upgrade storage…** and **Reset to base…** are disabled while the machine runs (tooltip "Close the session window first."). On a machine that has never started, the disks don't exist yet ("Created on first launch.").
 
+## Home folder size
+
+**Home folder size** sets how big the home disk is, in GB. The disk image is sparse: it only takes the space its files use, so the size is a ceiling — a smaller one makes a runaway process fail early instead of filling your Mac's disk.
+
+- Before the home exists (a new machine, or one whose home you erased), any size from 8 to 1024 GB can be picked: "The home is created at this size when the workspace first starts; after that it can grow but not shrink." The default is 16 GB (`vm.homeImageGB`, see [Advanced](../16a-advanced.mdx)).
+- Once it exists, the size can only grow, from its current size up to 1024 GB. A bigger home takes effect the next time the machine starts. To make a home smaller, **Erase home…** and pick the new size before the next start.
+
 ## Memory
 
 The **VM RAM** stepper sets the machine's memory, from 2 to 32 GB in steps of 2 — "Bump this if Claude / Codex feels sluggish or rust builds OOM." The default depends on your Mac: 4 GB on Macs with less than 18 GB, 6 GB up to 36 GB, 8 GB above. The VM has 4 virtual CPUs; that is not configurable.
@@ -75,6 +82,7 @@ Two app-wide sections appear at the bottom of Resources in this Mac's Preference
 |---|---|---|
 | **Your home folder** — **Erase home…** | Destructive button | — |
 | **Your home folder** — **Restore home…** / **Upgrade storage…** | Button | — |
+| **Home folder size** | Number field + stepper, 8–1024 GB (grow-only once the home exists) | 16 GB |
 | **Workspace system disk** — **Reset to base…** | Destructive button | — |
 | **Base OS image** | Read-only row | — |
 | **VM RAM** | Stepper, 2–32 GB, steps of 2 | 4, 6 or 8 GB depending on the Mac's memory |

@@ -30,6 +30,10 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     func activeTabIndex() -> Int?
     /// Run a guest command in the workspace, returning stdout (nil on failure).
     func execGuest(_ command: String, timeout: Int) async -> String?
+    /// Have the machine at the other end of a slow link type a message
+    /// itself (`PaneTypeGuard.runType` there): one request instead of one
+    /// per typing step. `.unsupported`: type it step by step from here.
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult
     /// Whether the agent is currently working. Cross-agent: bromure already
     /// computes this per tab — Claude via its per-window hooks, every other
     /// agent via MITM request activity — so it drives the "thinking" cue for
@@ -67,6 +71,7 @@ protocol BeautifiedTranscriptProvider: AnyObject {
 }
 
 extension BeautifiedTranscriptProvider {
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult { .unsupported }
     var guestPathNames: [String: String] { [:] }
     var historyCacheKey: String? { nil }
     var historyBytesHint: Int? { nil }
@@ -281,8 +286,14 @@ extension BeautifiedTranscriptProvider {
     @discardableResult
     func send(_ text: String) async -> ChatQueueStore.Outcome {
         guard let idx = activeTabIndex() else { return .refused(.gone) }
-        let out = await PaneTypeGuard.runType(target: paneTarget(window: idx), text: text) {
-            await self.execGuest($0, timeout: 20)
+        let target = paneTarget(window: idx)
+        let out: String?
+        if case .output(let o) = await typeRemotely(target, text) {
+            out = o
+        } else {
+            out = await PaneTypeGuard.runType(target: target, text: text) {
+                await self.execGuest($0, timeout: 20)
+            }
         }
         let outcome = ChatQueueStore.Outcome.of(out)
         switch outcome {
@@ -1239,6 +1250,22 @@ final class BeautifiedSessionModel: ObservableObject {
         parsedItems.reduce(0) { n, it in if case .userText = it.kind { return n + 1 }; return n }
     }
 
+    nonisolated static func userTurns(_ items: [TranscriptItem]) -> [String] {
+        items.compactMap { if case .userText(let t) = $0.kind { return t }; return nil }
+    }
+
+    /// How many user turns `chunk` adds read in front of `held` (the bytes
+    /// already loaded): counted from the bytes themselves — a turn split
+    /// at the old start and made whole by the chunk counts too — never by
+    /// finding the old turns' text in the new list, which a repeated
+    /// prompt ("thanks", "continue") put in the wrong place, both ways.
+    nonisolated static func userTurnsPrepended(_ chunk: Data, before held: Data) -> Int {
+        var joined = chunk
+        joined.append(held)
+        let count = { (d: Data) in userTurns(AgentTranscript.parse(d)).count }
+        return max(0, count(joined) - count(held))
+    }
+
     /// Drop queued messages the transcript now carries; deliver held ones
     /// once the agent is idle.
     private func reconcileQueued() {
@@ -1274,13 +1301,7 @@ final class BeautifiedSessionModel: ObservableObject {
         queueStore.update(queueKey) { queued in
           var lost: Set<UUID> = []
           queued.removeAll { q in
-            // One marked "Not delivered" that a turn carries after all (the
-            // user pressed Return in the terminal, the agent took it late):
-            // delivered — its stale banner goes.
-            if q.held, q.failure == ChatQueueStore.notDeliveredText || q.failure == Self.notTakenText,
-               turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) || Self.typedBecame(q.text, turn: $0) }) {
-                return true
-            }
+            if Self.arrivedAnyway(q, turns: turns) { return true }
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
@@ -1335,6 +1356,31 @@ final class BeautifiedSessionModel: ObservableObject {
            queueStore.isOwner(queueKey, self) {
             deliverHeld()
         }
+    }
+
+    /// A held message marked as failed that a turn since its baseline
+    /// carries after all: delivered, its stale banner goes. "Not
+    /// delivered" (the user pressed Return in the terminal, the agent took
+    /// it late), and "Not sent" too: a fat client's type call can lose its
+    /// answer (the link dropped, an exec timed out) after the server typed
+    /// the text — a failed send whose turn shows up went through. "Not
+    /// sent" may as well never have gone in: only a turn that IS the
+    /// message clears it, not one that merely contains or starts like it
+    /// (an older prompt, a longer one about it).
+    nonisolated static func arrivedAnyway(_ q: QueuedMessage, turns: [String]) -> Bool {
+        guard q.held, let f = q.failure else { return false }
+        let since = turns.dropFirst(q.baseline)
+        if f == ChatQueueStore.notTypedText {
+            let want = Self.squeezed(q.text)
+            return !want.isEmpty && since.contains { Self.squeezed($0) == want }
+        }
+        guard f == ChatQueueStore.notDeliveredText || f == notTakenText else { return false }
+        return since.contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
+    }
+
+    /// Whitespace runs folded, ends trimmed.
+    nonisolated static func squeezed(_ s: String) -> String {
+        s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Whether a recorded turn is a message Bromure typed, altered on the
@@ -1920,14 +1966,30 @@ final class BeautifiedSessionModel: ObservableObject {
         loadingEarlier = true
         defer { loadingEarlier = false }
         guard let fetch = await provider.fetchTranscript(known: (path, held.base), mode: .earlier, agent: agentKind),
-              fetch.path == path, var buf = buffers[path], fetch.end == buf.base, !fetch.chunk.isEmpty
+              fetch.path == path, let before = buffers[path], fetch.end == before.base, !fetch.chunk.isEmpty
         else { return }
-        var data = fetch.chunk
+        // The user turns this puts in front: a queued message's baseline
+        // counts the turns loaded, so it moves with them — else the turns
+        // before a send read as written after it.
+        let chunk = fetch.chunk, loaded = before.data
+        let prepended = await Task.detached(priority: .userInitiated) {
+            Self.userTurnsPrepended(chunk, before: loaded)
+        }.value
+        // Read again: the tail may have grown meanwhile (only the front
+        // matters here), or the buffer been replaced (then not ours).
+        guard var buf = buffers[path], buf.base == before.base else { return }
+        var data = chunk
         data.append(buf.data)
         buf.data = data
         buf.base = fetch.start
         buf.budget = max(buf.budget, buf.data.count + Self.earlierHistoryBytes * 2)
         buffers[path] = buf
+        // Moved now, with the bytes: until the reparse lands, a baseline
+        // ahead of the loaded list only waits — it never clears a row on a
+        // turn from before the send.
+        if prepended > 0, !queued.isEmpty {
+            queueStore.update(queueKey) { l in for i in l.indices { l[i].baseline += prepended } }
+        }
         canLoadEarlier = buf.base > 0
         sinkDirty = true
         parseDirty = true
@@ -2182,7 +2244,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Open the `/login` OAuth URL in the host browser — the user approves there,
     /// then pastes the code back into the card (`submitLoginCode`).
     func openLoginURL() {
-        guard let s = prompt?.authURL, let url = URL(string: s) else { return }
+        guard let s = prompt?.authURL, AgentScreen.isSignInURL(s, agent: agentKind), let url = URL(string: s) else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -2190,11 +2252,21 @@ final class BeautifiedSessionModel: ObservableObject {
     /// field, completing sign-in without ever touching the terminal.
     func submitLoginCode(_ code: String) {
         let c = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !c.isEmpty else { return }
+        guard !c.isEmpty, prompt?.awaitingCode == true else { return }
         setWorking(true)
         Task { [weak self] in
-            await self?.provider.typeText(c)
-            await self?.rescanSoon()
+            guard let self else { return }
+            // Typed only into the paste prompt still on screen: the code
+            // is a credential, and the pane may have moved on since the
+            // card was drawn (an answer to anything else would get it).
+            guard let screen = await self.provider.captureScreen(),
+                  TerminalPrompt.detect(inScreen: screen, agent: self.agentKind)?.awaitingCode == true else {
+                self.setWorking(false)
+                await self.rescanSoon()
+                return
+            }
+            await self.provider.typeText(c)
+            await self.rescanSoon()
         }
     }
 
@@ -2444,6 +2516,10 @@ final class BeautifiedSessionModel: ObservableObject {
                 self.sending = false
                 return
             }
+            // The turns before this send: a fat client's send can take tens
+            // of seconds, and the turn it makes may be read meanwhile — a
+            // failure marked after counted from then would never see it.
+            let baseline = self.userTurnCount
             let echo: Int? = isCommand ? nil : self.appendOptimistic(.userText(text))
             if !prefixed.isEmpty { _ = await self.provider.stage(prefixed) }
             let before = isCommand ? await self.provider.captureScreen() : nil
@@ -2459,7 +2535,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // message waits on the strip until it's answered.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true)
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: true, baseline: baseline)
                 await self.rescanSoon()
                 return
             case .refused(let r):
@@ -2471,7 +2547,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // why, to edit or drop.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.failureText(r))
                 return
             case .unconfirmed:
@@ -2479,7 +2555,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // sent — on the strip, "Not delivered".
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.notDeliveredText)
                 return
             case .dropped:
@@ -2488,7 +2564,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // from it on its own if a turn turns out to carry it.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: Self.notTakenText)
                 return
             case .failed, .unreachable:
@@ -2497,7 +2573,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 // "Not sent", to edit or drop.
                 if let echo { self.removeOptimistic(echo) }
                 self.setWorking(false)
-                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false,
+                await self.enqueueHeld(text, window: queuedWindow, awaitingAnswer: false, baseline: baseline,
                                        failure: ChatQueueStore.notTypedText)
                 return
             case .typed:
@@ -2574,12 +2650,12 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Put `text` on the strip as held by Bromure, for the window it is for
     /// (pinned to its stable id).
     private func enqueueHeld(_ text: String, window: Int?, awaitingAnswer: Bool,
-                             failure: String? = nil) async {
+                             baseline: Int? = nil, failure: String? = nil) async {
         var target: PaneTarget?
         if let w = window { target = await provider.pinnedTarget(window: w) }
         // Keyed by the session once it's known, so the strip shows it now.
         bindSessionQueue()
-        var q = QueuedMessage(text: text, held: true, editable: true, baseline: userTurnCount,
+        var q = QueuedMessage(text: text, held: true, editable: true, baseline: baseline ?? userTurnCount,
                               path: currentPath, offset: currentPath.flatMap { buffers[$0]?.end } ?? 0,
                               target: target, failure: failure, awaitingAnswer: awaitingAnswer ? true : nil)
         q.sessionID = currentSession?()?.id
@@ -4535,8 +4611,8 @@ struct TerminalPrompt: Equatable {
         // Sign-in: a sign-in URL or a device code on screen (any agent, any
         // wording), or the agent's own login wording — Claude's `/login`
         // method menu, Codex's first-run picker, the logged-out banners.
-        let url = AgentScreen.signInURL(lines)
-        let loginWords = AgentPhrases.matches(screen, .login, agent: agent)
+        let url = AgentScreen.signInURL(lines, agent: agent)
+        let loginWords = AgentScreen.loginShown(lines, agent: agent)
         if url != nil || loginWords {
             return TerminalPrompt(
                 kind: .login,
@@ -5287,7 +5363,9 @@ private struct PromptCard: View {
             }
             if prompt.authURL != nil {
                 Button(action: onOpenURL) {
-                    Label(NSLocalizedString("Open sign-in page", comment: "login"),
+                    Label(prompt.authURL.flatMap(AgentScreen.signInHost).map {
+                        String(format: NSLocalizedString("Open %@", comment: "login: the sign-in page's host"), $0)
+                    } ?? NSLocalizedString("Open sign-in page", comment: "login"),
                           systemImage: "arrow.up.right.square.fill")
                 }
                 .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)

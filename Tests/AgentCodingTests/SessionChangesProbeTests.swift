@@ -20,9 +20,12 @@ struct SessionChangesProbeTests {
             (key: "B", path: "/home/ubuntu/it's here", since: since),
         ])
         // Inside a repository: status of the folder's subtree, untracked
-        // included (porcelain), ignored files left out.
+        // included (porcelain), ignored files left out — no repository
+        // program run (submodules listed apart, a failed status still dirty).
         #expect(cmd.contains("git -C \"$p\" rev-parse --is-inside-work-tree"))
-        #expect(cmd.contains("git -C \"$p\" status --porcelain -- ."))
+        #expect(cmd.contains("git -C \"$p\" status --porcelain --ignore-submodules=dirty -- ."))
+        #expect(cmd.contains(RepoGitPrograms.off("\"$p\"")))
+        #expect(cmd.contains(RepoGitPrograms.dirtySubmodules("\"$p\"")))
         // Elsewhere: the first file written since the session began, hidden
         // folders and node_modules pruned, capped so a huge tree can't hang
         // the probe.

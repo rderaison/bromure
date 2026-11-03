@@ -180,6 +180,8 @@ struct WorkspaceEditorSheet: View {
         if generateSSH { doc["generateSSH"] = true }
         saving = true
         let original = loaded?.original
+        // Notes and Squelch left as the sheet opened them: the host's stay.
+        if editing != nil, let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
         Task { @MainActor in
             defer { saving = false }
             do {

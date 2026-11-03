@@ -171,11 +171,11 @@ The published image must be legally redistributable, so it contains only free so
 | 37 | Oh My Pi CLI (omp) + bun runtime | bun's install script, then omp through npm, Socket.dev-wrapped |
 | 40 | Google Cloud SDK (gcloud) | `gcloud`, `gsutil`, `bq` |
 
-On a new installation, all bundled steps run without an extra prompt: starting setup from the wizard (or running `bromure-cli init`) *is* your consent. Steps published later need your explicit approval through the **New recommended packages** prompt described under [Base-image updates](#base-image-updates). Because the catalog signature covers every step's command, a tampered download server cannot change what runs as root in your image.
+On a new installation, all bundled steps run without an extra prompt: starting setup from the wizard (or running `bromure-ac init`) *is* your consent. Steps published later need your explicit approval through the **New recommended packages** prompt described under [Base-image updates](#base-image-updates). Because the catalog signature covers every step's command, a tampered download server cannot change what runs as root in your image.
 
 ### The local build fallback
 
-If the download fails for a download-side reason — you're offline, the server is down, or the checksum or expansion fails — the app shows **Image download failed**, with the error and "Bromure can build the image locally instead (~10 min, same result).", and the buttons **Build Locally** and **Cancel**. It never switches to a local build silently. (The `bromure-cli init` command, by contrast, falls back automatically.)
+If the download fails for a download-side reason — you're offline, the server is down, or the checksum or expansion fails — the app shows **Image download failed**, with the error and "Bromure can build the image locally instead (~10 min, same result).", and the buttons **Build Locally** and **Cancel**. It never switches to a local build silently. (The `bromure-ac init` command, by contrast, falls back automatically.)
 
 The local build produces the same image on your Mac:
 
@@ -191,7 +191,7 @@ The local build is designed to survive VPNs: all package downloads go through a 
 - If the builder VM gets no network address, the build fails with **Network Issue During Base-Image Build**, offering **Repair and Retry** (restarts the macOS networking services; asks for your admin password) or **Cancel**.
 - On VPNs that drop large packets (for example WireGuard at MTU 1420), you can set the builder VM's MTU yourself: `defaults write io.bromure.agentic-coding vm.mtu -int 1400`.
 
-You can also choose the local build on purpose at any time: **Rebuild Base Image…** › **Rebuild Locally** in the app menu, or `bromure-cli init --build-local`.
+You can also choose the local build on purpose at any time: **Rebuild Base Image…** › **Rebuild Locally** in the app menu, or `bromure-ac init --build-local`.
 
 ### Network endpoints used during setup
 
@@ -262,7 +262,7 @@ Two things live elsewhere on purpose:
 - The credential master key is kept in the macOS Data Protection Keychain, marked *this device only*, so it never leaves the Mac. Secrets on disk are AES-256-GCM ciphertext; see [Credentials](08-credentials.mdx).
 - The app bundle contains a system daemon (`io.bromure.fatclient-tunnel`) used when you mirror a remote Mac. It is registered only when needed, and the first registration shows an approval switch under **System Settings › General › Login Items**; see [Remote Access & Clients](14-remote-access.mdx).
 
-`bromure-cli info` prints the installed image's version stamp, size, and path at any time.
+`bromure-ac info` prints the installed image's version stamp, size, and path at any time.
 
 ## Base-image updates
 
@@ -302,7 +302,9 @@ Nothing runs without this consent — setup steps run as root inside the base im
 
 ### Rebuilding by hand
 
-To reinstall the image at any time, choose **Rebuild Base Image…** in the app menu. It asks **Update the base image?** and offers **Download Prebuilt**, **Rebuild Locally**, and **Cancel**. Existing machines' disks aren't touched. The old image stays in use until the new one is complete, so you can keep starting machines during the rebuild. The command-line equivalents are `bromure-cli init` (download first) and `bromure-cli init --build-local`.
+To reinstall the image at any time, choose **Rebuild Base Image…** in the app menu. It asks **Update the base image?** and offers **Download Prebuilt**, **Rebuild Locally**, and **Cancel**. Existing machines' disks aren't touched. The old image stays in use until the new one is complete, so you can keep starting machines during the rebuild. The command-line equivalents are `bromure-ac init` (download first) and `bromure-ac init --build-local`.
+
+A download keeps a copy of the published image with the recommended packages installed (`stock.img`, sharing its disk blocks with the base image). As long as the catalog still names the same image, **Download Prebuilt** starts from that copy: it skips the download and the agent installs, applies only packages published since, and runs your customize script. That makes it quick to retry or revise a customize script. To start over anyway — for example to pick up newer agent releases — turn on **Re-download and reinstall the agents**, or run `bromure-ac init --fresh`.
 
 ## Keeping the app up to date
 
@@ -329,7 +331,7 @@ Three things don't transfer, on purpose:
 
 ## Uninstalling completely
 
-To reset only the base image while keeping the app and your machines, run `bromure-cli reset` (add `--yes` to skip the confirmation). It deletes `base.img`, `efivars.bin`, `base.version`, and `image-state.json`, so the next launch runs setup again. It never touches your machines.
+To reset only the base image while keeping the app and your machines, run `bromure-ac reset` (add `--yes` to skip the confirmation). It deletes `base.img`, `efivars.bin`, `base.version`, `image-state.json`, and the saved download (`stock.img`, `stock-state.json`), so the next launch runs setup again. It never touches your machines.
 
 There is no bundled uninstaller. To remove everything:
 

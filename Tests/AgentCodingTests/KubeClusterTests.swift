@@ -1,6 +1,9 @@
+import _CryptoExtras
+import Crypto
 import Foundation
 import SandboxEngine
 import Testing
+import X509
 @testable import bromure_ac
 
 // Kubernetes clusters: the persisted record + access list, the probe the
@@ -491,5 +494,54 @@ struct KubeClusterTests {
         m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [direct])
         #expect(m.yaml.contains("current-context: cloud"))
         #expect(m.yaml.contains("- name: dev\n"))
+    }
+
+    // k3s writes SEC1 `EC PRIVATE KEY`; many tools write PKCS#8. Neither is a
+    // shape SecKeyCreateWithData takes, so the proxy's upstream identity used
+    // to silently vanish and kubectl got a 401. Keys are minted per run so no
+    // PEM private key lives in the repo.
+    enum KeyShape: CaseIterable { case ecSEC1, rsaPKCS8 }
+
+    nonisolated static func selfSigned(_ shape: KeyShape) throws -> (cert: String, key: String) {
+        let key: Certificate.PrivateKey
+        let keyPEM: String
+        let algorithm: Certificate.SignatureAlgorithm
+        switch shape {
+        case .ecSEC1:
+            let ec = P256.Signing.PrivateKey()
+            // SEC1 ECPrivateKey for prime256v1 is fixed-layout DER around the
+            // scalar and the uncompressed public point.
+            let der = Data([0x30, 0x77, 0x02, 0x01, 0x01, 0x04, 0x20]) + ec.rawRepresentation
+                + Data([0xA0, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07,
+                        0xA1, 0x44, 0x03, 0x42, 0x00]) + ec.publicKey.x963Representation
+            keyPEM = "-----BEGIN EC PRIVATE KEY-----\n"
+                + der.base64EncodedString(options: .lineLength64Characters)
+                + "\n-----END EC PRIVATE KEY-----\n"
+            key = Certificate.PrivateKey(ec)
+            algorithm = .ecdsaWithSHA256
+        case .rsaPKCS8:
+            let rsa = try _RSA.Signing.PrivateKey(keySize: .bits2048)
+            keyPEM = rsa.pkcs8PEMRepresentation
+            key = Certificate.PrivateKey(rsa)
+            algorithm = .sha256WithRSAEncryption
+        }
+        let name = try DistinguishedName { CommonName("test") }
+        let cert = try Certificate(
+            version: .v3, serialNumber: .init(), publicKey: key.publicKey,
+            notValidBefore: Date().addingTimeInterval(-60), notValidAfter: Date().addingTimeInterval(3600),
+            issuer: name, subject: name, signatureAlgorithm: algorithm,
+            extensions: Certificate.Extensions(), issuerPrivateKey: key)
+        return (try cert.serializeAsPEM().pemString, keyPEM)
+    }
+
+    @Test("client-cert contexts register an upstream identity for SEC1 EC and PKCS#8 RSA keys",
+          arguments: KeyShape.allCases)
+    func clientCertIdentity(shape: KeyShape) throws {
+        let (cert, key) = try Self.selfSigned(shape)
+        var profile = Profile(name: "ws", tool: .claude, authMode: .token)
+        profile.kubeconfigs = [KubeconfigEntry(name: "dev", serverURL: "https://k8s.example.com:6443",
+                                               auth: .clientCert(certPEM: cert, keyPEM: key))]
+        let m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [])
+        #expect(m.clientIdentities.map(\.host) == ["k8s.example.com:6443"])
     }
 }

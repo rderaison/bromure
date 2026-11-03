@@ -147,7 +147,7 @@ Limits keep a chatty session bounded: 1 MB kept per message, 4,096 messages per 
 
 ## The Security Timeline
 
-The Trace Inspector answers "what did the agent send?"; the **Security Timeline** (**Window** → **Security Timeline…**) answers "what did Bromure's security engines *decide*?" — every credential swap, firewall verdict, package check, prompt-injection detection, PII swap and credential use, as one chronological table with a 24-hour **Overview**. Unlike tracing, it needs no setting: it is always recorded, kept for 90 days, and survives restarts. It has its own chapter: [Security Overview & Timeline](11a-security-timeline.mdx).
+The Trace Inspector answers "what did the agent send?"; the **Security Timeline** (**Window** → **Security…**) answers "what did Bromure's security engines *decide*?" — every credential swap, firewall verdict, package check, prompt-injection detection, PII swap and credential use, as one chronological table with a 24-hour **Overview**. Unlike tracing, it needs no setting: it is always recorded, kept for 90 days, and survives restarts. It has its own chapter: [Security Overview & Timeline](11a-security-timeline.mdx).
 
 ## The trace CLI
 
@@ -161,7 +161,7 @@ The `bromure-cli trace` command group gives you the same trace data in the termi
 | `bromure-cli trace leaks [workspace]` | Only requests with a potential credential leak — header, value preview, and suspicion class. Prints `No leaks detected. ✓` when clean. |
 | `bromure-cli trace clear [-f]` | Wipe **all** trace history — the in-memory ring and the on-disk files — after a `y/N` confirmation (skip it with `-f`). Reports how many records were cleared. |
 
-The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-cli agent running.` The full CLI is documented in [CLI, API & MCP](16-automation-cli.mdx).
+The optional `workspace` argument filters by id or name. If tracing is off for the workspace (or nothing has been recorded yet), `trace ls` prints `No trace records. (Tracing is per-workspace — enable it in the workspace's settings.)`; if the app is not running, every subcommand prints `No bromure-ac agent running.` The full CLI is documented in [CLI, API & MCP](16-automation-cli.mdx).
 
 ## Exporting a trace
 
@@ -198,9 +198,21 @@ On an enrolled Mac, sessions stream structured [cloud events](18-glossary.mdx) t
 - `egress.firewall` — one per firewall verdict: host, port, protocol, and the action taken.
 - `credential.exfiltration` — a fake credential was observed leaving the VM for a host outside its scope (previews and hosts only, never token bytes); `credential.exfiltration_allowed` when you answered the compromise alert with **Allow**.
 - `privacy.pii_swap` — per request where [PII Protection](10a-pii.mdx) swapped values: the host and the counts by kind, never the values.
+- `net.flow` — on a machine with the [kernel sentry](10b-sandbox-policy.mdx#the-kernel-sentry), each connection with its process chain, the tool call behind it and the host's decision ([network lineage](11a-security-timeline.mdx#network-lineage)).
+- Guest-sandbox, kernel-sentry and watchdog events — what the [guest sandbox](10b-sandbox-policy.mdx#the-guest-sandbox) refused, sentry tampering alarms, and watchdog findings.
+- `agent.reasoning` — what the agent wrote before a tool call (its reasoning, stated intent and your prompt), **only when the organization asks for it** (`capture_agent_reasoning` in its managed OpenShell policy). It is always shown locally, in the lineage sheet.
 - Detailed HTTP request logs — enrolled installs can additionally stream per-request HTTP metadata from the transparent interception layer, so an organization sees the workspace's outbound HTTP surface, not just its AI traffic.
 
-Only the newest assistant turn is walked, so resent history is never double-counted, and **raw prompts are never emitted** — the telemetry answers "what did the AI *do*", not "what did the user *ask*".
+Only the newest assistant turn is walked, so resent history is never double-counted, and **raw prompts are never emitted** unless the organization opted in to `agent.reasoning` — the telemetry answers "what did the AI *do*", not "what did the user *ask*".
+
+### Command lines are redacted
+
+Command lines in events — a process's arguments, a tool call's command, a tool input's summary — are cleaned of secrets before they are recorded in the Security Timeline, written to OCSF logs, or uploaded:
+
+- Tokens in a known format (Anthropic, OpenAI, GitHub, GitLab, Slack, AWS, Google, Hugging Face, npm, PyPI, DigitalOcean, xAI, Groq, JWTs…) become their fingerprint label, such as `[GitHub token #3f9a1c2e]` — the same label everywhere, so you can still tell which key was used.
+- Everything else secret becomes `***`: URL passwords (`https://user:***@host`), `curl -u user:***` (glued and clustered forms like `-fsSLu` too), curl cookies (`-b`, `--cookie`, every pair), certificate passphrases (`-E cert:***`), `Authorization`, API-key, token and `Cookie` header values, `--password` / `--token` / `--api-key`-style options, and `KEY=value` pairs whose key names a password, secret, token or key.
+- Quoted values are hidden whole, spaces and all.
+- Things that only look like secrets are kept: `rsync -u`, `git checkout -b`, `PWD` and other paths.
 
 ### The realtime event tap
 

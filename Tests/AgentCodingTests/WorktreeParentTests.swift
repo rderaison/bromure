@@ -50,4 +50,30 @@ struct WorktreeParentTests {
             .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         #expect(detached[1] == "dev")
     }
+
+    /// Finding (CWE-78): the branch, a name git accepts with `'`, `"`, `;`
+    /// or `$(` in it, was spliced into quoted strings of this command.
+    @Test("a branch name holding shell syntax is a name, never a command")
+    func shellSyntaxInBranch() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("wtparent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let marker = dir.appendingPathComponent("pwned").path
+        let branch = "wt/x';touch${IFS}\(marker);'\";touch${IFS}\(marker);\""
+        #expect(CodingTaskEngine.isSafeBranchName(branch))
+        _ = try sh("""
+            set -e
+            git init -q -b main repo && cd repo
+            git -c user.name=t -c user.email=t@t commit -q --allow-empty -m root
+            git checkout -q -b dev
+            git -c user.name=t -c user.email=t@t commit -q --allow-empty -m dev1
+            git worktree add -q -b \(CodingTaskEngine.shellQuote(branch)) ../task dev
+            git checkout -q main
+            """, in: dir)
+        let repo = dir.appendingPathComponent("repo").path
+        let out = try sh(CodingTaskEngine.worktreeMetadataCommand(repoPath: repo, branch: branch), in: dir)
+            .split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        #expect(!FileManager.default.fileExists(atPath: marker))
+        #expect(out.count >= 2 && out[0].hasSuffix("/task") && out[1] == "dev")
+    }
 }

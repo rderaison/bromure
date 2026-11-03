@@ -70,9 +70,11 @@ enum MobileSessions {
         model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888"
     }
 
-    /// "3m" — when the session last did something; nil while starting.
-    static func when(_ s: AgentSession) -> String? {
-        s.isLaunching ? nil : SessionHome.elapsedCompact(since: SessionHome.lastActivity(s))
+    /// "3m" — when the session last did something ("now" while it works);
+    /// nil while starting.
+    @MainActor
+    static func when(_ s: AgentSession, in model: SessionListModel) -> String? {
+        SessionHome.rowWhen(s, in: model)
     }
 }
 
@@ -97,8 +99,15 @@ struct MobileSessionScreen: View {
     @State private var worktreeSheet = false
     /// The session's machine settings (the workspace editor).
     @State private var machineSettings = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private var model: SessionListModel { controller.listModel }
+
+    /// On screen in the foreground: its replies are read -- here and, through
+    /// the server, on every other client.
+    private func markRead() {
+        if scenePhase == .active { controller.markRead(sessionID) }
+    }
     private var session: AgentSession? { controller.sessionStore.session(sessionID) }
 
     var body: some View {
@@ -116,8 +125,10 @@ struct MobileSessionScreen: View {
                 ToolbarItem(placement: .primaryAction) { menu(s) }
             }
         }
-        .onAppear(perform: select)
-        .onChange(of: sessionID) { _, _ in select() }
+        .onAppear { select(); markRead() }
+        .onChange(of: sessionID) { _, _ in select(); markRead() }
+        .onChange(of: session?.replies) { _, _ in markRead() }
+        .onChange(of: scenePhase) { _, _ in markRead() }
         .onChange(of: controller.revision) { _, _ in
             // A session's folder resolves after launch (a clone target, a
             // fresh folder): keep the shared context in step.
@@ -370,7 +381,7 @@ struct MobileSessionHeader: View {
         let detail: String?
         switch bucket {
         case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil
-        case .idle:    detail = SessionHome.elapsed(since: s.lastSeenAt)
+        case .idle:    detail = SessionHome.elapsed(since: SessionHome.lastActivity(s))
         case .ended:   detail = SessionHome.elapsed(since: s.endedAt).map {
             String(format: NSLocalizedString("%@ ago", comment: "pill"), $0) }
         default:       detail = nil
@@ -433,7 +444,7 @@ struct MobileNewSessionScreen: View {
         .alert("Couldn't start the session", isPresented: $failed) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(controller.lastError ?? "The server didn't answer. Check the connection and try again.")
+            Text(controller.lastStartError ?? "The server didn't answer. Check the connection and try again.")
         }
         .sheet(item: $workspaceEdit) { edit in
             WorkspaceEditorSheet(controller: controller, editing: edit.editingID) {
@@ -707,9 +718,12 @@ struct MobileSessionsSection: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
-                if let when = MobileSessions.when(s) {
-                    Text(when).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                let unread = SessionHome.showsUnread(s, in: model)
+                if let when = MobileSessions.when(s, in: model) {
+                    Text(when).font(.caption2.monospacedDigit().weight(unread ? .semibold : .regular))
+                        .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                 }
+                if unread { UnreadMark(size: 10) }
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
                     .foregroundStyle(urgent ? Color.red.opacity(0.55) : Color.secondary.opacity(0.5))
             }
@@ -745,7 +759,7 @@ struct MobileSessionsSection: View {
 /// One collapsible "Sessions" section for a `List(selection:)`: the
 /// new-session row, then every session in sidebar order (gone ones dimmed,
 /// last), each row tagged with its `PadSelection`.
-struct PadSessionSections: View {
+struct PadSessionSections<Boards: View>: View {
     let controller: RemoteHostController
     /// A session a row spawned (a worktree off its folder): select it.
     var onOpen: (UUID) -> Void = { _ in }
@@ -763,6 +777,22 @@ struct PadSessionSections: View {
     /// A right-click / long-press "New worktree…": the session to branch off.
     @State private var pendingWorktree: AgentSession?
 
+    /// The board rows, between New session and the sessions — as on the
+    /// desktop sidebar.
+    private let boards: Boards
+
+    init(controller: RemoteHostController,
+         onOpen: @escaping (UUID) -> Void = { _ in },
+         onOpenRoom: @escaping (UUID) -> Void = { _ in },
+         onNewInRoom: @escaping (UUID) -> Void = { _ in },
+         @ViewBuilder boards: () -> Boards) {
+        self.controller = controller
+        self.onOpen = onOpen
+        self.onOpenRoom = onOpenRoom
+        self.onNewInRoom = onNewInRoom
+        self.boards = boards()
+    }
+
     private var model: SessionListModel { controller.listModel }
 
     var body: some View {
@@ -770,6 +800,10 @@ struct PadSessionSections: View {
         let needsYou = all.filter { SessionHome.bucket(for: $0, in: model) == .needsYou }.count
         let put = MobileRooms.looseArchived(controller)
         let putRooms = controller.roomStore.archivedRooms
+        Section {
+            newSessionRow
+            boards
+        }
         sessionsSection(MobileRooms.loose(all, controller), needsYou: needsYou)
         if !put.isEmpty || !putRooms.isEmpty {
             // Put away, not gone: folded by default.
@@ -799,35 +833,41 @@ struct PadSessionSections: View {
         }
     }
 
-    private func sessionsSection(_ list: [AgentSession], needsYou: Int) -> some View {
-        Section(isExpanded: $expanded) {
-            Label("New Session…", systemImage: "plus")
-                .foregroundStyle(.tint)
-                .tag(PadSelection.newSession)
-                // The rows' "New worktree…" presents its sheet here too.
-                .sheet(item: $pendingWorktree) { s in
-                    NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
-                        Task {
-                            if let id = await controller.startWorktreeSession(
-                                from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
-                                onOpen(id)
-                            }
+    /// Above the boards, so it's there with the sessions folded too. It
+    /// also hosts the rows' worktree sheet and delete question (a row inside
+    /// the list can present; a Section can't).
+    private var newSessionRow: some View {
+        Label("New Session…", systemImage: "plus")
+            .foregroundStyle(.tint)
+            .tag(PadSelection.newSession)
+            // The rows' "New worktree…" presents its sheet here too.
+            .sheet(item: $pendingWorktree) { s in
+                NewWorktreeSheet(parent: s, gitState: { await controller.sessionGitState($0) }) { req in
+                    Task {
+                        if let id = await controller.startWorktreeSession(
+                            from: s.id, name: req.name, tool: req.tool, message: req.message, initGit: req.initGit, base: req.base) {
+                            onOpen(id)
                         }
                     }
-                    .presentationDetents([.medium, .large])
                 }
-                // The rows' Delete asks here when the agent is running (a
-                // row inside the list can present; the Section can't).
-                .confirmationDialog("Delete this session?", isPresented: Binding(
-                    get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-                    titleVisibility: .visible) {
-                    Button("Delete session", role: .destructive) {
-                        if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
-                        pendingDelete = nil
-                    }
-                } message: {
-                    Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+                .presentationDetents([.medium, .large])
+            }
+            // The rows' Delete asks here when the agent is running (a
+            // row inside the list can present; the Section can't).
+            .confirmationDialog("Delete this session?", isPresented: Binding(
+                get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                titleVisibility: .visible) {
+                Button("Delete session", role: .destructive) {
+                    if let s = pendingDelete { controller.sessionCommand(s.id, "delete") }
+                    pendingDelete = nil
                 }
+            } message: {
+                Text("The agent stops and the session leaves the list. Its folder stays on the machine.")
+            }
+    }
+
+    private func sessionsSection(_ list: [AgentSession], needsYou: Int) -> some View {
+        Section(isExpanded: $expanded) {
             if list.isEmpty && controller.roomStore.activeRooms.isEmpty {
                 Text(controller.hasSnapshot ? "No sessions yet." : "Loading sessions…")
                     .font(.callout).foregroundStyle(.secondary)
@@ -927,11 +967,14 @@ struct PadSessionSections: View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(s.title).lineLimit(1)
+                    let unread = SessionHome.showsUnread(s, in: model)
+                    Text(s.title).lineLimit(1).fontWeight(unread ? .semibold : nil)
                     Spacer(minLength: 0)
-                    if let when = MobileSessions.when(s) {
-                        Text(when).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                    if let when = MobileSessions.when(s, in: model) {
+                        Text(when).font(.caption2.monospacedDigit())
+                            .foregroundStyle(unread ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                     }
+                    if unread { UnreadMark(size: 8) }
                 }
                 HStack(spacing: 4) {
                     if !MobileSessions.workspaceName(model, s).isEmpty {

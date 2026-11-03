@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 import Testing
 @testable import bromure_ac
 
@@ -73,5 +74,30 @@ struct BaseImageCustomizeTests {
         // A catalog step still gets its three tries.
         let flaky = try runSteps(["0001-aaaaaaaa.sh": "# Catalog step\nfalse\n"])
         #expect(flaky.out.contains("attempt 3/3 failed"))
+    }
+}
+
+// A download re-derives base.img from the saved stock image (the published
+// image + catalog steps, no customize script) while upstream is unchanged.
+@Suite("Base image stock checkpoint")
+struct BaseImageStockTests {
+    private func step(_ uuid: String, _ seq: Int) -> PostinstallStep {
+        PostinstallStep(uuid: uuid, seq: seq, description: uuid, command: "true")
+    }
+    private func stock(_ image: String, _ applied: [String]) -> UbuntuImageManager.BaseImageState {
+        .init(imageUUID: image, version: "201", appliedStepUUIDs: applied)
+    }
+
+    @Test("reused only for the same image, applying just the new steps")
+    func missingSteps() {
+        let steps = [step("a", 1), step("b", 2), step("c", 3)]
+        let missing = { (s: UbuntuImageManager.BaseImageState?) in
+            UbuntuImageManager.stockMissingSteps(stock: s, imageUUID: "img1", steps: steps)?.map(\.uuid)
+        }
+        #expect(missing(nil) == nil)                                       // none saved
+        #expect(missing(stock("img0", ["a", "b", "c"])) == nil)            // upstream changed
+        #expect(missing(stock("img1", ["a", "b", "c"])) == [])             // customize only
+        #expect(missing(stock("img1", ["a", "c"])) == ["b"])               // a step published since
+        #expect(missing(stock("img1", ["a", "b", "c", "gone"])) == nil)    // a step withdrawn
     }
 }

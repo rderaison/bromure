@@ -166,9 +166,56 @@ final class RoomStageController {
     @ObservationIgnored let listModel: SessionListModel
 
     var focusedID: UUID?
-    var zoomedID: UUID?
+    var zoomedID: UUID? { didSet { if zoomedID != oldValue { shownChanged() } } }
     /// The tab on show (a page of `layout.size` sessions).
-    var page = 0
+    var page = 0 { didSet { if page != oldValue { shownChanged() } } }
+    /// Told when the sessions on screen change (a page, a zoom): what's on
+    /// show is read.
+    @ObservationIgnored var onShownChanged: (() -> Void)?
+    @ObservationIgnored private var lastShown: [UUID] = []
+
+    /// What's on show changed (a page, a zoom, the dock, the 1×1 tab).
+    private func shownChanged() {
+        lastShown = onScreenIDs
+        onShownChanged?()
+    }
+
+    /// Tell the owner when the chats on show changed without a page or zoom
+    /// change: a member joining or leaving the page on show, the auto layout
+    /// growing (a fifth session turns 2×2 into 3×2 on the same page), a new
+    /// layout, ended members shown or hidden, a tail loaded (Finding CWE-670,
+    /// "A room page that gains a session is not marked read").
+    func noteShown() {
+        let shown = onScreenIDs
+        guard shown != lastShown else { return }
+        lastShown = shown
+        onShownChanged?()
+    }
+
+    /// The Switchboard's chat is on show (the dock open, or its own tab at
+    /// 1×1) -- kept by the view, which owns the dock.
+    var switchboardOnScreen = false { didSet { if switchboardOnScreen != oldValue { shownChanged() } } }
+    /// At 1×1 the Switchboard's tab is up: the page's cell isn't on show.
+    var cellsHidden = false { didSet { if cellsHidden != oldValue { shownChanged() } } }
+
+    /// The sessions whose chats are on screen: the zoomed one, else the page
+    /// -- and the Switchboard when its chat shows (not while it sleeps).
+    var onScreenIDs: [UUID] {
+        var ids: [UUID]
+        if let z = zoomedID {
+            ids = [z]
+        } else {
+            let p = pages
+            ids = cellsHidden || !p.indices.contains(page) ? [] : p[page].map(\.id)
+        }
+        // Only cells that show the conversation: a live chat, or an asleep
+        // member's transcript tail -- not the placeholder an unloaded one
+        // shows (CWE-670, "iOS room marks asleep sessions read without
+        // showing the replies": the same here).
+        ids = ids.filter { models[$0] != nil || !(resting[$0] ?? []).isEmpty }
+        if switchboardOnScreen, let sb = switchboard, models[sb.id] != nil { ids.append(sb.id) }
+        return ids
+    }
     /// +1 / −1: which way the last page change went (the slide's direction).
     var pageDirection = 1
     /// Who the one composer under the grid talks to: the room's
@@ -206,7 +253,10 @@ final class RoomStageController {
 
     /// Ended sessions leave the grid and the tabs (per room, remembered).
     var hideEnded: Bool {
-        didSet { UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID)) }
+        didSet {
+            UserDefaults.standard.set(hideEnded, forKey: Self.hideEndedKey(roomID))
+            noteShown()
+        }
     }
     private static func hideEndedKey(_ id: UUID) -> String { "room.hideEnded.\(id.uuidString)" }
 
@@ -215,6 +265,16 @@ final class RoomStageController {
         self.backend = backend
         self.hideEnded = UserDefaults.standard.bool(forKey: Self.hideEndedKey(roomID))
         self.listModel = listModel
+        // What the stage opens on, until its view says otherwise: at 1×1 the
+        // Switchboard's tab (the composer aims there first), else the grid
+        // with the Switchboard docked open. A read before the view settles --
+        // the window becoming key as the room opens -- then can't mark the
+        // cell behind the tab, or miss the Switchboard (Finding CWE-670,
+        // "Room read-state marks the hidden 1×1 session and skips the
+        // Switchboard").
+        let single = layout.size == 1
+        cellsHidden = single && target == .switchboard
+        switchboardOnScreen = single ? target == .switchboard : true
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -260,6 +320,7 @@ final class RoomStageController {
         } else {
             page = 0
         }
+        noteShown()   // same page, different cells
     }
 
     /// Auto: the grid sized to fit the room's sessions.
@@ -268,6 +329,7 @@ final class RoomStageController {
     func setAutoLayout() {
         backend.setLayout(roomID, "")
         page = 0
+        noteShown()   // same page, different cells
     }
 
     func show(page p: Int) {
@@ -322,6 +384,9 @@ final class RoomStageController {
         if let z = zoomedID, !present.contains(z) { missingZoom += 1 } else { missingZoom = 0 }
         if missingZoom >= Self.missingRefreshesToMove { missingZoom = 0; zoomedID = nil }
         page = min(page, max(0, pages.count - 1))
+        // A member joined the page on show, or the Switchboard woke under an
+        // open dock: what's on screen changed, so it's read.
+        noteShown()
         // A member that went live will have more to show when it stops again.
         for id in models.keys where resting[id] != nil { resting[id] = nil }
         // Failed resting reads, due again.
@@ -340,6 +405,7 @@ final class RoomStageController {
         let stamp = Self.restingStamp(s)
         if let hit = Self.restingCache[s.id], hit.stamp == stamp {
             resting[s.id] = hit.items
+            noteShown()   // its cell shows the conversation now
             return
         }
         guard restingLoading.insert(s.id).inserted else { return }
@@ -366,6 +432,7 @@ final class RoomStageController {
             restingRetry[s.id] = nil
             let tail = Array(items.suffix(40))
             resting[s.id] = tail
+            noteShown()
             Self.restingCache[s.id] = (stamp, tail)
         }
     }
@@ -464,8 +531,15 @@ struct RoomStageView: View {
     @State private var wave: Double = 1
     @State private var dockHeight: CGFloat = 220
     /// At 1×1 the Switchboard is a tab of its own (no dock under a lone
-    /// cell): whether that tab is the one on show.
-    @State private var switchboardTab = false
+    /// cell): whether that tab is the one on show. Starts where the
+    /// controller does (its target), so the first report of what's on show
+    /// doesn't flip the cell on for a moment before `syncSingleTab`.
+    @State private var switchboardTab: Bool
+
+    init(controller: RoomStageController) {
+        self.controller = controller
+        _switchboardTab = State(initialValue: controller.target == .switchboard)
+    }
     /// The member whose nickname sheet is up (from its cell's ⋯ menu).
     @State private var nicknameFor: AgentSession?
     private var singleLayout: Bool { controller.layout.size == 1 && controller.zoomedID == nil }
@@ -474,6 +548,8 @@ struct RoomStageView: View {
     /// peeks at it without changing the grid's preference.
     @State private var dockPeek = false
     private var dockShown: Bool { controller.zoomedID == nil ? dockOpen : dockPeek }
+    /// Whether the Switchboard's chat is on show: its tab at 1×1, else the dock.
+    private var switchboardShown: Bool { singleLayout ? switchboardTab : dockShown }
     @State private var renaming = false
     @State private var draftName = ""
     @State private var pickingTarget = false
@@ -499,6 +575,16 @@ struct RoomStageView: View {
     }
 
     var body: some View {
+        stage
+            // What's on show is what gets read (`onScreenIDs`).
+            .onChange(of: switchboardShown, initial: true) { _, v in controller.switchboardOnScreen = v }
+            .onChange(of: singleLayout && switchboardTab, initial: true) { _, v in controller.cellsHidden = v }
+            // The first read waits for the view: before it, the 1×1 tab and
+            // the dock aren't known (the owner marks a turn later, see showRoom).
+            .onAppear { controller.onShownChanged?() }
+    }
+
+    private var stage: some View {
         VStack(spacing: 0) {
             header
             if controller.zoomedID == nil, controller.pages.count > 1 || controller.layout.size == 1 {

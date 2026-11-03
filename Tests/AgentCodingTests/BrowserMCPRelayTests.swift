@@ -68,3 +68,33 @@ struct BrowserMCPRelayTests {
         #expect(map.inbound("not json") == .stale)
     }
 }
+
+/// Server report: unix sockets "->(none)" piling up while a fat client was
+/// connected. The bridge lets go of a relay as it closes it, and the reader
+/// that closes the fd held the relay weakly — so it never did.
+@Suite("Browser MCP relay fd")
+struct BrowserMCPRelayFDTests {
+    private static func inode(_ fd: Int32) -> UInt64? {
+        var st = stat()
+        return fstat(fd, &st) == 0 ? UInt64(st.st_ino) : nil
+    }
+
+    @Test("a relay let go of as it's closed still closes its fd")
+    @MainActor func closedRelayClosesFD() async {
+        var sp: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0)
+        defer { close(sp[1]) }
+        let ino = Self.inode(sp[0])
+        var mux: RelayMux? = RelayMux(remoteFd: sp[0], onDrop: {})
+        mux?.close()
+        mux = nil
+        // The reader wakes on the shutdown, then closes on the main queue.
+        var closed = false
+        for _ in 0..<40 where !closed {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            closed = Self.inode(sp[0]) != ino
+        }
+        #expect(closed)
+        _ = mux
+    }
+}

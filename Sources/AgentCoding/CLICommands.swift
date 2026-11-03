@@ -309,15 +309,18 @@ struct VMAttachWindow: ParsableCommand {
 
     /// The guest command behind a scratch terminal: attach to (or create)
     /// its own tmux session in `cwd` — the home when the folder is gone.
-    /// The wheel scrolls its history (mouse on: its one client is ours);
-    /// status off, the chat draws the chrome.
+    /// Mouse off, as in a session's own tabs: a drag is the terminal's
+    /// native selection, kept until ⌘C (tmux's mouse took the drag and
+    /// dropped it on release). The wheel still scrolls its history through
+    /// the guest's server-wide user-keys bridge. Status off: the chat draws
+    /// the chrome.
     static func scratchCommand(session: String, cwd: String) -> String {
         func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let name = String(session.filter { $0.isLetter || $0.isNumber || $0 == "-" }.prefix(48))
         let dir = cwd == "~" ? "$HOME" : (cwd.hasPrefix("~/") ? "$HOME/" + q(String(cwd.dropFirst(2))) : q(cwd))
         return "d=\(dir); [ -d \"$d\" ] || d=\"$HOME\"; "
             + "exec tmux new-session -A -s \(q(name)) -c \"$d\" \\; set-option status off \\; "
-            + "set-option mouse on \\; set-option -s set-clipboard on"
+            + "set-option mouse off \\; set-option -s set-clipboard on"
     }
 
     private func attachLoop(client: ControlClient) throws {
@@ -396,6 +399,8 @@ struct FatClientPost: ParsableCommand {
     var path: String
     @Option(name: .long, help: "Inline JSON request body.")
     var json: String?
+    @Option(name: .long, help: "Send it N times on one connection and print the timings (link measurements).")
+    var `repeat`: Int?
 
     func run() throws {
         guard let id = UUID(uuidString: hostID), let client = RemoteTransport.client(hostID: id) else {
@@ -404,6 +409,19 @@ struct FatClientPost: ParsableCommand {
         var body: [String: Any]?
         if let json, let data = json.data(using: .utf8) {
             body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        if let n = `repeat`, n > 0 {
+            for i in 1...n {
+                let t = Date()
+                let r = try client.request(method, path, body: body)
+                FileHandle.standardError.write(Data(String(format: "#%d HTTP %d %.0f ms\n", i, r.status,
+                                                           Date().timeIntervalSince(t) * 1000).utf8))
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: RequestLedger.shared.report(),
+                                                   options: [.prettyPrinted, .sortedKeys]) {
+                print(String(data: d, encoding: .utf8) ?? "")
+            }
+            return
         }
         let resp = try client.request(method, path, body: body)
         FileHandle.standardError.write(Data("HTTP \(resp.status)\n".utf8))

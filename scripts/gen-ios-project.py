@@ -48,7 +48,8 @@ PACKAGES = [
     ("swift-nio", "https://github.com/apple/swift-nio.git", "upToNextMajorVersion", "2.65.0"),
     ("swift-nio-ssh", "https://github.com/apple/swift-nio-ssh.git", "upToNextMajorVersion", "0.9.0"),
     ("swift-markdown-ui", "https://github.com/gonzalezreal/swift-markdown-ui.git", "upToNextMajorVersion", "2.4.0"),
-    ("SwiftTerm", "https://github.com/migueldeicaza/SwiftTerm.git", "upToNextMajorVersion", "1.2.0"),
+    # 1.20.x: 1.99 is SwiftTerm v2's pre-release (getTerminal() gone).
+    ("SwiftTerm", "https://github.com/migueldeicaza/SwiftTerm.git", "upToNextMinorVersion", "1.20.0"),
 ]
 # (product, package name)
 PRODUCTS = [
@@ -459,6 +460,12 @@ def main():
         "CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;",
         "ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;",
         "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;",
+        # SwiftUI's VideoPlayer and PhotosPicker live in cross-import overlays
+        # (_AVKit_SwiftUI, _PhotosUI_SwiftUI) whose classes subclass AVKit's
+        # and PhotosUI's own. Autolinking links only the overlay: the base
+        # framework never loads, and the first VideoPlayer aborts the app
+        # ("failed to demangle superclass of VideoPlayerView ... AVPlayerView").
+        "OTHER_LDFLAGS = (\"$(inherited)\", \"-framework\", AVKit, \"-framework\", PhotosUI);",
     ]
     # The NSE inherits the project-level common settings; only its target
     # specifics differ. No app icon/assets, its own Info.plist + entitlements,

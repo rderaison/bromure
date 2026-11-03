@@ -1,6 +1,6 @@
 ---
 title: "Bromure Agentic Coding — User Manual"
-description: "The complete user manual for Bromure Agentic Coding 5.0.0: installation, sessions, rooms and machines, the settings reference, the security model, models, and automation."
+description: "The complete user manual for Bromure Agentic Coding 5.4: installation, sessions, rooms and machines, the settings reference, the security model and sandbox policies, models, and automation."
 order: 0
 ---
 
@@ -8,9 +8,9 @@ order: 0
 
 Welcome to the official user manual for **Bromure Agentic Coding**, the macOS app that runs AI coding agents — Claude Code, Codex, Grok, Kimi Code, Oh My Pi, and ordinary shell tooling — inside isolated Linux virtual machines on your Mac, with a host-side gateway that keeps your real credentials out of the agent's reach.
 
-This manual documents version **5.0.0**. It requires macOS 14 (Sonoma) or later on Apple Silicon.
+This manual documents version **5.4.0**. It requires macOS 14 (Sonoma) or later on Apple Silicon.
 
-Version 5.0.0 is organized around **sessions**: each conversation with an agent is a row in the sidebar, and you talk to it in a chat. The Linux VMs that sessions run in are called **machines** in the main window. The settings editor still calls them **workspaces**; the two words mean the same thing.
+Since version 5.0, the app is organized around **sessions**: each conversation with an agent is a row in the sidebar, and you talk to it in a chat. The Linux VMs that sessions run in are called **machines** in the main window. The settings editor still calls them **workspaces**; the two words mean the same thing.
 
 > **New to the app?** Start with [Installation & First Run](02-installation.mdx), then follow the [Quick Start](03-quick-start.mdx). Read [Concepts & Architecture](04-concepts.mdx) when you want the full picture. Use everything else as reference.
 
@@ -51,9 +51,9 @@ Version 5.0.0 is organized around **sessions**: each conversation with an agent 
 The settings reference has one page per pane, in the editor's order:
 
 - **Workspace:** [General](07-settings/general.mdx), [Appearance](07-settings/appearance.mdx)
-- **Models:** [Models](07-settings/models.mdx), [Fusion](07-settings/fusion.mdx)
+- **Models:** [Models](07-settings/models.mdx), [Fusion](07-settings/fusion.mdx), [Squelch](07-settings/squelch.mdx)
 - **Machine:** [Folders](07-settings/folders.mdx), [Environment](07-settings/environment.mdx), [MCP](07-settings/mcp.mdx), [Browser](07-settings/browser.mdx), [Resources](07-settings/resources.mdx)
-- **Security:** [Credentials](07-settings/credentials.mdx), [Tracing](07-settings/tracing.mdx), [Guardrails](07-settings/guardrails.mdx), [Supply Chain](07-settings/supply-chain.mdx), [Prompt Injection](07-settings/prompt-injection.mdx), [PII Protection](07-settings/pii-protection.mdx)
+- **Security:** [Credentials](07-settings/credentials.mdx), [Tracing](07-settings/tracing.mdx), [Guardrails](07-settings/guardrails.mdx), [Sandbox Policy](07-settings/sandbox-policy.mdx), [Supply Chain](07-settings/supply-chain.mdx), [Prompt Injection](07-settings/prompt-injection.mdx), [PII Protection](07-settings/pii-protection.mdx)
 - **App** (Preferences only): [Automation](07-settings/automation.mdx)
 
 ### Security & the wire boundary
@@ -62,16 +62,18 @@ The settings reference has one page per pane, in the editor's order:
 |---|---|
 | [8. Credentials & the Wire Boundary](08-credentials.mdx) | How real secrets stay on the host while the agent gets only fakes: the MITM proxy, sign-ins and API keys, per-credential approvals, and the compromise alert. |
 | [9. Supply-Chain Protection](09-supply-chain.mdx) | Checking, rewriting, and blocking package installs before the agent sees them: the age gate, OSV, socket.dev, Depi, and install-script stripping. |
-| [10. Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx) | On-device detectors that scan the agent's AI traffic for injected instructions, the egress firewall, and guardrails on destructive operations. |
+| [10. Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx) | On-device detectors that scan the agent's AI traffic for injected instructions, and guardrails on destructive operations. |
 | [10.5 PII Protection](10a-pii.mdx) | Swapping personal data for consistent stand-ins before a conversation leaves your Mac, and restoring it in the replies. |
+| [10.7 Sandbox Policy, the Guest Sandbox & the Kernel Sentry](10b-sandbox-policy.mdx) | The two sandbox engines: the Bromure Firewall and NVIDIA OpenShell policies; the guest sandbox and packages without root; the kernel sentry; the Sandbox drawer and the policy advisor; telling the agent when it's blocked; the watchdog; organization boundaries. |
 | [11. Tracing & Audit](11-tracing.mdx) | What a session trace records, the Trace Inspector, encryption at rest, retention, exporting, and privacy. |
-| [11.5 Security Overview & Timeline](11a-security-timeline.mdx) | The Security Timeline window: the 24-hour Overview, per-machine protections, and the filterable, exportable Timeline of every security decision. |
+| [11.5 Security Overview & Timeline](11a-security-timeline.mdx) | The Security window: the Overview, per-machine protections, the filterable, exportable Timeline of every security decision, network lineage from a prompt to a packet, and OCSF export. |
 
 ### Models & infrastructure
 
 | Chapter | What it covers |
 |---|---|
 | [12. Fusion — the Multi-Model Panel](12-fusion.mdx) | Answering each prompt with several models at once, judged and combined into a single reply on the wire. |
+| [12.5 Squelch — Less Noise, Fewer Tokens](12a-squelch.mdx) | Trimming passing tests, progress and other noise out of command output before the model reads it (after rtk), and the tokens it saved per session. |
 | [13. Models & Providers](13-models.mdx) | The global Models board: providers (sign-ins, API keys, Amazon Bedrock, OpenRouter, custom servers, on-device models), per-agent model choices, per-workspace overrides, and live changes. |
 | [13.5 Kubernetes Clusters & Registries](13a-kubernetes.mdx) | Running k3s clusters and a private container registry in their own VMs beside your machines: storage, load balancing, add-ons, access, and the infrastructure MCP server. |
 

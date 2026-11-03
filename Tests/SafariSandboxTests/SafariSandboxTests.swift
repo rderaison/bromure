@@ -166,7 +166,25 @@ struct ProfileSettingsTests {
     func emptyJSON() throws {
         let data = Data("{}".utf8)
         let s = try JSONDecoder().decode(ProfileSettings.self, from: data)
-        #expect(s == ProfileSettings())
+        // But for printing: on for a new profile, kept off for one saved
+        // before the setting existed.
+        var expected = ProfileSettings()
+        expected.allowPrinting = false
+        #expect(s == expected)
+    }
+
+    @Test("New profiles print and keep Keychain passwords off; older profiles keep printing off")
+    func printingAndPasswordDefaults() throws {
+        let fresh = ProfileSettings()
+        #expect(fresh.allowPrinting)
+        #expect(!fresh.keychainPasswords)
+        #expect(fresh.toVMConfig().allowPrinting == fresh.nativeChrome)
+        let legacy = try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8))
+        #expect(!legacy.allowPrinting)
+        var off = fresh
+        off.allowPrinting = false
+        #expect(!(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(off))).allowPrinting)
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(fresh)).allowPrinting)
     }
 
     @Test("Codable roundtrip preserves all fields")

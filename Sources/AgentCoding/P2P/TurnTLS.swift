@@ -103,9 +103,11 @@ enum TurnTLSTunnel {
     private static func startUplink(_ conn: NWConnection, _ fd: Int32) {
         Thread.detachNewThread {
             var buf = [UInt8](repeating: 0, count: 32768)
-            while true {
+            // One pool per chunk: a raw Thread never drains its implicit pool,
+            // and each send bridges its Data for Network.framework.
+            while autoreleasepool(invoking: { () -> Bool in
                 let n = Darwin.read(fd, &buf, buf.count)
-                if n <= 0 { break }                     // caller closed / error → done
+                if n <= 0 { return false }              // caller closed / error → done
                 let sem = DispatchSemaphore(value: 0)
                 var failed = false
                 conn.send(content: Data(buf[0..<n]),
@@ -126,8 +128,8 @@ enum TurnTLSTunnel {
                     stalls += 1
                     if stalls >= 4 { failed = true; break }   // ~60s wedged → dead peer
                 }
-                if failed { break }
-            }
+                return !failed
+            }) {}
             conn.send(content: nil, isComplete: true, completion: .idempotent)  // best-effort FIN
             conn.cancel()
             Darwin.shutdown(fd, SHUT_RDWR)   // wake a downlink blocked writing/reading the socket
@@ -142,7 +144,8 @@ enum TurnTLSTunnel {
     /// socket — then closes only that dup.
     private static func startDownlink(_ conn: NWConnection, _ fd: Int32) {
         Thread.detachNewThread {
-            while true {
+            // One pool per chunk: a raw Thread never drains its implicit pool.
+            while autoreleasepool(invoking: { () -> Bool in
                 let sem = DispatchSemaphore(value: 0)
                 var chunk: Data?
                 var done = false
@@ -154,8 +157,8 @@ enum TurnTLSTunnel {
                 }
                 sem.wait()
                 if let chunk, !chunk.isEmpty, !writeAll(fd, chunk) { done = true }
-                if done { break }
-            }
+                return !done
+            }) {}
             conn.cancel()
             Darwin.shutdown(fd, SHUT_RDWR)   // unblock the uplink's read on the shared socket
             Darwin.close(fd)                 // only this thread's dup

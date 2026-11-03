@@ -128,6 +128,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         /// reported within the dedupe window: not a new row, just one more
         /// to count on the allowed row it folds into.
         public var isRepeat: Bool = false
+        /// The program the guest's attestor named for a connection the
+        /// identity gate denied: the row's Allow names it (never a lookup at
+        /// click time, which a later connection could have changed).
+        public var exe: String? = nil
     }
     public typealias EgressObserver = @Sendable (EgressEvent) -> Void
     private var egressObserver: EgressObserver?
@@ -136,6 +140,8 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// IP. `dstIP` is 0 when `name` is set.
     private struct EgressKey: Hashable {
         let portID: Int; let name: String; let dstIP: UInt32; let dstPort: UInt16; let proto: UInt8
+        /// A deny for another program is its own report (and drawer row).
+        var exe: String? = nil
     }
     /// When each flow was last reported: a repeat within `egressReportEvery`
     /// isn't re-reported (a busy connection would flood the log), but one
@@ -372,6 +378,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         portGuestMAC[id] = nil
         portEgressPolicy[id] = nil
         portInterceptDisabled.remove(id)
+        quarantinedPorts.remove(id)
+        egressByteCounts[id] = nil
+        attestedFlows = attestedFlows.filter { $0.key.portID != id }
+        policyGeneration[id] = nil
         egressSeen = egressSeen.filter { $0.key.portID != id }
         let intercept = interceptor
         if releaseLease {
@@ -471,7 +481,9 @@ public final class VMNetSwitch: @unchecked Sendable {
         while !port.stopped {
             let n = Darwin.read(port.hostFD, buf, bufSize)
             guard n > 0 else { break }
-            handleFromVM(port.id, buf, n)
+            // This GCD block never returns, so its pool never drains; the
+            // egress observer handleFromVM calls builds Foundation objects.
+            autoreleasepool { handleFromVM(port.id, buf, n) }
         }
     }
 
@@ -1046,8 +1058,31 @@ public final class VMNetSwitch: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         portEgressPolicy[id] = policy
+        // Flows allowed for their executable were decided under the old
+        // policy: each is re-attested on its next packet (see handleEgress).
+        policyGeneration[id, default: 0] &+= 1
         egressSeen = egressSeen.filter { $0.key.portID != id }
     }
+
+    /// Quarantine a VM's port: drop every unicast IP frame it sends (see
+    /// `handleEgress`). Used by the agent watchdog; reversible.
+    public func setQuarantined(_ on: Bool, for handle: FileHandle) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return }
+        if on { quarantinedPorts.insert(id) } else { quarantinedPorts.remove(id) }
+    }
+
+    /// Off-subnet bytes a VM's port has sent since it attached.
+    public func egressByteCount(for handle: FileHandle) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let id = portByHandle[ObjectIdentifier(handle)] else { return 0 }
+        return egressByteCounts[id] ?? 0
+    }
+
+    private var quarantinedPorts: Set<Int> = []
+    private var egressByteCounts: [Int: UInt64] = [:]
 
     /// The connection verdict a port's CURRENT policy gives a flow — the exact
     /// snapshot `handleEgress` uses (tests).
@@ -1092,6 +1127,14 @@ public final class VMNetSwitch: @unchecked Sendable {
     private func handleEgress(_ srcPortID: Int, _ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
         let ethertype = Self.u16(buf, 12)
 
+        // Quarantine (the agent watchdog): no unicast IP leaves the VM — not
+        // off-subnet, not the gateway (DNS), not peers. ARP still answers so
+        // the link stays up for a release.
+        if ethertype == 0x0800 || ethertype == 0x86DD {
+            lock.lock(); let quarantined = quarantinedPorts.contains(srcPortID); lock.unlock()
+            if quarantined { return true }
+        }
+
         // ---- IPv6 ----
         // The firewall + MiTM are IPv4-only, so routable IPv6 egress is an
         // uninspected, unfilterable bypass. Drop global-unicast v6 on an
@@ -1122,6 +1165,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         let g = portGovernance(srcPortID)
         guard let pid = g.pid else { return false }          // non-session → native
 
+        // Outbound volume per VM, for the watchdog's exfiltration signal
+        // (counted here, independent of the proxy's own accounting).
+        lock.lock(); egressByteCounts[srcPortID, default: 0] &+= UInt64(n); lock.unlock()
+
         let hostnames = dnsCache.names(for: dstIP)
         let ipProto = buf[14 + 9]
         // An IP fragment (MF set, or a non-zero fragment offset) can't be
@@ -1151,7 +1198,55 @@ public final class VMNetSwitch: @unchecked Sendable {
 
         let ep: EgressPolicy.Proto = proto == 6 ? .tcp : .udp
         let now = Date()
-        let verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport, now: now) ?? .allow
+        var verdict = g.policy?.verdict(ip: dstIP, hostnames: hostnames, proto: ep, port: dport, now: now) ?? .allow
+        // `policy.local` (the OpenShell advisor) is answered by the MiTM itself.
+        if proto == 6, dport == 80, dstIP == EgressPolicy.advisorAddress, g.policy?.openShell != nil,
+           g.interceptor != nil {
+            verdict = .allow
+        }
+
+        // An OpenShell policy is keyed by hostname, which the snooped DNS cache
+        // may not hold for this address (DoH, cached lookups, shared CDN IPs).
+        // On an intercepted port the MiTM re-decides with the TLS SNI / Host
+        // header — and fails closed on flows that carry neither — so hand the
+        // flow over instead of dropping it here.
+        if verdict == .deny, proto == 6, g.policy?.defersToInterception(port: dport) == true,
+           g.interceptor != nil, g.interceptPorts.contains(dport) {
+            verdict = .allow
+        }
+
+        // Binary identity (strict sandbox + an OpenShell policy's `binaries`):
+        // a new TCP connection the MiTM won't see is decided for the
+        // executable that opened it. The first SYN is held while the guest's
+        // attestor answers (the guest retransmits it); later packets of an
+        // allowed connection pass on the remembered decision.
+        var deniedExe: String? = nil
+        if proto == 6, let policy = g.policy, policy.enforceBinaries,
+           !(g.interceptor != nil && g.interceptPorts.contains(dport)) {
+            let sport = Self.u16(buf, 14 + ihl)
+            let key = AttestedFlow(portID: srcPortID, sport: sport, dstIP: dstIP, dport: dport)
+            // A new connection, or one allowed under a policy that has since
+            // changed (a live update re-decides open streams too, as
+            // OpenShell's reload does), asks the attestor.
+            let standing = Self.isTCPSyn(buf, n) ? Attestation.unknown : attestation(key)
+            if Self.isTCPSyn(buf, n) || standing == .stale {
+                guard let gate = identityGate else { verdict = .deny; return dropDenied() }
+                switch gate(pid, sport, dstIP, dport, hostnames, policy) {
+                case nil:      return true                       // attestation in flight
+                case let d? where d.verdict == .deny:
+                    verdict = .deny; deniedExe = d.exe
+                default:       verdict = .allow; rememberAttested(key)
+                }
+            } else if standing == .current {
+                verdict = .allow
+            }
+        }
+        func dropDenied() -> Bool {
+            fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                       proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now, exe: deniedExe)
+            if Self.isTCPSyn(buf, n) { injectIPToPort(srcPortID, ipPacket: Self.buildTCPReset(buf, n)) }
+            return true
+        }
 
         let tcpFlags = proto == 6 ? Self.tcpFlags(buf, n) : nil
         if verdict == .deny {
@@ -1159,7 +1254,7 @@ public final class VMNetSwitch: @unchecked Sendable {
             let midFlow = tcpFlags.map { Self.denyReset(tcpFlags: $0) != .syn } ?? false
             fireEgress(portID: srcPortID, profileID: pid, dstIP: dstIP, hostnames: hostnames,
                        proto: proto, port: dport, denied: true, policy: g.policy, ep: ep, now: now,
-                       midFlow: midFlow)
+                       midFlow: midFlow, exe: deniedExe)
             if proto == 6 {
                 switch Self.denyReset(tcpFlags: tcpFlags) {
                 case .syn:                                     // fail the connect fast
@@ -1228,7 +1323,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         let policy = portEgressPolicy[srcPortID]
         let interceptor = portInterceptDisabled.contains(srcPortID) ? nil : self.interceptor
         let inspected = pid != nil && (interceptor != nil || (policy?.isActive ?? false))
-        return (pid, policy, interceptor, interceptPorts, inspected)
+        // An OpenShell policy inspects its L7 endpoints on whatever port they
+        // use, not only 80/443.
+        let ports = interceptor == nil ? interceptPorts : interceptPorts.union(policy?.inspectedPorts ?? [])
+        return (pid, policy, interceptor, ports, inspected)
     }
 
     /// Whether allowed flows are reported to the egress observer. The
@@ -1251,14 +1349,15 @@ public final class VMNetSwitch: @unchecked Sendable {
     private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, port: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
-                            midFlow: Bool = false, newConnection: Bool = false) {
+                            midFlow: Bool = false, newConnection: Bool = false, exe: String? = nil) {
         let name = hostnames.first ?? ""
-        let key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
+        var key = EgressKey(portID: portID, name: name, dstIP: name.isEmpty ? dstIP : 0,
                             // A dying flow's trailing segments dedupe apart from
                             // fresh connections: the app may fold them into the
                             // "connection closed" row, and a new connect after
                             // that must still get its own "deny" row.
                             dstPort: port, proto: (denied ? proto | 0x80 : proto) | (midFlow ? 0x40 : 0))
+        key.exe = denied ? exe : nil
         lock.lock()
         let now = Date()
         guard let observer = egressObserver else { lock.unlock(); return }
@@ -1282,6 +1381,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                                 proto: proto, port: port, denied: denied)
         event.midFlow = midFlow
+        if denied { event.exe = exe }
         if let policy {
             event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep,
                                            port: port, now: now)?.text
@@ -1303,11 +1403,51 @@ public final class VMNetSwitch: @unchecked Sendable {
         return (proto, u32(buf, 14 + 16), u16(buf, 14 + ihl + 2))
     }
 
+    /// Hook for binary-identity enforcement (set by the app): the verdict for
+    /// a new TCP connection from `srcPort` given the executable the guest's
+    /// attestor names for it, or nil while that answer is still coming.
+    /// `exe` is the program it was decided for (reported with a deny).
+    public var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32,
+                                         _ dport: UInt16, _ hostnames: [String],
+                                         _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
+
+    private struct AttestedFlow: Hashable { let portID: Int; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
+    /// Flows allowed for their executable: when, and under which policy
+    /// generation of their port.
+    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64)] = [:]
+    /// Bumped per port on every live policy change.
+    private var policyGeneration: [Int: UInt64] = [:]
+
+    private func rememberAttested(_ k: AttestedFlow) {
+        lock.lock(); defer { lock.unlock() }
+        attestedFlows[k] = (Date(), policyGeneration[k.portID] ?? 0)
+        if attestedFlows.count > 8192 {                 // drop the stalest half
+            let cut = attestedFlows.values.map(\.at).sorted()[attestedFlows.count / 2]
+            attestedFlows = attestedFlows.filter { $0.value.at > cut }
+        }
+    }
+
+    /// A flow's standing: allowed under the current policy, allowed under an
+    /// older one (must be re-attested before another packet passes), or unknown.
+    private enum Attestation { case current, stale, unknown }
+
+    private func attestation(_ k: AttestedFlow) -> Attestation {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = attestedFlows[k] else { return .unknown }
+        guard entry.generation == (policyGeneration[k.portID] ?? 0) else { return .stale }
+        attestedFlows[k] = (Date(), entry.generation)
+        return .current
+    }
+
     /// The TCP flags byte of an IPv4/TCP frame, or nil when it's too short.
     private static func tcpFlags(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> UInt8? {
         let ihl = Int(buf[14] & 0x0F) * 4
         guard n >= 14 + ihl + 14 else { return nil }
         return buf[14 + ihl + 13]
+    }
+
+    private static func isTCPSyn(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int) -> Bool {
+        denyReset(tcpFlags: tcpFlags(buf, n)) == .syn
     }
 
     /// True if an IPv6 frame's destination is a routable (global / ULA) unicast

@@ -1,6 +1,7 @@
 import Foundation
 import Compression
 @preconcurrency import Virtualization
+import SandboxEngine
 
 /// One MITM connection's lifetime: read CONNECT, send 200, terminate
 /// TLS with a forged leaf cert, read the wrapped HTTP request, swap
@@ -20,6 +21,19 @@ import Compression
 final class HTTPMitmConnection: @unchecked Sendable {
     let fd: Int32
     let profileID: UUID
+    /// The executable behind this connection, as the guest's root attestor
+    /// reported it (strict sandbox, transparent flows only). nil on the
+    /// cooperative proxy path, which can't be attributed.
+    var binaryIdentity: OpenShellPolicy.BinaryIdentity?
+    /// The scheme the guest's request travels in ("http" on a cleartext
+    /// flow), for the firewall events the OCSF export maps.
+    private var flowScheme = "https"
+    /// Under an OpenShell policy: the upstream addresses that passed its
+    /// destination checks (resolved host-side). Every upstream leg of this
+    /// connection dials only these. nil = not pinned.
+    private var pinnedUpstream: [OpenShellPolicy.IPAddress]?
+    private var destinationChecked = false
+    private var pinnedPort: Int?
     let certCache: CertCache
     let swapper: TokenSwapper
     let awsResigner: AWSResigner
@@ -60,6 +74,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Per-profile PII protection (swap personal data for stand-ins on the
     /// way to the model, restore it on the way back). Same static rationale.
     nonisolated(unsafe) static var piiPolicyProvider: (@Sendable (UUID) -> PIIPolicy?)?
+    /// Per-profile Squelch (command-output noise cut from AI requests).
+    /// Reads the workspaces' settings as last saved (`SquelchSettings`).
+    nonisolated(unsafe) static var squelchPolicyProvider: (@Sendable (UUID) -> SquelchPolicy?)? = {
+        SquelchSettings.policy(for: $0)
+    }
     /// Reads whether Fusion is currently engaged for a profile's session.
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
@@ -74,6 +93,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
+    /// The engine's `CredentialMinter`: rewrites the responses of calls
+    /// that issue a credential (`CredentialMint`). Set by MitmEngine.
+    nonisolated(unsafe) static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)?
     nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
     /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
     /// the token exchange is answered by the host, not the provider.
@@ -144,6 +166,39 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// uses blocking syscalls under the hood. Closes the FD on exit
     /// regardless of success.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
+    /// Remove a leading `BROMURE-CLIENT 1 sport=<n> …\n` line from `req`;
+    /// returns the client's source port when present and well formed.
+    static func stripClientPreamble(_ req: inout Data) -> Int? {
+        let magic = Data("BROMURE-CLIENT ".utf8)
+        guard req.starts(with: magic), let nl = req.firstIndex(of: 0x0A) else { return nil }
+        let line = String(decoding: req[req.startIndex..<nl], as: UTF8.self)
+        req = Data(req[req.index(after: nl)...])
+        for field in line.split(separator: " ") where field.hasPrefix("sport=") {
+            if let n = Int(field.dropFirst(6)), (1...65535).contains(n) { return n }
+        }
+        return nil
+    }
+
+    /// The client port a connection may label its flow with: the one its
+    /// preamble names, only when that line was seen (and counted) at once.
+    static func claimedSport(parsed: Int?, peeked: Int?) -> Int? {
+        guard let parsed, parsed == peeked else { return nil }
+        return parsed
+    }
+
+    /// The preamble's client port, read without consuming the stream (the
+    /// request read that follows still sees it), waiting briefly for the
+    /// first bytes: agentd writes the line before any client byte.
+    static func peekPreambleSport(fd: Int32, waitMs: Int32 = 500) -> Int? {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, waitMs) > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: 160)
+        let n = recv(fd, &buf, buf.count, MSG_PEEK)
+        guard n > 0 else { return nil }
+        var d = Data(buf.prefix(n))
+        return stripClientPreamble(&d)
+    }
+
     func run() async {
         defer { closeFD() }
         do {
@@ -161,7 +216,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    request line (Latin-1: byte-exact, never fails) — a forward-proxy
         //    request carries headers and possibly a body after it, and one
         //    non-ASCII byte there must not make the whole request "malformed".
-        let connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
+        // A preamble's claim is counted from its first line, before the
+        // request is read (see NetworkLineage.noteClaimant).
+        let peekedSport = Self.peekPreambleSport(fd: fd)
+        let claim = peekedSport.map { NetworkLineage.shared.noteClaimant(profileID: profileID, sport: $0) }
+        var connectReq = try readRawHTTPRequest(plainFD: fd, maxBytes: 16 * 1024)
+        // The guest's proxy bridge (agentd, 127.0.0.1:65534 → vsock) may
+        // open the stream with `BROMURE-CLIENT 1 sport=<n> peer=<ip>\n`: the
+        // client socket this request came from, which the kernel sentry
+        // reports as a loopback flow. It ties the CONNECT target to the
+        // process chain (NETWORK_LINEAGE.md). Optional: older guests omit it.
+        // The target is only ever recorded for a connection counted above:
+        // one whose line didn't arrive at once (agentd's always does) can't
+        // label a flow, so it can't dodge the claimant count either.
+        let clientSport = Self.claimedSport(parsed: Self.stripClientPreamble(&connectReq), peeked: peekedSport)
         guard let lineEndBytes = connectReq.range(of: Data("\r\n".utf8)),
               let firstLineStr = String(data: connectReq[connectReq.startIndex..<lineEndBytes.lowerBound],
                                         encoding: .isoLatin1) else {
@@ -192,6 +260,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             let afterScheme = target[scheme.upperBound...]
             let authority = String(afterScheme.prefix { $0 != "/" })
             let (host, port) = parseHTTPHostPort(authority)   // default 80
+            if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
             let originPath = String(afterScheme.dropFirst(authority.count))
             let path = originPath.isEmpty ? "/" : originPath
 
@@ -205,9 +274,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
             var rewritten = rewrittenLine.data(using: .isoLatin1) ?? Data(rewrittenLine.utf8)
             rewritten.append(connectReq.subdata(in: reqLineEnd.lowerBound..<connectReq.count))
 
-            if deniedByEgressPolicy(host: host, port: port) {
-                try? writeAll(fd: fd, bytes: Array(
-                    "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
+            if host.lowercased() != OpenShellAdvisor.host, egressVerdict(host: host, port: port) == .deny {
+                try? writeAll(fd: fd, bytes: Array(connectDeniedResponse(host: host, port: port).utf8))
                 return
             }
             reportProxyAllowed(host: host, port: port)
@@ -219,15 +287,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         let target = String(parts[1])
         let (host, port) = parseHostPort(target)
+        if clientSport != nil, let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
 
         // Connection-layer egress verdict for the cooperative-proxy path. The
         // transparent path enforces this in acceptTransparentFlow, but proxied
         // flows arrive over vsock and never cross the switch — without this,
         // `default deny` (and deny rules with no method list) never applied to
         // CONNECT tunnels.
-        if deniedByEgressPolicy(host: host, port: port) {
-            try? writeAll(fd: fd, bytes: Array(
-                "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".utf8))
+        let verdict = egressVerdict(host: host, port: port)
+        if verdict == .deny {
+            try? writeAll(fd: fd, bytes: Array(connectDeniedResponse(host: host, port: port).utf8))
+            return
+        }
+
+        // OpenShell: resolve the destination and validate every address
+        // before confirming the tunnel (a denial is the CONNECT's 403).
+        if case .failure(let denial) = checkDestination(host: host, port: port) {
+            try? writeAll(fd: fd, bytes: Array(destinationDeniedResponse(host: host, port: port,
+                                                                          reason: denial.reason).utf8))
             return
         }
 
@@ -236,9 +313,41 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // 2. Confirm the tunnel.
             try writeAll(fd: fd, bytes: Array("HTTP/1.1 200 Connection established\r\n\r\n".utf8))
 
+            // An OpenShell `tls: skip` endpoint is relayed raw, never terminated.
+            // `run()` closes `fd` on return, so the splice gets its own copy.
+            if verdict == .splice {
+                let own = dup(fd)
+                if own >= 0 {
+                    if let pinned = pinnedUpstream {
+                        MitmPassthrough.splice(appFD: own, addresses: pinned, destPort: port)
+                    } else {
+                        MitmPassthrough.splice(appFD: own, host: host, destPort: port)
+                    }
+                }
+                return
+            }
+
             try await driveTLS(host: host, port: port, t0: t0)
         }
     }
+
+    /// The 403 for a proxied connection the firewall refused. Under an
+    /// OpenShell policy it carries OpenShell's `policy_denied` body (layer
+    /// `l4`), with the advisor's next steps when agents may propose rules.
+    private func connectDeniedResponse(host: String, port: Int) -> String {
+        guard guardrailsProvider()?.egressPolicy?.openShell != nil else {
+            return "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        }
+        let advisor = OpenShellAdvisor.shared.modeProvider(profileID) != .off
+        var obj: [String: Any] = ["error": "policy_denied", "layer": "l4", "host": host, "port": port,
+                                  "detail": "no network policy allows \(host):\(port)",
+                                  "next_steps": advisor ? OpenShellAdvisor.nextSteps : []]
+        if advisor { obj["agent_guidance"] = OpenShellAdvisor.agentGuidance }
+        let body = String(decoding: (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data(),
+                          as: UTF8.self)
+        return "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: \(body.utf8.count)\r\nconnection: close\r\n\r\n\(body)"
+    }
+
 
     /// Run `body` (the life of this connection) registered with the firewall's
     /// open-connection registry, so a rule change that denies `host:port` cuts
@@ -251,12 +360,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let rule = guardrailsProvider()?.egressPolicy?
             .firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text
         let token = EgressConnectionRegistry.shared.register(
-            profileID: profileID, host: host, port: port, route: route, rule: rule) { [weak self] in
+            profileID: profileID, host: host, port: port, route: route, rule: rule,
+            identity: binaryIdentity) { [weak self] in
                 self?.cutForFirewall()
             }
         defer { EgressConnectionRegistry.shared.unregister(token) }
-        if let policy = guardrailsProvider()?.egressPolicy,
-           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16) == .deny {
+        // `policy.local` (the OpenShell advisor) is answered here, never
+        // forwarded: no rule governs it. Decided for the attested program:
+        // without it, a strict workspace's `binaries:` rules match nothing
+        // and every flow they allow was closed here, unlogged.
+        if host.lowercased() != OpenShellAdvisor.host, let policy = guardrailsProvider()?.egressPolicy,
+           policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity) == .deny {
             return
         }
         try await body()
@@ -363,19 +477,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
     }
 
-    /// Connection-layer egress check for proxied flows: true when the profile's
-    /// firewall denies this host/port outright (an explicit deny or the default
-    /// action) — the same `verdict` the switch/transparent layers apply, logged
-    /// with layer "proxy". Method-level `web` restrictions stay in the policy
-    /// chain, which sees the decrypted request.
-    private func deniedByEgressPolicy(host: String, port: Int) -> Bool {
-        guard let policy = guardrailsProvider()?.egressPolicy else { return false }
+    /// Connection-layer egress verdict for proxied flows — the same `verdict`
+    /// the switch/transparent layers apply, with a deny logged under layer
+    /// "proxy". Method-level `web` restrictions and OpenShell request rules
+    /// stay in the policy chain, which sees the decrypted request.
+    private func egressVerdict(host: String, port: Int) -> EgressPolicy.Verdict {
+        guard let policy = guardrailsProvider()?.egressPolicy else { return .allow }
         let p16 = UInt16(truncatingIfNeeded: port)
-        guard case .deny = policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
-                                          port: p16) else { return false }
+        let verdict = policy.verdict(ip: nil, hostnames: [host], proto: .tcp, port: p16, identity: binaryIdentity)
+        guard verdict == .deny else { return verdict }
         // Refused every time; reported once a minute per destination.
         guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
-                                                      port: port, denied: true) else { return true }
+                                                      port: port, denied: true) else { return .deny }
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny tcp \(host):\(port) (\(profileID.uuidString.prefix(8)))")
         BACEventEmitter.shared.emitDetached(
@@ -384,7 +497,223 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         "host": .string(host), "port": .int(port), "layer": .string("proxy"),
                         "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp, port: p16)?.text),
                         "by_policy": .bool(true)])
-        return true
+        return .deny
+    }
+
+    /// Run the workspace's OpenShell middleware chain for this request. Returns
+    /// the (possibly rewritten) request to forward, or nil after answering
+    /// the guest with a 403 (a fail-closed middleware that couldn't run).
+    private func applyOpenShellMiddleware(_ request: Data, host: String, port: Int,
+                                          method: String, path: String, spooled: Bool,
+                                          tls: MitmServerStream) -> Data? {
+        guard let chain = guardrailsProvider()?.egressPolicy?.openShell?.middlewares(for: host),
+              !chain.isEmpty else { return request }
+        var out = request
+        let fakes = swapper.entries(for: profileID).map(\.fake)
+        for mw in chain {
+            var failure = "middleware service unavailable"
+            if mw.isBuiltinRegex {
+                let outcome = spooled ? .failed("request_body_over_capacity")
+                    : OpenShellPolicy.regexMiddleware(Self.bodyPrefix(of: out) ?? Data(), keep: { v in
+                        fakes.contains(v) || Self.isSubscriptionPlaceholder(v) })
+                switch outcome {
+                case .unchanged: continue
+                case .rewritten(let redacted, let count):
+                    out = Self.replacingBody(of: out, with: redacted)
+                    BACEventEmitter.shared.emitDetached(
+                        profileID: profileID, eventType: "egress.middleware",
+                        eventData: ["middleware": .string(mw.kind), "entry": .string(mw.key), "host": .string(host),
+                                    "action": .string("redact"), "count": .int(count)])
+                    continue
+                case .failed(let why): failure = why
+                }
+            }
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID, eventType: "egress.middleware",
+                eventData: ["middleware": .string(mw.kind), "entry": .string(mw.key), "host": .string(host),
+                            "action": .string(mw.failOpen ? "skipped" : "deny"),
+                            "reason": .string(failure)])
+            if mw.failOpen { continue }
+            let reason = "middleware_failed: \(failure) (\(mw.name), \(mw.kind), fails closed)"
+            SupplyChainLog.shared.record("[firewall] ✗ deny \(method) \(host)\(path) — \(reason)")
+            let body = Self.openShellDeniedBody(policy: mw.key, reason: reason, method: method,
+                                                path: path, host: host, port: port)
+            var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+            resp += "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+            try? tls.write(Data(resp.utf8))
+            return nil
+        }
+        return out
+    }
+
+    /// `request` with its body replaced and `Content-Length` set to match.
+    static func replacingBody(of request: Data, with body: Data) -> Data {
+        guard let sep = request.range(of: Data("\r\n\r\n".utf8)),
+              let head = String(data: request.subdata(in: request.startIndex..<sep.lowerBound), encoding: .isoLatin1)
+        else { return request }
+        var lines = head.components(separatedBy: "\r\n").filter {
+            let l = $0.lowercased()
+            return !l.hasPrefix("content-length:") && !l.hasPrefix("transfer-encoding:")
+        }
+        lines.append("Content-Length: \(body.count)")
+        var out = Data(lines.joined(separator: "\r\n").utf8)
+        out.append(Data("\r\n\r\n".utf8))
+        out.append(body)
+        return out
+    }
+
+    /// Request headers as a lowercased-name map (last value wins).
+    static func lowercasedHeaders(of request: Data) -> [String: String] {
+        guard let hdr = rawHeaderSection(of: request) else { return [:] }
+        var out: [String: String] = [:]
+        for line in hdr.components(separatedBy: "\r\n").dropFirst() {
+            guard let c = line.firstIndex(of: ":") else { continue }
+            out[line[..<c].trimmingCharacters(in: .whitespaces).lowercased()] =
+                line[line.index(after: c)...].trimmingCharacters(in: .whitespaces)
+        }
+        return out
+    }
+
+    /// The buffered body bytes of a request (nil when there are none).
+    /// Forward only a permessage-deflate offer without client context
+    /// takeover (`rewrite_websocket_extensions_for_permessage_deflate`).
+    static func rewritingWebSocketExtensions(_ request: Data) -> Result<Data, OpenShellHTTP.Rejection> {
+        guard let sep = request.range(of: Data("\r\n\r\n".utf8)) else { return .success(request) }
+        let head = String(decoding: request.subdata(in: 0..<sep.lowerBound), as: UTF8.self)
+        var lines = head.components(separatedBy: "\r\n")
+        let values = lines.dropFirst().compactMap { line -> String? in
+            guard let c = line.firstIndex(of: ":"),
+                  line[..<c].trimmingCharacters(in: .whitespaces).lowercased() == "sec-websocket-extensions" else { return nil }
+            return String(line[line.index(after: c)...])
+        }
+        let offer: String?
+        switch OpenShellWebSocket.rewrittenExtensionOffer(values) {
+        case .success(let o): offer = o
+        case .failure(let e): return .failure(e)
+        }
+        lines = lines.filter { line in
+            guard let c = line.firstIndex(of: ":") else { return true }
+            return line[..<c].trimmingCharacters(in: .whitespaces).lowercased() != "sec-websocket-extensions"
+        }
+        if let offer { lines.append("Sec-WebSocket-Extensions: \(offer)") }
+        var out = Data(lines.joined(separator: "\r\n").utf8)
+        out.append(request.subdata(in: sep.lowerBound..<request.count))
+        return .success(out)
+    }
+
+    /// Replace the request line's target (OpenShell `rewrite_request_line_target`).
+    static func rewritingRequestTarget(_ request: Data, method: String, target: String, version: String) -> Data {
+        guard let eol = request.range(of: Data("\r\n".utf8)) else { return request }
+        var out = Data("\(method) \(target) \(version)".utf8)
+        out.append(request.subdata(in: eol.lowerBound..<request.count))
+        return out
+    }
+
+    /// OpenShell destination check for this connection's upstream (once per
+    /// connection): resolve host-side, validate every address, remember the
+    /// survivors for the upstream legs. No OpenShell policy → nothing pinned.
+    private func checkDestination(host: String, port: Int) -> Result<Void, OpenShellPolicy.DestinationDenial> {
+        if destinationChecked { return .success(()) }
+        destinationChecked = true
+        guard host.lowercased() != OpenShellAdvisor.host else { return .success(()) }
+        let policy = guardrailsProvider()?.egressPolicy
+        switch UpstreamPinning.pin(policy: policy?.openShell, host: host, port: port, identity: binaryIdentity,
+                                   enforceBinaries: policy?.enforceBinaries ?? false) {
+        case .success(let addrs):
+            pinnedUpstream = addrs
+            pinnedPort = port
+            return .success(())
+        case .failure(let denial):
+            SupplyChainLog.shared.record(
+                "[firewall] ✗ deny tcp \(host):\(port) — \(denial.reason) (\(profileID.uuidString.prefix(8)))")
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                "action": .string("deny"), "layer": .string("l4"), "proto": .string("tcp"),
+                "host": .string(host), "port": .int(port), "reason": .string(denial.reason),
+            ])
+            return .failure(denial)
+        }
+    }
+
+    /// OpenShell's CONNECT denial for a destination that failed validation.
+    private func destinationDeniedResponse(host: String, port: Int, reason: String) -> String {
+        let body = "{\"error\":\"destination_denied\",\"detail\":\(Self.jsonString(reason)),\"host\":\(Self.jsonString(host)),\"port\":\(port)}"
+        return "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+    }
+
+    /// Answer a request refused before any policy ran (OpenShell's framing
+    /// and authority checks), log it, and let the connection close.
+    @available(macOS, deprecated: 10.15)
+    /// The first known OpenShell placeholder left in a request's headers (or
+    /// its body, when the endpoint resolves bodies) after the swap.
+    static func unresolvedPlaceholder(in request: Data, checkBody: Bool, known: [String]) -> String? {
+        let placeholders = known.filter { $0.hasPrefix(TokenSwapper.openShellPlaceholderPrefix) }
+        guard !placeholders.isEmpty else { return nil }
+        let sep = request.range(of: Data("\r\n\r\n".utf8))
+        let head = sep.map { request.subdata(in: 0..<$0.lowerBound) } ?? request
+        let body = checkBody ? (sep.map { request.subdata(in: $0.upperBound..<request.count) } ?? Data()) : Data()
+        return placeholders.first { p in
+            let d = Data(p.utf8)
+            return head.range(of: d) != nil || body.range(of: d) != nil
+        }
+    }
+
+    private func rejectBeforePolicy(tls: MitmServerStream, status: Int, error: String, detail: String,
+                                    host: String, port: Int, method: String? = nil, path: String? = nil) {
+        SupplyChainLog.shared.record(
+            "[firewall] ✗ deny \(host):\(port) — \(detail) (\(profileID.uuidString.prefix(8)))")
+        var data: [String: AnyJSON] = [
+            "action": .string("deny"), "layer": .string("l7"), "proto": .string("tcp"),
+            "host": .string(host), "port": .int(port), "reason": .string(detail), "scheme": .string(flowScheme),
+        ]
+        if let method { data["method"] = .string(method) }
+        if let path { data["path"] = .string(path) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: data)
+        let body = "{\"error\":\"\(error)\",\"detail\":\(Self.jsonString(detail)),\"layer\":\"l7\"}"
+        let reason = status == 403 ? "Forbidden" : "Bad Request"
+        let resp = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\n"
+            + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        try? tls.write(Data(resp.utf8))
+    }
+
+    private static func jsonString(_ s: String) -> String {
+        (try? String(data: JSONSerialization.data(withJSONObject: [s]), encoding: .utf8))
+            .map { String($0.dropFirst().dropLast()) } ?? "\"\""
+    }
+
+    static func bodyPrefix(of request: Data) -> Data? {
+        guard let sep = request.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let body = request.subdata(in: sep.upperBound..<request.endIndex)
+        return body.isEmpty ? nil : body
+    }
+
+    /// Whether `value` is a host-minted subscription placeholder (Claude /
+    /// Codex / Grok / Kimi bogus keys the transforms replace with the real
+    /// OAuth credential) — Bromure's own, never an unmanaged secret.
+    static func isSubscriptionPlaceholder(_ value: String) -> Bool {
+        if let (store, _) = claudeSubscriptionProvider?(), store.profileForBogusKey(value) != nil { return true }
+        if codexSubscriptionProvider?()?.0.profileForBogusKey(value) != nil { return true }
+        if grokSubscriptionProvider?()?.0.profileForBogusKey(value) != nil { return true }
+        if kimiSubscriptionProvider?()?.0.profileForBogusKey(value) != nil { return true }
+        return false
+    }
+
+    /// OpenShell's L7 denial body (`error: policy_denied`, same keys as its
+    /// REST inspector), so tooling and agents built for OpenShell parse it.
+    static func openShellDeniedBody(policy: String?, reason: String, method: String,
+                                    path: String, host: String, port: Int,
+                                    advisor: Bool = false) -> String {
+        var obj: [String: Any] = [
+            "error": "policy_denied", "policy": policy ?? "", "rule": "\(method) \(path)",
+            "detail": reason, "layer": "l7", "protocol": "rest", "method": method,
+            "path": path, "host": host, "port": port,
+            "rule_missing": ["type": "rest_allow", "layer": "l7", "method": method,
+                             "path": path, "host": host, "port": port] as [String: Any],
+        ]
+        // OpenShell adds the advisor's next steps while it's enabled.
+        obj["next_steps"] = advisor ? OpenShellAdvisor.nextSteps : []
+        if advisor { obj["agent_guidance"] = OpenShellAdvisor.agentGuidance }
+        let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Transparent-interception entry point. The flow arrives already TCP-
@@ -437,6 +766,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    (the forward-proxy path). Everything downstream is identical; only
         //    the upstream scheme differs (http vs https).
         let tls: MitmServerStream
+        flowScheme = cleartext ? "http" : "https"
         if cleartext {
             tls = PlaintextServerStream(fd: fd, prefix: prefix)
         } else {
@@ -451,8 +781,58 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    inline cap (e.g. a docker layer blob) is spooled to a temp file so
         //    it's neither truncated nor buffered in RAM; `bodyFile` then holds
         //    the whole body and `request` carries the header + a bounded prefix.
-        let (request, bodyFile) = try readRequestSpooling(
-            via: tls, inlineCap: 8 * 1024 * 1024)
+        //    Under an OpenShell policy the read is strict (OpenShell's framing
+        //    rules), the request's authority must name this tunnel's endpoint,
+        //    and an inspected route forwards the canonical request-target.
+        let openShellMode = guardrailsProvider()?.egressPolicy?.openShell
+        var (guestRequest, bodyFile): (Data, URL?)
+        do {
+            (guestRequest, bodyFile) = try readRequestSpooling(
+                via: tls, inlineCap: 8 * 1024 * 1024, strict: openShellMode != nil)
+        } catch MitmError.invalidRequest(let why) {
+            rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request", detail: why,
+                               host: host, port: port)
+            return
+        }
+        if let openShell = openShellMode,
+           let sep = guestRequest.range(of: Data("\r\n\r\n".utf8)),
+           let head = try? OpenShellHTTP.parseHead(guestRequest.subdata(in: 0..<sep.upperBound)) {
+            guard OpenShellHTTP.authorityMatchesEndpoint(head, host: host, port: UInt16(truncatingIfNeeded: port),
+                                                         transportDefaultPort: cleartext ? 80 : 443) else {
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                rejectBeforePolicy(tls: tls, status: 403, error: "request_authority_mismatch",
+                                   detail: "HTTP request authority does not match the authorized tunnel endpoint",
+                                   host: host, port: port, method: head.method, path: head.target)
+                return
+            }
+            // An upgrade the inspected route can't follow (h2c anywhere; any
+            // Upgrade on JSON-RPC / MCP / GraphQL) is refused whatever the
+            // enforcement mode — after it, no rule would see the traffic.
+            if let detail = openShell.unsupportedUpgradeDetail(
+                host: host, port: UInt16(truncatingIfNeeded: port), target: head.target,
+                headerBlock: head.headerString, identity: binaryIdentity,
+                enforceBinaries: guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false) {
+                if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+                rejectBeforePolicy(tls: tls, status: 403, error: "unsupported_l7_protocol", detail: detail,
+                                   host: host, port: port, method: head.method, path: head.target)
+                return
+            }
+            if let canonical = openShell.canonicalRequestTarget(host: host, port: UInt16(truncatingIfNeeded: port),
+                                                                target: head.target),
+               canonical != head.target {
+                guestRequest = Self.rewritingRequestTarget(guestRequest, method: head.method,
+                                                           target: canonical, version: head.version)
+            }
+        }
+        // Transparent flows reach here without a CONNECT: validate the
+        // destination the upstream leg will dial (no-op if already done).
+        if openShellMode != nil, host.lowercased() != OpenShellAdvisor.host,
+           case .failure(let denial) = checkDestination(host: host, port: port) {
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            rejectBeforePolicy(tls: tls, status: 403, error: "destination_denied", detail: denial.reason,
+                               host: host, port: port)
+            return
+        }
 
         // 4a. Block OAuth/OIDC discovery for MCP hosts that have a
         // broker token. Claude Code probes multiple .well-known paths;
@@ -460,7 +840,68 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // (which can't work inside the VM). Return 404 for all of
         // them so Claude Code treats the server as unauthenticated
         // and the proxy's header injection handles auth transparently.
-        let (reqMethod, reqPath) = Self.parseRequestLine(request)
+        let (reqMethod, reqPath) = Self.parseRequestLine(guestRequest)
+
+        // `http://policy.local` — the OpenShell policy advisor's agent API,
+        // answered here and never forwarded.
+        if host.lowercased() == OpenShellAdvisor.host {
+            let body = Self.bodyPrefix(of: guestRequest) ?? Data()
+            let pid = profileID
+            let provider = guardrailsProvider
+            let (status, type, payload) = await OpenShellAdvisor.shared.handle(
+                profileID: pid, method: reqMethod, target: reqPath, body: body,
+                policyReloaded: { key in
+                    provider()?.egressPolicy?.openShell?.networkPolicies.contains { $0.key == key } ?? false
+                })
+            var resp = "HTTP/1.1 \(status) \(HTTPMitmConnection.reasonPhrase(status))\r\n"
+            resp += "Content-Type: \(type)\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
+            var out = Data(resp.utf8)
+            out.append(payload)
+            try? tls.write(out)
+            return
+        }
+
+        // OpenShell request rules (method / path / query on inspected
+        // endpoints). An `audit` endpoint logs the violation and forwards; an
+        // `enforce` one answers OpenShell's `policy_denied` 403 so agents that
+        // know OpenShell read it the same way.
+        if let openShell = guardrailsProvider()?.egressPolicy?.openShell,
+           case .violation(let reason, let rule, let enforced) = openShell.evaluateRequest(
+               host: host, port: UInt16(truncatingIfNeeded: port), method: reqMethod, target: reqPath,
+               headers: Self.lowercasedHeaders(of: guestRequest),
+               // A body spooled to disk is past every inspector's size limit.
+               body: Self.bodyPrefix(of: guestRequest), bodyComplete: bodyFile == nil,
+               identity: binaryIdentity,
+               enforceBinaries: guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false) {
+            SupplyChainLog.shared.record(
+                "[firewall] \(enforced ? "✗ deny" : "⚠ audit") \(reqMethod) \(host)\(reqPath) — \(reason) (\(profileID.uuidString.prefix(8)))")
+            var data: [String: AnyJSON] = [
+                "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
+                "proto": .string("tcp"), "host": .string(host), "port": .int(port),
+                "method": .string(reqMethod), "path": .string(reqPath), "reason": .string(reason),
+                "scheme": .string(flowScheme),
+            ]
+            if let rule { data["rule"] = .string(rule) }
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
+                                                eventData: data)
+            if enforced {
+                let body = Self.openShellDeniedBody(policy: rule, reason: reason, method: reqMethod,
+                                                    path: reqPath, host: host, port: port,
+                                                    advisor: OpenShellAdvisor.shared.modeProvider(profileID) != .off)
+                var resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+                resp += "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                try? tls.write(Data(resp.utf8))
+                return
+            }
+        }
+
+        // OpenShell `network_middlewares` (after policy, before credentials —
+        // OpenShell's order): the built-in regex redactor rewrites the body;
+        // an external middleware service can't be reached from here, so the
+        // traffic it selects follows its `on_error`.
+        guard let request = applyOpenShellMiddleware(guestRequest, host: host, port: port,
+                                                     method: reqMethod, path: reqPath,
+                                                     spooled: bodyFile != nil, tls: tls) else { return }
 
         // Guardrails: host-side destructive-op removal across protocols
         // (Kubernetes, AWS, DigitalOcean, Docker registries, GitHub/GitLab/
@@ -660,6 +1101,50 @@ final class HTTPMitmConnection: @unchecked Sendable {
             return
         }
 
+        // Strict credential mode: a credential Bromure didn't inject (found on
+        // disk, dumped from an env, guessed) never leaves the VM. Bromure's own
+        // fakes and subscription placeholders, the workspace's AWS key id, and
+        // tokens this site issued to the guest earlier are exempt.
+        if host.lowercased() != InferenceService.localMitmHost {
+            let unmanaged = UnmanagedCredentialGuard.shared.check(
+                rawRequest: request, host: host, profileID: profileID,
+                fakes: swapper.entries(for: profileID).map(\.fake),
+                awsAccessKeyID: awsResigner.accessKeyID(for: profileID),
+                isPlaceholder: { Self.isSubscriptionPlaceholder($0) })
+            if !unmanaged.isEmpty {
+                let alertsOff = guardrailsProvider()?.exfiltrationAlertsDisabled ?? false
+                for u in unmanaged {
+                    FileHandle.standardError.write(Data(
+                        "[mitm] UNMANAGED CREDENTIAL \(u.kind) \(u.preview) (\(u.location)) → \(host)\n".utf8))
+                    BACEventEmitter.shared.emitDetached(
+                        profileID: profileID, eventType: "credential.unmanaged",
+                        eventData: ["kind": .string(u.kind), "location": .string(u.location),
+                                    "preview": .string(u.preview), "fingerprint": .string(u.fingerprint),
+                                    "host": .string(host), "blocked": .bool(true),
+                                    "vm_paused": .bool(!alertsOff)])
+                }
+                if !alertsOff {
+                    var event = CompromiseEvent(
+                        profileID: profileID, observedHost: host,
+                        leaks: unmanaged.map {
+                            CompromiseLeak(fakeTokenPreview: $0.preview,
+                                           credentialDisplayName: "Unmanaged \($0.kind) (\($0.location))",
+                                           declaredHost: NSLocalizedString("not issued by Bromure", comment: "strict credential alert"),
+                                           observedHost: host)
+                        },
+                        timestamp: Date())
+                    event.unmanagedFingerprints = unmanaged.map(\.fingerprint)
+                    swapper.raiseCompromise(event)
+                }
+                let body = "Bromure: outbound request blocked — it carries a credential Bromure did not issue for \(host) (strict credential mode).\n"
+                var resp = "HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
+                resp += "Content-Type: text/plain; charset=utf-8\r\n"
+                resp += "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                try? tls.write(Data(resp.utf8))
+                return
+            }
+        }
+
         // Insecure-upstream opt-out. When the profile allows it (Guardrails →
         // "Allow X-bromure-insecure"), the guest can drop THIS request's
         // upstream certificate validation by sending `X-bromure-insecure: yes`
@@ -691,9 +1176,21 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 5. Swap tokens. host param is the SNI name; entries that
         //    don't match are no-ops. Skipped entirely for an insecure request
         //    (no fake→real substitution reaches the unvalidated upstream).
+        // OpenShell endpoints may opt into placeholder resolution in the body
+        // (UTF-8 JSON, form or text bodies of up to 256 KiB, as OpenShell).
+        let placeholderBody: Bool = {
+            guard let openShell = guardrailsProvider()?.egressPolicy?.openShell,
+                  openShell.credentialRewrite(host: host, port: UInt16(truncatingIfNeeded: port),
+                                              target: reqPath).body,
+                  let sep = request.range(of: Data("\r\n\r\n".utf8)),
+                  request.count - sep.upperBound <= 256 * 1024 else { return false }
+            let type = (Self.lowercasedHeaders(of: request)["content-type"] ?? "").lowercased()
+            return type.contains("json") || type.contains("x-www-form-urlencoded") || type.hasPrefix("text/")
+        }()
         var swap = insecure
             ? SwapResult(modified: request, swaps: [])
-            : await swapper.swap(rawRequest: request, host: host, profileID: profileID)
+            : await swapper.swap(rawRequest: request, host: host, port: port, profileID: profileID,
+                                 placeholderBody: placeholderBody)
         if !swap.swaps.isEmpty {
             for s in swap.swaps {
                 FileHandle.standardError.write(Data(
@@ -703,6 +1200,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
         for leak in leaks {
             FileHandle.standardError.write(Data(
                 "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
+        }
+        // OpenShell credential placeholders: one still present where it would
+        // have been resolved (the headers, or an opted-in body) means its
+        // credential isn't bound to this host or path. OpenShell refuses the
+        // request rather than forwarding it; so does Bromure.
+        if !insecure, let unresolved = Self.unresolvedPlaceholder(in: swap.modified, checkBody: placeholderBody,
+                                                                   known: swapper.entries(for: profileID).map(\.fake)) {
+            let variable = String(unresolved.dropFirst(TokenSwapper.openShellPlaceholderPrefix.count))
+            rejectBeforePolicy(tls: tls, status: 403, error: "credential_endpoint_mismatch",
+                               detail: "the credential for \(variable) is not bound to \(host)\(reqPath.split(separator: "?").first.map(String.init) ?? "")",
+                               host: host, port: port)
+            return
         }
 
         // 5b. MCP bearer header injection. For MCP servers whose OAuth
@@ -1012,12 +1521,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
            capture.matches(host: host, method: reqMethod, path: reqPath,
                            body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            let captureSession = upstreamSession(for: host, insecure: insecure)
-            noteUpstreamSession(captureSession)
-            defer { captureSession.finishTasksAndInvalidate() }
-            let upstream = try await relayUpstreamCollecting(
-                rawRequest: swap.modified, host: host, port: port,
-                session: captureSession, scheme: upstreamScheme)
+            let upstream: Data
+            if let sim = capture.simulatedReply {
+                // The sign-in simulator (e2e): the provider's reply is canned,
+                // everything else — the hook, its hop, its release here — is
+                // the real path.
+                upstream = sim
+            } else {
+                let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
+                noteUpstreamSession(captureSession)
+                defer { captureSession.finishTasksAndInvalidate() }
+                upstream = try await relayUpstreamCollecting(
+                    rawRequest: swap.modified, host: host, port: port,
+                    session: captureSession, scheme: upstreamScheme)
+            }
             let status = Self.parseStatusCode(upstream)
             let body = upstream.range(of: Data("\r\n\r\n".utf8))
                 .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
@@ -1055,17 +1572,127 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     path: reqPath,
                     statusCode: 101)
                 : nil
+            // OpenShell `protocol: websocket` route: every client text message
+            // is judged before it's forwarded (`WEBSOCKET_TEXT` rules, or
+            // GraphQL operation policy), and permessage-deflate is only
+            // offered upstream without client context takeover.
+            var upgradeRequest = swap.modified
+            var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
+            var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+            let wsChain = guardrailsProvider()?.egressPolicy?.openShell?.middlewares(for: host) ?? []
+            if let mw = wsChain.first(where: { !$0.isBuiltinRegex && !$0.failOpen }) {
+                // An external middleware can't be reached, and this one fails
+                // closed: refuse the session (OpenShell's preflight failure).
+                rejectBeforePolicy(tls: tls, status: 403, error: "middleware_failed",
+                                   detail: "middleware \(mw.name) (\(mw.kind)) is unavailable and fails closed",
+                                   host: host, port: port)
+                return
+            }
+            if wsChain.contains(where: \.isBuiltinRegex) {
+                let fakes = swapper.entries(for: profileID).map(\.fake)
+                let regexFailOpen = wsChain.first(where: \.isBuiltinRegex)?.failOpen ?? false
+                messageTransform = { text in
+                    switch OpenShellPolicy.regexMiddleware(Data(text.utf8), keep: { v in
+                        fakes.contains(v) || Self.isSubscriptionPlaceholder(v) }) {
+                    case .unchanged: return .unchanged
+                    case .rewritten(let d, _): return .replaced(String(decoding: d, as: UTF8.self))
+                    case .failed(let why): return .failed(why, failOpen: regexFailOpen)
+                    }
+                }
+            }
+            // `websocket_credential_rewrite`: OpenShell credential placeholders
+            // in client text messages are resolved (after the middleware, so
+            // a redactor never sees the real secret), for the credentials
+            // scoped to this host only.
+            if guardrailsProvider()?.egressPolicy?.openShell?
+                .credentialRewrite(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath).websocket == true {
+                let wsPath = OpenShellPolicy.canonicalPath(ofTarget: reqPath)
+                let placeholders = swapper.entries(for: profileID).filter { e in
+                    e.fake.hasPrefix(TokenSwapper.openShellPlaceholderPrefix)
+                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, port: port, scope: $0) } ?? true)
+                        && (e.paths.isEmpty || wsPath.map { p in
+                            e.paths.contains { OpenShellPolicy.pathSelector($0, matches: p) } } ?? false)
+                }
+                if !placeholders.isEmpty {
+                    let before = messageTransform
+                    messageTransform = { text in
+                        var current = text
+                        var changed = false
+                        switch before?(text) ?? .unchanged {
+                        case .unchanged: break
+                        case .replaced(let t): current = t; changed = true
+                        case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
+                        }
+                        for e in placeholders where current.contains(e.fake) {
+                            current = current.replacingOccurrences(of: e.fake, with: e.real)
+                            changed = true
+                        }
+                        return changed ? .replaced(current) : .unchanged
+                    }
+                }
+            }
+            let routesWS = guardrailsProvider()?.egressPolicy?.openShell?
+                .routesToWebSocket(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath) ?? false
+            if routesWS || messageTransform != nil {
+                switch Self.rewritingWebSocketExtensions(upgradeRequest) {
+                case .success(let rewritten): upgradeRequest = rewritten
+                case .failure(let rejection):
+                    rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request", detail: rejection.reason,
+                                       host: host, port: port)
+                    return
+                }
+                let enforce = guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false
+                let identity = binaryIdentity
+                if let openShell = guardrailsProvider()?.egressPolicy?.openShell, routesWS { messagePolicy = { text in
+                    openShell.websocketMessageDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
+                                                       text: text, identity: identity, enforceBinaries: enforce)
+                } }
+                if messagePolicy == nil { messagePolicy = { _ in .allow } }
+            }
+            let pid = profileID
+            let wsPath = reqPath
+            let wsScheme = flowScheme == "http" ? "ws" : "wss"
+            let onViolation: @Sendable (String, Bool) -> Void = { reason, enforced in
+                SupplyChainLog.shared.record(
+                    "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
+                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
+                    "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
+                    "proto": .string("tcp"), "host": .string(host), "port": .int(port),
+                    "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
+                    "scheme": .string(wsScheme),
+                ])
+            }
             // PII protection / prompt-injection detection on a model
             // provider's socket (Codex's Responses WebSocket): frame-level
             // relay instead of the opaque pump. nil → opaque pump.
-            let contentGuard = insecure ? nil
-                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID)
+            // An OpenShell message policy needs the opaque pump's per-message
+            // gate, so it takes precedence: policy enforcement is never traded
+            // for scanning.
+            let wsConversation = SquelchRewriter.sessionKey(
+                headers: String(decoding: swap.modified.prefix(16 << 10), as: UTF8.self))
+            let onPolicyPump = messagePolicy != nil || messageTransform != nil
+            let contentGuard = (insecure || onPolicyPump) ? nil
+                : WSContentGuard.make(host: host, path: reqPath, profileID: profileID, conversation: wsConversation)
+            // Squelch on the policy pump too: client text trimmed ahead of the
+            // OpenShell rewrites, server events read for the calls a chained
+            // turn's bare results are matched with. (It has no other socket
+            // path; PII / prompt injection still skip this pump.)
+            let squelchOnPump = !insecure && onPolicyPump
+                && WSContentGuard.squelchApplies(host: host, profileID: profileID)
+            if squelchOnPump {
+                messageTransform = WSContentGuard.squelchingTransform(then: messageTransform, profileID: profileID,
+                                                                      conversation: wsConversation)
+            }
             let result = try await handleWebSocketUpgrade(
                 serverTLS: tls,
-                rawRequest: swap.modified,
-                host: host, port: port,
+                rawRequest: upgradeRequest,
+                host: host, port: port, cleartext: cleartext,
                 captureBody: captureBody,
+                messagePolicy: messagePolicy,
+                messageTransform: messageTransform,
+                onViolation: onViolation,
                 contentGuard: contentGuard,
+                squelchLearnFor: squelchOnPump ? profileID : nil,
                 onUpstreamMessage: realtimeTap.map { tap in
                     { @Sendable msg in tap.handle(msg) }
                 })
@@ -1105,6 +1732,40 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     with a response written straight back to the guest, so
         //     the SDK gets a meaningful HTTP error rather than an
         //     opaque InvalidSignatureException after a round-trip.
+        // A call that issues a credential (sts:AssumeRole, iam:CreateAccessKey,
+        // ecr:GetAuthorizationToken, doctl registry/kubernetes/spaces …): its
+        // response is buffered and the credentials in it replaced by fakes
+        // before the VM sees it (`CredentialMint`); one whose secret no fake
+        // can stand in for is refused here, in every guardrail mode.
+        let mintKind: CredentialMint.Kind?
+        switch CredentialMint.classify(rawRequest: swap.modified, host: host) {
+        case .deny(let action)?:
+            FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.denial(action)
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        case .mint(let kind)?:
+            mintKind = kind
+        case nil:
+            mintKind = nil
+        }
+        let minter = Self.credentialMinterProvider?()
+        if mintKind != nil, minter == nil || bodyFile != nil {
+            if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
+            let response = CredentialMint.refusal(minter == nil ? "no credential minter" : "a streamed body")
+            try tls.write(response)
+            await emitTrace(host: host, port: port, preSwapRequest: request,
+                            upstreamResponse: response, upstreamWireBytes: response.count,
+                            responseTruncated: false, swaps: swap.swaps, leaks: leaks,
+                            latencyMs: Date().timeIntervalSince(t0) * 1000)
+            return
+        }
+
         var toForward: Data
         // Skip AWS SigV4 re-signing for an insecure request — resigning uses
         // the real AWS secret, exactly the credential we won't put on an
@@ -1157,7 +1818,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     The session's delegate looks up the profile's per-host
         //     SecIdentity (Kubernetes API server et al.) when the
         //     upstream challenges for a client cert.
-        let session = upstreamSession(for: host, insecure: insecure)
+        let session = upstreamSession(for: host, port: port, insecure: insecure)
         noteUpstreamSession(session)
         // URLSession strong-refs its delegate until invalidated (per
         // Apple's docs). Without this `defer`, every MITM connection
@@ -1443,13 +2104,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 var scOutcome = "allowed"
                 var scReasonKind: String? = nil
                 var scReason: String? = nil
+                // A blocked package the user may let through (the timeline
+                // row's "Always allow" action), or one they did.
+                var scOverridable = false
                 let scProfileID = self.profileID
                 defer {
                     emitSupplyChainFetch(profileID: scProfileID,
                         ecosystem: ecosystem.rawValue,
                         package: pkg, version: version,
                         kind: "artifact", outcome: scOutcome,
-                        reasonKind: scReasonKind, reason: scReason)
+                        reasonKind: scReasonKind, reason: scReason,
+                        overridable: scOverridable)
                 }
 
                 // Three pre-flight checks before forward. Each may
@@ -1500,6 +2165,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 // Accumulates the enabled reputation sources we couldn't reach
                 // for this package — drives the fail-closed hold below.
                 var verifyGaps: [String] = []
+                // Why each gave no verdict, in the words the prompt shows.
+                var verifyWhy: [String] = []
+                // What the reputation checks (OSV, socket.dev) found: the
+                // first block, applied after both ran unless the user
+                // overrides it (GitHub issue #54). A socket.dev malware
+                // verdict can't be overridden and wins over anything else.
+                var reputationBlock: (reason: String, kind: String, log: String, overridable: Bool)?
 
                 // 2. OSV check (free, no key, off by default).
                 if policy.osvEnabled {
@@ -1513,59 +2185,82 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                 "has \(blocking.count) vulnerabilit\(blocking.count == 1 ? "y" : "ies") " +
                                 "at \(policy.osvSeverity.displayName.lowercased()): " +
                                 "\(v.id) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] OSV 451: \(pkg)@\(version) → \(v.id)")
-                            scOutcome = "blocked"
-                            scReasonKind = "osv"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "osv", "OSV 451: \(pkg)@\(version) → \(v.id)", true)
                         }
                     } else {
                         // Lookup failed (network error, non-200, 429 rate-limit,
                         // parse error). No verdict — don't silently allow.
                         verifyGaps.append("the OSV vulnerability database")
+                        verifyWhy.append(NSLocalizedString("the OSV vulnerability database didn't answer.",
+                                                           comment: "supply chain: why a package has no verdict"))
                     }
                 }
 
                 // 3. socket.dev check (BYO key).
                 if policy.socketActive {
-                  if let result = await socketClient.check(
+                  let socketLookup = await socketClient.lookup(
                         ecosystem: ecosystem.rawValue, name: pkg, version: version,
-                        apiKey: policy.socketAPIKey) {
-                    if policy.socketBlockCompromised, let bad = result.compromised.first {
+                        apiKey: policy.socketAPIKey)
+                  if case .success(let result) = socketLookup {
+                    if policy.socketBlockCompromised,
+                       let bad = SocketDevClient.blockingIssue(result.compromised) {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                             "flagged by socket.dev (\(bad.severity.rawValue)): " +
                             "\(bad.type) — \(bad.summary)"
-                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                        SupplyChainLog.shared.record(
-                            "[supply-chain] socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]")
-                        scOutcome = "blocked"
-                        scReasonKind = "socket_compromised"
-                        scReason = reason
-                        return
+                        let malware = SocketDevClient.isMalwareVerdict(bad.type)
+                        if reputationBlock == nil || malware {
+                            reputationBlock = (reason, "socket_compromised",
+                                               "socket.dev compromised 451: \(pkg)@\(version) → \(bad.type) [\(bad.severity.rawValue)]",
+                                               !malware)
+                        }
                     }
-                    if policy.socketBlockCVE {
+                    if policy.socketBlockCVE, reputationBlock == nil {
                         let threshold = SocketDevClient.Severity.from(string: policy.socketCVESeverity.rawValue)
                         let bad = result.vulnerabilities.first { $0.severity.rank >= threshold.rank }
                         if let v = bad {
                             let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) " +
                                 "has known CVE per socket.dev (\(v.severity.rawValue)): " +
                                 "\(v.type) — \(v.summary)"
-                            try? tls.write(SupplyChainEnforcer.blockResponse(reason: reason))
-                            SupplyChainLog.shared.record(
-                                "[supply-chain] socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]")
-                            scOutcome = "blocked"
-                            scReasonKind = "socket_cve"
-                            scReason = reason
-                            return
+                            reputationBlock = (reason, "socket_cve",
+                                               "socket.dev CVE 451: \(pkg)@\(version) → \(v.type) [\(v.severity.rawValue)]", true)
                         }
                     }
-                  } else {
+                  } else if case .failure(let why) = socketLookup {
                     // socket.dev unreachable / non-200 / 429 / auth failure /
-                    // parse error → no verdict. Don't silently allow.
+                    // parse error / not analysed → no verdict. Don't silently allow.
                     verifyGaps.append("socket.dev")
+                    verifyWhy.append(why.reason.explanation)
                   }
+                }
+
+                // 3a. The reputation verdict: blocked, unless the package is
+                //     on the workspace's override list or the user lets it
+                //     through now (malware verdicts never are).
+                if let block = reputationBlock {
+                    var allowed = false
+                    if block.overridable {
+                        if policy.reputationAllows(ecosystem: ecosystem.rawValue, name: pkg) {
+                            allowed = true
+                        } else {
+                            allowed = await supplyChainBroker.consentOverride(
+                                profileID: profileID, ecosystem: ecosystem.rawValue, name: pkg,
+                                version: version, reason: block.reason)
+                        }
+                    }
+                    if !allowed {
+                        try? tls.write(SupplyChainEnforcer.blockResponse(reason: block.reason))
+                        SupplyChainLog.shared.record("[supply-chain] \(block.log)")
+                        scOutcome = "blocked"
+                        scReasonKind = block.kind
+                        scReason = block.reason
+                        scOverridable = block.overridable
+                        return
+                    }
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] overridden by the user: \(ecosystem.rawValue) \(pkg)@\(version) — \(block.reason)")
+                    scOutcome = "overridden"
+                    scReasonKind = block.kind
+                    scReason = block.reason
                 }
 
                 // 3b. Fail closed. An enabled reputation check couldn't reach
@@ -1578,13 +2273,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 //     whole dependency graph.
                 if !verifyGaps.isEmpty {
                     let gaps = verifyGaps.joined(separator: " and ")
-                    let allowed = await supplyChainBroker.consent(
-                        profileID: profileID,
-                        scope: "verify-unavailable:\(ecosystem.rawValue):\(pkg):\(version)",
-                        scopeDisplayName: NSLocalizedString("an unverified package", comment: ""),
-                        detail: String(format: NSLocalizedString(
-                            "Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?",
-                            comment: ""), gaps, ecosystem.rawValue, pkg, version))
+                    SupplyChainLog.shared.record(
+                        "[supply-chain] unverified: \(ecosystem.rawValue) \(pkg)@\(version) — \(verifyWhy.joined(separator: " "))")
+                    let allowed = await supplyChainBroker.consentUnverified(
+                        profileID: profileID, ecosystem: ecosystem.rawValue, name: pkg, version: version,
+                        why: verifyWhy.joined(separator: " "))
                     if !allowed {
                         let reason = "\(ecosystem.rawValue) package \(pkg)@\(version) blocked — " +
                             "reputation lookup unavailable (\(gaps)); user denied the unverified install"
@@ -1706,9 +2399,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // The trace copy is decoded too, so the log-mode injection scan (run
         // from emitTrace) and the inspector read the text, not the coding.
         var traceRequest = request
+        // Squelch reads the body too, but never blocks: a body it can't read
+        // goes out as the agent sent it.
+        let squelchOn = Self.isAIHost(host) && (Self.squelchPolicyProvider?(profileID)?.enabled ?? false)
         if Self.isAIHost(host) {
             let piOn = Self.promptInjectionPolicyProvider?(profileID)?.isActive ?? false
             let piiOn = Self.piiPolicyProvider?(profileID)?.isActive ?? false
+            if squelchOn, !piOn, !piiOn, bodyFile == nil,
+               case .decoded(let plain) = Self.decodeRequestContentEncoding(toForward) {
+                toForward = plain
+                if case .decoded(let plainTrace) = Self.decodeRequestContentEncoding(request) {
+                    traceRequest = plainTrace
+                }
+            }
             if piOn || piiOn {
                 let engines = [piOn ? "prompt_injection" : nil, piiOn ? "pii" : nil].compactMap { $0 }
                 if bodyFile != nil {
@@ -1766,6 +2469,16 @@ final class HTTPMitmConnection: @unchecked Sendable {
            pi.onDetection != .log,
            let conv = ConversationParser.parse(host: host, requestBody: toForward,
                                                responseBody: nil) {
+            // A detector model still loading: "try again" now, not a
+            // request held for the whole load.
+            let warming = Self.warmingDetectors(
+                injection: pi,
+                source: pi.detectSourceInjection ? await PromptInjectionClassifier.shared.readiness() : .absent,
+                rules: pi.detectRulesInjection ? await PromptInjectionClassifier.claudeMd.readiness() : .absent)
+            if !warming.isEmpty {
+                await answerWarming(warming, tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                return
+            }
             if let f = await Self.detectPromptInjection(in: conv, policy: pi) {
                 let pid = profileID
                 // Record + forward the *resolved outcome* (not just the mode):
@@ -1828,6 +2541,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
             servedByMarker = target.servedBy
         }
 
+        // Squelch: the noise in command output the conversation carries is
+        // cut before the model reads it (and before PII scans it). Every
+        // backend, the on-device engine included: its context is finite too.
+        if squelchOn, bodyFile == nil, let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
+            let head = toForward.subdata(in: 0..<split.upperBound)
+            let body = toForward.subdata(in: split.upperBound..<toForward.count)
+            let headText = String(decoding: head, as: UTF8.self)
+            if reqMethod.uppercased() == "POST", Self.headerValue("Content-Encoding", inHeaderSection: headText) == nil,
+               SquelchRewriter.mayCarryToolOutput(body) {
+                let outcome = SquelchRewriter.rewrite(body, priorCall: { SquelchCallRegistry.shared.call(profileID, $0) })
+                if outcome.body != body {
+                    toForward = head + outcome.body   // the relay re-frames (Content-Length)
+                }
+                SquelchLedger.shared.record(outcome, profileID: profileID,
+                                            conversation: SquelchRewriter.sessionKey(headers: headText) ?? outcome.conversation)
+            }
+        }
+
         // PII protection: swap personal data in the conversation for
         // stand-ins before it leaves the Mac; the relay below puts the real
         // values back in the reply. Not for a turn served by the on-device
@@ -1848,6 +2579,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                            inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
             if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
                                                 localEngineOffMac: offMacEngine != nil) {
+                if await PIIDetector.shared.readiness() == .loading {
+                    await answerWarming(["PII protection"], tls: tls, request: request, host: host, port: port, t0: t0, leaks: leaks)
+                    return
+                }
                 let vault = PIIVault.forProfile(profileID)
                 let t = Date()
                 let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
@@ -1929,7 +2664,15 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         defer { if ownsRelaySession { relaySession.finishTasksAndInvalidate() } }
         let relay: RelayResponse
-        if depiRouted {
+        if let mintKind, let minter {
+            // Buffered so no byte of a real credential reaches the guest; a
+            // response the rewrite can't account for becomes a 502.
+            let pid = profileID
+            relay = try await relayUpstreamBuffered(
+                rawRequest: toForward, host: upstreamHost, port: upstreamPort,
+                session: relaySession, tls: tls, scheme: upstreamScheme,
+                rewrite: { minter.process(response: $0, kind: mintKind, profileID: pid) })
+        } else if depiRouted {
             // Depi-routed npm traffic goes through the buffered
             // relay so a 401 can be swapped for a self-explanatory
             // error before any byte reaches the guest — the
@@ -2062,9 +2805,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
     @available(macOS, deprecated: 10.15, message: "takes TLSServerStream which wraps SecureTransport")
     private func handleWebSocketUpgrade(serverTLS: MitmServerStream,
                                         rawRequest: Data,
-                                        host: String, port: Int,
+                                        host: String, port: Int, cleartext: Bool = false,
                                         captureBody: Bool,
+                                        messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)? = nil,
+                                        messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)? = nil,
+                                        onViolation: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                                         contentGuard: WSContentGuard? = nil,
+                                        squelchLearnFor: UUID? = nil,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
         // This path bypasses URLSession, so it must resolve the same
         // upstream TLS material `ClientCertChallengeDelegate` supplies on
@@ -2072,7 +2819,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // pinned cluster CA. Skipping either is what made `kubectl exec`
         // (an HTTP upgrade) fail its upstream handshake against a private
         // API server while `kubectl get` succeeded.
-        let identityEntry = clientIdentities.entry(for: host, profileID: profileID)
+        let identityEntry = clientIdentities.entry(for: host, port: port, profileID: profileID)
         // Same consent gate the URLSession path applies to the identity, so
         // an upgrade can't become a way around a prompt that an ordinary
         // request would raise.
@@ -2105,20 +2852,25 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         let clientIdentity = identityEntry?.identity
-        let pinnedCA = clusterCAs.ca(for: host, profileID: profileID)
+        let pinnedCA = clusterCAs.ca(for: host, port: port, profileID: profileID)
 
-        let upstreamFD = try connectTCP(host: host, port: port)
+        let upstreamFD = try pinnedUpstream.map { try UpstreamPinning.connect($0, port: port) }
+            ?? connectTCP(host: host, port: port)
         // The handshake reads block: an upstream that never answers the
         // upgrade (seen with Codex's reconnect loop) held its thread for
         // good. Bounded here; the relay below polls and ignores it.
         var handshakeDeadline = timeval(tv_sec: 30, tv_usec: 0)
         setsockopt(upstreamFD, SOL_SOCKET, SO_RCVTIMEO, &handshakeDeadline,
                    socklen_t(MemoryLayout<timeval>.size))
-        let upstreamTLS: TLSClientStream
+        // A cleartext upgrade (`ws://`, reached on an inspected plain-HTTP
+        // port) goes upstream in cleartext too.
+        let upstreamTLS: MitmClientStream
         do {
-            upstreamTLS = try TLSClientStream(fd: upstreamFD, peerName: host,
-                                              clientIdentity: clientIdentity,
-                                              pinnedCA: pinnedCA)
+            upstreamTLS = cleartext
+                ? PlaintextClientStream(fd: upstreamFD)
+                : try TLSClientStream(fd: upstreamFD, peerName: host,
+                                      clientIdentity: clientIdentity,
+                                      pinnedCA: pinnedCA)
             try upstreamTLS.handshake()
         } catch {
             FileHandle.standardError.write(Data(
@@ -2216,9 +2968,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
             ? WSInflater(noContextTakeover: deflate!.serverNoContextTakeover) : nil
         let c2uCollector = captureBody
             ? WSTraceCollector(direction: .clientToUpstream, inflater: c2uInflater) : nil
+        // Squelch and the realtime tap read whole server messages (as the
+        // content-guard relay does, up to its 32 MB), not the trace's 1 MB
+        // preview: a tool call with a long argument, or the response.completed
+        // that carries it, is one big event that a cut-off prefix can't parse.
+        let learnCap = (squelchLearnFor != nil || onUpstreamMessage != nil)
+            ? WSMessageAssembler.maxMessage : WSTraceCollector.perMessageCap
         let u2cCollector = captureBody
-            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater) : nil
-        u2cCollector?.onMessage = onUpstreamMessage
+            ? WSTraceCollector(direction: .upstreamToClient, inflater: u2cInflater, deliverCap: learnCap) : nil
+        // Squelch's server side on the pump: the model's calls, learned from
+        // every server text message — through the trace collector when there
+        // is one, else a parser that keeps nothing.
+        let learn: (@Sendable (WSMessage) -> Void)? = squelchLearnFor.map { pid in
+            { msg in
+                if msg.kind == .text, !msg.truncated {
+                    SquelchCallRegistry.shared.learn(fromServerEvent: msg.payload, profileID: pid)
+                }
+            }
+        }
+        let u2cLearner = (u2cCollector == nil && learn != nil)
+            ? WSTraceCollector(direction: .upstreamToClient,
+                               inflater: deflate.map { WSInflater(noContextTakeover: $0.serverNoContextTakeover) },
+                               retainsMessages: false, deliverCap: learnCap) : nil
+        u2cLearner?.onMessage = learn
+        if let learn {
+            let tap = onUpstreamMessage
+            u2cCollector?.onMessage = { msg in learn(msg); tap?(msg) }
+        } else {
+            u2cCollector?.onMessage = onUpstreamMessage
+        }
+        // OpenShell per-message inspection of client text (see caller).
+        let inspector = messagePolicy.map { decide in
+            OpenShellWebSocket.ClientStream(compression: deflate != nil, decide: { text in
+                let v = decide(text)
+                if case .deny(let why) = v { onViolation(why, true) }
+                return v
+            }, onAudit: { onViolation($0, false) }, transform: messageTransform)
+        }
 
         // Switch both streams to non-blocking pump mode. The sequential
         // handshake above is finished, so from here one task reads each stream
@@ -2267,13 +3053,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 Self.pumpDirection(
                     readFD: serverFD, readNB: { try server.readNB(maxBytes: 16 * 1024) },
                     writeFD: upstreamFD, writeNB: { try upstream.writeNB($0) },
-                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) })
+                    onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) },
+                    gate: inspector.map { i in { i.feed($0) } },
+                    onGateStop: {
+                        // Tell the client why (1008), then end the session both ways.
+                        _ = try? server.writeNB(OpenShellWebSocket.policyCloseFrame(
+                            reason: inspector?.closeReason ?? "Bromure: client message not permitted by policy"))
+                    })
             }
             group.addTask {   // upstream → client
                 Self.pumpDirection(
                     readFD: upstreamFD, readNB: { try upstream.readNB(maxBytes: 16 * 1024) },
                     writeFD: serverFD, writeNB: { try server.writeNB($0) },
-                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); beat.tick($0) })
+                    onChunk: { counters.addUpstream($0.count); u2cCollector?.feed($0); u2cLearner?.feed($0); beat.tick($0) })
             }
             await group.next()
             group.cancelAll()
@@ -2342,35 +3134,49 @@ final class HTTPMitmConnection: @unchecked Sendable {
     private static func pumpDirection(
         readFD: Int32, readNB: () throws -> StreamReadOutcome,
         writeFD: Int32, writeNB: (Data) throws -> Int,
-        onChunk: (Data) -> Void) {
+        onChunk: (Data) -> Void,
+        gate: ((Data) -> (forward: Data, stop: Bool))? = nil,
+        onGateStop: () -> Void = {}) {
         var pending = Data()
+        var gateStopped = false
         while true {
-            if Task.isCancelled { return }
-            // 1. Drain all readable bytes into `pending`.
-            var eof = false
-            drain: while true {
-                let outcome: StreamReadOutcome
-                do { outcome = try readNB() } catch { return }
-                switch outcome {
-                case .bytes(let d): onChunk(d); pending.append(d)
-                case .wouldBlock:   break drain
-                case .eof:          eof = true; break drain
+            // One pool per pass: this runs on a raw Thread (mitm-io) for the
+            // connection's lifetime, and its implicit pool never drains.
+            let go = autoreleasepool { () -> Bool in
+                if Task.isCancelled { return false }
+                // 1. Drain all readable bytes into `pending`.
+                var eof = false
+                drain: while true {
+                    let outcome: StreamReadOutcome
+                    do { outcome = try readNB() } catch { return false }
+                    switch outcome {
+                    case .bytes(let d):
+                        guard let gate else { onChunk(d); pending.append(d); continue }
+                        let (fwd, stop) = gate(d)
+                        onChunk(fwd); pending.append(fwd)
+                        if stop { gateStopped = true; eof = true; break drain }
+                    case .wouldBlock:   break drain
+                    case .eof:          eof = true; break drain
+                    }
                 }
+                // 2. Flush `pending` to the write side, waiting for writability if
+                //    the socket buffer is full (backpressure).
+                while !pending.isEmpty {
+                    let n: Int
+                    do { n = try writeNB(pending) } catch { return false }
+                    if n > 0 { pending.removeFirst(n); continue }
+                    if Task.isCancelled { return false }
+                    var pfd = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
+                    if poll(&pfd, 1, 250) < 0 && errno != EINTR { return false }
+                }
+                if gateStopped { onGateStop(); return false }
+                if eof { return false }
+                // 3. Wait for the next readable event.
+                var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+                if poll(&pfd, 1, 250) < 0 && errno != EINTR { return false }
+                return true
             }
-            // 2. Flush `pending` to the write side, waiting for writability if
-            //    the socket buffer is full (backpressure).
-            while !pending.isEmpty {
-                let n: Int
-                do { n = try writeNB(pending) } catch { return }
-                if n > 0 { pending.removeFirst(n); continue }
-                if Task.isCancelled { return }
-                var pfd = pollfd(fd: writeFD, events: Int16(POLLOUT), revents: 0)
-                if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
-            }
-            if eof { return }
-            // 3. Wait for the next readable event.
-            var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
-            if poll(&pfd, 1, 250) < 0 && errno != EINTR { return }
+            if !go { return }
         }
     }
 
@@ -2493,6 +3299,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// here so the proxy hot path doesn't pay the cost when traces
     /// are off. Runs on the connection's Task — no main-actor hop
     /// for the body files (TraceStore.queue handles them off-thread).
+    /// Answer a request whose detector model is still loading (see
+    /// `detectorWarmingResponse`), and trace it like any other.
+    private func answerWarming(_ detectors: [String], tls: MitmServerStream, request: Data,
+                               host: String, port: Int, t0: Date, leaks: [LeakEntry]) async {
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host): \(detectors.joined(separator: " + ")) model still loading — answered 503\n".utf8))
+        let response = Self.detectorWarmingResponse(detectors)
+        try? tls.write(response)
+        await emitTrace(host: host, port: port, preSwapRequest: request, upstreamResponse: response,
+                        upstreamWireBytes: response.count, responseTruncated: false, swaps: [],
+                        leaks: leaks, latencyMs: Date().timeIntervalSince(t0) * 1000)
+    }
+
     private func emitTrace(host: String, port: Int,
                            preSwapRequest: Data,
                            upstreamResponse: Data,
@@ -2735,6 +3554,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 case .toolUse: calls += 1
                 case let .text(t): if message.role != .tool { texts.append(t) }
                 case .image: break   // a screenshot output is still output
+                case .thinking: break
                 }
             }
             if !results.isEmpty || calls > 0 || message.role == .tool {
@@ -2856,6 +3676,34 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// forwarded (it would leave unscanned). 415 is the status RFC 9110
     /// §15.5.16 assigns to an unsupported content coding; the plain-text body
     /// tells the user why their agent's call failed and what to change.
+    /// The detectors an enforcing prompt-injection policy waits on whose
+    /// model is still loading.
+    static func warmingDetectors(injection pi: PromptInjectionPolicy,
+                                 source: ModelReadiness, rules: ModelReadiness) -> [String] {
+        guard pi.isActive, pi.onDetection != .log else { return [] }
+        var out: [String] = []
+        if pi.detectSourceInjection, source == .loading { out.append("prompt-injection detection") }
+        if pi.detectRulesInjection, rules == .loading { out.append("instruction-file detection") }
+        return out
+    }
+
+    /// 503 while a detector's model loads (seconds, at first use or after an
+    /// idle release). Every agent retries a 503 on its own, by then against
+    /// a loaded model; nothing was sent.
+    static func detectorWarmingResponse(_ detectors: [String]) -> Data {
+        let body = "Bromure is loading its \(detectors.joined(separator: " and ")) model. "
+            + "This request was not sent; retry in a few seconds.\n"
+        var r = "HTTP/1.1 503 Service Unavailable\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Retry-After: \(detectorWarmingRetryAfter)\r\n"
+        r += "X-Bromure-Blocked: detector-model-loading\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+    static let detectorWarmingRetryAfter = 2
+
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")
@@ -3008,12 +3856,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// profile's identity registry. The session is single-use because
     /// URLSessionDelegate must be retained for the session's lifetime
     /// and we want the connection's identity binding to be tight.
-    private func upstreamSession(for host: String, insecure: Bool = false) -> URLSession {
+    private func upstreamSession(for host: String, port: Int, insecure: Bool = false) -> URLSession {
         let delegate = ClientCertChallengeDelegate(
             identityRegistry: clientIdentities,
             caRegistry: clusterCAs,
             consent: consent,
-            profileID: profileID, host: host, insecure: insecure)
+            profileID: profileID, host: host, port: port, insecure: insecure)
         let cfg = URLSessionConfiguration.ephemeral
         // `timeoutIntervalForRequest` is an IDLE timer — it fires when no byte
         // arrives from upstream for this long, NOT a wall-clock cap on the
@@ -3027,7 +3875,35 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `timeoutIntervalForResource` (unchanged) remains the hard backstop,
         // and a closed guest is still detected promptly on the next write.
         cfg.timeoutIntervalForRequest = 3600
+        // OpenShell: the TCP leg goes through a loopback dialer bound to the
+        // validated addresses; TLS (SNI, certificate) still runs end to end.
+        if let pinned = pinnedUpstream, !pinned.isEmpty,
+           let dialer = try? PinnedUpstreamDialer(host: host, port: pinnedPort ?? 443, addresses: pinned) {
+            cfg.connectionProxyDictionary = dialer.proxyDictionary
+            delegate.dialer = dialer
+        }
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+    }
+
+    /// The standard reason phrase for a status (RFC 9110), for response heads
+    /// the proxy writes itself — not Foundation's localized description.
+    static func reasonPhrase(_ code: Int) -> String {
+        let phrases: [Int: String] = [
+            100: "Continue", 101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted",
+            203: "Non-Authoritative Information", 204: "No Content", 205: "Reset Content", 206: "Partial Content",
+            300: "Multiple Choices", 301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified",
+            307: "Temporary Redirect", 308: "Permanent Redirect", 400: "Bad Request", 401: "Unauthorized",
+            402: "Payment Required", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+            406: "Not Acceptable", 407: "Proxy Authentication Required", 408: "Request Timeout", 409: "Conflict",
+            410: "Gone", 411: "Length Required", 412: "Precondition Failed", 413: "Content Too Large",
+            414: "URI Too Long", 415: "Unsupported Media Type", 416: "Range Not Satisfiable",
+            417: "Expectation Failed", 418: "I'm a teapot", 421: "Misdirected Request", 422: "Unprocessable Content",
+            425: "Too Early", 426: "Upgrade Required", 428: "Precondition Required", 429: "Too Many Requests",
+            431: "Request Header Fields Too Large", 451: "Unavailable For Legal Reasons",
+            500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway", 503: "Service Unavailable",
+            504: "Gateway Timeout", 505: "HTTP Version Not Supported",
+        ]
+        return phrases[code] ?? "Status"
     }
 
     /// Pull "GET /foo HTTP/1.1" → ("GET", "/foo").
@@ -3549,8 +4425,13 @@ private func readRawHTTPRequest(via tls: MitmServerStream, maxBytes: Int) throws
 /// scripted `MitmServerStream`.)
 @available(macOS, deprecated: 10.15)
 func readRequestSpooling(via tls: MitmServerStream,
-                         inlineCap: Int) throws -> (request: Data, bodyFile: URL?) {
+                         inlineCap: Int, strict: Bool = false) throws -> (request: Data, bodyFile: URL?) {
     let chunk = 64 * 1024
+    // strict (an OpenShell policy is active): OpenShell's framing rules —
+    // any ambiguity, truncation or malformed chunk is a 400 (`MitmError.
+    // invalidRequest`). Otherwise lenient, as before, except that nothing past
+    // the framed body is ever folded into it.
+    func reject(_ why: String) -> MitmError { .invalidRequest(why) }
 
     // Spool an arbitrary body (already read in `initial`, more pulled via
     // `pull`) to a temp file, whole. Shared by the Content-Length and de-chunk
@@ -3583,6 +4464,9 @@ func readRequestSpooling(via tls: MitmServerStream,
         func crlf() throws -> Int? {   // index of next CRLF, reading as needed
             while true {
                 if let r = stream.range(of: Data("\r\n".utf8)) { return r.lowerBound }
+                if strict, stream.count > OpenShellHTTP.maxChunkLineBytes {
+                    throw reject("Chunk-size line exceeds limit")
+                }
                 if !(try more()) { return nil }
             }
         }
@@ -3597,25 +4481,61 @@ func readRequestSpooling(via tls: MitmServerStream,
         }
 
         parse: while true {
-            guard let sizeAt = try crlf() else { break }      // EOF → forward what we have
-            let hex = (String(data: stream.subdata(in: 0..<sizeAt), encoding: .isoLatin1) ?? "")
-                .split(separator: ";").first.map(String.init)?    // strip chunk extensions
-                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard let sizeAt = try crlf() else {                  // EOF before the last chunk
+                if strict { throw reject("Chunked body ended before chunk-size line") }
+                break
+            }
+            guard let line = String(data: stream.subdata(in: 0..<sizeAt), encoding: strict ? .utf8 : .isoLatin1) else {
+                throw reject("Invalid UTF-8 in chunk-size line")
+            }
+            let hex = line.split(separator: ";", omittingEmptySubsequences: false).first
+                .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""  // strip chunk extensions
             drop(sizeAt + 2)
-            guard let size = Int(hex, radix: 16) else { throw MitmError.malformedHTTPRequest }
+            guard let size = Int(hex, radix: 16), size >= 0 else {
+                if strict { throw reject("Invalid chunk size token: \"\(hex)\"") }
+                throw MitmError.malformedHTTPRequest
+            }
             if size == 0 {                                    // last chunk: skip trailers to the blank line
-                while let e = try crlf() { let end = e == 0; drop(e + 2); if end { break } }
-                break parse
+                var fields = 0, bytes = 0
+                while true {
+                    guard let e = try crlf() else {
+                        if strict { throw reject("Chunked body ended before trailer terminator") }
+                        break parse
+                    }
+                    bytes += e + 2
+                    drop(e + 2)
+                    if e == 0 { break parse }
+                    fields += 1
+                    if strict, bytes > OpenShellHTTP.maxHeaderBytes {
+                        throw reject("Chunk trailers exceed \(OpenShellHTTP.maxHeaderBytes) bytes")
+                    }
+                    if strict, fields > OpenShellHTTP.maxTrailerFields {
+                        throw reject("Chunk trailers exceed \(OpenShellHTTP.maxTrailerFields) fields")
+                    }
+                }
             }
             var remaining = size                              // stream the chunk in slices (huge chunks don't blow RAM)
             while remaining > 0 {
-                if stream.isEmpty, !(try more()) { break parse }
+                if stream.isEmpty, !(try more()) {
+                    if strict { throw reject("Chunked body ended inside a chunk") }
+                    break parse
+                }
                 let take = min(remaining, stream.count)
                 try emit(stream.subdata(in: 0..<take))
                 drop(take); remaining -= take
             }
-            while stream.count < 2, try more() {}             // consume the chunk's trailing CRLF
-            if stream.count >= 2 { drop(2) }
+            while stream.count < 2, try more() {}             // the chunk's terminating CRLF
+            guard stream.count >= 2 else {
+                if strict { throw reject("Chunked body ended before chunk terminator") }
+                break parse
+            }
+            // A chunk not followed by CRLF is malformed in either mode —
+            // skipping two arbitrary bytes would silently corrupt the body.
+            guard stream.prefix(2) == Data("\r\n".utf8) else {
+                if strict { throw reject("Chunk payload missing terminating CRLF") }
+                throw MitmError.malformedHTTPRequest
+            }
+            drop(2)
         }
 
         if let t = tmpURL { try? fh?.close(); fh = nil; return (header, t) }
@@ -3623,22 +4543,36 @@ func readRequestSpooling(via tls: MitmServerStream,
     }
 
     var buffer = Data()
-    var headerEnd: Int? = nil
-    var contentLength: Int? = nil
-    var chunked = false
-
     while true {
-        if headerEnd == nil, let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
-            headerEnd = r.upperBound
-            let he = headerEnd!
+        if let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
+            let he = r.upperBound
+            let header = buffer.subdata(in: 0..<he)
             let headerStr = String(data: buffer.prefix(r.lowerBound), encoding: .isoLatin1) ?? ""
-            for line in headerStr.split(separator: "\r\n") {
-                let l = line.lowercased()
-                if l.hasPrefix("content-length:") {
-                    contentLength = Int(l.dropFirst("content-length:".count)
-                        .trimmingCharacters(in: .whitespaces))
-                } else if l.hasPrefix("transfer-encoding:"), l.contains("chunked") {
-                    chunked = true
+
+            // Framing: strict = OpenShell's `parse_body_length` (plus its
+            // header-block validation); lenient = chunked if named anywhere,
+            // else a parseable Content-Length, else no body.
+            var contentLength: Int? = nil
+            var chunked = false
+            if strict {
+                do {
+                    switch try OpenShellHTTP.parseHead(header).bodyLength {
+                    case .none: break
+                    case .contentLength(let n): contentLength = n
+                    case .chunked: chunked = true
+                    }
+                } catch let e as OpenShellHTTP.Rejection {
+                    throw reject(e.reason)
+                }
+            } else {
+                for line in headerStr.split(separator: "\r\n") {
+                    let l = line.lowercased()
+                    if l.hasPrefix("content-length:") {
+                        contentLength = Int(l.dropFirst("content-length:".count)
+                            .trimmingCharacters(in: .whitespaces))
+                    } else if l.hasPrefix("transfer-encoding:"), l.contains("chunked") {
+                        chunked = true
+                    }
                 }
             }
             // Answer Expect: 100-continue so the client releases the body.
@@ -3646,46 +4580,60 @@ func readRequestSpooling(via tls: MitmServerStream,
                headerStr.lowercased().contains("100-continue") {
                 try? tls.write(Data("HTTP/1.1 100 Continue\r\n\r\n".utf8))
             }
-            // Chunked takes precedence over Content-Length (RFC 7230 §3.3.3).
+            // Chunked takes precedence over Content-Length (RFC 9112 §6.3).
             if chunked {
-                return try dechunk(header: buffer.subdata(in: 0..<he),
-                                   initial: buffer.subdata(in: he..<buffer.count))
+                return try dechunk(header: header, initial: buffer.subdata(in: he..<buffer.count))
             }
+            // No body: bytes past the header block belong to nothing we
+            // forward (one request per connection).
+            guard let cl = contentLength else { return (header, nil) }
+
             // Large fixed-length body → spool the whole thing to a temp file.
-            if let cl = contentLength, cl > inlineCap, let s = spillFile() {
+            if cl > inlineCap, let s = spillFile() {
                 var written = 0
                 if buffer.count > he {
-                    let already = buffer.subdata(in: he..<buffer.count)
+                    let already = buffer.subdata(in: he..<min(buffer.count, he + cl))
                     try s.fh.write(contentsOf: already)
                     written = already.count
                 }
                 while written < cl {
                     let got = try tls.read(maxBytes: min(chunk, cl - written))
-                    if got.isEmpty { break }   // client EOF: forward what we have
+                    if got.isEmpty {
+                        if strict {
+                            try? s.fh.close(); try? FileManager.default.removeItem(at: s.url)
+                            throw reject("Request body ended before Content-Length bytes")
+                        }
+                        break   // client EOF: forward what we have
+                    }
                     try s.fh.write(contentsOf: got)
                     written += got.count
                 }
                 try? s.fh.close()
                 // The pipeline runs over header + a bounded body prefix only;
                 // the binary body carries no tokens to swap.
-                let prefixEnd = min(buffer.count, he + 64 * 1024)
+                let prefixEnd = min(buffer.count, he + min(cl, 64 * 1024))
                 return (buffer.subdata(in: 0..<prefixEnd), s.url)
             }
-        }
-        if let he = headerEnd {
-            if let cl = contentLength {
-                if buffer.count - he >= cl { return (buffer, nil) }
-            } else {
-                return (buffer, nil)   // no Content-Length, not chunked → no body
+            // Exactly Content-Length bytes: anything after (a pipelined
+            // request) is not part of this body.
+            while buffer.count - he < cl {
+                let got = try tls.read(maxBytes: chunk)
+                if got.isEmpty {
+                    if strict { throw reject("Request body ended before Content-Length bytes") }
+                    return (buffer, nil)   // client closed early; forward what we have
+                }
+                buffer.append(got)
             }
-        } else if buffer.count >= inlineCap {
+            return (buffer.subdata(in: 0..<(he + cl)), nil)
+        }
+        if strict, buffer.count > OpenShellHTTP.maxHeaderBytes {
+            throw reject("HTTP request headers exceed \(OpenShellHTTP.maxHeaderBytes) bytes")
+        }
+        if buffer.count >= inlineCap {
             throw MitmError.malformedHTTPRequest   // header alone blew the cap
         }
         let got = try tls.read(maxBytes: chunk)
-        if got.isEmpty {
-            if headerEnd == nil { throw MitmError.unexpectedTermination }
-            return (buffer, nil)   // client closed early; forward what we have
-        }
+        if got.isEmpty { throw MitmError.unexpectedTermination }
         buffer.append(got)
     }
 }
@@ -3754,7 +4702,7 @@ private final class WSByteCounters: @unchecked Sendable {
 /// the WebSocket upgrade fast-path; the main request path has its
 /// own length-aware reader because it needs to honour Content-Length.
 @available(macOS, deprecated: 10.15)
-private func readUntilDoubleCRLF(via tls: TLSClientStream, maxBytes: Int) throws -> Data {
+private func readUntilDoubleCRLF(via tls: MitmClientStream, maxBytes: Int) throws -> Data {
     var buffer = Data()
     while buffer.count < maxBytes {
         let got = try tls.read(maxBytes: 16 * 1024)
@@ -3915,6 +4863,19 @@ func mitmSanitizedAcceptEncoding(_ value: String) -> String? {
     return kept.isEmpty ? nil : kept.joined(separator: ", ")
 }
 
+/// Whether the upstream is asked for the body as is (`Accept-Encoding:
+/// identity`): a file that's already compressed — a `.tgz`, a `.gz`. Served
+/// with `Content-Encoding: gzip` (GitHub Pages does, e.g. Helm charts),
+/// URLSession sometimes leaves such a body encoded — for these paths with a
+/// binary Content-Type (octet-stream, x-gzip, x-tar), unlike application/gzip
+/// — while the head we emit has no Content-Encoding: the client saved the
+/// gzip wrapper as the file. Asked for identity, there is nothing to decode;
+/// compressing a compressed file saved nothing anyway.
+func mitmFetchesIdentity(_ url: URL) -> Bool {
+    let path = url.path.lowercased()
+    return path.hasSuffix(".gz") || path.hasSuffix(".tgz")
+}
+
 /// Collect the full upstream response (no TLS write side-effect).
 /// Shared between the buffered relay and any other call site that
 /// needs the full body before responding to the client.
@@ -3955,6 +4916,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
             req.setValue(value, forHTTPHeaderField: name)
         }
     }
+    if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
     let stripped: Set<String> = [
         "content-encoding", "content-length",
         "transfer-encoding", "connection",
@@ -4155,7 +5117,8 @@ private func emitSupplyChainFetch(profileID: UUID,
                                    kind: String,
                                    outcome: String,
                                    reasonKind: String? = nil,
-                                   reason: String? = nil) {
+                                   reason: String? = nil,
+                                   overridable: Bool = false) {
     var data: [String: AnyJSON] = [
         "ecosystem": .string(ecosystem),
         "package": .string(package),
@@ -4165,6 +5128,7 @@ private func emitSupplyChainFetch(profileID: UUID,
     if let version { data["version"] = .string(version) }
     if let reasonKind { data["reason_kind"] = .string(reasonKind) }
     if let reason { data["reason"] = .string(reason) }
+    if overridable { data["overridable"] = .bool(true) }
     BACEventEmitter.shared.emitDetached(
         profileID: profileID,
         eventType: "supply_chain.fetch",
@@ -4325,6 +5289,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             req.setValue(value, forHTTPHeaderField: name)
         }
     }
+    if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
     if local && !keepGuestKey {
         // Swap in this VM's own engine key, not the admin key: the engine
         // accepts either, but only the per-VM key lets the repair proxy
@@ -4422,10 +5387,16 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         switch event {
         case .head(let http):
             responseStarted = true
-            useChunked = !isHeadRequest && http.statusCode != 204 && http.statusCode != 304
-            var head = "HTTP/1.1 \(http.statusCode) "
-            head += HTTPURLResponse.localizedString(forStatusCode: http.statusCode).capitalized
-            head += "\r\n"
+            // The body reaches the guest byte-for-byte when URLSession didn't
+            // decode it (no Content-Encoding) and nothing rewrites it (no PII
+            // restorer): then the upstream's Content-Length is still exact and
+            // is kept, as a transparent proxy should (clients that frame by it
+            // break on a re-chunked body). Otherwise the body is re-chunked.
+            let encoding = (http.value(forHTTPHeaderField: "Content-Encoding") ?? "").lowercased()
+            let exactLength = (encoding.isEmpty || encoding == "identity") && responseRestorer == nil
+                && http.value(forHTTPHeaderField: "Content-Length").flatMap { Int($0) } != nil
+            useChunked = !isHeadRequest && http.statusCode != 204 && http.statusCode != 304 && !exactLength
+            var head = "HTTP/1.1 \(http.statusCode) \(HTTPMitmConnection.reasonPhrase(http.statusCode))\r\n"
             for (k, v) in http.allHeaderFields {
                 guard let key = k as? String, let val = v as? String else { continue }
                 let lk = key.lowercased()
@@ -4522,6 +5493,9 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         try? tls.write(terminator)
         totalWireBytes += terminator.count
     }
+    // Strict credential mode learns tokens this site issues the guest
+    // (cookies, OAuth token responses) so the guest can send them back.
+    UnmanagedCredentialGuard.shared.learn(response: responseBuffer, host: host, profileID: profileID)
     return RelayResponse(buffer: responseBuffer,
                          wireBytes: totalWireBytes,
                          truncatedForTrace: truncatedForTrace,
@@ -4666,20 +5640,32 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     let consent: ConsentBroker
     let profileID: UUID
     let host: String
+    /// The upstream port: the identity and CA are the ones registered for
+    /// this endpoint, not for another context on the same host name.
+    let port: Int
     /// The guest asked (and the profile permitted) this request to skip
     /// upstream cert validation — accept any server trust. See
     /// `GuardrailsPolicy.allowInsecureBypass`.
     let insecure: Bool
+    /// The pinned loopback dialer this session's connections go through
+    /// (OpenShell mode); closed when the session is invalidated.
+    var dialer: PinnedUpstreamDialer?
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        dialer?.shutdownListener()
+        dialer = nil
+    }
 
     init(identityRegistry: ClientIdentityRegistry,
          caRegistry: ClusterCATrustRegistry,
          consent: ConsentBroker,
-         profileID: UUID, host: String, insecure: Bool = false) {
+         profileID: UUID, host: String, port: Int, insecure: Bool = false) {
         self.identityRegistry = identityRegistry
         self.caRegistry = caRegistry
         self.consent = consent
         self.profileID = profileID
         self.host = host
+        self.port = port
         self.insecure = insecure
     }
 
@@ -4690,7 +5676,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
         let method = challenge.protectionSpace.authenticationMethod
         switch method {
         case NSURLAuthenticationMethodClientCertificate:
-            guard let entry = identityRegistry.entry(for: host, profileID: profileID) else {
+            guard let entry = identityRegistry.entry(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
@@ -4741,7 +5727,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
                 return
             }
             guard let trust = challenge.protectionSpace.serverTrust,
-                  let ca = caRegistry.ca(for: host, profileID: profileID) else {
+                  let ca = caRegistry.ca(for: host, port: port, profileID: profileID) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }

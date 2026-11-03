@@ -149,6 +149,15 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
     /// compilers). Same `ecosystem:name` format as ageGateAllowlist.
     public var stripAllowlist: [String]
 
+    // MARK: - Reputation overrides
+
+    /// Packages the user trusts despite a reputation verdict (an OSV
+    /// vulnerability, a socket.dev alert such as install scripts): their
+    /// downloads aren't blocked by those checks. Same `ecosystem:name` (or
+    /// bare `name`) format as the other allowlists. Never covers a
+    /// socket.dev malware verdict (GitHub issue #54).
+    public var reputationAllowlist: [String] = []
+
     // MARK: - Lockfile-pinned bypass prompt
 
     /// When true, lockfile-pinned tarball fetches (which we can't
@@ -177,7 +186,8 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         depiAPIKey: String = "",
         stripInstallScripts: Bool = false,
         stripAllowlist: [String] = [],
-        lockfilePrompt: Bool = false
+        lockfilePrompt: Bool = false,
+        reputationAllowlist: [String] = []
     ) {
         self.ageGateEnabled = ageGateEnabled
         self.ageGateDays = ageGateDays
@@ -197,6 +207,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         self.stripInstallScripts = stripInstallScripts
         self.stripAllowlist = stripAllowlist
         self.lockfilePrompt = lockfilePrompt
+        self.reputationAllowlist = reputationAllowlist
     }
 
     /// True if any layer of the policy is doing something. The proxy
@@ -241,6 +252,11 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         Self.allowlistMatches(stripAllowlist, ecosystem: ecosystem, name: name)
     }
 
+    /// The user overrode reputation blocks for this package.
+    public func reputationAllows(ecosystem: String, name: String) -> Bool {
+        Self.allowlistMatches(reputationAllowlist, ecosystem: ecosystem, name: name)
+    }
+
     private static func allowlistMatches(_ list: [String],
                                           ecosystem: String,
                                           name: String) -> Bool {
@@ -263,6 +279,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         case depiAPIKey = "delpiAPIKey"   // on-disk key unchanged (pre-rename spelling)
         case stripInstallScripts, stripAllowlist
         case lockfilePrompt
+        case reputationAllowlist
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -287,6 +304,7 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         stripInstallScripts   = try c.decodeIfPresent(Bool.self, forKey: .stripInstallScripts) ?? false
         stripAllowlist        = try c.decodeIfPresent([String].self, forKey: .stripAllowlist) ?? []
         lockfilePrompt        = try c.decodeIfPresent(Bool.self, forKey: .lockfilePrompt) ?? false
+        reputationAllowlist   = try c.decodeIfPresent([String].self, forKey: .reputationAllowlist) ?? []
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -314,5 +332,14 @@ public struct SupplyChainPolicy: Codable, Equatable, Sendable {
         if stripInstallScripts != false { try c.encode(stripInstallScripts, forKey: .stripInstallScripts) }
         if !stripAllowlist.isEmpty  { try c.encode(stripAllowlist, forKey: .stripAllowlist) }
         if lockfilePrompt != false   { try c.encode(lockfilePrompt, forKey: .lockfilePrompt) }
+        if !reputationAllowlist.isEmpty { try c.encode(reputationAllowlist, forKey: .reputationAllowlist) }
     }
+}
+
+extension Notification.Name {
+    /// A package was added to a workspace's reputation allowlist outside
+    /// the editor (the Security window, an override prompt's "Always
+    /// allow"). object: the profile id; userInfo["entry"]: `ecosystem:name`.
+    /// Here, not with the app code: the shared editor listens for it.
+    static let bromureSupplyChainAllowlistChanged = Notification.Name("io.bromure.supplyChainAllowlistChanged")
 }

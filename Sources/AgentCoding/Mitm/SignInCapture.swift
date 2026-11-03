@@ -21,6 +21,10 @@ struct SignInCapture: Sendable {
     /// a complete HTTP/1.1 response — or nil to pass the real reply through
     /// (a device-code poll still pending, an error).
     let handle: @Sendable (Int, Data) async -> Data?
+    /// The sign-in simulator's canned provider reply (a complete HTTP
+    /// response): the proxy answers the exchange with it instead of
+    /// contacting the provider. nil for every real sign-in.
+    var simulatedReply: Data? = nil
 
     /// The token exchange — not a refresh, which the guest never needs in
     /// subscription mode and which must not be swallowed if it happens.

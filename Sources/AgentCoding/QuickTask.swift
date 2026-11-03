@@ -24,6 +24,8 @@ final class QuickTaskPanel {
     /// sessions' nicknames, its board).
     private struct Target {
         let profiles: [Profile]
+        /// The agents a workspace can run, for the full editor's picker.
+        var toolSpecs: (Profile) -> [Profile.ToolSpec] = { $0.allToolSpecs }
         let choices: TaskAssigneeChoices
         /// The session in front of the user there, if any.
         let current: AgentSession?
@@ -43,7 +45,8 @@ final class QuickTaskPanel {
         @MainActor
         static func local(_ d: ACAppDelegate) -> Target {
             let current = d.unifiedWindow?.listModel.selectedSessionID.flatMap { d.agentSessionStore.session($0) }
-            return Target(profiles: d.profiles, choices: d.taskDispatcher.choices(), current: current,
+            return Target(profiles: d.profiles, toolSpecs: { d.readyToolSpecs(for: $0) },
+                          choices: d.taskDispatcher.choices(), current: current,
                           label: { d.delegationEngine.label($0) },
                           save: { d.codingTaskStore.upsert($0) },
                           assign: { d.taskDispatcher.assign($0, to: $1) },
@@ -65,7 +68,7 @@ final class QuickTaskPanel {
                 }
             let rooms = c.roomStore.rooms.filter { $0.archivedAt == nil }
                 .map { TaskAssigneeChoices.Room(id: $0.id, name: $0.name) }
-            return Target(profiles: c.profiles,
+            return Target(profiles: c.profiles, toolSpecs: { c.readyToolSpecs(for: $0) },
                           choices: TaskAssigneeChoices(sessions: Array(sessions), rooms: rooms),
                           current: w.selectedSessionID.flatMap { c.sessionStore.session($0) },
                           label: label,
@@ -130,6 +133,7 @@ final class QuickTaskPanel {
             workspaceName: target.profile(workspace)?.name ?? "",
             initialAssignment: initial,
             profiles: profiles,
+            toolSpecs: target.toolSpecs,
             profileID: workspace,
             tool: tool,
             onAdd: { [weak self] title, details, assignment, keepOpen in
@@ -267,6 +271,7 @@ struct QuickTaskView: View {
     let folder: String
     let workspaceName: String
     let profiles: [Profile]
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     let profileID: UUID
     let tool: Profile.Tool
     var onAdd: (String, String, TaskAssignment?, Bool) -> Void
@@ -289,7 +294,8 @@ struct QuickTaskView: View {
 
     init(choices: TaskAssigneeChoices, here: TaskAssignment?, folder: String, workspaceName: String,
          initialAssignment: TaskAssignment?,
-         profiles: [Profile] = [], profileID: UUID = UUID(), tool: Profile.Tool = .claude,
+         profiles: [Profile] = [], toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil,
+         profileID: UUID = UUID(), tool: Profile.Tool = .claude,
          onAdd: @escaping (String, String, TaskAssignment?, Bool) -> Void,
          onAddTask: @escaping (CodingTask) -> Void = { _ in },
          onPlanTask: @escaping (CodingTask) -> Void = { _ in },
@@ -300,6 +306,7 @@ struct QuickTaskView: View {
         self.folder = folder
         self.workspaceName = workspaceName
         self.profiles = profiles
+        self.toolSpecs = toolSpecs
         self.profileID = profileID
         self.tool = tool
         self.onAdd = onAdd
@@ -374,6 +381,17 @@ struct QuickTaskView: View {
 
     // MARK: Actions
 
+    /// Every ↩ that files (title, Details, with or without ⌘): the @/#
+    /// list still open picks its highlighted row first, as the row says —
+    /// only the next ↩ adds, under the assignee just picked.
+    private func pickOrSubmit(keepOpen: Bool) {
+        if let s = suggestions.first {
+            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
+        } else {
+            submit(keepOpen: keepOpen)
+        }
+    }
+
     private func submit(keepOpen: Bool) {
         guard !trimmed.isEmpty else { return }
         onAdd(trimmed, details.trimmingCharacters(in: .whitespacesAndNewlines), assignment, keepOpen)
@@ -412,12 +430,18 @@ struct QuickTaskView: View {
         return .handled
     }
 
+    /// An input method is composing in the window's field: its ↩ commits
+    /// that, and mustn't add the task too.
+    static func composing(in window: NSWindow?) -> Bool {
+        (window?.firstResponder as? NSTextView)?.hasMarkedText() == true
+    }
+
     // MARK: View
 
     var body: some View {
         if let draft = expanded {
             TaskEditorSheet(
-                task: draft, profiles: profiles, siblings: [], isNew: true,
+                task: draft, profiles: profiles, toolSpecs: toolSpecs, siblings: [], isNew: true,
                 onSave: onAddTask, onPlan: onPlanTask, onDelete: { _ in }, onCancel: onClose,
                 assignees: choices, canAssign: true, glass: true)
                 .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
@@ -438,16 +462,10 @@ struct QuickTaskView: View {
                     .font(.system(size: 21, weight: .medium))
                     .focused($focus, equals: .title)
                     .onChange(of: title) { highlighted = 0 }
-                    .onSubmit {
-                        if let s = suggestions.first {
-                            pick(suggestions.indices.contains(highlighted) ? suggestions[highlighted] : s)
-                        } else {
-                            submit(keepOpen: false)
-                        }
-                    }
+                    .onSubmit { pickOrSubmit(keepOpen: false) }
                     .onKeyPress(keys: [.return]) { press in
                         guard press.modifiers.contains(.command) else { return .ignored }
-                        submit(keepOpen: true)
+                        pickOrSubmit(keepOpen: true)
                         return .handled
                     }
                     .onKeyPress(.tab) { tab(fromDetails: false) }
@@ -495,6 +513,15 @@ struct QuickTaskView: View {
                     .font(.system(size: 13))
                     .lineLimit(1...5)
                     .focused($focus, equals: .details)
+                    // ↩ adds from here too (it used to do nothing, leaving
+                    // ⇥⇥ the only way on); ⌥↩ / ⇧↩ make a new line.
+                    .onKeyPress(keys: [.return]) { press in
+                        guard press.modifiers.isDisjoint(with: [.option, .shift]),
+                              !Self.composing(in: NSApp.currentEvent?.window ?? NSApp.keyWindow)
+                        else { return .ignored }
+                        pickOrSubmit(keepOpen: press.modifiers.contains(.command))
+                        return .handled
+                    }
                     .onKeyPress(.tab) { tab(fromDetails: true) }
                     .padding(.leading, 34)
                     .transition(.opacity.combined(with: .move(edge: .top)))

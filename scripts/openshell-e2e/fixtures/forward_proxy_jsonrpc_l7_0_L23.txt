@@ -1,0 +1,35 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            data = b""
+            while True:
+                size_line = self.rfile.readline()
+                if not size_line:
+                    break
+                size = int(size_line.split(b";", 1)[0].strip(), 16)
+                if size == 0:
+                    while self.rfile.readline().strip():
+                        pass
+                    break
+                data += self.rfile.read(size)
+                self.rfile.read(2)
+            return data
+        return self.rfile.read(int(self.headers.get("Content-Length", "0")))
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_POST(self):
+        self.read_body()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"jsonrpc":"2.0","id":1,"result":{}}')
+
+    def log_message(self, format, *args):
+        pass
+
+HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()

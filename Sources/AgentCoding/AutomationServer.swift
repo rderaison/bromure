@@ -71,7 +71,16 @@ final class ACAutomationServer {
     static func isMutating(_ method: String, path: String) -> Bool {
         guard method != "GET", method != "HEAD" else { return false }
         let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file"))
+        return !(bare.hasSuffix("/exec") || bare.hasSuffix("/file") || bare.hasSuffix("/type"))
+    }
+
+    /// `/vms/{id}/type` → the id (percent-decoded), else nil.
+    static func typeRouteID(_ path: String) -> String? {
+        let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        guard bare.hasPrefix("/vms/"), bare.hasSuffix("/type") else { return nil }
+        let id = String(bare.dropFirst("/vms/".count).dropLast("/type".count))
+        guard !id.isEmpty, !id.contains("/") else { return nil }
+        return id.removingPercentEncoding ?? id
     }
     let port: UInt16
     let bindAddress: String
@@ -120,6 +129,29 @@ final class ACAutomationServer {
     /// Coding board verbs: start / send-back / merge / to-testing / comment /
     /// delete on one task. Returns a JSON-able result ("error" key on failure).
     var onTaskCommand: ((_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any])?
+    /// `POST /tasks/{id}/answer`, answered once the board has actually
+    /// handed the answer to the agent (`{ok}`), or refused it (`{ok: false,
+    /// error}`) — not before, so the client keeps a refused answer's text.
+    /// Main-actor: the handler reads and writes the (main-actor) task store.
+    var onTaskAnswer: (@MainActor (_ id: UUID, _ body: [String: Any]) async -> [String: Any])?
+
+    /// The answer route's reply, on the connection's thread: the handler's
+    /// verdict, once it has one (on the main actor). No deadline: a reply
+    /// cut short while the delivery goes on (its prompt-injection scan, the
+    /// post) told the client "refused" for an answer that then went.
+    nonisolated static func awaitTaskAnswer(_ answer: @escaping @MainActor (UUID, [String: Any]) async -> [String: Any],
+                                            id: UUID, body: [String: Any]) -> [String: Any] {
+        final class Box: @unchecked Sendable { var r: [String: Any] = [:] }
+        let box = Box()
+        let sem = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) let body = body
+        Task { @MainActor in
+            box.r = await answer(id, body)
+            sem.signal()
+        }
+        sem.wait()
+        return box.r
+    }
     /// A finished task's raw session transcript (vsock or ext4) — nil when
     /// none exists.
     var onTaskTranscript: ((_ id: UUID) async -> String?)?
@@ -158,6 +190,11 @@ final class ACAutomationServer {
     /// Returns a vsock connection wrapping a ShellBridge-dequeued one, or nil
     /// if no shell-agent connection is available for that session.
     var onGetShellConnection: ((_ profileID: String) -> ACShellProxyConnection?)?
+    /// A chat message typed into a pane, guarded and confirmed here, next to
+    /// the agent (`PaneTypeGuard.runType`): the guard's output, nil when the
+    /// machine couldn't be asked. One request for a remote client instead of
+    /// one per typing step.
+    var onTypeIntoPane: ((_ profileID: String, _ target: PaneTarget, _ text: String) async -> String?)?
     /// Resolve an id-or-name to the canonical profile UUID string, so interactive
     /// attach state is keyed the same way the consent broker queries it (by UUID).
     var onResolveProfileID: ((_ idOrName: String) -> String?)?
@@ -184,10 +221,20 @@ final class ACAutomationServer {
 
     // Profile management (CLI `profiles …`).
     var onDescribeProfile: ((_ idOrName: String) -> [String: Any]?)?
+    /// `/profiles/{id}/proposals[/{proposal}/approve|reject]`: the OpenShell
+    /// policy advisor's pending proposals. Called on the server thread.
+    var onProfileProposals: ((_ idOrName: String, _ method: String, _ sub: [String],
+                              _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
+    /// `/profiles/{id}/policy/revisions[/{n}]`: the workspace's saved policy
+    /// versions. Called on the server thread.
+    var onProfilePolicyRevisions: ((_ idOrName: String, _ method: String, _ sub: [String],
+                                    _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
     /// A workspace's storage layers, for a fat client's Resources pane:
     /// where they live here (sized off the main thread by the route).
     var onDescribeStorage: ((_ idOrName: String) -> ProfileStorageContext?)?
     var onDeleteProfile: ((_ idOrName: String) -> [String: Any])?
+    /// POST /profiles/{id}/compromised {"action": "wipe" | "clear"}.
+    var onCompromise: ((_ idOrName: String, _ action: String) -> [String: Any])?
     /// Full-fidelity Profile JSON (secrets blanked) for the `workspaces edit`
     /// round-trip + the TUI raw-JSON hatch. nil when the workspace is unknown.
     var onExportProfile: ((_ idOrName: String) -> [String: Any]?)?
@@ -197,6 +244,16 @@ final class ACAutomationServer {
     /// Update a workspace (full-document, secret-preserving). Returns
     /// `{ok, …}` or `{ok:false, error}`.
     var onUpdateProfile: ((_ idOrName: String, _ doc: [String: Any]) -> [String: Any])?
+    /// POST /profiles/{id}/firewall {rules}: a fat client's firewall editor
+    /// puts its rules in force as they're edited (saved and applied live).
+    /// nil: not found or the rules don't parse.
+    var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
+    /// POST /profiles/{id}/squelch {enabled}: Squelch on or off for a
+    /// workspace (saved, applies to its next model request). false: no such
+    /// workspace.
+    var onSetSquelch: ((_ id: String, _ enabled: Bool) -> Bool)?
+    /// GET /squelch: every workspace's savings (`SquelchSummary` by id).
+    var onSquelchStats: (() -> [String: Any])?
     /// Reboot a running workspace in place (`soft` | `hard`). Async — a fresh
     /// VM has to boot before it returns.
     var onRebootVM: ((_ idOrName: String, _ mode: String) async -> [String: Any])?
@@ -258,6 +315,10 @@ final class ACAutomationServer {
     var onListAutomations: (() -> [String: Any])?
     /// Upsert / delete / run-now / toggle a scheduled automation.
     var onUpsertAutomation: ((_ doc: [String: Any]) -> Bool)?
+    /// A fat client's automation / watch editor: the lists a workspace's
+    /// GitHub token or Linear key can see (`AutomationSources`), fetched
+    /// here — the credentials never leave this host.
+    var onAutomationSources: ((_ body: [String: Any]) async -> [String: Any])?
     var onDeleteAutomation: ((_ id: String) -> Bool)?
     var onRunAutomation: ((_ id: String) -> Bool)?
     var onToggleAutomation: ((_ id: String) -> Bool)?
@@ -285,9 +346,14 @@ final class ACAutomationServer {
     /// the throwaway VM's IP + loopback callback port), or nil. The fat client
     /// opens the URL in ITS browser and tunnels the callback back.
     var onPendingRegistration: (() -> [String: Any]?)?
+    /// The last client-initiated registration's outcome, kept a while after
+    /// it ended (`RemoteRegistrationBroker.endedDict`).
+    var onEndedRegistration: (() -> [String: Any]?)?
+    var onEndedRegistrations: (() -> [[String: Any]])?
     /// Start a subscription registration on this host for a remote client.
     /// (provider, optional profile id) -> ok.
-    var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> Bool)?
+    /// Nil when the run is under way, else why it was refused.
+    var onBeginRegistration: ((_ provider: String, _ profileID: String?) -> String?)?
     /// Log a subscription out on this host for a remote client: the
     /// workspace's own sign-in if it has one, else the shared one.
     /// (provider, optional profile id) -> ok.
@@ -440,9 +506,35 @@ final class ACAutomationServer {
         var linger = Darwin.linger(l_onoff: 0, l_linger: 0)
         setsockopt(clientFD, SOL_SOCKET, SO_LINGER, &linger, socklen_t(MemoryLayout<Darwin.linger>.size))
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.handleRequest(fd: clientFD)
+        // A silent client gets a timeout, not a thread for good. Long for the
+        // first byte: a fat client opens a control channel ahead of need (its
+        // spare, replaced after `SSHConnection.spareMaxAge`) and its
+        // request comes when it's used.
+        Self.setReceiveTimeout(clientFD, Self.firstByteTimeout)
+        // A thread of its own, not the global queue: a request may block for
+        // long (a /state subscription for as long as its client stays, a call
+        // waiting on a machine's link, an exec), and the global queue's ~64
+        // threads ran out — then every connection accepted after waited
+        // unserved, holding its socket after its client gave up ("->(none)"
+        // unix sockets piling up on a server).
+        let t = Thread { [weak self] in
+            guard let self else { Darwin.close(clientFD); return }
+            self.handleRequest(fd: clientFD)
         }
+        t.name = "ac-control-request"
+        t.qualityOfService = .userInitiated
+        t.start()
+    }
+
+    /// Longest wait for a connection's first byte.
+    static let firstByteTimeout: TimeInterval = 900
+    /// Then, for each next bytes of its head or body.
+    static let requestReadTimeout: TimeInterval = 60
+
+    /// SO_RCVTIMEO on `fd`; 0 = block for as long as it takes.
+    static func setReceiveTimeout(_ fd: Int32, _ seconds: TimeInterval) {
+        var tv = timeval(tv_sec: Int(seconds), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     private func handleRequest(fd: Int32) {
@@ -475,6 +567,7 @@ final class ACAutomationServer {
         while bodyStart == nil {
             let n = Darwin.read(fd, &chunk, chunk.count)
             if n <= 0 { Darwin.close(fd); return }
+            if data.isEmpty { Self.setReceiveTimeout(fd, Self.requestReadTimeout) }
             data.append(contentsOf: chunk[0..<n])
             bodyStart = headerEndIndex()
             // A header block this large is bogus — bail rather than grow forever.
@@ -542,6 +635,9 @@ final class ACAutomationServer {
             }
         }
 
+        // Read in: what follows (a subscription, a terminal, a machine link
+        // waiting for its verb) reads as long as its stream lives.
+        Self.setReceiveTimeout(fd, 0)
         route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
     }
 
@@ -616,6 +712,13 @@ final class ACAutomationServer {
                     return
                 }
                 sendResponse(fd: fd, status: 200, body: ["ok": true]); return
+            }
+            // Typed here even for an attached machine's pane: the guard's
+            // round trips then run on this host's link to it, not the
+            // remote client's.
+            if method == "POST", let id = Self.typeRouteID(path) {
+                handleType(fd: fd, profileID: id, bodyJSON: bodyJSON, gzip: acceptGzip)
+                return
             }
             if let machine = MachineLinkHub.shared.target(method: method, path: path, body: bodyJSON) {
                 MachineLinkHub.shared.proxy(clientFD: fd, machine: machine, method: method, path: path,
@@ -741,6 +844,10 @@ final class ACAutomationServer {
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             handleStateSubscribe(fd: fd)
 
+        case ("GET", "/squelch"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            sendResponse(fd: fd, status: 200, body: DispatchQueue.main.sync { self.onSquelchStats?() } ?? ["workspaces": [:]])
+            return
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
@@ -775,12 +882,23 @@ final class ACAutomationServer {
             guard !provider.isEmpty else {
                 sendResponse(fd: fd, status: 400, body: ["error": "Missing 'provider'"]); return
             }
-            let ok = DispatchQueue.main.sync {
-                self.onBeginRegistration?(provider, profileID) ?? false
+            // The run's id: the client finds how it ended under it in
+            // /state's `registrationEnded`.
+            // A refusal says why (no proxy, one already in flight): the
+            // client shows it rather than a retry that can't succeed.
+            let (refused, run) = DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    // Spelled out: `?.` would flatten "no handler" into "started".
+                    let refused: String?
+                    if let begin = self.onBeginRegistration { refused = begin(provider, profileID) }
+                    else { refused = "registration unavailable" }
+                    return (refused, refused == nil ? RemoteRegistrationBroker.shared.pending?.id.uuidString : nil)
+                }
             }
-            sendResponse(fd: fd, status: ok ? 202 : 409,
-                         body: ["ok": ok,
-                                "error": ok ? "" : "couldn't start registration (one may be in flight)"])
+            let ok = refused == nil
+            var reply: [String: Any] = ["ok": ok, "error": refused ?? ""]
+            if let run { reply["registration"] = run }
+            sendResponse(fd: fd, status: ok ? 202 : 409, body: reply)
 
         case ("POST", "/subscriptions/forget"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -810,6 +928,18 @@ final class ACAutomationServer {
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             let list = DispatchQueue.main.sync { self.onListAutomations?() ?? ["automations": [], "runs": []] }
             sendResponse(fd: fd, status: 200, body: list)
+
+        case ("POST", "/automation-sources"):
+            guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            // A GitHub / Linear round trip, bridged onto this request's thread.
+            let sem = DispatchSemaphore(value: 0)
+            var reply: [String: Any] = ["error": "timed out"]
+            Task { @MainActor [weak self] in
+                if let r = await self?.onAutomationSources?(bodyJSON) { reply = r }
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 60)
+            sendResponse(fd: fd, status: reply["error"] == nil ? 200 : 400, body: reply)
 
         case ("POST", "/automations"):
             guard debugEnabled || isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -898,7 +1028,7 @@ final class ACAutomationServer {
                 // A handler that returns an `error` key is a clean refusal
                 // (e.g. the workspace's local model is still downloading).
                 if let err = info["error"] as? String {
-                    sendResponse(fd: fd, status: 409, body: ["error": err])
+                    sendResponse(fd: fd, status: info["notFound"] as? Bool == true ? 404 : 409, body: ["error": err])
                 } else {
                     sendResponse(fd: fd, status: 201, body: info)
                 }
@@ -989,6 +1119,10 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 400, body: ["error": "Bad task id"]); return
             }
             let action = m == "DELETE" ? "delete" : (parts.count > 1 ? parts[1] : "")
+            if action == "answer", let answer = onTaskAnswer {
+                sendResponse(fd: fd, status: 200, body: Self.awaitTaskAnswer(answer, id: id, body: bodyJSON))
+                return
+            }
             let r = DispatchQueue.main.sync {
                 self.onTaskCommand?(id, action, bodyJSON) ?? ["error": "no handler"]
             }
@@ -1723,6 +1857,61 @@ final class ACAutomationServer {
         let noQuery = parts.first ?? path
         let query = parts.count > 1 ? parts[1] : ""
         let raw = String(noQuery.dropFirst("/profiles/".count))
+        if method == "POST", raw.hasSuffix("/squelch") {
+            let key = String(raw.dropLast("/squelch".count))
+            guard let enabled = bodyJSON["enabled"] as? Bool else {
+                sendResponse(fd: fd, status: 400, body: ["error": "enabled required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            if DispatchQueue.main.sync(execute: { self.onSetSquelch?(id, enabled) ?? false }) {
+                sendResponse(fd: fd, status: 200, body: ["ok": true, "enabled": enabled])
+            } else {
+                sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
+            }
+            return
+        }
+        if method == "POST", raw.hasSuffix("/compromised") {
+            let key = String(raw.dropLast("/compromised".count))
+            let id = key.removingPercentEncoding ?? key
+            let action = bodyJSON["action"] as? String ?? ""
+            let result = DispatchQueue.main.sync(execute: { self.onCompromise?(id, action) })
+                ?? ["ok": false, "error": "unavailable"]
+            sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 409, body: result)
+            return
+        }
+        if method == "POST", raw.hasSuffix("/firewall") {
+            let key = String(raw.dropLast("/firewall".count))
+            guard let rules = bodyJSON["rules"] as? String else {
+                sendResponse(fd: fd, status: 400, body: ["error": "rules required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            switch DispatchQueue.main.sync(execute: { self.onCommitFirewall?(id, rules) }) {
+            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .none: sendResponse(fd: fd, status: 400, body: ["ok": false, "error": "unknown workspace or invalid rules"])
+            }
+            return
+        }
+        // Sub-resources: /profiles/{id}/proposals…, /profiles/{id}/policy/revisions…
+        let segments = raw.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        if segments.count >= 2 {
+            let key = segments[0].removingPercentEncoding ?? segments[0]
+            let sub = segments.dropFirst().map { $0.removingPercentEncoding ?? $0 }
+            let handler: ((String, String, [String], [String: Any]) -> (status: Int, body: [String: Any]))?
+            switch sub.first {
+            case "proposals": handler = onProfileProposals
+            case "policy": handler = onProfilePolicyRevisions
+            default: handler = nil
+            }
+            guard let handler else {
+                sendResponse(fd: fd, status: 404, body: ["error": "Unknown profile resource"])
+                return
+            }
+            let (status, body) = handler(key, method, Array(sub), bodyJSON)
+            sendResponse(fd: fd, status: status, body: body)
+            return
+        }
         let id = raw.removingPercentEncoding ?? raw
         switch method {
         case "GET":
@@ -1778,6 +1967,34 @@ final class ACAutomationServer {
         default:
             sendResponse(fd: fd, status: 405, body: ["error": "Method not allowed"])
         }
+    }
+
+    /// POST /vms/{id}/type {target, text}: `onTypeIntoPane`. Every reply
+    /// carries "typeRoute" so a client can tell this route from an older
+    /// server's 404/405 and fall back to typing step by step.
+    private func handleType(fd: Int32, profileID: String, bodyJSON: [String: Any], gzip: Bool) {
+        guard let text = bodyJSON["text"] as? String,
+              let raw = bodyJSON["target"],
+              JSONSerialization.isValidJSONObject([raw]),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
+              let target = try? JSONDecoder().decode(PaneTarget.self, from: data) else {
+            sendResponse(fd: fd, status: 400, body: ["typeRoute": true, "error": "target and text required"], gzip: gzip)
+            return
+        }
+        guard let type = onTypeIntoPane else {
+            sendResponse(fd: fd, status: 501, body: ["typeRoute": true, "error": "not available"], gzip: gzip)
+            return
+        }
+        let done = DispatchSemaphore(value: 0)
+        var out: String?
+        Task {
+            out = await type(profileID, target, text)
+            done.signal()
+        }
+        done.wait()
+        var body: [String: Any] = ["typeRoute": true]
+        if let out { body["output"] = out } else { body["unreachable"] = true }
+        sendResponse(fd: fd, status: 200, body: body, gzip: gzip)
     }
 
     private func handleExec(fd: Int32, profileID: String, bodyJSON: [String: Any]) {
@@ -1904,9 +2121,18 @@ final class ACAutomationServer {
     /// pump) and return the chosen 0-based index — or nil (no live attach / the
     /// user dismissed / timed out), which every broker maps to deny.
     static func presentConsentViaPump(profileID: String, prompt: String,
-                                      choices: [String], timeoutSeconds: TimeInterval) -> Int? {
+                                      choices: [String], timeoutSeconds: TimeInterval,
+                                      token: UUID = UUID()) -> Int? {
         attachLock.lock(); let gate = consentGates[profileID]; attachLock.unlock()
-        return gate?.ask(prompt: prompt, choices: choices, timeout: timeoutSeconds)
+        return gate?.ask(id: token, prompt: prompt, choices: choices, timeout: timeoutSeconds)
+    }
+
+    /// Take back the terminal prompt asked with `token` (a Guardrails
+    /// decision overtook it): its asker gets nil now, and the terminal stops
+    /// showing it.
+    static func withdrawConsentViaPump(token: UUID) {
+        attachLock.lock(); let gates = Array(consentGates.values); attachLock.unlock()
+        for g in gates { g.withdraw(token) }
     }
 
     private static func registerGate(_ gate: PumpConsentGate, for profileID: String) {
@@ -1916,45 +2142,73 @@ final class ACAutomationServer {
         attachLock.lock()
         if consentGates[profileID] === gate { consentGates[profileID] = nil }
         attachLock.unlock()
-        // Detached while a prompt was outstanding → wake the blocked broker now
-        // (deny) instead of letting it wait out the full timeout. The gate is
-        // discarded after this, so the signal can't affect a future prompt.
-        gate.deliver(nil)
+        // Detached while prompts were outstanding → wake the blocked brokers
+        // now (deny) instead of letting them wait out the full timeout.
+        gate.failAll()
     }
 
-    /// Hand-off between a broker (any thread) and the pump that owns the user's
-    /// terminal: the broker sets a prompt and blocks on `ask`; the pump claims it
-    /// via `takePending`, renders it, and `deliver`s the chosen index.
+    /// Hand-off between brokers (any thread) and the pump that owns the user's
+    /// terminal: each `ask` queues its prompt under its own id and blocks; the
+    /// pump claims the oldest via `takePending`, renders it, and `deliver`s
+    /// the chosen index to that id alone. One shared prompt/answer/semaphore
+    /// let a second ask (another credential, or a fresh prompt after an
+    /// overtaken one) overwrite the first, and a keystroke for one prompt
+    /// complete another.
     final class PumpConsentGate {
+        private final class Ask {
+            let id: UUID
+            let prompt: String
+            let choices: [String]
+            let timeout: TimeInterval
+            let done = DispatchSemaphore(value: 0)
+            var answer: Int?
+            var taken = false
+            var finished = false
+            init(id: UUID, prompt: String, choices: [String], timeout: TimeInterval) {
+                self.id = id; self.prompt = prompt; self.choices = choices; self.timeout = timeout
+            }
+        }
         private let lock = NSLock()
-        private var prompt: String?
-        private var choices: [String] = []
-        private var promptTimeout: TimeInterval = 120
-        private var answerIdx: Int?
-        private let answered = DispatchSemaphore(value: 0)
+        private var asks: [Ask] = []   // oldest first
 
-        func ask(prompt: String, choices: [String], timeout: TimeInterval) -> Int? {
-            lock.lock()
-            self.prompt = prompt; self.choices = choices
-            self.promptTimeout = timeout; self.answerIdx = nil
-            lock.unlock()
+        func ask(id: UUID = UUID(), prompt: String, choices: [String], timeout: TimeInterval) -> Int? {
+            let a = Ask(id: id, prompt: prompt, choices: choices, timeout: timeout)
+            lock.lock(); asks.append(a); lock.unlock()
             // Wait a little past the in-terminal read so the pump delivers first.
-            let r = answered.wait(timeout: .now() + timeout + 10)
+            _ = a.done.wait(timeout: .now() + timeout + 10)
             lock.lock(); defer { lock.unlock() }
-            self.prompt = nil; self.choices = []
-            return r == .timedOut ? nil : answerIdx
+            asks.removeAll { $0 === a }
+            return a.finished ? a.answer : nil
         }
-        /// Pump side: claim a pending prompt to render (once).
-        func takePending() -> (String, [String], TimeInterval)? {
+        /// Pump side: claim the oldest prompt not yet shown (once).
+        func takePending() -> (id: UUID, prompt: String, choices: [String], timeout: TimeInterval)? {
             lock.lock(); defer { lock.unlock() }
-            guard let p = prompt else { return nil }
-            prompt = nil
-            return (p, choices, promptTimeout)
+            guard let a = asks.first(where: { !$0.taken && !$0.finished }) else { return nil }
+            a.taken = true
+            return (a.id, a.prompt, a.choices, a.timeout)
         }
-        /// Pump side: hand the chosen index (or nil) back to the waiting broker.
-        func deliver(_ idx: Int?) {
-            lock.lock(); answerIdx = idx; lock.unlock()
-            answered.signal()
+        /// Pump side: the chosen index (or nil) for prompt `id` — only that
+        /// one; a prompt already withdrawn ignores it.
+        func deliver(_ idx: Int?, to id: UUID) { finish(id, idx) }
+        /// The asker no longer wants an answer: it gets nil now.
+        func withdraw(_ id: UUID) { finish(id, nil) }
+        /// Still waiting for its answer (the terminal keeps showing it).
+        func isOpen(_ id: UUID) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return asks.contains { $0.id == id && !$0.finished }
+        }
+        /// The attach ended: every waiting asker gets nil.
+        func failAll() {
+            lock.lock(); let open = asks.filter { !$0.finished }; lock.unlock()
+            for a in open { finish(a.id, nil) }
+        }
+        private func finish(_ id: UUID, _ idx: Int?) {
+            lock.lock()
+            guard let a = asks.first(where: { $0.id == id && !$0.finished }) else { lock.unlock(); return }
+            a.finished = true
+            a.answer = idx
+            lock.unlock()
+            a.done.signal()
         }
     }
 
@@ -1967,7 +2221,8 @@ final class ACAutomationServer {
     /// repaint afterward. Returns the 0-based index, or nil (Enter/timeout/EOF →
     /// deny).
     private static func presentConsent(clientFD a: Int32, prompt: String,
-                                       choices: [String], timeout: TimeInterval) -> Int? {
+                                       choices: [String], timeout: TimeInterval,
+                                       stillAsked: () -> Bool = { true }) -> Int? {
         var s = "\u{1b}[2J\u{1b}[H"                                 // clear, home
         s += "\u{1b}[1;33m🔒 Bromure — approval required\u{1b}[0m\r\n\r\n"
         s += prompt.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n"
@@ -1982,9 +2237,11 @@ final class ACAutomationServer {
         readLoop: while true {
             let remMs = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
             if remMs == 0 { break }
+            if !stillAsked() { break }                              // withdrawn: not asked any more
             var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0)]
-            let n = poll(&fds, 1, remMs)
-            if n <= 0 { break }                                     // timeout / error → deny
+            let n = poll(&fds, 1, min(remMs, 250))
+            if n == 0 { continue }                                  // look at the deadline / withdrawal again
+            if n < 0 { break }                                      // error → deny
             let r = Darwin.read(a, &buf, buf.count)
             if r <= 0 { break }                                     // client closed → deny
             inbuf.append(contentsOf: buf[0..<r])
@@ -2111,8 +2368,9 @@ final class ACAutomationServer {
             // Host-side consent: if a gate fired for this session, render its
             // prompt on the user's side (a) and read the answer here — the guest
             // (b) never sees it, so a compromised guest can't forge consent.
-            if let g = gate, let (prompt, choices, t) = g.takePending() {
-                g.deliver(presentConsent(clientFD: a, prompt: prompt, choices: choices, timeout: t))
+            if let g = gate, let p = g.takePending() {
+                g.deliver(presentConsent(clientFD: a, prompt: p.prompt, choices: p.choices, timeout: p.timeout,
+                                         stillAsked: { g.isOpen(p.id) }), to: p.id)
                 afterConsent?()   // repaint the guest's tmux over where the prompt was
             }
             var fds = [pollfd(fd: a, events: Int16(POLLIN), revents: 0),
@@ -2180,7 +2438,10 @@ final class ACAutomationServer {
                                     timeout: Int) -> ShellExecOutcome {
         var request: [String: Any] = ["cmd": command, "timeout": timeout]
         if let argv { request["argv"] = argv }
-        switch exchangeJSON(fd: fd, request: request) {
+        // The guest enforces `timeout`; the host gives up a little after it,
+        // so a guest that took the request and never answers can't hold the
+        // caller (and whatever it holds — a boot's keep-awake) forever.
+        switch exchangeJSON(fd: fd, request: request, replyWithin: TimeInterval(max(timeout, 1)) + 30) {
         case .deadConnection: return .deadConnection
         case .protocolFailure: return .protocolFailure
         case .success(let obj):
@@ -2196,7 +2457,10 @@ final class ACAutomationServer {
     /// Factored out of `executeShellCommand` so the file-service ops
     /// (`{"file": {...}}`, the file browser's data plane) share the wire
     /// code without pretending to be shell commands.
-    static func exchangeJSON(fd: Int32, request: [String: Any]) -> JSONExchangeOutcome {
+    /// `replyWithin`: seconds (of awake time) the whole reply may take; past
+    /// it the exchange is a protocol failure (it may have run — not retried).
+    static func exchangeJSON(fd: Int32, request: [String: Any],
+                             replyWithin: TimeInterval? = nil) -> JSONExchangeOutcome {
         guard let bodyData = try? JSONSerialization.data(withJSONObject: request) else {
             return .protocolFailure
         }
@@ -2210,11 +2474,26 @@ final class ACAutomationServer {
         }
         guard bytesWritten == payload.count else { return .deadConnection }
 
+        let deadline = replyWithin.map { ProcessInfo.processInfo.systemUptime + $0 }
+        /// Waits for data; false once the deadline passed with none.
+        func readable() -> Bool {
+            guard let deadline else { return true }
+            while true {
+                let left = deadline - ProcessInfo.processInfo.systemUptime
+                guard left > 0 else { return false }
+                var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let r = poll(&p, 1, Int32(min(left * 1000, 60_000).rounded(.up)))
+                if r > 0 { return true }
+                if r < 0, errno != EINTR { return true }   // let read() report it
+            }
+        }
+
         // Read length prefix. EOF before the FIRST byte = the peer was already
         // gone (stale pool entry from a previous guest boot) → retryable.
         var lenBuf = [UInt8](repeating: 0, count: 4)
         var got = 0
         while got < 4 {
+            guard readable() else { return .protocolFailure }
             let n = lenBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), 4 - got)
             }
@@ -2227,6 +2506,7 @@ final class ACAutomationServer {
         var bodyBuf = [UInt8](repeating: 0, count: Int(respLen))
         got = 0
         while got < Int(respLen) {
+            guard readable() else { return .protocolFailure }
             let n = bodyBuf.withUnsafeMutableBufferPointer { ptr -> Int in
                 Darwin.read(fd, ptr.baseAddress!.advanced(by: got), Int(respLen) - got)
             }
@@ -2264,8 +2544,12 @@ final class ACAutomationServer {
         var snapshot: [String: Any] = DispatchQueue.main.sync {
             var d: [String: Any] = [
                 "version": FatClient.protocolVersion,
+                "build": BuildInfo.dictionary,
                 "supportsPush": true,
                 "workspaces": self.onListWorkspaces?() ?? [],
+                // Not yet wired: the empty list above isn't the host's — a
+                // client keeps the rows it has (an empty listed one is real).
+                "workspacesListed": self.onListWorkspaces != nil,
                 "vms": self.onListVMs?() ?? [],
                 "gridLayout": self.onGetGridLayout?() ?? ["cells": []],
                 "automations": self.onListAutomations?() ?? ["automations": [], "runs": []],
@@ -2278,6 +2562,8 @@ final class ACAutomationServer {
             ]
             // Only present while a client-initiated registration is in flight.
             if let reg = self.onPendingRegistration?() { d["pendingRegistration"] = reg }
+            if let ended = self.onEndedRegistration?() { d["registrationEnded"] = ended }
+            if let ended = self.onEndedRegistrations?(), !ended.isEmpty { d["registrationsEnded"] = ended }
             // Only present on a server with the sessions-first home: an older
             // client ignores it, a newer client falls back to the classic
             // layout when it's missing.

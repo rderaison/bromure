@@ -24,6 +24,10 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     var onRevoked: (() -> Void)?
     /// A peer's SSH key was published/withdrawn — re-pull authorized keys now.
     var onKeysChanged: (() -> Void)?
+    /// Connected again after a drop that lasted at least `outageThreshold`
+    /// (the argument): the internet came back — a captive portal let us
+    /// through, a dead Wi-Fi recovered — without the path changing.
+    var onRecovered: ((_ downFor: TimeInterval) -> Void)?
 
     private let endpoint: ControlPlaneEndpoint
     private let token: String
@@ -36,6 +40,22 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     private var reconnectAttempt = 0
     private var heartbeat: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "io.bromure.p2p.device-channel")
+    /// Our ping cadence, and how long its pong may take. A ping on a half-open
+    /// socket (a train out of a tunnel: no reset ever arrives) never completes
+    /// at all, so the deadline — not the ping — is what notices. (Vars for
+    /// tests.)
+    var pingInterval: TimeInterval = 25
+    var pongTimeout: TimeInterval = 15
+    /// A socket younger than this isn't recycled: it's fresh enough, and a
+    /// peer that's merely offline mustn't churn ours on every attempt.
+    var recycleMinAge: TimeInterval = 30
+    private var openedAt: Date?
+    /// A drop shorter than this (a recycle, a blip) isn't an outage.
+    var outageThreshold: TimeInterval = 5
+    /// When the socket last dropped while wanted; nil while connected.
+    private var downSince: Date?
+    /// Bumped by `reconnectNow`: a backoff timer from before it stands down.
+    private var reconnectGen: UInt64 = 0
 
     init(endpoint: ControlPlaneEndpoint, token: String) {
         self.endpoint = endpoint
@@ -70,6 +90,42 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
     }
 
     var connected: Bool { lock.lock(); defer { lock.unlock() }; return isConnected }
+
+    /// Drop the current socket and open a fresh one now: the caller has
+    /// reason to think it's dead though it reads connected (signaling that
+    /// went unanswered).
+    /// `force`: the network path changed under it, so however fresh, the
+    /// socket is bound to a route that's gone.
+    func recycle(force: Bool = false) {
+        lock.lock()
+        let t = task
+        let want = desiredOpen
+        let young = openedAt.map { Date().timeIntervalSince($0) < recycleMinAge } ?? false
+        lock.unlock()
+        guard want, let t, force || !young else { return }
+        FatClientLog.log("p2p: device channel recycled")
+        t.cancel(with: .goingAway, reason: nil)
+        handleDrop(task: t, immediate: true)
+    }
+
+    /// Down — waiting out a reconnect backoff (up to 30 s), or an attempt
+    /// begun on the network just left (its 30 s timeout): try now instead.
+    /// No-op while connected. Runs on `queue`, as the backoff timer does, so
+    /// the two never both open a socket.
+    func reconnectNow() {
+        queue.async { [self] in
+            lock.lock()
+            guard desiredOpen, !isConnected else { lock.unlock(); return }
+            let stale = task
+            task = nil                 // its drop, when it comes, is no longer ours
+            reconnectGen &+= 1
+            if downSince == nil { downSince = Date() }
+            lock.unlock()
+            stale?.cancel(with: .goingAway, reason: nil)
+            FatClientLog.log("p2p: network changed — device channel reconnecting now")
+            openSocket()
+        }
+    }
 
     // MARK: Sending
 
@@ -157,7 +213,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         }
     }
 
-    private func handleDrop(task t: URLSessionWebSocketTask) {
+    private func handleDrop(task t: URLSessionWebSocketTask, immediate: Bool = false) {
         lock.lock()
         let current = (task === t)
         let want = desiredOpen
@@ -165,6 +221,7 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
             task = nil
             heartbeat?.cancel(); heartbeat = nil   // no pings during backoff
         }
+        if current, want, downSince == nil { downSince = Date() }
         lock.unlock()
         guard current else { return }
         setConnected(false)
@@ -176,23 +233,27 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
             return
         }
         guard want else { return }
-        scheduleReconnect()
+        scheduleReconnect(immediate: immediate)
     }
 
-    private func scheduleReconnect() {
+    private func scheduleReconnect(immediate: Bool = false) {
         lock.lock()
         reconnectAttempt += 1
-        let attempt = reconnectAttempt
+        let attempt = immediate ? 0 : reconnectAttempt
         lock.unlock()
         // 0.5s → cap 30s, capped exponential, with ±25% jitter so many devices
         // (or many sessions) knocked off by the same outage don't retry in
         // lockstep and hammer the link/relay the instant it returns.
         let base = min(30.0, 0.5 * pow(2.0, Double(min(attempt, 6))))
         let delay = base * Double.random(in: 0.75...1.25)
+        let gen = lock.withLock { reconnectGen }
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            self.lock.lock(); let want = self.desiredOpen; self.lock.unlock()
-            if want { self.openSocket() }
+            // Not if reconnectNow got there first (its socket is the task).
+            self.lock.lock()
+            let go = self.desiredOpen && self.reconnectGen == gen && self.task == nil
+            self.lock.unlock()
+            if go { self.openSocket() }
         }
     }
 
@@ -204,11 +265,20 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         lock.unlock()
         // Server pings every 30s (presence TTL 90s = 3 missed). We ping too so a
         // half-open TCP is detected and reconnected rather than lingering.
-        timer.schedule(deadline: .now() + 25, repeating: 25)
+        timer.schedule(deadline: .now() + pingInterval, repeating: pingInterval)
+        let pongTimeout = self.pongTimeout
         timer.setEventHandler { [weak self, weak t] in
             guard let self, let t else { return }
+            let answered = PongFlag()
             t.sendPing { err in
+                answered.set()
                 if err != nil { self.handleDrop(task: t) }
+            }
+            self.queue.asyncAfter(deadline: .now() + pongTimeout) { [weak self, weak t] in
+                guard let self, let t, !answered.isSet else { return }
+                FatClientLog.log("p2p: device channel ping unanswered for \(Int(pongTimeout)) s — reconnecting")
+                t.cancel(with: .goingAway, reason: nil)
+                self.handleDrop(task: t)
             }
         }
         timer.resume()
@@ -218,9 +288,21 @@ final class DeviceChannel: NSObject, @unchecked Sendable {
         lock.lock()
         let changed = isConnected != v
         isConnected = v
-        if v { reconnectAttempt = 0 }
+        var recoveredAfter: TimeInterval?
+        if v {
+            reconnectAttempt = 0
+            if let since = downSince {
+                let down = Date().timeIntervalSince(since)
+                if down >= outageThreshold { recoveredAfter = down }
+            }
+            downSince = nil
+        }
         lock.unlock()
         if changed { dispatch { self.onStateChange?(v) } }
+        if let d = recoveredAfter {
+            FatClientLog.log("p2p: device channel back after \(Int(d)) s down")
+            dispatch { self.onRecovered?(d) }
+        }
     }
 
     private func dispatch(_ block: @escaping () -> Void) {
@@ -235,6 +317,7 @@ extension DeviceChannel: URLSessionWebSocketDelegate {
                     didOpenWithProtocol protocol: String?) {
         lock.lock(); let current = (task === webSocketTask); lock.unlock()
         guard current else { return }
+        lock.lock(); openedAt = Date(); lock.unlock()
         setConnected(true)
         startHeartbeat(on: webSocketTask)
     }
@@ -247,4 +330,12 @@ extension DeviceChannel: URLSessionWebSocketDelegate {
         // actually distinguishes terminal from transient — this is just cleanup.
         handleDrop(task: webSocketTask)
     }
+}
+
+/// Whether a ping's pong (or its error) came back.
+private final class PongFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }

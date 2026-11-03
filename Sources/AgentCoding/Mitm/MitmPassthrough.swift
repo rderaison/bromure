@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -14,6 +15,11 @@ struct PassthroughList {
     /// Signal and WhatsApp pin theirs too (the messaging connector VM).
     static let builtins = ["google.com", "gstatic.com", "googleapis.com",
                            "signal.org", "whatsapp.net", "whatsapp.com"]
+
+    /// Nothing is passed through (strict credential mode inspects everything).
+    static let none = PassthroughList(entries: [])
+
+    private init(entries: [String]) { self.entries = entries }
 
     init(extra: [String]) {
         var all = PassthroughList.builtins
@@ -46,6 +52,31 @@ enum MitmPassthrough {
             close(appFD)
             return
         }
+        pumpBothWays(appFD: appFD, upstream: upstream)
+    }
+
+    /// Splice to `host:destPort`, resolving the hostname — for a proxied
+    /// CONNECT, where the guest named a host rather than an address (an
+    /// OpenShell `tls: skip` endpoint).
+    static func splice(appFD: Int32, host: String, destPort: Int) {
+        guard let upstream = connectRawTCP(ip: host, port: destPort, numericOnly: false) else {
+            close(appFD)
+            return
+        }
+        pumpBothWays(appFD: appFD, upstream: upstream)
+    }
+
+    /// Splice to addresses that already passed OpenShell's destination
+    /// checks (a `tls: skip` endpoint under an OpenShell policy).
+    static func splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int) {
+        guard let upstream = try? UpstreamPinning.connect(addresses, port: destPort) else {
+            close(appFD)
+            return
+        }
+        pumpBothWays(appFD: appFD, upstream: upstream)
+    }
+
+    private static func pumpBothWays(appFD: Int32, upstream: Int32) {
         let group = DispatchGroup()
         for (from, to) in [(appFD, upstream), (upstream, appFD)] {
             group.enter()
@@ -81,9 +112,10 @@ enum MitmPassthrough {
         }
     }
 
-    /// Connect to a numeric IP literal (no DNS). Blocking.
-    private static func connectRawTCP(ip: String, port: Int) -> Int32? {
-        var hints = addrinfo(ai_flags: AI_NUMERICHOST, ai_family: AF_UNSPEC,
+    /// Connect to a numeric IP literal (no DNS unless `numericOnly` is false).
+    /// Blocking.
+    private static func connectRawTCP(ip: String, port: Int, numericOnly: Bool = true) -> Int32? {
+        var hints = addrinfo(ai_flags: numericOnly ? AI_NUMERICHOST : 0, ai_family: AF_UNSPEC,
                              ai_socktype: SOCK_STREAM, ai_protocol: IPPROTO_TCP,
                              ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
         var res: UnsafeMutablePointer<addrinfo>?

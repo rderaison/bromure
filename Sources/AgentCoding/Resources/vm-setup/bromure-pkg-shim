@@ -1,0 +1,97 @@
+#!/bin/bash
+# Bromure: system packages on request, for a workspace whose sandbox has no
+# root (OpenShell engine, Enforce binaries). Staged into the meta share as
+# `apt`, `apt-get` and `sudo`, ahead of the real commands on PATH.
+#
+# `apt-get install …` (with or without sudo) becomes a request the user
+# approves in the Sandbox drawer; the guest's root supervisor then installs the
+# packages. The agent never becomes root. Everything else runs the real
+# command, unchanged: sudo that still works, apt queries, other sudo commands.
+
+name=${0##*/}
+
+real() {
+    local d
+    for d in /usr/bin /bin /usr/sbin /sbin; do
+        [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+args=("$@")
+if [ "$name" = sudo ]; then
+    real_sudo=$(real sudo) || { echo "sudo: not found" >&2; exit 127; }
+    # A sudo that works (no strict sandbox) is used as is.
+    if "$real_sudo" -n true 2>/dev/null; then exec "$real_sudo" "$@"; fi
+    # Skip sudo's own options (-E, -H, -u root…) to find the command.
+    while [ ${#args[@]} -gt 0 ]; do
+        case "${args[0]}" in
+            -u|-g|-C|-D|-h|-p|-r|-t|-U) args=("${args[@]:2}") ;;
+            --) args=("${args[@]:1}"); break ;;
+            -*) args=("${args[@]:1}") ;;
+            *) break ;;
+        esac
+    done
+    tool=${args[0]##*/}
+    args=("${args[@]:1}")
+    case "$tool" in
+        apt|apt-get) ;;
+        *) exec "$real_sudo" "$@" ;;
+    esac
+else
+    tool=$name
+    real_tool=$(real "$tool") || { echo "$tool: not found" >&2; exit 127; }
+    [ "$(id -u)" = 0 ] && exec "$real_tool" "$@"
+fi
+
+# The subcommand, and the package names after `install` (options skipped).
+sub=""
+pkgs=()
+for a in "${args[@]}"; do
+    case "$a" in
+        -*) ;;
+        *) if [ -z "$sub" ]; then sub=$a; else pkgs+=("$a"); fi ;;
+    esac
+done
+
+if [ "$sub" != install ] || [ ${#pkgs[@]} -eq 0 ]; then
+    if [ "$name" = sudo ]; then exec "$real_sudo" "$@"; fi
+    exec "$real_tool" "${args[@]}"
+fi
+
+body=$(/usr/bin/python3 -I -c 'import json,sys; print(json.dumps({"manager": "apt", "packages": sys.argv[1:]}))' "${pkgs[@]}")
+reply=$(curl -sS --max-time 20 -H 'Content-Type: application/json' -d "$body" http://policy.local/v1/packages) || {
+    echo "bromure: couldn't reach the host to ask for ${pkgs[*]}." >&2
+    exit 100
+}
+field() { /usr/bin/python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); v=d.get(sys.argv[2], ""); print(v if not isinstance(v, list) else " ".join(v))' "$1" "$2" 2>/dev/null; }
+id=$(field "$reply" id)
+if [ -z "$id" ]; then
+    echo "bromure: the request for ${pkgs[*]} was refused: $(field "$reply" detail)" >&2
+    exit 100
+fi
+
+echo "bromure: this sandbox has no root. Asked the user to approve installing: ${pkgs[*]}" >&2
+echo "bromure: waiting for their decision (Sandbox drawer › Proposals)…" >&2
+while :; do
+    reply=$(curl -sS --max-time 320 "http://policy.local/v1/packages/$id/wait?timeout=300") || { sleep 5; continue; }
+    status=$(field "$reply" status)
+    case "$status" in
+        pending|installing) continue ;;
+        installed)
+            field "$reply" output
+            echo "bromure: installed ${pkgs[*]}." >&2
+            exit 0 ;;
+        failed)
+            field "$reply" output
+            echo "bromure: installing ${pkgs[*]} failed (exit $(field "$reply" exit_code))." >&2
+            exit 100 ;;
+        rejected)
+            why=$(field "$reply" reason)
+            echo "bromure: the user declined installing ${pkgs[*]}${why:+: $why}. Don't retry; ask them if you need it." >&2
+            exit 100 ;;
+        *)
+            echo "bromure: unexpected reply: $reply" >&2
+            exit 100 ;;
+    esac
+done

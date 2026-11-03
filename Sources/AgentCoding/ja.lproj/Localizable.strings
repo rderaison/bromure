@@ -1194,6 +1194,20 @@
 "Couldn't start the network tunnel" = "ネットワークトンネルを開始できませんでした";
 "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure は内蔵のアプリ単位トンネルで引き続き動作します — このヘルパーは、他のローカルアプリからリモートの VM へ直接アクセスする機能を追加するだけです。";
 "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "特権ネットワークヘルパーに接続できません。システム設定 › 一般 › ログイン項目で「Bromure Agentic Coding」が許可されていることを確認して、もう一度お試しください。";
+"The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed)." = "ヘルパーは動作していますが、そのソケットはユーザー %d しか受け付けず、あなた（%d）は接続できません。古いバージョンのヘルパーは、起動時にログインしているユーザーにソケットを渡します。ヘルパーは誰もログインしていない起動直後に開始されます。再起動してください：システム設定 › 一般 › ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにします（またはこのバージョンのインストール後に Mac を再起動します）。";
+"The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy." = "ヘルパーが動作していません。macOS は別のアプリのコピー（%@）から登録しています。そこで許可され、そのコピーは移動、置き換え、または削除されました。ログイン項目で「Bromure Agentic Coding」をオフにしてから、ここでトンネルを再びオンにして、このコピーを登録してください。";
+"The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items." = "ヘルパーが動作していません：macOS が起動してもすぐに終了します（最後の終了：%@）。通常、許可したときとは異なる署名でアプリが再ビルドまたはアップデートされたことが原因です。ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにしてください。";
+"The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items." = "ログイン項目には表示されていますが、ヘルパーは launchd に読み込まれていません。ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにしてください。";
+"The helper isn't running yet, so its socket isn't there." = "ヘルパーはまだ動作していないため、ソケットがありません。";
+"The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items." = "ヘルパーのソケットはありますが、応答がありません：ヘルパーは停止しています。ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにしてください。";
+"The helper didn't accept the connection." = "ヘルパーが接続を受け付けませんでした。";
+"The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items." = "ネットワークヘルパーが応答せずに接続を閉じました。アプリをアップデートした直後であれば、ヘルパーを再起動してください：ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにします。";
+"This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "この Mac はすでに %@ を別の経路に送っています。通常はこの Mac 自身のワークスペースで、リモートのものと同じサブネットを使っています。トンネルはこれを引き継げません。\n\nヘルパー：%@";
+"The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "ネットワークヘルパーは、画面にログインしているユーザーにのみ対応します。\n\nヘルパー：%@";
+"The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "ネットワークヘルパーがトンネルインターフェイスを作成できませんでした。\n\nヘルパー：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "ネットワークヘルパーがルーティングするのはプライベートな /24 ネットワーク（10/8、172.16/12、192.168/16、100.64/10 内）だけですが、リモートのサブネット %@ はそれに当たりません。\n\nヘルパー：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "ネットワークヘルパーは、インストール元と同じ署名の Bromure Agentic Coding にのみ対応します。アプリをアップデートまたは再ビルドした直後であれば、ヘルパーを再起動してください：ログイン項目で「Bromure Agentic Coding」をオフにしてから再びオンにします。\n\nヘルパー：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "ネットワークヘルパーはすでに上限の %d 本のトンネルを保持しています。使っていないリモートのウインドウを閉じるか、アプリを終了して開き直してください。\n\nヘルパー：%@";
 "The network helper couldn't create the tunnel interface." = "ネットワークヘルパーはトンネルインターフェイスを作成できませんでした。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -1579,6 +1593,7 @@
 "Credential brokering" = "資格情報ブローカー";
 "Supply chain" = "サプライチェーン";
 "Firewall" = "ファイアウォール";
+"Sandbox Policy" = "サンドボックスポリシー";
 "Credential used" = "資格情報の使用";
 "Upstream TLS" = "上流 TLS";
 "Prompt injection" = "プロンプトインジェクション";
@@ -1847,6 +1862,9 @@
 "Another sign-in is already in progress." = "別のサインインがすでに進行中です。";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Bromure プロキシが動いていないため、サインインを取り込めません。";
 "Couldn't start the sign-in machine." = "サインイン用マシンを起動できませんでした。";
+"The sign-in was cancelled." = "サインインはキャンセルされました。";
+"The sign-in window was closed." = "サインインウインドウが閉じられました。";
+"The sign-in machine stopped." = "サインイン用マシンが停止しました。";
 "Finish signing in in your browser…" = "ブラウザでサインインを完了してください…";
 "Almost there — your browser will open in a moment…" = "もう少しです — まもなくブラウザが開きます…";
 "Sign in to %@…" = "%@ にサインイン…";
@@ -2066,8 +2084,8 @@
 "VMs" = "VM";
 "New automation…" = "新規オートメーション…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "「%@」は %@ を実行しますが、完了を報告しないため、このチェーンは決して発火しません。";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "クローン実行には完了を報告するエージェント（Claude Code または Kimi Code）が必要です — その合図でクローンが片付けられます。";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "フックで完了を報告するエージェント（Claude Code、Kimi Code）だけがタブを閉じられます。他のエージェントのタブは開いたままです。";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "クローン実行には完了を報告するエージェント（Claude Code、Codex、Grok または Kimi Code）が必要です — その合図でクローンが片付けられます。";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "フックで完了を報告するエージェント（Claude Code、Codex、Grok、Kimi Code）だけがタブを閉じられます。他のエージェントのタブは開いたままです。";
 "The image catalog could not be downloaded." = "イメージカタログをダウンロードできませんでした。";
 "Unsupported image compression: %@" = "対応していないイメージ圧縮形式：%@";
 "Could not expand the downloaded image: %@" = "ダウンロードしたイメージを展開できませんでした：%@";
@@ -2202,8 +2220,6 @@
 "The planning session failed: %@" = "計画セッションが失敗しました：%@";
 "No git identity or credentials found." = "git の作者情報も認証情報も見つかりません。";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure は、エージェントがモデルに送ろうとしている内容（%@ から）を検出しました。通しますか、それともこのリクエストをブロックしますか？\n\n%@";
-"an unverified package" = "未検証のパッケージ";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure は %2$@ %3$@@%4$@ を審査するために %1$@ に接続できませんでした。インストールすると、設定した評価ソースで確認されていないパッケージを受け入れることになります。\n\nそれでもこのインストールを許可しますか？";
 "to authenticate with the API server at %@" = "%@ の API サーバで認証するため";
 "Activity only" = "アクティビティのみ";
 "AI request details" = "AI リクエストの詳細";
@@ -2396,7 +2412,6 @@
 "sign-in expired" = "サインインの期限切れ";
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "左側でソースを登録してください。右側で選ばない限り、各エージェントはプロバイダの既定モデルを使います。";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "使用するプロバイダにサインインするか、API キーを貼り付けてください。各エージェントはプロバイダの既定モデルを使います。特定のモデルを使う場合は右側で選択できます（後から「環境設定 → モデル」でも変更できます）。";
-
 
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d 個のモデル";
@@ -2866,6 +2881,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ は %2$@ のモデルを使用できないため、独自のプロバイダーで動作します。別のモデルを選択してください。";
 "%d sessions whose machine or folder is gone" = "マシンまたはフォルダーが存在しないセッション %d 件";
 "(empty)" = "(空)";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "エージェントが開いたサインインページはこの Mac またはローカルネットワークを指しているため、Bromure は開きませんでした。";
+"Restore these workspaces and their sessions at next start" = "次回起動時にこれらのワークスペースとセッションを復元する";
+"Restoring your workspaces" = "ワークスペースを復元しています";
+"Restoring Workspaces" = "ワークスペースの復元";
+"Stop Restoring" = "復元を中止";
+"Starting “%@”…" = "「%@」を起動しています…";
+"%1$d of %2$d" = "%2$d 件中 %1$d 件";
+"did not start in time" = "時間内に起動しませんでした";
+/* VM dashboard: workspace notes */
+"Notes" = "メモ";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return で保存 · Shift-Return で改行 · Esc でキャンセル";
+"Save the notes (Return)" = "メモを保存（Return）";
+"Edit the notes as markdown" = "メモを Markdown で編集";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3119,6 +3147,7 @@
 "Erasing and restoring storage is done on the server Mac." = "ストレージの消去と復元はサーバーの Mac で行います。";
 "Home folder size" = "ホームフォルダのサイズ";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "%d GB（現在のサイズ。ホームは縮小できません）から 1024 GB まで。大きくしたホームはワークスペースの次回起動時に反映されます。ディスクイメージはファイルが使う分だけ容量を消費します。";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "%d GB から 1024 GB まで。ホームはワークスペースの初回起動時にこのサイズで作成されます。その後は拡大できますが、縮小はできません。ディスクイメージはファイルが使う分だけ容量を消費します。";
 "Queued — sent when the agent is done" = "待機中 — エージェントの作業が終わると送信します";
 "Queued — sent when %@ is done" = "待機中 — %@ の作業が終わると送信します";
 "Queued — the agent reads it next" = "待機中 — エージェントが次に読みます";
@@ -3565,6 +3594,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "最新の公開イメージを取得し、推奨パッケージを適用します。数分かかります。";
 "Recommended" = "推奨";
 "Rebuild locally" = "ローカルで再構築";
+"Re-download and reinstall the agents" = "再ダウンロードしてエージェントを再インストール";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "オフの場合、公開イメージが変わっていなければ保存済みのコピーを再利用し、新しいパッケージとカスタマイズスクリプトだけを実行します。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "この Mac 上でフルインストーラーを使って一から作成します。約 10 分かかります。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "ワークスペースは変更されません。次回起動時に、それぞれ新しいイメージへのリセットを提案します。";
 "Download & Update" = "ダウンロードして更新";
@@ -4109,3 +4140,214 @@
 "Show the findings for %@" = "%@ の検出事項を表示";
 "Sent to %@ to fix" = "修正のため %@ に送信しました";
 "Sent to %@ — it works on the fix in its own session." = "%@ に送信しました — 修正はそのセッション内で行われます。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "リポジトリにプッシュ先のリモートがありません — プッシュせずにマージしてください。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "%@ にマージしましたが、プッシュのためにワークスペースに接続できません — 起動していますか？";
+"Merge & Push" = "マージしてプッシュ";
+"Push %1$@ to %2$@" = "%1$@ を %2$@ にプッシュ";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ に反映された時点で完了です。%1$@ が先に進んでいる場合は、%3$@ がプルしてコンフリクトを解決し、プッシュします。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "%1$@ に送信できませんでした: %2$@";
+"that session is gone" = "そのセッションはもうありません";
+"the server didn't answer" = "サーバーが応答しませんでした";
+"the server runs an older Bromure — update it to hand findings to a session" = "サーバーは古い Bromure を実行しています — 検出事項をセッションに渡すにはアップデートしてください";
+"the server refused it" = "サーバーが拒否しました";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "%1$@ に渡せませんでした: %2$@";
+"a menu or dialog stayed open in that session" = "そのセッションでメニューまたはダイアログが開いたままでした";
+"something else was typed in that session's input box" = "そのセッションの入力欄に別の内容が入力されていました";
+"Couldn't hand it to the Switchboard: %@" = "スイッチボードに渡せませんでした: %@";
+"the Switchboard session is gone" = "スイッチボードのセッションはもうありません";
+"the message couldn't be typed into the Switchboard" = "メッセージをスイッチボードに入力できませんでした";
+"the Switchboard's agent never started" = "スイッチボードのエージェントが起動しませんでした";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "本文がプロンプトインジェクション検査でフラグ付けされました (%@) — エージェントに渡す前に確認してください";
+"Hand It Over Anyway" = "それでも渡す";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "プロンプトインジェクション検査でフラグが付けられました (%@)。これはリポジトリの内容を読んだエージェントによるもので、渡す先のエージェントもこれを読むことになります。渡す前に確認してください。";
+"Couldn't start the fix: %@" = "修正を開始できませんでした: %@";
+"Couldn't ask the Switchboard: %@" = "スイッチボードに依頼できませんでした: %@";
+"that finding is gone" = "その検出事項はもうありません";
+"couldn't start the fix" = "修正を開始できませんでした";
+"no Switchboard could be started" = "スイッチボードを起動できませんでした";
+
+/* Automations: runs at a time */
+"Runs at a time" = "同時実行数";
+"No limit" = "制限なし";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "まとめて届いたイベントは古い順に順番を待ち、実行が 1 つ終わると次が始まります。";
+"Reviews at a time" = "同時レビュー数";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "まとめて届いたコミットやプルリクエストは、一度にすべてレビューされるのではなく、古い順に順番を待ちます。";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "ワークスペース「%@」を削除しますか？";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "ディスク、設定、SSH キーを削除します。マウントされたホストのフォルダはそのまま残ります。";
+"Couldn't delete “%@”" = "「%@」を削除できませんでした";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "「%@」はアップグレードされませんでした";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "質問の表示中に現在のディスクで起動しました（オートメーションが起動しました）。シャットダウンしてから再度起動すると、もう一度確認されます。";
+
+/* automation editor */
+"This workspace has no github.com token." = "このワークスペースには github.com のトークンがありません。";
+
+/* automation editor */
+"This workspace has no Linear key." = "このワークスペースには Linear のキーがありません。";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "ホストで一覧を取得できませんでした（HTTP %d）。";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "ブランチをまだ記録中です。少ししてからもう一度お試しください。";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "ワークツリーを探しています…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "リポジトリ独自のフィルタープログラムを実行しないと Git はタスクのチェックアウトを読み取れないため、Bromure はクリーンかどうか判断できません。ご自身でマージしてから、タスクを完了にしてください。";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "ここでは git status が失敗しました — 変更されたファイルは表示されていません";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git が変更を読み取れませんでした";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "このチェックアウトでは、Bromure が実行しないリポジトリ独自のフィルタープログラムがないと Git が失敗します。ターミナルで確認してください。";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "%d 件送信中…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "送信中…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "ホストへ送信中です — 回線が遅くなっています";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@（こちらでは %3$@ %4$@）";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@（ホストの時刻）";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "各実行はここから新しいブランチで始まります。トリガーが監視するリポジトリの、ワークスペース内のクローンを選んでください。";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "各実行はここから新しいブランチで始まります。ワークスペース内の %@ のクローンを選んでください。";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "このウィンドウではワークスペースの GitHub トークンを読み取れません。リポジトリを owner/repo の形式で入力してください。";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "マージされたブランチは、そのマージコミットに対して 1 回だけ実行されます（ブランチ内の各コミットごとではありません）。コミットがもたらした変更は、最初の親との差分で確認できます: git diff {{commit.key}}^1 {{commit.key}}。";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "変更は行ったその場で実行中のワークスペースに適用されます。再起動も保存も不要で、「キャンセル」でルールを元に戻せます。ルールのチェックを外すと削除せずにオフにでき、時計メニューから期間限定でオンにすることもできます。";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "モデルが読む前にコマンド出力からノイズを取り除く";
+"Saved so far" = "これまでの節約";
+"%@ saved" = "%@ 節約";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch はモデルが読む前にコマンド出力からノイズを取り除きます — クリックすると節約量を表示します";
+"Squelch is off on this machine — click to trim the noise out of command output" = "このマシンでは Squelch はオフです — クリックするとコマンド出力のノイズを取り除きます";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "モデルが読む前に、コマンド出力から成功したテスト・進捗バー・繰り返し行を取り除きます。エラーと警告は残ります。";
+"Inspired by" = "着想元:";
+"Tokens are estimated as characters ÷ 4." = "トークン数は文字数 ÷ 4 で概算しています。";
+"Trim command output on “%@”" = "「%@」でコマンド出力を切り詰める";
+"Off on “%@”: its agents' models read every command's output as printed." = "「%@」ではオフ：エージェントのモデルは各コマンドの出力を表示されたとおりに読みます。";
+"This conversation" = "この会話";
+"All of “%@”" = "「%@」全体";
+"Where it came from" = "内訳";
+"%@ tokens · %@" = "%@ トークン · %@";
+"~%@ tokens saved" = "約 %@ トークン節約";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "コマンド出力 %2$@ トークンのうち %1$@ · 出力 %3$d 件、切り詰め %4$d 件";
+"Last two weeks" = "過去 2 週間";
+"%@: %@ tokens saved" = "%@：%@ トークン節約";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev から応答がありませんでした。";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev が API キーを拒否しました（HTTP %d）。ワークスペースのサプライチェーン設定で確認してください。";
+"socket.dev is rate-limiting this API key." = "socket.dev がこの API キーのレートを制限しています。";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev はこのバージョンの解析をまだ終えていません。";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev はこのバージョンを認識していません（公開されたばかりの可能性があります）。";
+"socket.dev's reply couldn't be read." = "socket.dev の応答を読み取れませんでした。";
+"socket.dev answered HTTP %d." = "socket.dev は HTTP %d を返しました。";
+"the OSV vulnerability database didn't answer." = "OSV 脆弱性データベースから応答がありませんでした。";
+"Install %@ from workspace “%@” without a reputation check?" = "ワークスペース「%2$@」の %1$@ を評判チェックなしでインストールしますか？";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure は %@ パッケージ %@ を検証できませんでした：%@ インストールすると、設定した評判ソースで確認されていないパッケージを受け入れることになります。";
+"%d more unverified packages are waiting for an answer." = "ほかに %d 個の未検証パッケージが回答を待っています。";
+"Allow all unverified packages for 15 minutes" = "未検証のパッケージを 15 分間すべて許可";
+"Don't allow unverified packages for the rest of the session" = "このセッションの間は未検証のパッケージを許可しない";
+"Don't allow %@" = "%@ を許可しない";
+"all unverified packages" = "すべての未検証パッケージ";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "これを書いた後、エージェントが新しい質問をしました。送信するには回答を編集してください。";
+"The agent asked a new question before your answer went. Read it and answer again." = "回答が届く前にエージェントが新しい質問をしました。読んでからもう一度回答してください。";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "回答を送信できませんでした。";
+"Your answer is already on its way." = "回答はすでに送信中です。";
+"“%@” wasn't wiped" = "「%@」は消去されませんでした";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "質問が表示されている間に現在のディスクで起動したため（自動化が起動しました）、何も消去されず、侵害済みのままです。シャットダウンしてから再度起動すると消去できます。";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "どのプログラムが接続しようとしたか特定できませんでした。「Enforce binaries」がオンのときは、ルールにプログラムを指定する必要があります。もう一度接続してから許可してください。";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "サプライチェーンの警告がありますが、ワークスペース「%2$@」から %1$@ をインストールしますか?";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure は %1$@ %2$@ %3$@ をブロックしました: %4$@\n\nこのパッケージと公開元を信頼できる場合にのみインストールしてください。";
+"Allow %@ for this session" = "このセッションでは %@ を許可";
+"Always allow %@ in this workspace" = "このワークスペースで %@ を常に許可";
+"Don't allow %@, and don't ask again this session" = "%@ を許可せず、このセッションではもう確認しない";
+"downloaded — allowed by you despite: %@" = "ダウンロード済み — 次の警告がありますが、あなたが許可しました: %@";
+"Trusted packages" = "信頼するパッケージ";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "OSV または socket.dev がパッケージをブロックすると、Bromure はそれでもインストールするか (このセッションのみ、または常に) を確認します。常に許可したパッケージはここに表示され、そのダウンロードではこれらのチェックが省略されます。socket.dev によるマルウェア判定は回避されません。";
+"Install despite reputation warnings (format: `npm:workerd`)" = "評判の警告があってもインストール (形式: `npm:workerd`)";
+"Always Allow %@ in This Workspace" = "このワークスペースで %@ を常に許可";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "評判の警告がありますが、このパッケージを信頼します — このワークスペースでの以降のダウンロードはこの警告でブロックされません";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "このワークスペースの信頼するパッケージは、ワークスペースを実行している Mac の設定で変更してください。";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "先にワークスペースをシャットダウンしてください。ディスクが使用中です。";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "一部のファイルを消去できなかったため（%@）、侵害マークは残っています。シャットダウンしてからもう一度お試しください。";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "その間に侵害マークが解除されたため、何も消去されていません。現在のディスクで起動します。";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "すでに消去されています。ディスクとホームは削除され、次回はクリーンな状態で起動します。";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "確認の表示中に侵害マークが誤検知として解除されたため、何も消去されず、起動もしていません。現在のディスクで起動するには、もう一度開始してください。";
+"Wipe “%@”?" = "「%@」を消去しますか？";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "システムディスク、ホーム、保存された状態が消去されます。設定と認証情報、マウントしているプロジェクトフォルダはそのまま残ります。侵害のマークは外れ、次回はクリーンな状態で起動します。";
+"Wipe" = "消去";
+"Clear the compromised mark on “%@”?" = "「%@」の侵害マークを外しますか？";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "誤検知だった場合のみ：ワークスペースは消去せずに現在のディスクとホームで起動し、何もなかったかのように動作します。漏えい自体はいずれにせよブロックされており、セキュリティタイムラインにはイベントが残ります。";
+"Clear Mark" = "マークを外す";
+"Couldn't wipe “%@”" = "「%@」を消去できませんでした";
+"Couldn't clear the mark on “%@”" = "「%@」のマークを外せませんでした";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "侵害の可能性あり：このワークスペースが認証情報を本来送るべきでない宛先へ送ろうとしたことを Bromure が検出しました（リクエストはブロック済み）。起動時にはまずディスクとホームの消去を確認します。右クリックで今すぐ消去するか、誤検知ならマークを外せます。";
+"Wipe and Restore…" = "消去して復元…";
+"Clear Compromised Mark…" = "侵害マークを外す…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "このホストとポートのルールを追加";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "このホストとポートのルールを %@ に追加";
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "「%@」はもう存在しません。別の Bromure プロセスが削除しました。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "%@ に対して（ホストで SigV4 署名）";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "「%@」はもう一方の Bromure プロセス（アプリまたはそのログインエージェント）で開いています。そちらで使うか、先にそちらでシャットダウンしてください。";
+"The workspace is open in the other Bromure process, which runs this automation there" = "ワークスペースはもう一方の Bromure プロセスで開いており、このオートメーションはそちらで実行されます";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "未読";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "サインインを開きませんでした：ポート %d は別のサインインで使用中です。そちらを完了するかキャンセルしてから、もう一度お試しください。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "ワークスペースのページを開きますか？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "“%1$@” 内の何かが、このページをブラウザで開こうとしています：\n\n%2$@\n\n心当たりがある場合だけ開いてください。ページはブラウザをこの Mac やネットワーク上のサービスへ誘導できます。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "ワークスペース内の何かが、このページをブラウザで開こうとしています：\n\n%@\n\n心当たりがある場合だけ開いてください。ページはブラウザをこの Mac やネットワーク上のサービスへ誘導できます。";
+
+/* guest URL open prompt */
+"Open in Browser" = "ブラウザで開く";

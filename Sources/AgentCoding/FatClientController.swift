@@ -56,6 +56,19 @@ final class RemoteHostController {
     /// without the link having gone quiet long enough to call it down): a
     /// calm indicator, content stays live.
     private(set) var linkSlow = false
+    /// What the user sent that the host hasn't answered yet (an action, a
+    /// typed prompt, a new session), since when — the window's "Sending…"
+    /// cue. On a slow link (a train, a tunnel) they wait in the queue
+    /// behind a poll, and nothing showed they were still on their way.
+    private(set) var outgoing: [UUID: Date] = [:]
+
+    func beginOutgoing() -> UUID {
+        let id = UUID()
+        outgoing[id] = Date()
+        return id
+    }
+
+    func endOutgoing(_ id: UUID) { outgoing[id] = nil }
     /// The measured link, one line ("request RTT 820 ms (min 610, ±90) ·
     /// 1.4 MB/s · P2P relay"), for the slow-link indicator's tooltip and the
     /// debug state. Refreshed on every poll outcome.
@@ -118,6 +131,66 @@ final class RemoteHostController {
     nonisolated static func uptimeDidReset(prevBoot: Date, newBoot: Date) -> Bool {
         newBoot.timeIntervalSince(prevBoot) > 20
     }
+
+    /// The host's own boot stamp (`bootedAt`, its clock) moved forward: a new
+    /// boot. Exact, unlike the uptime guess above — a reply that arrives late
+    /// (a slow P2P relay: 20 s and more) made `now − uptime` jump forward and
+    /// read as a reboot every few seconds (boot screen, browser rebuilt).
+    /// Only hosts that don't send the stamp fall back to the guess.
+    nonisolated static func bootStampMoved(prev: Double, new: Double) -> Bool {
+        new - prev > 1
+    }
+
+    /// The stamp moved BACKWARD and the uptime itself started over (well
+    /// below the last one reported): a new boot all the same — the host's
+    /// clock was set back between the two starts, so the new boot's stamp is
+    /// the earlier one. A backward stamp alone isn't one (an agent host
+    /// restarted after a clock change re-reads its Mac's boot time, moved by
+    /// the change), and the uptime is compared as reported, not as a boot
+    /// date: an agent host's uptime pauses through sleep, which moves its
+    /// derived date later without any reboot.
+    nonisolated static func bootStampWentBack(prev: Double, new: Double,
+                                              lastUptime: Int, uptime: Int) -> Bool {
+        prev - new > 1 && lastUptime - uptime > 20
+    }
+
+    /// The boot date shown for a host that stamps its boot: a moved stamp
+    /// takes the new sample; a stable one keeps the earlier of the two —
+    /// unless the date kept is `confirmed` (a second sample agreed with it)
+    /// and this one is earlier by more than a late reply explains: a host
+    /// that counts uptime on its wall clock (before it used a monotonic one)
+    /// had its clock stepped forward, and `min` kept that date for the rest
+    /// of the boot. An unconfirmed date may be a first reply that came in
+    /// late (a stalled first connection): the on-time one corrects it.
+    nonisolated static func bootTime(prev: Date, derived: Date, stampMoved: Bool,
+                                     confirmed: Bool = false) -> Date {
+        if stampMoved { return derived }
+        if confirmed, prev.timeIntervalSince(derived) > earlierSampleCap { return prev }
+        return min(prev, derived)
+    }
+
+    /// A sample within this of the date kept confirms it; one earlier than
+    /// a confirmed date by more is a clock step, not a sooner reply.
+    nonisolated static let earlierSampleCap: TimeInterval = 120
+
+    /// This Mac's wall clock against a clock that setting it can't move:
+    /// a change between two snapshots is a clock step here, and every boot
+    /// date kept (on the wall clock) moves by it — or `now − uptime`
+    /// samples would sit off by the step (read as a reboot, or refused).
+    nonisolated static func wallClockOffset(now: Date = Date()) -> TimeInterval {
+        let d = monotonicAnchor.duration(to: .now)
+        let mono = Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        return now.timeIntervalSince1970 - mono
+    }
+    private nonisolated static let monotonicAnchor = ContinuousClock.now
+
+    /// The step to apply to kept boot dates: the offset's change since the
+    /// last snapshot, or 0 within jitter.
+    nonisolated static func clockStep(last: TimeInterval?, now: TimeInterval) -> TimeInterval {
+        guard let last, abs(now - last) > 2 else { return 0 }
+        return now - last
+    }
+    private var lastWallClockOffset: TimeInterval?
     /// Fired when a mirrored workspace's terminal appearance overrides
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
@@ -147,11 +220,41 @@ final class RemoteHostController {
         var cpus = 0
         var diskAllocatedBytes: Int64 = 0
         var diskCapacityBytes: Int64 = 0
+        /// home.img's size on the server (nil: none, or a server that
+        /// doesn't say) -- what an open editor's home-size floor is.
+        var homeImageBytes: Int64? = nil
     }
     private(set) var specs: [Profile.ID: WorkspaceSpec] = [:]
+
+    /// Workspaces whose open editor should measure the server's storage
+    /// again: one booting (its prepare creates the home image), running,
+    /// stopped or back off after a failed boot -- and one whose home.img
+    /// changed with no run-state change at all (a compromise wipe deletes it
+    /// and the row stays off, a reset or a checkpoint rollback rewrites it;
+    /// the server's own notification never reaches this process). Finding
+    /// (CWE-670): "Compromise wipe deletes the home image without updating
+    /// an open editor's size floor".
+    nonisolated static func storageChanged(
+        rows: (was: [SessionListModel.ProfileRow], now: [SessionListModel.ProfileRow]),
+        specs: (was: [Profile.ID: WorkspaceSpec], now: [Profile.ID: WorkspaceSpec])
+    ) -> [Profile.ID] {
+        let was = Dictionary(rows.was.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return rows.now.compactMap { r in
+            guard let old = was[r.id] else { return nil }
+            let moved = old.state != r.state || old.compromised != r.compromised
+                || specs.was[r.id]?.homeImageBytes != specs.now[r.id]?.homeImageBytes
+            return moved ? r.id : nil
+        }
+    }
     /// Boot time of each running VM, derived from the mirrored uptime (kept
     /// stable across polls so the dashboard's uptime doesn't jitter).
     private(set) var bootTimes: [Profile.ID: Date] = [:]
+    /// Each VM's host-side boot stamp (`bootedAt`), for `bootStampMoved`.
+    private var bootStamps: [Profile.ID: Double] = [:]
+    /// Each VM's last reported uptime, for `bootStampWentBack`.
+    private var lastUptimes: [Profile.ID: Int] = [:]
+    /// Boot dates a second sample agreed with (`bootTime`'s `confirmed`).
+    private var bootConfirmed = Set<Profile.ID>()
 #if os(macOS)
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -208,6 +311,22 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
+    /// Sign-ins this client started, by the host's run id, each told how it
+    /// ended (/state's `registrationEnded`): a refused or failed run
+    /// otherwise just left /state, its reason shown only on the host.
+    private var registrationWaiters: [String: RegistrationWaiter] = [:]
+    private struct RegistrationWaiter {
+        let ended: (_ success: Bool, _ message: String?) -> Void
+        /// A snapshot showed the run in flight: once it's gone with no end
+        /// listed, the end was missed (the host forgot it), not yet to come.
+        var seenPending = false
+    }
+    /// The ends seen, by run id, for a waiter whose reply came late.
+    private var registrationEnds: [String: (success: Bool, message: String?)] = [:]
+    /// How long a sign-in card waits for its run at most: longer than the
+    /// host's own budget (VM boot, agent start, a four-minute credential
+    /// wait), so the card never stays on "browser will open" for good.
+    static let registrationWaitBudget: TimeInterval = 10 * 60
     /// The scratch login session we've opened a terminal for (nil = none).
     private var registrationTerminalID: UUID?
 
@@ -278,10 +397,78 @@ final class RemoteHostController {
 #endif
 
     /// Ask the remote to start a registration; the URL arrives via /state.
-    func beginRemoteRegistration(provider: String, profileID: UUID?) {
+    /// `ended` hears how it ends (a host too old to say never calls it).
+    func beginRemoteRegistration(provider: String, profileID: UUID?,
+                                 ended: ((_ success: Bool, _ message: String?) -> Void)? = nil) {
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
-        send("POST", "/subscriptions/register", body: body)
+        let host = self.host
+        Task { @MainActor [weak self] in
+            let resp = try? await Task.detached(priority: .userInitiated) {
+                try RemoteTransport.client(for: host).request("POST", "/subscriptions/register", body: body)
+            }.value
+            guard let self else { return }
+            self.pollOnce()
+            guard let ended else { return }
+            if let run = resp?.json["registration"] as? String {
+                self.awaitRegistration(run, ended)
+            } else if resp.map({ $0.status >= 400 }) ?? true {
+                // The host's refusal says why (no proxy, one in flight).
+                let why = (resp?.json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ended(false, why ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in"))
+            }
+        }
+    }
+
+    /// Tell `ended` how the host's sign-in run `id` ends — at once if it
+    /// already has.
+    func awaitRegistration(_ id: String, budget: TimeInterval = registrationWaitBudget,
+                           _ ended: @escaping (_ success: Bool, _ message: String?) -> Void) {
+        if let end = registrationEnds[id] {
+            ended(end.success, end.message)
+            return
+        }
+        registrationWaiters[id] = RegistrationWaiter(ended: ended)
+        // The deadline: a link down (or a Mac asleep) past the host's memory
+        // of the end must not leave the card waiting for ever.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+            self?.registrationWaiters.removeValue(forKey: id)?.ended(false, Self.missedRegistrationEnd)
+        }
+    }
+
+    private static var missedRegistrationEnd: String {
+        NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+    }
+
+    /// One /state snapshot's sign-in runs: the ends it lists (every recent
+    /// one, or only the last from an older host), then a waiter whose run
+    /// was seen in flight and is now neither in flight nor listed — its end
+    /// was missed, so it's told the run is over rather than left waiting.
+    func applyRegistrationSnapshot(pending: [String: Any]?, ended: [String: Any]?, endedList: [[String: Any]]?) {
+        for d in endedList ?? [] { applyRegistrationEnded(d) }
+        applyRegistrationEnded(ended)
+        let inFlight = pending?["id"] as? String
+        for (id, var w) in registrationWaiters {
+            if id == inFlight {
+                if !w.seenPending { w.seenPending = true; registrationWaiters[id] = w }
+            } else if w.seenPending {
+                registrationWaiters.removeValue(forKey: id)
+                w.ended(false, Self.missedRegistrationEnd)
+            }
+        }
+    }
+
+    /// One end from /state: the run's id and how it ended.
+    func applyRegistrationEnded(_ d: [String: Any]?) {
+        guard let d, let id = d["id"] as? String, registrationEnds[id] == nil else { return }
+        let success = d["success"] as? Bool ?? false
+        let message = d["message"] as? String
+        registrationEnds[id] = (success, message)
+        if registrationEnds.count > 64, let any = registrationEnds.keys.first(where: { registrationWaiters[$0] == nil }) {
+            registrationEnds.removeValue(forKey: any)
+        }
+        registrationWaiters.removeValue(forKey: id)?.ended(success, message)
     }
 
     /// Ask the remote to log a subscription out (its store, its scope rules);
@@ -332,6 +519,21 @@ final class RemoteHostController {
             registrationTerminalID = sid
             onRegistrationTerminal?(sid, (reg["provider"] as? String) ?? "")
         }
+        // A published sign-in URL is the guest's: only an agent's own sign-in
+        // page opens here (GuestURLGate.disposition) -- a page on this
+        // device's loopback or LAN, or any other page (a public name can
+        // resolve to the LAN, a public page redirect there), opens nowhere,
+        // and no callback tunnel stands up for it. An older server published
+        // such URLs, and Bromure Remote (iPhone, iPad, Vision Pro) opened them
+        // unchecked. The VM's terminal (shown above) still has the URL.
+        if let s = reg["url"] as? String, let url = URL(string: s), GuestURLGate.disposition(for: url) != .open {
+            if openedRegistrationURLs.insert(s).inserted {
+                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
+            }
+            registrationCallback?.stop()
+            registrationCallback = nil
+            return
+        }
         // Loopback-callback flows (Claude/Codex sign in via a localhost redirect)
         // need a tunnel from our 127.0.0.1:port to the VM's port so the browser's
         // callback reaches the CLI in the VM. Device-code flows (Grok's
@@ -356,6 +558,8 @@ final class RemoteHostController {
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
+        // Checked above, before the tunnel.
+        guard GuestURLGate.disposition(for: url) == .open else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
@@ -646,6 +850,8 @@ final class RemoteHostController {
             FatClientLog.log("link: \(up ? "UP" : "DOWN") (\(health.consecutiveFailures) failed poll(s)) — "
                 + LinkStats.describe(snap, path: linkPathLabel))
             connected = up
+            // A server back from a restart may be a newer build.
+            if up { serverLacksTypeRoute = false }
         }
         if slow != linkSlow {
             FatClientLog.log("link: \(slow ? "slow" : "normal") — " + LinkStats.describe(snap, path: linkPathLabel))
@@ -728,6 +934,12 @@ final class RemoteHostController {
                             } else {
                                 self.peerFailStreak = 0
                                 FatClientLog.log("p2p: mirror unreachable — tearing down the peer path to re-establish")
+                                // Everything closing the window drops (what
+                                // reconnecting by hand did and this didn't):
+                                // the pooled SSH connections over the old path
+                                // too, half-open ones included — the next dial
+                                // starts clean.
+                                SSHDialer.shared.closeHost(host.id)
                                 P2PBroker.shared.closePeer(pid)
                             }
                         }
@@ -741,13 +953,17 @@ final class RemoteHostController {
     private func send(_ method: String, _ path: String, body: [String: Any]? = nil,
                       then refresh: Bool = true) {
         let host = self.host
+        // On its way from now — queued behind a poll included — until the
+        // host answers (or the request fails).
+        let token = beginOutgoing()
         pollQueue.async { [weak self] in
             FatClientLog.log("send START \(method) \(path)")   // paired with DONE — a START with no DONE = a hung request blocking the serial pollQueue
             let client = RemoteTransport.client(for: host)
             let resp = try? client.request(method, path, body: body)
             FatClientLog.log("send DONE \(method) \(path) status=\(resp?.status ?? -1)")
-            if refresh {
-                DispatchQueue.main.async { self?.pollOnce() }
+            DispatchQueue.main.async {
+                self?.endOutgoing(token)
+                if refresh { self?.pollOnce() }
             }
         }
     }
@@ -762,13 +978,35 @@ final class RemoteHostController {
             appliedEpoch = epoch
             appliedGeneration = gen
         }
+        // Guard against a degenerate /state. A 200 poll whose body was truncated
+        // or failed to parse arrives as an (almost) empty snapshot, and a server
+        // whose list isn't wired yet sends an empty one. Applying it wipes
+        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell,
+        // the board, the sessions stage, and a sign-in in progress (a missing
+        // `pendingRegistration` reads as "the flow ended") — and because the
+        // workspace screen unmounts its live terminals whenever `isRunning`
+        // goes false, the screen flashes to a blank "Info" view until the next
+        // good poll repaints it. So once anything was applied, a snapshot with
+        // no `workspaces` array, or one whose host says it didn't list them,
+        // keeps the last good state — even with no workspace left to keep,
+        // since that is a steady state now. A listed, empty array is real: the
+        // last workspace was deleted — skipping it froze the mirror on the
+        // deleted row for good. (keys= reveals the cause.)
+        let listedWorkspaces = snapshot["workspaces"] as? [[String: Any]]
+        let degenerate = listedWorkspaces == nil || snapshot["workspacesListed"] as? Bool == false
+        if degenerate, revision > 0 {
+            FatClientLog.log("apply: skipped degenerate snapshot "
+                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
+                + "kept \(profilesByID.count) workspaces")
+            return
+        }
         // First: the workspace/VM updates below already consult it.
         isAgentHost = snapshot["hostKind"] as? String == "agent-host"
         if listModel.switchboardAvailable == isAgentHost { listModel.switchboardAvailable = !isAgentHost }
 #if os(macOS)
         updateDelegationRelay()
 #endif
-        let workspaces = (snapshot["workspaces"] as? [[String: Any]]) ?? []
+        let workspaces = listedWorkspaces ?? []
         let attached = Set(workspaces.compactMap { w -> UUID? in
             guard w["hostKind"] as? String == "agent-host" else { return nil }
             return (w["id"] as? String).flatMap(UUID.init(uuidString:))
@@ -782,24 +1020,6 @@ final class RemoteHostController {
         if listModel.pendingMachines != pendingMachines { listModel.pendingMachines = pendingMachines }
         let blockedMachines = FleetMachine.list(snapshot["blockedMachines"])
         if listModel.blockedMachines != blockedMachines { listModel.blockedMachines = blockedMachines }
-        // Guard against a degenerate /state. A 200 poll whose body was truncated
-        // or failed to parse arrives as an (almost) empty snapshot, and a partial
-        // server snapshot can momentarily carry no workspaces. Applying it wipes
-        // the ENTIRE mirror for one poll — every workspace row, tab and grid cell
-        // — and because the workspace screen unmounts its live terminals whenever
-        // `isRunning` goes false, the screen flashes to a blank "Info" view until
-        // the next good poll repaints it (and a just-created tab is wiped, so "+"
-        // looks slow to appear). Once we hold a populated mirror, an empty
-        // workspaces list is far likelier a bad read than a genuine "all
-        // workspaces removed", so keep the last good state instead of flashing.
-        // (keys= reveals the cause: empty ⇒ truncated/parse-fail whole body;
-        // vms/grid/… present but no workspaces ⇒ a partial server snapshot.)
-        if workspaces.isEmpty, revision > 0, !profilesByID.isEmpty {
-            FatClientLog.log("apply: skipped degenerate snapshot "
-                + "(keys=[\(snapshot.keys.sorted().joined(separator: ","))]) — "
-                + "kept \(profilesByID.count) workspaces")
-            return
-        }
         let vms = (snapshot["vms"] as? [[String: Any]]) ?? []
         let grid = (snapshot["gridLayout"] as? [String: Any]) ?? ["cells": []]
         let autos = (snapshot["automations"] as? [String: Any]) ?? [:]
@@ -827,6 +1047,9 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
+        applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
+                                  ended: snapshot["registrationEnded"] as? [String: Any],
+                                  endedList: snapshot["registrationsEnded"] as? [[String: Any]])
 #if os(macOS)
         applyLocalModels(snapshot["localModels"] as? [String: Any])
         // Mirror the host's security-engine decisions so the Security Timeline
@@ -867,13 +1090,20 @@ final class RemoteHostController {
             }
             rows.append(SessionListModel.ProfileRow(
                 id: id, name: name, accentHex: accentHex, state: state,
-                compromised: (w["compromised"] as? Bool) ?? false))
+                compromised: (w["compromised"] as? Bool) ?? false,
+                squelch: (w["squelch"] as? Bool) ?? false,
+                squelchSummary: (w["squelchSummary"] as? [String: Any]).flatMap {
+                    (try? JSONSerialization.data(withJSONObject: $0))
+                        .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
+                },
+                notes: w["comments"] as? String ?? ""))
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
             spec.cpus = w["cpuCount"] as? Int ?? 0
             spec.diskAllocatedBytes = Int64((w["diskAllocatedBytes"] as? Int) ?? 0)
             spec.diskCapacityBytes = Int64((w["diskCapacityBytes"] as? Int) ?? 0)
+            spec.homeImageBytes = (w["homeImageBytes"] as? Int).map(Int64.init)
             newSpecs[id] = spec
 
             var p = Profile(
@@ -881,7 +1111,10 @@ final class RemoteHostController {
                 tool: Profile.Tool(rawValue: w["tool"] as? String ?? "") ?? .claude,
                 authMode: Profile.AuthMode(rawValue: w["authMode"] as? String ?? "") ?? .token)
             p.color = ProfileColor(rawValue: w["color"] as? String ?? "") ?? .gray
+            p.squelch.enabled = (w["squelch"] as? Bool) ?? false
+            p.comments = w["comments"] as? String ?? ""
             p.memoryGB = spec.memoryGB
+            p.additionalTools = Self.additionalTools(from: w, primary: p.tool)
             // Terminal appearance overrides, mirrored so the client's ghostty
             // surfaces render the workspace's colors/fonts (absent = fall back
             // to this device's own terminal defaults, like resolveStyle does).
@@ -893,7 +1126,8 @@ final class RemoteHostController {
             if let gh = w["hasGitHubToken"] as? Bool {
                 newCredentials[id] = WorkspaceCredentials(
                     github: gh, linear: w["hasLinearToken"] as? Bool ?? false,
-                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [])
+                    askBeforeUseLabels: w["askBeforeUseLabels"] as? [String] ?? [],
+                    readyTools: Self.readyTools(from: w))
             }
         }
         // Restyle live terminal surfaces when a workspace's appearance changed
@@ -910,13 +1144,23 @@ final class RemoteHostController {
         }
         profilesByID = newProfiles
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
+        let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
+        for id in storageMoved {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
+        }
 
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
-        var rebootedIDs = Set<Profile.ID>()   // uptime reset since last poll → the VM rebooted
+        var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
+        let offset = Self.wallClockOffset()
+        let step = Self.clockStep(last: lastWallClockOffset, now: offset)
+        lastWallClockOffset = offset
+        if step != 0 {
+            for (k, d) in bootTimes { bootTimes[k] = d.addingTimeInterval(step) }
+        }
         for vm in vms {
             guard let idStr = vm["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             // Kubernetes node VMs aren't workspaces — the cluster dashboard
@@ -935,11 +1179,43 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+            let stamp = vm["bootedAt"] as? Double
+            var stampMoved = false
+            if let stamp {
+                if let prev = bootStamps[id], Self.bootStampMoved(prev: prev, new: stamp) {
+                    rebootedIDs.insert(id)
+                    stampMoved = true
+                } else if let prev = bootStamps[id], let last = lastUptimes[id],
+                          let up = vm["uptimeSeconds"] as? Int,
+                          Self.bootStampWentBack(prev: prev, new: stamp, lastUptime: last, uptime: up) {
+                    // Before, `min` kept the previous boot's date for the
+                    // whole new boot (dashboard uptime, the iPad transcript
+                    // floor letting the last boot's questions through).
+                    rebootedIDs.insert(id)
+                    stampMoved = true
+                }
+                bootStamps[id] = stamp
+            }
             if let up = vm["uptimeSeconds"] as? Int {
+                lastUptimes[id] = up
                 let derived = Date(timeIntervalSinceNow: TimeInterval(-up))
-                if let prev = bootTimes[id] {
+                if stamp != nil, let prev = bootTimes[id] {
+                    // The host stamps its boot: the date here (dashboard
+                    // uptime, the transcript floor) moves on a new boot only.
+                    // Otherwise only ever earlier — the most on-time sample —
+                    // never later: a late reply (its uptime short by the
+                    // delay) or a Mac that slept (awake-only uptime) moved
+                    // it forward, cutting the uptime and the transcript.
+                    bootTimes[id] = Self.bootTime(prev: prev, derived: derived, stampMoved: stampMoved,
+                                                  confirmed: bootConfirmed.contains(id))
+                    if stampMoved {
+                        bootConfirmed.remove(id)
+                    } else if abs(prev.timeIntervalSince(derived)) <= Self.earlierSampleCap {
+                        bootConfirmed.insert(id)
+                    }
+                } else if let prev = bootTimes[id] {
                     if Self.uptimeDidReset(prevBoot: prev, newBoot: derived) {
-                        rebootedIDs.insert(id)
+                        if stamp == nil { rebootedIDs.insert(id) }
                         bootTimes[id] = derived
                     } else if abs(prev.timeIntervalSince(derived)) >= 3 {
                         bootTimes[id] = derived   // minor drift correction
@@ -947,6 +1223,7 @@ final class RemoteHostController {
                     // else stable — keep prev (dashboard uptime doesn't wobble)
                 } else {
                     bootTimes[id] = derived   // first sighting, never a reboot
+                    bootConfirmed.remove(id)
                 }
             }
             mounts[id] = vm["mounts"] as? [String] ?? []
@@ -998,6 +1275,7 @@ final class RemoteHostController {
         // gone. Filtering by liveIDs here would erase the pre-reboot boot time
         // and the return would look like a first sighting (missed reboot).
         bootTimes = bootTimes.filter { profilesByID[$0.key] != nil }
+        bootStamps = bootStamps.filter { profilesByID[$0.key] != nil }
         mounts = mounts.filter { liveIDs.contains($0.key) }
         // A rebooted workspace's browser is bound to the old boot's network
         // (its IP inside the SOCKS-routed subnet); the window rebuilds it so the
@@ -1196,7 +1474,8 @@ final class RemoteHostController {
         let iso = ISO8601DateFormatter()
         let nextFires = ((autos["nextFires"] as? [String: String]) ?? [:])
             .compactMapValues { iso.date(from: $0) }
-        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires)
+        automationStore.mirror(automations: automations, runs: runs, nextFires: nextFires,
+                               timeZone: (autos["timeZone"] as? String).flatMap(TimeZone.init(identifier:)))
         #if os(macOS)
         // Absent on a server without repository watches: leave the mirror empty.
         if autos["watches"] != nil || autos["findings"] != nil {
@@ -1274,7 +1553,38 @@ final class RemoteHostController {
                 mirrored[i].userTitled = true
             }
         }
+        // A read just sent: no unread mark flashing back for a round trip.
+        for (id, pending) in pendingReads {
+            guard let i = mirrored.firstIndex(where: { $0.id == id }) else { pendingReads[id] = nil; continue }
+            if (mirrored[i].readReplies ?? 0) >= pending.seen || Date().timeIntervalSince(pending.at) > 10 {
+                pendingReads[id] = nil
+            } else {
+                mirrored[i].readReplies = pending.seen
+            }
+        }
         sessionStore.applyMirror(mirrored)
+        // A reply on a session on screen: read as it arrives.
+        for id in watching() { markRead(id) }
+    }
+
+    /// Reads sent to the server and not yet in a snapshot: the reply count.
+    private var pendingReads: [UUID: (seen: Int, at: Date)] = [:]
+
+    /// The sessions the user is looking at now (the window is key, the app
+    /// active; on iOS the screen marks its own).
+    var watching: () -> [UUID] = { [] }
+
+    /// The user saw a session's replies: the mark goes at once, here and —
+    /// through the server — on every other client.
+    func markRead(_ id: UUID) {
+        guard let s = sessionStore.session(id), s.isUnread, let n = s.replies else { return }
+        pendingReads[id] = (n, Date())
+        var list = sessionStore.sessions
+        if let i = list.firstIndex(where: { $0.id == id }) {
+            list[i].readReplies = n
+            sessionStore.applyMirror(list)
+        }
+        sessionCommand(id, "read", body: ["seen": n])
     }
 
     /// Renames sent to the server and not yet in a snapshot.
@@ -1366,7 +1676,31 @@ final class RemoteHostController {
         }
     }
 
-    /// POST /sessions/start — the new session's id once the server has it.
+    /// How long a Start waits for the server's answer. An attached machine's
+    /// start runs up to 60 s on the server, and a repeated Send waits there
+    /// for the first one (`SessionStartCoalescer.pendingWait`, 75 s) before
+    /// running its own: with the 12 s default the client gave up while the
+    /// session was still being made, and the user's next click raced it.
+    nonisolated static let sessionStartTimeout = 150
+
+    /// Why the last Start made no session — the server's own words (a
+    /// Sidecar's "Claude Code isn't installed on this Mac", say), or that it
+    /// didn't answer; nil after one that worked. The new-session screen
+    /// says it: a refused Start used to look like a dead button.
+    private(set) var lastStartError: String?
+
+    /// The words for a Start that made no session.
+    nonisolated static func startFailure(status: Int?, json: [String: Any]) -> String {
+        if let why = json["error"] as? String, !why.isEmpty { return why }
+        guard let status else {
+            return NSLocalizedString("The server didn't answer. Check the connection and try again.",
+                                     comment: "session start failure")
+        }
+        return String(format: NSLocalizedString("The server answered HTTP %d.", comment: "session start failure"), status)
+    }
+
+    /// POST /sessions/start — the new session's id once the server has it;
+    /// nil with `lastStartError` saying why.
     func startSession(profileID: Profile.ID, tool: Profile.Tool, cwd: String,
                       cloneURL: String?, message: String?,
                       attachments: [DroppedFile] = [], room: UUID? = nil,
@@ -1398,14 +1732,21 @@ final class RemoteHostController {
         // connection, not only after the next (up to 5 s) heartbeat poll.
         ConsolePresence.shared.noteMirror()
         let idle = String(ConsolePresence.shared.idleMillis())
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
         let resp = try? await Task.detached(priority: .userInitiated) {
             try RemoteTransport.client(for: host).request(
                 "POST", "/agent-sessions/start", body: body,
+                recvTimeoutSeconds: Self.sessionStartTimeout,
                 extraHeaders: [("X-Bromure-Console-Idle-Ms", idle)])
         }.value
         pollOnce()
-        guard let resp, resp.status == 200, let idStr = resp.json["id"] as? String else { return nil }
-        return UUID(uuidString: idStr)
+        guard let resp, resp.status == 200, let id = (resp.json["id"] as? String).flatMap(UUID.init(uuidString:)) else {
+            lastStartError = Self.startFailure(status: resp?.status, json: resp?.json ?? [:])
+            return nil
+        }
+        lastStartError = nil
+        return id
     }
 
     /// POST /sessions/{id}/{resume|close|rename|forget|archive|unarchive|delete}.
@@ -1549,14 +1890,43 @@ final class RemoteHostController {
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
 
+    /// A settings document without what the editor left as it opened it and
+    /// the app saves meanwhile (the dashboard's notes, the sidebar's Squelch
+    /// switch): the host's merge keeps a key left out (Finding CWE-362,
+    /// "Saving workspace settings overwrites notes edited on the VM
+    /// dashboard"). An edited Squelch policy goes whole: its encoder omits
+    /// the default one, which would read as "unchanged".
+    static func dropUnedited(_ doc: inout [String: Any], edited: Profile, opened: Profile) {
+        if edited.comments == opened.comments { doc.removeValue(forKey: "comments") }
+        if edited.squelch == opened.squelch {
+            doc.removeValue(forKey: "squelch")
+        } else if let sq = ACAppDelegate.codableToDict(edited.squelch) {
+            doc["squelch"] = sq
+        }
+    }
+
+    /// The host deleted this workspace (DELETE /profiles answered 200): its
+    /// row goes now, not at the next snapshot.
+    func workspaceDeleted(_ id: Profile.ID) {
+        profilesByID[id] = nil
+        specs[id] = nil
+        credentialsByID[id] = nil
+        listModel.profileRows.removeAll { $0.id == id }
+    }
+
     /// Which credentials a workspace holds on the host (the mirrored profile
     /// carries none). nil: an older host that doesn't say.
     struct WorkspaceCredentials: Equatable {
         var github: Bool
         var linear: Bool
         var askBeforeUseLabels: [String]
+        /// The agents the host can run there — its Models settings and
+        /// sign-ins included. nil: an older host; the profile's own list.
+        var readyTools: [Profile.ToolSpec]? = nil
     }
     private(set) var credentialsByID: [Profile.ID: WorkspaceCredentials] = [:]
+    /// The firewall editor's live commits, sent in the order made.
+    private let firewallQueue = DispatchQueue(label: "io.bromure.fatclient.firewall")
     func credentials(for id: Profile.ID) -> WorkspaceCredentials? { credentialsByID[id] }
     /// Mirrored profiles in source-list order (the automation editor's
     /// workspace picker + default owner rely on a stable order).
@@ -1568,8 +1938,18 @@ final class RemoteHostController {
 
     private func seg(_ id: Profile.ID) -> String { ControlClient.encodeSegment(id.uuidString) }
 
-    func startWorkspace(_ id: Profile.ID) {
+    /// Gone from the mirror (deleted here or on the host) once a snapshot
+    /// is in: its stage, pop-out and settings must go, and nothing may act
+    /// on it — a missing row otherwise reads as `.off`, with a Start button.
+    func isGone(_ id: Profile.ID) -> Bool { hasSnapshot && profilesByID[id] == nil }
+
+    /// Nothing for a workspace the mirror no longer has: an older host
+    /// minted a NEW workspace for an unknown id (named with it) and booted it.
+    @discardableResult
+    func startWorkspace(_ id: Profile.ID) -> Bool {
+        guard profilesByID[id] != nil else { return false }
         send("POST", "/vms", body: ["profile": id.uuidString, "detach": true])
+        return true
     }
     func shutdownWorkspace(_ id: Profile.ID) {
         send("DELETE", "/vms/\(seg(id))", body: ["action": "shutdown"])
@@ -1871,7 +2251,8 @@ final class RemoteHostController {
         let path = "/profiles/\(seg(id))?storage=1"
         guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
             try RemoteTransport.client(for: host).request("GET", path)
-        }).value, resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
+        }).value, !Task.isCancelled,   // superseded while the request ran: its answer is stale
+              resp.status == 200, let j = resp.json["baseBytes"] as? Int64 ?? (resp.json["baseBytes"] as? Int).map(Int64.init)
         else { return nil }
         func bytes(_ k: String) -> Int64 {
             (resp.json[k] as? Int64) ?? (resp.json[k] as? Int).map(Int64.init) ?? 0
@@ -1893,7 +2274,80 @@ final class RemoteHostController {
             base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
+        c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }
         return c
+    }
+
+    /// Put a workspace's firewall rules in force on the host now (saved and
+    /// applied live) — what its editor does as the rules are edited. An
+    /// older host has no route: the rules then apply on Save, as before.
+    func commitFirewall(_ id: Profile.ID, rules: String) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))/firewall"
+        firewallQueue.async {
+            _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["rules": rules])
+        }
+    }
+
+    /// Squelch on or off for one of the host's workspaces.
+    func setSquelch(_ id: Profile.ID, _ on: Bool) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))/squelch"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = try? RemoteTransport.client(for: host).request("POST", path, body: ["enabled": on])
+            DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        }
+    }
+
+    /// Every live firewall commit sent so far has reached the host — what a
+    /// settings save waits for, so its document lands after them.
+    func firewallCommitsSent() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            firewallQueue.async { done.resume() }
+        }
+    }
+
+    /// One notes save in flight per workspace, in the order they were made.
+    /// Each PUT dialed its own connection and the host applies whichever
+    /// reaches its main queue first: a second blur's save (its base the
+    /// first's draft, not stored yet) could land first, be refused as
+    /// superseded, and the first then wrote the older draft over it. In
+    /// order, the second's base is what the first left stored -- or it lost
+    /// to notes saved meanwhile, as it should.
+    private let notesSaves = InOrder<Profile.ID, VMDashboardView.NotesSave>()
+
+    func saveNotesInOrder(_ id: Profile.ID, _ text: String, ifStill base: String?) async -> VMDashboardView.NotesSave {
+        await notesSaves.run(id) { await Self.saveNotes(self, id, text, ifStill: base) }
+    }
+
+    /// The dashboard's notes save on the host (`ACAppDelegate.setNotes`'s
+    /// remote twin): the host applies an implicit save only while its notes
+    /// are still `base`, and says when they weren't.
+    static func saveNotes(_ c: RemoteHostController, _ id: Profile.ID, _ text: String,
+                          ifStill base: String?) async -> VMDashboardView.NotesSave {
+        var doc: [String: Any] = ["comments": text]
+        if let base { doc["_commentsIfStill"] = base }
+        guard let r = try? await c.putProfileDoc(id, doc) else { return .failed }
+        return notesOutcome(status: r.status, json: r.json)
+    }
+
+    /// What the host's answer to a notes save means. Superseded (even when
+    /// the rest of the save then failed): the notes that won are in the
+    /// answer, and the card shows them.
+    nonisolated static func notesOutcome(status: Int, json: [String: Any]) -> VMDashboardView.NotesSave {
+        if (json["commentsSuperseded"] as? Bool) == true { return .superseded(json["comments"] as? String) }
+        return status == 200 && (json["ok"] as? Bool) == true ? .saved : .failed
+    }
+
+    /// PUT a workspace document; the host's answer whatever it says.
+    func putProfileDoc(_ id: Profile.ID, _ doc: [String: Any]) async throws -> (status: Int, json: [String: Any]) {
+        let host = self.host
+        let path = "/profiles/\(seg(id))"
+        let resp = try await Task.detached(priority: .userInitiated) {
+            try RemoteTransport.client(for: host).request("PUT", path, body: doc)
+        }.value
+        DispatchQueue.main.async { [weak self] in self?.pollOnce() }
+        return (resp.status, resp.json)
     }
 
     /// Secret-preserving whole-document save (the counterpart of
@@ -2116,6 +2570,35 @@ final class RemoteHostController {
         }
     }
 
+    /// The server lacks POST /vms/{id}/type (an older build): learned from
+    /// its first answer, forgotten on reconnect (it may be updated).
+    var serverLacksTypeRoute = false
+
+    /// A chat message typed by the server itself (`/vms/{id}/type`): the
+    /// guard's round trips stay on the server's side of the WAN.
+    func typeIntoPane(_ id: Profile.ID, target: PaneTarget, text: String) async -> RemoteTypeResult {
+        guard !serverLacksTypeRoute, (try? checkGuestReachable(id)) != nil,
+              let data = try? JSONEncoder().encode(target),
+              let targetJSON = try? JSONSerialization.jsonObject(with: data) else { return .unsupported }
+        let host = self.host
+        let path = "/vms/\(seg(id))/type"
+        let token = beginOutgoing()
+        defer { endOutgoing(token) }
+        let resp = try? await Task.detached(priority: .userInitiated) {
+            // Staging, typing and confirming can take ~20 s on the server.
+            try RemoteTransport.bulkClient(for: host)
+                .request("POST", path, body: ["target": targetJSON, "text": text], recvTimeoutSeconds: 75)
+        }.value
+        guard let resp else { return .output(nil) }
+        guard resp.json["typeRoute"] as? Bool == true else {
+            serverLacksTypeRoute = true
+            FatClientLog.log("type: server has no /type route (HTTP \(resp.status)) — typing step by step")
+            return .unsupported
+        }
+        if resp.status == 501 { serverLacksTypeRoute = true; return .unsupported }
+        return .output(resp.json["output"] as? String)
+    }
+
     func guestExec(_ id: Profile.ID, command: String, timeout: Int) async throws -> String {
         try checkGuestReachable(id)
         let host = self.host
@@ -2171,23 +2654,97 @@ final class RemoteHostController {
     }
 
     // Coding-board verbs, over the tunnel; the mirror confirms on poll.
+    /// A server's reply to POST /tasks/{id}/answer: taken (`ok`), refused
+    /// (`ok: false`, `error`), or none — the link failed: not known to be
+    /// taken, so the text stays; sending it again can't post it twice (the
+    /// board refuses an answer while one is on its way, and once it went,
+    /// the question is gone). A server from before the reply waited answers
+    /// `{ok: true, …}` at once — as it always did. Only that boolean is a
+    /// yes: a 200 whose body never arrived or was cut off comes back as `[:]`
+    /// (ControlClient's "200 but empty JSON"), and the verdict it carried —
+    /// maybe a refusal — is unknown, so the draft stays (Finding CWE-754,
+    /// "Fat-client answer treats an empty 200 as accepted and drops the draft").
+    nonisolated static func answerAccepted(_ reply: [String: Any]?) -> Bool {
+        reply?["ok"] as? Bool == true
+    }
+
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
     /// A coding-board verb that needs the HOST'S reply (the plan-stream
     /// relay: event pages, structured answers). nil = transport failure.
     func taskCommandReply(_ id: UUID, _ action: String,
-                          body: [String: Any]) async -> [String: Any]? {
+                          body: [String: Any], recvTimeoutSeconds: Int = 12) async -> [String: Any]? {
         let host = self.host
         let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)"
         let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.client(for: host).request("POST", path, body: body)
+            try RemoteTransport.client(for: host).request("POST", path, body: body,
+                                                          recvTimeoutSeconds: recvTimeoutSeconds)
         }.value
         guard let resp, resp.status == 200 else { return nil }
         return resp.json
     }
     func deleteTask(_ id: UUID) {
         send("DELETE", "/tasks/\(ControlClient.encodeSegment(id.uuidString))")
+    }
+
+    /// The automation / watch editors' token-backed lists, fetched by the
+    /// host with the workspace's own credentials (they aren't mirrored).
+    /// A refusal throws: a GitHub 401 as GitHubPoller/401 (the editors'
+    /// "token rejected"), anything else (an older host without the route
+    /// too) as an error the editor shows above its free-text field.
+    /// A workspace's other agents from the host's list (tool + auth mode;
+    /// no keys) — an older host sends none: the primary only, as before.
+    nonisolated static func additionalTools(from w: [String: Any], primary: Profile.Tool) -> [Profile.ToolSpec] {
+        ((w["additionalTools"] as? [[String: Any]]) ?? []).compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)), tool != primary
+            else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
+    /// The agents the host says a workspace can run — nil from an older
+    /// host, which doesn't send them.
+    nonisolated static func readyTools(from w: [String: Any]) -> [Profile.ToolSpec]? {
+        (w["readyTools"] as? [[String: Any]])?.compactMap { t in
+            guard let tool = (t["tool"] as? String).flatMap(Profile.Tool.init(rawValue:)) else { return nil }
+            return Profile.ToolSpec(tool: tool,
+                                    authMode: (t["authMode"] as? String).flatMap(Profile.AuthMode.init(rawValue:)) ?? .token)
+        }
+    }
+
+    /// The agents a mirrored workspace's pickers offer: what the host says
+    /// it can run. An older host doesn't say, and the mirror can't see its
+    /// Models settings or sign-ins: every agent, as the watch editor offers
+    /// them — the host decides (its own list alone was the bug).
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        Self.offeredTools(p, hostSays: credentials(for: p.id)?.readyTools)
+    }
+
+    nonisolated static func offeredTools(_ p: Profile, hostSays: [Profile.ToolSpec]?) -> [Profile.ToolSpec] {
+        if let hostSays { return hostSays }
+        let own = p.allToolSpecs
+        return own + Profile.Tool.allCases.filter { t in !own.contains { $0.tool == t } }
+            .map { Profile.ToolSpec(tool: $0, authMode: .token) }
+    }
+
+    var automationSources: AutomationSources {
+        let host = self.host
+        return AutomationSources { body in
+            let resp = try await Task.detached(priority: .userInitiated) {
+                // The host is silent until GitHub / Linear answer (it waits
+                // up to 60 s): the default 12 s of quiet gave up first.
+                try RemoteTransport.client(for: host).request("POST", "/automation-sources", body: body,
+                                                              recvTimeoutSeconds: 75)
+            }.value
+            if resp.status == 200, resp.json["error"] == nil { return resp.json }
+            let code = resp.json["code"] as? Int ?? 0
+            let msg = resp.json["error"] as? String
+                ?? String(format: NSLocalizedString("The host couldn't list them (HTTP %d).", comment: "automation editor"), resp.status)
+            throw NSError(domain: code != 0 ? "GitHubPoller" : "AutomationSources", code: code,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
     }
     func upsertTask(_ task: CodingTask) {
         guard let doc = ACAppDelegate.codableToDict(task) else { return }
@@ -2239,6 +2796,20 @@ final class RemoteHostController {
         send(action.isEmpty ? "DELETE" : "POST",
              "/watches/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action))
     }
+    /// One request, answered on the main actor: (status, json); status nil
+    /// when the server couldn't be reached. Refreshes the mirror after.
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil,
+                 completion: @escaping @MainActor (Int?, [String: Any]) -> Void) {
+        let host = self.host
+        pollQueue.async { [weak self] in
+            let resp = try? RemoteTransport.client(for: host).request(method, path, body: body)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { completion(resp?.status, resp?.json ?? [:]) }
+                self?.pollOnce()
+            }
+        }
+    }
+
     func findingCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send(action.isEmpty ? "DELETE" : "POST",
              "/findings/\(ControlClient.encodeSegment(id.uuidString))" + (action.isEmpty ? "" : "/" + action),
@@ -2449,19 +3020,28 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     /// machine show the same transcript. nil: follow the active tab (a
     /// plain workspace mount, no session on stage).
     private let windowIndex: Int?
+    /// The session in that window when the chat was made: window indices
+    /// are reused — a session closed, the next one's tab took its number.
+    private let sessionID: UUID?
 
     init(controller: RemoteHostController, workspaceID: Profile.ID, windowIndex: Int? = nil,
-         accent: Color) {
+         sessionID: UUID? = nil, accent: Color) {
         self.controller = controller
         self.workspaceID = workspaceID
         self.windowIndex = windowIndex
+        self.sessionID = sessionID
         self.accent = accent
     }
 
     /// Over the tunnel every byte counts: reuse what was downloaded, and take
     /// a smaller first window (scrolling up loads the rest).
+    /// Per session, not only per window: keyed by the window alone, a new
+    /// session in a reused window opened on the previous one's downloaded
+    /// conversation — a Codex for its first half-minute, until it writes
+    /// a rollout of its own.
     var historyCacheKey: String? {
-        windowIndex.map { "\(controller.host.id.uuidString):\(workspaceID.uuidString):\($0)" }
+        windowIndex.map { "\(controller.host.id.uuidString):\(workspaceID.uuidString):\($0)"
+            + (sessionID.map { ":\($0.uuidString)" } ?? "") }
     }
     var historyBytesHint: Int? { 1_500_000 }
 
@@ -2483,6 +3063,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
 
     func execGuest(_ command: String, timeout: Int) async -> String? {
         try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+    }
+
+    func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult {
+        await controller.typeIntoPane(workspaceID, target: target, text: text)
     }
 
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
@@ -2662,18 +3246,34 @@ struct RemoteToolbarBar: View {
 @MainActor
 final class RemoteToolbarDelegate: NSObject, NSToolbarDelegate {
     static let itemID = NSToolbarItem.Identifier("io.bromure.ac.remote.controls")
+    /// The "Sending…" cue, left of the controls: in the toolbar only while
+    /// something is on its way, so the controls keep the trailing edge and
+    /// no empty bubble shows beside them.
+    static let sendingID = NSToolbarItem.Identifier("io.bromure.ac.remote.sending")
     private let rootView: AnyView
-    init(rootView: AnyView) { self.rootView = rootView }
+    private let sendingView: AnyView?
+    init(rootView: AnyView, sendingView: AnyView? = nil) {
+        self.rootView = rootView
+        self.sendingView = sendingView
+    }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.flexibleSpace, Self.itemID]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.itemID]
+        [.flexibleSpace, Self.sendingID, Self.itemID]
     }
     func toolbar(_ t: NSToolbar,
                  itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == Self.sendingID, let sendingView {
+            let item = NSToolbarItem(itemIdentifier: id)
+            let host = NSHostingView(rootView: sendingView)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            host.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            item.view = host
+            return item
+        }
         guard id == Self.itemID else { return nil }
         let item = NSToolbarItem(itemIdentifier: id)
         let host = NSHostingView(rootView: rootView)
@@ -2722,7 +3322,7 @@ final class RemoteRoomBackend: RoomStageBackend {
         guard let w = s.windowIndex else { return nil }
         // The session's own agent, not the workspace's default.
         window?.hintSessionTool(s.tool, profileID: s.profileID, window: w)
-        return window?.makeRemoteChatModel(id: s.profileID, window: w)
+        return window?.makeRemoteChatModel(id: s.profileID, window: w, session: s.id)
     }
 
     func startSwitchboard(_ room: AgentRoom) {
@@ -2827,6 +3427,9 @@ final class RemoteHostWindow: NSWindow {
     /// rebuilds the host — reusing it would show the previous tab's transcript
     /// until the next poll (the stale/blank flash a toggle worked around).
     private var beautifiedTabIndex: Int?
+    /// The session the mounted chat is for (`beautifiedTabIndex` alone is
+    /// reused by the next session to open in that window).
+    private var beautifiedSessionID: UUID?
     /// Boot "dive screen" overlaid on the stage while the shown workspace's VM
     /// boots and its tmux roster hasn't landed yet — the same cue the native
     /// window shows, so a reboot/base-image reset over the fat client reads as
@@ -2910,12 +3513,18 @@ final class RemoteHostWindow: NSWindow {
     private var expandedSidebarWidth: CGFloat = 240
     private static let sidebarRailWidth: CGFloat = 44
     /// Per-workspace settings editors (the pill's gearshape) — same
-    /// `ProfileEditorView` as local, saving over the tunnel.
-    private var settingsWindows: [Profile.ID: NSWindow] = [:]
+    /// `ProfileEditorView` as local, saving over the tunnel — and each one's
+    /// firewall edits, in force on the host as made: kept by a save, put
+    /// back by any other close, which also forgets the window.
+    private var settingsSessions: [Profile.ID: SettingsWindowSession] = [:]
     /// The full profile the settings editor opened with, so a save can diff it
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// A settings save still resolving, by workspace (its window may be
+    /// closed already): a reopen waits for it, so the new editor reads what
+    /// the save left in force and the old save can't touch the new window.
+    private var settingsSaves: [Profile.ID: Task<String?, Error>] = [:]
     /// The Trace Inspector (MITM proxy logs) — the same `TraceInspectorView` the
     /// local window opens, backed by a `RemoteTraceStore` that fetches the
     /// remote's records + decrypted bodies over the tunnel. One per host window.
@@ -2972,6 +3581,37 @@ final class RemoteHostWindow: NSWindow {
     /// A slow link is said in the title bar ("Slow connection · request RTT
     /// …") — an overlay pill sat on the session header. Re-armed on every
     /// change of the controller's link state.
+    /// "Sending…" left of the toolbar's controls while something the user
+    /// sent is still on its way past a beat. A trailing title-bar accessory
+    /// held its width even when empty and pushed the controls off the edge.
+    private func observeSending() {
+        withObservationTracking {
+            updateSendingItem()
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.observeSending() }
+        }
+    }
+
+    private func updateSendingItem() {
+        guard let tb = toolbar else { return }
+        let oldest = controller.outgoing.values.min()
+        let show = OutgoingIndicator.shows(oldest: oldest)
+        let at = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.sendingID }
+        if show, at == nil {
+            let controls = tb.items.firstIndex { $0.itemIdentifier == RemoteToolbarDelegate.itemID }
+            tb.insertItem(withItemIdentifier: RemoteToolbarDelegate.sendingID, at: controls ?? tb.items.count)
+        } else if !show, let at {
+            tb.removeItem(at: at)
+        }
+        // Not yet a beat old: look again when it is (the send may end first).
+        if let oldest, !show {
+            let wait = OutgoingIndicator.delay - Date().timeIntervalSince(oldest)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(wait, 0.01)) { [weak self] in
+                self?.updateSendingItem()
+            }
+        }
+    }
+
     private func observeLinkSubtitle() {
         withObservationTracking {
             let slow = controller.linkSlow && controller.linkPresentation != .reconnecting
@@ -2996,10 +3636,13 @@ final class RemoteHostWindow: NSWindow {
         observeLinkSubtitle()
         buildLayout()
         buildToolbar()
+        observeSending()
         showGrid()
+        controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
         controller.onSnapshotApplied = { [weak self] in
             guard let self else { return }
             self.syncSessionsHome()
+            self.refreshDashboardProfile()
             // Re-attempt the browser-MCP relay dial for the selected
             // workspace and any with an open/remembered browser: the
             // dial is guarded on a live VM, so a workspace selected
@@ -3028,7 +3671,11 @@ final class RemoteHostWindow: NSWindow {
             // they just approved) — re-show the boot dive screen so the reboot
             // reads as progress, not a frozen pane. Cleared when the fresh
             // roster lands (onTabsApplied).
-            if self.shownWorkspace == id { self.showBootCue(for: id) }
+            // Not over a live roster: that VM is up (its terminal is right
+            // there), whatever the reboot guess said.
+            if self.shownWorkspace == id, self.controller.tabsModel(for: id)?.rosterLive != true {
+                self.showBootCue(for: id)
+            }
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -3077,8 +3724,8 @@ final class RemoteHostWindow: NSWindow {
         clearDockerDashboard()
         clearKubeDashboard()
         clearRegistryDashboard()
-        for (_, w) in settingsWindows { w.close() }
-        settingsWindows.removeAll()
+        for s in Array(settingsSessions.values) { s.close() }
+        settingsSessions.removeAll()
         traceInspectorWindow?.close()   // willClose → reapTraceInspector stops polling
         traceInspectorWindow = nil
         remoteTraceStore?.stop()
@@ -3576,7 +4223,9 @@ final class RemoteHostWindow: NSWindow {
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
-        let delegate = RemoteToolbarDelegate(rootView: AnyView(bar))
+        let delegate = RemoteToolbarDelegate(
+            rootView: AnyView(bar),
+            sendingView: AnyView(OutgoingIndicator(controller: controller)))
         toolbarDelegate = delegate
         let tb = NSToolbar(identifier: "io.bromure.ac.remote")
         tb.delegate = delegate
@@ -3626,10 +4275,14 @@ final class RemoteHostWindow: NSWindow {
     /// (SSH-key import, subscription registration) stay hidden — their
     /// callbacks are nil, exactly like a freshly-created local profile.
     private func openWorkspaceSettings(_ id: Profile.ID) {
-        if let win = settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+        if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if let pending = self.settingsSaves[id] { _ = await pending.result }
+            // A close's revert (or a failed save's) only queues its POST:
+            // the fetch below reads the host once it has landed.
+            await c.firewallCommitsSent()
             let profile: Profile
             var credentialRefs: [CredentialRef]? = nil
             let remoteGlobalModels: ModelSettings
@@ -3653,8 +4306,11 @@ final class RemoteHostWindow: NSWindow {
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
             }
-            if let win = self.settingsWindows[id] { win.makeKeyAndOrderFront(nil); return }
+            if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
+            let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
+                                        commit: { [c] text in c.commitFirewall(id, rules: text); return true },
+                                        observeChanges: false)
             let win = NSWindow(
                 contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3685,6 +4341,7 @@ final class RemoteHostWindow: NSWindow {
                     self?.saveWorkspaceSettings(id, edited, generateSSH: generateSSH)
                 },
                 onCancel: { [weak self] in self?.closeSettingsWindow(id) },
+                onFirewallEdited: { live.edited($0) },
                 onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
                 claudeAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.registeredAt },
                 claudeReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["claude"]?.reauthRequiredAt },
@@ -3706,7 +4363,13 @@ final class RemoteHostWindow: NSWindow {
                 modelsPane: .workspace(global: remoteGlobalModels))
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
-            self.settingsWindows[id] = win
+            // Closed any way but a save: the firewall edits go back, and the
+            // window is forgotten — reopening reads the rules in force.
+            self.settingsSessions[id] = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+                guard let self, self.settingsSessions[id] === gone else { return }
+                self.settingsSessions[id] = nil
+                self.settingsOriginals[id] = nil
+            }
         }
     }
 
@@ -3726,7 +4389,18 @@ final class RemoteHostWindow: NSWindow {
         a.addButton(withTitle: NSLocalizedString("Continue", comment: ""))
         a.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID)
+        // A run that ends without its credential says why here: the host's
+        // own notice lands on a Mac nobody may be sitting at.
+        controller.beginRemoteRegistration(provider: provider.rawValue, profileID: profileID) { [weak self] ok, message in
+            guard !ok, let self else { return }
+            let failed = NSAlert()
+            failed.alertStyle = .warning
+            failed.messageText = String(format: NSLocalizedString("Register with %@", comment: ""), provider.displayName)
+            // A host older than the reasons sends none: still say it failed.
+            failed.informativeText = message ?? NSLocalizedString(
+                "The sign-in didn't complete. You can try again.", comment: "sign-in")
+            failed.beginSheetModal(for: self)
+        }
     }
 
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
@@ -3737,12 +4411,39 @@ final class RemoteHostWindow: NSWindow {
         if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
         if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
+        // Notes and the Squelch switch left as the window opened them aren't
+        // this save's: the host keeps what it has (a dashboard save, the
+        // sidebar's switch meanwhile).
+        if let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
         let c = controller
-        Task { @MainActor [weak self] in
+        // The firewall's live commits and this document are one ordered
+        // stream: nothing more goes live, the ones sent land first, then the
+        // document — the editor as it was at the click, every field alike —
+        // and a close meanwhile only reverts if the save fails.
+        // This window's session, not whichever is open when the save lands.
+        let session = settingsSessions[id]
+        let live = session?.live
+        // One save at a time: a second document could land before the first.
+        guard live?.isSaving != true, settingsSaves[id] == nil else { return }
+        live?.beginSave()
+        let save = Task { @MainActor () throws -> String? in
             do {
+                await c.firewallCommitsSent()
                 let resp = try await c.saveProfileDoc(id, doc)
-                self?.closeSettingsWindow(id)
-                if generateSSH, let pub = resp["sshPublicKey"] as? String, !pub.isEmpty {
+                live?.keep()
+                session?.close()
+                return resp["sshPublicKey"] as? String
+            } catch {
+                live?.saveFailed()
+                throw error
+            }
+        }
+        settingsSaves[id] = save
+        Task { @MainActor [weak self] in
+            defer { if self?.settingsSaves[id] == save { self?.settingsSaves[id] = nil } }
+            do {
+                let pub = try await save.value
+                if generateSSH, let pub, !pub.isEmpty {
                     let a = NSAlert()
                     a.messageText = NSLocalizedString("New SSH key generated", comment: "")
                     a.informativeText = String(format: NSLocalizedString(
@@ -3783,8 +4484,8 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func closeSettingsWindow(_ id: Profile.ID) {
-        settingsWindows[id]?.close()
-        settingsWindows[id] = nil
+        settingsSessions[id]?.close()
+        settingsSessions[id] = nil
         settingsOriginals[id] = nil
     }
 
@@ -3985,6 +4686,9 @@ final class RemoteHostWindow: NSWindow {
             credentials: { [controller] id in
                 controller.credentials(for: id).map { ($0.github, $0.linear) }
             },
+            toolSpecs: { [controller] p in controller.readyToolSpecs(for: p) },
+            sources: controller.automationSources,
+            listFolders: { [controller] pid, path in await controller.listSessionFolders(profileID: pid, path: path) },
             editing: id,
             prefill: prefill,
             initialTrigger: trigger,
@@ -4116,13 +4820,34 @@ final class RemoteHostWindow: NSWindow {
                     toggleWatch: { c.watchCommand($0, "toggle") },
                     scanNow: { c.watchCommand($0, "scan") },
                     scanBaseline: { c.watchCommand($0, "baseline") },
-                    fix: { c.findingCommand($0, "fix") },
-                    routeToSwitchboard: { id, room in
-                        c.findingCommand(id, "switchboard", body: room.map { ["room": $0.uuidString] } ?? [:])
+                    fix: { id, confirmed, done in
+                        // Wait for the host: it refuses a flag this mirror
+                        // hasn't shown yet, and the hub then asks.
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/fix",
+                                  body: confirmed ? ["confirmed": true] : [:]) { status, json in
+                            done(.fromServer(status: status, json: json))
+                        }
                     },
-                    askSession: { [weak self] id, sid in
-                        c.findingCommand(id, "session", body: ["session": sid.uuidString])
-                        self?.selectSession(sid)
+                    routeToSwitchboard: { id, room, confirmed, done in
+                        var body: [String: Any] = room.map { ["room": $0.uuidString] } ?? [:]
+                        if confirmed { body["confirmed"] = true }
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/switchboard",
+                                  body: body) { status, json in
+                            done(.fromServer(status: status, json: json))
+                        }
+                    },
+                    askSession: { id, sid, confirmed, done in
+                        // Wait for the server's answer: an older server
+                        // doesn't know the route. The user stays in the
+                        // code review, as on the local window: the
+                        // finding's row says it's in progress and opens
+                        // the task.
+                        c.request("POST", "/findings/\(ControlClient.encodeSegment(id.uuidString))/session",
+                                  body: ["session": sid.uuidString, "confirmed": confirmed]) { status, json in
+                            done(HandOverReply.fromServer(status: status, json: json, olderServer: NSLocalizedString(
+                                "the server runs an older Bromure — update it to hand findings to a session",
+                                comment: "finding → session failure")))
+                        }
                     },
                     sessionChoices: {
                         PeerMention.candidates(c.sessionStore.sessions.filter { !$0.isSwitchboard },
@@ -4138,9 +4863,8 @@ final class RemoteHostWindow: NSWindow {
                         c.findingCommand(id, "duplicate", body: ["of": of.uuidString])
                     },
                     deleteFinding: { c.findingCommand($0, "") },
-                    // No remote repo listing: the editor falls back to typing
-                    // owner/name.
-                    fetchRepos: { _ in [] }))
+                    // Listed by the host, with the workspace's token.
+                    fetchRepos: { [controller = c] pid in try await controller.automationSources.repos(pid) }))
             let host = NonMovableHostingView(rootView: view)
             host.sizingOptions = []   // never let board sizing resize the mirror window
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -4201,8 +4925,8 @@ final class RemoteHostWindow: NSWindow {
                                    app: .merge)
             },
             sendBack: { [weak self] id in self?.controller.taskCommand(id, "send-back") },
-            land: { [weak self] id, mode, target, keep in
-                var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep]
+            land: { [weak self] id, mode, target, keep, push in
+                var body: [String: Any] = ["mode": mode.rawValue, "keepBranch": keep, "push": push]
                 if let target { body["target"] = target }
                 self?.controller.taskCommand(id, "land", body: body)
             },
@@ -4233,6 +4957,21 @@ final class RemoteHostWindow: NSWindow {
                 var body: [String: Any] = ["path": path]
                 if let fp { body["fingerprint"] = fp }
                 self?.controller.taskCommand(id, "viewed", body: body)
+            },
+            relocate: { [weak self] task in
+                // The host looks (one exec per candidate session); the
+                // mirror shows what it found.
+                guard let self, await self.controller.taskCommandReply(task.id, "locate", body: [:]) != nil
+                else { return false }
+                // The mirror shows the host looking (`isLocating`) at once.
+                self.controller.foregroundKick()
+                // Until the host's look ends (it tries one session after
+                // another): as long as the mirror shows it looking, within
+                // `locateWindow`; 20 s for a host that never shows it (older).
+                // Review closed (the task cancelled) ends it at once.
+                let controller = self.controller
+                return await CodingTask.awaitLocate(task: { controller.taskStore.task(task.id) },
+                                                    kick: { controller.foregroundKick() })
             }))
 
     /// Native planning-conversation windows for the mirrored board — the
@@ -4463,6 +5202,7 @@ final class RemoteHostWindow: NSWindow {
                 store: c.taskStore,
                 model: c.listModel,
                 profilesProvider: { c.profiles },
+                toolSpecs: { c.readyToolSpecs(for: $0) },
                 actions: CodingKanbanView.Actions(
                     start: { c.taskCommand($0, "start") },
                     plan: { [weak self] id in
@@ -4476,10 +5216,16 @@ final class RemoteHostWindow: NSWindow {
                     moveToTesting: { c.taskCommand($0, "to-testing") },
                     backToInProgress: { c.taskCommand($0, "to-in-progress") },
                     merge: { [weak self] id in self?.taskReviewWindows.open(taskID: id, confirm: .merge) },
+                    mergeBatch: { ids, push in
+                        guard let first = ids.first else { return }
+                        c.taskCommand(first, "merge-batch",
+                                      body: ["with": ids.dropFirst().map(\.uuidString), "push": push])
+                    },
                     closeNoMerge: { c.taskCommand($0, "close-no-merge") },
                     markDone: { c.taskCommand($0, "mark-done") },
                     stop: { c.taskCommand($0, "stop") },
                     startOver: { c.taskCommand($0, "start-over") },
+                    reorder: { c.taskCommand($0, "rank", body: ["rank": $1]) },
                     delete: { c.deleteTask($0) },
                     save: { c.upsertTask($0) },
                     validate: { task in
@@ -4512,7 +5258,16 @@ final class RemoteHostWindow: NSWindow {
                             c.taskCommand(id, "assign", body: ["kind": "none"])
                         }
                     },
-                    answer: { id, text in c.taskCommand(id, "answer", body: ["text": text]) },
+                    answer: { id, ask, text in
+                        // The server's word on it: refused (the agent asked
+                        // again), or not answered — the sheet keeps the text.
+                        // The server replies once the answer went (its scan
+                        // included): wait for it.
+                        let r = await c.taskCommandReply(
+                            id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
+                            recvTimeoutSeconds: 180)
+                        return RemoteHostController.answerAccepted(r)
+                    },
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),
                 sessionStore: c.sessionStore)
@@ -4568,6 +5323,65 @@ final class RemoteHostWindow: NSWindow {
     /// The toast that offers Undo after a quick action.
     private lazy var toasts = UndoToastHost(window: self)
     private var flagsMonitor: Any?
+
+    /// "Delete workspace" on the server's machine — the local window's
+    /// question, then DELETE /profiles/<id>. A running workspace is refused
+    /// there (shut it down first); the server's reason is shown.
+    private func confirmDeleteWorkspace(_ id: UUID) {
+        guard let p = controller.profile(for: id) else { return }
+        let alert = NSAlert()
+        alert.messageText = String(format: NSLocalizedString("Delete workspace “%@”?", comment: "delete workspace"), p.name)
+        alert.informativeText = NSLocalizedString(
+            "Removes its disk, settings, and SSH key. The mounted host folder is untouched.",
+            comment: "delete workspace")
+        alert.addButton(withTitle: NSLocalizedString("Delete", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn, let self else { return }
+            self.controller.request("DELETE", "/profiles/\(ControlClient.encodeSegment(id.uuidString))") { [weak self] status, json in
+                guard status != 200 else { self?.controller.workspaceDeleted(id); return }
+                let why = (json["error"] as? String) ?? NSLocalizedString(
+                    "The server didn't answer.", comment: "delete workspace failure")
+                let fail = NSAlert()
+                fail.messageText = String(format: NSLocalizedString("Couldn't delete “%@”", comment: "delete workspace failure"), p.name)
+                fail.informativeText = why
+                guard let self else { return }
+                fail.beginSheetModal(for: self)
+            }
+        }
+        alert.beginSheetModal(for: self, completionHandler: go)
+    }
+
+    /// "Wipe and Restore…" / "Clear Compromised Mark…" on a remote workspace
+    /// marked compromised: asked here, done by the server.
+    private func confirmCompromiseRemedy(_ id: UUID, _ remedy: CompromiseRemedy) {
+        guard let p = controller.profile(for: id) else { return }
+        let (title, message, button) = ACAppDelegate.compromiseActionParts(remedy, name: p.name)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.first?.keyEquivalent = ""   // an explicit click, never Return
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn, let self else { return }
+            self.controller.request("POST", "/profiles/\(ControlClient.encodeSegment(id.uuidString))/compromised",
+                                    body: ["action": remedy.rawValue]) { [weak self] status, json in
+                guard status != 200, let self else { return }
+                let fail = NSAlert()
+                fail.messageText = String(format: remedy == .wipe
+                    ? NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace")
+                    : NSLocalizedString("Couldn't clear the mark on “%@”", comment: "compromised workspace"), p.name)
+                fail.informativeText = (json["error"] as? String) ?? NSLocalizedString(
+                    "The server didn't answer.", comment: "delete workspace failure")
+                fail.beginSheetModal(for: self)
+            }
+        }
+        alert.beginSheetModal(for: self, completionHandler: go)
+    }
 
     private func confirmDeleteSession(_ id: UUID) {
         guard let s = controller.sessionStore.session(id) else { return }
@@ -4910,6 +5724,7 @@ final class RemoteHostWindow: NSWindow {
                 }
             },
             editMachine: { [weak self] pid in self?.openWorkspaceSettings(pid) },
+            setSquelch: { [weak self] pid, on in self?.controller.setSquelch(pid, on) },
             openLinux: { [weak self] sid in self?.showLinux(for: sid) },
             openRoom: { [weak self] id in self?.showRoom(id) },
             newRoom: { [weak self] name, sid in
@@ -4991,11 +5806,21 @@ final class RemoteHostWindow: NSWindow {
             },
             onStart: { [weak self] req in
                 Task { @MainActor in
-                    guard let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
-                                                        cloneURL: req.cloneURL, message: req.openingMessage,
-                                                        attachments: req.attachments, room: room,
-                                                        instructions: req.instructions),
-                          let self else { return }
+                    let id = await c.startSession(profileID: req.profileID, tool: req.tool, cwd: req.cwd,
+                                                  cloneURL: req.cloneURL, message: req.openingMessage,
+                                                  attachments: req.attachments, room: room,
+                                                  instructions: req.instructions)
+                    guard let self else { return }
+                    guard let id else {
+                        // Refused (a Sidecar without the agent, a folder that
+                        // isn't there) or unanswered: say why, on this window.
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = NSLocalizedString("Couldn't start the session", comment: "session start failure")
+                        alert.informativeText = c.lastStartError ?? ""
+                        alert.beginSheetModal(for: self, completionHandler: nil)
+                        return
+                    }
                     // Started from a room: back to its grid, where it launches.
                     if let room, c.roomStore.room(room) != nil { self.showRoom(room); return }
                     // The mirror gets it with the next poll; select it then.
@@ -5029,6 +5854,7 @@ final class RemoteHostWindow: NSWindow {
         let model = controller.listModel
         if selectedSessionID == id, !model.newSessionSelected {
             presentSession(s)
+            controller.markRead(id)
             return
         }
         gridView?.removeFromSuperview()
@@ -5048,6 +5874,23 @@ final class RemoteHostWindow: NSWindow {
         UserDefaults.standard.set(id.uuidString, forKey: Self.remoteSelectedSessionKey)
         sessionPresentationKey = nil
         presentSession(s)
+        controller.markRead(id)
+    }
+
+    /// The sessions on this window's stage while the user can see them (the
+    /// window key, the app active): one, or a room's page. Their replies are
+    /// read as they come.
+    var sessionsOnScreen: [UUID] {
+        let model = controller.listModel
+        guard NSApp.isActive, isKeyWindow, isVisible, !isMiniaturized, !model.newSessionSelected else { return [] }
+        if let rc = roomController { return rc.onScreenIDs }
+        return model.selectedSessionID.map { [$0] } ?? []
+    }
+
+    /// Back to this window (or to the app): what's on its stage is seen.
+    override func becomeKey() {
+        super.becomeKey()
+        for id in sessionsOnScreen { controller.markRead(id) }
     }
 
     private func sessionStageDidChange() {
@@ -5323,8 +6166,19 @@ final class RemoteHostWindow: NSWindow {
         rc.onResumeAll = { ids in for sid in ids { c.sessionCommand(sid, "resume") } }
         rc.onEndAll = { ids in for sid in ids { c.sessionCommand(sid, "close") } }
         roomController = rc
+        // As the host's showRoom: wired before the view goes in, marked at
+        // once, and called once after the room opens (CWE-670, "Opening a
+        // room in the focused window never marks the chats on screen").
+        rc.onShownChanged = { [weak self, weak rc] in
+            guard let ids = rc?.onScreenIDs, !ids.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isKeyWindow, NSApp.isActive else { return }
+                for sid in ids { c.markRead(sid) }
+            }
+        }
         setSessionHeader(visible: false)
         showSessionOverlay(RoomStageView(controller: rc))
+        rc.onShownChanged?()
     }
 
     /// Leave the room stage (its chat models stop polling).
@@ -5458,6 +6312,7 @@ final class RemoteHostWindow: NSWindow {
 
     private static let debugReadBackActions: Set<String> = [
         "get-mirror-state", "window-info", "focused", "trace-records", "shot", "fc-drop-images",
+        "request-report",
     ]
 
     /// Drive rich-client features headlessly for the E2E harness. Control-plane
@@ -5643,6 +6498,12 @@ final class RemoteHostWindow: NSWindow {
                      "bucket": SessionHome.bucket(for: $0, in: model).title] as [String: Any]
                 },
             ]
+        case "request-report":
+            // What the remote control requests cost, per route (RequestLedger);
+            // {"reset": true} starts a fresh window.
+            let r = RequestLedger.shared.report()
+            if (p["reset"] as? Bool) == true { RequestLedger.shared.reset() }
+            return r
         case "get-mirror-state":
             return [
                 "connected": controller.connected,
@@ -5860,7 +6721,7 @@ final class RemoteHostWindow: NSWindow {
             return ["ok": true]
         case "shot-settings":
             // E2E hook: render that editor window to a PNG (`path`).
-            guard let id = resolveID(), let win = settingsWindows[id] else {
+            guard let id = resolveID(), let win = settingsSessions[id]?.window else {
                 return ["error": "settings window not open"]
             }
             let path = (p["path"] as? String) ?? "/tmp/bromure-remote-settings.png"
@@ -6421,9 +7282,12 @@ final class RemoteHostWindow: NSWindow {
             onSuspend: { [weak self] id in self?.controller.suspendWorkspace(id) },
             onRestart: { [weak self] id in self?.confirmReboot(id) },
             onEdit: { [weak self] id in self?.openWorkspaceSettings(id) },
-            onDuplicate: { _ in },
-            onReset: { _ in },
-            onDelete: { _ in },
+            // No route for these on the server: not offered, rather than a
+            // menu item that does nothing.
+            onDuplicate: nil,
+            onReset: nil,
+            onDelete: { [weak self] id in self?.confirmDeleteWorkspace(id) },
+            onCompromise: { [weak self] id, remedy in self?.confirmCompromiseRemedy(id, remedy) },
             // Option-click runs the credential wizard first, same gesture as
             // the local window's "+".
             onNewProfile: { [weak self] in
@@ -6597,13 +7461,71 @@ final class RemoteHostWindow: NSWindow {
             onSuspend:     { c.suspendWorkspace(id) },
             onReboot:      { [weak self] in self?.confirmReboot(id) },
             onShutdown:    { c.shutdownWorkspace(id) },
-            onResume:      { c.startWorkspace(id) })
+            onResume:      { c.startWorkspace(id) },
+            // A partial document: the host overlays the one field it names.
+            onSaveNotes:   { text, base in await c.saveNotesInOrder(id, text, ifStill: base) })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         host.sizingOptions = []   // never let SwiftUI size the window
         dashboardHost = host
         shownDashboard = (id, state)
         mount(host)
+    }
+
+    /// A snapshot changed the shown workspace's profile (notes saved in its
+    /// settings, a rename): the dashboard shows the new copy without being
+    /// rebuilt, so its vitals history keeps.
+    private func refreshDashboardProfile() {
+        guard let id = shownDashboard?.id, let host = dashboardHost,
+              let profile = controller.profile(for: id) else { return }
+        var view = host.rootView
+        guard view.profile != profile else { return }
+        view.profile = profile
+        view.accentHex = profile.color.hexInUI
+        host.rootView = view
+    }
+
+    /// A deleted workspace leaves the stage, the selection, its pop-out and
+    /// its settings window — at once after our delete (no new revision), or
+    /// at the snapshot that drops it.
+    private func leaveGoneWorkspaces() {
+        // Its browser first, while the stage/selection still name it: the
+        // pane closes (the globe and ⌘⌃B had no id left to close it with),
+        // its local browser VM stops, and the browser-MCP relay that dialed
+        // the deleted id forever ends. Its terminal surfaces are retired.
+        let release = Self.goneIDs(in: browserOpen.union(shownBrowser.map { [$0] } ?? [])
+            .union(browserControllers.keys).union(browserRelays.keys).union(termControllers.keys)
+            .union(browserModels.keys), isGone: controller.isGone)
+        for id in release {
+            if shownBrowser == id {
+                setBrowserOpen(id, false)
+            } else if browserOpen.contains(id) {
+                // Only remembered open (another workspace's browser is on
+                // screen): forgotten, never collapsing the pane that shows.
+                browserOpen.remove(id)
+                browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+                controller.listModel.browserOpenWorkspaces = browserOpen
+            }
+            browserControllers.removeValue(forKey: id)?.stop()
+            browserRelays.removeValue(forKey: id)?.stop()
+            browserModels[id] = nil
+            if shownWorkspace != id { termControllers.removeValue(forKey: id)?.retireAll() }
+        }
+        if let id = shownDashboard?.id, controller.isGone(id) { clearVMDashboard() }
+        if let id = shownWorkspace, controller.isGone(id) {
+            unmountTerminal()
+            termControllers.removeValue(forKey: id)?.retireAll()
+        }
+        if let id = controller.listModel.selectedID, controller.isGone(id) {
+            controller.listModel.selectedID = nil
+        }
+        for id in Array(popOutWindows.keys) where controller.isGone(id) { popOutWindows[id]?.close() }
+        for id in Array(settingsSessions.keys) where controller.isGone(id) { closeSettingsWindow(id) }
+    }
+
+    /// The ids among `ids` whose workspace is gone from the mirror.
+    nonisolated static func goneIDs(in ids: Set<Profile.ID>, isGone: (Profile.ID) -> Bool) -> [Profile.ID] {
+        ids.filter(isGone).sorted { $0.uuidString < $1.uuidString }
     }
 
     private func clearVMDashboard() {
@@ -7080,29 +8002,33 @@ final class RemoteHostWindow: NSWindow {
     /// sessions on one machine the same transcript.
     private func mountBeautified(for id: Profile.ID, window idx: Int) {
         let tabIndex: Int? = idx
-        // Keep the live host only for the same workspace AND the same tab; a
-        // different tab (or workspace) rebuilds so the transcript matches the
-        // tab on screen instead of lagging a poll behind.
-        if beautifiedWorkspace == id, beautifiedTabIndex == tabIndex, mountedBeautifiedHost != nil {
+        let sid = controller.sessionStore.session(profileID: id, windowIndex: idx)?.id
+        // Keep the live host only for the same workspace, tab AND session; a
+        // different one rebuilds so the transcript matches the tab on screen
+        // instead of lagging a poll behind — or, in a window a closed
+        // session left, showing that session's conversation.
+        if beautifiedWorkspace == id, beautifiedTabIndex == tabIndex, beautifiedSessionID == sid,
+           mountedBeautifiedHost != nil {
             shownWorkspace = id; return
         }
         unmountBeautified()
         mountedTermView?.removeFromSuperview(); mountedTermView = nil
         // A chat shown lately is still warm (kept streaming off stage):
         // reuse it — switching back is a render, not a download.
-        let key = "\(id.uuidString):\(idx)"
+        let key = Self.warmChatKey(id, idx, sid)
         let m: BeautifiedSessionModel
         if let warm = warmChats.removeValue(forKey: key) {
             warmChatOrder.removeAll { $0 == key }
             m = warm
             m.setBackground(false)
         } else {
-            m = makeRemoteChatModel(id: id, window: idx)
+            m = makeRemoteChatModel(id: id, window: idx, session: sid)
             m.start()
         }
         beautifiedModel = m
         beautifiedWorkspace = id
         beautifiedTabIndex = tabIndex
+        beautifiedSessionID = sid
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         // A long conversation's fitting height (thousands of points) must
         // never become the window's minimum.
@@ -7118,13 +8044,16 @@ final class RemoteHostWindow: NSWindow {
     /// the stage's own (delegations, mentions, slash commands, sign-in, the
     /// inline terminal) — not started. The stage mounts one; a room's grid
     /// builds one per session.
-    func makeRemoteChatModel(id: Profile.ID, window idx: Int) -> BeautifiedSessionModel {
+    func makeRemoteChatModel(id: Profile.ID, window idx: Int, session: UUID? = nil) -> BeautifiedSessionModel {
         let tabIndex: Int? = idx
         let accent = controller.profile(for: id).map { Color(hex: $0.color.hexInUI) } ?? .accentColor
+        let sid = session ?? controller.sessionStore.session(profileID: id, windowIndex: idx)?.id
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: id,
-                                                windowIndex: idx, accent: accent)
+                                                windowIndex: idx, sessionID: sid, accent: accent)
         let m = BeautifiedSessionModel(provider: provider)
-        m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)"
+        // Per session too: the next session in a reused window must not
+        // open on the previous one's unsent draft.
+        m.draftKey = "\(controller.host.id.uuidString):\(id.uuidString):\(idx)" + (sid.map { ":\($0.uuidString)" } ?? "")
         m.cachedTranscript = { [weak controller] sid in controller?.cachedTranscript(sid) }
         // Delegations this session is part of (read-only here: answering
         // for the agent is done on the server's own window), and the jump
@@ -7203,8 +8132,20 @@ final class RemoteHostWindow: NSWindow {
                         "This tab isn't a session — sign in from the machine's settings instead.", comment: "sign-in")))
                     return
                 }
-                self.controller.sessionCommand(s.id, "signin")
                 events(.status(NSLocalizedString("Sign-in started — your browser will open shortly…", comment: "sign-in")))
+                // The card hears the end: a refused start in the reply, a
+                // later one (refused page, timeout, success) through /state.
+                Task { @MainActor [weak self] in
+                    let r = await self?.controller.sessionRequest(s.id, "signin")
+                    guard let self else { return }
+                    if let run = r?.json["registration"] as? String {
+                        self.controller.awaitRegistration(run) { ok, message in
+                            events(.finished(success: ok, message: message))
+                        }
+                    } else if r.map({ $0.status >= 400 }) ?? true {
+                        events(.finished(success: false, message: r?.json["error"] as? String))
+                    }
+                }
             }
         }
         // An interactive slash command shows the tab's real terminal inline —
@@ -7245,10 +8186,15 @@ final class RemoteHostWindow: NSWindow {
     private var warmChats: [String: BeautifiedSessionModel] = [:]
     private var warmChatOrder: [String] = []
     private static let warmChatLimit = 4
+    /// A warm chat is a session's, in a window: the window alone was the
+    /// previous session's chat for the next one to open there.
+    static func warmChatKey(_ workspace: Profile.ID, _ window: Int, _ session: UUID?) -> String {
+        "\(workspace.uuidString):\(window)" + (session.map { ":\($0.uuidString)" } ?? "")
+    }
 
     private func unmountBeautified() {
         if let m = beautifiedModel, let id = beautifiedWorkspace, let idx = beautifiedTabIndex {
-            let key = "\(id.uuidString):\(idx)"
+            let key = Self.warmChatKey(id, idx, beautifiedSessionID)
             m.setBackground(true)
             warmChats[key] = m
             warmChatOrder.removeAll { $0 == key }
@@ -7262,6 +8208,7 @@ final class RemoteHostWindow: NSWindow {
         beautifiedModel = nil
         beautifiedWorkspace = nil
         beautifiedTabIndex = nil
+        beautifiedSessionID = nil
         mountedBeautifiedHost?.removeFromSuperview()
         mountedBeautifiedHost = nil
     }
@@ -7317,6 +8264,7 @@ final class RemoteHostWindow: NSWindow {
         if reconnectHost.isHidden == showOverlay {
             reconnectHost.isHidden = !showOverlay
         }
+        leaveGoneWorkspaces()
         guard controller.revision != lastRevision else { return }
         lastRevision = controller.revision
         // Test hook: auto-select a named workspace once it's running.
@@ -7644,4 +8592,72 @@ extension RemoteHostController: RemoteDelegationLink {
         let size = (r["size"] as? Int64) ?? Int64((r["size"] as? Int) ?? 0)
         return (data, size, (r["eof"] as? Bool) ?? data.isEmpty)
     }
+}
+
+#if os(macOS)
+/// The title bar's "Sending…" cue: an upload arrow that pulses while what
+/// the user sent (an action, a prompt, a new session) is still on its way —
+/// shown only past a beat, so a quick link never flickers it.
+struct OutgoingIndicator: View {
+    let controller: RemoteHostController
+    @State private var shown = false
+
+    static let delay: TimeInterval = 0.4
+
+    /// Whether the cue shows: something still on its way for a beat.
+    static func shows(oldest: Date?, now: Date = Date()) -> Bool {
+        guard let oldest else { return false }
+        return now.timeIntervalSince(oldest) >= delay
+    }
+
+    var body: some View {
+        let count = controller.outgoing.count
+        HStack(spacing: 4) {
+            if shown, count > 0 {
+                Image(systemName: "arrow.up.circle")
+                    .symbolEffect(.pulse, options: .repeating)
+                    .foregroundStyle(.secondary)
+                Text(count > 1
+                     ? String(format: NSLocalizedString("Sending %d…", comment: "fat client title bar: requests on their way"), count)
+                     : NSLocalizedString("Sending…", comment: "fat client title bar: a request on its way"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.2), value: shown && count > 0)
+        .help(NSLocalizedString("Still sending to the host — the link is slow", comment: "fat client title bar"))
+        .task(id: controller.outgoing.values.min()) {
+            // Only once the oldest still-pending send has waited a beat.
+            guard let oldest = controller.outgoing.values.min() else { shown = false; return }
+            let wait = Self.delay - Date().timeIntervalSince(oldest)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            if !Task.isCancelled { shown = Self.shows(oldest: controller.outgoing.values.min()) }
+        }
+    }
+}
+#endif
+
+/// Runs the operations given for one key one after the other, in the order
+/// they were asked for; different keys don't wait on each other.
+@MainActor
+final class InOrder<Key: Hashable, Value> {
+    private var tails: [Key: Task<Value, Never>] = [:]
+
+    func run(_ key: Key, _ operation: @escaping @MainActor () async -> Value) async -> Value {
+        let previous = tails[key]
+        let task = Task { @MainActor in
+            _ = await previous?.value
+            return await operation()
+        }
+        tails[key] = task
+        let value = await task.value
+        if tails[key] == task { tails[key] = nil }
+        return value
+    }
+
+    var idle: Bool { tails.isEmpty }
 }

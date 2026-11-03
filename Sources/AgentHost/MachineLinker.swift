@@ -178,17 +178,19 @@ final class MachineLinker: @unchecked Sendable {
         case "delegation-mcp":
             // Carries the next agent MCP stream to the server's engine.
             let done = DispatchSemaphore(value: 0)
-            DelegationHub.shared.park { shim in
-                // The server may have gone while this waited: don't hand an
-                // agent's stream to a dead link (it'd reconnect, but lose a call).
-                guard Self.isOpen(fd) else { done.signal(); return false }
+            DelegationHub.shared.park({ shim in
+                // The server may have gone while this waited (or dropped a
+                // slot nobody took, to dial a fresh one): don't hand an
+                // agent's stream to a dead link (it'd reconnect, but lose a
+                // call). -1: pruned by a later park.
+                guard shim >= 0, Self.isOpen(fd) else { done.signal(); return false }
                 Thread.detachNewThread {
                     Self.splice(fd, shim)
                     close(shim)
                     done.signal()
                 }
                 return true
-            }
+            }, alive: { Self.isOpen(fd) })
             done.wait()
         default:
             AgentHostLog.log("attach: unknown verb \(verb)")

@@ -61,3 +61,43 @@ struct AgentStatusDot: View {
         .help(help)
     }
 }
+
+/// A session's unread mark: the agent said something (it finished, or it's
+/// asking) and nobody has looked yet. A small orb whose colours slowly turn,
+/// with a soft glow -- read at a glance down a list, never loud. Still under
+/// Reduce Motion. Shared by the Mac sidebar, the fat client and iOS.
+struct UnreadMark: View {
+    var size: CGFloat = 9
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let colors: [Color] = [
+        Color(red: 0.30, green: 0.55, blue: 1.00), Color(red: 0.62, green: 0.40, blue: 1.00),
+        Color(red: 0.20, green: 0.80, blue: 0.95), Color(red: 0.30, green: 0.55, blue: 1.00),
+    ]
+
+    private func orb(_ angle: Double) -> some View {
+        Circle()
+            .fill(AngularGradient(colors: Self.colors, center: .center, angle: .degrees(angle)))
+            .overlay(Circle().fill(RadialGradient(colors: [.white.opacity(0.55), .clear], center: .init(x: 0.32, y: 0.28),
+                                                  startRadius: 0, endRadius: size * 0.55)))
+            .frame(width: size, height: size)
+            .shadow(color: Self.colors[0].opacity(0.55), radius: size * 0.45)
+    }
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                orb(0)
+            } else {
+                // A slow turn (one every 6 s), redrawn at 20 fps at most: a
+                // handful of these in a sidebar costs next to nothing, and the
+                // timeline stops with the view (no lingering animation).
+                TimelineView(.animation(minimumInterval: 1.0 / 20)) { t in
+                    orb(t.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) * 60)
+                }
+            }
+        }
+        .accessibilityLabel(NSLocalizedString("Unread", comment: "session list: the agent replied and the user hasn't looked"))
+        .help(NSLocalizedString("Unread", comment: "session list: the agent replied and the user hasn't looked"))
+    }
+}

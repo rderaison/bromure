@@ -67,7 +67,10 @@ final class AgentInstaller: ObservableObject {
     static let shared = AgentInstaller()
 
     enum Phase: Equatable {
+        /// Before any scan, or while the first one runs.
         case unknown
+        /// The last scan didn't finish (the login shell timed out): no verdict.
+        case unchecked
         case missing
         case installed(version: String, path: String)
         case queued
@@ -77,6 +80,8 @@ final class AgentInstaller: ObservableObject {
 
     @Published private(set) var phases: [String: Phase] = [:]
     @Published private(set) var scanning = false
+    /// The last scan ran to its end (`AgentDetection.Scan.complete`).
+    @Published private(set) var lastScanComplete = false
     @Published private(set) var busy = false
     /// Each agent's installer output, for "Show log".
     @Published private(set) var logs: [String: String] = [:]
@@ -89,11 +94,28 @@ final class AgentInstaller: ObservableObject {
 
     func phase(_ id: String) -> Phase { phases[id] ?? .unknown }
 
-    /// True only when a scan ran and didn't find it (unknown ≠ missing).
+    /// True only when a complete scan didn't find it (unknown ≠ missing),
+    /// and it still isn't in an installer's folder or on the login PATH:
+    /// a stale verdict (installed since, or a scan that went wrong) never
+    /// refuses a start — it's dropped, and a fresh scan runs.
     /// Read from any thread: session starts run off the main one.
     nonisolated static func isKnownMissing(_ id: String) -> Bool {
-        missingLock.lock(); defer { missingLock.unlock() }
-        return knownMissing.contains(id)
+        missingLock.lock()
+        let listed = knownMissing.contains(id)
+        missingLock.unlock()
+        guard listed else { return false }
+        guard AgentDetection.onDisk([id], dirs: searchDirs(), home: NSHomeDirectory())[id] != nil else { return true }
+        missingLock.lock(); knownMissing.remove(id); missingLock.unlock()
+        AgentHostLog.log("agents: \(id) found on disk after a scan missed it; rescanning")
+        Task { @MainActor in AgentInstaller.shared.scan() }
+        return false
+    }
+
+    /// Where an agent's binary may be without asking a shell: the
+    /// installers' folders, then the login PATH.
+    nonisolated static func searchDirs() -> [String] {
+        let path = HostEnvironment.forCommands()["PATH"] ?? ""
+        return extraBins + path.split(separator: ":").map(String.init)
     }
     nonisolated private static let missingLock = NSLock()
     nonisolated(unsafe) private static var knownMissing: Set<String> = []
@@ -110,7 +132,7 @@ final class AgentInstaller: ObservableObject {
         scanning = true
         let ids = AgentSpec.all.map(\.id)
         Task.detached {
-            let found = Self.detect(ids)
+            let (found, missing, complete) = Self.detect(ids)
             await MainActor.run {
                 for id in ids {
                     switch self.phases[id] {
@@ -121,39 +143,43 @@ final class AgentInstaller: ObservableObject {
                         self.phases[id] = .installed(version: version, path: path)
                     } else if case .failed? = self.phases[id] {
                         continue                          // keep the error visible
-                    } else {
+                    } else if missing.contains(id) {
                         self.phases[id] = .missing
+                    } else {
+                        self.phases[id] = .unchecked      // the scan didn't finish: no verdict
                     }
                 }
+                self.lastScanComplete = complete
                 self.scanning = false
                 self.publishMissing()
             }
         }
     }
 
-    /// `@@A@@id|path|version@@` per agent found; the markers skip whatever
-    /// the user's rc files print.
-    nonisolated static func detect(_ ids: [String]) -> [String: (String, String)] {
-        let extra = extraBins.joined(separator: ":")
-        var script = "export PATH=\"$PATH:\(extra)\"; "
-        for id in ids {
-            script += "p=$(command -v \(id) 2>/dev/null); if [ -n \"$p\" ]; then "
-                + "v=$(\(id) --version 2>/dev/null </dev/null | head -1 | tr -d '\\r'); "
-                + "printf '\\n@@A@@%s|%s|%s@@\\n' \(id) \"$p\" \"$v\"; fi; "
-        }
-        let r = HostProcess.run(executable: Tmux.userShell, args: ["-l", "-i", "-c", script],
+    /// The agents found (path, version) and the ones a complete scan says
+    /// aren't there (AgentDetection: a shell killed on its timeout calls
+    /// nothing missing; a binary in an installer's folder counts).
+    nonisolated static func detect(_ ids: [String]) -> (found: [String: (String, String)], missing: Set<String>, complete: Bool) {
+        let r = HostProcess.run(executable: Tmux.userShell,
+                                args: ["-l", "-i", "-c", AgentDetection.script(ids, extraBins: extraBins)],
                                 env: ["HOME": NSHomeDirectory(), "USER": NSUserName(), "TERM": "dumb",
                                       "LANG": "en_US.UTF-8", "SHELL": Tmux.userShell],
                                 timeout: 60)
-        var out: [String: (String, String)] = [:]
-        for line in r.stdout.split(separator: "\n") {
-            guard line.hasPrefix("@@A@@"), line.hasSuffix("@@") else { continue }
-            let body = line.dropFirst(5).dropLast(2).split(separator: "|", maxSplits: 2,
-                                                            omittingEmptySubsequences: false).map(String.init)
-            guard body.count == 3 else { continue }
-            out[body[0]] = (body[1], versionNumber(body[2]))
+        let scan = AgentDetection.parse(r.stdout)
+        let disk = AgentDetection.onDisk(ids, dirs: searchDirs(), home: NSHomeDirectory())
+        if !scan.complete {
+            AgentHostLog.log("agents: the login shell's scan didn't finish (status \(r.status)"
+                             + (r.timedOut ? ", timed out" : "") + "); nothing is called missing")
         }
-        return out
+        var out: [String: (String, String)] = [:]
+        for id in ids {
+            if let f = scan.found[id] {
+                out[id] = (f.path, f.version.map(versionNumber) ?? "installed")
+            } else if let path = disk[id] {
+                out[id] = (path, "installed")
+            }
+        }
+        return (out, AgentDetection.missing(ids, scan: scan, onDisk: disk), scan.complete)
     }
 
     /// "2.1.284 (Claude Code)" / "codex-cli 0.9.1" → the first version-looking
@@ -183,7 +209,7 @@ final class AgentInstaller: ObservableObject {
                     }
                 }
                 AgentHostLog.log("agents: \(s.id) installer \(ok ? "finished" : "failed")")
-                let found = Self.detect([s.id])[s.id]
+                let found = Self.detect([s.id]).found[s.id]
                 await MainActor.run {
                     if let (path, version) = found {
                         self.phases[s.id] = .installed(version: version, path: path)

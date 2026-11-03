@@ -131,7 +131,7 @@ A few low-level knobs are read from the app's UserDefaults domain, `io.bromure.a
 
 | Key | Effect | Default |
 | --- | --- | --- |
-| `vm.homeImageGB` | Apparent (guest-visible) size, in GiB, of a **newly created** ext4 home image. The host file is sparse, so this costs nothing up front. Clamped to 8–1024. | `64` |
+| `vm.homeImageGB` | Apparent (guest-visible) size, in GiB, of a **newly created** ext4 home image. The host file is sparse, so this costs nothing up front. Clamped to 8–1024. A legacy home migrating into its first image gets at least 64. | `16` |
 | `vm.mtu` | MTU clamp for a machine VM's primary NIC, written into the guest on each boot. The default of `1280` is VPN-safe (WireGuard, IKEv2, and corporate PMTU paths). | `1280` |
 | `terminal.allowGraphics` | Re-enables in-terminal image rendering (kitty graphics protocol) from the guest. Off by default because it means the host decoding guest-supplied image bytes — and the same channel could draw fake UI over the terminal. Turn it on only if you want agents to render images inline and accept that risk. | `NO` |
 | `ui.terminalBell` | Lets a terminal's bell ring. Off by default: agents ring the bell at the end of every turn, and the sidebar's status already tells you. | `NO` |

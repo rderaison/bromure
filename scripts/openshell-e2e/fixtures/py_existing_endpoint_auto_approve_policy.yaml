@@ -1,0 +1,12 @@
+version: 1
+network_policies:
+  cargo_registry:
+    name: cargo-registry
+    endpoints:
+      - host: index.crates.io
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - path: /usr/bin/cargo

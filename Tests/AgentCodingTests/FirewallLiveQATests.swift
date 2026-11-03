@@ -440,4 +440,34 @@ struct FirewallLiveQATests {
                                         previous: "default deny", editing: "allow tcp a.com:99999\ndefault deny")
                 == .ask)
     }
+
+    @Test("A strict workspace's re-check decides for the program that opened the connection")
+    func recheckKeepsIdentity() throws {
+        let cap = Captured()
+        let reg = registry(cap)
+        let pid = UUID()
+        var strict = EgressPolicy(openShell: try OpenShellPolicy.parse(BinaryIdentityTests.policyYAML))
+        strict.enforceBinaries = true
+        let gh = OpenShellPolicy.BinaryIdentity(exe: "/usr/bin/gh", sha256: "aaa", ancestors: [])
+        reg.register(profileID: pid, host: "api.github.com", port: 443, route: "transparent", rule: nil,
+                     identity: gh) { cap.cut("gh") }
+        reg.register(profileID: pid, host: "api.github.com", port: 443, route: "transparent", rule: nil) {
+            cap.cut("nobody")
+        }
+        // The rule names /usr/bin/gh: its connection stays, the unattested one is cut.
+        reg.reevaluate(profileID: pid, policy: strict)
+        #expect(cap.cuts == ["nobody"])
+    }
+
+    @Test("The proxy's connection checks pass the attested program to the verdict")
+    func proxyChecksPassIdentity() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/Mitm/HTTPProxy.swift"), encoding: .utf8)
+        // Without it, `binaries:` rules match nothing and a strict workspace's
+        // allowed flows were closed in `trackedForFirewall`, unlogged.
+        let calls = src.components(separatedBy: "policy.verdict(").dropFirst()
+            .map { String($0.prefix { $0 != ")" }) }
+        #expect(!calls.isEmpty)
+        for call in calls { #expect(call.contains("identity: binaryIdentity"), "\(call)") }
+    }
 }

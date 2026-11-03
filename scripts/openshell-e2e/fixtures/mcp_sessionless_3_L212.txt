@@ -1,0 +1,41 @@
+
+expected_receipts = []
+for version in SELECTED_VERSIONS:
+    if version == "2026-07-28":
+        status, _, body = post(1, "server/discover", {}, version)
+        assert status == 200, (version, "discovery", status, body)
+        assert json.loads(body)["result"]["supportedVersions"] == [version], body
+        expected_receipts.append([version, "server/discover", None])
+    else:
+        status, _, body = post(1, "initialize", {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": {"name": "openshell-e2e", "version": "1"},
+        }, version)
+        assert status == 200, (version, "initialize", status, body)
+        assert json.loads(body)["result"]["protocolVersion"] == version, body
+        expected_receipts.append([version, "initialize", None])
+        status, _, body = post(None, "notifications/initialized", {}, version)
+        assert status == 202, (version, "initialized", status, body)
+        expected_receipts.append([version, "notifications/initialized", None])
+
+    status, _, body = post(2, "tools/call", {"name": "read_status", "arguments": {}}, version)
+    assert status == 200, (version, "allowed tool", status, body)
+    tool = json.loads(body)
+    assert tool["id"] == 2, tool
+    assert tool["result"]["content"] == [{"type": "text", "text": "read_status"}], tool
+    expected_receipts.append([version, "tools/call", "read_status"])
+    assert tool["result"]["_meta"]["fixtureRequests"] == expected_receipts, tool
+
+    status, _, body = post(3, "tools/call", {"name": "read_details", "arguments": {}}, version)
+    assert status == 403, (version, "denied tool", status, body)
+
+    # The fixture accepts both tools. A later allowed call proves the denial
+    # came from the proxy and no denied operation reached the upstream.
+    status, _, body = post(4, "tools/call", {"name": "read_status", "arguments": {}}, version)
+    assert status == 200, (version, "receipt tool", status, body)
+    receipt = json.loads(body)
+    assert receipt["id"] == 4, receipt
+    expected_receipts.append([version, "tools/call", "read_status"])
+    assert receipt["result"]["_meta"]["fixtureRequests"] == expected_receipts, receipt
+    print(f"MCP_PROFILE_OK version={version} allowed_tool=200 denied_tool=403 receipts=verified")

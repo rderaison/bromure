@@ -53,6 +53,59 @@ struct EgressPolicyTests {
         #expect(p.verdict(ip: ip("1.2.3.5"), hostnames: [], proto: .udp, port: 5000) == .allow)
     }
 
+    @Test("An IP rule matches a proxy CONNECT to that IP literal (no resolved IP)")
+    func cidrMatchesIPLiteralHostname() throws {
+        let p = try EgressPolicy.parse("allow tcp 192.0.2.10:6443\ndefault deny")
+        #expect(p.verdict(ip: nil, hostnames: ["192.0.2.10"], proto: .tcp, port: 6443) == .allow)
+        #expect(p.verdict(ip: nil, hostnames: ["192.0.2.10"], proto: .tcp, port: 443) == .deny)
+        #expect(p.verdict(ip: nil, hostnames: ["192.0.2.11"], proto: .tcp, port: 6443) == .deny)
+        #expect(p.verdict(ip: nil, hostnames: ["k8s.example.com"], proto: .tcp, port: 6443) == .deny)
+    }
+
+    /// Finding (CWE-436): the proxy-layer IP match read "192.0.2.010" as
+    /// 192.0.2.10 while an inet_aton reader dials 192.0.2.8; and spellings
+    /// the policy took for hostnames (167772163, 10.1, 0x0a.1.2.3,
+    /// ::ffff:10.0.0.1) dial 10.x past a `deny 10.0.0.0/8`.
+    @Test("A proxy target spelled as anything but a.b.c.d is denied, whatever the rules")
+    func nonCanonicalIPLiteralDenied() throws {
+        let allow = try EgressPolicy.parse("allow tcp 192.0.2.10:6443\nallow tcp 10.0.0.0/8\ndefault deny")
+        for h in ["192.0.2.010", "010.1.2.3", "0172.16.0.1", "1.2.3.04"] {
+            #expect(allow.verdict(ip: nil, hostnames: [h], proto: .tcp, port: 6443) == .deny, "\(h)")
+        }
+        #expect(allow.verdict(ip: nil, hostnames: ["192.0.2.10"], proto: .tcp, port: 6443) == .allow)
+        let deny = try EgressPolicy.parse("deny any 10.0.0.0/8\ndefault allow")
+        for h in ["167772163", "10.1", "0x0a.1.2.3", "::ffff:10.0.0.1", "::ffff:a00:1", "010.0.0.1",
+                  "[::ffff:10.0.0.1]", "[::ffff:a00:1]", "[::10.0.0.1]"] {
+            #expect(deny.verdict(ip: nil, hostnames: [h], proto: .tcp, port: 443) == .deny, "\(h)")
+        }
+        #expect(deny.verdict(ip: nil, hostnames: ["10.0.0.1"], proto: .tcp, port: 443) == .deny)
+        #expect(deny.verdict(ip: nil, hostnames: ["example.com"], proto: .tcp, port: 443) == .allow)
+        #expect(deny.verdict(ip: nil, hostnames: ["1password.com"], proto: .tcp, port: 443) == .allow)
+        #expect(deny.verdict(ip: nil, hostnames: ["::1"], proto: .tcp, port: 443) == .allow)
+        #expect(deny.verdict(ip: nil, hostnames: ["[::1]"], proto: .tcp, port: 443) == .allow)
+        // At the switch the address is the resolved one: hostnames are names.
+        #expect(deny.verdict(ip: ip("8.8.8.8"), hostnames: ["010.1.2.3"], proto: .tcp, port: 443) == .allow)
+        // A flow's target: canonical only.
+        #expect(EgressPolicy.parseIPv4("010.1.2.3") == nil && EgressPolicy.parseIPv4("1.2.3.4") != nil)
+        #expect(EgressPolicy.parseIPv4("0.0.0.0") == 0 && EgressPolicy.parseIPv4("+1.2.3.4") == nil)
+        // A rule's address reads as it always did — never an error: a
+        // document that fails to parse enforces nothing (allow-all).
+        let lenient = try EgressPolicy.parse("allow tcp 010.0.0.0/8\nallow tcp 192.0.2.010\ndefault deny")
+        #expect(lenient.verdict(ip: ip("10.9.9.9"), hostnames: [], proto: .tcp, port: 443) == .allow)
+        #expect(lenient.verdict(ip: ip("192.0.2.10"), hostnames: [], proto: .tcp, port: 443) == .allow)
+        #expect(lenient.verdict(ip: nil, hostnames: ["192.0.2.010"], proto: .tcp, port: 443) == .deny)
+    }
+
+    @Test("CIDR with ports parses, matches both, and round-trips")
+    func cidrWithPorts() throws {
+        let p = try EgressPolicy.parse("allow tcp 10.1.0.0/16:636,3268-3269\ndefault deny")
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 636) == .allow)
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 3269) == .allow)
+        #expect(p.verdict(ip: ip("10.1.2.3"), hostnames: [], proto: .tcp, port: 443) == .deny)
+        #expect(p.verdict(ip: ip("10.2.0.1"), hostnames: [], proto: .tcp, port: 636) == .deny)
+        #expect(try EgressPolicy.parse(p.serialize()) == p)
+    }
+
     @Test("Protocol and port ranges gate matches")
     func protoPort() throws {
         let p = try EgressPolicy.parse("deny udp any:53\nallow tcp any:8000-8100\ndefault deny")

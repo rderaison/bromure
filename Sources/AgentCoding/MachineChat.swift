@@ -12,15 +12,21 @@ final class MachineTranscriptProvider: BeautifiedTranscriptProvider {
     private weak var machine: AttachedMachine?
     private let machineID: UUID
     private let window: Int
+    /// The session the chat is for: the window index is reused by the next
+    /// session to open there, and its cached history must not be this one's.
+    private let sessionID: UUID?
 
-    init(machine: AttachedMachine, window: Int, accent: Color) {
+    init(machine: AttachedMachine, window: Int, sessionID: UUID? = nil, accent: Color) {
         self.machine = machine
         self.machineID = machine.id
         self.window = window
+        self.sessionID = sessionID
         self.accent = accent
     }
 
-    var historyCacheKey: String? { "machine:\(machineID.uuidString):\(window)" }
+    var historyCacheKey: String? {
+        "machine:\(machineID.uuidString):\(window)" + (sessionID.map { ":\($0.uuidString)" } ?? "")
+    }
     /// The machine's link is SSH or a P2P relay, often over a WAN: a first
     /// read of the default 24 MB (a long Claude session's tail) took seconds
     /// to tens of seconds before anything showed. Same small first window

@@ -101,8 +101,8 @@ enum IncomingServerFrame {
             let payload = decodePayload(obj["payload"])
             return .signal(connectionId: connId, seq: seq, kind: kind, from: from, payload: payload)
         case "connection":
-            guard let connObj = obj["connection"],
-                  let sub = try? JSONSerialization.data(withJSONObject: connObj),
+            guard let connObj = obj["connection"], JSONSerialization.isValidJSONObject([connObj]),
+                  let sub = try? JSONSerialization.data(withJSONObject: connObj, options: [.fragmentsAllowed]),
                   let grant = try? JSONDecoder().decode(ConnectionGrant.self, from: sub)
             else { return .unknown(type: type) }
             return .connection(grant)
@@ -117,8 +117,10 @@ enum IncomingServerFrame {
     }
 
     private static func decodePayload(_ raw: Any?) -> P2PSignalPayload {
-        guard let raw,
-              let data = try? JSONSerialization.data(withJSONObject: raw),
+        // A bare string/number from the peer must fail the decode, not
+        // raise in the writer (an NSException `try?` can't catch).
+        guard let raw, JSONSerialization.isValidJSONObject([raw]),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
               let payload = try? JSONDecoder().decode(P2PSignalPayload.self, from: data)
         else { return P2PSignalPayload() }
         return payload

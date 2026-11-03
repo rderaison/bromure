@@ -16,19 +16,20 @@ Before changing anything, find out what the app itself is reporting.
 
 ### The Security Timeline
 
-Open **Window › Security Timeline…** (or search for it with ⌘K). It records every decision Bromure's security engines made for your agents — credential brokering and use, firewall verdicts, guardrails, supply-chain checks, prompt-injection scans, PII swaps, agent-delegation messages, and upstream TLS problems. Recording is always on, it survives restarts, and each day's events are kept for 90 days.
+Open **Window › Security…** (or search for it with ⌘K). It records every decision Bromure's security engines made for your agents — credential brokering and use, firewall and OpenShell verdicts, guest-sandbox refusals, guardrails, supply-chain checks, prompt-injection scans, PII swaps, agent-delegation messages, and upstream TLS problems. Recording is always on, it survives restarts, and each day's events are kept for 90 days.
 
 <p align="center">
-  <img src="images/security-overview.en.jpg" width="700" alt="The Security Timeline window on its Overview tab: Last 24 hours tiles for Blocked, Allowed, Credentials brokered, Packages checked and PII swapped, a Protections table listing each machine's protections, and a Latest blocks list" />
+  <img src="images/security-overview.en.jpg" width="700" alt="The Security window on its Overview tab: Last 24 hours tiles for Blocked, Allowed, Credential brokering, Supply chain and PII protection, a Protections table listing each machine's protections, and a Latest blocks list" />
 </p>
 
-- The **Overview** tab summarizes the **Last 24 hours** — **Blocked**, **Allowed**, **Credentials brokered**, **Packages checked**, **PII swapped** — shows each machine's protections, and lists the **Latest blocks**. A block is usually the fastest answer to "why did the agent's request fail?".
-- The **Timeline** tab lists every event. Narrow it with the **Filter events…** field (a package name, a host, a machine), the engine filter (**All engines**), and, when you mirror remote hosts, the machine filter (**All machines** / **This Mac** / a host).
+- The **Overview** tab summarizes a recent period (the last 24 hours by default) — **Blocked**, **Allowed**, **Credential brokering**, **Supply chain**, **PII protection** — shows each machine's protections, and lists the **Latest blocks**. A block is usually the fastest answer to "why did the agent's request fail?"; click it to find every time it happened.
+- The **Timeline** tab lists every event. Narrow it with the **Filter events…** field (a package name, a host, a machine), the workspace, time-range and engine filters, and, when you mirror remote hosts, the machine filter (**All machines** / **This Mac** / a host).
+- On a machine with the kernel sentry, double-click a **Network** row to see which prompt, tool call and process made the connection ([network lineage](11a-security-timeline.mdx#network-lineage)).
 - **Export…** saves the events — with any filter applied — as a CSV file. Attach it to a bug report or hand it to your security team.
 - **Clear** only hides the events in the window; the daily files on disk are kept.
 
 <p align="center">
-  <img src="images/security-timeline.en.jpg" width="700" alt="The Timeline tab of the Security Timeline window: a filter field, an engine filter, Export… and Clear buttons, and rows from the PII protection, Prompt injection, Supply chain, Firewall and Credential brokering engines" />
+  <img src="images/security-timeline.en.jpg" width="700" alt="The Timeline tab of the Security window: a filter field, workspace, time-range and engine filters, Export… and Clear buttons, and rows from the PII protection, Prompt injection, Supply chain, Firewall and Credential brokering engines" />
 </p>
 
 The window is described in full in [Security Overview & Timeline](11a-security-timeline.mdx).
@@ -117,9 +118,9 @@ The MTU already defaults to `1280`; lower it further only if a corporate PMTU pa
 
 ### The base image is left in a partial state
 
-**Cause.** Cancelling mid-install, or a failed build, leaves transient files behind: `base.img.partial`, `base.img.gz.partial`, and `efivars.partial` in the support directory. Their presence means an install is either running or was interrupted. The real image is only ever replaced atomically, so an existing working image stays usable throughout.
+**Cause.** Cancelling mid-install, or a failed build, leaves transient files behind: `base.img.partial`, `base.img.gz.partial`, `stock.img.partial`, and `efivars.partial` in the support directory. Their presence means an install is either running or was interrupted. The real image is only ever replaced atomically, so an existing working image stays usable throughout.
 
-**Fix.** Re-run the install to completion (**Rebuild Base Image…** or `bromure-ac init`). To start over from scratch, `bromure-ac reset` deletes the base-image files (`base.img`, `efivars.bin`, `base.version`, `image-state.json`) after a confirmation — it does **not** touch your machines. Confirm what is installed at any time with `bromure-ac info`.
+**Fix.** Re-run the install to completion (**Rebuild Base Image…** or `bromure-ac init`). To start over from scratch, `bromure-ac reset` deletes the base-image files (`base.img`, `efivars.bin`, `base.version`, `image-state.json`, and the saved download `stock.img` / `stock-state.json`) after a confirmation — it does **not** touch your machines. Confirm what is installed at any time with `bromure-ac info`.
 
 ### A newer base image is available
 
@@ -396,7 +397,7 @@ Storage lives under `~/Library/Application Support/BromureAC/` (see the [Appendi
 |---|---|---|
 | The Ubuntu base image | `base.img` | 24 GB logical, a few GB physical |
 | Per-machine system disks | `profiles/<uuid>/disk.img` | Copy-on-write clone of the base; grows only as the guest writes |
-| Per-machine homes | `profiles/<uuid>/home.img` | Sparse ext4, 64 GB apparent by default, allocated lazily |
+| Per-machine homes | `profiles/<uuid>/home.img` | Sparse ext4, 16 GB apparent by default, allocated lazily |
 | Suspended-VM RAM snapshots | `profiles/<uuid>/vm.state` | Up to the machine's allocated RAM, per suspended machine |
 | Disk and home checkpoints | `profiles/<uuid>/checkpoints/` | Real space only as they diverge from the live disks |
 | Kubernetes nodes, registries, messaging connector | `kube/<id>/nodes/<uuid>/` | One system disk each, plus a data disk per node with Longhorn (40 GB apparent by default) or the registry's **Image storage** |
@@ -405,7 +406,7 @@ Storage lives under `~/Library/Application Support/BromureAC/` (see the [Appendi
 | Trace bodies | `traces/` | Capped: 100 MB per session, 5 GB total |
 | Conversation copies | `transcripts/`, `task-transcripts/`, `runs/` | Grows with your sessions, tasks and automation runs |
 | Session, room and delegation records | `sessions.json`, `rooms.json`, `delegations.json` | Small |
-| Security Timeline | `security-timeline/<date>.jsonl` | Small; kept 90 days |
+| Security Timeline | `security-timeline/<date>.jsonl` | Small; kept 90 days by default (**Preferences › Tracing › Security history**) |
 | App log | `~/Library/Logs/BromureAC/` | At most about 16 MB (8 MB plus one rotated file) |
 
 > **Note:** The dashboard's Disk card prefers the guest's own `df` numbers over the host clone's allocation, because a copy-on-write clone over-reports usage — blocks freed inside the guest stay materialized in the clone.

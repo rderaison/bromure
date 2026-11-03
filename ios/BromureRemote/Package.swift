@@ -32,7 +32,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", from: "2.4.0"),
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        // 1.20.x: 1.99 is SwiftTerm v2's pre-release (strict concurrency,
+        // TerminalView.getTerminal() gone), which "from: 1.2.0" picked up.
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", .upToNextMinor(from: "1.20.0")),
     ],
     targets: [
         .target(

@@ -113,12 +113,10 @@ notarize_artifact() {
 # --- Build ---
 echo "=== Building $APP_NAME ($PRODUCT_NAME) ==="
 
-# GhosttyKit binaryTarget (never committed) — build from the pinned commit
-# when missing; cached under ~/.cache/bromure-ghostty (mirrors build.sh).
-if [ ! -d "$SCRIPT_DIR/vendor/GhosttyKit.xcframework" ]; then
-    echo "vendor/GhosttyKit.xcframework missing — running tools/build-ghostty.sh…"
-    "$SCRIPT_DIR/tools/build-ghostty.sh"
-fi
+# GhosttyKit binaryTarget (never committed) — always checked against its
+# stamp (pinned commit + build flags), rebuilt when it doesn't match; cached
+# under ~/.cache/bromure-ghostty (mirrors build.sh).
+"$SCRIPT_DIR/tools/build-ghostty.sh"
 
 # Same backend as build.sh: Xcode 26's default `swiftbuild` backend fails in
 # macro packages ("unable to open dependencies file …-primary.d") and tries
@@ -162,6 +160,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$CONTENTS/Info.plist"
+"$SCRIPT_DIR/scripts/stamp-build-info.sh" "$CONTENTS/Info.plist"
 
 # SPM omits the standard app rpath; add it so dyld can resolve
 # @rpath/Sparkle.framework/... to Contents/Frameworks/.

@@ -124,7 +124,7 @@ public final class GestureBridge {
                     _ = Darwin.write(conn.fileDescriptor, base, buf.count)
                 }
             }
-            Darwin.close(conn.fileDescriptor)
+            conn.close()   // VZ owns the fd: closing it here closed it twice
         }
     }
 }

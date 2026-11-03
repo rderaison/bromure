@@ -117,7 +117,7 @@ final class BrowserMCPServer {
                 let tabs = b.tabs().map { t -> [String: Any] in
                     ["id": t.id, "title": t.title, "url": t.url, "active": t.active]
                 }
-                return textResult(jsonString(tabs))
+                return textResult(Self.jsonString(tabs))
             case "browser_activate_tab":
                 b.activateTab(try requireArg(args, "id")); return textResult("ok")
             case "browser_close_tab":
@@ -132,7 +132,7 @@ final class BrowserMCPServer {
             case "browser_evaluate":
                 let js = try requireArg(args, "expression")
                 let value = try await b.evaluate(js)
-                return textResult(jsonString(value ?? NSNull()))
+                return textResult(Self.jsonString(value ?? NSNull()))
             case "browser_get_text":
                 return textResult(try await b.pageText())
             case "browser_get_html":
@@ -396,11 +396,13 @@ final class BrowserMCPServer {
     private func errorResult(_ msg: String) -> [String: Any] {
         ["content": [["type": "text", "text": "Error: \(msg)"]], "isError": true]
     }
-    private func jsonString(_ v: Any) -> String {
+    /// A page's value as JSON text. An evaluate can return a bare number,
+    /// bool or null: writing one without `.fragmentsAllowed` raises an
+    /// Objective-C exception that `try?` can't catch (5.2.3 crash).
+    nonisolated static func jsonString(_ v: Any) -> String {
         if let s = v as? String { return s }
-        guard JSONSerialization.isValidJSONObject(v)
-                || JSONSerialization.isValidJSONObject([v]),
-              let data = try? JSONSerialization.data(withJSONObject: v),
+        guard JSONSerialization.isValidJSONObject([v]),
+              let data = try? JSONSerialization.data(withJSONObject: v, options: [.fragmentsAllowed]),
               let s = String(data: data, encoding: .utf8) else { return "\(v)" }
         return s
     }

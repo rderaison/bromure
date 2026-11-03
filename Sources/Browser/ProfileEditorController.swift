@@ -102,7 +102,8 @@ final class ProfileEditorController {
             settings.enableClipboardSharing = true
             settings.enableLinkSender = true
             settings.keychainPasskeys = true
-            settings.keychainPasswords = true
+            // iCloud Passwords asks for a pairing code each launch: opt-in.
+            settings.keychainPasswords = false
             let profile = self.state.profileManager.createProfile(
                 name: name, color: color, settings: settings)
             self.state.selectedProfileID = profile.id

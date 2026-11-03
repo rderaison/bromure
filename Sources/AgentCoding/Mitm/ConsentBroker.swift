@@ -62,8 +62,9 @@ public actor ConsentBroker {
         public let kind: DecisionKind
         public let expiration: Date
         public let credentialDisplayName: String
-        /// Only meaningful when `kind == .allow`. Always false for
-        /// denies (deny memory is hard-capped at `denyTTL`).
+        /// Until the session ends (`expiration` is `.distantFuture`). A
+        /// prompt's "Don't allow" is capped at `denyTTL`; only a deny set
+        /// from the Guardrails pane can be session-scoped.
         public let isSessionScoped: Bool
     }
 
@@ -73,6 +74,7 @@ public actor ConsentBroker {
     private struct DenyMemory: Sendable {
         let expiration: Date
         let credentialDisplayName: String
+        var isSessionScoped = false
     }
 
     private static func storeKey(profileID: UUID, credentialID: CredentialID) -> String {
@@ -105,6 +107,16 @@ public actor ConsentBroker {
     /// other call for the same key parks here and resumes when the
     /// dialog resolves.
     private var pending: [String: [CheckedContinuation<Bool, Never>]] = [:]
+    /// The open prompt's handle per key (`ConsentPrompt.choose`'s token).
+    private var promptTokens: [String: UUID] = [:]
+    /// Prompts a Guardrails decision overtook (`grant`, `deny`, session
+    /// teardown): withdrawn, their waiters answered with that decision and
+    /// their key freed; the prompt's own answer, if one still comes, neither
+    /// stores nor allows — a "Don't allow" shrank a session deny to 5
+    /// minutes, and an "Allow" (Return) let the in-flight request through a
+    /// deny. Left up, the panel held the key: after a revoke, its Allow was
+    /// ignored and every new request parked on it and was refused.
+    private var superseded: Set<UUID> = []
     /// profileID → display name. Set by `ACAppDelegate` at session
     /// launch so the dialog can say "Profile <name> wants to…".
     private var profileNames: [UUID: String] = [:]
@@ -172,6 +184,8 @@ public actor ConsentBroker {
             }
         }
         pending[key] = []
+        let token = UUID()
+        promptTokens[key] = token
 
         let profileName = profileNames[profileID] ?? "(unknown workspace)"
         // Non-modal, with a deadline (no answer → deny); routed to a fat
@@ -187,7 +201,14 @@ public actor ConsentBroker {
         let timeout = ConsentPrompt.defaultTimeout
         let idx = await ConsentPrompt.choose(profileID: profileID, title: title, message: scopeHint,
                                              choices: choices, denyIndex: choices.count - 1,
-                                             timeout: timeout)
+                                             timeout: timeout, token: token)
+        if superseded.remove(token) != nil {
+            // Overtaken while it was up: the newer decision stands. Its
+            // waiters and its key went with the overtake (the key may be a
+            // newer prompt's by now).
+            return Self.liveAllow(grant: grants[key], deny: denies[key], at: Date())
+        }
+        promptTokens.removeValue(forKey: key)
         let decision: Decision
         switch idx {
         case 0:  decision = .allow1hr
@@ -237,6 +258,32 @@ public actor ConsentBroker {
         pending.removeValue(forKey: key)
         for w in waiters { w.resume(returning: allow) }
         return allow
+    }
+
+    /// What a stored decision says now: a live deny refuses, a live grant
+    /// allows, neither refuses (nobody said yes).
+    nonisolated static func liveAllow(grant: Grant?, deny: Date?, at now: Date) -> Bool {
+        if let deny, deny > now { return false }
+        return (grant?.expiration ?? .distantPast) > now
+    }
+
+    private static func liveAllow(grant: Grant?, deny: DenyMemory?, at now: Date) -> Bool {
+        liveAllow(grant: grant, deny: deny?.expiration, at: now)
+    }
+
+    /// A Guardrails decision for `key` while its prompt is up: the requests
+    /// waiting on that prompt get it now, and the prompt's answer won't count.
+    /// The prompt is withdrawn (its asker returns now) and the key freed: a
+    /// later request — after a revoke, say — asks afresh instead of parking
+    /// on a panel whose answer no longer counts.
+    private func overtakePrompt(_ key: String, allow: Bool) {
+        guard let waiters = pending.removeValue(forKey: key) else { return }
+        if let token = promptTokens.removeValue(forKey: key) {
+            superseded.insert(token)
+            RemoteConsent.withdraw(token: token)   // a terminal prompt
+            Task { @MainActor in ConsentPanelPresenter.shared.withdraw(token: token) }
+        }
+        for w in waiters { w.resume(returning: allow) }
     }
 
     /// What became of one consent request, as the Security Timeline says it.
@@ -293,9 +340,58 @@ public actor ConsentBroker {
                 kind: .deny,
                 expiration: d.expiration,
                 credentialDisplayName: d.credentialDisplayName,
-                isSessionScoped: false))
+                isSessionScoped: d.isSessionScoped))
         }
         return out.sorted { $0.credentialDisplayName < $1.credentialDisplayName }
+    }
+
+    /// Grant (or re-grant) without a prompt — the Guardrails pane's "Allow
+    /// for …" menu. A timed grant runs from now, so re-granting a nearly
+    /// spent 5 minutes gives a fresh 5. Clears a remembered deny. Keeps the
+    /// display name a prompt already gave this credential.
+    public func grant(profileID: UUID, credentialID: CredentialID,
+                      _ decision: Decision, credentialDisplayName: String) {
+        let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
+        let name = grants[key]?.credentialDisplayName ?? denies[key]?.credentialDisplayName
+            ?? credentialDisplayName
+        let now = Date()
+        switch decision {
+        case .deny:
+            return
+        case .allow5min:
+            grants[key] = Grant(expiration: now.addingTimeInterval(5 * 60),
+                                credentialDisplayName: name, isSessionScoped: false)
+        case .allow1hr:
+            grants[key] = Grant(expiration: now.addingTimeInterval(60 * 60),
+                                credentialDisplayName: name, isSessionScoped: false)
+        case .allowSession:
+            grants[key] = Grant(expiration: .distantFuture,
+                                credentialDisplayName: name, isSessionScoped: true)
+        }
+        denies.removeValue(forKey: key)
+        overtakePrompt(key, allow: true)
+        Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                            credential: name, scope: "granted from the Guardrails pane",
+                            outcome: Outcome(decision))
+    }
+
+    /// Refuse without a prompt — the Guardrails pane's "Deny for …" menu.
+    /// `duration` nil = until the session ends. Replaces a live grant, and
+    /// runs from now like `grant`.
+    public func deny(profileID: UUID, credentialID: CredentialID,
+                     for duration: TimeInterval?, credentialDisplayName: String) {
+        let key = Self.storeKey(profileID: profileID, credentialID: credentialID)
+        let name = grants[key]?.credentialDisplayName ?? denies[key]?.credentialDisplayName
+            ?? credentialDisplayName
+        denies[key] = DenyMemory(
+            expiration: duration.map { Date().addingTimeInterval($0) } ?? .distantFuture,
+            credentialDisplayName: name,
+            isSessionScoped: duration == nil)
+        grants.removeValue(forKey: key)
+        overtakePrompt(key, allow: false)
+        Self.recordDecision(profileID: profileID, credentialID: credentialID,
+                            credential: name, scope: "denied from the Guardrails pane",
+                            outcome: .deny)
     }
 
     public func revoke(profileID: UUID, credentialID: CredentialID) {
@@ -314,6 +410,10 @@ public actor ConsentBroker {
         }
         for k in denies.keys where k.hasPrefix(prefix) {
             denies.removeValue(forKey: k)
+        }
+        // The session is over: a prompt still up for it allows nothing.
+        for k in pending.keys where k.hasPrefix(prefix) {
+            overtakePrompt(k, allow: false)
         }
     }
 

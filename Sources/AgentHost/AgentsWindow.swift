@@ -109,10 +109,14 @@ private struct AgentsView: View {
         .frame(minWidth: 660, minHeight: 740)
         .background(VisualEffect().ignoresSafeArea())
         .onChange(of: installer.scanning) { _, scanning in
-            // Once we know what's here: Claude is preselected when it's missing.
+            // Once we know what's here: Claude is preselected when it's
+            // missing. A scan that didn't finish decides nothing — the next
+            // complete one does.
             guard !scanning, !seeded else { return }
+            let missing = Set(AgentSpec.all.map(\.id).filter { installer.phase($0) == .missing })
+            guard let pre = AgentDetection.preselection(complete: installer.lastScanComplete, missing: missing) else { return }
             seeded = true
-            if installer.phase("claude") == .missing { selected.insert("claude") }
+            selected.formUnion(pre)
         }
         .onChange(of: installer.busy) { _, busy in
             if !busy { selected.removeAll() }
@@ -371,6 +375,10 @@ private struct StatusPill: View {
             case .unknown:
                 ProgressView().controlSize(.mini)
                 Text("Checking")
+            case .unchecked:
+                Image(systemName: "questionmark.circle")
+                Text("Couldn't check")
+                    .help("The check didn't finish: your login shell took too long. Click ↻ to check again.")
             case .missing:
                 Text("Not installed")
             case .installed(let version, _):

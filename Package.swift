@@ -97,6 +97,12 @@ let package = Package(
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("CoreText"),
+                // SwiftUI's VideoPlayer (DisplayCards' video card) is in the
+                // _AVKit_SwiftUI overlay, whose VideoPlayerView subclasses
+                // AVKit's AVPlayerView. Autolinking links only the overlay, so
+                // AVKit never loaded and the first video aborted the app
+                // ("failed to demangle superclass of VideoPlayerView").
+                .linkedFramework("AVKit"),
                 .linkedLibrary("c++"),
             ]
         ),
@@ -140,6 +146,8 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager"),
                 .product(name: "BigInt", package: "BigInt"),
                 .product(name: "X509", package: "swift-certificates"),
+                // OpenShell sandbox policies (OpenShellPolicy.swift) are YAML.
+                .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources/SandboxEngine",
             resources: [.copy("Resources/vm-setup"),
@@ -188,6 +196,8 @@ let package = Package(
                 "bromure-ac", "GhosttyKit",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ],
             path: "Tests/AgentCodingTests",
             linkerSettings: [

@@ -61,8 +61,8 @@ struct HostMirrorScreen: View {
         deepWorkspace = target
     }
 
-    private var runningCount: Int {
-        controller.listModel.profileRows.filter { $0.state == .running }.count
+    private func runningCount(_ rows: [SessionListModel.ProfileRow]) -> Int {
+        rows.filter { $0.state == .running }.count
     }
 
     #if DEBUG
@@ -93,6 +93,12 @@ struct HostMirrorScreen: View {
             VStack(alignment: .leading, spacing: 20) {
                 if !controller.connected { reconnectBanner } else if controller.linkSlow { slowBanner }
 
+                // Sessions-first, as on the desktop: New session, then the
+                // boards, then the sessions — the machines below them.
+                if controller.supportsSessions { newSessionButton }
+
+                boardsRow
+
                 if controller.supportsSessions {
                     MobileSessionsSection(controller: controller,
                                           onSelect: { openSessionID = $0 },
@@ -101,13 +107,12 @@ struct HostMirrorScreen: View {
                                           onNewInRoom: { newSessionRoom = $0; newSession = true })
                 }
 
-                boardsRow
-
                 // The sessions list already surfaces agents waiting for a
                 // reply ("Needs you"); the tab-level list is for older servers.
                 if !controller.supportsSessions, !waitingAgents.isEmpty { waitingSection }
 
                 workspacesSection
+                nativeSection
             }
             .padding(16)
         }
@@ -273,11 +278,32 @@ struct HostMirrorScreen: View {
                 boardCard("Automations", icon: "bolt.badge.clock.fill",
                           count: controller.automationStore.automations.count, tint: .orange)
             }.buttonStyle(.plain)
-            NavigationLink { GridScreen(controller: controller) } label: {
-                boardCard("Grid", icon: "square.grid.2x2.fill",
-                          count: controller.gridStore.cells.count, tint: .purple)
-            }.buttonStyle(.plain)
         }
+    }
+
+    private var newSessionButton: some View {
+        Button { newSessionRoom = nil; newSession = true } label: {
+            Label("New Session", systemImage: "plus")
+                .font(.body.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.accentColor))
+                .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The workspaces — VMs — apart from the native machines (the desktop
+    /// sidebar's "Virtual Machines").
+    private var vmRows: [SessionListModel.ProfileRow] {
+        controller.listModel.profileRows.filter { !controller.listModel.machineIDs.contains($0.id) }
+    }
+
+    /// Plain Macs attached through Bromure Sidecar: their agents run
+    /// unsandboxed, so they're listed apart from the VMs, as on the desktop.
+    private var nativeRows: [SessionListModel.ProfileRow] {
+        controller.listModel.profileRows.filter { controller.listModel.machineIDs.contains($0.id) }
     }
 
     private func boardCard(_ title: String, icon: String, count: Int, tint: Color) -> some View {
@@ -342,10 +368,10 @@ struct HostMirrorScreen: View {
     @ViewBuilder private var workspacesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Text("Workspaces").font(.headline)
+                Text("Virtual Machines").font(.headline)
                 Spacer()
-                if !controller.listModel.profileRows.isEmpty {
-                    Text("\(runningCount) running")
+                if !vmRows.isEmpty {
+                    Text("\(runningCount(vmRows)) running")
                         .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
                 Button { workspaceEdit = .new } label: {
@@ -353,14 +379,16 @@ struct HostMirrorScreen: View {
                 }
                 .accessibilityLabel("New workspace")
             }
-            if controller.listModel.profileRows.isEmpty {
+            NavigationLink { GridScreen(controller: controller) } label: { gridCard }
+                .buttonStyle(.plain)
+            if vmRows.isEmpty {
                 Text(controller.hasSnapshot ? "No workspaces on this server."
                                             : "Loading workspaces…")
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             } else {
-                ForEach(controller.listModel.profileRows) { row in
+                ForEach(vmRows) { row in
                     NavigationLink {
                         WorkspaceScreen(controller: controller, profileID: row.id)
                     } label: { workspaceCard(row) }
@@ -375,13 +403,56 @@ struct HostMirrorScreen: View {
         }
     }
 
-    private func workspaceCard(_ row: SessionListModel.ProfileRow) -> some View {
+    @ViewBuilder private var nativeSection: some View {
+        let rows = nativeRows
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Text("Native Machines").font(.headline)
+                    Spacer()
+                    Text("\(runningCount(rows)) running")
+                        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                }
+                ForEach(rows) { row in
+                    NavigationLink {
+                        WorkspaceScreen(controller: controller, profileID: row.id)
+                    } label: { workspaceCard(row, native: true) }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var gridCard: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.purple.opacity(0.18)).frame(width: 42, height: 42)
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 18, weight: .medium)).foregroundStyle(.purple)
+            }
+            Text("Grid").font(.body.weight(.semibold))
+            Spacer(minLength: 4)
+            let cells = controller.gridStore.cells.count
+            if cells > 0 {
+                Text("\(cells)").font(.footnote.weight(.semibold)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(uiColor: .secondarySystemGroupedBackground)))
+    }
+
+    private func workspaceCard(_ row: SessionListModel.ProfileRow, native: Bool = false) -> some View {
         let accent = Color(hex: row.accentHex)
         return HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(accent.opacity(0.18)).frame(width: 42, height: 42)
-                Image(systemName: "cpu")
+                Image(systemName: native ? "desktopcomputer" : "cpu")
                     .font(.system(size: 18, weight: .medium)).foregroundStyle(accent)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -491,6 +562,7 @@ struct CodingBoardScreen: View {
             store: controller.taskStore,
             model: controller.listModel,
             profilesProvider: { controller.profiles },
+            toolSpecs: { controller.readyToolSpecs(for: $0) },
             actions: CodingKanbanView.Actions(
                 start: { controller.taskCommand($0, "start") },
                 plan: { controller.taskCommand($0, "plan") },
@@ -503,6 +575,7 @@ struct CodingBoardScreen: View {
                 markDone: { controller.taskCommand($0, "mark-done") },
                 stop: { controller.taskCommand($0, "stop") },
                 startOver: { controller.taskCommand($0, "start-over") },
+                reorder: { controller.taskCommand($0, "rank", body: ["rank": $1]) },
                 mergeNeedsConfirm: true,
                 delete: { controller.deleteTask($0) },
                 save: { controller.upsertTask($0) },
@@ -658,6 +731,9 @@ private struct AutomationEditorSheet: View {
                 credentials: { [controller] id in
                     controller.credentials(for: id).map { ($0.github, $0.linear) }
                 },
+                toolSpecs: { [controller] p in controller.readyToolSpecs(for: p) },
+                sources: controller.automationSources,
+                listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) },
                 editing: editing,
                 onSave: { auto in
                     controller.upsertAutomation(auto)

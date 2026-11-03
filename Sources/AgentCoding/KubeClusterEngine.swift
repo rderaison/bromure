@@ -792,6 +792,9 @@ final class KubeClusterEngine {
                     ?? " (\(error.localizedDescription))"
                 log(id, "\(node.name): saved state didn't restore\(drift) — booting fresh")
                 sessionDisk.clearSavedState()
+                // Stop the failed instance first: it may hold the disk, and
+                // its late stop mustn't read as the fresh boot's.
+                await sandbox.discardFailedRestore()
                 try sandbox.prepare()
                 // prepare() lays the meta share out again: the scripts staged
                 // above are gone with it (a connector booted without its

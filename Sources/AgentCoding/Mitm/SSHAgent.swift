@@ -25,7 +25,10 @@ import Crypto
 ///
 /// The user's macOS launchd ssh-agent is intentionally NOT exposed
 /// to the VM. Keys the user wants reachable from the VM go through
-/// the explicit-import flow.
+/// the explicit-import flow. A key that can't be a file (a YubiKey
+/// behind gpg-agent, say) is picked out of its host agent instead:
+/// the VM sees that key and nothing else the agent holds, and only
+/// sign requests for it are forwarded (`setHostAgentKeys`).
 public final class SSHAgentServer: @unchecked Sendable {
     private var keysByProfile: [UUID: [AgentKey]] = [:]
     /// Approval metadata for imported keys whose signing flows through
@@ -33,6 +36,11 @@ public final class SSHAgentServer: @unchecked Sendable {
     /// public-key blob that the in-VM client hands back in
     /// SIGN_REQUESTs.
     private var importedApprovals: [UUID: [Data: ImportedApproval]] = [:]
+    /// Keys the user picked out of a host ssh-agent, by public-key blob →
+    /// that agent's `ImportedSSHKey.hostAgentSocket`. The allow-list: a
+    /// host agent's identities are filtered through it, and a SIGN_REQUEST
+    /// reaches a host agent only for a blob in it.
+    private var hostAgentKeys: [UUID: [Data: String]] = [:]
     private let lock = NSLock()
     private let consent: ConsentBroker
 
@@ -58,10 +66,34 @@ public final class SSHAgentServer: @unchecked Sendable {
         importedApprovals[profileID] = entries
     }
 
+    /// The approvals in force for a profile's running session.
+    public func importedKeyApprovals(for profileID: UUID) -> [Data: ImportedApproval] {
+        lock.lock(); defer { lock.unlock() }
+        return importedApprovals[profileID] ?? [:]
+    }
+
     public func clearImportedKeyApprovals(for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         importedApprovals.removeValue(forKey: profileID)
     }
+
+    public func setHostAgentKeys(_ keys: [Data: String], for profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        hostAgentKeys[profileID] = keys
+    }
+
+    public func clearHostAgentKeys(for profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        hostAgentKeys.removeValue(forKey: profileID)
+    }
+
+    private func hostAgentKeys(for profileID: UUID) -> [Data: String] {
+        lock.lock(); defer { lock.unlock() }
+        return hostAgentKeys[profileID] ?? [:]
+    }
+
+    /// A host agent's sign can wait on a YubiKey touch or a pinentry PIN.
+    private static let hostAgentTimeout: TimeInterval = 120
 
     private func importedApproval(for profileID: UUID, blob: Data) -> ImportedApproval? {
         lock.lock(); defer { lock.unlock() }
@@ -121,7 +153,7 @@ public final class SSHAgentServer: @unchecked Sendable {
 
             switch msgType {
             case AgentMsg.requestIdentities.rawValue:
-                let resp = try handleRequestIdentities(profileID: profileID)
+                let resp = try await handleRequestIdentities(profileID: profileID)
                 try writeFrame(fd: fd, payload: resp)
             case AgentMsg.signRequest.rawValue:
                 let resp = try await handleSignRequest(body: body, profileID: profileID)
@@ -135,7 +167,7 @@ public final class SSHAgentServer: @unchecked Sendable {
 
     // MARK: - Message handlers
 
-    private func handleRequestIdentities(profileID: UUID) throws -> Data {
+    private func handleRequestIdentities(profileID: UUID) async throws -> Data {
         FileHandle.standardError.write(Data(
             "[ssh-agent] REQUEST_IDENTITIES from VM\n".utf8))
         let profileKeys = self.keys(for: profileID)
@@ -167,6 +199,23 @@ public final class SSHAgentServer: @unchecked Sendable {
         {
             seen.insert(ident.blob)
             entries.append(ident)
+        }
+        // Keys picked out of a host agent, listed only while that agent
+        // actually holds them (a YubiKey that's unplugged isn't offered).
+        // The agent's other keys never leave this loop.
+        let picked = hostAgentKeys(for: profileID)
+        for socket in Set(picked.values) {
+            guard let path = HostAgentClient.resolveHostSocket(socket) else { continue }
+            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout)
+            // Off the cooperative pool. This runs on every guest ssh, and a
+            // socket that accepts and then stays silent would pin a thread
+            // for hostAgentTimeout.
+            for ident in await client.identitiesDetached()
+                where picked[ident.blob] == socket && !seen.contains(ident.blob)
+            {
+                seen.insert(ident.blob)
+                entries.append(ident)
+            }
         }
 
         var out = Data()
@@ -251,14 +300,41 @@ public final class SSHAgentServer: @unchecked Sendable {
             if !allowed { return Data([AgentMsg.failure.rawValue]) }
         }
 
-        // Forward to the bromure private agent. The user's macOS
-        // launchd agent is deliberately NOT a fallback here — see the
-        // note in handleRequestIdentities for the security rationale.
         var fwd = Data()
         fwd.append(AgentMsg.signRequest.rawValue)
         fwd.append(string(keyBlob))
         fwd.append(string(data))
         fwd.append(uint32(flags))
+
+        // A key picked out of a host agent: forward to that agent, and
+        // only because this blob is on the allow-list.
+        if let socket = hostAgentKeys(for: profileID)[keyBlob] {
+            guard let path = HostAgentClient.resolveHostSocket(socket) else {
+                FileHandle.standardError.write(Data(
+                    "[ssh-agent] host agent key — SSH_AUTH_SOCK isn't set\n".utf8))
+                return Data([AgentMsg.failure.rawValue])
+            }
+            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout)
+            guard let resp = await client.requestDetached(fwd), !resp.isEmpty,
+                  resp[0] == AgentMsg.signResponse.rawValue else {
+                FileHandle.standardError.write(Data(
+                    "[ssh-agent] host agent at \(path) refused or didn't answer\n".utf8))
+                return Data([AgentMsg.failure.rawValue])
+            }
+            BACEventEmitter.shared.emitDetached(
+                profileID: profileID,
+                eventType: "credential.ssh_sign",
+                eventData: [
+                    "key_label": .string(importedApproval(for: profileID, blob: keyBlob)?.label ?? ""),
+                    "key_fingerprint_sha256": .string(Self.sha256Fingerprint(of: keyBlob)),
+                    "key_kind": .string("host-agent"),
+                ])
+            return resp
+        }
+
+        // Forward to the bromure private agent. The user's macOS
+        // launchd agent is deliberately NOT a fallback here — see the
+        // note in handleRequestIdentities for the security rationale.
         if let c = HostAgentClient.client(for: profileID),
            let resp = c.request(fwd), !resp.isEmpty,
            resp[0] == AgentMsg.signResponse.rawValue {

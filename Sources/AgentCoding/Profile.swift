@@ -26,6 +26,22 @@ public enum ProfileColor: String, Codable, CaseIterable, Equatable, Sendable {
     }
 }
 
+/// `host:port` with an IPv6 literal bracketed, the one form the proxy's
+/// scopes and endpoint keys use (`TokenSwapper.splitScope` reads it back).
+enum HostAuthority {
+    /// Lowercased; an IPv6 literal without its brackets.
+    static func bare(_ host: String) -> String {
+        let h = host.lowercased()
+        return h.hasPrefix("[") && h.hasSuffix("]") ? String(h.dropFirst().dropLast()) : h
+    }
+
+    /// `h:6443`, `[2001:db8::1]:6443`.
+    static func format(host: String, port: Int) -> String {
+        let h = bare(host)
+        return h.contains(":") ? "[\(h)]:\(port)" : "\(h):\(port)"
+    }
+}
+
 /// One Kubernetes context (cluster + auth) the user pointed bromure
 /// at. The full kubeconfig is materialized in the VM at session prep
 /// using only the synthetic credentials we generate; the real cert /
@@ -150,11 +166,22 @@ public struct KubeconfigEntry: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// Bare host[:port] used as the proxy's routing key when
-    /// registering client identities or scoped token swaps.
+    /// registering client identities and cluster CAs (see `endpointKey`).
     public var hostPattern: String {
         guard let url = URL(string: serverURL), let host = url.host else { return "" }
-        if let port = url.port { return "\(host):\(port)" }
+        if let port = url.port { return HostAuthority.format(host: host, port: port) }
         return host
+    }
+
+    /// The token swap's scope: host and the port kubectl dials, 443 (80 for
+    /// http) when the URL omits it, so a token meant for `h:6443` is never
+    /// handed to `h:443` or the other way round.
+    public var tokenScope: String {
+        guard let url = URL(string: serverURL), let host = url.host else { return "" }
+        let port = url.port ?? (url.scheme?.lowercased() == "http" ? 80 : 443)
+        // An IPv6 host is bracketed ([2001:db8::1]:443): its own colons
+        // would otherwise swallow the port (splitScope).
+        return HostAuthority.format(host: host, port: port)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -206,23 +233,35 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
     /// When true, every SSH sign request using this key prompts for
     /// user consent on the host. See `ConsentBroker`.
     public var requireApproval: Bool
+    /// Set when the key isn't a file at all but lives in an ssh-agent on
+    /// the host — a YubiKey behind gpg-agent, Secretive, 1Password — whose
+    /// private half can't be copied. Holds that agent's socket path ("~"
+    /// allowed; "" = bromure's own `SSH_AUTH_SOCK`). Nothing is copied or
+    /// ssh-add'ed: the VM is shown this one key (matched by
+    /// `publicKeyText`) and its sign requests are forwarded to the socket.
+    /// The agent's other keys stay invisible to the VM.
+    public var hostAgentSocket: String?
+
+    public var isFromHostAgent: Bool { hostAgentSocket != nil }
 
     public init(id: UUID = UUID(),
                 label: String,
                 filename: String,
                 publicKeyText: String = "",
                 hasPassphrase: Bool = false,
-                requireApproval: Bool = false) {
+                requireApproval: Bool = false,
+                hostAgentSocket: String? = nil) {
         self.id = id
         self.label = label
         self.filename = filename
         self.publicKeyText = publicKeyText
         self.hasPassphrase = hasPassphrase
         self.requireApproval = requireApproval
+        self.hostAgentSocket = hostAgentSocket
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, filename, publicKeyText, hasPassphrase, requireApproval
+        case id, label, filename, publicKeyText, hasPassphrase, requireApproval, hostAgentSocket
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -232,6 +271,7 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
         publicKeyText   = try c.decodeIfPresent(String.self, forKey: .publicKeyText) ?? ""
         hasPassphrase   = try c.decodeIfPresent(Bool.self, forKey: .hasPassphrase) ?? false
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        hostAgentSocket = try c.decodeIfPresent(String.self, forKey: .hostAgentSocket)
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -241,6 +281,7 @@ public struct ImportedSSHKey: Codable, Equatable, Sendable, Identifiable {
         try c.encode(publicKeyText, forKey: .publicKeyText)
         try c.encode(hasPassphrase, forKey: .hasPassphrase)
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
+        try c.encodeIfPresent(hostAgentSocket, forKey: .hostAgentSocket)
     }
 }
 
@@ -271,16 +312,26 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
     /// When true, every fake→real substitution for this token prompts
     /// the user on the host. See `ConsentBroker`.
     public var requireApproval: Bool
+    /// Request-path selectors (OpenShell endpoint `path` syntax, e.g.
+    /// `/v1/**`) the swap is limited to. Empty = any path. Set when the token
+    /// comes from an OpenShell provider profile whose endpoints narrow by path.
+    public var pathFilters: [String] = []
+    /// Extra env var names that also receive the fake (a provider profile's
+    /// `env_vars` beyond the first, e.g. `GH_TOKEN` next to `GITHUB_TOKEN`).
+    public var envVarAliases: [String] = []
 
     public init(id: UUID = UUID(), name: String = "", realValue: String = "",
                 envVarName: String = "", hostFilters: [String] = [],
-                requireApproval: Bool = false) {
+                requireApproval: Bool = false, pathFilters: [String] = [],
+                envVarAliases: [String] = []) {
         self.id = id
         self.name = name
         self.realValue = realValue
         self.envVarName = envVarName
         self.hostFilters = hostFilters
         self.requireApproval = requireApproval
+        self.pathFilters = pathFilters
+        self.envVarAliases = envVarAliases
     }
 
     public var isUsable: Bool {
@@ -299,6 +350,7 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         // `hostFilter` (singular) is the legacy pre-multi-host key, decoded for
         // migration only; new profiles write `hostFilters`.
         case id, name, realValue, envVarName, hostFilter, hostFilters, requireApproval
+        case pathFilters, envVarAliases
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -317,6 +369,8 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
             hostFilters = []
         }
         requireApproval = try c.decodeIfPresent(Bool.self, forKey: .requireApproval) ?? false
+        pathFilters = try c.decodeIfPresent([String].self, forKey: .pathFilters) ?? []
+        envVarAliases = try c.decodeIfPresent([String].self, forKey: .envVarAliases) ?? []
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -326,6 +380,22 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         try c.encode(envVarName, forKey: .envVarName)
         if !hostFilters.isEmpty { try c.encode(hostFilters, forKey: .hostFilters) }
         if requireApproval { try c.encode(true, forKey: .requireApproval) }
+        if !pathFilters.isEmpty { try c.encode(pathFilters, forKey: .pathFilters) }
+        if !envVarAliases.isEmpty { try c.encode(envVarAliases, forKey: .envVarAliases) }
+    }
+}
+
+/// An OpenShell provider profile attached to a workspace: the profile YAML as
+/// imported, the instance name its `_provider_<name>` rule carries, and the
+/// workspace credentials (`manualTokens`) minted from it.
+public struct OpenShellProviderAttachment: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var instanceName: String
+    public var profileYAML: String
+    public var tokenIDs: [UUID]
+    public init(id: UUID = UUID(), instanceName: String, profileYAML: String, tokenIDs: [UUID]) {
+        self.id = id; self.instanceName = instanceName
+        self.profileYAML = profileYAML; self.tokenIDs = tokenIDs
     }
 }
 
@@ -1002,20 +1072,23 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         /// per-tab hooks — a trustworthy "the agent is finished" signal the
         /// automation engine can stamp, chain, and tear down a clone on.
         ///
-        /// Claude Code (`Stop` hook) and Kimi Code (`[[hooks]]` event =
-        /// "Stop", plus a clean exit from its one-shot `--prompt` mode) both
-        /// qualify. Codex and Grok have neither, so their only "done" is the
-        /// proxy's 4-second traffic-silence heuristic — which fires during
-        /// any long quiet stretch mid-run and would complete a run early.
-        /// See `ACAppDelegate.hookDrivenAgents` for the UI-side twin.
+        /// Claude Code (`Stop` hook), Kimi Code (`[[hooks]]` event = "Stop",
+        /// plus a clean exit from its one-shot `--prompt` mode), Codex
+        /// (`[[hooks.Stop]]` in ~/.codex/config.toml, seeded with its trust
+        /// by agentd `_seed_codex_hooks`) and Grok (the same
+        /// ~/.claude/settings.json Stop hook as Claude) all qualify. A tool
+        /// left out here never completes a run: its tab stays open and the
+        /// run reads as running for days, since the proxy's silence
+        /// heuristic doesn't report for hook-driven agents
+        /// (`ACAppDelegate.hookDrivenAgents`, the UI-side twin).
         public var hasReliableDoneSignal: Bool {
             switch self {
-            case .claude, .kimi: return true
+            case .claude, .kimi, .codex, .grok: return true
             // omp drives its per-tab sidebar dot via a turn hook (loaded with
             // --hook; see Profile bashrc), but its "done" isn't yet trusted for
             // automation teardown/chaining — automation uses the worktree-exit
-            // reporter fallback like Codex/Grok until the hook path is hardened.
-            case .codex, .grok, .omp:  return false
+            // reporter fallback until the hook path is hardened.
+            case .omp: return false
             }
         }
 
@@ -1358,6 +1431,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// stay on the host; the VM's env carries fakes. See ManualToken.
     public var manualTokens: [ManualToken]
 
+    /// Credentials the VM created through an API (STS, iam:CreateAccessKey,
+    /// registry and cluster logins …) and the proxy kept on the host,
+    /// handing the VM fakes. Saved here so the fakes keep working after a
+    /// restart. See `MintedCredential`.
+    public var mintedCredentials: [MintedCredential] = []
+
     /// Pre-existing SSH private keys the user has pointed at this
     /// profile. Loaded into the bromure ssh-agent at every session
     /// launch alongside the auto-generated key.
@@ -1600,6 +1679,34 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// (switch L4 + SNI) and, via `web` rules, HTTP method restrictions.
     public var egressRules: String = ""
 
+    /// An NVIDIA OpenShell sandbox policy (YAML, schema version 1). When
+    /// non-empty it REPLACES `egressRules`: connections are default-deny and
+    /// allowed only by its `network_policies` (plus the provider layer Bromure
+    /// derives from the workspace's own credentials and agents), and requests
+    /// on inspected endpoints are checked in the MiTM. See `OpenShellPolicy`.
+    public var networkPolicy: String = ""
+
+    /// OpenShell provider profiles attached to this workspace. Each adds a
+    /// `_provider_<name>` rule (its endpoints) to the effective OpenShell
+    /// policy; its credentials live in `manualTokens`, bound to those endpoints.
+    public var openShellProviders: [OpenShellProviderAttachment] = []
+
+    /// OpenShell policy advisor for this workspace (`OpenShellAdvisor`):
+    /// whether agents may propose rules via `http://policy.local`, and whether
+    /// risk-free proposals are approved automatically. Stored as the raw mode
+    /// (`off` / `review` / `auto`).
+    public var openShellAdvisorMode: String = "off"
+
+    /// Agent watchdog (`AgentWatchdog`): `off`, `alert` (record a detection
+    /// finding when the session drifts), or `quarantine` (also cut the VM's
+    /// network and pause it). Stored raw so the iOS mirror can carry it.
+    public var watchdogMode: String = "off"
+
+    /// Whether the workspace's firewall is an OpenShell policy.
+    public var usesOpenShellPolicy: Bool {
+        !networkPolicy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// "Log allowed connections" (Firewall pane): whether the Security
     /// Timeline gets a row for connections the firewall lets through, not just
     /// the blocked ones. nil = automatic — logged while the workspace has
@@ -1608,9 +1715,29 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// destination (one a minute) and fold into a counted row.
     public var logAllowedConnections: Bool? = nil
 
+    /// "Tell the agent when policy blocks it" (`PolicySteering`): a note in
+    /// the agent's session naming what was refused and why, so it asks the
+    /// user instead of routing around the block. nil = automatic — on while
+    /// the workspace runs an OpenShell policy.
+    public var tellAgentOnDeny: Bool? = nil
+
+    /// Whether policy denials are told to the workspace's agents.
+    public var tellsAgentOnDeny: Bool { tellAgentOnDeny ?? usesOpenShellPolicy }
+
     /// Parsed firewall rules, or allow-all when empty/unparseable (never blocks
-    /// on a bad rule — the editor validates before save).
+    /// on a bad rule — the editor validates before save). An OpenShell policy
+    /// that fails to parse is the exception: it fails CLOSED (deny all but the
+    /// provider layer), as OpenShell does.
     public var resolvedEgressPolicy: EgressPolicy {
+        #if canImport(SandboxEngine)
+        // An organization boundary puts every workspace under OpenShell: its
+        // own policy (checked against the boundary), or the boundary itself.
+        if usesOpenShellPolicy || OpenShellGovernance.shared.boundaryYAML != nil {
+            var policy = resolvedOpenShellEgressPolicy
+            policy.logsAllowed = logAllowedConnections ?? policy.isActive
+            return policy
+        }
+        #endif
         #if canImport(SandboxEngine)
         var none = EgressPolicy.allowAll
         none.logsAllowed = logAllowedConnections
@@ -1646,6 +1773,105 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// interception (e.g. heavy cert-pinning not covered by the passthrough list).
     public var disableTransparentProxy: Bool = false
 
+    /// Strict credential mode: block any outbound request carrying a
+    /// credential Bromure didn't inject for that destination (a token the
+    /// agent found or guessed). Implies full interception — the transparent
+    /// proxy can't be disabled and the no-MITM passthrough list is ignored for
+    /// this workspace, so every HTTP(S) request is inspected. See
+    /// `UnmanagedCredentialGuard`.
+    public var strictCredentials: Bool = false
+
+    /// Custom credentials with no host filter (injected on any host) — not
+    /// allowed under strict credential mode.
+    public var unboundCredentialNames: [String] {
+        manualTokens.filter { $0.isUsable && $0.effectiveHostScopes == [""] }
+            .map { $0.name.isEmpty ? $0.envVarName : $0.name }
+    }
+
+    /// Strict sandbox: agents in this workspace get no path to root in the
+    /// guest (no sudo, no docker group, no console session) and a root-owned
+    /// attestor reports which executable opened each connection, so an
+    /// OpenShell policy's `binaries` are enforced (OpenShell RFC 0012 binary
+    /// identity). The cooperative proxy env is dropped — every connection goes
+    /// through transparent interception, where it can be attributed. Applies at
+    /// the next VM start.
+    public var strictSandbox: Bool = false
+
+    /// Kernel sentry: an in-kernel event stream (eBPF + a vsock bridge
+    /// module, lockdown raised after load) the host watches for tampering
+    /// and silence. `best_effort` runs without it when it can't load; `hard`
+    /// refuses to start agent sessions without it. Applies at the next VM
+    /// start.
+    public var kernelSentry: KernelSentryMode = .off
+    /// OpenShell credential placeholders: under an OpenShell policy, the
+    /// guest sees `openshell:resolve:env:<VAR>` instead of Bromure's
+    /// format-mimicking stand-ins for credentials delivered as environment
+    /// variables, resolved by the proxy with OpenShell's rules (headers
+    /// always; bodies / WebSocket text only where the endpoint opts in).
+    public var openShellCredentialPlaceholders: Bool = false
+    /// OpenShell engine: Python packages install into the home folder by
+    /// default (`pip install` → `~/.local`), since the sandbox has no root for
+    /// system-wide installs. npm already installs globally into
+    /// `~/.npm-global` on every workspace. Default on.
+    public var sandboxHomePackages: Bool = true
+    /// OpenShell engine: the agent can ask for a system package
+    /// (`apt-get install …`, with or without sudo); the request waits in the
+    /// Sandbox drawer and, once approved, the guest's root supervisor installs
+    /// it. The agent never gets root. Default on.
+    public var sandboxSystemPackages: Bool = true
+    /// The two above, in force: only under the OpenShell engine.
+    public var effectiveSandboxHomePackages: Bool { usesOpenShellPolicy && sandboxHomePackages }
+    public var effectiveSandboxSystemPackages: Bool { usesOpenShellPolicy && sandboxSystemPackages }
+
+    /// Strict modes as actually applied: the workspace's own switches, or the
+    /// organization's requirement (bromure.io managed policy).
+    public var effectiveStrictCredentials: Bool {
+        Self.organizationRequiresStrictCredentials || strictCredentials
+    }
+
+    /// The organization (bromure.io managed policy) requires strict credential
+    /// mode on every workspace of this install.
+    public static var organizationRequiresStrictCredentials: Bool {
+        #if os(macOS)
+        return OpenShellGovernance.shared.managed?.requireStrictCredentials == true
+        #else
+        return false
+        #endif
+    }
+
+    /// The kernel sentry as applied: the workspace's own setting, raised to
+    /// the organization's minimum (bromure.io managed policy).
+    public var effectiveKernelSentry: KernelSentryMode {
+        #if os(macOS)
+        let floor = OpenShellGovernance.shared.kernelSentryFloor
+        if floor.rank > kernelSentry.rank { return floor }
+        #endif
+        return kernelSentry
+    }
+
+    public var effectiveStrictSandbox: Bool {
+        #if os(macOS)
+        if OpenShellGovernance.shared.managed?.requireStrictSandbox == true { return true }
+        #endif
+        return strictSandbox || policyHasProcessSection
+    }
+
+    /// An OpenShell `process` section needs the strict sandbox: its seccomp
+    /// filters and no_new_privs would otherwise be skipped (they'd break the
+    /// sudo a non-strict workspace grants), which silently fails open.
+
+    public var policyHasProcessSection: Bool {
+        networkPolicy.split(separator: "\n", omittingEmptySubsequences: true).contains { line in
+            line.hasPrefix("process:") && !line.hasPrefix("process: null") && !line.hasPrefix("process: ~")
+        }
+    }
+
+    /// Interception opt-out as actually applied: strict credential mode
+    /// overrides the escape hatch.
+    public var effectiveDisableTransparentProxy: Bool {
+        disableTransparentProxy && !effectiveStrictCredentials && !effectiveStrictSandbox
+    }
+
     /// Suppress the interruptive "environment may be compromised" alert when a
     /// session credential is seen heading to a host it wasn't minted for. The
     /// leak is STILL blocked (the proxy returns 451) and STILL recorded in the
@@ -1666,6 +1892,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// PII protection — personal data swapped for stand-ins before it reaches
     /// the model provider, restored in the replies. Enforced in the MITM.
     public var pii: PIIPolicy
+    /// Squelch — noise cut from the command output the agent sends its
+    /// model (passing tests, progress, download chatter). Enforced in the MITM.
+    public var squelch = SquelchPolicy()
 
     /// DigitalOcean Personal Access Token. Injected as
     /// DIGITALOCEAN_ACCESS_TOKEN env + ~/.config/doctl/config.yaml in
@@ -1741,6 +1970,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
 
     /// Fields the app maintains itself, never the editor: a save from a
     /// working copy takes them from the stored profile instead.
+    /// What the app saves outside the editor while it's open -- the VM
+    /// dashboard's notes, the sidebar's Squelch switch: a field the editor
+    /// left as it `opened` it takes `stored`'s; one edited keeps the edit.
+    mutating func adoptAppEdits(from stored: Profile, opened: Profile) {
+        if comments == opened.comments { comments = stored.comments }
+        if squelch.enabled == opened.squelch.enabled { squelch.enabled = stored.squelch.enabled }
+    }
+
     public mutating func adoptRuntimeFields(from stored: Profile) {
         createdAt = stored.createdAt
         // The later of the two: a use recorded while the editor was open
@@ -2158,6 +2395,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case gitHTTPSCredentials
         case additionalTools
         case manualTokens
+        case mintedCredentials
         case importedSSHKeys
         case environmentVariables
         case traceLevel
@@ -2183,12 +2421,23 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case kubeconfigs
         case guardrails
         case egressRules
+        case networkPolicy
+        case openShellProviders
+        case openShellAdvisorMode
+        case watchdogMode
         case logAllowedConnections
+        case tellAgentOnDeny
         case disableTransparentProxy
+        case strictCredentials
+        case strictSandbox
+        case kernelSentry
+        case openShellCredentialPlaceholders
+        case sandboxHomePackages, sandboxSystemPackages
         case disableExfiltrationAlerts
         case supplyChain
         case promptInjection
         case pii
+        case squelch
         case digitalOceanToken
         case linearToken
         case twilioCredential
@@ -2275,6 +2524,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         }
         additionalTools = dedup
         manualTokens = try c.decodeIfPresent([ManualToken].self, forKey: .manualTokens) ?? []
+        mintedCredentials = try c.decodeIfPresent([MintedCredential].self, forKey: .mintedCredentials) ?? []
         importedSSHKeys = try c.decodeIfPresent([ImportedSSHKey].self, forKey: .importedSSHKeys) ?? []
         environmentVariables = try c.decodeIfPresent([EnvironmentVariable].self,
                                                      forKey: .environmentVariables) ?? []
@@ -2310,12 +2560,25 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         kubeconfigs = try c.decodeIfPresent([KubeconfigEntry].self, forKey: .kubeconfigs) ?? []
         guardrails = try c.decodeIfPresent(GuardrailsPolicy.self, forKey: .guardrails) ?? GuardrailsPolicy()
         egressRules = try c.decodeIfPresent(String.self, forKey: .egressRules) ?? ""
+        networkPolicy = try c.decodeIfPresent(String.self, forKey: .networkPolicy) ?? ""
+        openShellProviders = try c.decodeIfPresent([OpenShellProviderAttachment].self,
+                                                   forKey: .openShellProviders) ?? []
+        openShellAdvisorMode = try c.decodeIfPresent(String.self, forKey: .openShellAdvisorMode) ?? "off"
+        watchdogMode = try c.decodeIfPresent(String.self, forKey: .watchdogMode) ?? "off"
         logAllowedConnections = try c.decodeIfPresent(Bool.self, forKey: .logAllowedConnections)
+        tellAgentOnDeny = try c.decodeIfPresent(Bool.self, forKey: .tellAgentOnDeny)
         disableTransparentProxy = try c.decodeIfPresent(Bool.self, forKey: .disableTransparentProxy) ?? false
+        strictCredentials = try c.decodeIfPresent(Bool.self, forKey: .strictCredentials) ?? false
+        strictSandbox = try c.decodeIfPresent(Bool.self, forKey: .strictSandbox) ?? false
+        kernelSentry = (try? c.decodeIfPresent(KernelSentryMode.self, forKey: .kernelSentry)) ?? .off
+        openShellCredentialPlaceholders = try c.decodeIfPresent(Bool.self, forKey: .openShellCredentialPlaceholders) ?? false
+        sandboxHomePackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxHomePackages) ?? true
+        sandboxSystemPackages = try c.decodeIfPresent(Bool.self, forKey: .sandboxSystemPackages) ?? true
         disableExfiltrationAlerts = try c.decodeIfPresent(Bool.self, forKey: .disableExfiltrationAlerts) ?? false
         supplyChain = try c.decodeIfPresent(SupplyChainPolicy.self, forKey: .supplyChain) ?? SupplyChainPolicy()
         promptInjection = try c.decodeIfPresent(PromptInjectionPolicy.self, forKey: .promptInjection) ?? PromptInjectionPolicy()
         pii = try c.decodeIfPresent(PIIPolicy.self, forKey: .pii) ?? PIIPolicy()
+        squelch = try c.decodeIfPresent(SquelchPolicy.self, forKey: .squelch) ?? SquelchPolicy()
         digitalOceanToken = try c.decodeIfPresent(String.self, forKey: .digitalOceanToken) ?? ""
         linearToken = try c.decodeIfPresent(String.self, forKey: .linearToken) ?? ""
         twilioCredential = try c.decodeIfPresent(TwilioCredential.self, forKey: .twilioCredential) ?? TwilioCredential()
@@ -2392,6 +2655,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !manualTokens.isEmpty {
             try c.encode(manualTokens, forKey: .manualTokens)
         }
+        if !mintedCredentials.isEmpty {
+            try c.encode(mintedCredentials, forKey: .mintedCredentials)
+        }
         if !importedSSHKeys.isEmpty {
             try c.encode(importedSSHKeys, forKey: .importedSSHKeys)
         }
@@ -2466,7 +2732,34 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !egressRules.isEmpty {
             try c.encode(egressRules, forKey: .egressRules)
         }
+        if !networkPolicy.isEmpty {
+            try c.encode(networkPolicy, forKey: .networkPolicy)
+        }
+        if !openShellProviders.isEmpty {
+            try c.encode(openShellProviders, forKey: .openShellProviders)
+        }
+        if openShellAdvisorMode != "off" {
+            try c.encode(openShellAdvisorMode, forKey: .openShellAdvisorMode)
+        }
+        if watchdogMode != "off" {
+            try c.encode(watchdogMode, forKey: .watchdogMode)
+        }
+        if strictCredentials {
+            try c.encode(strictCredentials, forKey: .strictCredentials)
+        }
+        if strictSandbox {
+            try c.encode(strictSandbox, forKey: .strictSandbox)
+        }
+        if openShellCredentialPlaceholders {
+            try c.encode(true, forKey: .openShellCredentialPlaceholders)
+        }
+        if !sandboxHomePackages { try c.encode(false, forKey: .sandboxHomePackages) }
+        if !sandboxSystemPackages { try c.encode(false, forKey: .sandboxSystemPackages) }
+        if kernelSentry != .off {
+            try c.encode(kernelSentry, forKey: .kernelSentry)
+        }
         try c.encodeIfPresent(logAllowedConnections, forKey: .logAllowedConnections)
+        try c.encodeIfPresent(tellAgentOnDeny, forKey: .tellAgentOnDeny)
         if disableExfiltrationAlerts {
             try c.encode(disableExfiltrationAlerts, forKey: .disableExfiltrationAlerts)
         }
@@ -2482,6 +2775,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encode(supplyChain, forKey: .supplyChain)
         try c.encode(promptInjection, forKey: .promptInjection)
         if pii != PIIPolicy() { try c.encode(pii, forKey: .pii) }
+        if squelch != SquelchPolicy() { try c.encode(squelch, forKey: .squelch) }
         if !digitalOceanToken.isEmpty {
             try c.encode(digitalOceanToken, forKey: .digitalOceanToken)
         }
@@ -2834,6 +3128,14 @@ struct ProfileSecrets: Codable {
     /// write-only over the remote export path like everything else here.
     /// Keyed by EnvironmentVariable.id.uuidString.
     var environmentVariableValues: [String: String]?
+    /// Minted credentials' real values, keyed by MintedCredential.id: the
+    /// token or secret access key, and the session token. Optional for
+    /// older `secrets.enc` blobs.
+    var mintedCredentialSecrets: [String: MintedSecret]?
+    struct MintedSecret: Codable, Equatable {
+        var secret: String
+        var sessionToken: String
+    }
 
     var isEmpty: Bool {
         (apiKey?.isEmpty ?? true)
@@ -2856,6 +3158,7 @@ struct ProfileSecrets: Codable {
             && (mcpEnvironmentValues?.isEmpty ?? true)
             && (mcpRawJSONs?.isEmpty ?? true)
             && (environmentVariableValues?.isEmpty ?? true)
+            && (mintedCredentialSecrets?.isEmpty ?? true)
     }
 
     /// Pull every secret string out of the profile, replacing them
@@ -2890,6 +3193,13 @@ struct ProfileSecrets: Codable {
                 s.manualTokenValues[t.id.uuidString] = t.realValue
                 profile.manualTokens[i].realValue = ""
             }
+        }
+
+        for (i, m) in profile.mintedCredentials.enumerated() where !m.secret.isEmpty || !m.sessionToken.isEmpty {
+            s.mintedCredentialSecrets = s.mintedCredentialSecrets ?? [:]
+            s.mintedCredentialSecrets?[m.id.uuidString] = MintedSecret(secret: m.secret, sessionToken: m.sessionToken)
+            profile.mintedCredentials[i].secret = ""
+            profile.mintedCredentials[i].sessionToken = ""
         }
 
         if !profile.kubeconfigs.isEmpty {
@@ -3013,6 +3323,13 @@ struct ProfileSecrets: Codable {
             }
         }
 
+        for (i, m) in profile.mintedCredentials.enumerated() {
+            if let v = mintedCredentialSecrets?[m.id.uuidString] {
+                profile.mintedCredentials[i].secret = v.secret
+                profile.mintedCredentials[i].sessionToken = v.sessionToken
+            }
+        }
+
         if let kcs = kubeconfigs { profile.kubeconfigs = kcs }
         if let do_ = digitalOceanToken { profile.digitalOceanToken = do_ }
         if let lin = linearToken { profile.linearToken = lin }
@@ -3100,6 +3417,9 @@ struct ProfileSecrets: Codable {
         additionalToolApiKeys.merge(newer.additionalToolApiKeys) { _, n in n }
         gitHTTPSTokens.merge(newer.gitHTTPSTokens) { _, n in n }
         manualTokenValues.merge(newer.manualTokenValues) { _, n in n }
+        if let v = newer.mintedCredentialSecrets {
+            mintedCredentialSecrets = (mintedCredentialSecrets ?? [:]).merging(v) { _, n in n }
+        }
         // Kube round-trips through the redacted export with blank auth. Merge per
         // id so an identity/guardrail edit (name, requireApproval, …) applies while
         // a blank auth keeps the stored cert/token; a real incoming auth still wins.
@@ -3402,6 +3722,68 @@ public final class ProfileStore {
         rootDir.appendingPathComponent(profile.id.uuidString, isDirectory: true)
     }
 
+    /// `vm run --rm`: a marker in the workspace's own directory, so the
+    /// mark outlives the process -- a quit, a signal or a crash while the
+    /// VM is stopped (a reboot's relaunch waiting on a prompt, a boot that
+    /// gave up) can't turn it into a kept workspace (Finding CWE-459, "vm
+    /// run --rm reboot keeps the workspace only in memory, so quit during
+    /// relaunch retains the disk"). It goes with the directory.
+    /// It holds the pid of the process that owns the workspace (made it, or
+    /// boots it): two processes share this store (the login agent and the
+    /// GUI), and only the owner -- or anyone once the owner is gone -- may
+    /// sweep it.
+    static let ephemeralMarker = "ephemeral"
+
+    private func ephemeralMarkerURL(_ profile: Profile) -> URL {
+        profileDirectory(for: profile).appendingPathComponent(Self.ephemeralMarker)
+    }
+
+    /// Mark (or re-claim) `profile` as `vm run --rm`, owned by `owner`.
+    public func markEphemeral(_ profile: Profile, owner: pid_t = getpid()) {
+        try? Data(String(owner).utf8).write(to: ephemeralMarkerURL(profile), options: .atomic)
+    }
+
+    public func isEphemeral(_ profile: Profile) -> Bool {
+        fm.fileExists(atPath: ephemeralMarkerURL(profile).path)
+    }
+
+    /// The marker's owning pid; nil with no marker, 0 when unreadable.
+    public func ephemeralOwner(_ profile: Profile) -> pid_t? {
+        guard isEphemeral(profile) else { return nil }
+        let text = (try? String(contentsOf: ephemeralMarkerURL(profile), encoding: .utf8)) ?? ""
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Whether this process may delete a stopped `--rm` workspace: it owns
+    /// it (`mine`), or (`!mine`, a launch) its owner is no longer running.
+    /// A pid that's alive again under another program errs on keeping it.
+    public func ephemeralSweepable(_ profile: Profile, mine: Bool, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        if mine { return owner == getpid() }
+        return owner != getpid() && (owner <= 0 || !isAlive(owner))
+    }
+
+    /// Whether this process may claim or delete `profile`'s `--rm` mark:
+    /// there is one, and it is this process's or its owner is gone. Never a
+    /// live other process's (it may be running that workspace right now).
+    public func mayTakeEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        guard let owner = ephemeralOwner(profile) else { return false }
+        return owner == getpid() || owner <= 0 || !isAlive(owner)
+    }
+
+    /// `vm run --rm`, or a boot of a marked workspace: mark it this
+    /// process's -- unless a live other process owns it.
+    @discardableResult
+    public func claimEphemeral(_ profile: Profile, isAlive: (pid_t) -> Bool = ProfileStore.processAlive) -> Bool {
+        if isEphemeral(profile), !mayTakeEphemeral(profile, isAlive: isAlive) { return false }
+        markEphemeral(profile)
+        return true
+    }
+
+    public static func processAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno == EPERM
+    }
+
     public func diskURL(for profile: Profile) -> URL {
         profileDirectory(for: profile).appendingPathComponent("disk.img")
     }
@@ -3510,6 +3892,9 @@ public final class ProfileStore {
         if profile.manualTokens.contains(where: { !$0.realValue.isEmpty }) {
             return true
         }
+        if profile.mintedCredentials.contains(where: { !$0.secret.isEmpty || !$0.sessionToken.isEmpty }) {
+            return true
+        }
         if !profile.awsCredentials.secretAccessKey.isEmpty
             || !profile.awsCredentials.sessionToken.isEmpty {
             return true
@@ -3520,9 +3905,11 @@ public final class ProfileStore {
         return false
     }
 
-    public func save(_ profile: Profile) throws {
+    @discardableResult
+    public func save(_ profile: Profile) throws -> Profile {
         let dir = profileDirectory(for: profile)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let profile = carryingStoredMinted(profile, dir: dir)
 
         // Split secrets out. The Profile in memory keeps every field;
         // on disk we write profile.json (no secrets) + secrets.enc
@@ -3534,6 +3921,29 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
+        return profile
+    }
+
+    /// `profile` with the minted credentials already stored kept. Only the
+    /// process whose VM minted one records it, while every other copy in
+    /// memory -- the other Bromure process's, loaded at its startup, an
+    /// editor's, a launch's -- still has the older list: a save from one of
+    /// those dropped the record and its secret, and the access key the guest
+    /// still holds was then signed with the workspace's own key (Finding
+    /// CWE-284, "The other Bromure process's launch rewrites a workspace and
+    /// drops minted keys"). A stored credential the copy doesn't have is
+    /// kept; the copy's own version of one wins; long-expired ones go.
+    func carryingStoredMinted(_ profile: Profile, dir: URL) -> Profile {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("profile.json")),
+              var stored = try? JSONDecoder.iso8601().decode(Profile.self, from: data),
+              stored.id == profile.id else { return profile }
+        let have = Set(profile.mintedCredentials.map(\.id))
+        guard stored.mintedCredentials.contains(where: { !have.contains($0.id) }) else { return profile }
+        mergeSecrets(into: &stored, dir: dir)
+        var out = profile
+        out.mintedCredentials = MintedCredential.pruned(
+            profile.mintedCredentials + stored.mintedCredentials.filter { !have.contains($0.id) })
+        return out
     }
 
     /// Drop the encrypted blob (and best-effort delete any plaintext
@@ -3580,13 +3990,61 @@ public final class ProfileStore {
     /// launch; an older copy wrote it backwards).
     public func saveEdited(_ profile: inout Profile) throws {
         if let stored = storedProfile(id: profile.id) { profile.adoptRuntimeFields(from: stored) }
+        holdHomeSizeToImage(&profile)
         try save(profile)
     }
 
-    public func touch(_ profile: Profile) throws {
+    /// A home size below the workspace's existing image is raised to the
+    /// image's size. The disk layer only grows an image, so a smaller
+    /// setting never took effect and only came back as the size of the next
+    /// home after an erase -- and an editor that opened before the image
+    /// existed offered one (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists").
+    func holdHomeSizeToImage(_ profile: inout Profile) {
+        guard profile.homeModel == .ext4, let gb = profile.homeImageGB,
+              let n = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber
+        else { return }
+        let imageGB = Int(n.int64Value >> 30)
+        if gb < imageGB { profile.homeImageGB = imageGB }
+    }
+
+    /// A workspace whose directory is gone: the other process sharing this
+    /// store (login agent, GUI) deleted it -- a stopped `vm run --rm`
+    /// workspace its sweep took. An update from a stale copy must not write
+    /// it back, secrets and all, as a kept workspace (Finding CWE-459, "The
+    /// other Bromure process recreates a deleted vm run --rm workspace,
+    /// including its secrets").
+    public struct ProfileGone: LocalizedError {
+        public let name: String
+        public var errorDescription: String? {
+            String(format: NSLocalizedString(
+                "“%@” no longer exists: another Bromure process deleted it.",
+                comment: "workspace deleted by the other process (login agent or app)"), name)
+        }
+    }
+
+    /// Whether `profile` is still saved here (what `loadAll` lists).
+    public func exists(_ profile: Profile) -> Bool {
+        fm.fileExists(atPath: profileDirectory(for: profile).appendingPathComponent("profile.json").path)
+    }
+
+    /// Save a change to a workspace that is already saved -- from a copy
+    /// held in memory, which may outlive the directory. Never recreates it.
+    /// Returns what was written: `profile` with the stored minted
+    /// credentials it lacked (see `carryingStoredMinted`).
+    @discardableResult
+    public func update(_ profile: Profile) throws -> Profile {
+        guard exists(profile) else { throw ProfileGone(name: profile.name) }
+        return try save(profile)
+    }
+
+    /// Stamp a launch on a saved workspace; never recreates a deleted one.
+    /// Returns what was written, minted credentials as stored.
+    @discardableResult
+    public func touch(_ profile: Profile) throws -> Profile {
         var p = profile
         p.lastUsedAt = Date()
-        try save(p)
+        return try update(p)
     }
 
     public func delete(_ profile: Profile) throws {
@@ -3615,6 +4073,10 @@ public final class ProfileStore {
     public func duplicate(_ source: Profile, named newName: String) throws -> Profile {
         var fresh = source
         fresh.id = UUID()
+        // Its own kubeconfig entry ids: per-entry state on the host (the
+        // exec poller, consent grants) must not be shared by two running
+        // copies.
+        for i in fresh.kubeconfigs.indices { fresh.kubeconfigs[i].id = UUID() }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         fresh.name = trimmed.isEmpty ? source.name + " copy" : trimmed
         fresh.lastUsedAt = nil
@@ -3868,6 +4330,18 @@ public final class ProfileStore {
         try revertImage(fromCheckpoint: checkpointID,
                         in: homeCheckpointsDirectory(for: profile),
                         over: homeImageURL(for: profile), profile: profile)
+        Self.homeImageChanged(profile.id)   // a checkpoint from before a grow is smaller
+    }
+
+    /// A workspace's home image was created, grown, erased or rolled back:
+    /// an open editor measures it again. Posted where the file changes --
+    /// a boot creates it in `prepare()`, long before the session registers,
+    /// and a boot that then fails never registers at all (Finding CWE-670,
+    /// "Home-size floor stays at 8 GB after prepare() has created the image").
+    public static func homeImageChanged(_ id: UUID) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
+        }
     }
 
     private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
@@ -3901,6 +4375,7 @@ public final class ProfileStore {
         let img = homeImageURL(for: profile)
         if fm.fileExists(atPath: img.path) {
             try fm.removeItem(at: img)
+            Self.homeImageChanged(profile.id)
         }
         // Erased means erased: the home's rollback checkpoints hold the
         // same data and must not survive the wipe.
@@ -4011,17 +4486,31 @@ public final class ProfileStore {
     /// for the guest-side rewrite). The whole `delegation` server: it only
     /// reaches the host, which enforces the per-workspace reach policy.
     /// And `display`: showing the user a picture or a chart touches nothing.
-    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"]
+    /// And reading the delegation inbox, where the files other agents hand
+    /// over land: a VM's home is its workspace's own, so that inbox holds
+    /// only what was sent to this workspace. Read only — rewriting or
+    /// unpacking a file there (another session's incoming files too) goes
+    /// through the approval mode like any other edit.
+    static let claudeAlwaysAllowed = ["mcp__delegation", "mcp__display"] + claudeInboxRules
+    static let claudeInboxRules = ["Read(~/.bromure/inbox/**)"]
+    /// Rules earlier builds seeded and every merge re-added, so the user
+    /// couldn't drop them: taken back out (CWE-732, "Sidecar Claude can read
+    /// and edit every workspace's delegation inbox without a prompt").
+    static let claudeRetractedRules = ["Edit(~/.bromure/inbox/**)"]
+    /// `permissions.additionalDirectories` merged in too: Claude's built-in
+    /// read-only commands (ls, cat, grep…) then run there unprompted.
+    static let claudeInboxDirectory = "~/.bromure/inbox"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
-    /// (`StopCancelled`, fired instead of `Stop`) reports the tab done.
+    /// (`StopCancelled`, fired instead of `Stop`) reports the tab idle --
+    /// done on its dot, but the turn didn't finish (`AgentStatus.endsTurn`).
     static let grokStatusHooksJSON = """
     {
       "hooks": {
         "StopCancelled": [
           {
             "hooks": [
-              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh done", "timeout": 5 }
+              { "type": "command", "command": "/home/ubuntu/.bromure/agent-status.sh idle", "timeout": 5 }
             ]
           }
         ]
@@ -4437,11 +4926,14 @@ public final class ProfileStore {
             // Agent-to-agent traffic (delegate, report, deliver…) is our own
             // MCP to the host; auto mode's guardrails kept blocking it.
             // Merged into the user's list, never replacing it.
-            var allow = perms["allow"] as? [String] ?? []
+            var allow = (perms["allow"] as? [String] ?? []).filter { !Self.claudeRetractedRules.contains($0) }
             for rule in Self.claudeAlwaysAllowed where !allow.contains(rule) {
                 allow.append(rule)
             }
             perms["allow"] = allow
+            var dirs = perms["additionalDirectories"] as? [String] ?? []
+            if !dirs.contains(Self.claudeInboxDirectory) { dirs.append(Self.claudeInboxDirectory) }
+            perms["additionalDirectories"] = dirs
             settings["permissions"] = perms
             // Auto mode's classifier: what this VM is (see ClaudeAutoMode) —
             // Bromure's entries replaced, the user's own kept.
@@ -4504,10 +4996,16 @@ public final class ProfileStore {
                 }
             }
             hooks["SessionStart"] = hookCmd("start") + othersUnder("SessionStart")
-            hooks["UserPromptSubmit"] = hookCmd("working") + othersUnder("UserPromptSubmit")
+            // `policy`: notes about actions the workspace's policy refused
+            // (PolicySteering), read right after the tool call that hit them.
+            hooks["UserPromptSubmit"] = hookCmd("working") + hookCmd("policy") + othersUnder("UserPromptSubmit")
             hooks["PreToolUse"] = hookCmd("working") + [pqPre] + othersUnder("PreToolUse")
-            hooks["PostToolUse"] = [pqPost] + othersUnder("PostToolUse")
-            hooks["Stop"] = hookCmd("done") + [pqStop] + othersUnder("Stop")
+            hooks["PostToolUse"] = hookCmd("policy") + [pqPost] + othersUnder("PostToolUse")
+            // Stop drains them too: a note written after the blocked tool's
+            // PostToolUse ran would otherwise wait for the next message. One
+            // `stop` command (the hooks of an event run in parallel): it
+            // reports `done` only when no note kept the turn going.
+            hooks["Stop"] = hookCmd("stop") + [pqStop] + othersUnder("Stop")
             hooks["Notification"] = hookCmd("needsInput") + othersUnder("Notification")
             // A turn the API refused (auth, quota, overload) fires StopFailure,
             // not Stop: without it the tab sat "working" forever. A refused
@@ -4582,12 +5080,160 @@ public final class ProfileStore {
             let statusScript = #"""
             #!/bin/sh
             # Bromure Claude-hook status reporter → per-tab sidebar dot.
-            # $1 = working|done|needsInput.
+            # $1 = working|done|idle|needsInput (idle: at its prompt, no turn ended).
             # $2 = optional tmux pane. Claude/Kimi hooks run inside the tab's
             # pane, so $TMUX_PANE is set and $2 is omitted; omp's hook passes
             # $TMUX_PANE explicitly (its pi.exec may not inherit the env).
             # Either way the pane resolves this tab's window index — reported in
             # the filename so each tab's dot is independent.
+            # `policy` (Claude's PostToolUse / UserPromptSubmit / Stop): hand the model
+            # the notes the host left for this tab when the workspace's policy
+            # blocked something it did (PolicySteering), as the hook's
+            # additionalContext. The notes are in the host's read-only meta
+            # share, never a guest folder: a Stop note keeps the turn going, so
+            # one any guest process could write would be a prompt nobody typed.
+            # Each is claimed by an exclusive marker, so two hooks firing at
+            # once never hand over the same one.
+            # `stop` (Claude's one Stop hook): a turn that ends with notes
+            # owed is kept going with them (`decision: block`), and then it has
+            # NOT ended: reporting `done` too would let the host type a held
+            # notice and finish a task while the agent works on. Claude runs a
+            # Stop event's hooks in parallel, so the drain and the report are
+            # one command. A `done` run for a Stop event does the same, and a
+            # `policy` one leaves the notes to it: a settings file seeded before
+            # (Claude since turned off, Grok still loading it) lists both.
+            stop_json=""
+            stop_event='"hook_\{0,1\}[eE]vent_\{0,1\}[nN]ame"[[:space:]]*:[[:space:]]*"Stop"'
+            if [ "${1:-}" = stop ] || [ "${1:-}" = done ]; then
+              if [ ! -t 0 ]; then stop_json=$(cat 2>/dev/null); fi
+              stop_read=1
+              if [ "$1" = stop ] || printf '%s' "$stop_json" | grep -q "$stop_event"; then
+                kept=$(printf '%s' "$stop_json" | BROMURE_STOP_DRAIN=1 sh "$0" policy)
+                rc=$?
+                if [ -n "$kept" ]; then printf '%s\n' "$kept"; exit 0; fi
+                # 3: a note is owed but couldn't be checked or claimed here
+                # (the sandbox can't read the mount table, the home isn't
+                # writable). Not "the turn ended": done would let the host
+                # type a held notice and finish the task over an undelivered
+                # note — the tab says it needs you instead.
+                if [ "$rc" = 3 ]; then undelivered=1; else drained=1; fi
+              fi
+              if [ -n "${undelivered:-}" ]; then set -- needsInput "${2:-}"; else set -- done "${2:-}"; fi
+            fi
+            if [ "${1:-}" = policy ]; then
+              pol_json=""
+              if [ ! -t 0 ]; then pol_json=$(cat 2>/dev/null); fi
+              if [ -z "${BROMURE_STOP_DRAIN:-}" ] && printf '%s' "$pol_json" | grep -q "$stop_event"; then exit 0; fi
+              [ -n "${TMUX_PANE:-}" ] || exit 0
+              idx=$(tmux display-message -p -t "$TMUX_PANE" '#{window_index}' 2>/dev/null)
+              [ -n "$idx" ] || exit 0
+              set -- /mnt/bromure-meta/policy-notes/w"$idx"-*.note
+              [ -e "$1" ] || exit 0
+              printf '%s' "$pol_json" | python3 -I -c '
+            import json, os, stat, sys
+            event = "PostToolUse"
+            try:
+                e = json.load(sys.stdin)
+                event = e.get("hook_event_name") or e.get("hookEventName") or event
+            except Exception:
+                pass
+            # The host share itself, not something mounted over it (outside the
+            # strict sandbox the guest has sudo, and a bind mount would stack a
+            # guest folder on the path): the mount covering the notes must be
+            # the read-only virtiofs export, and each note must be on it.
+            share = "/mnt/bromure-meta"
+            def procfs(fd):
+                # The table is procfs itself, not a file bound over it.
+                if not sys.platform.startswith("linux"):
+                    return True
+                import ctypes
+                buf = ctypes.create_string_buffer(256)
+                if ctypes.CDLL(None, use_errno=True).fstatfs(fd, buf) != 0:
+                    return False
+                return int.from_bytes(buf.raw[:ctypes.sizeof(ctypes.c_long)], sys.byteorder) == 0x9FA0
+            def owed():
+                # A note is here and cannot be handed over from this pane.
+                sys.exit(3 if os.environ.get("BROMURE_STOP_DRAIN") else 0)
+            dev = None
+            try:
+                table = open("/proc/self/mountinfo")
+            except OSError:
+                owed()
+            try:
+                with table as h:
+                    if not procfs(h.fileno()):
+                        raise OSError("not procfs")
+                    for line in h:
+                        a, _, b = line.partition(" - ")
+                        a, b = a.split(), b.split()
+                        mp = a[4].replace("\\040", " ")
+                        if mp == share or share.startswith(mp.rstrip("/") + "/"):
+                            ok = (mp == share and a[3] == "/" and "ro" in a[5].split(",")
+                                  and b[:2] == ["virtiofs", "bromure-meta"])
+                            major, minor = a[2].split(":")
+                            dev = os.makedev(int(major), int(minor)) if ok else None
+                        elif mp.startswith(share + "/"):
+                            dev = None
+            except (OSError, ValueError, IndexError):
+                dev = None
+            if dev is None:
+                # Notes are here (the shell saw them) but the share cannot be
+                # vouched for: owed, not drained (Finding CWE-670, "A mount
+                # check that cannot validate the share reports done and drops
+                # the owed-note hold").
+                owed()
+            claims = os.path.join(os.path.expanduser("~"), ".bromure", "policy-claims")
+            try:
+                os.makedirs(claims, mode=0o700, exist_ok=True)
+            except OSError:
+                owed()
+            notes = []
+            stuck = False
+            for f in sorted(sys.argv[1:]):
+                # Checked and read through one descriptor, so nothing can swap
+                # the file in between.
+                try:
+                    nfd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
+                except OSError:
+                    continue
+                with os.fdopen(nfd) as h:
+                    st = os.fstat(nfd)
+                    if not stat.S_ISREG(st.st_mode) or st.st_dev != dev:
+                        continue
+                    try:
+                        cfd = os.open(os.path.join(claims, os.path.basename(f)),
+                                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    except FileExistsError:
+                        continue            # handed over already
+                    except OSError:
+                        stuck = True        # cannot claim it: still owed
+                        continue
+                    os.close(cfd)
+                    try:
+                        notes.append(h.read().strip())
+                    except (OSError, ValueError):
+                        pass
+            # Forget the claims on notes the host has since dropped.
+            try:
+                live = set(os.listdir(os.path.dirname(sys.argv[1])))
+                for n in os.listdir(claims):
+                    if n not in live:
+                        os.unlink(os.path.join(claims, n))
+            except OSError:
+                pass
+            if stuck and not notes:
+                owed()
+            if notes and event == "Stop":
+                # The turn ended on the blocked action, before the note was
+                # written: keep the turn going with the note, rather than
+                # holding it until the next message.
+                print(json.dumps({"decision": "block", "reason": "\n".join(notes)}))
+            elif notes:
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                                         "additionalContext": "\n".join(notes)}}))
+            ' "$@"
+              exit $?
+            fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
             # No pane → bail. An empty -t target resolves to the ACTIVE window,
@@ -4602,13 +5248,15 @@ public final class ProfileStore {
             # the transcript file (kept per tab, below) and, for a
             # Notification, WHICH notification. Not a terminal → nothing to read.
             hook_json=""
-            if [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
+            if [ -n "${stop_read:-}" ]; then hook_json=$stop_json
+            elif [ ! -t 0 ]; then hook_json=$(cat 2>/dev/null); fi
             # Claude's Notification hook fires for more than questions: an
             # idle_prompt comes after the agent has merely sat at its prompt
             # for a while. Reporting that as "needs input" made every idle
             # agent look like it had a dialog up, and the host then held its
             # delegation notices indefinitely (that is the state it never
-            # types over). Only a real prompt is needsInput; idle is done;
+            # types over). Only a real prompt is needsInput; idle is "idle"
+            # (done on the dot, but no turn ended: no run or task finishes);
             # anything else (auth_success, elicitation bookkeeping, quota
             # notices) says nothing about the turn.
             # Grok runs these same hooks (it loads ~/.claude/settings.json)
@@ -4619,9 +5267,50 @@ public final class ProfileStore {
               case "$ntype" in
                 "") ;;
                 permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input) ;;
-                idle_prompt) signal="done" ;;
+                idle_prompt) signal="idle" ;;   # at its prompt: no turn ended
                 *) exit 0 ;;
               esac
+            fi
+            # A policy note owed to this tab that its Stop couldn't hand over
+            # (see `stop`): until new activity or a Stop that drains, no
+            # `done` for this tab — not the idle_prompt that follows a minute
+            # later, not Grok's StopCancelled, not a typed one — or the host
+            # finishes the task over the note.
+            # Kept in the outbox, beside the status this run writes: the home
+            # may be what couldn't be written (no claims folder).
+            owed="$d/.policy-owed-$idx"
+            if [ -n "${undelivered:-}" ]; then
+              : > "$owed" 2>/dev/null
+            elif [ -n "${drained:-}" ] || [ "$signal" = "working" ]; then
+              rm -f "$owed" 2>/dev/null
+            fi
+            # The mark holds for a note not handed over yet: with none left for
+            # this window (handed over, or pruned by the host), it goes. Window
+            # indexes are reused -- a new tab numbered like a closed one isn't
+            # owed that tab's note (Finding CWE-670, "Owed-note mark follows a
+            # reused tmux window after the note is gone").
+            if [ -e "$owed" ]; then
+              left=""
+              for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
+                if [ -e "$n" ] && [ ! -e "$HOME/.bromure/policy-claims/${n##*/}" ]; then left=1; break; fi
+              done
+              [ -n "$left" ] || rm -f "$owed" 2>/dev/null
+            fi
+            # An idle report too: the note is still owed, the tab needs you.
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -e "$owed" ]; then signal="needsInput"; fi
+            # The mark goes on new activity (a PreToolUse `working`), but the
+            # note it held for may still be unread: a `done` that didn't drain
+            # (StopCancelled, an Interrupt, a typed `done`) is no turn end
+            # while a note for this tab sits unclaimed (Finding CWE-670,
+            # "PreToolUse working clears an owed policy note, so a non-Stop
+            # done finishes the task"). Notes are only written for tabs whose
+            # hooks drain them (Claude's).
+            if { [ "$signal" = "done" ] || [ "$signal" = "idle" ]; } && [ -z "${drained:-}" ]; then
+              for n in /mnt/bromure-meta/policy-notes/w"$idx"-*.note; do
+                [ -e "$n" ] || continue
+                [ -e "$HOME/.bromure/policy-claims/${n##*/}" ] && continue
+                signal="needsInput"; break
+              done
             fi
             # Tool-call lineage: a PreToolUse also lands, as one JSON line, in
             # agent-tool-<idx>.jsonl — the call's id, tool, command and the
@@ -5215,6 +5904,16 @@ public final class ProfileStore {
     # `grok update` installs — kept AHEAD of /usr/local/bin so a user update
     # actually shadows the baked root grok).
     export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.grok/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+
+    # OpenShell engine (the sandbox has no root): pip installs into the home
+    # folder, and `apt-get install` (with or without sudo) becomes a request
+    # the user approves (Settings › Sandbox Policy › Sandbox, both switchable).
+    if [ -f /mnt/bromure-meta/home-packages ]; then
+        export PIP_USER=1 PIP_BREAK_SYSTEM_PACKAGES=1
+    fi
+    if [ -d /mnt/bromure-meta/pkg-bin ]; then
+        export PATH="/mnt/bromure-meta/pkg-bin:$PATH"
+    fi
 
     # MITM proxy env (HTTPS_PROXY + per-language CA bundles + ssh-agent
     # socket). Sourced before api_key.env so the fake API keys are
@@ -5946,7 +6645,12 @@ public final class ProfileStore {
     # Apply per-profile hostname BEFORE startx — see comment above.
     if [ -r /mnt/bromure-meta/hostname.txt ]; then
         NEW_HOST=$(head -1 /mnt/bromure-meta/hostname.txt | tr -d '[:space:]')
-        if [ -n "$NEW_HOST" ]; then
+        # Every terminal is a login shell too: only the first one (tty1, at
+        # boot) has anything to change. sudo -n everywhere in this file: under
+        # the strict sandbox the agent user has no sudo, and a plain sudo
+        # prompts for a password on the terminal (>/dev/null doesn't hide
+        # the prompt, which goes to the tty).
+        if [ -n "$NEW_HOST" ] && [ "$(hostname)" != "$NEW_HOST" ]; then
             # /etc/hosts first, so subsequent sudo calls can resolve.
             NEW_HOSTS=$(mktemp 2>/dev/null || echo /tmp/hosts.new)
             {
@@ -5955,10 +6659,10 @@ public final class ProfileStore {
                 printf '127.0.1.1\t%s\n'             "$NEW_HOST"
                 printf '\n# Bromure AC: managed at session boot.\n'
             } > "$NEW_HOSTS"
-            sudo install -m 644 "$NEW_HOSTS" /etc/hosts >/dev/null 2>&1 || true
+            sudo -n install -m 644 "$NEW_HOSTS" /etc/hosts >/dev/null 2>&1 || true
             rm -f "$NEW_HOSTS"
-            sudo hostname "$NEW_HOST" >/dev/null 2>&1 || true
-            echo "$NEW_HOST" | sudo tee /etc/hostname >/dev/null 2>&1 || true
+            sudo -n hostname "$NEW_HOST" >/dev/null 2>&1 || true
+            echo "$NEW_HOST" | sudo -n tee /etc/hostname >/dev/null 2>&1 || true
         fi
     fi
 
@@ -5976,8 +6680,8 @@ public final class ProfileStore {
     # 5-in-10s limit permanently failed the unit on a crash loop even after
     # the host restaged a fixed source.
     if [ "$(tty)" = "/dev/tty1" ] && [ -r /mnt/bromure-meta/bromure-agentd.py ]; then
-        if ! grep -sq "KillMode=process" /etc/systemd/system/bromure-agentd.service; then
-            sudo tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
+        if ! grep -sq "python3 -s " /etc/systemd/system/bromure-agentd.service; then
+            sudo -n tee /etc/systemd/system/bromure-agentd.service >/dev/null <<'UNIT'
     [Unit]
     Description=Bromure guest agent daemon
     After=mnt-bromure\x2dmeta.mount network.target
@@ -5986,7 +6690,7 @@ public final class ProfileStore {
     [Service]
     Type=simple
     User=ubuntu
-    ExecStart=/usr/bin/python3 /mnt/bromure-meta/bromure-agentd.py
+    ExecStart=/usr/bin/python3 -s /mnt/bromure-meta/bromure-agentd.py
     Restart=always
     RestartSec=1
     KillMode=process
@@ -5994,10 +6698,10 @@ public final class ProfileStore {
     [Install]
     WantedBy=multi-user.target
     UNIT
-            sudo systemctl daemon-reload >/dev/null 2>&1 || true
-            sudo systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
+            sudo -n systemctl daemon-reload >/dev/null 2>&1 || true
+            sudo -n systemctl enable bromure-agentd.service >/dev/null 2>&1 || true
         fi
-        sudo systemctl start bromure-agentd.service >/dev/null 2>&1 || true
+        sudo -n systemctl start bromure-agentd.service >/dev/null 2>&1 || true
     fi
     [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
     """#
@@ -6266,6 +6970,26 @@ public extension Profile {
         }
     }
 
+    /// The id the consent broker keeps this credential's grants under — the
+    /// same one each gated call site passes to `ConsentBroker.consent`.
+    func consentCredentialID(_ ref: CredentialRef) -> String {
+        switch ref {
+        case .primaryToolKey:        return ConsentCredentialID.primaryToolAPIKey(tool: tool.rawValue)
+        case .additionalTool(let t): return ConsentCredentialID.primaryToolAPIKey(tool: t.rawValue)
+        case .git(let u):            return ConsentCredentialID.gitHTTPS(u)
+        case .manual(let u):         return ConsentCredentialID.manualToken(u)
+        case .docker(let u):         return ConsentCredentialID.dockerRegistry(u)
+        case .database(let u):       return ConsentCredentialID.httpDatabase(u)
+        case .kube(let u):           return ConsentCredentialID.kubeconfig(u)
+        case .aws:                   return ConsentCredentialID.aws()
+        case .digitalOcean:          return ConsentCredentialID.digitalOcean()
+        case .linear:                return ConsentCredentialID.linear()
+        case .twilio:                return ConsentCredentialID.twilio()
+        case .managedSSHKey:         return ConsentCredentialID.bromureSSHKey()
+        case .importedSSHKey(let u): return ConsentCredentialID.sshKey(u.uuidString)
+        }
+    }
+
     /// A short human title for a credential row.
     func credentialTitle(_ ref: CredentialRef) -> String {
         switch ref {
@@ -6330,6 +7054,30 @@ public extension Profile {
         case .linear:       return ["linear.app"]
         case .twilio:       return ["twilio.com"]
         case .managedSSHKey, .importedSSHKey: return []
+        }
+    }
+}
+
+/// A workspace's kernel sentry requirement (see `Profile.kernelSentry`).
+public enum KernelSentryMode: String, Codable, CaseIterable, Sendable {
+    case off
+    case bestEffort = "best_effort"
+    case hard
+
+    var rank: Int {
+        switch self {
+        case .off: return 0
+        case .bestEffort: return 1
+        case .hard: return 2
+        }
+    }
+
+    /// As the editor names it.
+    var label: String {
+        switch self {
+        case .off: return NSLocalizedString("Off", comment: "kernel sentry mode")
+        case .bestEffort: return NSLocalizedString("Best effort", comment: "kernel sentry mode")
+        case .hard: return NSLocalizedString("Required", comment: "kernel sentry mode")
         }
     }
 }

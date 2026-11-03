@@ -224,6 +224,11 @@ public struct GuardrailsConfig: Sendable {
     /// VM isn't paused — the Security Timeline row must say so.
     public var exfiltrationAlertsDisabled: Bool = false
 
+    /// Strict credential mode (`Profile.strictCredentials`): block requests
+    /// carrying credentials Bromure didn't inject, and inspect every flow
+    /// (no passthrough).
+    public var strictCredentials: Bool = false
+
     public init(kubernetes: GuardrailsPolicy.Mode, kubeHosts: Set<String>,
                 aws: GuardrailsPolicy.Mode = .off,
                 digitalOcean: GuardrailsPolicy.Mode = .off,
@@ -318,9 +323,9 @@ public struct GuardrailsConfig: Sendable {
 
     /// Any AWS endpoint. AWS uses well-known `*.amazonaws.com` hosts, so —
     /// unlike kube — there's no per-profile host list to maintain.
+    /// The resigner's test: a host it signs for is one the guardrail sees.
     public static func isAWSHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return h == "amazonaws.com" || h.hasSuffix(".amazonaws.com")
+        AWSHosts.isAWSHost(host)
     }
 
     /// Classify an AWS action name by prefix. Read-ish prefixes mirror the

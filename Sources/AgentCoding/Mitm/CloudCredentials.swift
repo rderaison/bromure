@@ -5,11 +5,33 @@ import _CryptoExtras
 import X509
 import SwiftASN1
 
+// MARK: - Endpoint keys
+
+/// The key both registries file an upstream under: the lowercased host,
+/// then `:port` unless it's 443 -- what `KubeconfigEntry.hostPattern`
+/// gives for `https://h` and `https://h:6443`, with an explicit `:443`
+/// folded onto the bare form (same endpoint). One key per endpoint, so a
+/// registration never writes into another context's slot and a lookup
+/// never falls back to one.
+/// An IPv6 literal is keyed unbracketed on 443 and bracketed with any other
+/// port (`[2001:db8::1]:6443`), whichever form the host arrived in (CONNECT's
+/// authority is bracketed, a URL's host is not).
+func endpointKey(host: String, port: Int) -> String {
+    port == 443 ? HostAuthority.bare(host) : HostAuthority.format(host: host, port: port)
+}
+
+/// A registration's `host[:port]` as an `endpointKey`.
+func endpointKey(_ hostPattern: String) -> String {
+    let (host, port) = TokenSwapper.splitScope(hostPattern.lowercased())
+    return endpointKey(host: host, port: port ?? 443)
+}
+
 // MARK: - SecIdentity registry
 
 /// Per-host client identity table the proxy hands to URLSession when
 /// the upstream API server asks for client-cert auth (Kubernetes,
-/// internal mTLS APIs, etc.). Keyed by `host[:port]` lowercased.
+/// internal mTLS APIs, etc.). Keyed by `endpointKey` -- the host, with
+/// its port unless 443 -- and looked up the same way, exactly.
 public final class ClientIdentityRegistry: @unchecked Sendable {
     private let lock = NSLock()
 
@@ -39,20 +61,11 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
     public func setIdentity(_ identity: SecIdentity, host: String, profileID: UUID,
                             consentCredentialID: String? = nil,
                             consentDisplayName: String? = nil) {
-        let h = host.lowercased()
         let entry = Entry(identity: identity,
                           consentCredentialID: consentCredentialID,
                           consentDisplayName: consentDisplayName)
         lock.lock(); defer { lock.unlock() }
-        var byHost = perProfile[profileID] ?? [:]
-        byHost[h] = entry
-        // Also index by bare hostname — URLSession challenges + the
-        // proxy's CONNECT-parsed host typically drop the port, so a
-        // single registration must hit both forms.
-        if let bare = h.split(separator: ":").first.map(String.init), bare != h {
-            byHost[bare] = entry
-        }
-        perProfile[profileID] = byHost
+        perProfile[profileID, default: [:]][endpointKey(host)] = entry
     }
 
     public func clearAll(for profileID: UUID) {
@@ -60,18 +73,30 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
         perProfile.removeValue(forKey: profileID)
     }
 
-    public func entry(for host: String, profileID: UUID) -> Entry? {
-        let h = host.lowercased()
+    /// Replace a profile's identities in ONE locked swap. Clearing and
+    /// re-adding them one by one left a gap a handshake on the proxy's
+    /// queue could hit -- no client certificate for that request (Finding
+    /// CWE-362, "Live kube trust rebuild drops the cluster CA and client
+    /// cert between lock acquisitions").
+    public func replaceAll(_ identities: [(host: String, entry: Entry)], for profileID: UUID) {
+        var byHost: [String: Entry] = [:]
+        for (host, entry) in identities { byHost[endpointKey(host)] = entry }
         lock.lock(); defer { lock.unlock() }
-        if let e = perProfile[profileID]?[h] { return e }
-        if let bareHost = h.split(separator: ":").first.map(String.init),
-           let e = perProfile[profileID]?[bareHost] { return e }
-        return nil
+        perProfile[profileID] = byHost.isEmpty ? nil : byHost
+    }
+
+    /// The identity registered for this endpoint -- `host` and `port` as
+    /// the connection dials them. Never another port's: a `host:8443`
+    /// context's certificate isn't presented to `host:6443` or `host`.
+    public func entry(for host: String, port: Int, profileID: UUID) -> Entry? {
+        let key = endpointKey(host: host, port: port)
+        lock.lock(); defer { lock.unlock() }
+        return perProfile[profileID]?[key]
     }
 
     /// Compatibility shortcut for code that only needs the SecIdentity.
-    public func identity(for host: String, profileID: UUID) -> SecIdentity? {
-        return entry(for: host, profileID: profileID)?.identity
+    public func identity(for host: String, port: Int, profileID: UUID) -> SecIdentity? {
+        return entry(for: host, port: port, profileID: profileID)?.identity
     }
 }
 
@@ -80,8 +105,9 @@ public final class ClientIdentityRegistry: @unchecked Sendable {
 /// Per-host root-CA table the proxy hands to URLSession when an
 /// upstream uses a cert that doesn't chain to the macOS system trust
 /// store (e.g. a private k8s API server with its own CA). Keyed by
-/// `host[:port]` lowercased. When an entry is present, the registered
-/// PEM is the *only* anchor used to evaluate that host's server cert.
+/// `endpointKey` and looked up exactly. When an entry is present, the
+/// registered PEM is the *only* anchor used to evaluate that host's
+/// server cert.
 public final class ClusterCATrustRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var perProfile: [UUID: [String: SecCertificate]] = [:]
@@ -96,14 +122,8 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
                 "[mitm] cluster CA parse failed for host=\(host) — falling back to system trust\n".utf8))
             return
         }
-        let h = host.lowercased()
         lock.lock(); defer { lock.unlock() }
-        var byHost = perProfile[profileID] ?? [:]
-        byHost[h] = cert
-        if let bare = h.split(separator: ":").first.map(String.init), bare != h {
-            byHost[bare] = cert
-        }
-        perProfile[profileID] = byHost
+        perProfile[profileID, default: [:]][endpointKey(host)] = cert
     }
 
     public func clearAll(for profileID: UUID) {
@@ -111,13 +131,43 @@ public final class ClusterCATrustRegistry: @unchecked Sendable {
         perProfile.removeValue(forKey: profileID)
     }
 
-    public func ca(for host: String, profileID: UUID) -> SecCertificate? {
-        let h = host.lowercased()
+    /// Replace a profile's cluster CAs in ONE locked swap, every PEM parsed
+    /// first -- a lookup never sees the profile cleared (an empty slot is
+    /// system trust for that handshake: Finding CWE-362, "Live kube trust
+    /// rebuild drops the cluster CA and client cert between lock
+    /// acquisitions"). A host whose new PEM doesn't parse keeps the CA it
+    /// had, rather than falling back to system trust. Each endpoint has
+    /// its own key and nothing else writes it, so that CA is always its
+    /// own -- never a context's this rebuild removed, or another port's on
+    /// the same name (Findings CWE-295, "A failed cluster-CA parse
+    /// republishes a removed context's CA on the bare host" and "Portless
+    /// kube CA parse failure republishes another context's certificate").
+    /// With no previous CA of its own it stays unpinned, as a new host would.
+    public func replaceAll(_ cas: [(pem: String, host: String)], for profileID: UUID) {
+        var parsed: [String: SecCertificate] = [:]
+        var failed: [String] = []
+        for (pem, host) in cas {
+            let key = endpointKey(host)
+            guard let cert = Self.parseFirstCertPEM(pem) else { failed.append(key); continue }
+            parsed[key] = cert
+        }
         lock.lock(); defer { lock.unlock() }
-        if let c = perProfile[profileID]?[h] { return c }
-        if let bareHost = h.split(separator: ":").first.map(String.init),
-           let c = perProfile[profileID]?[bareHost] { return c }
-        return nil
+        let previous = perProfile[profileID] ?? [:]
+        for key in failed where parsed[key] == nil {
+            FileHandle.standardError.write(Data(
+                "[mitm] cluster CA parse failed for host=\(key) — keeping its previous CA\n".utf8))
+            parsed[key] = previous[key]
+        }
+        perProfile[profileID] = parsed.isEmpty ? nil : parsed
+    }
+
+    /// The CA pinned for this endpoint -- `host` and `port` as the
+    /// connection dials them -- and only that one: a `host:8443` context's
+    /// CA never anchors a handshake to `host` (443) or `host:6443`.
+    public func ca(for host: String, port: Int, profileID: UUID) -> SecCertificate? {
+        let key = endpointKey(host: host, port: port)
+        lock.lock(); defer { lock.unlock() }
+        return perProfile[profileID]?[key]
     }
 
     /// PEM bundle → DER → SecCertificate (first cert). Handles both
@@ -283,7 +333,7 @@ public final class KubeconfigMaterializer {
         public let consentDisplayName: String?
     }
 
-    public struct ExecContext: Sendable {
+    public struct ExecContext: Sendable, Equatable {
         public let entryID: UUID
         public let host: String
         public let fakeToken: String
@@ -296,9 +346,15 @@ public final class KubeconfigMaterializer {
     /// hand back the swap entries + client identities. Pure function —
     /// callers thread the result into the swap map / identity registry
     /// / exec poller before VM start.
+    ///
+    /// `reusingExec`: the exec contexts in force (a live refresh). An exec
+    /// entry whose plugin, arguments and host are unchanged keeps its fake,
+    /// so the guest's kubeconfig keeps naming the token the poller already
+    /// resolved rather than a new one with nothing behind it yet.
     public func materialize(profile: Profile,
                             bromureCAPEM: String,
-                            directClusters: [KubeDirectCluster] = []) -> Materialized {
+                            directClusters: [KubeDirectCluster] = [],
+                            reusingExec: [ExecContext] = []) -> Materialized {
         var contexts: [String] = []
         var clusters: [String] = []
         var users: [String] = []
@@ -376,7 +432,7 @@ public final class KubeconfigMaterializer {
             case .bearerToken(let realToken):
                 let fake = makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: realToken,
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
@@ -413,15 +469,17 @@ public final class KubeconfigMaterializer {
                 // plugin, the host poller does. Initial fake is a
                 // placeholder; the poller updates the real value
                 // before kubectl needs it.
-                let fake = makeFakeToken()
+                let fake = reusingExec.first {
+                    $0.entryID == entry.id && $0.host == entry.tokenScope && $0.command == cmd && $0.args == args
+                }?.fakeToken ?? makeFakeToken()
                 bearerSwaps.append(BearerSwap(
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake, realToken: "",
                     consentCredentialID: consentID,
                     consentDisplayName: consentDisplay))
                 execContexts.append(ExecContext(
                     entryID: entry.id,
-                    host: entry.hostPattern,
+                    host: entry.tokenScope,
                     fakeToken: fake,
                     command: cmd, args: args,
                     refreshSeconds: max(60, secs)))
@@ -520,49 +578,31 @@ public final class KubeconfigMaterializer {
               let secCert = SecCertificateCreateWithData(nil, certData as CFData) else {
             return nil
         }
-        // Try the key as PKCS#8 first (modern), then RSA (legacy).
-        let keyDataCandidates: [(Data, [CFString: Any])] = {
-            var out: [(Data, [CFString: Any])] = []
-            if let pkcs8 = pemDecode(keyPEM, marker: "PRIVATE KEY") {
-                // PKCS#8 wraps multiple key types; SecKey handles RSA + EC.
-                out.append((pkcs8, [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-                out.append((pkcs8, [
-                    kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            if let rsa = pemDecode(keyPEM, marker: "RSA PRIVATE KEY") {
-                out.append((rsa, [
-                    kSecAttrKeyType: kSecAttrKeyTypeRSA,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            if let ec = pemDecode(keyPEM, marker: "EC PRIVATE KEY") {
-                out.append((ec, [
-                    kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-                    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                ]))
-            }
-            return out
-        }()
-
-        var secKey: SecKey?
-        for (data, attrs) in keyDataCandidates {
-            var err: Unmanaged<CFError>?
-            if let k = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, &err) {
-                secKey = k
-                break
-            }
-        }
-        guard let key = secKey else { return nil }
+        guard let key = makeSecKey(keyPEM: keyPEM) else { return nil }
 
         guard let identity = bromure_SecIdentityCreate(nil, secCert, key) else {
             return nil
         }
         return identity.takeRetainedValue()
+    }
+
+    /// SecKeyCreateWithData takes PKCS#1 DER for RSA and X9.63
+    /// (`04 || X || Y || K`) for EC, not SEC1 or PKCS#8 PEM.
+    private func makeSecKey(keyPEM: String) -> SecKey? {
+        let ecAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+                                        kSecAttrKeyClass: kSecAttrKeyClassPrivate]
+        let rsaAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                                         kSecAttrKeyClass: kSecAttrKeyClassPrivate]
+        let candidates: [(Data, [CFString: Any])] = [
+            ((try? P256.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? P384.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? P521.Signing.PrivateKey(pemRepresentation: keyPEM))?.x963Representation, ecAttrs),
+            ((try? _RSA.Signing.PrivateKey(unsafePEMRepresentation: keyPEM))?.derRepresentation, rsaAttrs),
+        ].compactMap { data, attrs in data.map { ($0, attrs) } }
+        for (data, attrs) in candidates {
+            if let k = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, nil) { return k }
+        }
+        return nil
     }
 
     /// Strip `-----BEGIN X-----` / `-----END X-----` and base64-decode
@@ -589,42 +629,98 @@ public final class KubeconfigMaterializer {
 /// Lifetime is bound to the session — start on launch, stop on close.
 @MainActor
 public final class ExecCredentialPoller {
-    private var tasks: [UUID: Task<Void, Never>] = [:]
+    /// One task per workspace and kubeconfig entry. Keyed by the entry
+    /// alone, a workspace's live refresh cancelled and took over another
+    /// workspace's poller for an entry with the same id (a duplicated
+    /// workspace's), whose token then froze until it expired (Finding
+    /// CWE-362, "A live kubeconfig refresh cancels another workspace's
+    /// exec poller when entry ids match").
+    private struct Key: Hashable { let profileID: UUID; let entryID: UUID }
+    /// A poller: its context, its generation, its task. Only the current
+    /// generation writes a token: a run whose plugin outlived its poller
+    /// (stopped or replaced while it ran) wrote its older token over the
+    /// newer one on the same reused fake (Finding CWE-362, "A cancelled kube
+    /// exec poll writes an older token onto the reused fake").
+    private struct Running { let ctx: KubeconfigMaterializer.ExecContext; let generation: Int; let task: Task<Void, Never> }
+    private let lock = NSLock()
+    private var tasks: [Key: Running] = [:]
+    private var generation = 0
 
     public init() {}
+
+    /// Make `profileID`'s pollers `contexts`: one whose context is unchanged
+    /// keeps running (a live push no longer overlaps two runs of its
+    /// plugin), a changed one restarts, one no longer listed stops.
+    public func sync(_ contexts: [KubeconfigMaterializer.ExecContext],
+                     profileID: UUID,
+                     swapper: TokenSwapper) {
+        let keep = Set(contexts.map(\.entryID))
+        lock.lock()
+        for key in tasks.keys where key.profileID == profileID && !keep.contains(key.entryID) {
+            tasks.removeValue(forKey: key)?.task.cancel()
+        }
+        lock.unlock()
+        start(contexts, profileID: profileID, swapper: swapper)
+    }
 
     public func start(_ contexts: [KubeconfigMaterializer.ExecContext],
                       profileID: UUID,
                       swapper: TokenSwapper) {
+        lock.lock(); defer { lock.unlock() }
         for ctx in contexts {
-            stop(entryID: ctx.entryID)
+            let key = Key(profileID: profileID, entryID: ctx.entryID)
+            if let running = tasks[key], running.ctx == ctx { continue }
+            tasks[key]?.task.cancel()
+            generation += 1
+            let gen = generation
             let task = Task { [weak self, weak swapper] in
                 guard self != nil else { return }
                 while !Task.isCancelled {
                     let token = await Self.runExec(command: ctx.command, args: ctx.args)
-                    if let token, let swapper {
-                        Self.updateSwap(swapper: swapper,
-                                        profileID: profileID,
-                                        host: ctx.host,
-                                        fake: ctx.fakeToken,
-                                        real: token)
-                        FileHandle.standardError.write(Data(
-                            "[k8s-exec] refreshed token for \(ctx.host) (\(ctx.command))\n".utf8))
+                    if let token, let swapper, let self {
+                        // Checked and written under one lock: a run that
+                        // outlived its poller writes nothing.
+                        self.ifCurrent(key, gen) {
+                            Self.updateSwap(swapper: swapper,
+                                            profileID: profileID,
+                                            host: ctx.host,
+                                            fake: ctx.fakeToken,
+                                            real: token)
+                            FileHandle.standardError.write(Data(
+                                "[k8s-exec] refreshed token for \(ctx.host) (\(ctx.command))\n".utf8))
+                        }
                     }
                     try? await Task.sleep(for: .seconds(Double(ctx.refreshSeconds)))
                 }
             }
-            tasks[ctx.entryID] = task
+            tasks[key] = Running(ctx: ctx, generation: gen, task: task)
         }
     }
 
-    public func stop(entryID: UUID) {
-        tasks[entryID]?.cancel()
-        tasks.removeValue(forKey: entryID)
+    private func ifCurrent(_ key: Key, _ gen: Int, _ write: () -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        guard tasks[key]?.generation == gen, !Task.isCancelled else { return }
+        write()
+    }
+
+    /// Stop one workspace's pollers, and only its: a workspace closing
+    /// used to stop every running workspace's exec-credential refresh.
+    public func stopAll(profileID: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        for key in tasks.keys where key.profileID == profileID {
+            tasks.removeValue(forKey: key)?.task.cancel()
+        }
+    }
+
+    /// The kubeconfig entries being refreshed for `profileID`.
+    public func entries(for profileID: UUID) -> Set<UUID> {
+        lock.lock(); defer { lock.unlock() }
+        return Set(tasks.keys.filter { $0.profileID == profileID }.map(\.entryID))
     }
 
     public func stopAll() {
-        for (_, t) in tasks { t.cancel() }
+        lock.lock(); defer { lock.unlock() }
+        for (_, r) in tasks { r.task.cancel() }
         tasks.removeAll()
     }
 
@@ -673,15 +769,12 @@ public final class ExecCredentialPoller {
         // by appending; old entries with the same fake get
         // overwritten by the lookup-by-fake nature of the swap.
         var entries = swapper.entries(for: profileID)
-        // Preserve any consent metadata the original entry carried —
-        // otherwise an exec-plugin refresh would silently strip the
-        // gate flag for that kubeconfig context.
-        let prior = entries.first(where: { $0.fake == fake })
-        entries.removeAll { $0.fake == fake }
-        entries.append(TokenMap.Entry(
-            fake: fake, real: real, host: host,
-            consentCredentialID: prior?.consentCredentialID,
-            consentDisplayName: prior?.consentDisplayName))
+        // The entry as the map has it (consent gate, header, paths), with the
+        // new token. One the map no longer has (the kubeconfig was removed)
+        // isn't put back.
+        guard let prior = entries.first(where: { $0.fake == fake && $0.host == host }) else { return }
+        entries.removeAll { $0.fake == fake && $0.host == host }
+        entries.append(prior.withReal(real))
         swapper.setMap(TokenMap(entries: entries), for: profileID)
     }
 }

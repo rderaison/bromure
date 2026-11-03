@@ -117,12 +117,24 @@ struct BromureAC: ParsableCommand {
         // Hidden verification hook: run the PII detector over files and print
         // what it finds and how long it took. Standalone, no servers or VMs.
         //   bromure-ac __pii-scan <file>… [--min 0.6] [--quiet] [--plan]
+        // Hidden verification hook: the app log's _exit hook names the caller.
+        //   bromure-ac __exit-hook-test   → logs "_exit(3) … called from:" + a backtrace, exits 3
+        if filtered.first == "__exit-hook-test" {
+            AppLog.install()
+            exitHookTestBailOut()
+        }
         if filtered.first == "__bench-scroll" {
             ScrollBench.run(Array(filtered.dropFirst()))
             return
         }
         if filtered.first == "__pii-scan" {
             PIIScanCLI.run(Array(filtered.dropFirst()))
+            return
+        }
+        // Hidden verification hook: what Squelch makes of a command's output.
+        //   some-command 2>&1 | bromure-ac __squelch "some-command" [--stats]
+        if filtered.first == "__squelch" {
+            SquelchCLI.run(Array(filtered.dropFirst()))
             return
         }
         // Hidden docs/screenshot hook: render the reworked "Log in to bromure.io"
@@ -285,6 +297,20 @@ struct BromureAC: ParsableCommand {
                     tl.append(.init(time: now.addingTimeInterval(Double(-600 + i * 60)), engine: r.0, condition: r.1,
                                     decision: r.2, kind: r.3, profileID: pid, workspace: "Claude Dev"))
                 }
+                // One noisy block (grouped into one row with a count) and a
+                // guest-sandbox denial with a changing pid (grouped by what
+                // was tried), from a second, OpenShell workspace.
+                let osID = UUID()
+                for i in 0..<101 {
+                    tl.append(.init(time: now.addingTimeInterval(Double(-3000 + i * 25)), engine: "Firewall",
+                                    condition: "telemetry.example.net:443 tcp", decision: "deny", kind: .blocked,
+                                    profileID: i % 3 == 0 ? osID : pid, workspace: i % 3 == 0 ? "Payments API" : "Claude Dev"))
+                }
+                for (i, procID) in [412, 980, 1311].enumerated() {
+                    tl.append(.init(time: now.addingTimeInterval(Double(-120 + i * 30)), engine: "Guest sandbox",
+                                    condition: "bash (pid \(procID)) — exec /opt/grok/bin/grok", decision: "denied",
+                                    kind: .blocked, profileID: osID, workspace: "Payments API"))
+                }
                 // PII swaps go through the real mapping.
                 for (i, d) in [["name": 2, "email": 1], ["name": 3, "phone": 1, "address": 1]].enumerated() {
                     var data: [String: AnyJSON] = ["host": .string("api.anthropic.com"),
@@ -301,10 +327,56 @@ struct BromureAC: ParsableCommand {
                                     guardrails: true, promptInjection: true, pii: true),
                     SecurityPosture(id: UUID(), name: "Daily", colorHex: "#10B981", firewall: false, supplyChain: true,
                                     guardrails: false, promptInjection: true),
+                    SecurityPosture(id: osID, name: "Payments API", colorHex: "#22C55E", firewall: true, supplyChain: true,
+                                    guardrails: true, promptInjection: false, sandbox: true),
                 ]
                 view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
                                                     startOnTimeline: which == "timeline"))
                 size = NSSize(width: 980, height: 720)
+            case "lineage", "lineage-allowed":
+                // The lineage sheet on demo data: an agent installs a
+                // dependency; its postinstall script phones home and is denied.
+                let tl = SecurityTimeline(directory: nil)
+                let t0 = Date().addingTimeInterval(-300)
+                let reasoning: [String: AnyJSON] = [
+                    "tool_use_id": .string("toolu_01Demo"), "tool": .string("Bash"), "truncated": .bool(false),
+                    "text": .string("The health check needs an HTTP client with timeouts and retries. I'll add axios rather than hand-rolling fetch retries, then run the tests."),
+                    "prompt": .string("Add a health check that retries the payments API with a timeout."),
+                    "intent": .string("Install axios")]
+                if var r = SecurityTimeline.map(profileID: pid, eventType: "agent.reasoning", eventData: reasoning, now: t0) {
+                    r.eventType = "agent.reasoning"; r.detail = reasoning; r.workspace = "Payments API"
+                    tl.append(r)
+                }
+                let base: [(Int, String, String, String)] = [
+                    (412, "claude", "/usr/bin/node", "claude"),
+                    (980, "bash", "/usr/bin/bash", "/bin/bash -c -l eval 'npm install axios' < /dev/null"),
+                    (981, "npm", "/usr/bin/node", "npm install axios")]
+                func flow(_ chain: [(Int, String, String, String)], host: String, ip: String, decision: String,
+                          layer: String, reason: String? = nil, at: Double) -> SecurityTimeline.Event? {
+                    var d: [String: AnyJSON] = [
+                        "proto": .string("tcp"), "dst": .string(ip), "host": .string(host), "dport": .int(443),
+                        "sport": .int(41_000 + Int(at)), "decision": .string(decision), "layer": .string(layer), "count": .int(1),
+                        "processes": .array(chain.map { .object(["pid": .int($0.0), "comm": .string($0.1),
+                                                                 "exe": .string($0.2), "argv": .string($0.3)]) }),
+                        "agent": .object(["tool": .string("Bash"), "tool_use_id": .string("toolu_01Demo"),
+                                          "confidence": .string("exact")]),
+                        "command": .string("npm install axios")]
+                    if let reason { d["reason"] = .string(reason) }
+                    guard var e = SecurityTimeline.map(profileID: pid, eventType: "net.flow", eventData: d,
+                                                       now: t0.addingTimeInterval(at)) else { return nil }
+                    e.eventType = "net.flow"; e.detail = d; e.workspace = "Payments API"
+                    return e
+                }
+                let registry = flow(base, host: "registry.npmjs.org", ip: "104.16.3.35", decision: "allow", layer: "l7", at: 2)
+                let postinstall = base + [(1290, "sh", "/usr/bin/dash", "sh -c node scripts/postinstall.js"),
+                                          (1291, "node", "/usr/bin/node", "node scripts/postinstall.js")]
+                let phoneHome = flow(postinstall, host: "telemetry.example.net", ip: "203.0.113.24", decision: "deny",
+                                     layer: "l7", reason: "no matching network policy", at: 5)
+                for e in [registry, phoneHome].compactMap({ $0 }) { tl.append(e) }
+                let focus = (which == "lineage" ? phoneHome : registry)!
+                view = AnyView(NetworkLineageView(timeline: tl, focus: focus, onClose: {}, scrolls: false)
+                                  .frame(width: 760).fixedSize(horizontal: false, vertical: true))
+                size = NSSize(width: 760, height: 980)
             case "pii-settings", "pii-off":
                 // The real workspace editor, opened on PII Protection.
                 setenv("BROMURE_EDITOR_CATEGORY", EditorCategory.pii.rawValue, 1)
@@ -340,6 +412,10 @@ struct BromureAC: ParsableCommand {
                 var p = Profile(name: which == "prefs" ? "Defaults" : "Workspace 2", tool: .claude,
                                 authMode: .subscription)
                 if which == "prefs" { p.id = ProfileStore.templateID } else { p.agentReach = [] }
+                // BROMURE_SHOT_OPENSHELL=1: the Firewall pane on its OpenShell side.
+                if ProcessInfo.processInfo.environment["BROMURE_SHOT_OPENSHELL"] == "1" {
+                    p.networkPolicy = OpenShellPolicyEditor.starterPolicy
+                }
                 view = AnyView(ProfileEditorView(profile: p, isNew: which != "prefs", terminalDefaults: .fallback,
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {}))
                 size = NSSize(width: 820, height: 680)
@@ -347,6 +423,49 @@ struct BromureAC: ParsableCommand {
                     let wh = env.split(separator: "x").compactMap { Double($0) }
                     if wh.count == 2 { size = NSSize(width: wh[0], height: wh[1]) }
                 }
+            case "policy-drawer", "policy-drawer-openshell":
+                // The Sandbox drawer over a stand-in stage, with demo blocks
+                // in an in-memory timeline (never the user's own).
+                let os = which == "policy-drawer-openshell"
+                var p = Profile(name: "Web app", tool: .claude, authMode: .subscription)
+                if os {
+                    p.networkPolicy = OpenShellPolicyEditor.starterPolicy
+                        + "\nfilesystem_policy:\n  read_only: [/bin, /usr, /lib, /etc]\n  read_write: [/home/ubuntu, /tmp]\n"
+                    p.kernelSentry = .bestEffort
+                }
+                else { p.egressRules = "allow tcp github.com:443\nallow tcp registry.npmjs.org:443 #@until=\(Int(Date().timeIntervalSince1970) + 2400)\nallow web api.openai.com GET,POST #@until=stop\n" }
+                let tl = SecurityTimeline(directory: nil)
+                let now = Date()
+                for (i, (h, port, n)) in [("api.stripe.com", 443, 3), ("www.bromure.io", 443, 1),
+                                          ("pypi.org", 443, 7), ("10.0.0.12", 5432, 2)].enumerated() {
+                    tl.append(SecurityTimeline.Event(
+                        time: now.addingTimeInterval(Double(-90 - i * 260)), engine: "Firewall",
+                        condition: "\(h):\(port)", decision: "deny", kind: .blocked, profileID: p.id,
+                        count: n, firewall: .init(host: h.first!.isNumber ? nil : h, ip: h.first!.isNumber ? h : "104.18.1.\(i)",
+                                                  port: port, proto: "tcp", rule: nil, denied: true, byPolicy: true)))
+                }
+                if os {
+                    for (i, (path, exe, n)) in [("/opt/grok/downloads/grok-linux-aarch64", "/usr/bin/bash", 3),
+                                                ("/srv/datasets/train.parquet", "/usr/bin/python3.12", 12)].enumerated() {
+                        var ev = SecurityTimeline.Event(
+                            time: now.addingTimeInterval(Double(-40 - i * 400)), engine: "Guest sandbox",
+                            condition: path, decision: "denied", kind: .blocked, profileID: p.id)
+                        ev.eventType = "sentry.event"
+                        ev.detail = ["category": .string("sandbox_denial"), "kind": .string("landlock_denied"),
+                                     "path": .string(path), "exe": .string(exe), "op": .string(i == 0 ? "exec" : "open"),
+                                     "count": .int(n)]
+                        tl.append(ev)
+                    }
+                }
+                let list = SessionListModel()
+                list.policyDrawerOpen = true
+                view = AnyView(ZStack(alignment: .trailing) {
+                    LinearGradient(colors: [Color(nsColor: .textBackgroundColor), Color(nsColor: .underPageBackgroundColor)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    PolicyDrawer(list: list, onClose: {}, onOpenSettings: { _ in }, timeline: tl, profileOverride: p)
+                        .padding(10)
+                })
+                size = NSSize(width: 720, height: 620)
             case "machinemenu":
                 view = AnyView(HStack(spacing: 8) {
                     Spacer()
@@ -381,6 +500,17 @@ struct BromureAC: ParsableCommand {
             let end = Date().addingTimeInterval(1.5)
             while Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
             let bounds = host.bounds
+            // BROMURE_SHOT_WINDOW=1: capture the window as the window server
+            // drew it. cacheDisplay leaves a split view's detail blank (the
+            // settings editor's panes).
+            if ProcessInfo.processInfo.environment["BROMURE_SHOT_WINDOW"] == "1",
+               let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                [.boundsIgnoreFraming, .bestResolution]),
+               let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: path))
+                FileHandle.standardError.write(Data("[shot] wrote \(data.count) bytes → \(path)\n".utf8))
+                Darwin.exit(0)
+            }
             if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width * 2),
                                           pixelsHigh: Int(bounds.height * 2), bitsPerSample: 8, samplesPerPixel: 4,
                                           hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
@@ -470,6 +600,10 @@ struct Init: ParsableCommand {
                              visibility: .hidden))
     var downloadOnly = false
 
+    @Flag(name: .long,
+          help: "Re-download the image and reinstall the agents even when the saved copy of the published image is current.")
+    var fresh = false
+
     @Option(name: .long,
             help: ArgumentHelp("Install into this directory instead of Application Support (pipeline tests).",
                                visibility: .hidden))
@@ -510,6 +644,7 @@ struct Init: ParsableCommand {
         var result: Result<Void, Error>?
         let buildLocal = self.buildLocal
         let downloadOnly = self.downloadOnly
+        let fresh = self.fresh
         Task {
             let progress: (String) -> Void = { msg in
                 FileHandle.standardError.write(Data("[init] \(msg)\n".utf8))
@@ -533,7 +668,7 @@ struct Init: ParsableCommand {
                 } else {
                     do {
                         try await imageManager.downloadBaseImage(
-                            catalogStore: catalogStore, progress: progress)
+                            catalogStore: catalogStore, fresh: fresh, progress: progress)
                     } catch let error where !downloadOnly
                         && UbuntuImageManager.isDownloadSideFailure(error) {
                         // Only download-side failures (catalog, transfer,
@@ -798,7 +933,12 @@ struct Run: ParsableCommand {
         MainActor.assumeIsolated {
             FileHandle.standardError.write(Data(
                 "[run] launching NSApplication\(headless ? " (headless agent)" : "")…\n".utf8))
-            let app = NSApplication.shared
+            // The first touch makes the app's class ours (an exception that
+            // crossed a Swift job stops the app at once — BromureApplication).
+            let app = BromureApplication.shared
+            if !(app is BromureApplication) {
+                FileHandle.standardError.write(Data("[run] NSApp was created before BromureApplication\n".utf8))
+            }
             app.setActivationPolicy(headless ? .accessory : .regular)
 
             let delegate = ACAppDelegate(imageManager: imageManager, headless: headless)
@@ -828,9 +968,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
         ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
         ?? ProcessInfo.processInfo.processName
     let L = { (k: String) in NSLocalizedString(k, comment: "") }
-    appMenu.addItem(withTitle: String(format: L("About %@"), appName),
-                    action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-                    keyEquivalent: "")
+    let aboutItem = NSMenuItem(title: String(format: L("About %@"), appName),
+                               action: #selector(ACAppDelegate.showAboutPanelAction(_:)),
+                               keyEquivalent: "")
+    aboutItem.target = delegate
+    appMenu.addItem(aboutItem)
     appMenu.addItem(NSMenuItem.separator())
 
     let prefsItem = NSMenuItem(title: L("Preferences…"),
@@ -1119,6 +1261,11 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
                                  keyEquivalent: "b")
     browserItem.keyEquivalentModifierMask = [.command, .control]
     viewMenu.addItem(browserItem)
+    let networkItem = NSMenuItem(title: L("Toggle Sandbox Drawer"),
+                                 action: #selector(UnifiedSessionWindow.togglePolicyDrawer(_:)),
+                                 keyEquivalent: "n")
+    networkItem.keyEquivalentModifierMask = [.command, .control]
+    viewMenu.addItem(networkItem)
     viewMenu.addItem(NSMenuItem.separator())
     let fullScreenItem = NSMenuItem(title: L("Enter Full Screen"),
                                     action: #selector(NSWindow.toggleFullScreen(_:)),
@@ -1215,6 +1362,16 @@ final class RunningSession {
     var kubeClusterID: UUID?
     /// When the VM booted — surfaced as uptime in `vm ls`.
     let startedAt: Date
+    /// The boot on a clock the Mac's own clock setting can't move (it runs
+    /// through sleep): what `uptime` counts from.
+    let startedClock = ContinuousClock.now
+    /// How long the VM has run. Not `now − startedAt`: a host clock step
+    /// moved that by the step while `bootedAt` stayed put, and a fat
+    /// client's boot date (`now − uptime` on its clock) followed it.
+    var uptime: TimeInterval {
+        let d = ContinuousClock.now - startedClock
+        return Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+    }
     /// Last tab snapshot, captured on detach so a reattaching window can
     /// rebuild its bar against the kittys still running inside the guest.
     var lastTabsSnapshot: SessionDisk.TabsState?
@@ -1327,16 +1484,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     let store = ProfileStore()
     var profiles: [Profile] = [] {
         didSet {
+            OpenShellAdvisorModeCache.shared.refresh(profiles)
             // Single funnel: every assignment to `profiles` (load,
             // save, delete, restore) flows through here, so the
             // private-profile set on the cloud emitter and any open
             // session window's streaming indicator stay in lockstep
             // with the latest store state.
             refreshStreamingState()
+            // Squelch is read by the proxy on every model request.
+            SquelchSettings.update(Dictionary(profiles.map { ($0.id, $0.squelch) }, uniquingKeysWith: { a, _ in a }))
             // A workspace's firewall rules changed (any save path: editor,
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
             firewallProfilesChanged(from: oldValue)
+            // An open VM dashboard shows the stored notes, whoever stored
+            // them (settings, AppleScript, the CLI): a card left on older
+            // ones had its next Save write them back over the newer.
+            unifiedWindow?.refreshVMDashboard()
         }
     }
 
@@ -1347,9 +1511,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Internal so the AppleScript bridge can read window IDs.
     var mainWindow: NSWindow?
-    var editorWindow: NSWindow?
+    var editorWindow: NSWindow? { editorSession?.window }
     private var sshWindow: NSWindow?
     private var editorEditingProfile: Profile?  // nil = creating
+    /// The open editor and its firewall edits, in force as they're made:
+    /// kept by a save, put back by any other close — which also forgets
+    /// the window, so reopening builds it again from the rules in force.
+    private var editorSession: SettingsWindowSession?
 
     /// One *attached* window per profile. Each window holds N tabs, all
     /// rendering the same VM. Note this is only the windows currently on
@@ -1616,6 +1784,80 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { unattendedLaunchRefusals[id] }
 
+    /// The workspace is booting or running in the other Bromure process.
+    func workspaceOpenElsewhere(_ id: Profile.ID) -> Bool {
+        guard !diskInUse(id), let p = profiles.first(where: { $0.id == id }) else { return false }
+        return WorkspaceLease.heldElsewhere(id, dir: store.profileDirectory(for: p))
+    }
+
+    /// This process's VM of `id` is gone: let the other process have it --
+    /// unless a reboot is between its stop and its next boot.
+    func releaseLeaseIfIdle(_ id: Profile.ID) {
+        if leasePins.isLive(id) { return }
+        leasePins.clear(id)
+        if !diskInUse(id) { WorkspaceLease.release(id) }
+    }
+
+    /// Workspaces whose lease outlives their VM: a reboot stops the old one
+    /// and boots the next, and the other process must not take the workspace
+    /// in between -- however long the next boot's launch waits first (a
+    /// fat client's prompts, up to two minutes each; Kimi provisioning). The
+    /// next boot's acquire takes the pin over (`launch`); an attempt that
+    /// gives up lets it lapse at `pinLeaseSeconds`, and the lease goes then.
+    /// Deadlines and the wake's sleep share one monotonic clock (`LeasePins`).
+    private var leasePins = LeasePins()
+    static let pinLeaseSeconds: TimeInterval = 600
+    /// How often a pin whose reboot is still waiting is looked at again.
+    static let pinRecheckSeconds: TimeInterval = 30
+    func pinLease(_ id: Profile.ID) {
+        var until = leasePins.pin(id, for: Self.pinLeaseSeconds)
+        Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(until: until, clock: .continuous)
+                // Lapsed, unless re-pinned or taken over meanwhile: cleared
+                // here, so releaseLeaseIfIdle sees no pin.
+                guard let self, self.leasePins.lapse(id, deadline: until) else { return }
+                // The reboot's launch may still be waiting: a local wipe or
+                // base-image alert has no timeout, and the lease went with
+                // it on screen -- the other process then booted its stale
+                // copy (Finding CWE-667, "Reboot pin drops the workspace lease
+                // while a local prompt is still up"). Kept while it asks or
+                // holds the disk; only a launch that gave up lets it go.
+                guard Self.pinOutlivesWait(questionUp: self.launchQuestions.isUp(id),
+                                           diskInUse: self.diskInUse(id)) else {
+                    self.releaseLeaseIfIdle(id)
+                    return
+                }
+                until = self.leasePins.pin(id, for: Self.pinRecheckSeconds)
+            }
+        }
+    }
+
+    /// At a pin's deadline: keep it (true) while its reboot's launch still
+    /// asks a question or holds the disk (a boot under way, Kimi
+    /// provisioning), else let it lapse.
+    nonisolated static func pinOutlivesWait(questionUp: Bool, diskInUse: Bool) -> Bool {
+        questionUp || diskInUse
+    }
+    /// The reboot gave up before any boot (nothing left to launch).
+    func unpinLease(_ id: Profile.ID) {
+        leasePins.clear(id)
+        releaseLeaseIfIdle(id)
+    }
+
+    private func refuseOpenElsewhere(_ profile: Profile, unattended: Bool) {
+        let reason = String(format: NSLocalizedString(
+            "“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first.",
+            comment: "launch refused: the workspace runs in the other process"), profile.name)
+        if unattended { refuseUnattendedLaunch(profile, reason); return }
+        FileHandle.standardError.write(Data("[launch] \(reason)\n".utf8))
+        let alert = NSAlert()
+        alert.messageText = reason
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
     private func refuseUnattendedLaunch(_ profile: Profile, _ reason: String) {
         unattendedLaunchRefusals[profile.id] = reason
         FileHandle.standardError.write(Data(
@@ -1683,14 +1925,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         requestStopSession(id, action: .shutdown)
         Task { [weak self] in
             // Wait for the session to wind down (bounded) before deleting
-            // its storage out from under a live VM.
-            for _ in 0..<24 {
+            // its storage out from under a live VM. A boot still under way
+            // is stopped when it registers (the stop above is deferred), so
+            // its time doesn't count — up to a hard cap.
+            var waited = 0
+            for _ in 0..<120 {
                 guard let self else { return }
-                if self.runningSessions[id] == nil { break }
+                if !self.diskInUse(id) { break }
+                if self.runningSessions[id] != nil { waited += 1 }
+                if waited >= 24 { break }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             guard let self else { return }
-            guard self.runningSessions[id] == nil else {
+            guard !self.diskInUse(id) else {
                 BACDebug.log("automation",
                              "clone “\(profile.name)” still running — leaving it for manual cleanup")
                 return
@@ -1828,7 +2075,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 name: p.name,
                 accentHex: p.color.hexInUI,
                 state: runState(for: p),
-                compromised: SessionDisk.isCompromised(profile: p, store: store))
+                compromised: SessionDisk.isCompromised(profile: p, store: store),
+                squelch: p.squelch.enabled,
+                squelchSummary: SquelchLedger.shared.summary(p.id),
+                notes: p.comments)
         } + machines.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
@@ -1857,6 +2107,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The new-session screen holds the workspaces by value: rebuild it
         // when they changed (the first one just saved from the editor).
         w.workspacesDidChange()
+        // So does the VM dashboard on the stage (its notes, name, color).
+        w.refreshVMDashboard()
         // A pane came or went: the selected session's tab may have appeared
         // (boot landed) or the workspace gone to sleep.
         agentSessionStore.reconcile(entries: sessionEntries(for: w.listModel))
@@ -1910,6 +2162,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// else it's off.
     private func runState(for profile: Profile) -> SessionListModel.RunState {
         if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
+        if bootsInFlight.contains(profile.id) { return .booting }
         if let session = runningSessions[profile.id] {
             switch session.sandbox.state {
             case .running:            return .running
@@ -1924,6 +2177,104 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // Id-based wrappers so the sidebar's ⋯ menu can drive the Profile-typed
     // handlers without holding the Profile itself.
+    /// Squelch on or off for a workspace: saved, and in force from its next
+    /// model request (the proxy reads `SquelchSettings`, kept by `profiles`).
+    /// Keep a credential the VM minted (`MintedCredential`) in its
+    /// workspace's configuration, dropping ones long expired. No live
+    /// refresh: the proxy registered it already, and nothing in the guest's
+    /// environment changes.
+    func saveMintedCredential(_ minted: MintedCredential, profileID: Profile.ID) {
+        guard let i = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        var p = profiles[i]
+        p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] minted credential: couldn't save profile: \(error)")
+            return
+        }
+        profiles[i] = p
+        runningSessions[profileID]?.profile = p
+        if lastStagedProfiles[profileID] != nil {
+            lastStagedProfiles[profileID]?.mintedCredentials = p.mintedCredentials
+        }
+    }
+
+    /// The workspace's notes (markdown), saved: the dashboard's in-place
+    /// editor. Nothing in the guest changes.
+    @discardableResult
+    /// The dashboard's notes save. `ifStill`: an implicit save (the focus
+    /// or the dashboard went away) writes only while the stored notes are
+    /// still the ones its edit started from; notes saved since (settings)
+    /// win. nil: Return / Save, an unconditional write.
+    func setNotes(_ id: Profile.ID, _ text: String, ifStill base: String? = nil) -> VMDashboardView.NotesSave {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return .failed }
+        var p = profiles[i]
+        if let base, !Self.notesStill(p.comments, base) { return .superseded(p.comments) }
+        guard p.comments != text else { return .saved }
+        p.comments = text
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] notes: couldn't save profile: \(error)")
+            return .failed
+        }
+        profiles[i] = p
+        runningSessions[id]?.profile.comments = text
+        refreshSidebar()   // the row's tooltip carries the notes
+        return .saved
+    }
+
+    /// An implicit notes save over the API (`_commentsIfStill`) whose base
+    /// isn't the stored notes any more: its `comments` is dropped (true).
+    nonisolated static func dropSupersededComments(_ doc: inout [String: Any], stored: String,
+                                                   ifStill base: String?) -> Bool {
+        guard let base, doc["comments"] != nil, !notesStill(stored, base) else { return false }
+        doc.removeValue(forKey: "comments")
+        return true
+    }
+
+    /// Stored notes still the ones an edit started from: trailing blanks
+    /// aside, as the dashboard saves them.
+    nonisolated static func notesStill(_ stored: String, _ base: String) -> Bool {
+        func trimmed(_ s: String) -> Substring {
+            var t = Substring(s)
+            while t.last?.isWhitespace == true { t.removeLast() }
+            return t
+        }
+        return trimmed(stored) == trimmed(base)
+    }
+
+    @discardableResult
+    func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
+        guard let i = profiles.firstIndex(where: { $0.id == id }) else { return false }
+        var p = profiles[i]
+        guard p.squelch.enabled != on else { return true }
+        p.squelch.enabled = on
+        do { try store.update(p) } catch {
+            NSLog("[bromure-ac] squelch: couldn't save profile: \(error)")
+            return false
+        }
+        profiles[i] = p
+        runningSessions[id]?.profile = p
+        refreshSidebar()
+        return true
+    }
+
+    /// New savings: the sidebar rows and session headers redraw, and fat
+    /// clients get a fresh snapshot — at most once a second.
+    func observeSquelchLedger() {
+        // The cloud report (a no-op until an uploader is set: SquelchCloud).
+        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { _ in
+            Task.detached(priority: .utility) { await SquelchCloud.sendPending() }
+        }
+        let pending = SquelchRefreshGate()
+        SquelchLedger.shared.onChange = { [weak self] _ in
+            guard pending.claim() else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                pending.release()
+                ACAutomationServer.noteMutation()
+                self?.refreshSidebar()
+            }
+        }
+    }
+
     func sidebarEditProfile(_ id: Profile.ID) {
         if let p = profiles.first(where: { $0.id == id }) { openEditorWindow(editing: p) }
     }
@@ -1974,6 +2325,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let pane = pane(for: id) else { return }
         for (tab, kind) in agentTabs(of: pane) where !Self.hookDrivenAgents.contains(kind) {
             if status == .done && tab.agentStatus != .working { continue }
+            // Its turn ended: the card counts from now (no hook to say so,
+            // and no reply to count -- this is read off the traffic).
+            if status == .done, let s = agentSessionStore.session(profileID: id, windowIndex: tab.index) {
+                agentSessionStore.noteActive(s.id)
+            }
             tab.agentStatus = status
         }
     }
@@ -2081,11 +2437,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Per-tab status from a Claude hook (keyed by the tmux window index the
     /// hook reported). Authoritative for that tab — no timer, since the Stop
     /// hook delivers the terminal state explicitly.
-    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus) {
+    /// `turnEnded` false: a `.done` that is only the agent idle at its prompt
+    /// (an interrupt, a session end, an idle notification -- see
+    /// `AgentStatus.endsTurn`): the tab shows it, no run or task finishes.
+    func setTabAgentStatus(_ id: Profile.ID, index: Int, _ status: AgentStatus,
+                           turnEnded: Bool = true) {
         // Always on the session too: a workspace the fat client drives has no
         // pane here, and dropping the report left every tab of it "Ready".
         let recorded = runningSessions[id]?.agentStatus[index]
         runningSessions[id]?.agentStatus[index] = status
+        // A turn that ended, or a question: the session's card shows unread
+        // on every client until someone looks.
+        let before = pane(for: id)?.model.tabs.first(where: { $0.index == index })?.agentStatus ?? recorded
+        if Self.isReply(from: before, to: status),
+           let s = agentSessionStore.session(profileID: id, windowIndex: index) {
+            agentSessionStore.noteReply(s.id)
+        }
         // A new turn (hook activity) means no dialog is waiting any more;
         // a chat still showing one re-asserts it on its next screen scan.
         if status == .working,
@@ -2100,10 +2467,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // its transcript and closes the tab if so — or a coding task, which
             // moves to Testing.
             if status == .done {
-                scheduledAutomationEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
-                codingTaskEngine.agentFinished(
-                    profileID: id, worktreeBranch: tab.worktreeBranch)
+                if turnEnded {
+                    scheduledAutomationEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                    codingTaskEngine.agentFinished(
+                        profileID: id, worktreeBranch: tab.worktreeBranch)
+                }
                 // A request or a reply held while this agent worked goes now.
                 delegationEngine.promptFreed(profileID: id, window: index)
             }
@@ -2119,10 +2488,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard status == .done,
               let tab = runningSessions[id]?.tabs.first(where: { $0.index == index })
         else { return }
-        scheduledAutomationEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
-        codingTaskEngine.agentFinished(
-            profileID: id, worktreeBranch: tab.worktreeBranch)
+        if turnEnded {
+            scheduledAutomationEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+            codingTaskEngine.agentFinished(
+                profileID: id, worktreeBranch: tab.worktreeBranch)
+        }
         delegationEngine.promptFreed(profileID: id, window: index)
     }
 
@@ -2167,6 +2538,56 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// attached (detached / headless). The persistent-agent model — where
     /// VMs survive the GUI being closed — hangs off this split.
     var runningSessions: [Profile.ID: RunningSession] = [:]
+
+    /// Boots `launch` has started but not finished (see `BootsInFlight`).
+    let bootsInFlight = BootsInFlight()
+    /// Workspaces with a launch question up (the base-image upgrade, the
+    /// compromise wipe). A second start of the same workspace meanwhile (a
+    /// double-clicked Start, a control-socket start the modal pumps) asks
+    /// nothing and boots nothing: the first one's answer decides, and its
+    /// launch boots. Two answers raced — a second "Yes" was told "wasn't
+    /// upgraded, start it again to be asked again" while the first's
+    /// upgrade was booting, or after the first's "No" was saved.
+    var launchQuestions = LaunchQuestionGate()
+
+    /// A VM has (or is about to have) this workspace's disk and home open:
+    /// it is running, or its boot is under way. Deleting, resetting or
+    /// reverting them now would pull the images out from under it.
+    func diskInUse(_ id: Profile.ID) -> Bool {
+        bootsInFlight.diskInUse(id, running: runningSessions[id] != nil)
+    }
+
+    /// A reboot's gap: the old session is out of `runningSessions`, yet a
+    /// boot remedy and the fresh VM's prepare()/start() own the disk until it
+    /// registers. Marks it booting (in use) until the returned release runs —
+    /// which leaves a mark it didn't set alone.
+    /// `work` with the workspace's disk held (booting): an await a boot
+    /// makes before `launch` claims the disk itself. Returns a stop asked
+    /// for meanwhile (Shutdown on the booting row, a clone's cleanup — kept
+    /// for the boot's registration, which this boot hasn't reached): the
+    /// caller then doesn't boot at all. Ending the hold would otherwise
+    /// drop it, and the boot that followed stayed up.
+    @discardableResult
+    func whileHoldingDisk(_ id: Profile.ID, _ work: () async -> Void) async -> Profile.CloseAction? {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        await work()
+        let stop = claimed ? bootsInFlight.takeStop(id) : nil
+        if claimed { bootsInFlight.end(id) }
+        refreshSidebar()
+        return stop
+    }
+
+    func holdDiskForRelaunch(_ id: Profile.ID) -> () -> Void {
+        let claimed = bootsInFlight.begin(id)
+        refreshSidebar()
+        return { [weak self] in
+            guard let self else { return }
+            if claimed { self.bootsInFlight.end(id) }
+            self.releaseLeaseIfIdle(id)   // the relaunch failed: no VM holds it
+            self.refreshSidebar()
+        }
+    }
 
     /// Scheduled automations (sidebar "Automations"): recurring, unattended
     /// agent runs. The store persists next to the profiles dir; the engine
@@ -2257,6 +2678,75 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// A session by id, here or on an attached machine — synchronous, unlike
     /// `homeSessionStore` (which follows a change a runloop turn later).
+    /// A status change that leaves something for the user to read: a turn
+    /// that ended (working → done), or the agent stopping to ask. An unknown
+    /// "before" that is done says nothing (a replayed status at launch).
+    nonisolated static func isReply(from before: AgentStatus?, to now: AgentStatus) -> Bool {
+        switch now {
+        case .done:       return before == .working
+        case .needsInput: return before != .needsInput
+        case .working:    return false
+        }
+    }
+
+    /// The sessions the user is looking at on this Mac right now: on the
+    /// stage of the key window of the active app (one, or a room's page).
+    var sessionsOnScreen: [UUID] {
+        guard NSApp.isActive, let w = unifiedWindow, w.isKeyWindow, w.isVisible, !w.isMiniaturized
+        else { return [] }
+        return w.sessionsOnStage
+    }
+
+
+    /// The user read a session (here, or on a client: `upTo` is the reply
+    /// count that client showed). Every client's mark goes with the next
+    /// snapshot. A session on an attached machine is that machine's to keep.
+    func markSessionRead(_ id: UUID, upTo: Int? = nil) {
+        if let m = machine(forSession: id) {
+            // Its count lives on the machine: shown read here at once, the
+            // read sent there (what this screen showed; nothing to read: none).
+            // Unread on the MACHINE (not as shown here, where a read on its
+            // way already reads as read): until it confirms, another read goes.
+            guard m.unreadOnMachine(id), let n = m.machineSessions.first(where: { $0.id == id })?.replies else { return }
+            m.markRead(id, upTo: min(upTo ?? n, n))
+            homeSessionStore.applyMirror(allSessionRecords)   // the sidebar's copy, now
+            return
+        }
+        if agentSessionStore.markRead(id, upTo: upTo) { ACAutomationServer.noteMutation() }
+    }
+
+    /// The host half of a guest page whose OAuth redirect is a loopback port:
+    /// that port's forwarder into this VM. nil: open the page (no loopback
+    /// redirect, or the forwarder is up). Else why it must NOT be opened:
+    /// another workspace's sign-in holds the port (or another program, or the
+    /// VM has no socket) -- the browser's redirect, code and all, would land
+    /// on that listener, not this sign-in (Finding CWE-441, "A refused
+    /// loopback port still opens the sign-in, so another workspace receives
+    /// the OAuth code").
+    func loopbackCallbackRefusal(for url: URL, device: VZVirtioSocketDevice?,
+                                 browserResponse: String? = nil) -> String? {
+        guard let port = Self.loopbackCallbackPort(from: url) else { return nil }
+        if let device, LoopbackCallbackForwarder.forPort(port, socketDevice: device, browserResponse: browserResponse,
+                                                         in: &loopbackForwarders) != nil {
+            FileHandle.standardError.write(Data("[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+            return nil
+        }
+        FileHandle.standardError.write(Data("[ac] sign-in page not opened: 127.0.0.1:\(port) is taken\n".utf8))
+        return String(format: NSLocalizedString(
+            "Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again.",
+            comment: "sign-in: a guest's OAuth callback port is held by another workspace's sign-in"), Int(port))
+    }
+
+    /// Stop the OAuth callback listeners that relay into `device` (its VM is
+    /// going), and any whose VM is already gone.
+    func stopLoopbackForwarders(of device: VZVirtioSocketDevice?) {
+        loopbackForwarders.removeAll { fwd in
+            guard fwd.relays(into: device) || !fwd.hasWorkspace else { return false }
+            fwd.stop()
+            return true
+        }
+    }
+
     func sessionRecord(_ id: UUID) -> AgentSession? {
         agentSessionStore.session(id) ?? attachedMachines.values.lazy.compactMap { $0.sessionStore.session(id) }.first
     }
@@ -2278,6 +2768,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func refreshHomeSessions() {
         homeSessionStore.applyMirror(allSessionRecords)
+        // An attached machine's session on stage: a reply that came with its
+        // snapshot is read as it lands (ours are read in `onReply`) -- once:
+        // the machine's mirror shows it read until its count catches up, and
+        // a read that never lands shows unread again and is sent again.
+        for id in sessionsOnScreen where machine(forSession: id) != nil && sessionRecord(id)?.isUnread == true {
+            markSessionRead(id)
+        }
     }
 
     private func trackHomeSessions() {
@@ -2311,6 +2808,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         refreshHomeSessions()
         trackHomeSessions()
+        // A reply on the session the user is watching is read already.
+        agentSessionStore.onReply = { [weak self] id in
+            guard let self else { return }
+            if self.sessionsOnScreen.contains(id) { self.agentSessionStore.markRead(id) }
+            ACAutomationServer.noteMutation()
+        }
         machineLinksObserver = NotificationCenter.default.addObserver(
             forName: MachineLinkHub.machinesChanged, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
@@ -2414,6 +2917,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Profiles created with `vm run --rm`: deleted (profile + disk) when their
     /// VM stops, mirroring `docker run --rm`.
     private var ephemeralProfiles: Set<Profile.ID> = []
+    /// Workspaces between a reboot's teardown and its relaunch: a reboot
+    /// isn't the end of a `vm run --rm` one. Deleting it there left the
+    /// relaunch nothing to boot -- the waits for Kimi or a remote prompt
+    /// found it gone and gave up, and a direct relaunch recreated it no
+    /// longer ephemeral (Finding CWE-670, "Ephemeral reboot is cancelled
+    /// when launch waits on Kimi or a remote prompt").
+    private var rebootingProfiles: Set<Profile.ID> = []
 
     // MARK: Boot filesystem-failure remedies
     //
@@ -2445,6 +2955,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// is the strong owner that keeps the VM alive independent of any window.
     @discardableResult
     func registerSession(_ sandbox: UbuntuSandboxVM, profile: Profile) -> RunningSession {
+        // Every running VM holds its workspace's lease (`launch` took it
+        // already; a boot that didn't come through there takes it here).
+        if !WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)),
+           store.exists(profile) {
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' registered while the other Bromure process holds its lease\n".utf8))
+        }
+        // A stop asked for during the boot (it had no session to stop then):
+        // honored now that there is one.
+        if let action = bootsInFlight.takeStop(profile.id) {
+            requestStopSession(profile.id, action: action)
+        }
         if let existing = runningSessions[profile.id] {
             existing.sandbox = sandbox
             existing.profile = profile
@@ -2453,6 +2975,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         let session = RunningSession(profileID: profile.id, profile: profile, sandbox: sandbox)
         runningSessions[profile.id] = session
+        // The boot created the home image an open editor may still think absent.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: profile.id)
         updateStatusMenu()
         // Boot completes asynchronously after the launch path's initial render,
         // so refresh the picker now that the VM is actually running (Start →
@@ -2465,10 +2989,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// deallocates once any in-flight stop/suspend task also releases it
     /// (its `deinit` then detaches the vmnet switch port).
     func unregisterSession(_ id: Profile.ID) {
+        // Its OAuth callback listeners go with it: a stopped VM must not keep
+        // a sign-in's port (the next one couldn't bind it, and the browser's
+        // redirect would be reset or relayed into a VM shutting down).
+        if let dev = runningSessions[id]?.sandbox.socketDevice { stopLoopbackForwarders(of: dev) }
         runningSessions.removeValue(forKey: id)
+        releaseLeaseIfIdle(id)
         updateStatusMenu()
         // "Until the workspace stops" firewall rules end here.
         endUntilStopFirewallRules(for: id)
+        // An open editor's Erase / Reset come back now it's stopped.
+        NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
     }
 
     /// NSEvent monitor that intercepts ⌘T / ⌘W / ⌘1-9 at the
@@ -2563,6 +3094,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // refreshStreamingState() via the non-forcing `loadedMitmEngine`
             // handle (profiles.didSet must never spawn the engine early).
             self.loadedMitmEngine = e
+            // A supply-chain override prompt's "Always allow" saves to the
+            // workspace's reputation allowlist.
+            self.wireSupplyChainOverrides(e.supplyChainBroker)
+            // A credential the VM minted through an API is saved in its
+            // workspace (the proxy already made it usable).
+            e.credentialMinter.sink = { [weak self] pid, minted in
+                Task { @MainActor in self?.saveMintedCredential(minted, profileID: pid) }
+            }
             if BACEnrollmentStore.load() != nil {
                 let up = BACTraceUploader()
                 up.setPrivateProfiles(Set(self.profiles.filter { $0.privateMode }.map { $0.id }))
@@ -2701,6 +3240,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// profile (its own, or the shared one it inherits). Fed to the model
     /// overlay so a signed-in subscription authenticates at launch even when the
     /// Models pane's mirror flag hasn't synced.
+    /// The agents a workspace can run, for every agent picker (automation,
+    /// task, a new session): the same set a new session counts as ready. A
+    /// plain Mac runs whatever agent its user installed.
+    func readyToolSpecs(for p: Profile) -> [Profile.ToolSpec] {
+        if attachedMachines[p.id] != nil {
+            return p.allToolSpecs + Profile.Tool.allCases
+                .filter { t in !p.allToolSpecs.contains { $0.tool == t } }
+                .map { Profile.ToolSpec(tool: $0, authMode: .token) }
+        }
+        return p.readyToolSpecs(ModelSettingsStore.shared.effective(for: p),
+                                subscribed: subscribedProviders(for: p))
+    }
+
     func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
         guard let e = mitmEngine else { return [] }
         var s = Set<ModelProvider>()
@@ -2992,82 +3544,95 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                       egressPolicy: profile.resolvedEgressPolicy,
                                       allowInsecureBypass: g.allowInsecureBypass)
         config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
+        config.strictCredentials = profile.effectiveStrictCredentials
         return config
     }
 
+    /// The port of a guest page's loopback OAuth redirect -- the one the
+    /// host's forwarder must own before the page may open (see
+    /// `loopbackCallbackRefusal`). Any host the browser would take to this
+    /// Mac's loopback counts (`reachesLoopback`): only `127.0.0.1` and
+    /// `localhost` did, so a `[::1]` redirect -- which the forwarder also
+    /// listens on -- skipped the ownership check and the page opened, the
+    /// code landing on whichever workspace held the port (Finding CWE-441,
+    /// "Sign-in refusal ignores a [::1] redirect, so the other workspace
+    /// still receives the OAuth code").
     static func loopbackCallbackPort(from url: URL) -> UInt16? {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let redirect = comps.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
               let rc = URLComponents(string: redirect),
-              let host = rc.host?.lowercased(),
-              host == "127.0.0.1" || host == "localhost",
+              let host = rc.host, reachesLoopback(host),
               let port = rc.port, port > 0, port <= 65_535 else {
             return nil
         }
         return UInt16(port)
     }
 
+    // The host checks are GuestURLGate's (shared with Bromure Remote, which
+    // opens the same guest sign-in URLs); these keep their names here.
+    typealias URLIPv4 = GuestURLGate.URLIPv4
+    nonisolated static func bareHost(_ h: String) -> String { GuestURLGate.bareHost(h) }
+    nonisolated static func browserHost(_ h: String) -> String? { GuestURLGate.browserHost(h) }
+    nonisolated static func urlIPv4(_ h: String) -> URLIPv4 { GuestURLGate.urlIPv4(h) }
+    nonisolated static func ipv4IsLocalOrPrivate(_ a: UInt32) -> Bool { GuestURLGate.ipv4IsLocalOrPrivate(a) }
+    nonisolated static func reachesLoopback(_ h: String) -> Bool { GuestURLGate.reachesLoopback(h) }
+    nonisolated static func opensInRealBrowser(_ url: URL) -> Bool { GuestURLGate.opensInRealBrowser(url) }
+    nonisolated static func hostIsLocalOrPrivate(_ h: String) -> Bool { GuestURLGate.hostIsLocalOrPrivate(h) }
+
     /// Open a guest-relayed URL (from the VM's `bromure-open` outbox) in the
-    /// user's REAL browser — unless its host is local/private. A compromised
-    /// guest must not be able to point the host browser at loopback / LAN
-    /// services (H2 "local drive-by"): the browser would fetch them carrying
-    /// the user's cookies + session. The legitimate in-VM OAuth flow only ever
-    /// opens a PUBLIC authorize URL here; the browser then follows the
-    /// `127.0.0.1:<port>` redirect to the loopback forwarder ITSELF, so
-    /// blocking local hosts at this hand-off costs the real flow nothing.
-    static func openGuestRelayedURL(_ url: URL) {
-        guard opensInRealBrowser(url) else {
+    /// user's REAL browser. A compromised guest must not be able to point the
+    /// host browser at loopback / LAN services (H2 "local drive-by"): the
+    /// browser would fetch them carrying the user's cookies + session. A
+    /// local/private host is refused; an agent's sign-in page opens (the
+    /// browser then follows its `127.0.0.1:<port>` redirect to the loopback
+    /// forwarder itself); any other page -- a public name can resolve to the
+    /// LAN, a public page can redirect there -- opens only once the user says
+    /// so (`GuestURLGate.disposition`).
+    static func openGuestRelayedURL(_ url: URL, workspace: String? = nil) {
+        switch GuestURLGate.disposition(for: url) {
+        case .refuse:
             FileHandle.standardError.write(Data(
                 "[ac] refused to open guest URL with local/private host: \(url.host ?? "?")\n".utf8))
+        case .open:
+            NSWorkspace.shared.open(url)
+        case .ask:
+            askBeforeOpeningGuestURL(url, workspace: workspace)
+        }
+    }
+
+    /// Guest pages waiting on the user's word: a guest can't stack sheets.
+    private static var guestURLAsksPending = 0
+
+    /// "Open this page from the workspace?" as a sheet (a modal would stall
+    /// the main queue). No window to ask in (an unattended launch), or three
+    /// already waiting: not opened.
+    private static func askBeforeOpeningGuestURL(_ url: URL, workspace: String?) {
+        let delegate = NSApp.delegate as? ACAppDelegate
+        guard guestURLAsksPending < 3,
+              let window = NSApp.keyWindow ?? delegate?.unifiedWindow as NSWindow? ?? delegate?.mainWindow else {
+            FileHandle.standardError.write(Data(
+                "[ac] did not open guest URL (no window to ask in, or asks pending): \(url.host ?? "?")\n".utf8))
             return
         }
-        NSWorkspace.shared.open(url)
-    }
-
-    /// Whether `url` may be handed to the user's real browser: it must have a
-    /// PUBLIC host. Empty / local / private / link-local / ULA / `.local`
-    /// hosts are refused.
-    nonisolated static func opensInRealBrowser(_ url: URL) -> Bool {
-        guard let host = url.host, !host.isEmpty else { return false }
-        return !hostIsLocalOrPrivate(host)
-    }
-
-    /// Classify a URL host as local/private (loopback, RFC1918, CGNAT,
-    /// link-local, IPv6 loopback/ULA/link-local, or an mDNS `.local` /
-    /// `localhost` name). A plain public DNS name returns false. Pure — no
-    /// actor state — so callers on any executor (and tests) can use it.
-    nonisolated static func hostIsLocalOrPrivate(_ rawHost: String) -> Bool {
-        var host = rawHost.lowercased()
-        if host.hasPrefix("["), host.hasSuffix("]") {
-            host = String(host.dropFirst().dropLast())   // IPv6 literal brackets
+        guestURLAsksPending += 1
+        let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("Open a Page from the Workspace?", comment: "guest URL open prompt")
+        alert.informativeText = workspace.map {
+            String(format: NSLocalizedString(
+                "Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+                comment: "guest URL open prompt: workspace name, URL"), $0, shown)
+        } ?? String(format: NSLocalizedString(
+            "Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network.",
+            comment: "guest URL open prompt: URL"), shown)
+        // Cancel is the default: Return doesn't open it.
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
+        alert.beginSheetModal(for: window) { response in
+            guestURLAsksPending -= 1
+            if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
         }
-        // Named loopback / mDNS.
-        if host == "localhost" || host.hasSuffix(".localhost") { return true }
-        if host == "local" || host.hasSuffix(".local") { return true }
-        // IPv4 literal.
-        var v4 = in_addr()
-        if inet_pton(AF_INET, host, &v4) == 1 {
-            let o = withUnsafeBytes(of: v4.s_addr) { Array($0) }   // network order
-            switch (o[0], o[1]) {
-            case (0, _), (127, _), (10, _): return true            // unspecified / loopback / RFC1918
-            case (172, 16...31): return true                       // 172.16/12
-            case (192, 168): return true                           // 192.168/16
-            case (169, 254): return true                           // link-local
-            case (100, 64...127): return true                      // CGNAT 100.64/10
-            default: return false
-            }
-        }
-        // IPv6 literal.
-        var v6 = in6_addr()
-        if inet_pton(AF_INET6, host, &v6) == 1 {
-            let b = withUnsafeBytes(of: v6) { Array($0) }
-            if b.allSatisfy({ $0 == 0 }) { return true }                       // ::
-            if b.prefix(15).allSatisfy({ $0 == 0 }), b[15] == 1 { return true }// ::1
-            if b[0] == 0xFE, (b[1] & 0xC0) == 0x80 { return true }             // fe80::/10 link-local
-            if (b[0] & 0xFE) == 0xFC { return true }                           // fc00::/7 ULA
-            return false
-        }
-        return false   // a normal public DNS name
     }
 
     /// Per-profile shell bridges (vsock 5800), created for every session —
@@ -3359,6 +3924,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         default: break
         }
         profiles = store.loadAll()
+        // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
+        // a crash) and whose process is gone.
+        sweepStoppedEphemeral(atLaunch: true)
         // First launch after the model-management redesign: seed the global
         // ModelSettings from what the user already configured per-workspace so
         // the new "Models" pane opens pre-populated. Idempotent once configured.
@@ -3466,7 +4034,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                                            ip: ipString, port: Int(ev.port)) {
                 return
             }
-            let eventData: [String: AnyJSON] = [
+            var eventData: [String: AnyJSON] = [
                 "action": .string(action),
                 "layer": .string("l4"),
                 "proto": .string(proto),
@@ -3480,6 +4048,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "rule": .of(ev.rule),
                 "by_policy": .bool(ev.byPolicy),
             ]
+            // The program the identity gate denied: the drawer row's Allow names it.
+            if let exe = ev.exe { eventData["exe"] = .string(exe) }
             // One more connection to a destination already listed: count it
             // on the timeline's folded row (local only — no log line, no
             // cloud event per connection).
@@ -3539,6 +4109,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         delegationEngine.onBoardMessage = { [weak self] d, m in
             self?.taskDispatcher.handle(d, m)
         }
+        delegationEngine.boardWantsRevival = { [weak self] d in
+            self?.taskDispatcher.wantsRevival(d) ?? true
+        }
         taskDispatcher.start()
         // ⇧⌥Space from any app: the Quick Task panel.
         QuickTaskHotKey.register { [weak self] in self?.quickTaskPanel.toggle() }
@@ -3552,6 +4125,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.kubeClusterEngine.startAutoStartClusters()
+            // What the last quit asked to bring back (its checkbox).
+            self?.restoreAtLaunch()
         }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
@@ -3682,6 +4257,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self?.handleCompromise(event)
                 }
             }
+            wireOpenShellAdvisor(engine)
+            wirePolicySteering(engine)
+            AgentWatchdog.shared.modeProvider = { OpenShellAdvisorModeCache.shared.watchdogMode(for: $0) }
+            // The kernel sentry's liveness clock only runs while the VM does
+            // (a paused, quarantined or suspended VM sends nothing).
+            let running = KernelSentryRunState()
+            KernelSentryService.shared.vmRunningProvider = { running.isRunning($0) }
+            KernelSentryService.shared.pinDirectory = { [weak self] in self?.store.profileDirectory(for: $0) }
+            wireSentryModules()
+            // `.common` modes: the watchdog's quarantine alert is a modal, and
+            // a default-mode timer stops during it, so a VM it had just paused
+            // stayed "running" and its silent sentry was flagged as tampering.
+            let runTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    running.set(Set(self.runningSessions.compactMap { pid, s in
+                        s.sandbox.vm?.state == .running ? pid : nil
+                    }))
+                }
+            }
+            RunLoop.main.add(runTimer, forMode: .common)
+            AgentWatchdog.shared.onTrip = { [weak self] pid, mode, signals in
+                Task { @MainActor [weak self] in self?.handleWatchdogTrip(pid, mode: mode, signals: signals) }
+            }
+            // Switch-side outbound volume, sampled for the watchdog.
+            Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    for (pid, session) in self.runningSessions {
+                        AgentWatchdog.shared.sampleBytes(profileID: pid, total: session.sandbox.egressByteCount, interval: 5)
+                    }
+                }
+            }
+            VMNetSwitch.shared.identityGate = { pid, sport, dst, dport, hosts, policy in
+                BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport,
+                                                  hostnames: hosts, policy: policy)
+            }
             // Warm the trace ring from disk so `bromure-ac trace` shows recent
             // history right after the agent starts, not just live traffic.
             engine.traceStore.reload()
@@ -3801,6 +4413,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Remote access (optional SSH front door)
 
+    /// `BROMURE_AC_NO_REMOTE=1`: no SSH front door and no P2P serving — for a
+    /// test instance running beside the real one.
+    nonisolated static var remoteAccessSuppressed: Bool {
+        ProcessInfo.processInfo.environment["BROMURE_AC_NO_REMOTE"] == "1"
+    }
+
     /// UserDefaults-backed remote config. Defaults: disabled, port 2222,
     /// bind 0.0.0.0, both auth methods on.
     func remoteAccessConfig() -> RemoteAccessServer.Config {
@@ -3826,6 +4444,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// this again from their completion path.
     @MainActor func startRemoteAccessIfNeeded() {
         guard UserDefaults.standard.bool(forKey: "remoteAccess.enabled") else { return }
+        // A side-by-side test instance shares this Mac's device identity and
+        // preferences: it must not answer for the Mac (SSH front door, P2P).
+        guard !Self.remoteAccessSuppressed else {
+            SupplyChainLog.shared.record("[remote] disabled for this instance (BROMURE_AC_NO_REMOTE).")
+            return
+        }
         guard imageManager.hasBaseImage, installTask == nil else {
             SupplyChainLog.shared.record(
                 "[remote] SSH front door deferred until the base image is installed.")
@@ -4191,6 +4815,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     window = self.branchesWindows.window(for: pid)
                 case let w where w.hasPrefix("session-review:"):
                     window = UUID(uuidString: String(w.dropFirst(15))).flatMap { self.sessionReviews.window(for: $0) }
+                case let w where w.hasPrefix("vm:"):
+                    // A workspace's VM dashboard ("vm:<name or id>") as the
+                    // stage surface, then the unified window.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(3))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id)
+                    window = self.unifiedWindow
+                case let w where w.hasPrefix("vm-notes:"):
+                    // The same dashboard with its notes open in their editor.
+                    guard let p = self.profileByNameOrID(String(w.dropFirst(9))) else {
+                        return ["error": "unknown profile"]
+                    }
+                    self.ensureUnifiedWindow().showVMDashboard(p.id, editingNotes: true)
+                    window = self.unifiedWindow
                 case "grid":
                     // The Grid as the stage surface (side panes fold for it).
                     self.ensureUnifiedWindow().showGrid()
@@ -4353,6 +4992,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 let action = params["action"] as? String ?? ""
                 switch action {
+                case "open-editor":
+                    // Open a workspace's settings (E2E / doc-screenshot hook);
+                    // BROMURE_EDITOR_CATEGORY picks the pane.
+                    guard let key = params["profile"] as? String,
+                          let p = self.profileByNameOrID(key) else { return ["error": "unknown profile"] }
+                    self.openEditorWindow(editing: p)
+                    if let h = params["height"] as? Double, let w = self.editorWindow {
+                        var f = w.frame
+                        f.origin.y += f.height - h
+                        f.size.height = h
+                        w.setFrame(f, display: true)
+                    }
+                    return ["ok": true]
                 case "wizard":
                     // First-run wizard (doc/E2E hook): press its primary or
                     // secondary button, and report the step it's on.
@@ -4398,6 +5050,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          "succeeded": s.succeeded]
                     }
                     return out
+                case "sign-in-sim", "sign-in-sim-state", "loopback-sim":
+                    // E2E hooks exercising the in-session sign-in path: a
+                    // simulated capture on the real proxy route, and the
+                    // OAuth loopback relay into the guest. `profile` = name
+                    // or id of a running workspace.
+                    let key = (params["profile"] as? String ?? "").lowercased()
+                    guard let profile = self.profiles.first(where: {
+                        $0.name.lowercased() == key || $0.id.uuidString.lowercased() == key })
+                    else { return ["error": "profile required"] }
+                    switch action {
+                    case "sign-in-sim":
+                        guard let token = self.beginSimulatedSignIn(profileID: profile.id) else {
+                            return ["error": "a sign-in is already in flight there (or the proxy is down)"]
+                        }
+                        return ["ok": true, "token": token.uuidString,
+                                "host": SignInSimulator.host, "path": SignInSimulator.path]
+                    case "sign-in-sim-state":
+                        let s = self.proxySignIns[profile.id]
+                        return ["ok": true, "inFlight": s.map { !$0.finished } ?? false,
+                                "completed": SignInSimulator.completed]
+                    default:
+                        guard let port = (params["port"] as? Int).flatMap(UInt16.init(exactly:)),
+                              let dev = self.runningSessions[profile.id]?.sandbox.socketDevice else {
+                            return ["error": "port and a running workspace required"]
+                        }
+                        let page = (params["override"] as? Bool) == true
+                            ? LoopbackCallbackForwarder.registrationSuccessResponse(provider: "ace2e") : nil
+                        guard LoopbackCallbackForwarder.forPort(port, socketDevice: dev, browserResponse: page,
+                                                                in: &self.loopbackForwarders) != nil else {
+                            return ["error": "couldn't bind 127.0.0.1:\(port)"]
+                        }
+                        return ["ok": true, "port": Int(port)]
+                    }
                 case "start-session":
                     // E2E/doc hook for the home screen: start an agent session
                     // the way the New Session screen would.
@@ -4937,6 +5622,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ACShellProxyConnection(fd: conn.fileDescriptor, conn: conn)
         }
 
+        server.onTypeIntoPane = { [weak self] idOrName, target, text in
+            guard let self else { return nil }
+            let id: UUID? = await MainActor.run {
+                UUID(uuidString: idOrName) ?? self.resolveRunningSessionID(idOrName)
+            }
+            guard let id else { return nil }
+            return await PaneTypeGuard.runType(target: target, text: text) { cmd in
+                try? await self.guestExec(profileID: id, command: cmd, timeout: 20)
+            }
+        }
+
         server.onResolveProfileID = { [weak self] idOrName in
             guard let self else { return nil }
             return MainActor.assumeIsolated { self.resolveRunningSessionID(idOrName)?.uuidString }
@@ -4984,6 +5680,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ?? ["error": "unavailable"]
         }
         server.onDescribeProfile = { [weak self] key in self?.automationProfileDescribe(key) }
+        server.onProfilePolicyRevisions = { [weak self] key, method, sub, body in
+            guard let dir = DispatchQueue.main.sync(execute: { () -> URL? in
+                guard let self, let p = self.profileByNameOrID(key) else { return nil }
+                return self.store.profileDirectory(for: p)
+            }) else { return (404, ["error": "Profile not found"]) }
+            return Self.policyRevisionsRoute(directory: dir, method: method, sub: sub)
+        }
+        server.onProfileProposals = { [weak self] key, method, sub, body in
+            guard let pid = DispatchQueue.main.sync(execute: { self?.profileByNameOrID(key)?.id }) else {
+                return (404, ["error": "Profile not found"])
+            }
+            return Self.advisorProposalsRoute(profileID: pid, method: method, sub: sub, body: body)
+        }
         server.onDescribeStorage = { [weak self] key in
             guard let self, let p = self.profileByNameOrID(key) else { return nil }
             return self.makeStorageContext(for: p)
@@ -4992,11 +5701,42 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onCreateProfile = { [weak self] doc in
             self?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "unavailable"]
         }
+        server.onCommitFirewall = { [weak self] id, rules in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id),
+                      self.profiles.contains(where: { $0.id == uuid }),
+                      (try? EgressPolicy.parse(rules)) != nil else { return nil }
+                return self.commitFirewallRules(rules, profileID: uuid)
+            }
+        }
+        server.onSetSquelch = { [weak self] id, on in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id) else { return false }
+                return self.setSquelch(uuid, on)
+            }
+        }
+        server.onSquelchStats = { [weak self] in
+            MainActor.assumeIsolated {
+                var out: [String: Any] = [:]
+                for p in self?.profiles ?? [] {
+                    var row: [String: Any] = ["name": p.name, "enabled": p.squelch.enabled]
+                    if let sum = SquelchLedger.shared.summary(p.id, commands: 30, days: 30) {
+                        row["summary"] = Self.codableToDict(sum)
+                    }
+                    out[p.id.uuidString] = row
+                }
+                return ["workspaces": out]
+            }
+        }
+        observeSquelchLedger()
         server.onUpdateProfile = { [weak self] key, doc in
             self?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "unavailable"]
         }
         server.onDeleteProfile = { [weak self] key in
             self?.automationDeleteProfile(key) ?? ["ok": false, "error": "unavailable"]
+        }
+        server.onCompromise = { [weak self] key, action in
+            self?.automationCompromise(key, action) ?? ["ok": false, "error": "unavailable"]
         }
         server.onExportTemplate = { [weak self] in self?.automationTemplateExport() }
         server.onExportModelSettings = { [weak self] in self?.automationModelSettingsExport() }
@@ -5064,6 +5804,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onUpsertAutomation = { [weak self] doc in
             MainActor.assumeIsolated { self?.automationUpsertScheduled(doc) ?? false }
         }
+        server.onAutomationSources = { [weak self] body in
+            await self?.automationSources(body) ?? ["error": "no app"]
+        }
         server.onDeleteAutomation = { [weak self] id in
             MainActor.assumeIsolated {
                 guard let self, let uuid = UUID(uuidString: id) else { return false }
@@ -5107,7 +5850,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // machines and tabs, exactly as the local sidebar does).
         server.onListAgentSessions = { [weak self] in
             MainActor.assumeIsolated {
-                self?.agentSessionStore.sessions.compactMap(Self.codableToDict) ?? []
+                // What Squelch saved in each conversation rides along: a
+                // client has no ledger of the host's.
+                self?.agentSessionStore.sessions.compactMap { s -> [String: Any]? in
+                    var s = s
+                    if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
+                    return Self.codableToDict(s)
+                } ?? []
             }
         }
         server.onListDelegations = { [weak self] in
@@ -5166,14 +5915,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // {room}: started from a room's "New Session".
                     let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
                         .flatMap { self.agentRoomStore.room($0)?.id }
-                    let sid = self.agentSessionEngine.start(.init(
+                    let req = AgentSessionEngine.NewSessionRequest(
                         profileID: profile.id, tool: tool,
                         cwd: body["cwd"] as? String ?? "~",
                         cloneURL: body["cloneURL"] as? String,
                         openingMessage: body["message"] as? String,
                         attachments: attachments, roomID: room,
-                        instructions: body["instructions"] as? String), remotely: true)
-                    return ["ok": true, "id": sid.uuidString]
+                        instructions: body["instructions"] as? String)
+                    // Send clicked again while the reply crossed a slow link:
+                    // the session already started, not another one.
+                    return SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
+                        ["ok": true, "id": self.agentSessionEngine.start(req, remotely: true).uuidString]
+                    }
                 case (nil, "switchboard"):
                     // The Switchboard, started (or woken) for a client that
                     // clicked its row: {profile?} picks the workspace.
@@ -5288,6 +6041,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard self.agentSessionStore.session(sid)?.worktreeBranch != nil else { return ["error": "not a branch session"] }
                     self.agentSessionEngine.keepBranchQuietly(sid)
                     return ["ok": true]
+                case (let sid?, "read"):
+                    // {seen?}: the reply count the client's screen showed.
+                    guard self.sessionRecord(sid) != nil else { return ["error": "unknown session"] }
+                    self.markSessionRead(sid, upTo: body["seen"] as? Int)
+                    return ["ok": true]
                 case (let sid?, "rename"):
                     guard self.agentSessionStore.session(sid) != nil,
                           let title = body["title"] as? String else { return ["error": "unknown session or no title"] }
@@ -5327,19 +6085,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let provider = SubscriptionProvider(rawValue: s.tool.rawValue) else {
                         return ["error": "no account sign-in for \(s.tool.rawValue)"]
                     }
-                    guard self.claudeRegistration == nil else { return ["error": "a sign-in is already in progress"] }
+                    guard self.claudeRegistration == nil else {
+                        return ["error": NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")]
+                    }
                     let pid = s.profileID
+                    // A start that fails at once says why in the reply; a
+                    // later end reaches the client's card through /state's
+                    // `registrationEnded`, under the id given here.
+                    var refused: String?
                     self.beginSubscriptionRegistration(
                         provider: provider, scope: .alwaysShared, remoteInitiated: true, quiet: true,
                         events: { [weak self] event in
-                            guard case .finished(true, _) = event else { return }
+                            guard case .finished(let ok, let message) = event else { return }
+                            guard ok else { refused = message; return }
                             Task { @MainActor in
                                 guard let self else { return }
                                 self.applyRegisteredSubscription(provider: provider, profileID: pid)
                                 self.agentSessionEngine.relaunchAfterSignIn(sid)
                             }
                         })
-                    return ["ok": true]
+                    guard let run = RemoteRegistrationBroker.shared.pending?.id else {
+                        return ["error": refused ?? RemoteRegistrationBroker.shared.ended?.message
+                            ?? "the sign-in couldn't start"]
+                    }
+                    return ["ok": true, "registration": run.uuidString]
                 default:
                     return ["error": "unknown action \(action)"]
                 }
@@ -5541,6 +6310,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return true
             }
         }
+        server.onTaskAnswer = { [weak self] id, body in
+            guard let self else { return ["ok": false, "error": "no app"] }
+            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+            if await self.taskDispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            return ["ok": false, "error": self.codingTaskStore.task(id)?.lastError
+                        ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
+        }
         server.onTaskCommand = { [weak self] id, action, body in
             MainActor.assumeIsolated {
                 guard let self else { return ["error": "no app"] }
@@ -5563,7 +6340,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                 case "answer":
                     guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
-                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, text: text) }
+                    let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
+                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text) }
                 case "recall":
                     self.taskDispatcher.recall(id)
                 case "plan", "plan-start":   // plan-start: legacy alias
@@ -5571,13 +6349,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case "send-back":
                     Task { @MainActor in await self.codingTaskEngine.sendBack(id) }
                 case "merge", "land":
-                    // {mode: merge|squash|pr, target?, keepBranch?}; the
+                    // {mode: merge|squash|pr, target?, keepBranch?, push?}; the
                     // legacy merge body ({squash, cleanup}) still works.
                     let mode = (body["mode"] as? String).flatMap(TaskLanding.Mode.init(rawValue:))
                         ?? ((body["squash"] as? Bool ?? false) ? .squash : .merge)
                     let keep = body["keepBranch"] as? Bool ?? !(body["cleanup"] as? Bool ?? true)
                     self.codingTaskEngine.land(id, mode: mode, target: body["target"] as? String,
-                                               keepBranch: keep)
+                                               keepBranch: keep, push: body["push"] as? Bool ?? false)
+                case "merge-batch":
+                    // {with: [ids], push?, keepBranch?}: this task and those,
+                    // one batch (CodingTaskEngine.landBatch).
+                    let others = ((body["with"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
+                    self.codingTaskEngine.landBatch([id] + others, keepBranch: body["keepBranch"] as? Bool ?? false,
+                                                    push: body["push"] as? Bool ?? false)
                 case "open-pr":
                     self.codingTaskEngine.land(id, mode: .pr, target: body["target"] as? String)
                 case "retry-landing":
@@ -5616,6 +6400,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     self.codingTaskEngine.closeWithoutMerge(id)
                 case "mark-done":
                     self.codingTaskEngine.markDone(id)
+                case "rank":
+                    // A Backlog card dragged on a client: its new place.
+                    guard let rank = (body["rank"] as? NSNumber)?.doubleValue, rank.isFinite
+                    else { return ["error": "rank required"] }
+                    self.codingTaskStore.mutate(id) { $0.queueRank = rank }
+                case "locate":
+                    // A fat client's review window: a delivered card without
+                    // a worktree is looked for again; the mirror picks it up.
+                    Task { @MainActor in await self.taskDispatcher.relocateDelivery(id) }
                 case "comment-remove":
                     guard let cid = (body["comment"] as? String).flatMap(UUID.init(uuidString:))
                     else { return ["error": "comment required"] }
@@ -5763,15 +6556,37 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return d
             }
         }
+        server.onEndedRegistration = {
+            MainActor.assumeIsolated { RemoteRegistrationBroker.shared.endedDict() }
+        }
+        server.onEndedRegistrations = {
+            MainActor.assumeIsolated { RemoteRegistrationBroker.shared.endedList() }
+        }
         server.onBeginRegistration = { [weak self] provider, profileID in
             MainActor.assumeIsolated {
-                guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }
-                guard self.claudeRegistration == nil else { return false }   // one at a time
+                guard let self else { return "registration unavailable" }
+                guard let p = SubscriptionProvider(rawValue: provider) else { return "unknown provider \(provider)" }
+                guard self.claudeRegistration == nil else {   // one at a time
+                    return NSLocalizedString("Another sign-in is already in progress.", comment: "sign-in")
+                }
                 let scope: SubscriptionRegistrationScope = profileID
                     .flatMap(UUID.init(uuidString:)).map { .askPerSession($0) } ?? .alwaysShared
-                self.beginSubscriptionRegistration(provider: p, scope: scope,
-                                                   remoteInitiated: true)
-                return true
+                // A start refused at once (no proxy) says why here, for the
+                // reply; a later end reaches the client through /state.
+                var refused: String?
+                self.beginSubscriptionRegistration(
+                    provider: p, scope: scope, remoteInitiated: true,
+                    events: { event in
+                        if case .finished(false, let message) = event { refused = message }
+                    })
+                // Only the synchronous refusal: once under way, a failure
+                // still posts the host notice an older client relies on.
+                self.claudeRegistration?.onEvent = nil
+                guard RemoteRegistrationBroker.shared.pending != nil else {
+                    return refused ?? RemoteRegistrationBroker.shared.ended?.message
+                        ?? NSLocalizedString("The sign-in didn't complete. You can try again.", comment: "sign-in")
+                }
+                return nil
             }
         }
         server.onForgetSubscription = { [weak self] provider, profileID in
@@ -5974,7 +6789,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func saveField(of id: Profile.ID, _ change: (inout Profile) -> Void) {
         guard var saved = profiles.first(where: { $0.id == id }) else { return }
         change(&saved)
-        try? store.save(saved)
+        try? store.update(saved)
         if let i = profiles.firstIndex(where: { $0.id == id }) { profiles[i] = saved }
     }
 
@@ -6020,6 +6835,94 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// Curated, secret-free view of a profile's settings for `profiles describe`.
+    /// Control-socket route for a workspace's OpenShell policy revisions:
+    ///   GET /profiles/{id}/policy/revisions        → every revision (no text)
+    ///   GET /profiles/{id}/policy/revisions/{n}    → one revision, with its policy
+    nonisolated static func policyRevisionsRoute(directory: URL, method: String, sub: [String])
+        -> (status: Int, body: [String: Any]) {
+        guard method == "GET", sub.count >= 2, sub[1] == "revisions" else {
+            return (405, ["error": "Use GET /policy/revisions[/{version}]"])
+        }
+        let iso = ISO8601DateFormatter()
+        let all = PolicyHistory.shared.revisions(in: directory)
+        func describe(_ r: PolicyHistory.Revision, withPolicy: Bool) -> [String: Any] {
+            var d: [String: Any] = ["version": r.version, "hash": r.hash,
+                                    "saved_at": iso.string(from: r.savedAt), "source": r.source]
+            if withPolicy { d["policy"] = r.policy }
+            return d
+        }
+        if sub.count == 3 {
+            guard let n = Int(sub[2]), let r = all.first(where: { $0.version == n }) else {
+                return (404, ["error": "No revision \(sub[2])"])
+            }
+            return (200, describe(r, withPolicy: true))
+        }
+        return (200, ["current": all.last?.version as Any, "revisions": all.reversed().map { describe($0, withPolicy: false) }])
+    }
+
+    /// Control-socket route for the OpenShell advisor's proposals — the
+    /// same approve / reject the policy editor offers:
+    ///   GET  /profiles/{id}/proposals                       → every proposal
+    ///   POST /profiles/{id}/proposals/{proposal}/approve
+    ///   POST /profiles/{id}/proposals/{proposal}/reject     {"reason": "…"}
+    /// Runs on the automation server's thread.
+    nonisolated static func advisorProposalsRoute(profileID: UUID, method: String, sub: [String],
+                                                  body: [String: Any], advisor: OpenShellAdvisor = .shared)
+        -> (status: Int, body: [String: Any]) {
+        func describe(_ p: OpenShellAdvisor.Proposal) -> [String: Any] {
+            var d: [String: Any] = [
+                "id": p.id, "status": p.status.rawValue, "source": p.source, "intent": p.intent,
+                "host": p.host, "port": Int(p.port), "rule_name": p.rule.name,
+                "binaries": p.rule.binaries, "findings": p.findings, "auto": p.auto,
+                "created_at": ISO8601DateFormatter().string(from: p.createdAt),
+            ]
+            if let r = p.rejectionReason { d["rejection_reason"] = r }
+            if let e = p.applicationError { d["application_error"] = e }
+            return d
+        }
+        switch (method, sub.count) {
+        case ("GET", 1):
+            return (200, ["proposals": advisor.proposals(for: profileID).map(describe),
+                          "packages": advisor.packageRequests(for: profileID).map(advisor.describe)])
+        case ("POST", 3) where sub[1].hasPrefix("pkg-") && (sub[2] == "approve" || sub[2] == "reject"):
+            // A system-package request: approve starts the install and returns.
+            let id = sub[1]
+            guard let r = advisor.packageRequests(for: profileID).first(where: { $0.id == id }) else {
+                return (404, ["error": "No package request \(id)"])
+            }
+            guard r.status == .pending else {
+                return (409, ["error": "Package request \(id) is already \(r.status.rawValue)", "request": advisor.describe(r)])
+            }
+            if sub[2] == "reject" {
+                advisor.rejectPackages(id: id, profileID: profileID, reason: (body["reason"] as? String) ?? "")
+            } else {
+                Task.detached { await advisor.approvePackages(id: id, profileID: profileID) }
+            }
+            return (200, ["ok": true, "request": advisor.packageRequests(for: profileID).first { $0.id == id }.map(advisor.describe) ?? [:]])
+        case ("POST", 3) where sub[2] == "approve" || sub[2] == "reject":
+            let id = sub[1]
+            guard let current = advisor.proposals(for: profileID).first(where: { $0.id == id }) else {
+                return (404, ["error": "No proposal \(id)"])
+            }
+            guard current.status == .pending else {
+                return (409, ["error": "Proposal \(id) is already \(current.status.rawValue)", "proposal": describe(current)])
+            }
+            if sub[2] == "reject" {
+                advisor.reject(id: id, profileID: profileID, reason: (body["reason"] as? String) ?? "")
+            } else {
+                let done = DispatchSemaphore(value: 0)
+                Task.detached { await advisor.approve(id: id, profileID: profileID); done.signal() }
+                if done.wait(timeout: .now() + 30) == .timedOut {
+                    return (504, ["error": "Approving \(id) timed out"])
+                }
+            }
+            let after = advisor.proposals(for: profileID).first { $0.id == id }
+            return (200, ["ok": true, "proposal": after.map(describe) ?? [:]])
+        default:
+            return (405, ["error": "Use GET /proposals or POST /proposals/{id}/approve|reject"])
+        }
+    }
+
     @MainActor private func automationProfileDescribe(_ key: String) -> [String: Any]? {
         guard let p = profileByNameOrID(key) else { return nil }
         let iso = ISO8601DateFormatter()
@@ -6053,12 +6956,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let p = profileByNameOrID(key) else {
             return ["ok": false, "error": "Workspace not found: \(key)"]
         }
-        if runningSessions[p.id] != nil {
-            return ["ok": false, "error": "Workspace '\(p.name)' has a running VM — `vm kill` it first."]
+        if diskInUse(p.id) {
+            // Read by the CLI and by a fat client's "Delete workspace".
+            return ["ok": false, "error": "“\(p.name)” is running — shut it down (or `vm kill` it), then delete it."]
         }
         do {
             try store.delete(p)
             profiles = store.loadAll()
+            // As the sidebar's own delete does: its cluster access goes too.
+            kubeClusterEngine.workspaceDeleted(p.id)
             refreshSidebar()
             return ["ok": true, "name": p.name]
         } catch {
@@ -6068,7 +6974,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// Snapshot of running VMs for `vm ls`.
     @MainActor private func automationVMList() -> [[String: Any]] {
-        let now = Date()
         return runningSessions.values.map { s in
             let stateStr: String
             switch s.sandbox.state {
@@ -6128,7 +7033,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // the machines list; the CLI can still `vm exec` it.
                 "kubeClusterID": s.kubeClusterID?.uuidString ?? "",
                 "attached": isAttached(s.profileID),
-                "uptimeSeconds": Int(now.timeIntervalSince(s.startedAt)),
+                "uptimeSeconds": Int(s.uptime),
+                // The boot itself, on this host's clock: a client tells a
+                // reboot by this changing — never by uptime against its own
+                // clock, which a late reply (a slow relay) moved forward.
+                "bootedAt": s.startedAt.timeIntervalSince1970,
                 "ip": s.lastIP ?? "",
                 "mounts": s.profile.folderPaths,
                 "tabs": tabs,
@@ -6181,6 +7090,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// All workspaces (running or not) as sidebar rows — the exact shape
     /// `refreshSidebar()` builds `ProfileRow` from, so a fat client renders the
     /// source list 1:1.
+    /// home.img's size, or NSNull when there is none (the row says so, rather
+    /// than leaving the key out like a server too old to report it).
+    nonisolated static func homeImageBytes(_ url: URL) -> Any {
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? NSNull()
+    }
+
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
@@ -6206,13 +7121,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,
                 "diskCapacityBytes": dash.diskCapacity,
+                // A fat client's editor remeasures when this moves (a wipe,
+                // reset or rollback leaves the run state as it was).
+                "homeImageBytes": Self.homeImageBytes(store.homeImageURL(for: p)),
                 // Which credentials it holds (never the values): a fat client's
                 // automation and code-review editors gate on them, and its
                 // mirrored profile carries no credentials at all.
                 "hasGitHubToken": p.hasGitHubCredential,
                 "hasLinearToken": !p.linearToken.isEmpty,
                 "askBeforeUseLabels": p.askBeforeUseCredentialLabels,
+                // Its other agents (which, and how they sign in — never a
+                // key): a fat client's automation editor offered only the
+                // primary one.
+                "additionalTools": p.additionalTools.filter { $0.tool != p.tool }.map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
+                // The agents it can run (set up there, or through the Models
+                // settings / a shared sign-in) — what a fat client's agent
+                // pickers offer. Its mirror sees none of the host's models.
+                "readyTools": readyToolSpecs(for: p).map {
+                    ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
+                },
+                "squelch": p.squelch.enabled,
+                // Its notes: the fat client's dashboard card and row tooltip.
+                "comments": p.comments,
             ]
+            if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
             if let failure = activeBootFailures[p.id] { row["bootFailure"] = failure }
@@ -6251,6 +7185,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
+            // The clock the schedules run on: a client in another zone
+            // names it, and shows its own equivalent.
+            "timeZone": TimeZone.current.identifier,
             // Repository watches + findings ride along for the fat client.
             "watches": findingStore.watches.compactMap(Self.codableToDict),
             "findings": findingStore.findings.compactMap(Self.codableToDict),
@@ -6336,6 +7273,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let wasAttached = isAttached(id)
         session.sandbox.sessionDisk?.clearSavedState()   // cold-boot fresh, never resume
 
+        rebootingProfiles.insert(id)
+        // The lease stays with this process from the stop to the next boot's
+        // acquire (launch takes the pin over; one that gives up lets it lapse).
+        pinLease(id)
         if force, let vm = session.sandbox.vm {
             await Self.forceStop(vm)
             handleSessionStopped(profileID: id)   // a forced stop fires no onStopped
@@ -6349,6 +7290,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if runningSessions[id] == nil { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        rebootingProfiles.remove(id)
         launch(profile, detached: !wasAttached, remoteInitiated: remoteInitiated)
         var up = false
         for _ in 0..<600 {   // first boots can take a while
@@ -6397,7 +7339,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return ["error": "Workspace not found: \(idOrName)"]
         }
         // The image is replaced wholesale, so the VM must not have it open.
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
         }
         do {
@@ -6433,11 +7375,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// or resolves a profile, applies `-v` mounts, persists it, then drives the
     /// normal `launch` path (so all the engine / token / boot wiring is shared)
     /// and optionally detaches for a headless `-d` run.
+    /// A `profile` that is a workspace id no workspace has: deleted, not a
+    /// name to mint a workspace under (a client still showing the deleted
+    /// one's Start button created a new workspace named with its id, and
+    /// booted it). The /vms route answers 404.
+    nonisolated static func unknownWorkspaceRefusal(_ ref: Any?) -> [String: Any]? {
+        guard let ref = ref as? String, UUID(uuidString: ref) != nil else { return nil }
+        return ["error": "No workspace with id \(ref) — it was deleted.", "notFound": true]
+    }
+
     @MainActor private func automationCreateVM(spec: [String: Any]) async -> [String: Any]? {
         // 1. Resolve an existing profile, or mint one on the fly.
         var profile: Profile
         if let ref = spec["profile"] as? String, let existing = profileByNameOrID(ref) {
+            // Deleted by the other process (its `vm run --rm` sweep): the
+            // row is stale, and the save below would bring it back as a
+            // kept workspace, secrets and all. Answered as deleted (404).
+            guard store.exists(existing) else {
+                profiles = store.loadAll()
+                refreshSidebar()
+                return ["error": ProfileStore.ProfileGone(name: existing.name).localizedDescription, "notFound": true]
+            }
             profile = existing
+        } else if let refusal = Self.unknownWorkspaceRefusal(spec["profile"]) {
+            return refusal
         } else {
             let fallback = "cli-" + String(UUID().uuidString.prefix(8)).lowercased()
             let name = (spec["name"] as? String) ?? (spec["profile"] as? String) ?? fallback
@@ -6480,7 +7441,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         profiles = store.loadAll()
         let saved = profiles.first { $0.id == profile.id } ?? profile
-        if spec["rm"] as? Bool == true { ephemeralProfiles.insert(saved.id) }
+        if spec["rm"] as? Bool == true {
+            // Another live process's --rm workspace isn't ours to boot.
+            guard store.claimEphemeral(saved) else {
+                FileHandle.standardError.write(Data("[vm run] '\(saved.name)' belongs to another Bromure process\n".utf8))
+                return nil
+            }
+            ephemeralProfiles.insert(saved.id)
+        }
 
         // 4. Boot via the shared launch path. A headless `-d` run boots
         //    window-less from the start (no pane is ever hosted) so no window
@@ -7040,6 +8008,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// proceed (nothing running, or the user clicked Quit), false to abort.
     @MainActor
     private func confirmQuit() -> Bool {
+        // A quit AppKit refused after an earlier confirmation must not leave
+        // its answer to a later one (that may not even ask).
+        restorePlanAtQuit = nil
+        restoreDecidedAtQuit = false
         let running = runningSessions.values.filter { $0.sandbox.vm?.state == .running }
         if running.isEmpty { return true }
         // A background agent (`--headless`: no window, nobody at the Mac to
@@ -7061,6 +8033,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.alertStyle = .warning
         alert.addButton(withTitle: NSLocalizedString("Quit", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        // Bring the workspaces (and the sessions open in them) back at the
+        // next start. The infrastructure machines come up with their
+        // clusters, not from here.
+        let restoreBox: NSButton? = workspaces.isEmpty ? nil : {
+            let b = NSButton(checkboxWithTitle: NSLocalizedString(
+                "Restore these workspaces and their sessions at next start",
+                comment: "quit confirmation checkbox"), target: nil, action: nil)
+            b.state = UserDefaults.standard.object(forKey: LaunchRestorePlan.preferenceKey) as? Bool ?? true ? .on : .off
+            return b
+        }()
+        alert.accessoryView = restoreBox
         // Come forward first. Quit usually arrives as an Apple Event (menu,
         // ⌘Q, Dock, `osascript`) while another app is frontmost, and a modal
         // put up from that handler can end up unfocused and behind whatever
@@ -7069,8 +8052,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // they're actually being asked about.
         NSApp.activate(ignoringOtherApps: true)
         quitAlert = alert
-        return alert.runModal() == .alertFirstButtonReturn
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        if let restoreBox {
+            let restore = restoreBox.state == .on
+            UserDefaults.standard.set(restore, forKey: LaunchRestorePlan.preferenceKey)
+            // Taken now, before the drain: shutting a workspace down unbinds
+            // its sessions' tabs. Written at applicationWillTerminate, so a
+            // quit AppKit refuses after this leaves nothing behind.
+            restorePlanAtQuit = restore ? LaunchRestorePlan.make(
+                running: running.filter { $0.kubeClusterID == nil }
+                    .map { (id: $0.profileID, name: $0.profile.name) }
+                    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+                sessions: agentSessionStore.sessions) : nil
+            restoreDecidedAtQuit = true
+        }
+        return true
     }
+
+    /// The quit confirmation's restore checkbox: what to bring back at the
+    /// next start (nil: nothing), and whether the user was asked at all.
+    private var restorePlanAtQuit: LaunchRestorePlan?
+    private var restoreDecidedAtQuit = false
 
     /// The quit confirmation's body: what happens to each running workspace,
     /// grouped by what its close action does at quit (shut down; anything
@@ -7203,6 +8205,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLog.stamp("applicationWillTerminate (clean quit)")
+        if restoreDecidedAtQuit {
+            if let plan = restorePlanAtQuit {
+                LaunchRestorePlan.save(plan)
+                AppLog.stamp("quit: \(plan.workspaces.count) workspace(s) to restore at next start")
+            } else {
+                LaunchRestorePlan.discard()
+            }
+        }
+        SquelchLedger.shared.flush()
+        // `vm run --rm` workspaces whose VM is off (a reboot's relaunch
+        // waiting, a boot that gave up): over with the app.
+        sweepStoppedEphemeral()
         // Discard the ephemeral browser VM (if any) so we don't orphan it.
         unifiedWindow?.teardownBrowserVM()
         // Nuke every workspace's ssh-agent. The orphaned-process risk is
@@ -7245,6 +8259,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.mitmEngine?.terminateAllSSHAgents()
                 InferenceService.killIfRunning()
                 CloudflareTunnelSupervisor.killIfRunning()
+                MainActor.assumeIsolated { self?.sweepStoppedEphemeral() }
                 // Exit with a non-zero code so callers can distinguish
                 // signal-driven shutdown from a clean ⌘Q.
                 exit(128 + sig)
@@ -7707,7 +8722,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func startInit(force: Bool = false, buildLocal: Bool = false,
-                           fromWizard: Bool = false) {
+                           freshDownload: Bool = false, fromWizard: Bool = false) {
         // Note: we do NOT delete the version stamp here even when
         // force == true. The stamp gates whether existing sessions
         // can launch from the old image — wiping it would brick the
@@ -7768,7 +8783,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else {
                     do {
                         try await self.imageManager.downloadBaseImage(
-                            progress: progressCB, output: outputCB)
+                            fresh: freshDownload, progress: progressCB, output: outputCB)
                     } catch let error where UbuntuImageManager.isDownloadSideFailure(error) {
                         // No prebuilt image reachable (offline, CDN
                         // outage, bad artifact) — the one class of
@@ -8966,6 +9981,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// whose defaults the window edits — preselected to the remote whose
     /// mirror window had focus when the menu fired, else this Mac — so ⌘,
     /// from a fat-client window edits THAT server's settings, not this Mac's.
+    /// About, with the Jenkins build and commit (BuildInfo).
+    @objc func showAboutPanelAction(_ sender: Any?) { BuildInfo.showAboutPanel() }
+
     @objc func openPreferencesAction(_ sender: Any?) {
         if let win = preferencesWindow {
             win.makeKeyAndOrderFront(nil)
@@ -9085,6 +10103,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.closePreferencesWindow()
             },
             onCancel: { [weak self] in self?.closePreferencesWindow() },
+            // File import stays off here (a key file is copied into ONE
+            // workspace's folder; the template has none), but a host-agent
+            // key is only a public key + socket, so new workspaces can
+            // inherit it. The editor discovers sockets off the main thread.
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
             claudeAccountSavedAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.record(for: nil)?.savedAt },
             claudeReauthRequiredAt: { [weak self] in self?.mitmEngine?.claudeSubscriptionStore.reauthRequiredAt(for: nil) },
             codexReauthRequiredAt: { [weak self] in self?.mitmEngine?.codexSubscriptionStore.reauthRequiredAt(for: nil) },
@@ -9228,9 +10251,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     @objc func rebuildBaseImageAction(_ sender: Any?) {
         switch RebuildBaseImageWindow.run() {
-        case .download: startInit(force: true)
-        case .local:    startInit(force: true, buildLocal: true)
-        case nil:       break
+        case (.download, let fresh)?: startInit(force: true, freshDownload: fresh)
+        case (.local, _)?:            startInit(force: true, buildLocal: true)
+        case nil:                     break
         }
     }
 
@@ -9492,7 +10515,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let override = p.bedrockModelOverride(global: global) else { continue }
             p.modelOverride = override
             do {
-                try store.save(p)
+                try store.update(p)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept Claude Code on Amazon Bedrock via a workspace override")
@@ -9515,7 +10538,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyLocalEngine(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): kept its own local engine via a workspace override")
@@ -9537,7 +10560,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for p in profiles {
             guard let moved = p.migratedLegacyOmpCustom(global: global) else { continue }
             do {
-                try store.save(moved)
+                try store.update(moved)
                 changed = true
                 InferenceLog.shared.record(
                     "[models] \(p.name): moved omp's custom server into the workspace's model settings")
@@ -9687,8 +10710,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // old one down and rebuild. The previous guard re-surfaced whatever
         // editor was open regardless of `editing`, so once any profile's
         // Settings had been opened, every later "Settings" click re-showed
-        // that same window — and since the editor isn't nil'd on a red-button
-        // close, it stuck to the first profile edited this session.
+        // that same window. Only an OPEN editor is reused: a closed one is
+        // forgotten (its session), so reopening reads the rules in force.
         if let existing = editorWindow {
             if editorEditingProfile?.id == editing?.id {
                 existing.makeKeyAndOrderFront(nil)
@@ -9715,6 +10738,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // their own values.
         let initialDraft: Profile? = editing
             ?? store.newProfileFromTemplate(name: nextDefaultProfileName())
+        // An existing workspace's firewall edits apply as they're made (a
+        // new one has nothing running to apply them to).
+        let live = editing.map { p in
+            FirewallLiveEdit(profileID: p.id, opening: p.egressRules) { [weak self] text in
+                self?.commitFirewallRules(text, profileID: p.id) ?? false
+            }
+        }
         win.contentView = NSHostingView(rootView: ProfileEditorView(
             profile: initialDraft,
             isNew: editing == nil,
@@ -9726,6 +10756,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.handleEditorSave(profile: profile, generateSSH: generateSSH, editing: editing)
             },
             onCancel: { self.closeEditorWindow() },
+            onFirewallEdited: live.map { live in { live.edited($0) } },
             onTitleChange: { [weak win] title in win?.title = title },
             onImportSSHKey: { [weak self] url, passphrase, label in
                 // Import requires a saved profile (we need an id for
@@ -9745,6 +10776,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             onRemoveSSHKey: { [weak self] key in
                 guard let self, let editing else { return }
                 self.removeImportedSSHKey(key, for: editing)
+            },
+            // Socket discovery runs off the main thread inside the editor.
+            onListHostAgentKeys: { socket in try Self.listHostAgentKeys(socket: socket) },
+            consentGrants: editing.flatMap { p in
+                mitmEngine.map { Self.consentGrantControls($0.consent, profileID: p.id) }
             },
             claudeAccountSavedAt: (editing ?? initialDraft).map { p in
                 { [weak self] in
@@ -9850,7 +10886,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         .withSubscriptionHealth({ [weak self] provider in self?.localSubscriptionHealth(provider, profileID: editing?.id) }))
         win.isReleasedWhenClosed = false
         win.makeKeyAndOrderFront(nil)
-        editorWindow = win
+        // Closed any way but a save (Cancel, the close button, another
+        // workspace's editor taking its place): the firewall edits go back,
+        // and the window is forgotten.
+        editorSession = SettingsWindowSession(window: win, live: live) { [weak self] gone in
+            guard let self, self.editorSession === gone else { return }
+            self.editorSession = nil
+            self.editorEditingProfile = nil
+        }
     }
 
     /// Snapshot of where this profile's data lives + how to nuke it.
@@ -9879,7 +10922,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let homeImage = store.homeImageURL(for: editing)
         let hasHomeImage = editing.homeModel == .ext4
             && FileManager.default.fileExists(atPath: homeImage.path)
-        return ProfileStorageContext(
+        var context = ProfileStorageContext(
             baseImageURL: baseURL,
             baseImageVersion: readCurrentBaseVersion(),
             baseImageBuildDate: buildDate,
@@ -9897,11 +10940,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 ? { [weak self] in self?.restoreHomeStorage(editing) }
                 : nil
         )
+        context.homeImageFile = editing.homeModel == .ext4 ? homeImage : nil
+        context.remeasure = { [weak self] in self?.makeStorageContext(for: editing) }
+        return context
     }
 
     func closeEditorWindow() {
-        editorWindow?.close()
-        editorWindow = nil
+        editorSession?.close()
+        editorSession = nil
         editorEditingProfile = nil
     }
 
@@ -9964,7 +11010,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard p.homeModel == .ext4 else {
             return NSLocalizedString("This machine keeps its home on the Mac, not in an image — nothing to rewind.", comment: "rewind home")
         }
-        guard runningSessions[p.id] == nil else {
+        guard !diskInUse(p.id) else {
             return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
         }
         do {
@@ -9984,7 +11030,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func restoreHomeStorage(_ profile: Profile) {
         let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .ext4 else { return }
-        guard runningSessions[p.id] == nil else { return }   // row is disabled while running
+        guard !diskInUse(p.id) else { return }   // row is disabled while running
         let checkpoints = store.listHomeCheckpoints(for: p)
         guard !checkpoints.isEmpty else {
             let alert = NSAlert()
@@ -10022,6 +11068,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard alert.runModal() == .alertFirstButtonReturn,
               checkpoints.indices.contains(popup.indexOfSelectedItem) else { return }
         let choice = checkpoints[popup.indexOfSelectedItem]
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(p.id) else { showRunningRefusal(profile: p, what: "home folder"); return }
 
         do {
             // Safety net first: the pre-restore home becomes a checkpoint.
@@ -10110,6 +11158,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       : "Couldn't save the workspace.")
             return
         }
+        editorSession?.live?.keep()
         closeEditorWindow()
         // A machine made on the spot is the one the new-session screen
         // selects when it rebuilds ("New machine…" in its picker).
@@ -10150,6 +11199,95 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Strict sandbox: listen for the VM's root attestor (binary identity).
+    /// A fresh boot forgets the previous attestor's pinned secret (a new
+    /// attestor mints a new one); a restore keeps it, so only the attestor
+    /// that was running when the VM was suspended can reattach.
+    @MainActor
+    func attachIdentityBridge(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) {
+        // The attestor also carries the guest sandbox's status, so it runs
+        // whenever OpenShell's filesystem / process sections or the kernel
+        // sentry are in play, not only under strict sandbox.
+        let spec = OpenShellSandboxSpec(policyYAML: profile.networkPolicy, workdirs: [],
+                                        strictSandbox: profile.effectiveStrictSandbox,
+                                        sentry: profile.effectiveKernelSentry.rawValue)
+        if !restoring { GuestSandboxStatusStore.shared.reset(profileID: profile.id) }
+        KernelSentryService.shared.attach(profile: profile, socketDevice: socketDevice, restoring: restoring)
+        guard profile.effectiveStrictSandbox || spec.isActive else { return }
+        let secret = store.profileDirectory(for: profile).appendingPathComponent("attestor.secret")
+        if !restoring { try? FileManager.default.removeItem(at: secret) }
+        BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret)
+    }
+
+    /// Connect the OpenShell policy advisor to the live workspaces: mode and
+    /// effective policy per workspace, credential scopes for its risk check,
+    /// and the approval path (append the rule to the workspace's policy text,
+    /// save, apply live — the same route an editor save takes).
+    private func wireOpenShellAdvisor(_ engine: MitmEngine) {
+        let advisor = OpenShellAdvisor.shared
+        let modes = OpenShellAdvisorModeCache.shared
+        advisor.modeProvider = { modes.mode(for: $0) }
+        advisor.policyProvider = { [weak engine] in engine?.guardrailsConfig(for: $0)?.egressPolicy?.openShell }
+        advisor.credentialScopesProvider = { [weak engine] pid in
+            engine?.swapper.entries(for: pid).compactMap { $0.host } ?? []
+        }
+        advisor.applyApproved = { [weak self] pid, proposal in
+            await MainActor.run { [weak self] () -> String? in
+                guard let self, let existing = self.profile(for: pid) else { return "workspace not found" }
+                var updated = existing
+                do {
+                    updated.networkPolicy = try OpenShellPolicy.insertingRules(proposal.yaml, into: existing.networkPolicy)
+                    if let result = OpenShellGovernance.shared.check(policyYAML: updated.networkPolicy,
+                                                                      providerRules: updated.openShellProviderRules),
+                       !result.passed {
+                        return "outside the organization boundary — \(result.summary)"
+                    }
+                    try self.persistEditedProfile(&updated, editing: existing, generateSSH: false, policySource: "advisor")
+                } catch {
+                    return "\(error)"
+                }
+                self.applyLiveEditToRunningSession(updated)
+                return nil
+            }
+        }
+        // System packages on request: an approved package is installed by
+        // the guest's root supervisor (agentd → sandboxd), never by the agent.
+        advisor.systemPackagesProvider = { modes.systemPackagesOn($0) }
+        advisor.enforceBinariesProvider = { [weak engine] in
+            engine?.guardrailsConfig(for: $0)?.egressPolicy?.enforceBinaries == true
+        }
+        advisor.installPackages = { [weak self] pid, manager, packages in
+            guard let self else { return (1, "the app is going away") }
+            do {
+                // No reply deadline here (guestJSONRequest waits for agentd):
+                // the guest answers only once apt has finished or been
+                // stopped, so a failure shown is never one still running.
+                let reply = try await self.guestJSONRequest(
+                    profileID: pid, request: ["apt_install": ["packages": packages], "timeout": 2000])
+                return (reply["exit_code"] as? Int ?? 1, reply["output"] as? String ?? "")
+            } catch {
+                return (1, "\(error)")
+            }
+        }
+        modes.refresh(profiles)
+        // A new organization boundary / managed policy re-resolves every
+        // running workspace's firewall at once.
+        NotificationCenter.default.addObserver(forName: OpenShellGovernance.changedNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reapplyOpenShellGovernance() }
+        }
+    }
+
+    @MainActor
+    func reapplyOpenShellGovernance() {
+        OpenShellAdvisorModeCache.shared.refresh(profiles)
+        for (id, session) in runningSessions {
+            let profile = profiles.first { $0.id == id } ?? session.profile
+            mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: id)
+            session.sandbox.applyEgressPolicy(profile.resolvedEgressPolicy)
+        }
+    }
+
     /// Shared save + app-state reconciliation for a created/edited profile.
     /// Deliberately AppKit-free (no NSAlert, no window ops) so the headless
     /// control-socket path can call it too — the GUI-only bits (folder-discard
@@ -10158,7 +11296,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the sidebar. Throws on disk/keychain failure.
     @MainActor
     func persistEditedProfile(_ profile: inout Profile, editing: Profile?,
-                              generateSSH: Bool) throws {
+                              generateSSH: Bool, policySource: String = "user") throws {
+        // The organization boundary is a hard gate on every save, whichever
+        // path it came from (the Sandbox drawer's Allow used to skip it).
+        if let refusal = OpenShellGovernance.shared.refusal(saving: profile, editing: editing) {
+            throw refusal
+        }
+        // An edit of a workspace the other process deleted meanwhile: don't
+        // write it back.
+        if editing != nil, !store.exists(profile) {
+            profiles = store.loadAll()
+            refreshSidebar()
+            throw ProfileStore.ProfileGone(name: profile.name)
+        }
         // Belt-and-braces: trim every secret before persisting. Pasted tokens
         // routinely come with trailing whitespace; embedding either in an HTTP
         // header value at swap time would corrupt the request and trigger a
@@ -10173,9 +11323,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var t = $0; t.realValue = t.realValue.trimmingCharacters(in: .whitespacesAndNewlines); return t
         }
 
+        // Credentials the VM minted while the editor was open
+        // (`saveMintedCredential`): the editor never edits them, so the app's
+        // copy -- secrets included -- is the current one.
+        if let current = profiles.first(where: { $0.id == profile.id }) {
+            profile.mintedCredentials = current.mintedCredentials
+            // Fields the app saves while settings is open -- the dashboard's
+            // notes, the sidebar's Squelch switch: left as the editor opened
+            // them, they're the stored ones (Finding CWE-362, "Saving
+            // workspace settings overwrites notes edited on the VM
+            // dashboard"). Edited here, the editor's win.
+            if let opened = editing { profile.adoptAppEdits(from: current, opened: opened) }
+        }
         // The editor's copy is as old as the window: keep what the app
         // updated meanwhile (lastUsedAt went backwards on a save).
         try store.saveEdited(&profile)
+        // The OpenShell policy's revision history (identical saves keep the
+        // current version).
+        if profile.usesOpenShellPolicy || !(PolicyHistory.shared.revisions(in: store.profileDirectory(for: profile)).isEmpty) {
+            PolicyHistory.shared.record(policy: profile.networkPolicy, source: policySource,
+                                        in: store.profileDirectory(for: profile))
+        }
         // Write the managed home with FAKE credentials, not reals. The editor
         // save previously called prepareHomeDirectory with NO token plan, so
         // its git / gh / glab / docker writers fell back to the real secret —
@@ -10258,7 +11426,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             changed = true
         }
         if changed {
-            do { try store.save(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
+            do { try store.update(p) } catch { NSLog("[bromure-ac] sign-in: couldn't save profile: \(error)") }
             if let i = profiles.firstIndex(where: { $0.id == p.id }) { profiles[i] = p }
             applyLiveEditToRunningSession(p)
         } else {
@@ -10311,6 +11479,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         doc.removeValue(forKey: "_secretsRedacted")
         let generateSSH = (rawDoc["generateSSH"] as? Bool) == true
         doc.removeValue(forKey: "generateSSH")
+        // `_commentsIfStill`: the notes an implicit dashboard save started
+        // from. Other notes stored since (settings) win: its `comments` is
+        // dropped here, where the check and the write are one step.
+        let commentsIfStill = rawDoc["_commentsIfStill"] as? String
+        doc.removeValue(forKey: "_commentsIfStill")
+        var commentsSuperseded = false
 
         let profile: Profile
         let editing: Profile?
@@ -10321,6 +11495,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let existing = profileByNameOrID(idOrName) else {
                 return ["ok": false, "error": "Workspace not found: \(idOrName)"]
             }
+            commentsSuperseded = Self.dropSupersededComments(&doc, stored: existing.comments, ifStill: commentsIfStill)
             // A partial document (only the fields to change) is overlaid on
             // the stored workspace; a full one replaces every field it names.
             var incoming: Profile
@@ -10357,6 +11532,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var merged = existingSecrets
             merged.overlay(with: incomingSecrets)
             merged.apply(to: &incoming)
+            // Minted credentials are the VM's, never the document's: a copy
+            // round-tripped while the VM minted one would drop it (and its
+            // secret), and the next boot would sign its key as the workspace.
+            incoming.mintedCredentials = existing.mintedCredentials
 
             // Kube contexts are part of this full-document replace: honor the
             // caller's exact set so removing one in the (redacted) editor sticks.
@@ -10393,11 +11572,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             editing = nil
         }
 
+        // An OpenShell policy that doesn't validate would fail closed on the
+        // next session; refuse it here like the GUI's disabled Save.
+        if profile.usesOpenShellPolicy {
+            do { _ = try OpenShellPolicy.parse(profile.networkPolicy) } catch {
+                return ["ok": false, "error": "Invalid OpenShell policy: \(error)"]
+            }
+            if let r = OpenShellGovernance.shared.check(policyYAML: profile.networkPolicy,
+                                                        providerRules: profile.openShellProviderRules),
+               !r.passed {
+                return ["ok": false, "error": "OpenShell policy is outside the organization boundary: \(r.summary)"]
+            }
+        }
+
         var toSave = profile
         do {
-            try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH)
+            try persistEditedProfile(&toSave, editing: editing, generateSSH: generateSSH, policySource: "api")
         } catch {
-            return ["ok": false, "error": error.localizedDescription]
+            var r: [String: Any] = ["ok": false, "error": error.localizedDescription]
+            // The notes it dropped are still the ones that won: a client that
+            // read only "failed" reopened its stale draft.
+            if commentsSuperseded, let editing { r["commentsSuperseded"] = true; r["comments"] = editing.comments }
+            return r
         }
 
         // Push host-side cosmetic + live-swap updates into a running session,
@@ -10406,6 +11602,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var result = automationProfileDescribe(toSave.id.uuidString) ?? ["id": toSave.id.uuidString]
         result["ok"] = true
+        if commentsSuperseded { result["commentsSuperseded"] = true }
         // Surface the freshly-minted public key so the caller can show it for
         // pasting into GitHub etc. (public, not a secret).
         if generateSSH, let pub = toSave.sshPublicKey, !pub.isEmpty { result["sshPublicKey"] = pub }
@@ -10502,6 +11699,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var merged = existingSecrets
         merged.overlay(with: incomingSecrets)
         merged.apply(to: &incoming)
+        // No VM runs on the template: it mints nothing.
+        incoming.mintedCredentials = []
         // Only an explicitly-sent kubeconfigs array is authoritative (removing a
         // context in the redacted editor must stick); an absent key = untouched.
         if let sentKube = rawDoc["kubeconfigs"] as? [[String: Any]] {
@@ -10568,10 +11767,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case keyboardSettings
         case terminalAppearance
         case gitIdentity
+        case strictSandbox
+        case guestSandbox
     }
 
     private func restartLabel(for change: RestartChange) -> String {
         switch change {
+        case .strictSandbox:
+            return NSLocalizedString("Strict sandbox", comment: "restart-required change")
+        case .guestSandbox:
+            return NSLocalizedString("Filesystem / process sandbox or kernel sentry", comment: "restart-required change")
         case .memory:
             return NSLocalizedString("VM memory", comment: "")
         case .homeSize:
@@ -10667,6 +11872,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             changes.append(.networking)
         }
         if old.folderPaths != new.folderPaths { changes.append(.sharedFolders) }
+        if old.effectiveStrictSandbox != new.effectiveStrictSandbox { changes.append(.strictSandbox) }
+        if old.effectiveKernelSentry != new.effectiveKernelSentry
+            || OpenShellSandboxSpec.sectionsFingerprint(yaml: old.networkPolicy)
+                != OpenShellSandboxSpec.sectionsFingerprint(yaml: new.networkPolicy) {
+            changes.append(.guestSandbox)
+        }
         // Note: a plain API-key change is NOT here — it's applied live
         // (api_key.env + swap map). Only switching the tool itself or its
         // auth mode needs a restart, since that re-runs the agent
@@ -10720,7 +11931,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // The egress firewall (`egressRules`) is NOT here: it has its own
             // live path (applyLiveFirewall, run before this guard), so a rule
             // edit / toggle doesn't re-emit the guest env or print a spurious
-            // "environment refreshed" line.
+            // "environment refreshed" line. An OpenShell policy and its
+            // providers are: they also carry credentials and the guest
+            // sandbox's policy.
+            || old.networkPolicy != new.networkPolicy
+            || old.openShellProviders != new.openShellProviders
             || old.supplyChain != new.supplyChain
             || old.promptInjection != new.promptInjection
             || old.pii != new.pii
@@ -10761,6 +11976,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // guest re-sources a consistent proxy env for the new mode (see the
             // applyInterceptDisabled call in applyLiveSessionRefresh).
             || old.disableTransparentProxy != new.disableTransparentProxy
+            || old.strictCredentials != new.strictCredentials
     }
 
     /// Apply env-var / credential / guardrail edits to a running session
@@ -10846,6 +12062,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if old.sshKeyRequiresApproval != new.sshKeyRequiresApproval, let engine = mitmEngine {
             engine.sshAgent.setKeys(loadAgentKeys(for: new), for: new.id)
         }
+        // The imported and host-agent keys' gates too: "Require approval"
+        // turned on was only read at launch — the key kept signing, and a
+        // Guardrails deny (badge and all) was never asked, until a cold boot.
+        if old.importedSSHKeys != new.importedSSHKeys, let engine = mitmEngine {
+            engine.sshAgent.setImportedKeyApprovals(
+                Self.liveImportedKeyApprovals(running: engine.sshAgent.importedKeyApprovals(for: new.id), to: new),
+                for: new.id)
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(new), for: new.id)
+        }
 
         // Transparent (IP-stack) interception on/off is a live L3/L4 flip of
         // the VM's switch port — no reboot, and BEFORE the guard so it applies
@@ -10858,14 +12083,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // (kubectl, whose kubeconfig CA trusts the MiTM leaf) could be left
         // pointed the wrong way and fail with "certificate signed by unknown
         // authority".
-        if old.disableTransparentProxy != new.disableTransparentProxy {
-            sandbox?.applyInterceptDisabled(new.disableTransparentProxy)
+        if old.effectiveDisableTransparentProxy != new.effectiveDisableTransparentProxy {
+            sandbox?.applyInterceptDisabled(new.effectiveDisableTransparentProxy)
         }
 
         // Outbound-connection rules (add / edit / switch on-off / expiry) go
         // straight to the running VM's switch port and the MiTM — no restart,
         // and before the guard since a rule change alone doesn't trip it.
-        if old.egressRules != new.egressRules || old.logAllowedConnections != new.logAllowedConnections {
+        if old.egressRules != new.egressRules || old.logAllowedConnections != new.logAllowedConnections
+            || old.networkPolicy != new.networkPolicy || old.openShellProviders != new.openShellProviders {
             applyLiveFirewall(for: new, sandbox: sandbox)
         }
 
@@ -10925,9 +12151,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Full map = profile plan + kubeconfig bearer/exec swaps, the
             // same composition the launch path builds.
             var fresh = plan.tokenMap()
+            // Credentials the VM minted earlier (`MintedCredential`).
+            fresh.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             let kubeMat = KubeconfigMaterializer().materialize(
                 profile: profile, bromureCAPEM: engine.ca.certificatePEM,
-                directClusters: kubeClusterEngine.directClusters(for: profile.id))
+                directClusters: kubeClusterEngine.directClusters(for: profile.id),
+                reusingExec: engine.kubeExecContexts(for: profile.id))
             kubeYAML = kubeMat.yaml
             for swap in kubeMat.bearerSwaps {
                 fresh.entries.append(TokenMap.Entry(
@@ -10941,11 +12171,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // reissued) lets in-flight work finish on the old value instead
             // of erroring, while new shells pick up the new fake. Same
             // additive pattern the subscription / OAuth coordinators use.
-            let freshFakes = Set(fresh.entries.map(\.fake))
-            let preserved = engine.swapper.entries(for: profile.id)
-                .filter { !freshFakes.contains($0.fake) }
-            engine.swapper.setMap(TokenMap(entries: fresh.entries + preserved),
+            // A placeholder (an exec token not fetched yet, a 1Password
+            // reference) keeps the real value already resolved for its fake.
+            engine.swapper.setMap(TokenMap.liveMerge(fresh: fresh.entries,
+                                                     current: engine.swapper.entries(for: profile.id)),
                                   for: profile.id)
+            // The 1Password loop follows the new references: one that
+            // changed is resolved now; one already resolved keeps its secret.
+            engine.opRefresher.start(
+                profileID: profile.id, refs: OnePasswordRefresher.refs(in: fresh.entries),
+                swapper: engine.swapper,
+                onFirstError: { [weak self] err in
+                    self?.presentOnePasswordError(err, profileName: profile.name)
+                })
+            // …and the rest of what the kubeconfigs need, as at launch: a
+            // kubeconfig imported while the VM runs must be trusted (its
+            // cluster CA) and authenticated (its client certificate) now.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
         }
 
         // Rewrite the guest-side credential files with the freshly-minted
@@ -11090,9 +12332,34 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The launch-time copy is updated too (`inout`): `launch` saves that
     /// copy right after (`store.touch`), which would otherwise put the old
     /// answer back over the stored record.
-    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile, current: String) {
+    ///
+    /// The offer is a modal (or, remote, a suspended wait): a boot that began
+    /// meanwhile — an automation's timer fires inside the modal run loop —
+    /// has the disk open, and "Yes" must not delete it from under that VM.
+    /// Then: "No" and "Remind me later" are still recorded (they touch no
+    /// disk); "Yes" is not carried out, and says so (`upgradeSkipped`).
+    /// Either way that other boot owns the workspace: this launch stops.
+    /// One launch question (upgrade, wipe) up per workspace at a time.
+    struct LaunchQuestionGate {
+        private var up = Set<Profile.ID>()
+        /// False: this workspace already has one up — don't ask, don't boot.
+        mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
+        mutating func end(_ id: Profile.ID) { up.remove(id) }
+        func isUp(_ id: Profile.ID) -> Bool { up.contains(id) }
+    }
+
+    enum UpgradeAnswerOutcome: Equatable {
+        case applied
+        case diskInUse(upgradeSkipped: Bool)
+    }
+
+    @discardableResult
+    func applyBaseImageUpgradeAnswer(_ index: Int, profile: inout Profile,
+                                     current: String) -> UpgradeAnswerOutcome {
+        let busy = diskInUse(profile.id)
         switch index {
         case 0:
+            if busy { return .diskInUse(upgradeSkipped: true) }
             try? store.resetDisk(for: profile)
             emitDiskResetEvent(profile: profile, reason: "base_image_drift")
         case 1:
@@ -11105,6 +12372,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             profile.baseImageUpgradeRemindAfter = until
             recordBaseImageUpgradeAnswer(profileID: profile.id, declinedFor: nil, remindAfter: until)
         }
+        return busy ? .diskInUse(upgradeSkipped: false) : .applied
+    }
+
+    /// "Yes, upgrade" answered after the workspace started anyway (an
+    /// automation, during the prompt): what happened, and what to do.
+    static func upgradeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't upgraded", comment: "base image upgrade skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again.",
+            comment: "base image upgrade skipped"))
+    }
+
+    private func showUpgradeSkipped(_ profile: Profile) {
+        let (title, message) = Self.upgradeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
     }
 
     private func recordBaseImageUpgradeAnswer(profileID: UUID, declinedFor: String?, remindAfter: Date?) {
@@ -11124,7 +12411,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func resetProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "system disk")
             return
         }
@@ -11143,6 +12430,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Reset to base")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // The modal ran the run loop: a boot may have started meanwhile.
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "system disk"); return }
 
         do {
             try store.resetDisk(for: profile)
@@ -11156,7 +12445,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// `resetProfile`: system layer survives, but everything personal
     /// the user accumulated under /home/ubuntu is gone.
     private func resetHomeProfile(_ profile: Profile) {
-        if runningSessions[profile.id] != nil {
+        if diskInUse(profile.id) {
             showRunningRefusal(profile: profile, what: "home folder")
             return
         }
@@ -11177,6 +12466,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.addButton(withTitle: "Erase Home")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "home folder"); return }
 
         do {
             try store.resetHome(for: profile)
@@ -11187,7 +12477,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if profile.sshPublicKey != nil {
                 var p = profile
                 p.sshPublicKey = nil
-                try? store.save(p)
+                try? store.update(p)
                 profiles = store.loadAll()
                 refreshSidebar()
             }
@@ -11199,19 +12489,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private func showRunningRefusal(profile: Profile, what: String) {
         let alert = NSAlert()
         alert.messageText = "Close “\(profile.name)” first."
-        alert.informativeText = "The \(what) is in use by the running VM. Resetting it now would corrupt the live session — close the session window and try again."
+        alert.informativeText = "The \(what) is in use by the running VM. Changing it now would corrupt the live session — close the session window and try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
     private func deleteProfile(_ profile: Profile) {
+        if diskInUse(profile.id) {
+            showRunningRefusal(profile: profile, what: "workspace")
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Delete workspace “\(profile.name)”?"
         alert.informativeText = "Removes its disk, settings, and SSH key. The mounted host folder is untouched."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !diskInUse(profile.id) else { showRunningRefusal(profile: profile, what: "workspace"); return }
 
         do {
             try store.delete(profile)
@@ -11275,15 +12570,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if !detached { attachWindow(to: session, quiet: quiet) }
             return
         }
+        // Already booting (a detached boot has no pane to find above): one
+        // boot per disk.
+        if bootsInFlight.contains(profile.id) { return }
+        // Deleted by the other process (its `vm run --rm` sweep): the row
+        // is stale. Booting it would save it back as a kept workspace.
+        guard store.exists(profile) else { forgetDeletedProfile(profile, unattended: unattended); return }
+        // Open in the other Bromure process (the app, or its login agent):
+        // it runs there, and this process's copy of it is stale.
+        if workspaceOpenElsewhere(profile.id) {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
         // A Kimi subscription whose record has no managed config (registration
         // captured the credential but not what `kimi login` provisions) would
         // boot a guest that can't start its agent at all — "LLM not set". Ask
         // /models with the real credential first (a second or two, once per
         // credential; the result is stored on the record), then re-enter.
         if !kimiProvisioned, kimiNeedsProvisioning(profile) {
+            // The disk is held (booting) through the provisioning — up to
+            // 30 s on the network, before this launch claims it below: a
+            // delete, reset or revert in that gap went through and the
+            // re-entered launch booted whatever was left (a detached reboot
+            // had just dropped its own mark to call us). Released in the
+            // same turn as the re-entry, which claims it again.
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                let stop = await self.whileHoldingDisk(profile.id) {
+                    await self.mitmEngine?.kimiProvisioner.ensureProvisioned(for: profile.id)
+                }
+                // Stopped while it provisioned: it stays off.
+                guard stop == nil, self.profiles.contains(where: { $0.id == profile.id }) else {
+                    self.dropAbandonedEphemeral(profile.id); return
+                }
                 self.launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                             remoteInitiated: remoteInitiated, preflightResolved: preflightResolved,
                             unattended: unattended, quiet: quiet, kimiProvisioned: true)
@@ -11352,7 +12671,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Local NSAlert only: a remote-initiated launch resolved (and
             // performed) the wipe in the async preflight, so this gate is
             // already clear when it re-enters.
-            if !confirmWipeAndProceed(profile: profile) {
+            guard launchQuestions.begin(profile.id) else { return }
+            let wipe = confirmWipeAndProceed(profile: profile)
+            launchQuestions.end(profile.id)
+            switch wipe {
+            case .wiped: break
+            case .cancelled: dropAbandonedEphemeral(profile.id); return
+            case .diskInUse:
+                // Confirmed, but not carried out: say so, never wipe the open disk.
+                showWipeSkipped(profile)
+                return
+            case .failed(let left):
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = String(format: NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace"), profile.name)
+                alert.informativeText = Self.wipeFailedMessage(left)
+                alert.runModal()
+                dropAbandonedEphemeral(profile.id)
+                return
+            case .markCleared:
+                showMarkCleared(profile)
+                dropAbandonedEphemeral(profile.id)
                 return
             }
             // Fall through — disk + home are gone, flag is cleared,
@@ -11376,6 +12715,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             } else {
                 // Local NSAlert only: a remote-initiated launch resolved this in
                 // the async preflight above and re-entered with preflightResolved.
+                // The same question already up for this workspace: that one decides.
+                guard launchQuestions.begin(profile.id) else { return }
                 let (title, message) = Self.driftPromptParts(recorded: recorded, current: current)
                 let alert = NSAlert()
                 alert.messageText = title
@@ -11387,11 +12728,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 case .alertSecondButtonReturn: index = 1
                 default: index = 2
                 }
-                applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+                launchQuestions.end(profile.id)
+                // Another boot began during the modal: it owns the disk now.
+                if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                               current: current) {
+                    if skipped { showUpgradeSkipped(profile) }
+                    return
+                }
             }
         }
 
-        try? store.touch(profile)
+        // Held from here until the VM is gone (or its boot fails): the other
+        // process sees it open and leaves it alone. Taken after the
+        // questions above, which wait on the user.
+        guard WorkspaceLease.acquire(profile.id, dir: store.profileDirectory(for: profile)) else {
+            refuseOpenElsewhere(profile, unattended: unattended || remoteInitiated)
+            return
+        }
+        leasePins.clear(profile.id)   // a reboot's pin: this boot holds it now
+        // Again after the questions above: they wait on the user, and the
+        // other process may have deleted it meanwhile. The stamp keeps the
+        // minted credentials on disk, which this copy may predate (the other
+        // process's VM minted them): the boot registers those.
+        do {
+            let written = try store.touch(profile)
+            if written.mintedCredentials != profile.mintedCredentials {
+                profile.mintedCredentials = written.mintedCredentials
+                if let i = profiles.firstIndex(where: { $0.id == profile.id }) {
+                    profiles[i].mintedCredentials = written.mintedCredentials
+                }
+            }
+        } catch is ProfileStore.ProfileGone {
+            releaseLeaseIfIdle(profile.id)
+            forgetDeletedProfile(profile, unattended: unattended)
+            return
+        } catch {}
 
         // Home-storage migration (virtiofs → ext4 image) is MANDATORY: a
         // legacy virtiofs home is live-mounted as the guest's `/home/ubuntu`,
@@ -11451,6 +12822,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Token map = the profile-derived plan + the kubeconfig
             // bearer/exec swap entries.
             var tokenMap = plan.tokenMap()
+            // Credentials the VM minted in an earlier boot (`MintedCredential`).
+            tokenMap.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: salt)
+            engine.awsCreds.setMinted(profile.mintedCredentials, for: profile.id)
             for swap in kubeMat.bearerSwaps {
                 tokenMap.entries.append(TokenMap.Entry(
                     fake: swap.fakeToken, real: swap.realToken, host: swap.host,
@@ -11459,46 +12833,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             engine.swapper.setMap(tokenMap, for: profile.id)
 
-            // Per-host client identities for upstream mTLS (kubectl
-            // → API server).
-            for ident in kubeMat.clientIdentities {
-                engine.clientIdentities.setIdentity(
-                    ident.identity, host: ident.host, profileID: profile.id,
-                    consentCredentialID: ident.consentCredentialID,
-                    consentDisplayName: ident.consentDisplayName)
-            }
-            // Per-host CA overrides so the proxy can verify private
-            // API-server certs that don't chain to macOS roots.
-            for entry in kubeMat.clusterCAs {
-                engine.clusterCAs.setCA(
-                    pem: entry.caPEM, host: entry.host, profileID: profile.id)
-            }
-            // Exec-credential poller: refreshes the swap map on a
-            // schedule for each context. Cancelled in unregister.
-            if !kubeMat.execContexts.isEmpty {
-                engine.execPoller.start(kubeMat.execContexts,
-                                        profileID: profile.id,
-                                        swapper: engine.swapper)
-            }
+            // Client identities for upstream mTLS (kubectl → API server),
+            // each cluster's own CA (private API-server certs don't chain to
+            // macOS roots), and the exec-credential pollers.
+            engine.applyKubeMaterial(kubeMat, profileID: profile.id)
 
-            // 1Password: manual tokens whose value is an `op://` reference are
-            // resolved host-side. The plan already minted a stable fake from the
-            // reference string; the refresher resolves the real secret now (and
-            // every 120s), so the guest only ever holds the fake and only the
-            // op:// path is on disk. First-resolution failures surface here.
-            let opRefs: [OnePasswordRefresher.Ref] = profile.manualTokens.compactMap { tok in
-                guard tok.isUsable, let opRef = OnePasswordCLI.reference(in: tok.realValue)
-                else { return nil }
-                let fake = SessionTokenPlan.deriveFake(
-                    prefix: "brm_",
-                    real: tok.realValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                    salt: salt)
-                let hosts: [String?] = tok.effectiveHostScopes.map { $0.isEmpty ? nil : $0 }
-                return .init(
-                    opRef: opRef, fake: fake, hosts: hosts,
-                    consentID: tok.requireApproval ? ConsentCredentialID.manualToken(tok.id) : nil,
-                    consentName: tok.name.isEmpty ? "manual token" : "“\(tok.name)” token")
-            }
+            // 1Password: credentials whose value is an `op://` reference are
+            // resolved host-side. The plan already gave each a stable fake (from
+            // the reference string, or an OpenShell placeholder); the refresher
+            // resolves the real secret at that fake now (and every 120s), so the
+            // guest only ever holds the fake and only the op:// path is on disk.
+            // First-resolution failures surface here.
+            let opRefs = OnePasswordRefresher.refs(in: tokenMap.entries)
             engine.opRefresher.start(
                 profileID: profile.id, refs: opRefs, swapper: engine.swapper,
                 onFirstError: { [weak self] err in
@@ -11576,15 +12922,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // process), so the broker is consulted just before that
             // forward. Keys without `publicKeyText` (no .pub on import)
             // can't be matched by blob and will sign without a prompt.
-            var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
-            for k in profile.importedSSHKeys where k.requireApproval {
-                guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText)
-                else { continue }
-                approvals[blob] = SSHAgentServer.ImportedApproval(
-                    label: k.label,
-                    consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
-            }
-            engine.sshAgent.setImportedKeyApprovals(approvals, for: profile.id)
+            engine.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
+            // Keys picked out of a host agent (YubiKey & co.): the allow-
+            // list of blobs the VM may see and sign with through that
+            // agent. Nothing else it holds is reachable.
+            engine.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
         } else {
             FileHandle.standardError.write(Data(
                 "[mitm] session launch for '\(profile.name)': MITM ENGINE IS NIL — nothing will be wired\n".utf8))
@@ -11595,6 +12937,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // is a detached login-boot — then it boots window-less and the session
         // lives on detached. Promote to a regular app first in case we're
         // launching from a headless/background agent.
+        // One boot per disk — claimed before the pane exists: a boot that
+        // began during a prompt above keeps the disk, and this launch leaves
+        // no pane behind.
+        guard bootsInFlight.begin(profile.id) else { return }
+        // A `--rm` workspace this process boots is this process's to sweep --
+        // and one a live other process owns (the login agent's, the GUI's:
+        // it may be up there, or in its reboot gap) isn't booted here at all:
+        // its owner would delete the disk out from under this VM.
+        if store.isEphemeral(profile), !store.claimEphemeral(profile) {
+            bootsInFlight.end(profile.id)
+            releaseLeaseIfIdle(profile.id)
+            refreshSidebar()
+            FileHandle.standardError.write(Data(
+                "[launch] '\(profile.name)' is a vm run --rm workspace another Bromure process owns; not booting it here\n".utf8))
+            return
+        }
         let win = SessionPane(profile: profile, acDelegate: self)
         if detached {
             // Boots window-less: the pane binds the VZ view through boot, then
@@ -11636,7 +12994,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             win.model.tabs = [TabsModel.Tab(label: "shell")]
         }
 
+        refreshSidebar()
         Task { @MainActor [self] in
+            defer {
+                bootsInFlight.end(profile.id)
+                releaseLeaseIfIdle(profile.id)   // the boot failed: no VM holds it
+                refreshSidebar()
+            }
             let sessionDisk = SessionDisk(
                 profile: profile,
                 store: store,
@@ -11732,7 +13096,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         AppLog.stamp("restore of '\(profile.name)' failed: \(error.localizedDescription)\(drift) — booting fresh\(who)")
                         sessionDisk.clearSavedState()
                         // VZ leaves the VM in an indeterminate state
-                        // after a failed restore; rebuild it.
+                        // after a failed restore: stop it (it may hold the
+                        // disk, and its later stop isn't this boot's), then
+                        // rebuild it.
+                        await sandbox.discardFailedRestore()
                         try sandbox.prepare()
                         try await sandbox.start()
                         // Restore failed → this is now a fresh boot. Drop the
@@ -11784,6 +13151,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                self.attachIdentityBridge(profile: profile, socketDevice: dev,
+                                          restoring: sandbox.didRestore)
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
@@ -11814,7 +13183,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -11908,7 +13280,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // never attaches the old virtiofs home again.
             if var p = self.profiles.first(where: { $0.id == profile.id }) {
                 p.homeModel = .ext4
-                try? self.store.save(p)
+                try? self.store.update(p)
                 self.profiles = self.store.loadAll()
             }
             self.runningSessions[profile.id]?.homeJustMigrated = true
@@ -12122,6 +13494,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// path. Builds the same guest command as the GUI request functions but
     /// writes straight to the session's outbox, so no window/pane is needed.
     @MainActor
+    /// The worktree branches of a workspace's open tabs — what an
+    /// automation run's slot is checked against. [] when the workspace isn't
+    /// running (nothing runs there), nil when its tabs can't be told (no
+    /// window has its entry).
+    /// Every worktree branch with an open tab in a running workspace: the
+    /// window's tabs and the session roster's (a detached session has no
+    /// window entry). [] when it isn't running.
+    func openWorktreeBranches(profileID: UUID) -> [String] {
+        guard let s = runningSessions[profileID] else { return [] }
+        return s.tabs.compactMap(\.worktreeBranch) + (liveWorktreeBranches(profileID: profileID) ?? [])
+    }
+
+    func liveWorktreeBranches(profileID: UUID) -> [String]? {
+        guard runningSessions[profileID] != nil else { return [] }
+        guard let entry = unifiedWindow?.listModel.entries.first(where: { $0.id == profileID }) else { return nil }
+        return entry.model.tabs.compactMap(\.worktreeBranch)
+    }
+
     func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
         guard let p = profileByNameOrID(profileNameOrID),
               let session = runningSessions[p.id],
@@ -12927,8 +14317,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return }
                 Task { @MainActor in await self.codingTaskEngine.sendBack(taskID) }
             },
-            land: { [weak self] taskID, mode, target, keep in
-                self?.codingTaskEngine.land(taskID, mode: mode, target: target, keepBranch: keep)
+            land: { [weak self] taskID, mode, target, keep, push in
+                self?.codingTaskEngine.land(taskID, mode: mode, target: target, keepBranch: keep, push: push)
             },
             retryLanding: { [weak self] in self?.codingTaskEngine.retryLanding($0) },
             cancelLanding: { [weak self] in self?.codingTaskEngine.cancelLanding($0) },
@@ -12957,6 +14347,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     v[path] = fp
                     t.reviewViewed = v.isEmpty ? nil : v
                 }
+            },
+            relocate: { [weak self] task in
+                await self?.taskDispatcher.relocateDelivery(task.id) ?? false
             }))
 
     /// Repo branches for the review window's "Merge into…" picker.
@@ -13038,25 +14431,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// another Stop). Tearing the session down on the first done kills
     /// them mid-flight. This holds completion until the transcript has
     /// been quiet for `quiet` seconds; an unreadable probe (no transcript,
-    /// VM gone) counts as quiet, and `cap` bounds the total wait.
-    func waitForSessionQuiet(profileID: Profile.ID, branch: String,
-                             quiet: Int = 20, cap: TimeInterval = 1800) async {
+    /// VM gone) counts as quiet, and `cap` bounds the total wait. `tool`
+    /// picks the agent's transcript store. Returns whether the probe read the
+    /// transcript's age at all: false, nothing was watched.
+    @discardableResult
+    func waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool? = nil,
+                             quiet: Int = 20, cap: TimeInterval = 1800) async -> Bool {
         guard branch.hasPrefix("wt/"),
               let cmd = CodingTaskEngine.transcriptAgeCommand(
-                  slug: String(branch.dropFirst(3))) else { return }
+                  slug: String(branch.dropFirst(3)), agent: tool) else { return false }
         let deadline = Date().addingTimeInterval(cap)
-        var held = false
+        var held = false, read = false
         while Date() < deadline {
             guard let out = try? await guestExec(profileID: profileID,
                                                  command: cmd, timeout: 10),
                   let age = Int(out.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return }
+            else { return read }
+            read = true
             if age >= quiet {
                 if held {
                     BACDebug.log("session",
                                  "\(branch): transcript quiet — completing")
                 }
-                return
+                return true
             }
             if !held {
                 held = true
@@ -13068,6 +14465,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 UInt64(max(quiet - age, 5)) * 1_000_000_000)
         }
         BACDebug.log("session", "\(branch): settle cap reached — completing anyway")
+        return read
     }
 
     /// Copy a finished automation run's Claude transcript out of the guest
@@ -13517,7 +14915,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationKubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {
@@ -13526,7 +14925,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return ["ok": false, "error": "missing name"]
             }
             var spec = KubeClusterSpec()
-            if let raw = doc["spec"], let data = try? JSONSerialization.data(withJSONObject: raw),
+            if let raw = doc["spec"], JSONSerialization.isValidJSONObject([raw]),
+               let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
                let decoded = try? JSONDecoder().decode(KubeClusterSpec.self, from: data) {
                 spec = decoded
             }
@@ -13567,7 +14967,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationRegistryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         let action = (doc["action"] as? String) ?? ""
         func decodeAccess(_ raw: Any?) -> KubeWorkspaceAccess? {
-            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            guard let raw, JSONSerialization.isValidJSONObject([raw]),
+                  let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]) else { return nil }
             return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
         }
         if id == nil {
@@ -13646,8 +15047,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor private func resolveRemoteLaunchPrompts(
         _ profile: Profile, detached: Bool, freshBootFallback: Bool, quiet: Bool = false) async {
         var profile = profile
+        // A question already up for this workspace (another start's): that
+        // one decides, and its launch boots.
+        guard launchQuestions.begin(profile.id) else { return }
+        var asking = true
+        defer { if asking { launchQuestions.end(profile.id) } }
         if SessionDisk.isCompromised(profile: profile, store: store) {
-            guard await confirmWipeAndProceedAsync(profile: profile) else { return }
+            switch await confirmWipeAndProceedAsync(profile: profile) {
+            case .wiped: break
+            case .cancelled: dropAbandonedEphemeral(profile.id); return
+            case .diskInUse:
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                launchQuestions.end(profile.id); asking = false
+                let (title, message) = Self.wipeSkippedParts(profile.name)
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
+                return
+            case .failed(let left):
+                launchQuestions.end(profile.id); asking = false
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id,
+                    title: String(format: NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace"), profile.name),
+                    message: Self.wipeFailedMessage(left),
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
+                return
+            case .markCleared:
+                launchQuestions.end(profile.id); asking = false
+                let (title, message) = Self.markClearedParts(profile.name)
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profile.id, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                dropAbandonedEphemeral(profile.id)
+                return
+            }
         }
         let current = readCurrentBaseVersion()
         if baseImageUpgradeOfferDue(profile, current: current),
@@ -13658,8 +15094,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let index = await PendingPromptBroker.shared.askAsync(
                 profileID: profile.id, title: title, message: message,
                 buttons: Self.baseImageUpgradeButtons, fallback: 2)
-            applyBaseImageUpgradeAnswer(index, profile: &profile, current: current)
+            launchQuestions.end(profile.id); asking = false
+            if case .diskInUse(let skipped) = applyBaseImageUpgradeAnswer(index, profile: &profile,
+                                                                           current: current) {
+                // The start already returned to the client: it hears it
+                // through the same prompt channel the question came on.
+                if skipped {
+                    let (title, message) = Self.upgradeSkippedParts(profile.name)
+                    _ = await PendingPromptBroker.shared.askAsync(
+                        profileID: profile.id, title: title, message: message,
+                        buttons: [NSLocalizedString("OK", comment: "")], fallback: 0)
+                }
+                dropAbandonedEphemeral(profile.id)
+                return
+            }
         }
+        // Deleted while the prompts were up: nothing to boot.
+        guard profiles.contains(where: { $0.id == profile.id }) else { return }
         launch(profile, detached: detached, freshBootFallback: freshBootFallback,
                remoteInitiated: true, preflightResolved: true, quiet: quiet)
     }
@@ -13697,20 +15148,230 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// The wipe a confirmed compromise prompt performs (disk + home, keep
-    /// tokens/settings), plus the bookkeeping that goes with it.
-    @MainActor private func wipeCompromised(profile: Profile) {
+    /// tokens/settings), plus the bookkeeping that goes with it. The mark is
+    /// looked at again: the question was up a while, and a clear (the
+    /// sidebar, another window, a fat client) may have answered it the other
+    /// way meanwhile -- that disk is the user's to keep. `.failed`: some of
+    /// it couldn't be erased, so it stays marked.
+    @MainActor func wipeCompromised(profile: Profile) -> CompromiseWipeStep {
         let session = SessionDisk(
             profile: profile, store: store,
             baseDiskURL: imageManager.baseDiskURL)
-        session.wipeForCompromise()
+        switch Self.compromiseStep(.wipe, marked: session.isCompromised,
+                                   last: session.lastCompromiseResolution) {
+        case .already: return .alreadyWiped
+        case .undone: return .markCleared
+        case .perform: break
+        }
+        if diskInUse(profile.id) { return .diskInUse }
+        do {
+            try session.wipeForCompromise()
+        } catch let e as SessionDisk.WipeIncomplete {
+            FileHandle.standardError.write(Data("[compromise] wipe of \(profile.name) left \(e.left.map(\.path)) -- still marked\n".utf8))
+            refreshSidebar()
+            return .failed(e.left.map(\.lastPathComponent))
+        } catch {
+            refreshSidebar()
+            return .failed([])
+        }
         emitDiskResetEvent(profile: profile, reason: "compromised")
         // Re-render so the badge disappears immediately. (`launch`
         // continues right after this, but the picker behind the
         // session window will reflect the change once focus returns.)
         refreshSidebar()
+        return .wiped
     }
 
-    private func confirmWipeAndProceed(profile: Profile) -> Bool {
+    /// Why a wipe that ran left the workspace marked.
+    static func wipeFailedMessage(_ left: [String]) -> String {
+        String(format: NSLocalizedString("Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again.",
+                                         comment: "compromise wipe failed"),
+               left.isEmpty ? "?" : left.joined(separator: ", "))
+    }
+
+    /// What a wipe or a clear does about the mark it was asked to resolve.
+    enum CompromiseStep: Equatable {
+        /// Still marked: do it.
+        case perform
+        /// Gone the way asked (wiped since the mark, or cleared): nothing to do.
+        case already
+        /// Gone the other way (or nobody knows how): the asked one didn't happen.
+        case undone
+    }
+
+    /// The mark is checked when the answer comes, not when the question was put.
+    static func compromiseStep(_ action: CompromiseRemedy, marked: Bool,
+                               last: CompromiseRemedy?) -> CompromiseStep {
+        if marked { return .perform }
+        if last == action { return .already }
+        // Unmarked with no record: a clear has nothing left to do; a wipe
+        // can't say the disk was erased.
+        return action == .clear && last == nil ? .already : .undone
+    }
+
+    /// How `wipeCompromised` ended.
+    enum CompromiseWipeStep: Equatable {
+        case wiped
+        /// Another wipe got there first: the disk is erased all the same.
+        case alreadyWiped
+        /// Cleared as a false alarm while the question was up: kept as is.
+        case markCleared
+        /// A boot has the disk open: nothing was wiped.
+        case diskInUse
+        /// Wiped, but these (file names) couldn't be erased: still marked.
+        case failed([String])
+    }
+
+    /// An open "Wipe and Launch" question, per workspace, and how to take it
+    /// down: a clear answers it.
+    private var compromiseQuestionDismissers: [UUID: () -> Void] = [:]
+
+    /// The sidebar's "Wipe and Restore…" / "Clear Compromised Mark…" on a
+    /// workspace marked compromised. nil when done, else why not. A wipe
+    /// needs the disk closed; clearing keeps the disk as it is. Two of them
+    /// (two windows, a fat client) can be confirmed at once: the second one
+    /// hears what the first did, never a success for what it didn't do.
+    @MainActor func resolveCompromise(_ profile: Profile, _ action: CompromiseRemedy) -> String? {
+        switch action {
+        case .wipe:
+            switch wipeCompromised(profile: profile) {
+            case .wiped, .alreadyWiped: break
+            case .diskInUse:
+                return NSLocalizedString("Shut the workspace down first: its disk is in use.",
+                                         comment: "compromised workspace")
+            case .markCleared:
+                return NSLocalizedString("Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk.",
+                                         comment: "compromised workspace")
+            case .failed(let left):
+                return Self.wipeFailedMessage(left)
+            }
+        case .clear:
+            let session = SessionDisk(profile: profile, store: store, baseDiskURL: imageManager.baseDiskURL)
+            switch Self.compromiseStep(.clear, marked: session.isCompromised,
+                                       last: session.lastCompromiseResolution) {
+            case .already: return nil
+            case .undone:
+                return NSLocalizedString("It was already wiped: its disk and home were erased, and it boots fresh next time.",
+                                         comment: "compromised workspace")
+            case .perform: break
+            }
+            session.clearCompromisedAsFalseAlarm()
+            // A "Wipe and Launch" still up for it is answered now.
+            compromiseQuestionDismissers.removeValue(forKey: profile.id)?()
+            FileHandle.standardError.write(Data("[compromise] mark cleared on \(profile.name) (\(profile.id)) by the user\n".utf8))
+            BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "vm.compromise_cleared",
+                                                eventData: ["reason": .string("false alarm")])
+            refreshSidebar()
+        }
+        return nil
+    }
+
+    /// The confirmation for `resolveCompromise`, on this Mac.
+    static func compromiseActionParts(_ action: CompromiseRemedy, name: String) -> (title: String, message: String, button: String) {
+        switch action {
+        case .wipe:
+            return (String(format: NSLocalizedString("Wipe “%@”?", comment: "compromised workspace"), name),
+                    NSLocalizedString("Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time.", comment: "compromised workspace"),
+                    NSLocalizedString("Wipe", comment: "compromised workspace"))
+        case .clear:
+            return (String(format: NSLocalizedString("Clear the compromised mark on “%@”?", comment: "compromised workspace"), name),
+                    NSLocalizedString("Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event.", comment: "compromised workspace"),
+                    NSLocalizedString("Clear Mark", comment: "compromised workspace"))
+        }
+    }
+
+    func sidebarCompromise(_ id: Profile.ID, _ action: CompromiseRemedy) {
+        guard let p = profiles.first(where: { $0.id == id }) else { return }
+        let (title, message, button) = Self.compromiseActionParts(action, name: p.name)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.buttons.first?.keyEquivalent = ""   // an explicit click, never Return
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if let why = resolveCompromise(p, action) {
+            let fail = NSAlert()
+            fail.messageText = String(format: action == .wipe
+                    ? NSLocalizedString("Couldn't wipe “%@”", comment: "compromised workspace")
+                    : NSLocalizedString("Couldn't clear the mark on “%@”", comment: "compromised workspace"), p.name)
+            fail.informativeText = why
+            fail.runModal()
+        }
+    }
+
+    /// POST /profiles/{id}/compromised {"action": "wipe" | "clear"}: a fat
+    /// client's "Wipe and Restore…" / "Clear Compromised Mark…" (it asked).
+    @MainActor func automationCompromise(_ key: String, _ action: String) -> [String: Any] {
+        guard let a = CompromiseRemedy(rawValue: action) else { return ["ok": false, "error": "action must be wipe or clear"] }
+        guard let p = profiles.first(where: { $0.id.uuidString == key || $0.name == key }) else {
+            return ["ok": false, "error": "workspace not found"]
+        }
+        if let why = resolveCompromise(p, a) { return ["ok": false, "error": why] }
+        return ["ok": true]
+    }
+
+    /// How a compromise-wipe question ended.
+    enum CompromiseWipe: Equatable {
+        case cancelled
+        case wiped
+        /// "Wipe and Launch", but a boot began while the question was up and
+        /// has the disk open: nothing was wiped, and the user is told so.
+        case diskInUse
+        /// Wiped, but these (file names) couldn't be erased: still marked,
+        /// and nothing boots.
+        case failed([String])
+        /// The mark was cleared as a false alarm while the question was up
+        /// (which takes it down): nothing was wiped, nothing boots.
+        case markCleared
+    }
+
+    static func compromiseWipe(confirmed: Bool, wiped: () -> CompromiseWipeStep) -> CompromiseWipe {
+        guard confirmed else { return .cancelled }
+        switch wiped() {
+        case .wiped, .alreadyWiped: return .wiped
+        case .diskInUse: return .diskInUse
+        case .markCleared: return .markCleared
+        case .failed(let left): return .failed(left)
+        }
+    }
+
+    static func markClearedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk.",
+            comment: "compromise wipe skipped"))
+    }
+
+    private func showMarkCleared(_ profile: Profile) {
+        let (title, message) = Self.markClearedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
+    static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.",
+            comment: "compromise wipe skipped"))
+    }
+
+    private func showWipeSkipped(_ profile: Profile) {
+        let (title, message) = Self.wipeSkippedParts(profile.name)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+        alert.runModal()
+    }
+
+    private func confirmWipeAndProceed(profile: Profile) -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         do {
             let alert = NSAlert()
@@ -13731,26 +15392,39 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // first button so the user has to click it explicitly.
             alert.buttons.first?.keyEquivalent = ""
             NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            compromiseQuestionDismissers[profile.id] = { [weak alert] in
+                if let alert, NSApp.modalWindow === alert.window { NSApp.abortModal() }
+            }
+            let answer = alert.runModal()
+            compromiseQuestionDismissers[profile.id] = nil
+            if answer == .abort { return .markCleared }
+            return Self.compromiseWipe(confirmed: answer == .alertFirstButtonReturn,
+                                       wiped: { wipeCompromised(profile: profile) })
         }
-        wipeCompromised(profile: profile)
-        return true
     }
 
     /// Async twin of `confirmWipeAndProceed` for remote-initiated launches:
     /// suspends on the broker (the main queue keeps draining, so the fat
     /// client actually receives and can answer the prompt) instead of pumping
     /// the run loop from inside a control-socket callout.
-    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> Bool {
+    @MainActor private func confirmWipeAndProceedAsync(profile: Profile) async -> CompromiseWipe {
         let (title, info) = Self.compromisePromptParts(profile: profile)
         // Fallback (timeout / client gone) is Cancel — never auto-wipe.
-        guard await PendingPromptBroker.shared.askAsync(
-            profileID: profile.id, title: title, message: info,
-            buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
-                      NSLocalizedString("Cancel", comment: "")],
-            fallback: 1) == 0 else { return false }
-        wipeCompromised(profile: profile)
-        return true
+        let ask = Task { @MainActor in
+            await PendingPromptBroker.shared.answerAsync(
+                profileID: profile.id, title: title, message: info,
+                buttons: [NSLocalizedString("Wipe and Launch", comment: ""),
+                          NSLocalizedString("Cancel", comment: "")],
+                fallback: 1)
+        }
+        final class Dismissed { var yes = false }
+        let dismissed = Dismissed()
+        compromiseQuestionDismissers[profile.id] = { dismissed.yes = true; ask.cancel() }
+        // The start's own cancellation still reaches the question.
+        let answer = await withTaskCancellationHandler { await ask.value } onCancel: { ask.cancel() }
+        compromiseQuestionDismissers[profile.id] = nil
+        if dismissed.yes { return .markCleared }
+        return Self.compromiseWipe(confirmed: answer == 0, wiped: { wipeCompromised(profile: profile) })
     }
 
     /// True while a compromise alert is up on screen. The swap-time
@@ -13852,6 +15526,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // already returned 451 for the leaking request — if the
                 // VM tries again, the detector fires again and the alert
                 // re-opens. Nothing is added to the session allowlist.
+                window.setSuspendedTint(false)
+                if vm.state == .paused {
+                    do { try await vm.resume() }
+                    catch {
+                        FileHandle.standardError.write(Data(
+                            "[ac] compromise: resume failed (\(error))\n".utf8))
+                    }
+                }
+
+            case .allow where !event.unmanagedFingerprints.isEmpty:
+                // Strict credential mode: approve exactly these credentials for
+                // this session (not the host for every other credential).
+                UnmanagedCredentialGuard.shared.allowForSession(event.unmanagedFingerprints,
+                                                                profileID: event.profileID)
+                BACEventEmitter.shared.emitDetached(
+                    profileID: event.profileID,
+                    eventType: "credential.exfiltration_allowed",
+                    eventData: ["observed_host": .string(event.observedHost),
+                                "scope": .string("session"), "unmanaged": .bool(true)])
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
                     do { try await vm.resume() }
@@ -14085,6 +15778,133 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     enum CompromiseAction { case allow, block, shutdown, saveForInvestigation }
 
+    /// The agent watchdog tripped. Quarantine mode: cut the VM off the network
+    /// at the switch first (immediate — before any UI), pause it, then ask.
+    @MainActor
+    /// Kernel sentry modules come from the CDN. The guest reports its kernels
+    /// (running + installed); the host caches their modules and drops them
+    /// into the running VM's meta share, where a guest waiting at boot picks
+    /// them up. Known kernels of sentry workspaces are prefetched at launch,
+    /// so a normal boot never waits.
+    func wireSentryModules() {
+        guard let setupDir = agentdURL?.deletingLastPathComponent(),
+              let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return }
+        let store = SentryModuleStore.shared
+        GuestSandboxStatusStore.shared.onKernels = { [weak self] pid, kernels, waiting in
+            // Status reports repeat; act on a new kernel set or a waiting guest
+            // (boot staging already covers every kernel known before the boot).
+            guard store.record(kernels: kernels, for: pid) || waiting else { return }
+            Task { @MainActor [weak self] in
+                let meta = self?.runningSessions[pid]?.sandbox.sessionDisk?.metadataDirectory
+                Task.detached {
+                    // Only a workspace whose spec is active has a sentry dir.
+                    let dir = meta?.appendingPathComponent("sentry", isDirectory: true)
+                    // A waiting guest gives up after ~45 s; a transient failure
+                    // (offline, a failed download) is retried within that,
+                    // and each success is staged at once.
+                    let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
+                    let short = String(pid.uuidString.prefix(8))
+                    // Each kernel on its own, in parallel, staged (or marked
+                    // unavailable) the moment ITS answer is in: the guest
+                    // reports the running kernel first and then every
+                    // installed one, and a slow download for another kernel
+                    // must not hold back the one it's waiting for.
+                    @Sendable func settle(_ kernel: String, attempt: Int) async -> Bool {
+                        let f = await store.ensureOutcome(kernel: kernel, hash: hash)
+                        if let f, attempt == 0, waiting || kernel == kernels.first {
+                            SentryModuleStore.log("\(short): \(kernel): \(f.reason)")
+                        }
+                        if let dir, FileManager.default.fileExists(atPath: dir.path) {
+                            if let f, f.definitive {
+                                // A guest waiting for a module none will come
+                                // for stops at once, with the host's reason —
+                                // only then: a transient failure leaves it waiting.
+                                store.markUnavailable([kernel: f.reason], in: dir)
+                            } else if f == nil, !store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
+                                SentryModuleStore.log("\(short): staged \(kernel) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                            }
+                        }
+                        return f.map { !$0.definitive } ?? false     // retry?
+                    }
+                    var pending = kernels
+                    var attempt = 0
+                    while !pending.isEmpty {
+                        let round = attempt
+                        pending = await withTaskGroup(of: (String, Bool).self) { group in
+                            for kernel in pending { group.addTask { (kernel, await settle(kernel, attempt: round)) } }
+                            var retry: [String] = []
+                            for await (kernel, again) in group where again { retry.append(kernel) }
+                            return retry
+                        }
+                        attempt += 1
+                        guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
+                        try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
+                    }
+                }
+            }
+        }
+        let prefetch = profiles.filter { $0.effectiveKernelSentry != .off }
+            .map { store.knownKernels(for: $0.id) }.flatMap { $0 }
+        Task.detached {
+            await store.refreshCatalog(hash)
+            for kernel in Set(prefetch) { _ = await store.ensure(kernel: kernel, hash: hash) }
+        }
+    }
+
+    @MainActor
+    func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) {
+        guard mode == .quarantine, let session = runningSessions[pid] else { return }
+        let sandbox = session.sandbox
+        sandbox.setNetworkQuarantined(true)
+        FileHandle.standardError.write(Data("[watchdog] quarantined \(session.profile.name)\n".utf8))
+        Task { @MainActor in
+            if let vm = sandbox.vm, vm.canPause { try? await vm.pause() }
+            let kinds = Array(Set(signals.map(\.kind))).sorted().joined(separator: ", ")
+            let title = NSLocalizedString("The agent watchdog quarantined this workspace", comment: "watchdog alert title")
+            var info = String(format: NSLocalizedString(
+                "“%@” behaved outside its normal pattern (%@) within a minute. Its network is cut and the VM is paused.",
+                comment: "watchdog alert body"), session.profile.name, kinds) + "\n\n"
+            for s in signals.suffix(8) { info += "  • \(s.kind): \(s.detail)\n" }
+            let buttons = [NSLocalizedString("Shut down", comment: ""),
+                           NSLocalizedString("Keep quarantined", comment: "watchdog: resume with network cut"),
+                           NSLocalizedString("Release", comment: "watchdog: restore network and resume")]
+            let choice: Int
+            if canPresentBlockingModal {
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = title
+                alert.informativeText = info + "\n" + NSLocalizedString(
+                    "Keep quarantined resumes the VM with its network still cut, so you can look inside. Release restores the network.",
+                    comment: "")
+                for b in buttons { alert.addButton(withTitle: b) }
+                for b in alert.buttons.dropFirst() { b.keyEquivalent = "" }
+                NSApp.activate(ignoringOtherApps: true)
+                switch alert.runModal() {
+                case .alertSecondButtonReturn: choice = 1
+                case .alertThirdButtonReturn:  choice = 2
+                default:                        choice = 0
+                }
+            } else {
+                choice = await PendingPromptBroker.shared.askAsync(
+                    profileID: pid, title: title, message: info, buttons: buttons, fallback: 1, timeout: 180)
+            }
+            switch choice {
+            case 2:
+                sandbox.setNetworkQuarantined(false)
+                AgentWatchdog.shared.release(profileID: pid)
+                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+            case 1:
+                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+            default:
+                // A forced stop (the guest is paused and untrusted, so no clean
+                // poweroff) fires no delegate callback: finish the teardown here,
+                // or the session stays listed as running with no VM behind it.
+                if let vm = sandbox.vm { await Self.forceStop(vm) }
+                handleSessionStopped(profileID: pid)
+            }
+        }
+    }
+
 
     /// Wire the standard set of sandbox callbacks for `win`. Used by
     /// both the initial launch and the post-reboot relaunch — the
@@ -14101,9 +15921,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// registry so a reattaching window can render it.
     private func wireSandboxCallbacks(_ sandbox: UbuntuSandboxVM) {
         guard let pid = sandbox.sessionDisk?.profile.id else { return }
-        sandbox.onStopped = { [weak self] _ in
+        sandbox.onStopped = { [weak self, weak sandbox] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // Only the workspace's current sandbox stopping ends it: an
+                // earlier one's late stop (a launch since replaced it) tore
+                // the newer boot down — a resume "found itself off", and the
+                // next start shut down too.
+                guard Self.stopEndsSession(of: sandbox, current: self.runningSessions[pid]?.sandbox) else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] an earlier VM of this workspace stopped — the running one stays\n".utf8))
+                    return
+                }
                 // A reboot — whether requested from the app (pane.rebootRequested)
                 // or initiated inside the guest (`reboot`, which sets the session
                 // flag via onGuestReboot) — rebuilds a fresh VM in place. An
@@ -14152,24 +15981,41 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
+                guard let self else { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
-                // browser's callback reaches the in-VM CLI before we open it.
-                if let self, let sandbox,
-                   let port = Self.loopbackCallbackPort(from: url),
-                   let dev = sandbox.socketDevice,
-                   let fwd = LoopbackCallbackForwarder(port: port, socketDevice: dev) {
-                    self.loopbackForwarders.removeAll { !$0.isRunning }
-                    self.loopbackForwarders.append(fwd)
-                    FileHandle.standardError.write(Data(
-                        "[ac] loopback callback forwarder up on 127.0.0.1:\(port) → guest\n".utf8))
+                // browser's callback reaches the in-VM CLI before we open it
+                // -- and when this workspace can't have that port, never open it.
+                if let refused = self.loopbackCallbackRefusal(for: url, device: sandbox?.socketDevice) {
+                    if let signIn = self.proxySignIns[pid], !signIn.finished {
+                        // Ended, not just reported: the card said "failed"
+                        // while the sign-in stayed in flight -- its capture
+                        // armed, and the retry refused as "another sign-in"
+                        // until the 5-minute timeout (Finding CWE-459, "A
+                        // refused workspace sign-in stays in flight, so retry
+                        // is blocked for five minutes").
+                        self.endProxySignIn(signIn, success: false, message: refused)
+                    } else {
+                        self.unifiedWindow?.showNotice(refused)
+                    }
+                    return
                 }
                 // A sign-in card is waiting on this very page.
-                if let self, let signIn = self.proxySignIns[pid], !signIn.finished {
+                if let signIn = self.proxySignIns[pid], !signIn.finished {
+                    // A page on this Mac's loopback or network is never
+                    // opened: the sign-in ends instead of waiting out its
+                    // timeout on a page nobody will see.
+                    guard Self.opensInRealBrowser(url) else {
+                        self.endProxySignIn(signIn, success: false, message: NSLocalizedString(
+                            "The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it.",
+                            comment: "sign-in refused: the guest's sign-in URL has a local or private host"))
+                        Self.openGuestRelayedURL(url)   // logs the refusal
+                        return
+                    }
                     signIn.onEvent?(.status(NSLocalizedString(
                         "Finish signing in in your browser…", comment: "sign-in")))
                 }
-                Self.openGuestRelayedURL(url)
+                Self.openGuestRelayedURL(url, workspace: self.profile(for: pid)?.name)
             }
         }
         sandbox.onTabList = { [weak self] tabs in
@@ -14239,6 +16085,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         }
+        // Agents' PreToolUse hooks: each tool call before it runs, with its
+        // provider id and the agent's pid (network lineage).
+        sandbox.onAgentToolCall = { [weak self] line, window in
+            guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                  let id = o["tool_use_id"] as? String, !id.isEmpty else { return }
+            // Which tab this agent is: a policy note about a process in its
+            // tree goes to it. The host's own agent tabs come first when the
+            // guest-writable lines have filled every slot.
+            if let window, let agentPid = o["pid"] as? Int {
+                let host = MainActor.assumeIsolated { self?.hostAgentWindows(profileID: pid) ?? [] }
+                PolicySteering.shared.noteAgent(profileID: pid, pid: agentPid, window: window, hostWindows: host)
+            }
+            NetworkLineage.shared.noteToolCall(
+                profileID: pid, id: String(id.prefix(128)), tool: o["tool"] as? String ?? "tool",
+                command: (o["command"] as? String).map { String($0.prefix(4000)) }, reasoning: "",
+                agentPid: o["pid"] as? Int, agent: o["agent"] as? String)
+        }
         sandbox.onDockerList = { [weak self] containers in
             Task { @MainActor in
                 self?.runningSessions[pid]?.mirrorDockerList(containers)
@@ -14288,10 +16151,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerError(message)
             }
         }
-        sandbox.onWorktreeError = { [weak self] message in
+        sandbox.onWorktreeError = { [weak self] raw in
             Task { @MainActor in
                 guard let self else { return }
-                SupplyChainLog.shared.record("[worktree] \(message)")
+                // An automation (or task) run's refusal names its slug on the
+                // first line: that run failed — it isn't left "launched".
+                let (slug, message) = Self.splitWorktreeError(raw)
+                SupplyChainLog.shared.record("[worktree] \(ScheduledAutomationEngine.guestReported(message))")
+                if let slug {
+                    // A claim from the guest: a run whose tab is up isn't failed.
+                    let live = self.openWorktreeBranches(profileID: pid)
+                    let outcomes = [
+                        self.scheduledAutomationEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live),
+                        self.codingTaskEngine.runRefused(profileID: pid, slug: slug, reason: message, liveBranches: live),
+                    ]
+                    // Held for the tab grace, or ignored (its tab is up): no
+                    // failure to tell the user about -- not yet, maybe never.
+                    guard ScheduledAutomationEngine.showsWorktreeFailure(outcomes) else { return }
+                }
                 // NON-BLOCKING. A modal runModal() here froze the main run loop
                 // — and with it the automation server that POST /sessions waits
                 // on — so one failed worktree wedged the whole app (and hung the
@@ -14302,7 +16179,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = NSLocalizedString("Worktree action failed", comment: "")
-                alert.informativeText = message
+                alert.informativeText = ScheduledAutomationEngine.guestReported(message)
                 alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
                 alert.beginSheetModal(for: win) { _ in }
             }
@@ -14317,7 +16194,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let w = AgentSessionStore.statusWindow(
                     index: index, conversation: conversation, profileID: pid,
                     sessions: self.agentSessionStore.sessions) else { return }
-                self.setTabAgentStatus(pid, index: w, status)
+                self.setTabAgentStatus(pid, index: w, status,
+                                       turnEnded: AgentStatus.endsTurn(signal: signal))
             }
         }
         sandbox.onDockerBinfmt = { [weak self] arches in
@@ -14370,6 +16248,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
+        BinaryIdentityService.shared.detach(profileID: profile.id, socketDevice: nil)
+        KernelSentryService.shared.detach(profileID: profile.id, socketDevice: nil)
+        GuestSandboxStatusStore.shared.reset(profileID: profile.id)
+        OpenShellAdvisor.shared.reset(profileID: profile.id)
+        AgentWatchdog.shared.reset(profileID: profile.id)
+        UnmanagedCredentialGuard.shared.reset(profileID: profile.id)
+        PolicySteering.shared.reset(profileID: profile.id)
         browserMCPBridges[profile.id]?.stop()
         browserMCPBridges.removeValue(forKey: profile.id)
         taskMCPBridges[profile.id]?.stop()
@@ -14394,10 +16279,76 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         InferenceRepairProxy.shared.setExternalEngine(profile.id, nil)
     }
 
+    /// Whether `stopped` stopping ends the workspace's session: it is the
+    /// session's sandbox, or no session has one yet (a boot still on its
+    /// way). Pure.
+    nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {
+        guard let current else { return true }
+        return stopped === current
+    }
+
     /// The VM for `profileID` stopped (guest poweroff, crash, or the tail of an
     /// explicit stop). Idempotent: runs per-session teardown once, drops the
     /// registry entry, and closes any attached window.
     @MainActor
+    /// A launch that gave up before booting -- a stop asked while it waited
+    /// (Kimi provisioning, a boot remedy), a remote or local prompt
+    /// cancelled or skipped: a `vm run --rm` workspace that isn't running is
+    /// over, and goes as its stop would have taken it. (A reboot keeps it
+    /// through its teardown -- `rebootingProfiles` -- so it can boot again;
+    /// abandoned, nothing else would ever delete it.)
+    /// A workspace the other process deleted (`ProfileStore.ProfileGone`):
+    /// drop the stale row instead of acting on it.
+    private func forgetDeletedProfile(_ profile: Profile, unattended: Bool) {
+        ephemeralProfiles.remove(profile.id)
+        rebootingProfiles.remove(profile.id)
+        if unattended {
+            refuseUnattendedLaunch(profile, ProfileStore.ProfileGone(name: profile.name).localizedDescription)
+        }
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
+    private func dropAbandonedEphemeral(_ id: Profile.ID) {
+        // Not while a boot holds the disk (begun, not registered yet): that
+        // boot is the workspace's, and its stop deletes it.
+        guard runningSessions[id] == nil, !diskInUse(id), !rebootingProfiles.contains(id),
+              let p = profiles.first(where: { $0.id == id }), takeEphemeral(p) else { return }
+        try? store.delete(p)
+        profiles = store.loadAll()
+        refreshSidebar()
+    }
+
+    /// `p` is a `vm run --rm` workspace this process may delete: its
+    /// on-disk mark is ours, or its owner is gone -- never a live other
+    /// process's (the login agent's or the GUI's: it may be running it).
+    /// Forgets the in-memory mark (which alone still counts if the marker
+    /// couldn't be written: then nobody else has one either).
+    private func takeEphemeral(_ p: Profile) -> Bool {
+        let inMemory = ephemeralProfiles.remove(p.id) != nil
+        return store.isEphemeral(p) ? store.mayTakeEphemeral(p) : inMemory
+    }
+
+    /// Delete the `vm run --rm` workspaces that are over: at a quit or a
+    /// caught signal (`atLaunch` false; a reboot's relaunch can't finish
+    /// then), the ones THIS process owns that aren't running and whose disk
+    /// no boot of its holds; at launch, the ones whose owning process is
+    /// gone (it quit uncleanly or crashed: their VM died with it). Another
+    /// live process's -- the login agent's, the GUI's -- are never touched:
+    /// running sessions and disk holds are per process. A running one's
+    /// stop deletes it; a boot under way is left to the next launch's sweep.
+    func sweepStoppedEphemeral(atLaunch: Bool = false) {
+        var deleted = false
+        for p in profiles where runningSessions[p.id] == nil && !diskInUse(p.id)
+            && store.ephemeralSweepable(p, mine: !atLaunch) {
+            ephemeralProfiles.remove(p.id)
+            rebootingProfiles.remove(p.id)
+            try? store.delete(p)
+            deleted = true
+        }
+        if deleted { profiles = store.loadAll() }
+    }
+
     func handleSessionStopped(profileID: Profile.ID) {
         guard let session = runningSessions[profileID] else { return }   // already handled
         // The boot-failure cycle (if any) dies with the session. A queued
@@ -14417,9 +16368,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // own view in `removePane`, wired in the unified-window phase).
         unifiedWindow?.removePane(profileID)
         unregisterPane(profileID)
-        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped.
-        if ephemeralProfiles.remove(profileID) != nil,
-           let p = profiles.first(where: { $0.id == profileID }) {
+        // `vm run --rm`: delete the ephemeral profile + its disk now it stopped
+        // -- not when it is only rebooting (it stays ephemeral).
+        if !rebootingProfiles.contains(profileID),
+           let p = profiles.first(where: { $0.id == profileID }), takeEphemeral(p) {
             try? store.delete(p)
             profiles = store.loadAll()
         }
@@ -14434,6 +16386,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// guest "all shells exited" signal.
     @MainActor
     func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+        // Still booting: no session yet, so nothing to stop — and the VM that
+        // registers after would stay up. Stopped when it registers instead.
+        if runningSessions[profileID] == nil, bootsInFlight.deferStop(profileID, action: action) {
+            return
+        }
         guard let session = runningSessions[profileID], !session.stopping,
               let vm = session.sandbox.vm else { return }
         let sandbox = session.sandbox
@@ -14532,16 +16489,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // teardown — handleSessionStopped clears the remedy queue.
             let profile = currentProfile(profileID) ?? runningSessions[profileID]?.profile
             let remedy = pendingBootRemedies.removeValue(forKey: profileID)
+            rebootingProfiles.insert(profileID)
+            pinLease(profileID)   // kept from this stop to the next boot
             handleSessionStopped(profileID: profileID)
+            rebootingProfiles.remove(profileID)
             if let profile {
                 if let remedy {
+                    // In use while the remedy works on the disk; handed to
+                    // launch's own mark (it refuses while one is set).
                     Task { @MainActor in
-                        await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        // Held while the remedy works on the disk; a stop
+                        // asked meanwhile leaves the workspace off.
+                        let stop = await self.whileHoldingDisk(profileID) {
+                            await self.executeBootRemedy(remedy, profile: profile, pane: nil)
+                        }
+                        if stop != nil { self.unpinLease(profileID) }   // left off: no boot follows
+                        guard stop == nil else { self.dropAbandonedEphemeral(profileID); return }
                         self.launch(profile, detached: true)
                     }
                 } else {
                     launch(profile, detached: true)
                 }
+            } else {
+                unpinLease(profileID)
             }
         }
     }
@@ -14791,9 +16761,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            if let robot = BromureIcons.image("robot") {
-                let icon = robot.copy() as! NSImage
-                icon.size = NSSize(width: 18, height: 18)
+            // The app icon's mark (Resources/BromureAC.icon), as a template.
+            if let mark = BromureIcons.image("app-mark") {
+                let icon = mark.copy() as! NSImage
+                let h: CGFloat = 16
+                icon.size = NSSize(width: (h * mark.size.width / max(mark.size.height, 1)).rounded(), height: h)
                 icon.isTemplate = true
                 button.image = icon
             } else {
@@ -14949,6 +16921,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Drop the old VM from the registry (and the window borrow) so it
         // deallocates (its deinit detaches the vmnet switch port). The fresh
         // sandbox is registered below once it's built.
+        // Out of runningSessions, but the remedy, the fresh VM's prepare() and
+        // start() still own the disk until it registers: in use (booting) for
+        // the whole gap, or a delete / reset / revert landed under the new VM.
+        // Held before the old VM leaves the registry, so the workspace's lease
+        // stays with this process across the reboot (the other one would boot
+        // its stale copy into the gap).
+        let release = holdDiskForRelaunch(profile.id)
         unregisterSession(profile.id)
         // The reboot killed any streamed planning driver with the guest;
         // without this the hub session stays un-ended forever (no terminal
@@ -14970,6 +16949,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         win.model.tabs = [TabsModel.Tab(label: "shell")]
 
         Task { @MainActor [self] in
+            defer { release() }
             // A queued boot-failure remedy (native fsck / disk reset) runs
             // first, against the stopped VM's disk, with the pane's boot
             // overlay narrating. Only then does the fresh VM build.
@@ -15093,6 +17073,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let dev = sandbox.socketDevice {
                 let bridge = ShellBridge(socketDevice: dev)
                 self.shellBridges[profile.id] = bridge
+                self.attachIdentityBridge(profile: profile, socketDevice: dev,
+                                          restoring: sandbox.didRestore)
                 // Browser MCP listener (vsock 5830): the agents' stdio shim
                 // connects here; we serve the browser tools, driving the
                 // unified window's embedded browser (opening it on demand).
@@ -15128,7 +17110,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         save: { [weak self] a in self?.saveAutomation(a) },
                         remove: { [weak self] id in self?.scheduledAutomationStore.remove(id) },
                         runNow: { [weak self] id in self?.runAutomationNow(id) },
-                        watches: { [weak self] in self?.repoWatchEngine }),
+                        watches: { [weak self] in self?.repoWatchEngine },
+                        readyTools: { [weak self] p in
+                            (self?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)
+                        }),
                     port: SessionDisk.automationMCPVsockPort)
                 // Infrastructure MCP listener (vsock 5834): the Kubernetes
                 // clusters and container registries this workspace may use,
@@ -15254,7 +17239,48 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Returns nil for empty / malformed input — callers that can't
     /// resolve a blob skip the consent gate (better than refusing to
     /// sign for keys we can't identify).
+    /// The imported keys whose signing asks first (`requireApproval`), by
+    /// public-key blob. Keys without a public key can't be matched by blob
+    /// and sign without a prompt.
+    nonisolated static func importedKeyApprovals(_ profile: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
+        for k in profile.importedSSHKeys where k.requireApproval {
+            guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            approvals[blob] = SSHAgentServer.ImportedApproval(
+                label: k.label, consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
+        }
+        return approvals
+    }
+
+    /// A running session's gates after a live edit: the saved profile's —
+    /// plus every gate `running` holds for a key no longer on the list. A
+    /// key taken off stays loaded in the agent until the restart: it stays
+    /// gated, through any number of later edits (carried from the running
+    /// map, not from the profile before this one), never let through ungated.
+    nonisolated static func liveImportedKeyApprovals(running: [Data: SSHAgentServer.ImportedApproval],
+                                                     to new: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals = importedKeyApprovals(new)
+        let listed = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+        for (blob, a) in running where !listed.contains(blob) { approvals[blob] = a }
+        return approvals
+    }
+
+    /// Host-agent keys (YubiKey & co.) the VM may see and sign with: blob → socket.
+    nonisolated static func hostAgentKeys(_ profile: Profile) -> [Data: String] {
+        var keys: [Data: String] = [:]
+        for k in profile.importedSSHKeys {
+            guard let socket = k.hostAgentSocket,
+                  let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            keys[blob] = socket
+        }
+        return keys
+    }
+
     private func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
+        Self.sshPublicKeyBlob(fromOpenSSHText: text)
+    }
+
+    nonisolated static func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
         let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
             .first?
             .trimmingCharacters(in: .whitespaces) ?? ""
@@ -15355,9 +17381,72 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             hasPassphrase: hasPass)
     }
 
+    /// The Guardrails pane's view of one workspace's consent grants.
+    nonisolated static func consentGrantControls(_ broker: ConsentBroker,
+                                                 profileID: UUID) -> ProfileEditorView.ConsentGrantControls {
+        ProfileEditorView.ConsentGrantControls(
+            status: {
+                var out: [String: ProfileEditorView.ConsentGrantStatus] = [:]
+                for e in await broker.snapshot() where e.profileID == profileID {
+                    out[e.credentialID] = .init(denied: e.kind == .deny, expiration: e.expiration,
+                                                sessionScoped: e.isSessionScoped)
+                }
+                return out
+            },
+            allow: { id, name, minutes in
+                let decision: ConsentBroker.Decision = switch minutes {
+                case nil: .allowSession
+                case 5: .allow5min
+                default: .allow1hr
+                }
+                await broker.grant(profileID: profileID, credentialID: id, decision,
+                                   credentialDisplayName: name)
+            },
+            deny: { id, name, minutes in
+                await broker.deny(profileID: profileID, credentialID: id,
+                                  for: minutes.map { TimeInterval($0 * 60) },
+                                  credentialDisplayName: name)
+            },
+            revoke: { id in await broker.revoke(profileID: profileID, credentialID: id) })
+    }
+
+    /// The keys a host ssh-agent holds, as `ImportedSSHKey`s ready to
+    /// add to a profile: nothing is copied — `hostAgentSocket` points
+    /// signing back at the agent. `socket` is a `hostAgentSocket` value
+    /// ("" = this process's SSH_AUTH_SOCK).
+    nonisolated static func listHostAgentKeys(socket: String) throws -> [ImportedSSHKey] {
+        func fail(_ msg: String) -> NSError {
+            NSError(domain: "BromureAC", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+        guard let path = HostAgentClient.resolveHostSocket(socket) else {
+            throw fail(NSLocalizedString("SSH_AUTH_SOCK isn't set for Bromure.", comment: ""))
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw fail(String(format: NSLocalizedString("No agent socket at %@.", comment: ""), path))
+        }
+        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+            // The blob opens with the key type as an ssh-string.
+            guard ident.blob.count > 4 else { return nil }
+            let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+            guard n > 0, 4 + n <= ident.blob.count,
+                  let type = String(data: ident.blob.subdata(in: 4..<(4 + n)), encoding: .utf8)
+            else { return nil }
+            let comment = ident.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ImportedSSHKey(
+                label: comment.isEmpty ? type : comment,
+                filename: "",
+                publicKeyText: "\(type) \(ident.blob.base64EncodedString())"
+                    + (comment.isEmpty ? "" : " \(comment)"),
+                hostAgentSocket: socket)
+        }
+    }
+
     /// Remove an imported key: file + (optional) keychain entry. The
     /// editor calls this when the user clicks the row's minus button.
     func removeImportedSSHKey(_ key: ImportedSSHKey, for profile: Profile) {
+        // A host-agent key has no file (filename "" would name the whole
+        // imported/ dir) — the agent keeps it.
+        guard !key.isFromHostAgent, !key.filename.isEmpty else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
         try? FileManager.default.removeItem(
@@ -15378,7 +17467,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
               let agentSocket = mitmEngine?.sshAgentSocket(for: profile.id) else { return }
         let importedDir = store.profileDirectory(for: profile)
             .appendingPathComponent("agent/imported", isDirectory: true)
-        for key in profile.importedSSHKeys {
+        for key in profile.importedSSHKeys where !key.isFromHostAgent {
             let path = importedDir.appendingPathComponent(key.filename).path
             guard FileManager.default.fileExists(atPath: path) else {
                 FileHandle.standardError.write(Data(
@@ -15407,43 +17496,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var env = ProcessInfo.processInfo.environment
         env["SSH_AUTH_SOCK"] = agentSocket
 
-        var askpassURL: URL?
-        if let pass = passphrase, !pass.isEmpty {
-            // Script just echoes the passphrase. Single-quote the value
-            // safely; ssh-add doesn't do shell expansion on the result.
-            let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
-            let script = "#!/bin/sh\nprintf '%s\\n' '\(escaped)'\n"
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
-            try? script.write(to: url, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: 0o700)],
-                ofItemAtPath: url.path)
-            env["SSH_ASKPASS"] = url.path
-            // Apple's ssh-add only consults SSH_ASKPASS when DISPLAY is
-            // also set, OR when SSH_ASKPASS_REQUIRE=force. Belt-and-
-            // braces both.
-            env["DISPLAY"] = ":0"
-            env["SSH_ASKPASS_REQUIRE"] = "force"
-            askpassURL = url
-        }
+        // ssh-add never prompts on a terminal. It reads a passphrase from
+        // /dev/tty, not stdin — and an app started from a shell has one:
+        // ssh-add tried it from the background, the kernel stopped it
+        // (SIGTTOU), and the launch waited on it forever with the main
+        // thread (a 20-minute beachball on a key with no stored
+        // passphrase). So askpass, always (Apple's ssh-add wants DISPLAY
+        // too, or SSH_ASKPASS_REQUIRE=force: both), and it answers once:
+        // the stored passphrase, then nothing — a wrong one would be
+        // offered again on every "Bad passphrase, try again".
+        let askpassURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bromure-ac-askpass-\(UUID().uuidString).sh")
+        try? Self.askpassScript(passphrase: passphrase)
+            .write(to: askpassURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: askpassURL.path)
+        env["SSH_ASKPASS"] = askpassURL.path
+        env["DISPLAY"] = ":0"
+        env["SSH_ASKPASS_REQUIRE"] = "force"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
         p.arguments = [path]
         p.environment = env
-        // ssh-add reading from /dev/null prevents it from blocking on
-        // tty even when SSH_ASKPASS is missing or fails.
         p.standardInput = FileHandle(forReadingAtPath: "/dev/null")
         p.standardOutput = Pipe()
         let stderr = Pipe()
         p.standardError = stderr
         defer {
-            if let u = askpassURL { try? FileManager.default.removeItem(at: u) }
+            try? FileManager.default.removeItem(at: askpassURL)
+            try? FileManager.default.removeItem(atPath: askpassURL.path + ".used")
         }
         do {
-            try p.run()
-            p.waitUntilExit()
+            guard try Self.runBounded(p, seconds: 15) else {
+                FileHandle.standardError.write(Data(
+                    "[mitm] ssh-add (imported '\(label)') didn't finish in 15 s — stopped it\n".utf8))
+                return
+            }
             if p.terminationStatus != 0 {
                 let msg = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
                                  encoding: .utf8) ?? ""
@@ -15457,6 +17546,28 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             FileHandle.standardError.write(Data(
                 "[mitm] ssh-add (imported '\(label)') launch failed: \(error)\n".utf8))
         }
+    }
+
+    /// The askpass ssh-add runs for an imported key: the passphrase (when
+    /// there is one) on its first call, a refusal after — ssh-add asks
+    /// again after a wrong one, for as long as it gets an answer.
+    nonisolated static func askpassScript(passphrase: String?) -> String {
+        guard let pass = passphrase, !pass.isEmpty else { return "#!/bin/sh\nexit 1\n" }
+        let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
+        return "#!/bin/sh\n[ -e \"$0.used\" ] && exit 1\n: > \"$0.used\"\nprintf '%s\\n' '\(escaped)'\n"
+    }
+
+    /// Run `p` and wait at most `seconds` for it; past that it is killed
+    /// (SIGKILL: a stopped process ignores the rest until continued).
+    /// false = it had to be killed.
+    nonisolated static func runBounded(_ p: Process, seconds: TimeInterval) throws -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        try p.run()
+        if done.wait(timeout: .now() + seconds) == .success { return true }
+        kill(p.processIdentifier, SIGKILL)
+        _ = done.wait(timeout: .now() + 2)
+        return false
     }
 
     /// Add the per-profile key to bromure's private ssh-agent so the
@@ -15893,7 +18004,8 @@ struct Reset: ParsableCommand {
         }
         let fm = FileManager.default
         for url in [imageManager.baseDiskURL, imageManager.efiVarsURL,
-                    imageManager.versionStampURL, imageManager.imageStateURL] {
+                    imageManager.versionStampURL, imageManager.imageStateURL,
+                    imageManager.stockDiskURL, imageManager.stockStateURL] {
             try? fm.removeItem(at: url)
         }
         print("Base image cleared.")
@@ -15968,9 +18080,11 @@ enum BaseImageCustomize {
 enum RebuildBaseImageWindow {
     enum Method { case download, local }
 
+    /// The method, and for a download whether to discard the saved stock
+    /// image (re-download, reinstall the agents) even if it's current.
     @MainActor
-    static func run() -> Method? {
-        var chosen: Method?
+    static func run() -> (method: Method, fresh: Bool)? {
+        var chosen: (method: Method, fresh: Bool)?
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 480),
                            styleMask: [.titled, .closable, .fullSizeContentView],
                            backing: .buffered, defer: false)
@@ -15979,7 +18093,7 @@ enum RebuildBaseImageWindow {
         win.isMovableByWindowBackground = true
         win.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: RebuildBaseImageView(
-            onStart: { m in chosen = m; NSApp.stopModal() },
+            onStart: { m, fresh in chosen = (m, fresh); NSApp.stopModal() },
             onCancel: { NSApp.stopModal() }))
         win.contentView = host
         win.setContentSize(host.fittingSize)
@@ -15995,10 +18109,11 @@ enum RebuildBaseImageWindow {
 }
 
 struct RebuildBaseImageView: View {
-    let onStart: (RebuildBaseImageWindow.Method) -> Void
+    let onStart: (RebuildBaseImageWindow.Method, Bool) -> Void
     let onCancel: () -> Void
 
     @State private var method: RebuildBaseImageWindow.Method = .download
+    @State private var fresh = false
     @AppStorage(BaseImageCustomize.enabledKey) private var customize = false
     @AppStorage(BaseImageCustomize.pathKey) private var path = ""
     @State private var showCustomize = UserDefaults.standard.bool(forKey: BaseImageCustomize.enabledKey)
@@ -16022,6 +18137,20 @@ struct RebuildBaseImageView: View {
                            badge: nil)
             }
             .padding(.horizontal, 24)
+            if method == .download {
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(NSLocalizedString("Re-download and reinstall the agents", comment: "rebuild base image"),
+                           isOn: $fresh)
+                        .font(.system(size: 12))
+                    Text(NSLocalizedString("Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run.", comment: "rebuild base image"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 20)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 10)
+            }
             Label(NSLocalizedString("Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts.", comment: "rebuild base image"),
                   systemImage: "checkmark.shield")
                 .font(.system(size: 11.5))
@@ -16041,7 +18170,7 @@ struct RebuildBaseImageView: View {
                     .controlSize(.large)
                 Button(method == .download
                        ? NSLocalizedString("Download & Update", comment: "rebuild base image")
-                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method) }
+                       : NSLocalizedString("Rebuild", comment: "rebuild base image")) { onStart(method, fresh) }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)

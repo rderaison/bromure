@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - iPad host mirror
 //
 // The iPad counterpart of the macOS `RemoteHostWindow`: a persistent sidebar
-// (boards + workspaces, like the desktop's SessionSidebar) with the selected
+// (boards + machines, like the desktop's SessionSidebar) with the selected
 // board / workspace filling the detail column. The same `RemoteHostController`
 // mirror drives everything; the detail column hosts the same content views the
 // iPhone pushes onto its stack (WorkspaceScreen, the kanbans, the grid).
@@ -85,54 +85,21 @@ struct PadHostMirror: View {
                 }
             }
 
+            // Sessions-first, as on the desktop: New session, then the
+            // boards, then the sessions — the machines below them.
             if controller.supportsSessions {
                 PadSessionSections(controller: controller,
                                    onOpen: { selection = .session($0) },
                                    onOpenRoom: { selection = .room($0) },
-                                   onNewInRoom: { selection = .newSessionInRoom($0) })
+                                   onNewInRoom: { selection = .newSessionInRoom($0) }) {
+                    boardRows
+                }
+            } else {
+                Section("Boards") { boardRows }
             }
 
-            Section("Boards") {
-                boardRow(.coding, "Coding Tasks", icon: "checklist", tint: .blue,
-                         count: controller.taskStore.tasks.count)
-                boardRow(.automations, "Automations", icon: "bolt.badge.clock.fill", tint: .orange,
-                         count: controller.automationStore.automations.count)
-                boardRow(.grid, "Grid", icon: "square.grid.2x2.fill", tint: .purple,
-                         count: controller.gridStore.cells.count)
-            }
-
-            Section {
-                if controller.listModel.profileRows.isEmpty {
-                    Text(controller.hasSnapshot ? "No workspaces on this server."
-                                                : "Loading workspaces…")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else {
-                    ForEach(controller.listModel.profileRows) { row in
-                        workspaceRow(row)
-                            .tag(PadSelection.workspace(row.id))
-                            .contextMenu { workspaceMenu(row) }
-                    }
-                }
-                // The desktop sidebar closes the list with its "+" row; same
-                // affordance here (the toolbar "+" stays for muscle memory).
-                Button {
-                    workspaceEdit = .new
-                } label: {
-                    Label("New Workspace…", systemImage: "plus")
-                        .foregroundStyle(.tint)
-                }
-                .buttonStyle(.plain)
-            } header: {
-                HStack {
-                    Text("Workspaces")
-                    Spacer()
-                    if runningCount > 0 {
-                        Text("\(runningCount) running")
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .textCase(nil)
-                    }
-                }
-            }
+            machinesSection
+            nativeSection
         }
         .listStyle(.sidebar)
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
@@ -155,6 +122,85 @@ struct PadHostMirror: View {
         }
     }
 
+    @ViewBuilder private var boardRows: some View {
+        boardRow(.coding, "Coding Tasks", icon: "checklist", tint: .blue,
+                 count: controller.taskStore.tasks.count)
+        boardRow(.automations, "Automations", icon: "bolt.badge.clock.fill", tint: .orange,
+                 count: controller.automationStore.automations.count)
+    }
+
+    /// The workspaces — VMs — with the Grid of their terminals, apart from
+    /// the native machines (the desktop sidebar's "Virtual Machines").
+    private var vmRows: [SessionListModel.ProfileRow] {
+        controller.listModel.profileRows.filter { !controller.listModel.machineIDs.contains($0.id) }
+    }
+
+    /// Plain Macs attached through Bromure Sidecar: their agents run
+    /// unsandboxed, so they're listed apart from the VMs, as on the desktop.
+    private var nativeRows: [SessionListModel.ProfileRow] {
+        controller.listModel.profileRows.filter { controller.listModel.machineIDs.contains($0.id) }
+    }
+
+    private var machinesSection: some View {
+        Section {
+            boardRow(.grid, "Grid", icon: "square.grid.2x2.fill", tint: .purple,
+                     count: controller.gridStore.cells.count)
+            if vmRows.isEmpty {
+                Text(controller.hasSnapshot ? "No workspaces on this server."
+                                            : "Loading workspaces…")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ForEach(vmRows) { row in
+                    workspaceRow(row)
+                        .tag(PadSelection.workspace(row.id))
+                        .contextMenu { workspaceMenu(row) }
+                }
+            }
+            // The desktop sidebar closes the list with its "+" row; same
+            // affordance here (the toolbar "+" stays for muscle memory).
+            Button {
+                workspaceEdit = .new
+            } label: {
+                Label("New Workspace…", systemImage: "plus")
+                    .foregroundStyle(.tint)
+            }
+            .buttonStyle(.plain)
+        } header: {
+            machinesHeader("Virtual Machines", running: runningCount(vmRows))
+        }
+    }
+
+    @ViewBuilder private var nativeSection: some View {
+        let rows = nativeRows
+        if !rows.isEmpty {
+            Section {
+                ForEach(rows) { row in
+                    workspaceRow(row, native: true)
+                        .tag(PadSelection.workspace(row.id))
+                        .contextMenu { nativeMenu(row) }
+                }
+            } header: {
+                machinesHeader("Native Machines", running: runningCount(rows))
+            }
+        }
+    }
+
+    private func machinesHeader(_ title: LocalizedStringKey, running: Int) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            if running > 0 {
+                Text("\(running) running")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .textCase(nil)
+            }
+        }
+    }
+
+    private func runningCount(_ rows: [SessionListModel.ProfileRow]) -> Int {
+        rows.filter { $0.state == .running }.count
+    }
+
     private func boardRow(_ sel: PadSelection, _ title: String,
                           icon: String, tint: Color, count: Int) -> some View {
         Label {
@@ -173,7 +219,7 @@ struct PadHostMirror: View {
         .tag(sel)
     }
 
-    private func workspaceRow(_ row: SessionListModel.ProfileRow) -> some View {
+    private func workspaceRow(_ row: SessionListModel.ProfileRow, native: Bool = false) -> some View {
         let accent = Color(hex: row.accentHex)
         let waiting = waitingWindows(row.id).count
         return Label {
@@ -195,7 +241,7 @@ struct PadHostMirror: View {
                 }
             }
         } icon: {
-            Image(systemName: "cpu").foregroundStyle(accent)
+            Image(systemName: native ? "desktopcomputer" : "cpu").foregroundStyle(accent)
         }
     }
 
@@ -221,6 +267,16 @@ struct PadHostMirror: View {
         case .suspended, .off:
             Button { controller.startWorkspace(row.id) } label: {
                 Label("Start", systemImage: "play.circle")
+            }
+        }
+    }
+
+    /// A native machine is a Mac, not a VM: no settings, boot or suspend —
+    /// only a terminal on it while it's attached.
+    @ViewBuilder private func nativeMenu(_ row: SessionListModel.ProfileRow) -> some View {
+        if row.state == .running {
+            Button { controller.newTab(row.id) } label: {
+                Label("New Terminal", systemImage: "plus.rectangle.on.rectangle")
             }
         }
     }
@@ -322,10 +378,6 @@ struct PadHostMirror: View {
     }
 
     // MARK: Waiting agents / deep link
-
-    private var runningCount: Int {
-        controller.listModel.profileRows.filter { $0.state == .running }.count
-    }
 
     /// Tab indices of agents paused on a question for one workspace.
     private func waitingWindows(_ id: Profile.ID) -> [Int] {

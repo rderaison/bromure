@@ -56,12 +56,12 @@ extension AgentSessionEngine {
         for s in sessions {
             let dir = Self.q(ScheduledAutomationEngine.guestPath(s.cwd))
             let parent = s.branchParent.map(Self.q) ?? "''"
-            script += "( printf '%s\\t' \(s.id.uuidString); cd \(dir) 2>/dev/null || { echo gone; exit; }; "
+            script += "( printf '%s\\t' \(s.id.uuidString); cd \(dir) 2>/dev/null || { echo gone; exit; }; \(RepoGitPrograms.off("."))"
                 + "r=$(git worktree list --porcelain 2>/dev/null | head -1 | cut -c10-); "
                 + "p=\(parent); [ -n \"$p\" ] || p=$(git -C \"$r\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
                 + "a=$(git rev-list --count \"$p..HEAD\" 2>/dev/null || echo 0); "
                 + "b=$(git rev-list --count \"HEAD..$p\" 2>/dev/null || echo 0); "
-                + "c=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' '); "
+                + "c=$( { git status --porcelain --ignore-submodules=dirty 2>/dev/null\(RepoGitPrograms.statusFailed); \(RepoGitPrograms.dirtySubmodules(".")) } | wc -l | tr -d ' '); "
                 + "echo \"$a $b $c|$r|$p\" ); "
         }
         guard let out = try? await delegate.guestExec(profileID: profileID, command: script, timeout: 20) else { return }
@@ -120,6 +120,12 @@ extension AgentSessionEngine {
                 return
             }
             let into = target ?? facts.parent
+            // Both names reach git, from this script and from the agent's
+            // brief: never one git would read as an option.
+            if let bad = CodingTaskEngine.unsafeBranch(branch, into) {
+                self.store.mutate(id) { $0.lastError = CodingTaskEngine.unsafeBranchWhy(bad) }
+                return
+            }
             self.store.mutate(id) {
                 $0.lastError = nil
                 $0.branchMerge = BranchMerge(target: into, squash: squash, removeAfter: removeAfter,
@@ -130,22 +136,9 @@ extension AgentSessionEngine {
             // The fast path: a clean branch merges on its own. Anything else
             // (uncommitted work, a conflict, a dirty target) goes back as it
             // was and the session's agent is asked to finish it.
-            let root = Self.q(facts.root)
-            let b = Self.q(branch), t = Self.q(into)
-            let tdir = "t=$(git -C \(root) worktree list --porcelain | awk -v want=\"branch refs/heads/\"\(t) "
-                + "'/^worktree /{w=substr($0,10)} $0==want{print w}'); [ -n \"$t\" ] || t=\(root); "
-            let src = Self.q(ScheduledAutomationEngine.guestPath(s.cwd))
-            // A machine with no git identity still gets its merge commit
-            // (the same stand-in `git init` on the fly uses).
-            let who = "who=; git -C \"$t\" config user.email >/dev/null || who='-c user.name=Bromure -c user.email=bromure@localhost'; "
-            let mergeCmd = squash
-                ? "git $who -C \"$t\" merge --squash \(b) >/dev/null 2>&1 && git $who -C \"$t\" commit -q -m \"Squash-merge \(branch)\" >/dev/null 2>&1"
-                : "git $who -C \"$t\" merge --no-edit \(b) >/dev/null 2>&1"
-            let script = tdir + who
-                + "if [ \"$(git -C \"$t\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" != \(t) ]; then echo elsewhere; "
-                + "elif [ -n \"$(git -C \(src) status --porcelain 2>/dev/null)\" ]; then echo dirty; "
-                + "elif \(mergeCmd); then echo merged; "
-                + "else git -C \"$t\" merge --abort >/dev/null 2>&1; git -C \"$t\" reset -q --merge >/dev/null 2>&1; echo conflict; fi"
+            let script = BranchMergeCommands.mergeScript(
+                root: facts.root, branch: branch, into: into,
+                sourceDir: ScheduledAutomationEngine.guestPath(s.cwd), squash: squash)
             let out = ((try? await delegate.guestExec(profileID: s.profileID, command: script, timeout: 60)) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if out.hasSuffix("merged") {
@@ -153,22 +146,8 @@ extension AgentSessionEngine {
                 return
             }
             // Hand it to the session's own agent.
-            let why = out.hasSuffix("dirty")
-                ? "This worktree has uncommitted changes."
-                : out.hasSuffix("elsewhere")
-                ? "'\(into)' isn't checked out anywhere, so it can't be merged into directly — check it out (in the main checkout, if that is free) first."
-                : "Merging it straight away hit a conflict (or the target checkout has uncommitted changes)."
-            let step = squash
-                ? "`git -C \"$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} $0==\"branch refs/heads/\(into)\"{print w}')\" merge --squash \(branch)`, then commit it there as \"Squash-merge \(branch)\""
-                : "`git merge --no-edit \(branch)` in the checkout of '\(into)' (`git worktree list` shows where it is)"
-            let prompt = """
-                The user asked to \(squash ? "squash-merge" : "merge") this branch ('\(branch)') into '\(into)'. \(why)
-                1. Commit all the intended work on this branch with clear commit messages (leave out build artifacts and scratch files).
-                2. Then run \(step).
-                3. If it conflicts, resolve every conflicted file keeping both sides' intent, stage the resolutions and complete the merge commit.
-                4. Reply with one line saying what landed in '\(into)'.
-                If git has no identity configured here, commit with `git -c user.name=Bromure -c user.email=bromure@localhost` rather than stopping to ask.
-                """
+            let prompt = BranchMergeCommands.mergePrompt(branch: branch, into: into, squash: squash,
+                                                         why: BranchMergeCommands.why(out))
             self.store.mutate(id) { $0.branchMerge?.phase = .conflicts }
             self.resume(id, message: prompt)
             self.watchMerge(id)
@@ -184,6 +163,9 @@ extension AgentSessionEngine {
         if let target { into = target }
         else if let facts = await branchFacts(s) { into = facts.parent }
         else { return "couldn't read the branch on its machine" }
+        if let bad = CodingTaskEngine.unsafeBranch(s.worktreeBranch, into) {
+            return "'\(bad)' isn't a plain branch name — git would read it as an option"
+        }
         store.mutate(id) {
             $0.branchMerge = BranchMerge(target: into, squash: squash, removeAfter: true,
                                          startedAt: Date(), phase: .requested, askedBy: askedBy)
@@ -216,7 +198,7 @@ extension AgentSessionEngine {
                 // Merged: the branch is in the target. Squashed: the target
                 // holds everything the branch changed.
                 let check = m.squash
-                    ? "[ -z \"$(git -C \(r) diff \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
+                    ? "[ -z \"$(git -C \(r) diff \(RepoGitPrograms.diffFlags) \(t) \(b) -- 2>/dev/null)\" ] && echo merged"
                     : "git -C \(r) merge-base --is-ancestor \(b) \(t) 2>/dev/null && echo merged"
                 let out = (try? await delegate.guestExec(profileID: s.profileID, command: check + "; true", timeout: 15)) ?? ""
                 if out.contains("merged") {
@@ -289,13 +271,13 @@ extension AgentSessionEngine {
     func branchPullRequest(_ id: UUID, into target: String? = nil) {
         guard let s = store.session(id), let branch = s.worktreeBranch else { return }
         let into = target ?? s.branchParent ?? "main"
-        resume(id, message: """
-            Open a pull request for this branch ('\(branch)') into '\(into)':
-            1. Review the changes and commit anything outstanding with clear messages.
-            2. Push the branch: `git push -u origin \(branch)`.
-            3. Create the PR with `gh pr create --base \(into)` — a concise title, and a body that explains what changed and why, and how it was tested.
-            4. Reply with the PR's URL.
-            """)
+        // The names go into commands the agent runs: plain branch names
+        // only, quoted.
+        if let bad = CodingTaskEngine.unsafeBranch(branch, into) {
+            store.mutate(id) { $0.lastError = CodingTaskEngine.unsafeBranchWhy(bad) }
+            return
+        }
+        resume(id, message: BranchMergeCommands.pullRequestPrompt(branch: branch, into: into))
     }
 
     // MARK: Git on the fly

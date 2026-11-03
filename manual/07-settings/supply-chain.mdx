@@ -12,7 +12,7 @@ Coding agents install a lot of packages, and a freshly compromised dependency is
   <img src="../images/editor-supply-chain.en.jpg" width="600" alt="The Supply Chain pane of the machine Web app: the Age gate group with Refuse packages younger than the cutoff ticked, a 2-day minimum and an Add entry button for exempt packages, and the OSV vulnerability check group with its lookup unticked and Block at severity set to High and above" />
 </p>
 
-The pane groups five independently toggled layers: **Age gate**, **OSV vulnerability check**, **Package filtering**, **Install scripts**, and **Lockfile-pinned installs** (scroll for the last three). This page documents the settings; the full pipeline — ecosystem coverage, response headers, and compromise detection — is covered in [Supply-Chain Protection](../09-supply-chain.mdx).
+The pane groups five independently toggled layers: **Age gate**, **OSV vulnerability check**, **Package filtering**, **Install scripts**, and **Lockfile-pinned installs** (scroll for the last three), followed by the **Trusted packages** list. This page documents the settings; the full pipeline — ecosystem coverage, response headers, and compromise detection — is covered in [Supply-Chain Protection](../09-supply-chain.mdx).
 
 ## How enforcement works
 
@@ -79,6 +79,10 @@ Turn on **Prompt before passing lockfile-pinned tarballs through unmodified (`np
 
 > **Note:** Although the label mentions `pip --require-hashes`, detection is currently implemented for npm's `npm ci` only — pip hash-pinned installs do not trigger the prompt.
 
+## Trusted packages
+
+Packages you trust despite an OSV or socket.dev verdict. When either blocks a package, Bromure asks whether to install it anyway — for this session, or always; **Always** adds it here. Listed packages' downloads skip those two checks, in the same `npm:workerd` / `workerd` format as the other lists. A socket.dev malware verdict is never overridden, and the age gate and script stripping keep their own lists. See [Trusting a blocked package](../09-supply-chain.mdx#trusting-a-blocked-package).
+
 ## When a reputation source is unreachable
 
 If an enabled reputation source (OSV or socket.dev) cannot produce a verdict — network down, rate-limited, auth failure, unsupported ecosystem — Bromure fails closed rather than silently allowing. The download is held and a dialog asks, per package and version, whether to accept the unverified package; denying blocks with a 451. Approvals are keyed per `package@version`, so one answer cannot blanket an entire dependency graph.
@@ -103,5 +107,6 @@ This is deliberate protection against an attacker inducing rate limits to sneak 
 | **Strip preinstall / install / postinstall / prepare from npm tarballs on the fly** | Toggle | Off |
 | **Allow install scripts for** | List (`npm:better-sqlite3`) | Empty |
 | **Prompt before passing lockfile-pinned tarballs through unmodified** | Toggle | Off |
+| **Install despite reputation warnings** (Trusted packages) | List (`npm:workerd`) | Empty |
 
 API keys entered here stay on the Mac, in the machine's `profile.json`, and never enter the VM; all reputation calls come from the proxy on the Mac. For per-ecosystem interception details and the compromise alarm that pairs with these policies, see [Supply-Chain Protection](../09-supply-chain.mdx); for the record of every check, see [Security Overview & Timeline](../11a-security-timeline.mdx).

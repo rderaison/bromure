@@ -200,7 +200,6 @@ enum ManualShots {
         settings.enableClipboardSharing = true
         settings.enableLinkSender = true
         settings.keychainPasskeys = true
-        settings.keychainPasswords = true
         settings.homePage = "https://bromure.io/hello"
         return Profile(name: "Work", color: .blue, settings: settings)
     }

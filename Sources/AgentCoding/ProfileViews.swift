@@ -88,13 +88,14 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     case general     = "General"
     case localModels = "Models"
     case fusion      = "Fusion"
+    case squelch     = "Squelch"
     case folders     = "Folders"
     case credentials = "Credentials"
     case environment = "Environment"
     case mcp         = "MCP"
     case tracing     = "Tracing"
     case guardrails       = "Guardrails"
-    case firewall         = "Firewall"
+    case firewall         = "Sandbox Policy"
     case supplyChain      = "Supply Chain"
     case promptInjection  = "Prompt Injection"
     case pii              = "PII Protection"
@@ -116,7 +117,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
     var group: Group {
         switch self {
         case .general, .appearance: return .workspace
-        case .localModels, .fusion: return .models
+        case .localModels, .fusion, .squelch: return .models
         case .folders, .environment, .resources, .browser, .mcp: return .machine
         case .credentials, .guardrails, .firewall, .supplyChain, .promptInjection, .pii, .tracing: return .security
         case .automation: return .app
@@ -129,13 +130,14 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:         return "name color close login notes defaults task approved merge pull request kimi approvals never ask auto yolo sensitive reach delegation nickname"
         case .localModels:     return "llm provider api key anthropic openai bedrock openrouter ollama vllm local subscription"
         case .fusion:          return "mount mac folders fusion"
+        case .squelch:         return "tokens noise output trim filter compress savings context cost test logs"
         case .folders:         return "shared folder mount directory"
         case .credentials:     return "keys tokens secrets ssh aws github password vault 1password"
         case .environment:     return "env variables dotenv shell description auto mode safety servers staging production trusted"
         case .mcp:             return "tools servers mcp"
         case .tracing:         return "trace http log requests"
         case .guardrails:      return "credentials approval write policy kubernetes aws docker github destructive exfiltration"
-        case .firewall:        return "firewall egress outbound network connections block allow deny host port web methods interception proxy"
+        case .firewall:        return "firewall sandbox openshell kernel sentry landlock egress outbound network connections block allow deny host port web methods interception proxy"
         case .supplyChain:     return "npm pypi packages age socket osv install scripts depi"
         case .promptInjection: return "injection detector scan classifier"
         case .pii:             return "privacy personal data names email phone gdpr redact anonymize pseudonymize"
@@ -151,6 +153,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:     "person.text.rectangle.fill"
         case .localModels: "sparkles"
         case .fusion:      "bolt.fill"
+        case .squelch:     "line.3.horizontal.decrease.circle.fill"
         case .folders:     "folder.fill"
         case .credentials: "key.fill"
         case .environment: "terminal.fill"
@@ -173,6 +176,7 @@ enum EditorCategory: String, CaseIterable, Identifiable {
         case .general:     .indigo
         case .localModels: .purple
         case .fusion:      .yellow
+        case .squelch:     .mint
         case .folders:     .orange
         case .credentials: .green
         case .environment: .teal
@@ -213,6 +217,10 @@ struct ProfileStorageContext {
     /// new profiles. When set, the home row sizes/labels against the
     /// image instead of walking the directory.
     var profileHomeImageURL: URL?
+    /// Where an ext4 home's image lives, whether or not it exists yet: the
+    /// size field stats it on every draw, so an image a boot created after
+    /// the editor opened is its floor even before a remeasure arrives.
+    var homeImageFile: URL? = nil
     /// True if the profile's VM is currently open in a session window —
     /// reset actions are unsafe in that state.
     var isRunning: Bool
@@ -231,6 +239,13 @@ struct ProfileStorageContext {
     /// server (the URLs above are only placeholders there), and the erase /
     /// reset / restore actions left to the server Mac.
     var remoteSizes: StorageSizes? = nil
+    /// The same context measured again now. Everything above is a snapshot
+    /// taken when the editor opened, and the editor stays open across a
+    /// boot that creates the home image or an erase that deletes it: the
+    /// home-size floor read "no image yet" from it and let a size below
+    /// the image be saved (Finding CWE-670, "Home size stays shrinkable
+    /// after the image exists"). nil: nothing to re-read.
+    var remeasure: (@MainActor () async -> ProfileStorageContext?)? = nil
 
     static func empty(baseImageURL: URL) -> ProfileStorageContext {
         ProfileStorageContext(
@@ -247,6 +262,13 @@ struct ProfileStorageContext {
             onRestoreHome: nil
         )
     }
+}
+
+extension Notification.Name {
+    /// A workspace's storage may have changed under an open editor: it
+    /// started (a boot creates the home image) or stopped. `object` is the
+    /// profile id; its editor measures the storage again.
+    static let bromureWorkspaceStorageChanged = Notification.Name("io.bromure.workspaceStorageChanged")
 }
 
 /// What each storage layer costs on the Mac that holds it.
@@ -476,6 +498,14 @@ struct ProfileEditorView: View {
     @State private var bgColor: Color
     @State private var fgColor: Color
     @State private var selectedCategory: EditorCategory = .general
+    /// Bumped when an erase or reset in Resources changed the disks.
+    @State private var storageRevision = 0
+    /// `storageContext` measured again since the editor opened (after an
+    /// erase, a boot, a stop); nil until then.
+    @State private var liveStorage: ProfileStorageContext?
+    /// Bumped when `liveStorage` arrives, so the storage stack re-measures it.
+    @State private var storageGeneration = 0
+    private var currentStorage: ProfileStorageContext? { liveStorage ?? storageContext }
     /// The pane a freshly opened Preferences editor starts on (set just before
     /// a workspace editor opens Preferences), consumed on init.
     static var pendingPreferencesCategory: EditorCategory?
@@ -529,6 +559,13 @@ struct ProfileEditorView: View {
     /// Sheet state for the SSH-key import flow.
     @State private var importSheet: ImportSheetState?
     @State private var importError: String?
+    /// Sheet state for "Add from host agent…".
+    @State private var hostAgentSheet: HostAgentSheetState?
+    /// Filled off the main thread when the caller did not pass a list.
+    @State private var discoveredHostSockets: [String] = []
+    /// This workspace's live consent decisions (Guardrails badges), polled
+    /// from `consentGrants` while the pane is open.
+    @State private var liveGrants: [String: ConsentGrantStatus] = [:]
     @State private var confirmBrowserRedownload = false
     /// Keys of the disclosure groups the user has expanded in the
     /// Credentials pane. All sections start collapsed — the user
@@ -570,8 +607,45 @@ struct ProfileEditorView: View {
         var passphrase: String
     }
 
+    /// A live consent decision for one credential, as the Guardrails pane
+    /// shows it next to "Require approval to use".
+    struct ConsentGrantStatus: Equatable {
+        var denied: Bool
+        var expiration: Date
+        var sessionScoped: Bool
+    }
+
+    /// The host's consent broker, seen from the editor: this workspace's live
+    /// grants by consent id, and the right-click actions on them. nil = no
+    /// broker here (a new workspace, a remote editor) → no badges.
+    struct ConsentGrantControls {
+        var status: () async -> [String: ConsentGrantStatus]
+        /// minutes nil = the rest of the session.
+        var allow: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var deny: (_ credentialID: String, _ displayName: String, _ minutes: Int?) async -> Void
+        var revoke: (_ credentialID: String) async -> Void
+    }
+
+    struct HostAgentSheetState: Identifiable {
+        let id = UUID()
+        /// A `hostAgentSocket` value: "" = bromure's SSH_AUTH_SOCK.
+        var socket: String
+        var keys: [ImportedSSHKey] = []
+        /// `publicKeyText` of the rows ticked.
+        var selected: Set<String> = []
+        var error: String?
+        var loaded = false
+        /// A list is in flight. Distinct from `loaded` so editing the socket
+        /// field does not show a spinner.
+        var loading = false
+    }
+
     let onSave: (Profile, _ generateSSH: Bool) -> Void
     let onCancel: () -> Void
+    /// The firewall table changed: put those rules in force now (the host
+    /// puts the opening ones back unless the editor is saved). nil: they
+    /// apply on Save.
+    let onFirewallEdited: ((String) -> Void)?
     /// Fires as the name is typed so a hosting NSWindow can keep its title bar
     /// in sync. SwiftUI's `navigationTitle` doesn't reach the window behind an
     /// NSHostingView, so the host is told explicitly.
@@ -584,6 +658,14 @@ struct ProfileEditorView: View {
     /// Called when the user removes a row — frees the on-disk file +
     /// keychain entry. Provided by ACAppDelegate.
     let onRemoveSSHKey: ((ImportedSSHKey) -> Void)?
+    /// Agent sockets to offer in "Add from host agent…" (`hostAgentSocket`
+    /// values, "" first = SSH_AUTH_SOCK). Empty means the editor discovers
+    /// them off the main thread when `onListHostAgentKeys` is set.
+    let hostAgentSockets: [String]
+    /// Lists the keys a host agent holds, ready to add. nil = not on the
+    /// host (remote clients) → the button is disabled.
+    let onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])?
+    let consentGrants: ConsentGrantControls?
     /// Returns the date this profile/preferences' Claude subscription was
     /// captured (nil = not registered). A closure (not a value) so it's
     /// re-read live after a register/forget. nil = no proxy engine → hide.
@@ -635,9 +717,13 @@ struct ProfileEditorView: View {
         siblingWorkspaces: [WorkspaceRef] = [],
         onSave: @escaping (Profile, _ generateSSH: Bool) -> Void,
         onCancel: @escaping () -> Void,
+        onFirewallEdited: ((String) -> Void)? = nil,
         onTitleChange: ((String) -> Void)? = nil,
         onImportSSHKey: ((URL, _ passphrase: String?, _ label: String) throws -> ImportedSSHKey)? = nil,
         onRemoveSSHKey: ((ImportedSSHKey) -> Void)? = nil,
+        hostAgentSockets: [String] = [],
+        onListHostAgentKeys: (@Sendable (String) throws -> [ImportedSSHKey])? = nil,
+        consentGrants: ConsentGrantControls? = nil,
         claudeAccountSavedAt: (() -> Date?)? = nil,
         claudeReauthRequiredAt: (() -> Date?)? = nil,
         codexReauthRequiredAt: (() -> Date?)? = nil,
@@ -661,6 +747,9 @@ struct ProfileEditorView: View {
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
+        self.hostAgentSockets = hostAgentSockets
+        self.onListHostAgentKeys = onListHostAgentKeys
+        self.consentGrants = consentGrants
         self.claudeAccountSavedAt = claudeAccountSavedAt
         self.claudeReauthRequiredAt = claudeReauthRequiredAt
         self.codexReauthRequiredAt = codexReauthRequiredAt
@@ -723,6 +812,7 @@ struct ProfileEditorView: View {
         self.siblingWorkspaces = siblingWorkspaces
         self.onSave = onSave
         self.onCancel = onCancel
+        self.onFirewallEdited = onFirewallEdited
         self.onTitleChange = onTitleChange
     }
 
@@ -833,6 +923,10 @@ struct ProfileEditorView: View {
         .sheet(item: $importSheet) { sheet in
             importSheetView(for: sheet)
         }
+        .sheet(item: $hostAgentSheet) { _ in
+            hostAgentSheetView
+        }
+        .task { await loadHostAgentSocketChoices() }
         .sheet(item: $credSheet) { sheet in
             credentialSheetView(sheet)
         }
@@ -918,7 +1012,10 @@ struct ProfileEditorView: View {
     /// draft (the pane can't save it live the way the local store does).
     private func commitSave() {
         if case .remoteGlobal? = modelsPane { onSaveGlobalModels?(remoteGlobalDraft) }
-        onSave(draft, generateSSH)
+        var out = draft
+        out.homeImageGB = Self.homeSetting(out.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        draft = out
+        onSave(out, generateSSH)
     }
 
     /// "Create" / "Save", localized. A bare `isNew ? "Create" : "Save"`
@@ -1129,6 +1226,7 @@ struct ProfileEditorView: View {
         case .general:     generalSection
         case .localModels: localModelsSection
         case .fusion:      fusionSection
+        case .squelch:     squelchSection
         case .folders:     foldersSection
         case .credentials: credentialsSection
         case .environment: environmentSection
@@ -1385,12 +1483,18 @@ struct ProfileEditorView: View {
                 // A grouped Form draws an empty TextField borderless and
                 // right-aligned — invisible until typed into. The prompt
                 // makes the field visible.
-                TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
-                          text: $draft.comments,
-                          prompt: Text(NSLocalizedString("Add a note about this workspace",
-                                                         comment: "Profile notes field placeholder")),
-                          axis: .vertical)
+                let notes = TextField(NSLocalizedString("Notes (optional)", comment: "Profile notes field label"),
+                                      text: $draft.comments,
+                                      prompt: Text(NSLocalizedString("Add a note about this workspace",
+                                                                     comment: "Profile notes field placeholder")),
+                                      axis: .vertical)
                     .lineLimit(2...6)
+                #if os(macOS)
+                // Markdown wants its lines: Shift-Return adds one.
+                notes.shiftReturnInsertsNewline()
+                #else
+                notes
+                #endif
             }
 
             // Delegation / @nickname reach: one machine's own policy.
@@ -2122,6 +2226,13 @@ struct ProfileEditorView: View {
                 Spacer()
             }
             .buttonStyle(.bordered).controlSize(.small).padding(.top, 2)
+
+            #if os(macOS)
+            if draft.usesOpenShellPolicy {
+                Divider()
+                OpenShellCredentialsSection(draft: $draft)
+            }
+            #endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -3271,8 +3382,18 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(onImportSSHKey == nil)
+                Button {
+                    openHostAgentSheet(socket: hostSocketChoices.first ?? "")
+                } label: {
+                    Label("From host agent…", systemImage: "key.radiowaves.forward")
+                }
+                .buttonStyle(.borderless)
+                .disabled(onListHostAgentKeys == nil)
             }
             Text("Point bromure at any existing SSH private key (RSA, ed25519, ecdsa) — encrypted ones included. The key is loaded into the per-workspace bromure ssh-agent at every session launch; passphrases are stored in the macOS Keychain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("A key that can't be copied — on a YubiKey, in gpg-agent, Secretive or 1Password — can be picked from that ssh-agent instead. The VM sees only the keys you pick, and their signatures are made by the agent on your Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -3286,11 +3407,18 @@ struct ProfileEditorView: View {
                 ForEach(Array(draft.importedSSHKeys.enumerated()), id: \.element.id) { (idx, key) in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
-                            Image(systemName: "key.horizontal.fill")
+                            Image(systemName: key.isFromHostAgent
+                                  ? "key.radiowaves.forward.fill" : "key.horizontal.fill")
                                 .foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(spacing: 6) {
                                     Text(key.label).font(.callout)
+                                    if let socket = key.hostAgentSocket {
+                                        Text(Self.hostAgentSocketName(socket))
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                            .help("Signed by the ssh-agent on your Mac; never copied.")
+                                    }
                                     if key.hasPassphrase {
                                         Image(systemName: "lock.fill")
                                             .font(.caption2)
@@ -3373,6 +3501,156 @@ struct ProfileEditorView: View {
         }
         .padding(20)
         .frame(width: 480)
+    }
+
+    /// The "Add from host agent…" sheet: pick an agent socket, tick keys.
+    @ViewBuilder
+    private var hostAgentSheetView: some View {
+        let state = hostAgentSheet ?? HostAgentSheetState(socket: "")
+        let alreadyAdded = Set(draft.importedSSHKeys.compactMap { k in
+            k.isFromHostAgent ? Self.publicKeyBlobText(k.publicKeyText) : nil
+        })
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add keys from a host ssh-agent")
+                .font(.title3.bold())
+            HStack {
+                TextField("Agent socket", text: Binding(
+                    get: { hostAgentSheet?.socket ?? "" },
+                    set: {
+                        hostAgentSheet?.socket = $0
+                        hostAgentSheet?.loaded = false
+                        hostAgentSheet?.loading = false
+                    }
+                ), prompt: Text("SSH_AUTH_SOCK"))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout.monospaced())
+                    .onSubmit { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+                if hostSocketChoices.count > 1 {
+                    Menu {
+                        ForEach(hostSocketChoices, id: \.self) { socket in
+                            Button(Self.hostAgentSocketName(socket)) {
+                                openHostAgentSheet(socket: socket)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .fixedSize()
+                }
+                Button("Load") { openHostAgentSheet(socket: hostAgentSheet?.socket ?? "") }
+            }
+            Text("Empty = Bromure's SSH_AUTH_SOCK (the macOS agent, unless Bromure was started from a shell). For a YubiKey behind gpg-agent, use ~/.gnupg/S.gpg-agent.ssh.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            if state.loading {
+                Text("Loading keys…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let err = state.error {
+                Text(err).font(.caption).foregroundStyle(.red)
+            } else if state.loaded && state.keys.isEmpty {
+                Text("This agent holds no keys. Plug in the security key, or check the socket.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(state.keys, id: \.publicKeyText) { key in
+                let added = alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText))
+                Toggle(isOn: Binding(
+                    get: { added || (hostAgentSheet?.selected.contains(key.publicKeyText) ?? false) },
+                    set: { on in
+                        if on { hostAgentSheet?.selected.insert(key.publicKeyText) }
+                        else { hostAgentSheet?.selected.remove(key.publicKeyText) }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(key.label).font(.callout)
+                        Text(key.publicKeyText.split(separator: " ").first.map(String.init) ?? "")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .disabled(added)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { hostAgentSheet = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    for key in state.keys where state.selected.contains(key.publicKeyText)
+                        && !alreadyAdded.contains(Self.publicKeyBlobText(key.publicKeyText)) {
+                        draft.importedSSHKeys.append(key)
+                    }
+                    hostAgentSheet = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(state.selected.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+    }
+
+    /// Passed-in sockets, or the list discovered in the background.
+    private var hostSocketChoices: [String] {
+        hostAgentSockets.isEmpty ? discoveredHostSockets : hostAgentSockets
+    }
+
+    /// `gpgconf` and `stat` stay off the main thread. Remote editors pass
+    /// no lister, so they never scan this Mac.
+    private func loadHostAgentSocketChoices() async {
+        #if os(macOS)
+        guard onListHostAgentKeys != nil, hostAgentSockets.isEmpty else { return }
+        let found = await HostAgentClient.candidateHostSocketsDetached()
+        if !Task.isCancelled { discoveredHostSockets = found }
+        #endif
+    }
+
+    /// (Re)load the sheet's key list from `socket`, opening it if needed.
+    /// The agent query blocks (bounded); it runs off the main thread.
+    private func openHostAgentSheet(socket: String) {
+        guard let lister = onListHostAgentKeys else { return }
+        if hostAgentSheet == nil {
+            var state = HostAgentSheetState(socket: socket)
+            state.loading = true
+            hostAgentSheet = state
+        } else {
+            hostAgentSheet?.socket = socket
+            hostAgentSheet?.keys = []
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = nil
+            hostAgentSheet?.loaded = false
+            hostAgentSheet?.loading = true
+        }
+        Task {
+            let outcome = await withCheckedContinuation { (cont: CheckedContinuation<([ImportedSSHKey], String?), Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        cont.resume(returning: (try lister(socket), nil))
+                    } catch {
+                        cont.resume(returning: ([], error.localizedDescription))
+                    }
+                }
+            }
+            guard hostAgentSheet?.socket == socket else { return }
+            hostAgentSheet?.keys = outcome.0
+            hostAgentSheet?.selected = []
+            hostAgentSheet?.error = outcome.1
+            hostAgentSheet?.loaded = true
+            hostAgentSheet?.loading = false
+        }
+    }
+
+    /// "SSH_AUTH_SOCK" for "", else the path as stored.
+    static func hostAgentSocketName(_ socket: String) -> String {
+        socket.isEmpty ? "SSH_AUTH_SOCK" : socket
+    }
+
+    /// The base64 blob field of an OpenSSH public-key line — identity
+    /// without the comment.
+    static func publicKeyBlobText(_ line: String) -> String {
+        let parts = line.split(separator: " ")
+        return parts.count >= 2 ? String(parts[1]) : line
     }
 
     private func presentImportPicker() {
@@ -3683,6 +3961,14 @@ struct ProfileEditorView: View {
             }
 
             // Manual tokens moved to Credentials → Other API keys.
+
+            // App-wide: this Mac's Preferences only.
+            #if os(macOS)
+            if isLocalPreferences {
+                Divider()
+                SecurityHistorySettingsView()
+            }
+            #endif
         }
     }
 
@@ -3717,10 +4003,10 @@ struct ProfileEditorView: View {
 
     /// The home image's size now, GiB — nil before it exists.
     private var homeCapacityGB: Int? {
-        if let r = storageContext?.remoteSizes {
+        if let r = currentStorage?.remoteSizes {
             return r.homeCapacity > 0 ? Int(r.homeCapacity >> 30) : nil
         }
-        guard let u = storageContext?.profileHomeImageURL,
+        guard let u = currentStorage?.profileHomeImageURL ?? currentStorage?.homeImageFile,
               let n = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? NSNumber
         else { return nil }
         return Int(n.int64Value >> 30)
@@ -3730,25 +4016,85 @@ struct ProfileEditorView: View {
         #if os(macOS)
         SessionDisk.resolvedHomeImageGB()
         #else
-        64
+        16
         #endif
     }
 
+    /// Smallest home a workspace can be created with, GiB (what
+    /// SessionDisk clamps a setting to).
+    static let minHomeGB = 8
+
     /// Grow-only: a running VM can't see its disk grow, so a bigger size
     /// lands at the workspace's next start (the host grows the image, the
-    /// guest grows the filesystem).
+    /// guest grows the filesystem). Before the image exists (a new
+    /// workspace, or one whose home was erased) any size from 8 GB is
+    /// fine: it's created at that size on the next boot.
+    /// The size field's numbers: `current` (the image's size, or the
+    /// default before it exists), the `floor` it can't go below (that size,
+    /// or 8 GB before it exists), and what a typed or stepped value becomes
+    /// (nil = keep following the default).
+    struct HomeSizeBounds: Equatable {
+        let current: Int
+        let floor: Int
+        init(existingGB: Int?, defaultGB: Int) {
+            current = existingGB ?? defaultGB
+            floor = existingGB ?? ProfileEditorView.minHomeGB
+        }
+        func shown(_ setting: Int?) -> Int { setting.map { max($0, floor) } ?? current }
+        func setting(for value: Int, saved: Int?) -> Int? {
+            let gb = min(1024, max(floor, value))
+            return (gb == current && saved == nil) ? nil : gb
+        }
+    }
+
+    /// Re-read the storage (the snapshot's own `remeasure`), then hold the
+    /// size setting to the image that is there now.
+    @MainActor
+    private func remeasureStorage() async {
+        let asked = storageRevision
+        guard let fresh = await storageContext?.remeasure?(),
+              Self.remeasureLands(asked: asked, now: storageRevision, cancelled: Task.isCancelled)
+        else { return }
+        liveStorage = fresh
+        storageGeneration += 1
+        clampHomeSetting()
+    }
+
+    /// Whether a remeasure's answer is still the newest. A start or stop
+    /// bumps the revision and cancels the task, but a fat client's fetch
+    /// still came back -- a slower one from before the image existed, after
+    /// a newer one, put the floor back at 8 GB (Finding CWE-362, "A slower
+    /// home-size remeasure can drop the floor back below the image").
+    static func remeasureLands(asked: Int, now: Int, cancelled: Bool) -> Bool {
+        !cancelled && asked == now
+    }
+
+    /// A setting below the existing image is raised to its size: the disk
+    /// layer never shrinks an image, so a smaller stored number would only
+    /// resurface as the size of the next home after an erase.
+    private func clampHomeSetting() {
+        let gb = Self.homeSetting(draft.homeImageGB, existingGB: homeCapacityGB, saved: savedHomeImageGB)
+        if gb != draft.homeImageGB { draft.homeImageGB = gb }
+    }
+
+    /// `setting` held to an existing image of `existingGB` (nil = none yet).
+    static func homeSetting(_ setting: Int?, existingGB: Int?, saved: Int?) -> Int? {
+        guard let existingGB, let setting, setting < existingGB else { return setting }
+        return HomeSizeBounds(existingGB: existingGB, defaultGB: existingGB).setting(for: setting, saved: saved)
+    }
+
     private var homeSizeSection: some View {
-        let current = homeCapacityGB ?? Self.defaultHomeGB
-        let chosen = draft.homeImageGB.map { max($0, current) } ?? current
-        // Any whole GB from the current size up to 1 TB; below the current
-        // size it clamps (the image only grows — shrinking would cut the
-        // filesystem short).
+        _ = storageRevision   // re-read the image after an erase or reset
+        let existing = homeCapacityGB
+        let bounds = HomeSizeBounds(existingGB: existing, defaultGB: Self.defaultHomeGB)
+        let (current, floor) = (bounds.current, bounds.floor)
+        let chosen = bounds.shown(draft.homeImageGB)
+        // Any whole GB from the floor up to 1 TB; below an existing
+        // image's size it clamps (the image only grows — shrinking would
+        // cut the filesystem short).
         let size = Binding<Int>(
             get: { chosen },
-            set: { v in
-                let gb = min(1024, max(current, v))
-                draft.homeImageGB = (gb == current && savedHomeImageGB == nil) ? nil : gb
-            })
+            set: { v in draft.homeImageGB = bounds.setting(for: v, saved: savedHomeImageGB) })
         return VStack(alignment: .leading, spacing: 6) {
             Text("Home folder size")
                 .font(.headline)
@@ -3758,10 +4104,12 @@ struct ProfileEditorView: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 72)
                 Text(verbatim: "GB")
-                Stepper("", value: size, in: current...1024, step: 8)
+                Stepper("", value: size, in: floor...1024, step: 8)
                     .labelsHidden()
             }
-            Text(String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
+            Text(existing == nil
+                 ? String(format: NSLocalizedString("From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use.", comment: "home folder size, before the home exists"), floor)
+                 : String(format: NSLocalizedString("From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use.", comment: "home folder size"), current))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3778,17 +4126,25 @@ struct ProfileEditorView: View {
                 Text("Three layers stack to make this workspace's environment. The bottom is shared and immutable; the top two are yours and can be erased independently.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let storageContext {
+                if let currentStorage {
                     StorageStackView(
                         isNewProfile: isNew,
-                        context: storageContext
+                        context: currentStorage,
+                        onStorageChanged: { storageRevision += 1 }
                     )
+                    .id(storageGeneration)   // a fresh context: measure it again
                 } else {
                     Text("Storage controls only apply to real workspaces. They appear in each workspace's editor when you create or edit one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            // Each time the pane shows, after an erase or reset, and when the
+            // workspace starts or stops, the storage is measured again.
+            .task(id: storageRevision) { await remeasureStorage() }
+            .onReceive(NotificationCenter.default.publisher(for: .bromureWorkspaceStorageChanged)) { note in
+                if (note.object as? UUID) == draft.id { storageRevision += 1 }
             }
 
             if draft.homeModel == .ext4 {
@@ -4101,17 +4457,18 @@ struct ProfileEditorView: View {
         // scrolling and clips the trailing toggles.
         guardrailsScrollWrapper {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    Text("How this workspace's credentials may be used.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    InfoTip("Guardrails govern how this workspace's configured credentials are used. **Ask before use** pops a host-side confirmation the first time a credential is used in a session. A **write policy** strips or blocks destructive operations on the wire — enforced in the proxy, so a compromised agent can't bypass it. Only credentials you've configured appear here.\n\nA write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.")
+                }
 
                 let refs = remoteCredentialRefs ?? draft.configuredCredentials()
                 if refs.isEmpty {
                     VStack(spacing: 6) {
                         Image(systemName: "shield.slash").font(.title2).foregroundStyle(.secondary)
                         Text("No credentials to guard").font(.subheadline.weight(.medium))
-                        Text("Add credentials in the Credentials pane. Each one appears here with an “ask before use” toggle and, where it applies, a write policy.")
+                        Text("Add credentials in the Credentials pane.")
                             .font(.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
@@ -4122,22 +4479,67 @@ struct ProfileEditorView: View {
                         guardrailCredentialRow(ref)
                         Divider()
                     }
-                    Text("A write policy is per service, so two credentials for the same service (e.g. two GitHub tokens) share one policy.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .padding(.top, 2)
                 }
 
                 Divider().padding(.vertical, 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Don't alert on credential exfiltration",
-                           isOn: $draft.disableExfiltrationAlerts)
-                    Text("By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                settingRow(caption: "A leaked credential is still blocked and logged; only the pop-up goes away.",
+                           info: "By default, when a session credential is seen heading to a host it wasn't minted for, Bromure pauses the VM and pops up a compromise alert. Turn this on to suppress that modal. The leak is STILL blocked and still recorded in the Security Timeline — only the interruption goes away. Applies live, no restart.") {
+                    Toggle("Don't alert on credential exfiltration", isOn: $draft.disableExfiltrationAlerts)
                 }
-                .padding(.top, 2)
+
+                Divider().padding(.vertical, 4)
+                Text("Protections").font(.headline)
+                VStack(alignment: .leading, spacing: 10) {
+                    settingRow(caption: "The agent asks you instead of retrying or finding a way round.",
+                               info: "When the firewall or the sandbox blocks something an agent tried, the agent is told what was blocked and why, and to ask you rather than retry or find another way round. Without it, an agent sees only a failed connection or “permission denied” and may keep trying. Claude Code reads it right after the command that hit the block; other agents get it when their turn ends. Until you choose, it's on while the workspace uses an OpenShell policy.") {
+                        Toggle("Tell the agent when policy blocks it",
+                               isOn: Binding(get: { draft.tellsAgentOnDeny }, set: { draft.tellAgentOnDeny = $0 }))
+                    }
+                    settingRow(caption: "Flags a session that behaves suspiciously; Quarantine also cuts its network and pauses it.",
+                               info: "Watches the session as a whole from outside the VM — bursts of blocked requests, credentials that don't belong, tampering, new destinations once the session has settled, and outbound volume far above its own baseline (counted at the network switch, independently of the proxy). Past a threshold within a minute it records a detection finding; in Quarantine it also cuts the VM's network and pauses it in milliseconds, then asks you. Applies live.") {
+                        Picker("Agent watchdog", selection: $draft.watchdogMode) {
+                            Text("Off").tag("off")
+                            Text("Alert").tag("alert")
+                            Text("Quarantine").tag("quarantine")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 360)
+                    }
+
+                    settingRow(caption: "Blocks any credential Bromure didn't put there itself.",
+                               info: "Blocks any request that carries a credential Bromure didn't put there — an API key or token the agent found in a file, an environment dump or a git config, or guessed. Bromure's own credentials still flow to the hosts they're bound to, and tokens a site issues inside the VM (a login, an OAuth flow) can be sent back to that site. A blocked request raises the compromise alert; Allow approves that one credential for the session. Strict mode inspects every HTTP(S) request, so transparent interception stays on and the no-MITM list is ignored. Raw TCP (SSH, databases) can't be inspected: deny it with the firewall. Applies live.") {
+                        Toggle("Only allow credentials Bromure injects (strict mode)", isOn: $draft.strictCredentials)
+                            .disabled(Profile.organizationRequiresStrictCredentials)
+                    }
+                    if draft.strictCredentials, !draft.unboundCredentialNames.isEmpty {
+                        Label("Give these credentials a host filter before saving (strict mode doesn't allow credentials usable on any host): "
+                              + draft.unboundCredentialNames.joined(separator: ", "),
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    settingRow(caption: "For clients that break when Bromure intercepts them; proxy-aware tools still go through Bromure.",
+                               info: "Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.") {
+                        Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
+                            .disabled(draft.strictCredentials)
+                    }
+
+                    settingRow(caption: "Lets the agent skip one host's certificate check with a header.",
+                               info: "A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.") {
+                        Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
+                               isOn: $draft.guardrails.allowInsecureBypass)
+                    }
+                }
             }
             .padding(.bottom, 8)
+        }
+        .task {
+            guard let controls = consentGrants else { return }
+            while !Task.isCancelled {
+                liveGrants = await controls.status()
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
@@ -4153,30 +4555,30 @@ struct ProfileEditorView: View {
                 // mirrors profiles but neither edits nor enforces egress
                 // rules, so the pane simply omits the table there.
                 #if os(macOS)
-                EgressRulesEditor(pfText: $draft.egressRules, profileID: draft.id,
-                                  logAllowed: $draft.logAllowedConnections)
+                FirewallEditor(draft: $draft, onEdited: onFirewallEdited)
                 #else
                 Text(NSLocalizedString("Outbound connection rules are edited on the Mac that runs this workspace.", comment: "Firewall pane, remote client"))
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 #endif
 
-                Divider().padding(.vertical, 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle("Disable transparent interception", isOn: $draft.disableTransparentProxy)
-                    Text("Transparent interception (on by default) diverts the VM's HTTP/HTTPS into Bromure at the network layer, so the proxy sees the traffic even when a client doesn't use the proxy env vars. Turn it off and that forced divert stops: raw sockets and cert-pinned clients (Signal and similar) reach the real network — and the real upstream cert — directly. This does NOT disable the proxy itself: HTTP(S)_PROXY stays set, so proxy-aware tools (apt/git/pip/curl/node…) and the agent's own API calls still go through Bromure and keep credential/token swap, tracing, and guardrails. Applies live, no restart. Use for a workspace with a client that breaks under transparent interception.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Toggle("Allow per-request insecure bypass (X-bromure-insecure)",
-                           isOn: $draft.guardrails.allowInsecureBypass)
-                        .padding(.top, 8)
-                    Text("A lighter escape hatch than full passthrough. When a request to a self-signed / private-CA host fails validation, the agent can retry it with the header `X-bromure-insecure: yes` to skip validating THAT upstream's certificate. Interception, tracing, and the leak guard stay on, and Bromure injects no real credential on such a request (only the guest's fakes go out). Every use is recorded in the Security Timeline. On by default (it only acts when the guest explicitly sends the header); turn it off to forbid the header outright.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .padding(.bottom, 8)
+        }
+    }
+
+    /// A setting with one line of caption under it and its full explanation
+    /// behind an ⓘ.
+    @ViewBuilder
+    private func settingRow<C: View>(caption: LocalizedStringKey, info: LocalizedStringKey,
+                                     @ViewBuilder _ control: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                control()
+                InfoTip(info)
+            }
+            Text(caption).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -4214,7 +4616,7 @@ struct ProfileEditorView: View {
                     .labelsHidden().pickerStyle(.menu).frame(width: 176)
                 }
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 3)
@@ -4248,11 +4650,105 @@ struct ProfileEditorView: View {
                 }
                 .padding(.leading, 26)
             }
-            requireApprovalToggle(isOn: approvalBinding(for: ref))
+            approvalLine(ref)
                 .padding(.leading, 26)
         }
         .padding(.vertical, 4)
         #endif
+    }
+
+    /// "Require approval to use", plus — while the credential has a live
+    /// grant or remembered deny — a badge counting it down. Right-click to
+    /// allow or deny for a fresh 5 min / 1 hr / the session, or revoke so the next
+    /// use asks again. Acts on the running session at once (grants aren't
+    /// profile settings, so nothing waits for Save).
+    @ViewBuilder
+    private func approvalLine(_ ref: CredentialRef) -> some View {
+        let isOn = approvalBinding(for: ref)
+        let line = HStack(spacing: 6) {
+            requireApprovalToggle(isOn: isOn)
+            if isOn.wrappedValue, let status = liveGrants[draft.consentCredentialID(ref)] {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    grantBadge(status, now: ctx.date)
+                }
+            }
+        }
+        if let controls = consentGrants, isOn.wrappedValue {
+            line.contextMenu { grantMenu(ref, controls: controls) }
+        } else {
+            line
+        }
+    }
+
+    @ViewBuilder
+    private func grantBadge(_ status: ConsentGrantStatus, now: Date) -> some View {
+        if status.sessionScoped && status.denied {
+            Text(NSLocalizedString("denied this session", comment: "guardrails deny badge"))
+                .font(.caption2).foregroundStyle(.red).lineLimit(1)
+                .help(NSLocalizedString("Refused without asking until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if status.sessionScoped {
+            Text(NSLocalizedString("allowed this session", comment: "guardrails grant badge"))
+                .font(.caption2).foregroundStyle(.blue).lineLimit(1)
+                .help(NSLocalizedString("Allowed until the workspace stops. Right-click to change or revoke.", comment: ""))
+        } else if now < status.expiration {
+            let left = Self.grantRemaining(status.expiration.timeIntervalSince(now))
+            let until = status.expiration.formatted(date: .omitted, time: .shortened)
+            if status.denied {
+                Text(String(format: NSLocalizedString("denied · %@", comment: "guardrails deny badge; %@ = time left"), left))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.red).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Refused without asking until %@. Right-click to allow or to ask again.", comment: ""), until))
+            } else {
+                Label(left, systemImage: "clock")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.orange).lineLimit(1)
+                    .help(String(format: NSLocalizedString("Allowed without asking until %@. Right-click to extend or revoke.", comment: ""), until))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func grantMenu(_ ref: CredentialRef, controls: ConsentGrantControls) -> some View {
+        let id = draft.consentCredentialID(ref)
+        let name = draft.credentialTitle(ref)
+        let act: (@escaping () async -> Void) -> Void = { action in
+            Task { @MainActor in
+                await action()
+                liveGrants = await controls.status()
+            }
+        }
+        Button(NSLocalizedString("Allow for 5 minutes", comment: "")) {
+            act { await controls.allow(id, name, 5) }
+        }
+        Button(NSLocalizedString("Allow for 1 hour", comment: "")) {
+            act { await controls.allow(id, name, 60) }
+        }
+        Button(NSLocalizedString("Allow for the rest of the session", comment: "")) {
+            act { await controls.allow(id, name, nil) }
+        }
+        Divider()
+        Button(NSLocalizedString("Deny for 5 minutes", comment: "")) {
+            act { await controls.deny(id, name, 5) }
+        }
+        Button(NSLocalizedString("Deny for 1 hour", comment: "")) {
+            act { await controls.deny(id, name, 60) }
+        }
+        Button(NSLocalizedString("Deny for the rest of the session", comment: "")) {
+            act { await controls.deny(id, name, nil) }
+        }
+        if liveGrants[id] != nil {
+            Divider()
+            Button(NSLocalizedString("Revoke — ask next time", comment: ""), role: .destructive) {
+                act { await controls.revoke(id) }
+            }
+        }
+    }
+
+    /// "4m" / "1h 05m" / "45s" — rounded up, so a grant never reads 0 early.
+    static func grantRemaining(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds.rounded(.up)))
+        if s < 60 { return "\(s)s" }
+        let m = (s + 59) / 60
+        if m < 60 { return "\(m)m" }
+        return String(format: "%dh %02dm", m / 60, m % 60)
     }
 
     /// A `Binding<Bool>` into a configured credential's `requireApproval` flag,
@@ -4315,6 +4811,60 @@ struct ProfileEditorView: View {
         }
     }
 
+
+    // MARK: - Squelch section
+
+    @ViewBuilder
+    private var squelchSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox(label: Label(NSLocalizedString("Squelch", comment: "Squelch: feature name"),
+                                  systemImage: EditorCategory.squelch.symbol)) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle(NSLocalizedString("Trim the noise out of command output before the model reads it", comment: "Squelch toggle"),
+                           isOn: $draft.squelch.enabled)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            #if os(macOS)
+            if draft.id != ProfileStore.templateID, let summary = SquelchLedger.shared.summary(draft.id) {
+                GroupBox(label: Label(NSLocalizedString("Saved so far", comment: "Squelch: savings"), systemImage: "chart.bar.fill")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        SquelchTallyRow(title: draft.name, tally: summary.total)
+                        if !summary.commands.isEmpty {
+                            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                                ForEach(summary.commands, id: \.name) { e in
+                                    GridRow {
+                                        Text(e.name).font(.system(size: 11.5, design: .monospaced)).lineLimit(1)
+                                        Text(String(format: NSLocalizedString("%@ tokens", comment: "session header"),
+                                                    SquelchFormat.tokens(e.tally.savedTokens)))
+                                            .monospacedDigit()
+                                        Text(SquelchFormat.percent(e.tally.savedFraction)).monospacedDigit().foregroundStyle(.secondary)
+                                    }
+                                    .font(.system(size: 11.5))
+                                }
+                            }
+                        }
+                        SquelchDaysChart(days: summary.days)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            #endif
+
+            Text(SquelchHome.tokenNote)
+                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text(NSLocalizedString("Inspired by", comment: "Squelch: credit, followed by the project's link"))
+                Link(destination: URL(string: "https://github.com/rtk-ai/rtk")!) {
+                    Text(verbatim: "rtk — Rust Token Killer (rtk-ai), Apache-2.0")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+    }
 
     // MARK: - Supply Chain section
 
@@ -4595,8 +5145,33 @@ struct ProfileEditorView: View {
                 }
                 .padding(8)
             }
+
+            // GitHub issue #54: a package a reputation check blocks, that
+            // the user trusts, without turning the checks off.
+            GroupBox(label: Label(NSLocalizedString("Trusted packages", comment: "supply chain settings: reputation allowlist"),
+                                  systemImage: "checkmark.shield")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(NSLocalizedString("When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden.", comment: "supply chain settings: reputation allowlist"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    allowlistEditor(
+                        title: NSLocalizedString("Install despite reputation warnings (format: `npm:workerd`)", comment: "supply chain settings: reputation allowlist"),
+                        list: $draft.supplyChain.reputationAllowlist)
+                }
+                .padding(8)
+            }
         }
         .padding(16)
+        .onReceive(NotificationCenter.default.publisher(for: .bromureSupplyChainAllowlistChanged)) { note in
+            // Allowed elsewhere while this editor is open (the Security
+            // window, an override prompt): adopt it, so this older draft
+            // can't drop it on Save.
+            guard (note.object as? UUID) == draft.id, let entry = note.userInfo?["entry"] as? String,
+                  !draft.supplyChain.reputationAllowlist.contains(where: { $0.lowercased() == entry.lowercased() })
+            else { return }
+            draft.supplyChain.reputationAllowlist.append(entry)
+        }
     }
 
     /// Compact list-editor reused for the per-package allowlists.
@@ -4775,7 +5350,22 @@ struct ProfileEditorView: View {
         // Only the name is required to save. Empty API key is allowed
         // (token mode users may want to paste the key after creation;
         // subscription mode never needs one).
-        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !draft.name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        #if os(macOS)
+        // A broken OpenShell policy fails closed (no network but the provider
+        // layer), so it can't be saved; the editor shows why.
+        if draft.usesOpenShellPolicy, (try? OpenShellPolicy.parse(draft.networkPolicy)) == nil { return false }
+        // …and must fit inside the organization boundary.
+        if draft.usesOpenShellPolicy,
+           OpenShellGovernance.shared.check(policyYAML: draft.networkPolicy,
+                                            providerRules: draft.openShellProviderRules)?.passed == false {
+            return false
+        }
+        #endif
+        // Strict credential mode binds every credential to its hosts; a custom
+        // token with no host filter would be injected anywhere.
+        if draft.strictCredentials, !draft.unboundCredentialNames.isEmpty { return false }
+        return true
     }
 
     @ViewBuilder
@@ -5707,6 +6297,15 @@ private struct MCPServerRow: View {
 private struct StorageStackView: View {
     let isNewProfile: Bool
     let context: ProfileStorageContext
+    /// An erase or reset changed the disks under the editor: the home size
+    /// field's floor follows the image (gone after an erase, so a smaller
+    /// home can be picked), and nothing else would redraw it.
+    var onStorageChanged: () -> Void = {}
+
+    /// Run a storage action, then re-measure and tell the editor.
+    private func changing(_ action: @escaping () -> Void) -> () -> Void {
+        { action(); onStorageChanged(); Task { await refreshSizes() } }
+    }
 
     /// Computed asynchronously on view appear so a huge npm-global tree
     /// doesn't block the editor's first paint.
@@ -5743,7 +6342,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetHome
+                        handler: changing(context.onResetHome)
                       ),
                 // One slot, model-exclusive: legacy homes offer the upgrade,
                 // ext4 homes offer the checkpoint rollback.
@@ -5790,7 +6389,7 @@ private struct StorageStackView: View {
                         disabledHelp: remote ? Self.remoteHelp : context.isRunning
                             ? NSLocalizedString("Close the session window first.", comment: "")
                             : NSLocalizedString("Created on first launch.", comment: ""),
-                        handler: context.onResetDisk
+                        handler: changing(context.onResetDisk)
                       )
             )
 
@@ -6948,5 +7547,30 @@ struct HostListField: View {
                 // Changed elsewhere (not by typing here): show it.
                 if Self.parse(text) != new { text = new.joined(separator: ", ") }
             }
+    }
+}
+
+/// An ⓘ beside a setting that shows its full explanation in a popover, so a
+/// settings pane reads as one short line per setting.
+struct InfoTip: View {
+    private let text: Text
+    @State private var shown = false
+
+    init(_ key: LocalizedStringKey) { text = Text(key) }
+    init(verbatim s: String) { text = Text(verbatim: s) }
+
+    var body: some View {
+        Button { shown.toggle() } label: {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(Text("More about this setting"))
+        .accessibilityLabel(Text("More about this setting"))
+        .popover(isPresented: $shown, arrowEdge: .trailing) {
+            text.font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 340, alignment: .leading)
+                .padding(14)
+        }
     }
 }

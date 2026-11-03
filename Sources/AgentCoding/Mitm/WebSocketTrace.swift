@@ -276,6 +276,9 @@ final class WSTraceCollector: @unchecked Sendable {
     private var pendingCompressed = false
 
     private(set) var messages: [WSMessage] = []
+    /// Messages past `maxMessages`: parsed and handed to `onMessage` like
+    /// any other, just not kept for the transcript.
+    private(set) var droppedMessages = 0
 
     /// Per-message hook fired as soon as a complete frame is assembled
     /// (data frames after defragment + inflate; control frames
@@ -286,13 +289,31 @@ final class WSTraceCollector: @unchecked Sendable {
     /// is the only writer.
     var onMessage: (@Sendable (WSMessage) -> Void)?
 
-    init(direction: WSMessage.Direction, inflater: WSInflater? = nil) {
+    /// false: a parser that only fires `onMessage` and keeps nothing (a
+    /// socket nobody traces, whose messages are still read — Squelch).
+    let retainsMessages: Bool
+    /// How much of a data message `onMessage` gets. The transcript keeps
+    /// `perMessageCap` of each; a reader that must see the whole message
+    /// (Squelch learning a tool call whose arguments run past 1 MB) asks for
+    /// more, up to the inflater's own 32 MB ceiling.
+    let deliverCap: Int
+
+    init(direction: WSMessage.Direction, inflater: WSInflater? = nil, retainsMessages: Bool = true,
+         deliverCap: Int = WSTraceCollector.perMessageCap) {
         self.direction = direction
         self.inflater = inflater
+        self.retainsMessages = retainsMessages
+        self.deliverCap = max(deliverCap, Self.perMessageCap)
     }
 
     /// Feed a chunk of bytes. Internally parses frames, defragments
-    /// continuations, and appends complete messages. Returns the
+    /// continuations, and appends complete messages. Every complete frame
+    /// in the chunk is handled before this returns, cap or not: the caller
+    /// forwards the chunk next, and `onMessage` (Squelch learning a tool
+    /// call, the BAC events) must have seen it by then. `maxMessages` only
+    /// stops the keeping. (It used to stop the parsing: one frame per
+    /// chunk past the cap, so the backlog never drained and calls a
+    /// streaming turn announced after message 4096 went unlearned.) Returns the
     /// number of *application* bytes (sum of all frame payloads,
     /// including continuations) seen in this chunk — the caller adds
     /// these to its byte counters.
@@ -303,7 +324,6 @@ final class WSTraceCollector: @unchecked Sendable {
         while let frame = decoder.nextFrame() {
             appBytes += frame.payload.count
             handle(frame: frame)
-            if messages.count >= Self.maxMessages { break }
         }
         return appBytes
     }
@@ -337,7 +357,7 @@ final class WSTraceCollector: @unchecked Sendable {
         if pendingKind != nil { flushPending() }
         pendingKind = kind
         pendingCompressed = rsv1 && (inflater != nil)
-        pendingPayload = pendingCompressed ? first : takePreview(first)
+        pendingPayload = pendingCompressed ? first : first.prefix(deliverCap)
         pendingTotal = first.count
     }
 
@@ -353,7 +373,7 @@ final class WSTraceCollector: @unchecked Sendable {
             // Keep the full compressed payload — inflate after FIN.
             pendingPayload.append(payload)
         } else {
-            let remaining = Self.perMessageCap - pendingPayload.count
+            let remaining = deliverCap - pendingPayload.count
             if remaining > 0 {
                 pendingPayload.append(payload.prefix(remaining))
             }
@@ -367,11 +387,16 @@ final class WSTraceCollector: @unchecked Sendable {
         // before truncation/preview — running the preview cap on
         // compressed input mid-block would corrupt it.
         var payload = pendingPayload
+        // The message's real length: the INFLATED one when it was
+        // compressed. (It was the compressed length, so a 1.5 MB event that
+        // deflated to 2 KB came out cut at 1 MB yet "not truncated", and its
+        // tool call was lost to Squelch — finding CWE-670, "Squelch misses a
+        // tool call whose server event the trace preview cut at 1MB".)
+        var total = pendingTotal
         if pendingCompressed, let inflater {
             if let inflated = inflater.inflate(payload) {
-                payload = inflated.count > Self.perMessageCap
-                    ? inflated.prefix(Self.perMessageCap)
-                    : inflated
+                total = inflated.count
+                payload = inflated.count > deliverCap ? inflated.prefix(deliverCap) : inflated
             }
             // On inflate failure: fall through with the still-
             // compressed bytes so the user sees something rather
@@ -379,15 +404,15 @@ final class WSTraceCollector: @unchecked Sendable {
             // in the renderer will fall back to hex.
         }
 
-        let truncated = pendingTotal > payload.count
+        let now = Date()
         let msg = WSMessage(
             direction: direction,
-            timestamp: Date(),
+            timestamp: now,
             kind: kind,
             payload: payload,
-            truncated: truncated,
-            totalBytes: pendingTotal)
-        messages.append(msg)
+            truncated: total > payload.count,
+            totalBytes: total)
+        keep(msg)
         onMessage?(msg)
         pendingKind = nil
         pendingPayload = Data()
@@ -404,8 +429,19 @@ final class WSTraceCollector: @unchecked Sendable {
             payload: preview,
             truncated: payload.count > preview.count,
             totalBytes: payload.count)
-        messages.append(msg)
+        keep(msg)
         onMessage?(msg)
+    }
+
+    /// The transcript's copy: the first `perMessageCap` bytes (marked
+    /// truncated when that cut anything), and none past `maxMessages`.
+    private func keep(_ msg: WSMessage) {
+        guard retainsMessages else { return }
+        guard messages.count < Self.maxMessages else { droppedMessages += 1; return }
+        let kept = takePreview(msg.payload)
+        messages.append(kept.count == msg.payload.count ? msg
+            : WSMessage(direction: msg.direction, timestamp: msg.timestamp, kind: msg.kind, payload: kept,
+                        truncated: true, totalBytes: msg.totalBytes))
     }
 
     private func takePreview(_ data: Data) -> Data {
@@ -432,6 +468,10 @@ enum WSTranscriptRenderer {
         }
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let dropped = c2u.droppedMessages + u2c.droppedMessages
+        if dropped > 0 {
+            out.append(Data("(\(dropped) later messages not kept: \(WSTraceCollector.maxMessages) per direction)\n".utf8))
+        }
         for m in all {
             let arrow = m.direction == .clientToUpstream ? ">>>" : "<<<"
             let truncMark = m.truncated ? " (truncated, total \(m.totalBytes) bytes)" : ""
@@ -514,3 +554,4 @@ enum WSTranscriptRenderer {
 private extension Optional where Wrapped == Bool {
     func intoBool() -> Bool { self ?? false }
 }
+

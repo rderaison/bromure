@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import Virtualization
+import SandboxEngine
 
 /// Process-lifetime MITM coordinator. Owns the CA, the cert cache,
 /// the token swap maps, and the ssh-agent keystore. ACAppDelegate
@@ -35,6 +36,9 @@ public final class MitmEngine {
     /// requests and re-signs with material that lives only on the host.
     /// See `AWSResigner` for the threat model.
     public let awsResigner: AWSResigner
+    /// Rewrites the responses of calls that issue a credential; see
+    /// `CredentialMint`. The app sets its `sink` to save what it mints.
+    public let credentialMinter: CredentialMinter
     public let consent: ConsentBroker
     /// Per-profile, per-scope consent for the `.promptOnWrite`
     /// guardrails mode. Lives alongside the credential `consent`
@@ -72,6 +76,12 @@ public final class MitmEngine {
     /// re-resolve op-sourced credentials every 120 s and update the swap map
     /// in place. Cancelled in `unregister(profileID:)`.
     public let opRefresher = OnePasswordRefresher()
+    /// The exec contexts the poller runs per workspace, so a live refresh
+    /// can keep their fakes (`KubeconfigMaterializer.materialize(reusingExec:)`).
+    private var kubeExecContexts: [UUID: [KubeconfigMaterializer.ExecContext]] = [:]
+    public func kubeExecContexts(for profileID: UUID) -> [KubeconfigMaterializer.ExecContext] {
+        kubeExecContexts[profileID] ?? []
+    }
 
     /// Per-profile trace level + session id, set by ACAppDelegate at
     /// session launch. The HTTPProxy connection looks these up to
@@ -112,6 +122,7 @@ public final class MitmEngine {
         guardrailsLock.lock()
         let prior = guardrailsConfigs[profileID]?.egressPolicy
         guardrailsConfigs[profileID] = config
+        UnmanagedCredentialGuard.shared.setEnabled(config.strictCredentials, for: profileID)
         guardrailsLock.unlock()
         // The firewall is live: a connection the new rules deny is cut now,
         // not left running until it ends on its own (the proxy route never
@@ -131,6 +142,8 @@ public final class MitmEngine {
     public nonisolated func clearGuardrailsConfig(for profileID: UUID) {
         guardrailsLock.lock()
         guardrailsConfigs.removeValue(forKey: profileID)
+        UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
+        UnmanagedCredentialGuard.shared.reset(profileID: profileID)
         guardrailsLock.unlock()
         EgressConnectionRegistry.shared.forget(profileID: profileID)
     }
@@ -395,6 +408,7 @@ public final class MitmEngine {
                 ofItemAtPath: saltURL.path)
             self.fakeTokenSalt = fresh
         }
+        self.credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
     }
 
     /// Wire vsock listeners on the VM's socket device. Call once per
@@ -423,6 +437,7 @@ public final class MitmEngine {
         }
         // Claude subscription auth: one closure lets the proxy reach the shared
         // store (bogus-key lookup) + refresher (live access token).
+        HTTPMitmConnection.credentialMinterProvider = { [weak self] in self?.credentialMinter }
         HTTPMitmConnection.claudeSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.claudeSubscriptionStore, self.claudeRefresher)
@@ -491,48 +506,84 @@ public final class MitmEngine {
     /// spliced raw (fail open); everything else is MiTM'd through the identical
     /// per-profile policy chain as the vsock path. Takes ownership of `appFD`.
     @available(macOS, deprecated: 10.15)
-    public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int) {
+    public nonisolated func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int,
+                                                  srcPort: Int = 0) {
         // Off the cooperative pool: the connection blocks on its sockets.
         MitmTasks.spawn { [weak self] in
             guard let self else { close(appFD); return }
 
+            // Strict sandbox: ask the guest's root attestor which executable
+            // opened this connection (by its source port), before any policy
+            // decision. No answer = no identity = only provider rules apply.
+            var identity: OpenShellPolicy.BinaryIdentity?
+            if self.guardrailsConfig(for: profileID)?.egressPolicy?.enforceBinaries == true, srcPort > 0 {
+                identity = await BinaryIdentityService.shared.identity(
+                    profileID: profileID, sport: UInt16(truncatingIfNeeded: srcPort),
+                    dst: destIP, dport: UInt16(truncatingIfNeeded: destPort))
+            }
+
             // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
             // destination (the switch has no SNI for cleartext), apply the egress
             // policy, then MiTM as cleartext (or splice on passthrough / non-HTTP).
-            if destPort == 80 {
-                let host = Self.peekHTTPHost(fd: appFD) ?? destIP
-                var shouldSplice = PassthroughList.current().matches(host)
-                if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
-                    switch policy.verdict(ip: nil, hostnames: [host], proto: .tcp,
-                                          port: UInt16(truncatingIfNeeded: destPort)) {
+            let destAddr = EgressPolicy.parseIPv4Address(destIP)
+            // An OpenShell L7 endpoint on another port: the switch diverted it
+            // here, and cleartext HTTP on it gets the same treatment as :80.
+            var plainHTTP = destPort == 80
+            var tlsPeek: TLSClientHello.Result?
+            if !plainHTTP,
+               self.guardrailsConfig(for: profileID)?.egressPolicy?.inspectedPorts
+                   .contains(UInt16(truncatingIfNeeded: destPort)) == true {
+                let d = TLSClientHello.peek(fd: appFD)
+                if case .notTLS = d { plainHTTP = true } else { tlsPeek = d }
+            }
+            if plainHTTP {
+                let peeked = Self.peekHTTPHost(fd: appFD)
+                let host = peeked ?? destIP
+                BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: peeked, port: destPort)
+                let strict80 = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
+                var shouldSplice = !strict80 && PassthroughList.current().matches(host)
+                // `policy.local` on its reserved address: the advisor, answered
+                // by the proxy (no egress decision, never forwarded).
+                let advisor = destIP == EgressPolicy.advisorAddressString && host == OpenShellAdvisor.host
+                if !advisor, let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
+                    // pf rules keep their name-only check here; OpenShell also
+                    // needs the address (allowed_ips, private-range guard).
+                    let os = policy.openShell != nil
+                    switch policy.verdict(ip: os ? destAddr : nil,
+                                          hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
+                                          port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
                         if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: host,
-                                                                   port: destPort, denied: true) {
+                                                                   port: destPort, denied: true, exe: identity?.exe) {
                         SupplyChainLog.shared.record(
                             "[firewall] ✗ deny tcp \(host):\(destPort) (\(profileID.uuidString.prefix(8)))")
                         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                             eventData: ["action": .string("deny"), "proto": .string("tcp"),
                                         "host": .string(host), "port": .int(destPort), "layer": .string("l4"),
+                                        "dst_ip": .string(destIP), "exe": .of(identity?.exe),
                                         "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
                                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
                                         "by_policy": .bool(true)])
                         }
                         close(appFD); return
-                    case .mitm:  shouldSplice = false
-                    case .allow: break
+                    case .mitm:   shouldSplice = false
+                    case .splice: shouldSplice = true
+                    case .allow:  break
                     }
                 }
                 if shouldSplice {
                     MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
                 } else {
-                    await self.makeConnection(fd: appFD, profileID: profileID)
+                    await self.makeConnection(fd: appFD, profileID: profileID, identity: identity)
                         .runTransparentHTTP(host: host, port: destPort)
                 }
                 return
             }
 
-            let decision = TLSClientHello.peek(fd: appFD)
-            let passthrough = PassthroughList.current()
+            let decision = tlsPeek ?? TLSClientHello.peek(fd: appFD)
+            // Strict credential mode inspects every flow: no passthrough list.
+            let strict = self.guardrailsConfig(for: profileID)?.strictCredentials ?? false
+            let passthrough = strict ? PassthroughList.none : PassthroughList.current()
             let host: String
             var shouldSplice: Bool
             switch decision {
@@ -550,41 +601,61 @@ public final class MitmEngine {
             // Egress firewall by SNI hostname (the authoritative check for TLS,
             // and the fallback for hostnames the switch couldn't DNS-resolve at
             // L4). deny → close; a `web` rule → force MiTM over passthrough.
-            if case .sni(let sni) = decision,
-               let policy = self.guardrailsConfig(for: profileID)?.egressPolicy {
-                switch policy.verdict(ip: nil, hostnames: [sni], proto: .tcp, port: UInt16(truncatingIfNeeded: destPort)) {
+            // An OpenShell policy also decides SNI-less and non-TLS flows (by
+            // destination address) instead of letting them fail open: its rules
+            // are default-deny, and the switch deferred these flows to us.
+            let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: sniHost, port: destPort)
+            if let policy = self.guardrailsConfig(for: profileID)?.egressPolicy,
+               sniHost != nil || policy.openShell != nil {
+                switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,
+                                      hostnames: sniHost.map { [$0] } ?? [], proto: .tcp,
+                                      port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                 case .deny:
-                    if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: sni,
-                                                               port: destPort, denied: true) {
+                    let label = sniHost ?? destIP
+                    if EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
+                                                               port: destPort, denied: true, exe: identity?.exe) {
                     SupplyChainLog.shared.record(
-                        "[firewall] ✗ deny tcp \(sni):\(destPort) (\(profileID.uuidString.prefix(8)))")
+                        "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
                     BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
                         eventData: ["action": .string("deny"), "proto": .string("tcp"),
-                                    "host": .string(sni), "port": .int(destPort), "layer": .string("sni"),
-                                    "rule": .of(policy.firstMatch(ip: nil, hostnames: [sni], proto: .tcp,
+                                    "host": .string(label), "port": .int(destPort), "layer": .string("sni"),
+                                    "dst_ip": .string(destIP), "exe": .of(identity?.exe),
+                                    "rule": .of(policy.firstMatch(ip: nil, hostnames: sniHost.map { [$0] } ?? [],
+                                                                  proto: .tcp,
                                                                   port: UInt16(truncatingIfNeeded: destPort))?.text),
                                     "by_policy": .bool(true)])
                     }
                     close(appFD); return
-                case .mitm:  shouldSplice = false               // `web` rule overrides passthrough
-                case .allow: break
+                case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
+                case .splice: shouldSplice = true               // OpenShell `tls: skip`
+                case .allow:  break
                 }
             }
 
             if shouldSplice {
+                // Strict credential mode can't vouch for an uninspected
+                // non-TLS stream on an HTTP(S) port; only an explicit OpenShell
+                // `tls: skip` endpoint is relayed raw.
+                if strict, sniHost == nil {
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny uninspectable tcp \(destIP):\(destPort) — strict credentials (\(profileID.uuidString.prefix(8)))")
+                    close(appFD); return
+                }
                 MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
                 return
             }
 
-            let conn = self.makeConnection(fd: appFD, profileID: profileID)
+            let conn = self.makeConnection(fd: appFD, profileID: profileID, identity: identity)
             await conn.runTransparentTLS(host: host, port: destPort)
         }
     }
 
     /// Build a MITM connection wired to this engine's per-profile policy chain.
     /// Shared by the TLS (:443) and cleartext (:80) transparent paths.
-    private nonisolated func makeConnection(fd: Int32, profileID: UUID) -> HTTPMitmConnection {
-        HTTPMitmConnection(
+    private nonisolated func makeConnection(fd: Int32, profileID: UUID,
+                                            identity: OpenShellPolicy.BinaryIdentity? = nil) -> HTTPMitmConnection {
+        let conn = HTTPMitmConnection(
             fd: fd,
             profileID: profileID,
             certCache: self.certCache,
@@ -603,6 +674,8 @@ public final class MitmEngine {
             guardrailsProvider: { [weak self] in self?.guardrailsConfig(for: profileID) },
             supplyChainProvider: { [weak self] in self?.supplyChainPolicy(for: profileID) }
         )
+        conn.binaryIdentity = identity
+        return conn
     }
 
     /// MSG_PEEK the start of a plain-HTTP request and extract the destination
@@ -676,6 +749,37 @@ public final class MitmEngine {
         }
     }
 
+    /// Hand the proxy what a workspace's kubeconfigs need on the wire: the
+    /// real client identities (upstream mTLS), each cluster's own CA (the
+    /// only anchor its API server is checked against), and the exec-plugin
+    /// pollers. Replaces whatever the workspace had, so an entry added,
+    /// edited or removed while the VM runs takes effect at once.
+    ///
+    /// The launch path did all of this and the live credential refresh only
+    /// the token swaps: a kubeconfig imported into a running workspace got
+    /// its YAML and fakes but no CA ("signed by a CA the host running
+    /// Bromure AC does not trust") and no client certificate.
+    public func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID) {
+        kubeExecContexts[profileID] = mat.execContexts.isEmpty ? nil : mat.execContexts
+        Self.applyKubeMaterial(mat, profileID: profileID, identities: clientIdentities,
+                               clusterCAs: clusterCAs, poller: execPoller, swapper: swapper)
+    }
+
+    static func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID,
+                                  identities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry,
+                                  poller: ExecCredentialPoller, swapper: TokenSwapper) {
+        // Each registry swapped in one locked step: a handshake on the
+        // proxy's queue never sees the workspace cleared mid-rebuild.
+        identities.replaceAll(mat.clientIdentities.map {
+            (host: $0.host, entry: .init(identity: $0.identity, consentCredentialID: $0.consentCredentialID,
+                                         consentDisplayName: $0.consentDisplayName))
+        }, for: profileID)
+        clusterCAs.replaceAll(mat.clusterCAs.map { (pem: $0.caPEM, host: $0.host) }, for: profileID)
+        // Unchanged contexts keep their poller (no second run of the same
+        // plugin racing the first); changed ones restart, removed ones stop.
+        poller.sync(mat.execContexts, profileID: profileID, swapper: swapper)
+    }
+
     public func unregister(profileID: UUID) {
         listenerHolders.removeValue(forKey: profileID)
         // Kill this workspace's signing oracle along with its key maps.
@@ -687,10 +791,12 @@ public final class MitmEngine {
         swapper.clearMap(for: profileID)
         sshAgent.clearKeys(for: profileID)
         sshAgent.clearImportedKeyApprovals(for: profileID)
+        sshAgent.clearHostAgentKeys(for: profileID)
         awsCreds.clearCredentials(for: profileID)
         clientIdentities.clearAll(for: profileID)
         clusterCAs.clearAll(for: profileID)
-        execPoller.stopAll()
+        execPoller.stopAll(profileID: profileID)
+        kubeExecContexts[profileID] = nil
         opRefresher.stop(profileID: profileID)
         // Drop any consent grants the user issued during this session
         // — "Allow for the rest of the session" must not survive a

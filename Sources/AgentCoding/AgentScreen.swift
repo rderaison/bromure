@@ -590,21 +590,167 @@ enum AgentScreen {
     /// device-code page (Grok, Kimi, Codex). Not the changelog link or the
     /// percent-encoded redirect_uri buried inside one. tmux `-J` joins the
     /// wrapped URL back into one line.
-    static func signInURL(_ lines: [String]) -> String? {
+    ///
+    /// The screen is the agent's pane — diffs and files it prints too —
+    /// so what it shows is untrusted. A line that quotes or assigns a URL
+    /// is code, the rest of it ignored (finding 2510C61A), and a URL is
+    /// taken only when it is the exact sign-in page `agent` itself prints
+    /// (`isSignInURL`: host, path, and for an authorize page its client
+    /// and where it sends the code) — not any page on a provider's domain
+    /// (finding 30BA541B: script.google.com, a GitHub consent page for an
+    /// attacker's app, a device page with an attacker's code).
+    static func signInURL(_ lines: [String], agent: String? = nil) -> String? {
         for line in lines {
             var rest = Substring(line)
-            while let r = rest.range(of: "https://") {
+            scan: while let r = rest.range(of: "https://") {
                 let url = String(rest[r.lowerBound...].prefix(while: { !$0.isWhitespace }))
-                rest = rest[r.upperBound...]
-                let low = url.lowercased()
-                if low.contains("/oauth/authorize") || low.contains("/oauth2/device")
-                    || low.contains("authorize_device") || low.contains("/codex/device")
-                    || low.contains("user_code=") {
-                    return url
+                let before = rest[..<r.lowerBound]
+                if let c = before.last, "\"'`=(<[".contains(c) { break scan }
+                if before.contains(where: { "\"'`".contains($0) }) { break scan }
+                // Past the whole URL: one quoted string can't hide another.
+                rest = rest[rest.index(r.lowerBound, offsetBy: url.count)...]
+                if isSignInURL(url, agent: agent) { return url }
+            }
+        }
+        return nil
+    }
+
+    /// One agent sign-in page: its exact hosts and path, and for an OAuth
+    /// authorize page the clients it may name (nil = any) and the
+    /// redirect hosts it may send the code to besides loopback (a page
+    /// that shows the code for pasting back).
+    struct SignInPage: Sendable {
+        enum Kind: Sendable { case authorize, device }
+        var kind: Kind
+        var hosts: Set<String>
+        var paths: Set<String>
+        var clientIDs: Set<String>? = nil
+        var codePages: Set<String> = []
+    }
+
+    /// Claude Code's OAuth client.
+    static let claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+    static let claudePages = [
+        SignInPage(kind: .authorize,
+                   hosts: ["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"],
+                   paths: ["/oauth/authorize", "/cai/oauth/authorize"],
+                   clientIDs: [claudeClientID],
+                   codePages: ["platform.claude.com", "console.anthropic.com"]),
+    ]
+    static let codexPages = [
+        SignInPage(kind: .device, hosts: ["auth.openai.com"], paths: ["/codex/device"]),
+        SignInPage(kind: .authorize, hosts: ["auth.openai.com"], paths: ["/oauth/authorize"]),
+    ]
+
+    /// The sign-in pages each agent prints (nil agent: any of them).
+    /// GitHub's device page is no one's: its code is whoever's printed.
+    static let signInPages: [String: [SignInPage]] = [
+        "claude": claudePages,
+        "codex": codexPages,
+        "grok": [
+            SignInPage(kind: .device, hosts: ["accounts.x.ai", "auth.x.ai"], paths: ["/oauth2/device"]),
+            SignInPage(kind: .authorize, hosts: ["accounts.x.ai", "auth.x.ai"],
+                       paths: ["/oauth2/auth", "/oauth2/authorize"]),
+        ],
+        "kimi": [
+            SignInPage(kind: .device,
+                       hosts: ["auth.kimi.ai", "kimi.ai", "www.kimi.ai", "auth.kimi.com", "kimi.com", "www.kimi.com"],
+                       paths: ["/device", "/authorize_device", "/code/authorize_device", "/api/oauth/authorize_device"]),
+        ],
+        "omp": claudePages + codexPages + [
+            SignInPage(kind: .authorize, hosts: ["accounts.google.com"],
+                       paths: ["/o/oauth2/auth", "/o/oauth2/v2/auth"]),
+        ],
+    ]
+
+    /// `url` is a sign-in page `agent` prints: exact host and path; an
+    /// authorize page names one of its clients and redirects to loopback
+    /// (or to its own code page).
+    static func isSignInURL(_ url: String, agent: String?) -> Bool {
+        signInPage(for: url, agent: agent) != nil
+    }
+
+    static func signInPage(for url: String, agent: String?) -> SignInPage? {
+        guard let host = signInHost(url), let u = URLComponents(string: url) else { return nil }
+        let path = u.path.lowercased()
+        let pages = agent.flatMap { signInPages[$0] } ?? signInPages.values.flatMap { $0 }
+        for page in pages where page.hosts.contains(host) && page.paths.contains(path) {
+            switch page.kind {
+            case .device:
+                return page
+            case .authorize:
+                let items = u.queryItems ?? []
+                func value(_ k: String) -> String? { items.first { $0.name == k }?.value }
+                if let ids = page.clientIDs, !ids.contains(value("client_id") ?? "") { continue }
+                guard let redirect = value("redirect_uri").flatMap(URLComponents.init(string:)),
+                      let rh = redirect.host?.lowercased() else { continue }
+                if Self.isLoopback(rh) || (redirect.scheme == "https" && page.codePages.contains(rh)) {
+                    return page
                 }
             }
         }
         return nil
+    }
+
+    static func isLoopback(_ host: String) -> Bool {
+        host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+    }
+
+    /// `url`'s host, lowercased — what the card's button names.
+    static func signInHost(_ url: String) -> String? {
+        guard let u = URLComponents(string: url), u.scheme?.lowercased() == "https",
+              let host = u.host?.lowercased(), !host.isEmpty, u.user == nil, u.password == nil else { return nil }
+        return host
+    }
+
+    /// The agent's sign-in shows: a dialog's own wording anywhere (but in
+    /// quotes), or
+    /// everyday wording ("not logged in", "run /login") as a status line
+    /// says it — leading the line, or after its " · " / "error:" — never
+    /// inside quotes or a code or diff line the agent printed (the card
+    /// came up over a diff with `# "Not logged in". Then exec …` in it).
+    static func loginShown(_ lines: [String], agent: String?) -> Bool {
+        let phrases = AgentPhrases.phrases(.login, agent: agent)
+        for raw in lines {
+            let line = AgentPhrases.normalize(raw)
+            for phrase in phrases {
+                guard let r = line.range(of: phrase) else { continue }
+                if Self.quoted(line, at: r) { continue }
+                if !AgentPhrases.everydayLogin.contains(phrase) { return true }
+                if Self.isStatusMention(line, at: r) { return true }
+            }
+        }
+        return false
+    }
+
+    /// `phrase` at `r` sits in a string: a quote opened before it on the
+    /// line, or one left open after it — the tail of a string the TUI
+    /// wrapped onto this line (`please run /login")`).
+    static func quoted(_ line: String, at r: Range<String.Index>) -> Bool {
+        let before = line[..<r.lowerBound], after = line[r.upperBound...]
+        if before.contains(where: { $0 == "\"" || $0 == "`" }) || before.last == "'" { return true }
+        return after.filter { $0 == "\"" }.count % 2 == 1 || after.filter { $0 == "`" }.count % 2 == 1
+    }
+
+    /// `phrase` at `r` reads as the agent's own message, not quoted text.
+    static func isStatusMention(_ line: String, at r: Range<String.Index>) -> Bool {
+        // The line's content: past the frame, the agent's markers and a
+        // list number ("⎿ ", "● ", "│ ", "1. ").
+        var body = Substring(line).drop { c in
+            c.isWhitespace || "│┃|>❯›▶●⎿✗✘⚠•*■".contains(c)
+                || (c.unicodeScalars.first.map { (0x2500...0x257F).contains($0.value) } ?? false)
+        }
+        if let dot = body.firstIndex(where: { !$0.isNumber }), dot > body.startIndex,
+           ".)".contains(body[dot]) {
+            body = body[body.index(after: dot)...].drop(while: \.isWhitespace)
+        }
+        // Code or a diff line: a comment, or "123 +"/"-" gutter.
+        if body.hasPrefix("#") || body.hasPrefix("//") || body.hasPrefix("+") || body.hasPrefix("-") { return false }
+        if body.range(of: #"^\d+\s*[+-]"#, options: .regularExpression) != nil { return false }
+        if body.startIndex == r.lowerBound { return true }
+        let lead = line[body.startIndex..<r.lowerBound]
+        return lead.hasSuffix("· ") || lead.hasSuffix("error: ") || lead.hasSuffix("error:")
     }
 
     /// A device code standing on its own line ("QZQD-KPB5"), or after a
@@ -624,12 +770,14 @@ enum AgentScreen {
     /// whose redirect goes to a page that SHOWS the code (Claude's
     /// `code=true` flow) rather than to a loopback listener.
     static func wantsPastedCode(_ url: String) -> Bool {
-        let low = url.lowercased()
-        guard low.contains("/oauth/authorize") else { return false }
-        if low.contains("code=true") { return true }
-        guard let r = low.range(of: "redirect_uri=") else { return false }
-        let redirect = (low[r.upperBound...].prefix(while: { $0 != "&" }).removingPercentEncoding ?? "")
-        return !(redirect.contains("localhost") || redirect.contains("127.0.0.1"))
+        // Only a sign-in page whose redirect is its provider's own code
+        // page: a code pasted back goes nowhere else (`code=true` alone
+        // proved nothing — anyone can put it in a URL).
+        guard let page = signInPage(for: url, agent: nil), page.kind == .authorize,
+              let redirect = URLComponents(string: url)?.queryItems?.first(where: { $0.name == "redirect_uri" })?.value
+                .flatMap(URLComponents.init(string:)),
+              let rh = redirect.host?.lowercased() else { return false }
+        return page.codePages.contains(rh)
     }
 
     /// The folder a dialog is about: a line that is just an absolute path
@@ -764,6 +912,17 @@ enum AgentPhrases {
         let t = normalize(text)
         return phrases(topic, agent: agent).contains { t.contains($0) }
     }
+
+    /// Sign-in wording that also turns up in ordinary text — code the agent
+    /// prints, a diff, a chat answer about logins. It counts only as the
+    /// agent's own status line says it (see `AgentScreen.loginShown`); the
+    /// rest of `.login` names a sign-in dialog and counts anywhere.
+    static let everydayLogin: Set<String> = [
+        "not logged in", "please run /login", "run /login", "please log in", "not signed in",
+        "login required", "llm not set", "run /login or /provider", "kimi login", "grok login",
+        "oauth login expired", "no models available", "no api key", "api key is not set",
+        "missing api key", "anthropic_api_key", "no model selected",
+    ]
 
     /// The first phrase of `topic` in `text`, for callers that need which.
     static func firstMatch(_ text: String, _ topic: Topic, agent: String?) -> String? {

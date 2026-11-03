@@ -970,7 +970,7 @@ enum Fusion {
     private static func responseWireBlob(status: Int, headers: HTTPURLResponse?,
                                          body: Data) -> Data {
         var s = "HTTP/1.1 \(status) "
-        s += HTTPURLResponse.localizedString(forStatusCode: status).capitalized + "\r\n"
+        s += HTTPMitmConnection.reasonPhrase(status) + "\r\n"
         if let headers {
             for (k, v) in headers.allHeaderFields {
                 guard let key = k as? String, let val = v as? String else { continue }

@@ -141,15 +141,19 @@ final class InferenceRepairProxy: @unchecked Sendable {
 
     private func handle(clientFD: Int32, enginePort: Int) {
         defer { close(clientFD) }
-        while let req = Self.readRequest(fd: clientFD) {
+        // One pool per request: a raw Thread never drains its implicit pool,
+        // so a keep-alive connection would hold every request's (multi-MB)
+        // prompt JSON until it closed.
+        while autoreleasepool(invoking: { () -> Bool in
+            guard let req = Self.readRequest(fd: clientFD) else { return false }
             guard let resp = Self.respond(to: req, enginePort: enginePort,
                                           streamFD: clientFD) else {
-                break   // streamed directly on the socket (Connection: close)
+                return false   // streamed directly on the socket (Connection: close)
             }
-            if !Self.writeAll(clientFD, resp) { break }
+            if !Self.writeAll(clientFD, resp) { return false }
             // Honour keep-alive; the read loop exits on EOF / next-request error.
-            if req.headerValue("connection")?.lowercased() == "close" { break }
-        }
+            return req.headerValue("connection")?.lowercased() != "close"
+        }) {}
     }
 
     struct Request {

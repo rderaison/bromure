@@ -51,19 +51,24 @@ final class BrowserMCPRelayClient {
         let host = self.host, vm = self.vm
         Thread.detachNewThread { [weak self] in
             while self?.runningSnapshot() == true {
-                guard let raw = RemoteTransport.browserMCPDial(host: host, vm: vm), raw >= 0 else {
-                    Thread.sleep(forTimeInterval: 1.0); continue
+                // One pool per dial: a raw Thread never drains its implicit pool.
+                let go = autoreleasepool { () -> Bool in
+                    guard let raw = RemoteTransport.browserMCPDial(host: host, vm: vm), raw >= 0 else {
+                        Thread.sleep(forTimeInterval: 1.0); return true
+                    }
+                    // Atomic vs stop(): if stop() raced the dial, close and exit —
+                    // otherwise the fd is adopted with no closer and pump() parks.
+                    guard self?.adoptFD(raw) == true else { Darwin.close(raw); return false }
+                    FDGuard.adopt(raw, "browser-mcp-relay")
+                    self?.pump(raw)          // blocks until the channel drops
+                    // Clear before closing so stop() can't act on a stale number;
+                    // this is the sole close — stop() only shuts down.
+                    self?.clearFD(raw)
+                    FDGuard.close(raw, "browser-mcp-relay")
+                    if self?.runningSnapshot() == true { Thread.sleep(forTimeInterval: 0.5) }
+                    return true
                 }
-                // Atomic vs stop(): if stop() raced the dial, close and exit —
-                // otherwise the fd is adopted with no closer and pump() parks.
-                guard self?.adoptFD(raw) == true else { Darwin.close(raw); break }
-                FDGuard.adopt(raw, "browser-mcp-relay")
-                self?.pump(raw)          // blocks until the channel drops
-                // Clear before closing so stop() can't act on a stale number;
-                // this is the sole close — stop() only shuts down.
-                self?.clearFD(raw)
-                FDGuard.close(raw, "browser-mcp-relay")
-                if self?.runningSnapshot() == true { Thread.sleep(forTimeInterval: 0.5) }
+                if !go { return }
             }
         }
     }

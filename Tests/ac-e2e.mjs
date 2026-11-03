@@ -1902,7 +1902,10 @@ async function main() {
     await test("15.4 workspaces rm refuses while the VM is running", async () => {
       await withCLIVM("ACE2E_CLI_RmGuard", [], async (name) => {
         const out = cli(["workspaces", "rm", name, "-f"], { allowFail: true });
-        assert(/running VM/i.test(out), `expected a refusal, got: ${out}`);
+        // "“<name>” is running — shut it down (or `vm kill` it), then delete it."
+        assert(/is running/i.test(out) && /shut it down/i.test(out), `expected a refusal, got: ${out}`);
+        const ls = cli(["workspaces", "ls"], { allowFail: true });
+        assertIncludes(ls, name, "the refused rm deleted the workspace anyway");
       });
     });
   }
@@ -2833,7 +2836,10 @@ async function main() {
             await sh(id, `cd ${wtDir} && echo kanban > KANBAN.txt && git add -A && ` +
                          `git commit -qm 'add KANBAN.txt'`);
             await signalDone(id, branch);
-            const t = await waitForTask(KTID, (x) => x.stage === "testing", 30);
+            // The tab's agent is live, so completion holds until its own
+            // transcript has been quiet ~20s (waitForSessionQuiet) — poll
+            // well past that on a loaded node.
+            const t = await waitForTask(KTID, (x) => x.stage === "testing", 60);
             assert(t && t.stage === "testing", `task never reached Testing: ${JSON.stringify(t)}`);
             assertEq(t.branch, branch, "Testing task lost its actual branch");
             assertEq(t.parentBranch, defBranch, "parent branch not captured");
@@ -2926,6 +2932,20 @@ async function main() {
             // Fabricate the Claude transcript the host pulls at completion —
             // the project dir just has to match the host's `*-<slug>` glob.
             const MARK = `{"type":"user","message":{"role":"user","content":"ace2e-transcript"}}`;
+            // The run's real agent writes its own transcript under a project
+            // dir that ALSO ends in the slug. Both the quiet probe and the
+            // transcript pull take the newest such dir: an agent that creates
+            // its session after the fabricated one (a slow start on a loaded
+            // node) has the probe hold on a live transcript for 20s+ and the
+            // pull serve the wrong file. Let it create its session (or give
+            // up waiting), then stop it — nothing writes after this point.
+            await sh(id,
+              `for i in $(seq 1 20); do ls ~/.claude/projects/*-${runRec.branchSlug}/*.jsonl ` +
+              `>/dev/null 2>&1 && break; sleep 1; done; ` +
+              `idx=$(tmux list-windows -t bromure -F '#{window_index} #{@worktree}' | ` +
+              `awk -v b='${branchName}' '$2==b {print $1; exit}'); [ -n "$idx" ] || exit 1; ` +
+              `p=$(tmux list-panes -t bromure:$idx -F '#{pane_pid}' | head -1); ` +
+              `pkill -KILL -P "$p"; sleep 1; true`, { timeout: 40 });
             // Back-date the transcript so it reads as already "quiet": the
             // automation-run completion holds in waitForSessionQuiet until the
             // transcript has been untouched for ~20s (to let background subagents
@@ -3185,10 +3205,10 @@ echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           // GET allowed (reaches upstream), POST blocked with OUR 403.
           assert(Number(grab(out, "GET443")) < 400, `GET https should be allowed, got ${grab(out, "GET443")}`);
           assertEq(grab(out, "POST443"), "403", `POST https should be blocked (403), got ${grab(out, "POST443")}`);
-          assertIncludes(grab(out, "BODY443"), "Bromure Guardrails", "443 POST 403 not from Bromure Guardrails");
+          assertIncludes(grab(out, "BODY443"), "Bromure firewall rule", "443 POST 403 not from the Bromure firewall");
           assert(Number(grab(out, "GET80")) < 400, `GET http:80 should be allowed, got ${grab(out, "GET80")}`);
           assertEq(grab(out, "POST80"), "403", `POST http:80 should be blocked (403), got ${grab(out, "POST80")}`);
-          assertIncludes(grab(out, "BODY80"), "Bromure Guardrails", "80 POST 403 not from Bromure Guardrails");
+          assertIncludes(grab(out, "BODY80"), "Bromure firewall rule", "80 POST 403 not from the Bromure firewall");
         });
       });
 
@@ -3890,8 +3910,8 @@ for n, c in enumerate(calls, 1):
             assert(r.ok === true && r.id, `start-session: ${JSON.stringify(r)}`);
             s2 = r.id;
             const rec = await waitBound(s2);
-            assert(/^~\/claude-\d{6}-\d{4}$/.test(rec.cwd),
-                   `expected a synthetic ~/claude-yyMMdd-HHmm folder, got ${rec.cwd}`);
+            assert(/^~\/claude-\d{4}-\d{4}$/.test(rec.cwd),
+                   `expected a synthetic ~/claude-MMdd-HHmm folder, got ${rec.cwd}`);
             await gx(vm.id, `test -d ${guestPath(rec.cwd)}`);
             assertEq(await tabDisplay(vm.id, rec.windowIndex), rec.launchDisplay, "@display mismatch");
             const other = s1 && (await sessionRec(s1));
@@ -4232,17 +4252,25 @@ for n, c in enumerate(calls, 1):
             assert(hits.length > 0, "the request's notice was never typed into any tab");
             assert(hits.every((l) => l.startsWith(`line w${B.w} `)),
                    `the notice went to the wrong tab (B is w${B.w}): ${hits.join(" | ")}`);
+            // A short request is typed whole, with its file — it counts as read
+            // (no read_inbox round trip for the peer).
+            assert(hits.some((l) => l.includes("that is the whole request") && l.includes("payload.txt")),
+                   `the notice doesn't carry the whole request and its file: ${hits.join(" | ")}`);
             assert(!(await sessionTranscript(A.id)).includes("asks you (request"), "the requester got its own notice");
           });
 
           await test("31.3 peer read_inbox → deliver with a file; requester gets the notice, the reply, and the file", async () => {
             assert(reqID, "no request from 31.2");
+            // The notice carried the request whole, so it counts as read: the
+            // inbox needn't serve it again (it may, if read_inbox beats the
+            // notice's bookkeeping — then it must be the request).
             const [inbox] = await mcp(vm.id, B.w, [{ name: "read_inbox" }]);
-            assert(!inbox.isError && inbox.json, `read_inbox: ${inbox.text.slice(0, 300)}`);
-            const brief = (inbox.json.messages || []).find((m) => sameID(m.delegation_id, reqID));
-            assert(brief && brief.kind === "brief" && brief.text.includes(`ace2e request ${n}`),
-                   `the request isn't in B's inbox: ${inbox.text.slice(0, 300)}`);
-            assert(brief.request === true, "inbox item not flagged as a request");
+            assert(!inbox.isError, `read_inbox: ${inbox.text.slice(0, 300)}`);
+            const brief = ((inbox.json && inbox.json.messages) || []).find((m) => sameID(m.delegation_id, reqID));
+            if (brief) {
+              assert(brief.kind === "brief" && brief.text.includes(`ace2e request ${n}`) && brief.request === true,
+                     `B's inbox serves something else for the request: ${inbox.text.slice(0, 300)}`);
+            }
             const reply = `ace2e reply ${n}`;
             await gx(vm.id, `printf '%s\\n' '${reply} file' > ${guestPath(FB)}/reply.txt`);
             const from = (await stubLog(vm.id)).length;
@@ -4255,15 +4283,18 @@ for n, c in enumerate(calls, 1):
             assert(hits.length > 0, "the reply's notice never reached the requester");
             assert(hits.every((l) => l.startsWith(`line w${A.w} `)),
                    `the reply's notice went to the wrong tab (A is w${A.w}): ${hits.join(" | ")}`);
-            const [aIn] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
-            const got = ((aIn.json && aIn.json.messages) || []).find((m) => m.kind === "deliver");
-            assert(got && got.text.includes(reply), `the reply isn't in A's inbox: ${aIn.text.slice(0, 300)}`);
+            // A short reply is typed whole, with where its file landed.
+            assert(hits.some((l) => l.includes(reply) && l.includes("reply.txt")),
+                   `the reply's notice doesn't carry the reply and its file: ${hits.join(" | ")}`);
+            const d = await delegationRec(reqID);
+            assertEq(d.status, "delivered", "the request isn't marked delivered");
+            const got = (d.messages || []).find((m) => m.kind === "deliver");
+            assert(got && got.text.includes(reply), `no deliver message on the record: ${JSON.stringify(d.messages || []).slice(0, 300)}`);
             const f = (got.files || [])[0];
             assert(f && f.includes(`/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/reply.txt`), `reply file not landed: ${JSON.stringify(got.files)}`);
             assertEq((await gx(vm.id, `cat ${JSON.stringify(f)}`)).trim(), `${reply} file`, "landed reply differs");
-            const d = await delegationRec(reqID);
-            assertEq(d.status, "delivered", "the request isn't marked delivered");
-            // Reading takes it: a second look is empty.
+            // Reading takes whatever was left: a second look is empty.
+            await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
             const [again] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
             assertIncludes(again.text, "Nothing waiting", "read_inbox didn't take the messages");
           });
@@ -4311,9 +4342,10 @@ for n, c in enumerate(calls, 1):
             const hits = lines.filter((l) => l.includes(`ace2e done ${n}`));
             assert(hits.length > 0 && hits.every((l) => l.startsWith(`line w${A.w} `)),
                    `the delivery notice didn't go (only) to the parent's tab w${A.w}: ${hits.join(" | ")}`);
-            const [inb] = await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: did } }]);
-            const kinds = ((inb.json && inb.json.messages) || []).map((m) => m.kind);
-            assert(kinds.includes("report") && kinds.includes("deliver"), `parent inbox kinds: ${JSON.stringify(kinds)}`);
+            // On the record (a deliver typed whole counts as read, so the
+            // inbox may no longer hold it).
+            const kinds = ((await delegationRec(did)).messages || []).filter((m) => m.to === "parent").map((m) => m.kind);
+            assert(kinds.includes("report") && kinds.includes("deliver"), `messages to the parent: ${JSON.stringify(kinds)}`);
             const [cl] = await mcp(vm.id, A.w, [{ name: "close_delegation", arguments: { delegation_id: did, verdict: "accepted" } }]);
             assert(!cl.isError, `close_delegation: ${cl.text.slice(0, 200)}`);
             const retired = await waitRec(cid, (x) => !!x.archivedAt, 20);
@@ -4426,6 +4458,122 @@ for n, c in enumerate(calls, 1):
           }
         }
       } finally {
+        await stubVMDown(vm);
+      }
+    }
+  }
+
+  // ======================================================================
+  // 33. Sign-in capture + OAuth callback relay (stress)
+  //
+  // The in-session sign-in path, many times over and concurrently, with no
+  // browser and no real provider (debug `sign-in-sim` / `loopback-sim`):
+  //   - the proxy's capture: a guest POST to the simulator's token endpoint
+  //     (through the guest's HTTPS_PROXY, like an agent's login) is matched,
+  //     the values-only hook hops to the main actor and back, the host
+  //     answers, and the connection frees its copy of the hook — the exact
+  //     path that crashed on macOS 15 (use-after-free in the hook's context);
+  //   - the loopback relay: a host-side 127.0.0.1:<port> forwarder spliced
+  //     to a listener in the guest over vsock 5010, both as a plain splice
+  //     and answered by the host (registration) — the dup'd-fd path (a
+  //     closed-twice descriptor quit the app on "Authorize").
+  // The app must still be up at the end.
+  // ======================================================================
+  if (!SKIP_SESSIONS && sectionActive("33.")) {
+    console.log("\n--- 33. Sign-in capture + OAuth callback relay (stress) ---");
+
+    await test("33.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  Sign-in stress tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const ROUNDS = Number(process.env.ACE2E_SIGNIN_ROUNDS || 40);
+      const vm = await stubVMUp("ACE2E_SignIn");
+      // The exchange an agent's login makes, through the guest's proxy env.
+      const exchange = (grant) =>
+        `set -a; . /mnt/bromure-meta/proxy.env; set +a; ` +
+        `curl -sS --max-time 20 -X POST https://signin-sim.bromure.test/oauth/token ` +
+        `-H 'Content-Type: application/x-www-form-urlencoded' --data 'grant_type=${grant}&code=ace2e'`;
+      const simState = () => dbg("sign-in-sim-state", { profile: vm.name });
+      const armAndExchange = async (label) => {
+        const a = await dbg("sign-in-sim", { profile: vm.name });
+        assert(a.ok === true && a.token, `${label}: sign-in-sim: ${JSON.stringify(a)}`);
+        const out = await gx(vm.id, exchange("authorization_code"), { timeout: 30 });
+        assert(out.includes('"bromure_sim":"kept-on-host"') && out.includes(a.token),
+               `${label}: the exchange wasn't answered by the host: ${out.slice(0, 300)}`);
+      };
+      const PORT = 41000 + Math.floor(Math.random() * 8000);
+      const relayOnce = async (i, override) => {
+        const r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+        assert(r.ok === true, `loopback-sim ${i}: ${JSON.stringify(r)}`);
+        const res = await fetch(`http://127.0.0.1:${PORT}/callback?code=ace2e-${i}`,
+                                { signal: AbortSignal.timeout(20000) });
+        const body = await res.text();
+        if (override) {
+          assert(body.includes("Signed in to ace2e"), `relay ${i}: host-answered page missing: ${body.slice(0, 200)}`);
+        } else {
+          assertEq(body.trim(), `ace2e-guest-ok /callback?code=ace2e-${i}`, `relay ${i}: guest reply`);
+        }
+      };
+      try {
+        await test("33.1 workspace boots", async () => {
+          if (vm.error) throw new Error(vm.error);
+        });
+        if (!vm.error) {
+          await test(`33.2 a sign-in exchange is captured and answered by the host, ${ROUNDS} times`, async () => {
+            const before = (await simState()).completed;
+            for (let i = 0; i < ROUNDS; i++) await armAndExchange(`round ${i}`);
+            const st = await simState();
+            assertEq(st.completed - before, ROUNDS, "simulated sign-ins completed");
+            assert(st.inFlight === false, "a sign-in is still in flight after its exchange");
+          });
+
+          await test("33.3 a refresh-token exchange is never captured", async () => {
+            const a = await dbg("sign-in-sim", { profile: vm.name });
+            assert(a.ok === true, `sign-in-sim: ${JSON.stringify(a)}`);
+            const out = await gx(vm.id, exchange("refresh_token"), { timeout: 30, ok: false });
+            assert(!out.includes("bromure_sim"), `a refresh was captured: ${out.slice(0, 200)}`);
+            assert((await simState()).inFlight === true, "the refresh ended the sign-in");
+            // The code exchange that follows is still the one captured.
+            const out2 = await gx(vm.id, exchange("authorization_code"), { timeout: 30 });
+            assert(out2.includes('"bromure_sim":"kept-on-host"') && out2.includes(a.token),
+                   `the armed sign-in didn't capture the code exchange: ${out2.slice(0, 200)}`);
+            assert((await simState()).inFlight === false, "the sign-in is still in flight");
+          });
+
+          await test("33.4 the guest listener for the callback relay comes up", async () => {
+            const srv =
+              "import http.server,socketserver\n" +
+              "class H(http.server.BaseHTTPRequestHandler):\n" +
+              "  def do_GET(self):\n" +
+              "    b=('ace2e-guest-ok '+self.path+'\\n').encode()\n" +
+              "    self.send_response(200);self.send_header('Content-Length',str(len(b)));" +
+              "self.send_header('Connection','close');self.end_headers();self.wfile.write(b)\n" +
+              "  def log_message(self,*a): pass\n" +
+              "socketserver.ThreadingTCPServer.allow_reuse_address=True\n" +
+              `socketserver.ThreadingTCPServer(('127.0.0.1',${PORT}),H).serve_forever()\n`;
+            await gx(vm.id, `echo ${toB64(srv)} | base64 -d > /tmp/ace2e-cb.py && ` +
+                            `(setsid python3 /tmp/ace2e-cb.py </dev/null >/dev/null 2>&1 &) && sleep 1 && ` +
+                            `curl -sS --noproxy '*' http://127.0.0.1:${PORT}/ping`);
+          });
+
+          await test(`33.5 the OAuth callback relay (splice and host-answered), ${ROUNDS} times`, async () => {
+            for (let i = 0; i < ROUNDS; i++) await relayOnce(i, i % 2 === 1);
+          });
+
+          await test("33.6 exchanges and callback relays at the same time", async () => {
+            for (let i = 0; i < Math.max(5, ROUNDS / 4); i++) {
+              await Promise.all([armAndExchange(`concurrent ${i}`), relayOnce(1000 + i, i % 2 === 0)]);
+            }
+          });
+
+          await test("33.7 the app is still up", async () => {
+            const h = await api("GET", "/health");
+            assertEq(h.status, "ok", "the app went away during the sign-in stress");
+          });
+        }
+      } finally {
+        await gx(vm.id, "pkill -f /tmp/ace2e-cb.py; true", { ok: false }).catch(() => {});
         await stubVMDown(vm);
       }
     }

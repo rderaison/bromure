@@ -36,6 +36,7 @@
 		78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */; };
 		B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */; };
 		C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */; };
+		B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */; };
 		C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */; };
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
@@ -59,6 +60,7 @@
 		9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A054E65FF7AFB16A80708D8 /* FatForward.swift */; };
 		CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 057EC22F78972A50849C0EEF /* FileExplorer.swift */; };
 		7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */; };
+		867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */; };
 		A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */ = {isa = PBXBuildFile; fileRef = D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */; };
 		FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */; };
 		F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */; };
@@ -66,13 +68,16 @@
 		10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD18B9BFD8961799C389C4D /* KubeCluster.swift */; };
 		C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */; };
 		E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 475294421C25AAB556D7138F /* MermaidFence.swift */; };
+		5B0B1C8FEBA226F85DDB0ADA /* Mitm__AWSHosts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */; };
 		B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */; };
 		61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */; };
+		43050C53A02DDF0CD1952B4D /* Mitm__MintedCredential.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */; };
 		A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */; };
 		4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */; };
 		FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */; };
 		5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */; };
 		B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */; };
+		B18A76889B92FA13B083F96F /* Mitm__SquelchPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0FD755D38B593111C9F1074 /* Mitm__SquelchPolicy.swift */; };
 		AD266798BBB080664E84AD70 /* Mitm__SupplyChainPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */; };
 		C46EAD94103A7DFA39B00F4A /* Mitm__TraceRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */; };
 		9830CFB853F2FA4D5CE61573 /* P2P__ControlPlaneClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */; };
@@ -96,11 +101,14 @@
 		3B15992E5BD329D249A9D27D /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2368064077094F44DF16B8E /* Profile.swift */; };
 		51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */; };
 		F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2652DA1029D0752C313AC9D0 /* PushCrypto.swift */; };
+		D59955574D92902591CD3340 /* RepoGitPrograms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 711FBB6794DB20DBD6C19C20 /* RepoGitPrograms.swift */; };
+		8608FFFC9FB5AAEFB5551694 /* RequestLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4148ED406683C31F2725C2F7 /* RequestLedger.swift */; };
 		B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */; };
 		332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */; };
 		B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45F1F9D11A980D236BD970D /* SessionModels.swift */; };
 		465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */; };
 		435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */; };
+		F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8B3ECA30D79673393D2C03A /* SquelchViews.swift */; };
 		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
 		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
 		87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */; };
@@ -182,6 +190,7 @@
 		C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunArchive.swift"; path = "Sources/BromureRemote/_shared/AutomationRunArchive.swift"; sourceTree = "<group>"; };
 		0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunWindow.swift"; path = "Sources/BromureRemote/_shared/AutomationRunWindow.swift"; sourceTree = "<group>"; };
 		5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BACDebug.swift"; path = "Sources/BromureRemote/_shared/BACDebug.swift"; sourceTree = "<group>"; };
+		D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BranchMergeCommands.swift"; path = "Sources/BromureRemote/_shared/BranchMergeCommands.swift"; sourceTree = "<group>"; };
 		000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeAutoMode.swift"; path = "Sources/BromureRemote/_shared/ClaudeAutoMode.swift"; sourceTree = "<group>"; };
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
@@ -205,6 +214,7 @@
 		1A054E65FF7AFB16A80708D8 /* FatForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FatForward.swift"; path = "Sources/BromureRemote/_shared/FatForward.swift"; sourceTree = "<group>"; };
 		057EC22F78972A50849C0EEF /* FileExplorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorer.swift"; path = "Sources/BromureRemote/_shared/FileExplorer.swift"; sourceTree = "<group>"; };
 		C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "FileExplorerViews.swift"; path = "Sources/BromureRemote/_shared/FileExplorerViews.swift"; sourceTree = "<group>"; };
+		3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "GuestURLGate.swift"; path = "Sources/BromureRemote/_shared/GuestURLGate.swift"; sourceTree = "<group>"; };
 		D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Icons.swift"; path = "Sources/BromureRemote/_shared/Icons.swift"; sourceTree = "<group>"; };
 		C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelCatalog.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelCatalog.swift"; sourceTree = "<group>"; };
 		0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Inference__ModelSettings.swift"; path = "Sources/BromureRemote/_shared/Inference__ModelSettings.swift"; sourceTree = "<group>"; };
@@ -212,13 +222,16 @@
 		8DD18B9BFD8961799C389C4D /* KubeCluster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeCluster.swift"; path = "Sources/BromureRemote/_shared/KubeCluster.swift"; sourceTree = "<group>"; };
 		8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "KubeDashboard.swift"; path = "Sources/BromureRemote/_shared/KubeDashboard.swift"; sourceTree = "<group>"; };
 		475294421C25AAB556D7138F /* MermaidFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "MermaidFence.swift"; path = "Sources/BromureRemote/_shared/MermaidFence.swift"; sourceTree = "<group>"; };
+		973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__AWSHosts.swift"; path = "Sources/BromureRemote/_shared/Mitm__AWSHosts.swift"; sourceTree = "<group>"; };
 		D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__ConsentCredentialID.swift"; path = "Sources/BromureRemote/_shared/Mitm__ConsentCredentialID.swift"; sourceTree = "<group>"; };
 		6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__GuardrailsPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__GuardrailsPolicy.swift"; sourceTree = "<group>"; };
+		5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__MintedCredential.swift"; path = "Sources/BromureRemote/_shared/Mitm__MintedCredential.swift"; sourceTree = "<group>"; };
 		323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__OnePasswordCLI.swift"; path = "Sources/BromureRemote/_shared/Mitm__OnePasswordCLI.swift"; sourceTree = "<group>"; };
 		98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PIIPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PIIPolicy.swift"; sourceTree = "<group>"; };
 		973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__PromptInjectionPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__PromptInjectionPolicy.swift"; sourceTree = "<group>"; };
 		0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SecretsVault.swift"; path = "Sources/BromureRemote/_shared/Mitm__SecretsVault.swift"; sourceTree = "<group>"; };
 		7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SessionTokenPlan.swift"; path = "Sources/BromureRemote/_shared/Mitm__SessionTokenPlan.swift"; sourceTree = "<group>"; };
+		F0FD755D38B593111C9F1074 /* Mitm__SquelchPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SquelchPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__SquelchPolicy.swift"; sourceTree = "<group>"; };
 		9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__SupplyChainPolicy.swift"; path = "Sources/BromureRemote/_shared/Mitm__SupplyChainPolicy.swift"; sourceTree = "<group>"; };
 		01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Mitm__TraceRecord.swift"; path = "Sources/BromureRemote/_shared/Mitm__TraceRecord.swift"; sourceTree = "<group>"; };
 		4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "P2P__ControlPlaneClient.swift"; path = "Sources/BromureRemote/_shared/P2P__ControlPlaneClient.swift"; sourceTree = "<group>"; };
@@ -242,11 +255,14 @@
 		C2368064077094F44DF16B8E /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Profile.swift"; path = "Sources/BromureRemote/_shared/Profile.swift"; sourceTree = "<group>"; };
 		1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ProfileViews.swift"; path = "Sources/BromureRemote/_shared/ProfileViews.swift"; sourceTree = "<group>"; };
 		2652DA1029D0752C313AC9D0 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "PushCrypto.swift"; path = "Sources/BromureRemote/_shared/PushCrypto.swift"; sourceTree = "<group>"; };
+		711FBB6794DB20DBD6C19C20 /* RepoGitPrograms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RepoGitPrograms.swift"; path = "Sources/BromureRemote/_shared/RepoGitPrograms.swift"; sourceTree = "<group>"; };
+		4148ED406683C31F2725C2F7 /* RequestLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RequestLedger.swift"; path = "Sources/BromureRemote/_shared/RequestLedger.swift"; sourceTree = "<group>"; };
 		9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomationViews.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomationViews.swift"; sourceTree = "<group>"; };
 		6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ScheduledAutomations.swift"; path = "Sources/BromureRemote/_shared/ScheduledAutomations.swift"; sourceTree = "<group>"; };
 		C45F1F9D11A980D236BD970D /* SessionModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionModels.swift"; path = "Sources/BromureRemote/_shared/SessionModels.swift"; sourceTree = "<group>"; };
 		507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SessionStageViews.swift"; path = "Sources/BromureRemote/_shared/SessionStageViews.swift"; sourceTree = "<group>"; };
 		17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SharedStatusViews.swift"; path = "Sources/BromureRemote/_shared/SharedStatusViews.swift"; sourceTree = "<group>"; };
+		A8B3ECA30D79673393D2C03A /* SquelchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SquelchViews.swift"; path = "Sources/BromureRemote/_shared/SquelchViews.swift"; sourceTree = "<group>"; };
 		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
 		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
 		A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptArchive.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptArchive.swift"; sourceTree = "<group>"; };
@@ -352,6 +368,7 @@
 				C08D9C7419177C68677DCD1F /* AutomationRunArchive.swift */,
 				0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */,
 				5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */,
+				D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */,
 				000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */,
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
@@ -375,6 +392,7 @@
 				1A054E65FF7AFB16A80708D8 /* FatForward.swift */,
 				057EC22F78972A50849C0EEF /* FileExplorer.swift */,
 				C0453523F2BE1F32CADAC697 /* FileExplorerViews.swift */,
+				3FF463DD3CB2AD02B7E9209F /* GuestURLGate.swift */,
 				D920F3B6A7DE1B4DFAAD38A1 /* Icons.swift */,
 				C25D929CBF9FEE1C8DAE5D65 /* Inference__ModelCatalog.swift */,
 				0C887F6993BA9E584EBCF71C /* Inference__ModelSettings.swift */,
@@ -382,13 +400,16 @@
 				8DD18B9BFD8961799C389C4D /* KubeCluster.swift */,
 				8FF94FEB3AA32BE0A68F4651 /* KubeDashboard.swift */,
 				475294421C25AAB556D7138F /* MermaidFence.swift */,
+				973AE7CA5D171BEAFC1E8641 /* Mitm__AWSHosts.swift */,
 				D44A614A9C984367AC672221 /* Mitm__ConsentCredentialID.swift */,
 				6EB9F48DDC3863CF6D3AEBA7 /* Mitm__GuardrailsPolicy.swift */,
+				5894374C4B7C423046F0B650 /* Mitm__MintedCredential.swift */,
 				323184223997DF9012FF85AA /* Mitm__OnePasswordCLI.swift */,
 				98E5CAA937E7F279BDA1098C /* Mitm__PIIPolicy.swift */,
 				973FCFE569F013ED0562570B /* Mitm__PromptInjectionPolicy.swift */,
 				0B579D496A77ADA25710EBE0 /* Mitm__SecretsVault.swift */,
 				7CE9DF9709C77FF85D7CF9B0 /* Mitm__SessionTokenPlan.swift */,
+				F0FD755D38B593111C9F1074 /* Mitm__SquelchPolicy.swift */,
 				9BE2FBEDD33B118F9C4238D7 /* Mitm__SupplyChainPolicy.swift */,
 				01E67908022893BC04C5048F /* Mitm__TraceRecord.swift */,
 				4D779938B58750E7E3F93AB6 /* P2P__ControlPlaneClient.swift */,
@@ -412,11 +433,14 @@
 				C2368064077094F44DF16B8E /* Profile.swift */,
 				1CAE7533E1BB8D5DD3ABADCC /* ProfileViews.swift */,
 				2652DA1029D0752C313AC9D0 /* PushCrypto.swift */,
+				711FBB6794DB20DBD6C19C20 /* RepoGitPrograms.swift */,
+				4148ED406683C31F2725C2F7 /* RequestLedger.swift */,
 				9E590B560083591BE3F710B3 /* ScheduledAutomationViews.swift */,
 				6E45A1E3E8B91F9A0B83BA8A /* ScheduledAutomations.swift */,
 				C45F1F9D11A980D236BD970D /* SessionModels.swift */,
 				507FB4D8B393F7A6B19CD1A8 /* SessionStageViews.swift */,
 				17539851B2CC566E8E5061C1 /* SharedStatusViews.swift */,
+				A8B3ECA30D79673393D2C03A /* SquelchViews.swift */,
 				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
 				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
 				A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */,
@@ -576,6 +600,7 @@
 				78E28F26904086D687BBCD47 /* AutomationRunArchive.swift in Sources */,
 				B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */,
 				C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */,
+				B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */,
 				C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */,
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
@@ -599,6 +624,7 @@
 				9EE4192A5E89F57A22D770D9 /* FatForward.swift in Sources */,
 				CB4D856D0C4FBA4C1DBB9BD4 /* FileExplorer.swift in Sources */,
 				7D861836DE503A1CCD7A50F2 /* FileExplorerViews.swift in Sources */,
+				867D27D064C7CEE2148B2A53 /* GuestURLGate.swift in Sources */,
 				A57D74F0A97FAFD8528AEC62 /* Icons.swift in Sources */,
 				FCAF56C79B11F3651D621920 /* Inference__ModelCatalog.swift in Sources */,
 				F3188ED7F3EED8B10F60EB70 /* Inference__ModelSettings.swift in Sources */,
@@ -606,13 +632,16 @@
 				10A3ACDB90C2C0DA80497153 /* KubeCluster.swift in Sources */,
 				C22000EE6F92FE9C79B2529F /* KubeDashboard.swift in Sources */,
 				E91B787E2C9DBFF12D604A3C /* MermaidFence.swift in Sources */,
+				5B0B1C8FEBA226F85DDB0ADA /* Mitm__AWSHosts.swift in Sources */,
 				B1F1D8FE74937BA7AC128D69 /* Mitm__ConsentCredentialID.swift in Sources */,
 				61D9E03E4DDCE1EB2436424E /* Mitm__GuardrailsPolicy.swift in Sources */,
+				43050C53A02DDF0CD1952B4D /* Mitm__MintedCredential.swift in Sources */,
 				A85D78C85937E89F20C34421 /* Mitm__OnePasswordCLI.swift in Sources */,
 				4C4053D0D9DCB88EC29BDD19 /* Mitm__PIIPolicy.swift in Sources */,
 				FED3004C83536B84CF8C0C61 /* Mitm__PromptInjectionPolicy.swift in Sources */,
 				5C0722E5CF0BF28BADBEA327 /* Mitm__SecretsVault.swift in Sources */,
 				B854291378C379CF05ECFEE3 /* Mitm__SessionTokenPlan.swift in Sources */,
+				B18A76889B92FA13B083F96F /* Mitm__SquelchPolicy.swift in Sources */,
 				AD266798BBB080664E84AD70 /* Mitm__SupplyChainPolicy.swift in Sources */,
 				C46EAD94103A7DFA39B00F4A /* Mitm__TraceRecord.swift in Sources */,
 				9830CFB853F2FA4D5CE61573 /* P2P__ControlPlaneClient.swift in Sources */,
@@ -636,11 +665,14 @@
 				3B15992E5BD329D249A9D27D /* Profile.swift in Sources */,
 				51EE9DAD2EADCE068EFAA010 /* ProfileViews.swift in Sources */,
 				F3011FF5C29C08F27538AE45 /* PushCrypto.swift in Sources */,
+				D59955574D92902591CD3340 /* RepoGitPrograms.swift in Sources */,
+				8608FFFC9FB5AAEFB5551694 /* RequestLedger.swift in Sources */,
 				B47EFB48B64411BF181D2140 /* ScheduledAutomationViews.swift in Sources */,
 				332BE05FECAFCE5409388316 /* ScheduledAutomations.swift in Sources */,
 				B8BCF82DBF631DEFA8A1849A /* SessionModels.swift in Sources */,
 				465BC25D7D2C8913821F4960 /* SessionStageViews.swift in Sources */,
 				435FC51F11B11F312B92DAC5 /* SharedStatusViews.swift in Sources */,
+				F508C137A218C5B85B9A5B09 /* SquelchViews.swift in Sources */,
 				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
 				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,
 				87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */,
@@ -748,6 +780,7 @@
 				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", AVKit, "-framework", PhotosUI);
 				APS_ENVIRONMENT = development;
 				CODE_SIGN_STYLE = Automatic;
 			};
@@ -768,6 +801,7 @@
 				CODE_SIGN_ENTITLEMENTS = App/BromureRemote.entitlements;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				OTHER_LDFLAGS = ("$(inherited)", "-framework", AVKit, "-framework", PhotosUI);
 				APS_ENVIRONMENT = production;
 				CODE_SIGN_STYLE = Manual;
 				CODE_SIGN_IDENTITY = "$(IOS_SIGN_IDENTITY)";
@@ -882,8 +916,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.2.0;
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.20.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

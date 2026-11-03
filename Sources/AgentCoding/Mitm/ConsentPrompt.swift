@@ -32,7 +32,10 @@ enum ConsentPrompt {
                        choices: [String], denyIndex: Int,
                        style: NSAlert.Style = .informational,
                        detailText: String? = nil,
-                       timeout: TimeInterval = ConsentPrompt.defaultTimeout) async -> Int? {
+                       timeout: TimeInterval = ConsentPrompt.defaultTimeout,
+                       token: UUID = UUID()) async -> Int? {
+        // `token`: the caller's handle to take the question back
+        // (`ConsentPanelPresenter.withdraw(token:)`) — it then returns nil.
         // ONE deadline for every surface and for the held request: fixed
         // here, when the question is asked. The panel counts down to it, the
         // watchdog denies at it, the remote surfaces get what's left of it —
@@ -45,6 +48,7 @@ enum ConsentPrompt {
             // a prompt because a mirror happens to be connected.
             let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
             let idx = await race(
+                token: token,
                 remote: {
                     await PendingPromptBroker.shared.answerAsync(
                         profileID: profileID, title: title, message: body,
@@ -63,14 +67,15 @@ enum ConsentPrompt {
             let idx = await Task.detached {
                 RemoteConsent.choose(profileID: profileID, title: title, message: body,
                                      choices: choices,
-                                     timeoutSeconds: max(1, deadline.timeIntervalSinceNow))
+                                     timeoutSeconds: max(1, deadline.timeIntervalSinceNow),
+                                     token: token)
             }.value
             return idx == denyIndex ? nil : idx
         case .localAlert:
             let idx = await ConsentPanelPresenter.shared.presentOffMain(
                 profileID: profileID, title: title, message: message, choices: choices,
                 denyIndex: denyIndex, style: style, detailText: detailText, timeout: timeout,
-                deadline: deadline)
+                token: token, deadline: deadline)
             return idx == denyIndex ? nil : idx
         }
     }
@@ -83,9 +88,8 @@ extension ConsentPrompt {
     /// answers (a dismissal or its deadline is its deny). The loser is
     /// withdrawn: the remote task is cancelled (its prompt leaves `/state`),
     /// the local panel closed (`withdraw(token:)`).
-    static func race(remote: @escaping @Sendable () async -> Int?,
+    static func race(token: UUID = UUID(), remote: @escaping @Sendable () async -> Int?,
                      local: @escaping @Sendable (UUID) async -> Int?) async -> Int? {
-        let token = UUID()
         return await withTaskGroup(of: (Bool, Int?).self) { group in
             group.addTask { (true, await remote()) }
             group.addTask { (false, await local(token)) }
@@ -322,6 +326,16 @@ final class ConsentPanelPresenter {
         queues[profileID] = q.isEmpty ? nil : q
         // Already answered (its deadline passed while it waited): next.
         if cont.isAnswered { pump(profileID); return }
+        // Its deadline is up, its watchdog not run yet (questions asked
+        // together share a deadline: the first one's expiry pumps the next
+        // at the same instant). Deny without a panel: one built now would
+        // answer itself from its first tick, before it's on record here, and
+        // stay on screen at "0 s" for good — a stack of them, one per package.
+        if !req.isNotice, req.effectiveDeadline() <= Date() {
+            cont.resume(req.denyIndex)
+            pump(profileID)
+            return
+        }
         if req.deadline == nil {
             // A notice: its (display-only) time runs from when it shows.
             req.deadline = Date().addingTimeInterval(max(1, req.timeout))
@@ -333,7 +347,8 @@ final class ConsentPanelPresenter {
         let ui = makeUI(req) { [weak self] choice in
             self?.resolve(profileID, requestID: req.id, choice: choice)
         }
-        if active[profileID]?.request.id == req.id { active[profileID]?.ui = ui }
+        // Answered while being built: nothing will close it but this.
+        if active[profileID]?.request.id == req.id { active[profileID]?.ui = ui } else { ui?.dismiss() }
     }
 
     private func resolve(_ profileID: UUID, requestID: UUID, choice: Int?) {
@@ -557,7 +572,9 @@ final class ConsentPanelWindow: NSObject, ConsentPanelUI, NSWindowDelegate {
             text.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.inset),
         ])
         panel.contentView = content
-        tick()
+        if !req.isNotice {
+            countdown.stringValue = Self.countdownLine(secondsLeft: Self.secondsLeft(until: deadline), request: req)
+        }
         content.layoutSubtreeIfNeeded()
         var size = content.fittingSize
         // The estimate above can run a few points over (a wrapped title or

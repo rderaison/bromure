@@ -380,6 +380,10 @@ struct CodingKanbanView: View {
         /// (where a review window exists), else lands it — after the
         /// board's own confirm when `mergeNeedsConfirm`.
         var merge: (UUID) -> Void = { _ in }
+        /// Merge several Review cards at once (`push`: and push the
+        /// target): one agent for what Bromure can't merge itself. nil:
+        /// not offered.
+        var mergeBatch: (([UUID], _ push: Bool) -> Void)? = nil
         /// Discard: Done without merging, the branch and its checkout deleted.
         var closeNoMerge: (UUID) -> Void = { _ in }
         /// Review / In Progress → Done as it stands (no merge, branch kept).
@@ -389,6 +393,9 @@ struct CodingKanbanView: View {
         /// A fresh run on a new branch, when there's nothing left to resume
         /// into (repository or branch gone).
         var startOver: (UUID) -> Void = { _ in }
+        /// A Backlog card dragged to a new place: its new rank (the queue's
+        /// order too). nil: the board can't reorder.
+        var reorder: ((UUID, Double) -> Void)? = nil
         /// No review window here (iOS): the board confirms a Merge itself.
         var mergeNeedsConfirm = false
         var delete: (UUID) -> Void = { _ in }
@@ -411,8 +418,12 @@ struct CodingKanbanView: View {
         /// Queue a task for new agents, a session or a room (nil = take it
         /// off its queue). nil closure = queues aren't available here.
         var assign: ((UUID, TaskAssignment?) -> Void)?
-        /// Answer the assignee's question.
-        var answer: (UUID, String) -> Void = { _, _ in }
+        /// Answer the assignee's question: task, the ask the answer was
+        /// written for (`pendingAskID`), text. True once the board handed it
+        /// to the agent; false when it was refused (the agent asked again,
+        /// the question is gone) or couldn't be sent — the sheet then keeps
+        /// the text.
+        var answer: (UUID, UUID?, String) async -> Bool = { _, _, _ in false }
         /// Take a handed-off task back to the backlog.
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
@@ -425,6 +436,9 @@ struct CodingKanbanView: View {
     @Bindable var model: SessionListModel
     /// Fresh profile snapshot for the editor sheet's pickers.
     let profilesProvider: () -> [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     let actions: Actions
     /// The sessions behind the cards: a running card reads its agent's
     /// state exactly as the sidebar row does. nil: the tab roster alone.
@@ -440,6 +454,9 @@ struct CodingKanbanView: View {
     @State private var finishWithPR = TaskAssignment.finishWithPullRequest
     /// Plan-column multi-selection (batch start).
     @State private var selectedPhases: Set<UUID> = []
+    /// Review cards picked for one batch merge.
+    @State private var selectedReview: Set<UUID> = []
+    @State private var confirmingBatchMerge = false
     @State private var confirmingBatchDelete = false
     /// Card actions that ask first: Mark Done on a task with code (its
     /// branch is kept), Discard, and Merge where no review window confirms.
@@ -530,6 +547,7 @@ struct CodingKanbanView: View {
             TaskEditorSheet(
                 task: task,
                 profiles: profilesProvider(),
+                toolSpecs: toolSpecs,
                 siblings: task.parentTaskID.map { parent in
                     store.tasks.filter { $0.parentTaskID == parent && $0.id != task.id }
                         .sorted { $0.createdAt < $1.createdAt }
@@ -838,11 +856,54 @@ struct CodingKanbanView: View {
                     onAssign: actions.assign == nil ? nil : { assigning = task },
                     onUnassign: actions.assign.map { assign in { assign(task.id, nil) } })
                     .draggable(task.id.uuidString)
+                    // Dropped on another card: just above it.
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: task.id, in: tasks)
+                    }
                     .modifier(RemovableCard(title: task.title, stage: task.stage) {
                         actions.delete(task.id)
                     })
             }
+            // Dropped below the cards: to the bottom. Only there — on the
+            // whole column, a drop on the header (aimed at the top) or in a
+            // gap sent the card to the end of its assignee's queue.
+            if !tasks.isEmpty {
+                Color.clear
+                    .frame(maxWidth: .infinity, minHeight: Self.backlogTailHeight)
+                    .contentShape(Rectangle())
+                    .dropDestination(for: String.self) { items, _ in
+                        reorderBacklog(items, before: nil, in: tasks)
+                    }
+            }
         }
+    }
+
+    /// The drop zone under the Backlog's last card ("to the bottom").
+    static let backlogTailHeight: CGFloat = 120
+
+    /// Backlog cards dragged to a new place in the column (top runs first —
+    /// the order their assignees' queues follow). Cards from elsewhere
+    /// aren't the Backlog's to take.
+    private func reorderBacklog(_ items: [String], before target: UUID?, in column: [CodingTask]) -> Bool {
+        guard let reorder = actions.reorder else { return false }
+        var column = column
+        var moved = false
+        for id in items.compactMap(UUID.init(uuidString:)) where id != target {
+            guard let t = store.task(id), t.stage == .backlog else { continue }
+            let rank = CodingTask.rank(dropping: id, before: target, in: column)
+            // No room left between the two neighbours: respace that gap,
+            // with every task the queue sorts on (not just this column).
+            let changes = CodingTask.fits(rank, dropping: id, in: column) ? [(id, rank)]
+                : CodingTask.respaced(dropping: id, before: target, in: column, all: store.tasks)
+            for (cid, r) in changes {
+                reorder(cid, r)
+                // The next dragged card goes after this one, in the same spot.
+                if let i = column.firstIndex(where: { $0.id == cid }) { column[i].queueRank = r }
+            }
+            column.sort(by: CodingTask.backlogOrder)
+            moved = true
+        }
+        return moved
     }
 
     private var planColumn: some View {
@@ -962,7 +1023,7 @@ struct CodingKanbanView: View {
                         accentHex: accentHex(for: task.profileID),
                         workspaceName: workspaceName(for: task.profileID),
                         onOpen: { actions.openAssignee(task) },
-                        onAnswer: { actions.answer(task.id, $0) },
+                        onAnswer: { await actions.answer(task.id, $0, $1) },
                         onRecall: { actions.recall(task.id) })
                 } else {
                 InProgressTaskCard(
@@ -1020,14 +1081,55 @@ struct CodingKanbanView: View {
         }
     }
 
+    /// A Review card that can go in a batch merge: something to merge, not
+    /// landing already.
+    private func batchable(_ t: CodingTask) -> Bool {
+        !t.isNoCode && !t.isLocating && t.branch != nil && (t.landing == nil || t.landing?.phase == .needsYou)
+    }
+
+    private func toggleReview(_ id: UUID) {
+        if selectedReview.contains(id) { selectedReview.remove(id) } else { selectedReview.insert(id) }
+    }
+
     private var testingColumn: some View {
         let tasks = store.tasks(in: .testing)
+        let selected = tasks.filter { selectedReview.contains($0.id) && batchable($0) }
         return KanbanColumn(title: NSLocalizedString("Review", comment: "kanban column"),
                             systemImage: "eye",
                             count: tasks.count,
                             tint: .purple,
                             emptyText: NSLocalizedString("Nothing to review", comment: "kanban"),
                             subtitle: NSLocalizedString("Waiting for your review", comment: "kanban column")) {
+            if let mergeBatch = actions.mergeBatch, !selected.isEmpty {
+                HStack(spacing: 8) {
+                    Button { confirmingBatchMerge = true } label: {
+                        Label(String(format: NSLocalizedString("Merge %d Selected…", comment: "review column"),
+                                     selected.count),
+                              systemImage: "arrow.triangle.merge")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .help(NSLocalizedString(
+                        "Merges every selected task into its target in one go: Bromure merges the clean ones itself; the rest go to one agent, which merges them all, fixes conflicts and runs the checks once.",
+                        comment: "review column"))
+                    .sheet(isPresented: $confirmingBatchMerge) {
+                        BatchMergeSheet(
+                            titles: selected.map(\.title),
+                            targets: Set(selected.compactMap(\.landingTarget)).sorted(),
+                            agentName: selected.first?.workerName ?? "",
+                            onCancel: { confirmingBatchMerge = false },
+                            onConfirm: { push in
+                                confirmingBatchMerge = false
+                                mergeBatch(selected.map(\.id), push)
+                                selectedReview.removeAll()
+                            })
+                    }
+                    Button(NSLocalizedString("Clear", comment: "plan column")) { selectedReview.removeAll() }
+                        .controlSize(.small)
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 2)
+            }
             ForEach(tasks) { task in
                 TestingTaskCard(
                     task: task,
@@ -1037,6 +1139,8 @@ struct CodingKanbanView: View {
                     onOpenSession: { task.delegationID != nil ? actions.openAssignee(task) : actions.jumpToRun(task) },
                     onMarkDone: { requestMarkDone(task) },
                     onRetry: actions.retryLanding.map { retry in { retry(task.id) } },
+                    isSelected: actions.mergeBatch != nil && batchable(task) ? selectedReview.contains(task.id) : nil,
+                    onToggleSelect: { toggleReview(task.id) },
                     menu: testingMenu(task))
                     .draggable(task.id.uuidString)
                     .modifier(RemovableCard(title: task.title, stage: task.stage,
@@ -1066,7 +1170,14 @@ struct CodingKanbanView: View {
         if landable {
             d.append(.init(title: NSLocalizedString("Mark Done", comment: "review")) { requestMarkDone(task) })
         }
-        if !task.isNoCode, landable {
+        if actions.mergeBatch != nil, batchable(task) {
+            d.append(.init(title: selectedReview.contains(task.id)
+                           ? NSLocalizedString("Deselect", comment: "plan card menu")
+                           : NSLocalizedString("Select for a Batch Merge", comment: "review card menu")) {
+                toggleReview(task.id)
+            })
+        }
+        if !task.isNoCode, !task.isLocating, landable {
             d.append(.init(title: String(format: NSLocalizedString("Merge into %@…", comment: "kanban menu"),
                                          task.landingTarget ?? NSLocalizedString("parent", comment: "kanban menu"))) {
                 requestMerge(task)
@@ -1144,6 +1255,75 @@ struct CodingKanbanView: View {
 /// Hover-revealed ✕ on a kanban card, behind a confirmation so a stray
 /// click can't nuke a task. Removal deletes the card only — a running
 /// agent session, its branch, and its worktree are untouched.
+/// "Merge N tasks?" — a sheet, not a confirmation dialog: every approved
+/// title is listed, and a long batch grew the alert past the screen, its
+/// buttons out of reach. The list scrolls; the buttons stay put.
+struct BatchMergeSheet: View {
+    let titles: [String]
+    let targets: [String]
+    let agentName: String
+    let onCancel: () -> Void
+    let onConfirm: (_ push: Bool) -> Void
+    /// Button titles: Cancel, Merge, Merge & Push (a test passes others).
+    var labels = (cancel: NSLocalizedString("Cancel", comment: ""),
+                  merge: NSLocalizedString("Merge", comment: "landing confirm"),
+                  push: NSLocalizedString("Merge & Push", comment: "landing confirm"))
+    /// iPhone: the sheet fills the screen, no fixed width.
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    @ViewBuilder private var buttons: some View {
+        Button(labels.cancel, action: onCancel)
+            .keyboardShortcut(.cancelAction)
+        Button(labels.merge) { onConfirm(false) }
+            .keyboardShortcut(.defaultAction)
+        // ⌘↩: the one that also pushes.
+        Button(labels.push) { onConfirm(true) }
+            .keyboardShortcut(.return, modifiers: .command)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(String(format: NSLocalizedString("Merge %d tasks?", comment: "review column"), titles.count))
+                .font(.system(size: 15, weight: .semibold))
+            Text(String(format: NSLocalizedString(
+                "Into %1$@. Bromure merges each one directly when it can; the others go to one agent — %2$@ — which merges them all, fixes conflicts and runs the tests once. Afterwards the branches are removed and the sessions archived.",
+                comment: "review column: batch merge"),
+                targets.joined(separator: ", "), agentName))
+                .font(.system(size: 12.5))
+                .fixedSize(horizontal: false, vertical: true)
+            // What's approved, in full: a card shows three lines of its title.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(titles.enumerated()), id: \.offset) { _, title in
+                        Text("• \(title)")
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(minHeight: min(CGFloat(titles.count) * 20 + 16, 260), maxHeight: 260)
+            .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+            // Three buttons side by side don't fit every language (German
+            // runs past the width): then they stack, Merge & Push still on
+            // screen.
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Spacer()
+                    buttons
+                }
+                VStack(alignment: .trailing, spacing: 8) {
+                    buttons
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(20)
+        .frame(width: hSize == .compact ? nil : 460)
+    }
+}
+
 private struct RemovableCard: ViewModifier {
     let title: String
     let stage: CodingTask.Stage
@@ -1787,10 +1967,14 @@ private struct AssignedTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void
-    var onAnswer: (String) -> Void
+    var onAnswer: (UUID?, String) async -> Bool
     var onRecall: () -> Void
     @State private var answering = false
-    @State private var reply = ""
+    @State private var draft = TaskAnswerDraft()
+    @State private var sending = false
+    /// The last Send was refused or didn't go (the sheet says why from the
+    /// task's current `lastError`).
+    @State private var sendFailed = false
 
     var body: some View {
         Button(action: onOpen) {
@@ -1873,18 +2057,154 @@ private struct AssignedTaskCard: View {
                 + [.divider,
                    .init(title: NSLocalizedString("Stop & Return to Backlog", comment: "task card"),
                          role: .destructive, action: onRecall)])))
-        .alert(String(format: NSLocalizedString("Answer %@", comment: "task card"), task.assignment?.label ?? ""),
-               isPresented: $answering) {
-            TextField(NSLocalizedString("Your answer", comment: "task card"), text: $reply)
-            Button(NSLocalizedString("Send", comment: "")) {
-                let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { onAnswer(text) }
-                reply = ""
-            }
-            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) { reply = "" }
-        } message: {
-            Text(task.pendingQuestion ?? "")
+        // A sheet, not an alert: a question runs to paragraphs (lists, code)
+        // and an answer to a few lines — the alert showed both in a sliver.
+        .sheet(isPresented: $answering) {
+            TaskAnswerSheet(task: task,
+                            reply: Binding(get: { draft.text }, set: { draft.edit($0, for: task.pendingAskID) }),
+                            stale: draft.isStale(for: task.pendingAskID),
+                            sending: sending,
+                            error: sendFailed ? (task.lastError ?? NSLocalizedString(
+                                "The answer couldn't be sent.", comment: "coding task: answer refused")) : nil,
+                            onSend: { text in
+                                guard !sending, draft.canSend(to: task.pendingAskID) else { return }
+                                sending = true
+                                sendFailed = false
+                                let sent = draft
+                                Task { @MainActor in
+                                    let ok = await onAnswer(sent.askID, text)
+                                    sending = false
+                                    // Gone only once the board took it: a
+                                    // refused answer stays, with why.
+                                    draft = draft.afterSend(sent, accepted: ok)
+                                    if ok {
+                                        answering = false
+                                    } else {
+                                        sendFailed = true
+                                    }
+                                }
+                            },
+                            onCancel: { answering = false })   // the draft stays for next time
         }
+    }
+}
+
+/// An answer being written, and the ask it was written for. The agent can
+/// ask again while a draft waits (an ask returns after `waitCap`, and the
+/// next replaces the card's question): a draft for an earlier question is
+/// never sent to the new one until the user has edited it with the new
+/// question on screen.
+struct TaskAnswerDraft: Equatable {
+    private(set) var text = ""
+    private(set) var askID: UUID?
+
+    /// Every edit is made with `ask` on screen.
+    mutating func edit(_ text: String, for ask: UUID?) {
+        self.text = text
+        askID = ask
+    }
+
+    /// Written for another question than the one asked now.
+    func isStale(for ask: UUID?) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && askID != ask
+    }
+
+    func canSend(to ask: UUID?) -> Bool {
+        ask != nil && askID == ask && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The draft once a Send of `sent` came back: gone only when the board
+    /// took it and it wasn't edited meanwhile; a refused answer keeps its
+    /// text for the user to send again (or rewrite for the new question).
+    func afterSend(_ sent: TaskAnswerDraft, accepted: Bool) -> TaskAnswerDraft {
+        accepted && self == sent ? TaskAnswerDraft() : self
+    }
+}
+
+/// Answer a task's question: the whole question, readable and selectable,
+/// above room to write the reply. ⌘↩ sends, Esc closes (the draft is kept).
+struct TaskAnswerSheet: View {
+    let task: CodingTask
+    @Binding var reply: String
+    /// The draft was written for an earlier question.
+    var stale = false
+    /// On its way to the agent: Send waits.
+    var sending = false
+    /// Why the last Send didn't go (the text is still here).
+    var error: String? = nil
+    var onSend: (String) -> Void
+    var onCancel: () -> Void
+    @FocusState private var editorFocused: Bool
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    private var trimmed: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label(String(format: NSLocalizedString("%@ asks", comment: "task answer sheet"),
+                             task.assignment?.label ?? NSLocalizedString("The agent", comment: "task answer sheet")),
+                      systemImage: "questionmark.bubble.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(task.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            ScrollView {
+                MarkdownBlocks(text: task.pendingQuestion ?? "")
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(minHeight: 120, maxHeight: .infinity)
+            .layoutPriority(1)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.06)))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(NSLocalizedString("Your answer", comment: "task card"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $reply)
+                    .font(.system(size: 13.5))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 140)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.5)))
+                    .overlay(RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(editorFocused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.5))
+                    .focused($editorFocused)
+                if stale {
+                    Label(NSLocalizedString("The agent asked a new question since you wrote this. Change your answer to send it.", comment: "task answer sheet: the draft was for an earlier question"),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let error {
+                    Label(error, systemImage: "exclamationmark.circle.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack {
+                Text(NSLocalizedString("⌘↩ to send", comment: "task answer sheet"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if sending { ProgressView().controlSize(.small) }
+                Button(NSLocalizedString("Cancel", comment: ""), role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(NSLocalizedString("Send", comment: "")) { onSend(trimmed) }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmed.isEmpty || stale || sending)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: hSize == .compact ? nil : 560, idealWidth: 640,
+               minHeight: hSize == .compact ? nil : 480, idealHeight: 560)
+        .onAppear { editorFocused = true }
     }
 }
 
@@ -2337,6 +2657,9 @@ private struct TestingTaskCard: View {
     var onMarkDone: () -> Void = {}
     /// Retry a landing that needs the user (nil: not offered here).
     var onRetry: (() -> Void)? = nil
+    /// Picked for a batch merge (nil: it can't be).
+    var isSelected: Bool? = nil
+    var onToggleSelect: () -> Void = {}
     /// The card's menu (built by the column).
     var menu: [CardMenuItem] = []
     @State private var hovering = false
@@ -2352,6 +2675,17 @@ private struct TestingTaskCard: View {
                         CardStatusPill(text: TaskPlurals.comments(unsent),
                                        tint: .purple, systemImage: "text.bubble.fill")
                             .help(NSLocalizedString("Draft review comments", comment: ""))
+                    }
+                    if let isSelected, isSelected || hovering {
+                        Button(action: onToggleSelect) {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 14))
+                                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor)
+                                                            : AnyShapeStyle(.tertiary))
+                        }
+                        .buttonStyle(.plain)
+                        .help(isSelected ? NSLocalizedString("Deselect", comment: "plan card menu")
+                                         : NSLocalizedString("Select for a batch merge", comment: "review card"))
                     }
                 }
                 Text(task.title)
@@ -2391,12 +2725,13 @@ private struct TestingTaskCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(CardChrome(borderTint: needsYou ? .red : .purple))
+        .modifier(CardChrome(borderTint: needsYou ? .red : isSelected == true ? .accentColor : .purple))
         .onHover { hovering = $0 }
         .modifier(CardAccessibility(
             label: [task.title, workspaceName.isEmpty ? nil : workspaceName,
                     TaskLandingText.line(for: task)
-                        ?? (task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                        ?? (task.isLocating ? CodingTask.locatingText
+                            : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                           : NSLocalizedString("Ready to land", comment: "task card")),
                     unsent > 0 ? TaskPlurals.comments(unsent) : nil,
                     task.lastError].compactMap { $0 }.joined(separator: ", "),
@@ -2473,7 +2808,8 @@ private struct TestingTaskCard: View {
                     quickDone
                 }
             }
-        } else if let err = task.lastError {
+        } else if let err = task.lastError, !task.isLocating {
+            // (While the look runs, its "no worktree" error is out of date.)
             HStack(alignment: .top, spacing: 6) {
                 CardErrorLine(text: err)
                 Spacer(minLength: 0)
@@ -2483,7 +2819,8 @@ private struct TestingTaskCard: View {
             // The state on its own row, the actions below it: side by side
             // at the narrowest column they wrapped mid-word.
             VStack(alignment: .leading, spacing: 6) {
-                Text(task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
+                Text(task.isLocating ? CodingTask.locatingText
+                     : task.isNoCode ? NSLocalizedString("No code changes", comment: "task card")
                                    : NSLocalizedString("Ready to land", comment: "task card"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
@@ -2577,6 +2914,9 @@ private struct DoneTaskCard: View {
 struct TaskEditorSheet: View {
     @State var task: CodingTask
     let profiles: [Profile]
+    /// The agents a workspace can run (its Models settings and sign-ins
+    /// included); nil: the workspace's own list.
+    var toolSpecs: ((Profile) -> [Profile.ToolSpec])? = nil
     /// Fellow phases of the same plan (any stage), in plan order — the
     /// pool a phase's dependencies are picked from. Empty for plain tasks.
     let siblings: [CodingTask]
@@ -2605,7 +2945,8 @@ struct TaskEditorSheet: View {
     }
 
     private var toolChoices: [Profile.ToolSpec] {
-        selectedProfile?.allToolSpecs ?? []
+        guard let p = selectedProfile else { return [] }
+        return toolSpecs?(p) ?? p.allToolSpecs
     }
 
     /// A title, or a description to take one from — not every task

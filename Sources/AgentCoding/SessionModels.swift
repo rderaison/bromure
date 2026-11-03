@@ -149,17 +149,32 @@ public struct ListeningPort: Equatable, Sendable {
 enum AgentStatus: String, Sendable {
     case working, done, needsInput
 
-    /// Parse a guest-hook signal ("working"/"done"/"needsInput"/"needs-input").
-    /// Only its first line: the reporter adds the hook's session id on a
-    /// second one (`AgentStatusReport`).
+    /// Parse a guest-hook signal ("working"/"done"/"idle"/"needsInput"/
+    /// "needs-input"). Only its first line: the reporter adds the hook's
+    /// session id on a second one (`AgentStatusReport`).
     init?(signal: String) {
-        let first = signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        switch first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        switch Self.firstLine(signal) {
         case "working": self = .working
-        case "done": self = .done
+        case "done", "idle": self = .done
         case "needsinput", "needs-input", "needs_input": self = .needsInput
         default: return nil
         }
+    }
+
+    /// Whether the signal says the agent's turn ended (`done`: Stop), not just
+    /// that it sits at its prompt. `idle` -- an interrupt (Codex/Kimi Esc,
+    /// Grok's StopCancelled), Codex's SessionEnd, an idle_prompt notification
+    /// -- shows the tab as done but finishes no automation run or coding task:
+    /// the work stopped unfinished and can be resumed (Finding CWE-670,
+    /// "Interrupting Codex now completes and tears down an unfinished
+    /// automation").
+    static func endsTurn(signal: String) -> Bool {
+        firstLine(signal) != "idle"
+    }
+
+    private static func firstLine(_ signal: String) -> String {
+        (signal.split(whereSeparator: \.isNewline).first.map(String.init) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
 
@@ -353,6 +368,28 @@ final class SessionListModel {
         var accentHex: String
         var state: RunState
         var compromised: Bool
+        /// Squelch is on for it, and what it saved so far (nil: nothing yet,
+        /// or a machine Squelch doesn't reach).
+        var squelch = false
+        var squelchSummary: SquelchSummary? = nil
+        /// The workspace's notes (markdown source), for the row's tooltip.
+        var notes = ""
+
+        /// The notes' opening, for a tooltip: the first five lines, at most
+        /// 300 characters, an ellipsis when there is more. Empty when none.
+        var notesExcerpt: String {
+            let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "" }
+            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+            var excerpt = lines.prefix(5).joined(separator: "\n")
+            var cut = lines.count > 5
+            if excerpt.count > 300 {
+                excerpt = String(excerpt.prefix(300))
+                cut = true
+            }
+            excerpt = excerpt.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cut ? excerpt + "…" : excerpt
+        }
     }
 
     /// Running, attached panes — carry live tab models.
@@ -393,6 +430,16 @@ final class SessionListModel {
     /// True when the right-hand file-explorer pane is open. Drives the
     /// toolbar button tint and the pane's own context/polling.
     var filePaneOpen = false
+    /// True while the Sandbox drawer (blocked connections, proposals) is open.
+    var policyDrawerOpen = false
+    /// When each workspace's drawer was last looked at: the toolbar badge
+    /// counts blocks since.
+    var policyDrawerSeen: [UUID: Date] = [:]
+    /// The workspace the stage shows: with a session on stage, that
+    /// session's machine — not whichever machine was selected last.
+    var stageProfileID: UUID? {
+        (sessionsFirst && selectedSessionID != nil) ? (selectedSessionProfileID ?? selectedID) : selectedID
+    }
     /// True when the agentic browser pane is open. Drives the toolbar tint.
     /// (Local window; set from the selected pane's browser state.)
     var browserPaneOpen = false

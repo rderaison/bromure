@@ -47,7 +47,14 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// diff that was seen.
     var reviewViewed: [String: String]?
 
-    var createdAt: Date
+    var createdAt: Date { didSet { createdAtExact = createdAt.timeIntervalSince1970 } }
+    /// `createdAt` to the fraction of a second. tasks.json and the /state
+    /// snapshot write it as an ISO-8601 string in whole seconds — and stay
+    /// so: a build on macOS 14 / iOS 17 rejects a fraction there, and would
+    /// drop every task. The Backlog ranks on creation time, and a card sent
+    /// to the bottom sits a millisecond past now: truncated, a task created
+    /// later that second reloaded above it. nil: saved before this existed.
+    var createdAtExact: Double?
     /// When the task last changed (the store stamps it). nil: not since
     /// it was created.
     var updatedAt: Date?
@@ -70,6 +77,15 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var validationRequestedAt: Date?
     /// Why the last start attempt failed, shown on the backlog card.
     var lastError: String?
+    /// The refusal `TaskDispatcher.answer` put in `lastError` (a delivery
+    /// it couldn't make): an answer that then goes clears it — saved, so
+    /// that holds after a relaunch — and only while it's still what the
+    /// card shows.
+    var answerRefusal: String?
+    /// A refusal the guest reported before the run's tab could be listed:
+    /// held until the tab shows up (dropped) or the grace runs out without
+    /// it (then `lastError`). See `CodingTaskEngine.runRefused`.
+    var pendingRefusal: String?
     /// A start is being checked (workspace up, folder present, a repo of
     /// its own) — the card stays where it is with a "Starting…" spinner and
     /// moves to In Progress only once the launch can actually happen.
@@ -119,6 +135,12 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     var pendingAskID: UUID?
     /// What the assignee said when it delivered.
     var deliverySummary: String?
+    /// Where the user put it in the Backlog (dragged): its place, between its
+    /// neighbours' ranks. nil: where its creation put it (`backlogRank`).
+    var queueRank: Double?
+    /// The host is looking for this delivered card's worktree (since then):
+    /// `TaskDispatcher.relocateDelivery`. Not "no code" meanwhile.
+    var locatingSince: Date?
     /// What the assignee said when it merged the task on acceptance.
     var mergeReport: String?
     /// The pull request the assignee opened for it (found in its delivery).
@@ -130,6 +152,12 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
     /// The landing under way (or stuck) — set from the moment the user
     /// approves a merge or a pull request until the card goes Done.
     var landing: TaskLanding?
+    /// Where the user last approved landing this round of work — kept when
+    /// they cancel the landing (its brief may be out already), cleared when
+    /// the work goes back to the agent. Only a landing into it, seen in git,
+    /// finishes the card with no landing under way: the parent branch is
+    /// read from the machine the agent works on, so it's never the approval.
+    var approvedTarget: String?
     /// How a Done card got there (nil on cards finished by older builds —
     /// `effectiveCompletion` derives one from `merged`/`prOpened`).
     var completion: TaskCompletion?
@@ -190,6 +218,7 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         self.rootRepo = rootRepo
         self.comments = comments
         self.createdAt = createdAt
+        self.createdAtExact = createdAt.timeIntervalSince1970
         self.startedAt = startedAt
         self.testingAt = testingAt
         self.completedAt = completedAt
@@ -272,13 +301,148 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
         return Date().timeIntervalSince(at) < 900
     }
 
+    /// Its place in the Backlog and in its assignee's queue: top runs first.
+    var backlogRank: Double { queueRank ?? createdTime }
+
+    /// When it was created, with the fraction `createdAt` loses on disk and
+    /// over the wire — unless `createdAt` was since set elsewhere (an older
+    /// build doesn't keep `createdAtExact` in step).
+    var createdTime: Double {
+        let whole = createdAt.timeIntervalSince1970
+        guard let exact = createdAtExact, abs(exact - whole) < 1 else { return whole }
+        return exact
+    }
+
+    /// Backlog order: by rank, oldest first among equals, then by id — a
+    /// total order, so cards created the same second don't swap places
+    /// between redraws (Swift's sort isn't stable).
+    static func backlogOrder(_ a: CodingTask, _ b: CodingTask) -> Bool {
+        if a.backlogRank != b.backlogRank { return a.backlogRank < b.backlogRank }
+        if a.createdTime != b.createdTime { return a.createdTime < b.createdTime }
+        return a.id.uuidString < b.id.uuidString
+    }
+
+    /// The rank that puts a card dropped on `target` just above it — or at
+    /// the bottom, `target` nil — among the column `ordered` (by rank),
+    /// leaving out the card being moved. A collapsed midpoint (many drops into
+    /// one gap) fails `fits`, and the drag respaces that gap.
+    static func rank(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                     now: Date = Date()) -> Double {
+        let others = ordered.filter { $0.id != moving }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }) else {
+            // The bottom: just past the last card and past now — not a whole
+            // second past the last card, which put the next new card (ranked
+            // by when it's created) above the one just sent to the bottom.
+            return max(others.last?.backlogRank ?? 0, now.timeIntervalSince1970) + 0.001
+        }
+        let after = others[i].backlogRank
+        guard i > 0 else { return after - 1 }
+        return (others[i - 1].backlogRank + after) / 2
+    }
+
+    /// New ranks when there's no room left between `target` and the card
+    /// above it (cards created the same second, or many drags into one gap):
+    /// the midpoint would equal one of them and the card would snap back.
+    /// Only that gap is respaced: every task (`all` — not just the column on
+    /// show: a hidden brief, a card in progress keep ranks the queue sorts
+    /// on) ranked between those two neighbours, in its order, with `moving`
+    /// just above `target`, spread over the open interval to the nearest
+    /// ranks outside — so nobody else changes place. Renumbering the visible
+    /// column from its minimum jumped the tasks it didn't show. Only the
+    /// ranks that change.
+    static func respaced(dropping moving: UUID, before target: UUID?, in ordered: [CodingTask],
+                         all: [CodingTask]) -> [(UUID, Double)] {
+        let others = ordered.filter { $0.id != moving }
+        guard let card = ordered.first(where: { $0.id == moving }) ?? all.first(where: { $0.id == moving })
+        else { return [] }
+        guard let target, let i = others.firstIndex(where: { $0.id == target }), i > 0 else {
+            return [(moving, rank(dropping: moving, before: target, in: ordered))]
+        }
+        let lowRank = others[i - 1].backlogRank, highRank = others[i].backlogRank
+        let (x, y) = (min(lowRank, highRank), max(lowRank, highRank))
+        let rest = all.filter { $0.id != moving }
+        var cluster = rest.filter { $0.backlogRank >= x && $0.backlogRank <= y }.sorted(by: backlogOrder)
+        let at = cluster.firstIndex { $0.id == target } ?? cluster.count
+        cluster.insert(card, at: at)
+        let lo = rest.map(\.backlogRank).filter { $0 < x }.max() ?? (x - 1)
+        let hi = rest.map(\.backlogRank).filter { $0 > y }.min() ?? (y + 1)
+        let step = (hi - lo) / Double(cluster.count + 1)
+        return cluster.enumerated().compactMap { n, t in
+            let r = lo + step * Double(n + 1)
+            if t.id != moving, let old = rest.first(where: { $0.id == t.id }), old.backlogRank == r { return nil }
+            return (t.id, r)
+        }
+    }
+
+    /// Whether `rank` lands between its new neighbours (it doesn't once the
+    /// gap is used up).
+    static func fits(_ rank: Double, dropping moving: UUID, in ordered: [CodingTask]) -> Bool {
+        !ordered.contains { $0.id != moving && $0.backlogRank == rank }
+    }
+
     /// A task with nothing to merge: no branch at all, a delegated delivery
     /// whose worktree was never found, or a branch measured with no change
     /// against its target. Review offers Mark Done, not git.
     var isNoCode: Bool {
         if branch == nil && branchSlug == nil { return true }
-        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return true }
+        // While the host still looks for it, the worktree may well be there:
+        // "no code" then offered a one-click Mark Done that closed the card
+        // and made the look's find be dropped.
+        if delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty { return !isLocating }
         return codeChanges == 0
+    }
+
+    /// The host is still looking for the worktree (a look that never ended —
+    /// the app quit mid-way — counts for `locateWindow` at most).
+    var isLocating: Bool {
+        guard awaitsRelocation, let at = locatingSince else { return false }
+        return Date().timeIntervalSince(at) < Self.locateWindow
+    }
+    static let locateWindow: TimeInterval = 600
+    /// A fat client waiting on the host's look, at its `polls`-th look at
+    /// the mirror (2 a second): found (true), over (false), or keep waiting
+    /// (nil) — for as long as the host shows it looking; 20 s for a host that
+    /// never does (older). A fixed 20 s gave up while the host was still
+    /// trying the next session, each up to 15 s.
+    static func locateOutcome(_ t: CodingTask?, sawLocating: Bool, polls: Int) -> Bool? {
+        guard let t else { return false }
+        if !t.awaitsRelocation { return !(t.worktreeDir ?? "").isEmpty }
+        if t.isLocating { return nil }
+        return sawLocating || polls >= 40 ? false : nil
+    }
+
+    /// The fat client's wait on the host's look: polls the mirrored card
+    /// every `interval` until `locateOutcome` settles, `window` passes, or
+    /// the waiting task is cancelled (false) — a closed Review window's
+    /// sleep throws at once, and without that check the loop spun the main
+    /// actor flat out for the rest of the look. `kick`: a poll now and then.
+    @MainActor
+    static func awaitLocate(interval: UInt64 = 500_000_000, window: TimeInterval = locateWindow,
+                            task: () -> CodingTask?, kick: () -> Void) async -> Bool {
+        var sawLocating = false
+        let deadline = Date().addingTimeInterval(window)
+        var i = 0
+        while Date() < deadline, !Task.isCancelled {
+            i += 1
+            try? await Task.sleep(nanoseconds: interval)
+            let t = task()
+            if t?.isLocating == true { sawLocating = true }
+            if let done = locateOutcome(t, sawLocating: sawLocating, polls: i) { return done }
+            if i % 6 == 0 { kick() }
+        }
+        return false
+    }
+
+    static var locatingText: String {
+        NSLocalizedString("Looking for the worktree…", comment: "task card: Review is still looking for a delivered branch's checkout")
+    }
+
+    /// A delivered card in Review whose worktree wasn't found when it came
+    /// in (and isn't landed): the review window looks for it again
+    /// (`TaskDispatcher.relocateDelivery`).
+    var awaitsRelocation: Bool {
+        delegationID != nil && stage == .testing && (worktreeDir ?? "").isEmpty
+            && landing?.phase != .landed
     }
 
     /// Who does (and lands) the task, for cards: the assignee ("@hotfixes")
@@ -290,8 +454,10 @@ struct CodingTask: Codable, Identifiable, Equatable, Sendable {
 
     /// The branch this task lands in: the landing's own target while one
     /// runs, else where the work forked from.
+    /// A parent that isn't a plain branch name (it's read from the agent's
+    /// machine) is no target.
     var landingTarget: String? {
-        landing?.target ?? parentBranch
+        landing?.target ?? parentBranch.flatMap { BranchMergeCommands.isSafeBranchName($0) ? $0 : nil }
     }
 
     /// How the card got to Done — recorded, or derived for cards an older
@@ -345,12 +511,23 @@ struct TaskLanding: Codable, Equatable, Sendable {
     var verified: Bool = false
     /// Keep the branch (and its checkout) once it has landed.
     var keepBranch: Bool = false
+    /// Merge landings: push the target to its remote afterwards — done only
+    /// once the remote has it. nil/false = a local merge.
+    var push: Bool?
+    /// The remote it goes to ("origin"), resolved when the landing starts.
+    var remote: String?
+    var pushes: Bool { push == true && mode != .pr }
     /// The agent's latest line while it lands, for the card — only ever
     /// from after the brief reached it.
     var agentLine: String?
     /// The landing brief is on its way to the agent (typed in, or its
     /// conversation being resumed): not landing yet. nil once delivered.
     var handingOver: Bool?
+    /// A batch landing — several Review cards merged into one target by
+    /// one agent: on the card whose agent does it, the other cards; on
+    /// each of those, that card. Its report and its turn's end settle all.
+    var batch: [UUID]?
+    var batchLead: UUID?
 }
 
 /// How a Done card got there — what its card says.
@@ -479,7 +656,7 @@ struct TaskAssignment: Codable, Equatable, Sendable, Hashable {
     static func queuePosition(of task: CodingTask, in tasks: [CodingTask]) -> Int? {
         guard task.stage == .backlog, let a = task.assignment else { return nil }
         let queue = tasks.filter { $0.stage == .backlog && a.same(as: $0.assignment) }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: CodingTask.backlogOrder)
         return queue.firstIndex { $0.id == task.id }.map { $0 + 1 }
     }
 
@@ -562,6 +739,14 @@ struct ReviewComment: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// A finish's snapshot of its card when it was armed: the card was moved
+/// by hand since (sent back, put back to work) when either stamp changed.
+struct TaskFinishArmed: Equatable, Sendable {
+    var startedAt: Date?
+    var testingAt: Date?
+    func moved(_ t: CodingTask) -> Bool { t.startedAt != startedAt || t.testingAt != testingAt }
+}
+
 // MARK: - Store
 
 /// Persistence for the coding board: one JSON blob at
@@ -609,12 +794,14 @@ final class CodingTaskStore {
     /// column and disappears from Backlog (it stays in the store as the
     /// phases' parent — title chip, plan overview). If every phase is
     /// later deleted, the brief resurfaces.
+    /// The Backlog column, top first: the order its assignees' queues run.
     func backlogTasks() -> [CodingTask] {
         tasks.filter { t in
             t.stage == .backlog
                 && !(t.validatedAt != nil
                      && tasks.contains { $0.parentTaskID == t.id })
         }
+        .sorted(by: CodingTask.backlogOrder)
     }
 
     func remove(_ id: UUID) {
@@ -1366,6 +1553,14 @@ struct PaneTarget: Equatable, Sendable, Codable {
     }
 }
 
+/// What a provider's `typeRemotely` came back with.
+enum RemoteTypeResult {
+    /// No such route (local, or an older server): type it from here.
+    case unsupported
+    /// The guard's output there; nil when that machine couldn't be asked.
+    case output(String?)
+}
+
 /// Why a guarded send typed nothing.
 enum PaneRefusal: String, Equatable, Sendable {
     /// No such window (closed, or never resolved).
@@ -2001,8 +2196,8 @@ final class CodingTaskEngine {
             delegate.startProfileForAutomation(profileID, detached: detached)
         }
         defer { pendingBoots.remove(profileID) }
-        let deadline = Date().addingTimeInterval(Self.bootTimeout)
-        while Date() < deadline {
+        let budget = BootBudget.workspace(profileID, seconds: Self.bootTimeout, reason: "Starting a workspace for a task")
+        while budget.remains {
             try? await Task.sleep(nanoseconds: Self.bootPollInterval)
             if let why = delegate.unattendedLaunchRefusal(profileID) { return why }
             if (try? await delegate.guestExec(profileID: profileID, command: "true", timeout: 5)) != nil {
@@ -2193,6 +2388,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()
                 $0.startingAt = nil
                 $0.lastError = nil
+                $0.pendingRefusal = nil   // an earlier run's
             }
             guard delegate.automationWorktreeCommand(
                 profileNameOrID: profileID.uuidString, action: "run", args: args) else {
@@ -2211,6 +2407,55 @@ final class CodingTaskEngine {
         }
     }
 
+    /// The guest refused to start a task's run (`worktree-error.txt` named
+    /// its slug): say why on the card now, not after the launch watch. A
+    /// claim any guest process can make (see the automation engine's
+    /// `runRefused`): not for a task whose tab is up, and shown as what the
+    /// workspace said.
+    /// Before the tab could be listed (`tabAppearGrace` from the start), no
+    /// tab says nothing: the refusal is held, and `settlePendingRefusals`
+    /// puts it on the card only if the grace runs out with no tab.
+    @discardableResult
+    func runRefused(profileID: UUID, slug: String, reason: String, liveBranches: [String]?,
+                    now: Date = Date()) -> ScheduledAutomationEngine.RefusalOutcome {
+        guard let t = store.tasks.first(where: { $0.profileID == profileID && $0.branchSlug == slug
+                                                  && $0.stage == .inProgress }) else { return .noRun }
+        // Its tab is up: the claim is ignored, and so is one held before.
+        if liveBranches?.contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) == true {
+            if t.pendingRefusal != nil { store.mutate(t.id) { $0.pendingRefusal = nil } }
+            return .ignored
+        }
+        let text = ScheduledAutomationEngine.guestReported(reason)
+        if let started = t.startedAt, now.timeIntervalSince(started) < ScheduledAutomationEngine.tabAppearGrace {
+            store.mutate(t.id) { $0.pendingRefusal = text }
+            return .held
+        }
+        // Shown now: an older held one must not come back over it.
+        store.mutate(t.id) { $0.lastError = text; $0.pendingRefusal = nil }
+        return .applied
+    }
+
+    /// Held refusals: dropped once the task's tab is listed (or it left In
+    /// Progress), put on the card once the grace ran out with no tab --
+    /// unless the card already says why since (a later report, the launch
+    /// watch's own diagnosis): a held refusal is older than that, and never
+    /// written over it (Finding CWE-670, "Held task refusal overwrites a
+    /// later error on the card").
+    func settlePendingRefusals(now: Date = Date(), liveBranches: (UUID) -> [String]) {
+        for t in store.tasks where t.pendingRefusal != nil {
+            guard let reason = t.pendingRefusal else { continue }
+            guard t.stage == .inProgress, let slug = t.branchSlug else {
+                store.mutate(t.id) { $0.pendingRefusal = nil }
+                continue
+            }
+            if liveBranches(t.profileID).contains(where: { AutomationBoard.branchMatches($0, slug: slug) }) {
+                store.mutate(t.id) { $0.pendingRefusal = nil }
+            } else if now.timeIntervalSince(t.startedAt ?? .distantPast) >= ScheduledAutomationEngine.tabAppearGrace {
+                store.mutate(t.id) { $0.pendingRefusal = nil; if $0.lastError == nil { $0.lastError = reason } }
+            }
+        }
+    }
+
     /// An agent that takes its brief on the command line: watch the launch
     /// so one that dies at once (bad flag, missing binary) puts the reason
     /// on the card in seconds, not never.
@@ -2221,7 +2466,7 @@ final class CodingTaskEngine {
             guard case .died = outcome, let t = self.store.task(taskID), t.stage == .inProgress,
                   t.branchSlug.map({ "wt/" + $0 }) == branch || t.branch == branch else { return }
             let why = Self.launchFailure(worker: worker, outcome)
-            self.store.mutate(taskID) { $0.lastError = why }
+            self.store.mutate(taskID) { $0.lastError = why; $0.pendingRefusal = nil }
             self.noteSessionLaunchFailed(taskID, branch: branch, reason: why)
         }
     }
@@ -2266,7 +2511,7 @@ final class CodingTaskEngine {
             }
             BACDebug.log("tasks", "opening brief NOT delivered to \(branch)")
             let why = Self.onceUpFailure(worker: worker, failure)
-            self.store.mutate(taskID) { $0.lastError = why }
+            self.store.mutate(taskID) { $0.lastError = why; $0.pendingRefusal = nil }
             if case .launch = failure { self.noteSessionLaunchFailed(taskID, branch: branch, reason: why) }
         }
     }
@@ -2315,6 +2560,7 @@ final class CodingTaskEngine {
                 $0.startedAt = Date()
                 $0.startingAt = nil
                 $0.lastError = nil
+                $0.pendingRefusal = nil   // an earlier run's
             }
             BACDebug.log("tasks", "“\(task.title)”: resuming on its kept branch \(branch)")
             let prompt = self.store.task(taskID).map(Self.resumePrompt(for:)) ?? Self.resumePrompt(for: task)
@@ -2528,15 +2774,20 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(task.id) else { return }
             settling.insert(task.id)
+            // The card as this finish found it: moved by hand while it waits
+            // (Move to Review, then Send Back or Back to In Progress), the
+            // finish no longer moves it.
+            let armed = TaskFinishArmed(startedAt: task.startedAt, testingAt: task.testingAt)
+            let tool = task.tool
             // Finalize only after the session is quiet — a Stop-hook done
             // with background subagents still running isn't done.
             Task { [weak self] in
                 await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                          branch: branch)
+                                                          branch: branch, tool: tool)
                 guard let self else { return }
                 self.settling.remove(task.id)
                 await self.finalizeTaskDone(task.id, profileID: profileID,
-                                            branch: branch)
+                                            branch: branch, armed: armed)
             }
             return
         }
@@ -2567,11 +2818,12 @@ final class CodingTaskEngine {
         }) {
             guard !settling.contains(parent.id) else { return }
             settling.insert(parent.id)
+            let tool = parent.tool
             Task { [weak self] in
                 // Subagents the planner spawned may still be exploring — or
                 // about to file phases through the MCP. Settle before judging.
                 await self?.delegate?.waitForSessionQuiet(profileID: profileID,
-                                                          branch: branch)
+                                                          branch: branch, tool: tool)
                 guard let self else { return }
                 self.settling.remove(parent.id)
                 guard let p = self.store.task(parent.id) else { return }
@@ -2595,9 +2847,11 @@ final class CodingTaskEngine {
     /// diff), stage → Testing, session tab closed. Idempotent via the
     /// stage guard.
     private func finalizeTaskDone(_ taskID: UUID, profileID: UUID,
-                                  branch: String) async {
+                                  branch: String, armed: TaskFinishArmed) async {
+        // Moved to Review while the session settled: it still needs the
+        // branch and checkout this finish looks up.
         guard let task = store.task(taskID),
-              task.stage == .inProgress || task.stage == .planning else { return }
+              task.stage == .inProgress || task.stage == .planning || Self.fillsReview(task) else { return }
         let tab = delegate?.pane(for: profileID)?.model.tabs
             .first { $0.worktreeBranch == branch }
         var dir = tab?.repoRoot?.isEmpty == false ? tab?.repoRoot : tab?.cwd
@@ -2612,18 +2866,33 @@ final class CodingTaskEngine {
             root = root ?? m.root
         }
         BACDebug.log("tasks", "“\(task.title)” agent done → testing (\(branch))")
+        var wrote = false
         store.mutate(taskID) {
+            // The lookup above awaited. Moved to Review meanwhile (Move to
+            // Review, a delegated delivery): it keeps its state, but gets
+            // the branch and checkout it lacks — without them Merge marked
+            // it done unmerged and Send Back did nothing.
+            let atWork = $0.stage == .inProgress || $0.stage == .planning
+            if Self.fillsReview($0) || (atWork && armed.moved($0)) {
+                wrote = Self.fillWorktree(&$0, branch: branch, dir: dir, parent: parent, root: root)
+                return
+            }
+            // Marked done, discarded or stopped meanwhile: it stays as it is.
+            guard $0.stage == .inProgress || $0.stage == .planning else { return }
+            wrote = true
             $0.stage = .testing
             $0.testingAt = Date()
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
             $0.restartNeeded = nil
             if let dir { $0.worktreeDir = dir }
-            if let parent { $0.parentBranch = parent }
+            // Read from the guest (its registry, or HEAD): a plain branch name only.
+            if let parent, parent != branch, Self.isSafeBranchName(parent) { $0.parentBranch = parent }
             if let root { $0.rootRepo = root }
         }
         // The agent stays in its tab through review: send-back types into
@@ -2631,7 +2900,57 @@ final class CodingTaskEngine {
         // that wrote the change. The tab is put away when the task lands, is
         // marked done or discarded — or after a long idle spell in Review
         // (`sweepIdleReview`).
-        await measureCodeChanges(taskID)
+        if wrote { await measureCodeChanges(taskID) }
+    }
+
+    /// The branch a Review card stands for: the one recorded, or — not yet
+    /// recorded — its live tab's, when exactly one tab is the slug's (an old
+    /// `wt/<slug>` beside the new `wt/<slug>-2` is ambiguous: wait).
+    /// The guest may have suffixed the slug ("-2"), so the slug alone
+    /// names a branch that isn't this card's. nil: wait for the lookup.
+    func reviewBranch(_ t: CodingTask) -> String? {
+        if let b = t.branch { return b }
+        guard let slug = t.branchSlug else { return nil }
+        let tabs = delegate?.pane(for: t.profileID)?.model.tabs.map(\.worktreeBranch) ?? []
+        return Self.onlyBranch(tabs, slug: slug)
+    }
+
+    /// The one branch among `tabs` that is the slug's, or nil (none, or more).
+    nonisolated static func onlyBranch(_ tabs: [String?], slug: String) -> String? {
+        let hits = Set(tabs.compactMap { $0 }.filter { AutomationBoard.branchMatches($0, slug: slug) })
+        return hits.count == 1 ? hits.first : nil
+    }
+
+    nonisolated static var branchPendingText: String {
+        NSLocalizedString("The branch is still being recorded — try again in a moment.",
+                          comment: "task card: Merge/Send Back on a card whose branch isn't known yet")
+    }
+
+    /// A card a finished agent's lookup only fills in: already in Review,
+    /// not landed or closed.
+    nonisolated static func fillsReview(_ t: CodingTask) -> Bool {
+        t.stage == .testing && t.landing?.phase != .landed && t.completion == nil
+    }
+
+    /// The branch and checkout a Review card lacks, from a lookup — never
+    /// over what it has (another branch, a checkout already found), and
+    /// nothing else (its landing, its stage). True when it wrote anything.
+    @discardableResult
+    nonisolated static func fillWorktree(_ t: inout CodingTask, branch: String, dir: String?,
+                                         parent: String?, root: String?) -> Bool {
+        guard t.branch == nil || t.branch == branch else { return false }
+        let before = t
+        if t.branch == nil { t.branch = branch }
+        if (t.worktreeDir ?? "").isEmpty, let dir { t.worktreeDir = dir }
+        if (t.parentBranch ?? "").isEmpty, let parent, parent != branch, isSafeBranchName(parent) {
+            t.parentBranch = parent
+        }
+        if (t.rootRepo ?? "").isEmpty, let root { t.rootRepo = root }
+        // Merge / Send Back's "still being recorded" is moot once it is.
+        if t.lastError == branchPendingText { t.lastError = nil }
+        // A delivery's "no worktree" error is moot once there is one.
+        if !(t.worktreeDir ?? "").isEmpty, t.lastError == TaskDispatcher.noWorktreeText(branch) { t.lastError = nil }
+        return t != before
     }
 
     /// Tab-independent worktree metadata: the checkout dir from
@@ -2667,21 +2986,24 @@ final class CodingTaskEngine {
     /// one on a tie. The folder's HEAD alone named whatever that checkout
     /// happened to be on, not where the work came from.
     nonisolated static func worktreeMetadataCommand(repoPath: String, branch: String) -> String {
-        let q = "'" + repoPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); "
+        func quoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        // The branch is a name git accepts — `'`, `;`, `$(` and all: quoted
+        // like every other value, never spliced into a quoted string.
+        let q = quoted(repoPath)
+        return "root=$(git -C \(q) rev-parse --show-toplevel 2>/dev/null); tb=\(quoted(branch)); "
             + "[ -n \"$root\" ] || exit 0; "
             + "dir=$(git -C \"$root\" worktree list --porcelain 2>/dev/null "
-            + "| awk -v b='refs/heads/\(branch)' "
+            + "| awk -v b=\(quoted("refs/heads/" + branch)) "
             + "'/^worktree /{d=substr($0,10)} $0==\"branch \" b {print d; exit}'); "
             + "reg=\"$HOME/.bromure/worktrees/$(basename \"$root\")/.registry\"; "
-            + "parent=$(awk -F'\\x1f' -v b='\(branch)' '$1==b {print $2; exit}' "
+            + "parent=$(awk -F'\\x1f' -v b=\(quoted(branch)) '$1==b {print $2; exit}' "
             + "\"$reg\" 2>/dev/null); "
             + "if [ -z \"$parent\" ]; then "
             + "best=999999; "
             + "head=$(git -C \"$root\" rev-parse --abbrev-ref HEAD 2>/dev/null); "
             + "for b in \"$head\" $(git -C \"$root\" for-each-ref --count=300 --format='%(refname:short)' refs/heads/); do "
-            + "case \"$b\" in ''|HEAD|wt/*|\"\(branch)\") continue;; esac; "
-            + "n=$(git -C \"$root\" rev-list --count \"$b..\(branch)\" 2>/dev/null) || continue; "
+            + "case \"$b\" in ''|HEAD|wt/*|\"$tb\") continue;; esac; "
+            + "n=$(git -C \"$root\" rev-list --count \"$b..$tb\" 2>/dev/null) || continue; "
             + "if [ \"$n\" -lt \"$best\" ]; then best=$n; parent=$b; fi; "
             + "done; fi; "
             + "printf '%s\\n%s\\n%s\\n' \"$dir\" \"$parent\" \"$root\""
@@ -2712,6 +3034,7 @@ final class CodingTaskEngine {
             $0.branch = branch
             $0.sessionParkedAt = nil
             $0.landing = nil
+            $0.approvedTarget = nil
             // Handed over: whatever failed on the way here (a send-back
             // that didn't get through, a relaunch that timed out) is moot.
             $0.lastError = nil
@@ -2753,8 +3076,11 @@ final class CodingTaskEngine {
     /// confirmed; a failed one leaves them pending with the reason on the
     /// card, and Restart Session sends them.
     func sendBack(_ taskID: UUID) async {
-        guard let task = store.task(taskID), task.stage == .testing,
-              let branch = task.branch, let delegate else { return }
+        guard let task = store.task(taskID), task.stage == .testing, let delegate else { return }
+        guard let branch = reviewBranch(task) else {
+            if task.branchSlug != nil { store.mutate(taskID) { $0.lastError = Self.branchPendingText } }
+            return
+        }
         let unsent = task.comments.filter { $0.sentAt == nil }
         guard !unsent.isEmpty else { return }
         let ids = Set(unsent.map(\.id))
@@ -2765,9 +3091,14 @@ final class CodingTaskEngine {
         if task.delegationID != nil {
             guard await delegate.taskDispatcher.sendBack(taskID, feedback: feedback) else { return }
             store.mutate(taskID) {
+                // The steer awaited: a card that landed, was marked done or
+                // discarded meanwhile stays as it is now (the comments still
+                // reached the agent).
+                guard $0.stage == .testing, $0.landing?.phase != .landed, $0.completion == nil else { return }
                 $0.stage = .inProgress
                 $0.lastError = nil
                 $0.landing = nil
+                $0.approvedTarget = nil
                 $0.deliverySummary = nil
             }
             markCommentsSent(taskID, ids)
@@ -2779,8 +3110,10 @@ final class CodingTaskEngine {
             $0.stage = .inProgress
             $0.lastError = nil
             $0.landing = nil   // cancels a landing under way
+            $0.approvedTarget = nil
             $0.sessionParkedAt = nil
             $0.startedAt = Date()   // restart the session-gone clock
+            $0.pendingRefusal = nil   // a fresh grace: an earlier run's hold isn't this one's
         }
         if await deliverToConversation(taskID, branch: branch, text: feedback) {
             markCommentsSent(taskID, ids)
@@ -3228,6 +3561,7 @@ final class CodingTaskEngine {
             $0.parentBranch = nil; $0.rootRepo = nil
             $0.startedAt = nil; $0.testingAt = nil; $0.completedAt = nil
             $0.landing = nil; $0.merged = false; $0.prOpened = nil
+            $0.approvedTarget = nil
             $0.completion = nil; $0.codeChanges = nil; $0.sessionParkedAt = nil
             $0.lastError = nil; $0.restartNeeded = nil; $0.resumeBranch = nil
         }
@@ -3274,8 +3608,10 @@ final class CodingTaskEngine {
             self.store.mutate(taskID) {
                 $0.stage = .inProgress
                 $0.startedAt = Date()   // restart the session-gone clock
+                $0.pendingRefusal = nil   // a fresh grace: an earlier run's hold isn't this one's
                 // A finished task picked back up is active again.
                 $0.completedAt = nil; $0.merged = false; $0.prOpened = nil; $0.landing = nil
+                $0.approvedTarget = nil
                 $0.completion = nil; $0.sessionParkedAt = nil
                 $0.restartNeeded = nil
             }
@@ -3614,6 +3950,15 @@ final class CodingTaskEngine {
     /// store; each task records the tool it ran.
     nonisolated static func taskTranscriptCommand(
         branch: String, agent: Profile.Tool = .claude) -> String? {
+        transcriptCommand(branch: branch, agent: agent,
+                          emit: "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
+                            + "| iconv -f UTF-8 -t UTF-8 -c; fi")
+    }
+
+    /// Locates the session's transcript as `taskTranscriptCommand` does (into
+    /// `$f`), then runs `emit` on it.
+    private nonisolated static func transcriptCommand(
+        branch: String, agent: Profile.Tool, emit: String) -> String? {
         guard branch.hasPrefix("wt/") else { return nil }
         let slug = String(branch.dropFirst(3))
         guard !slug.isEmpty,
@@ -3626,8 +3971,6 @@ final class CodingTaskEngine {
         let markerCwd =
             "cwd=$(tmux -u list-windows -t bromure -F '#{@worktree}\t#{pane_current_path}' "
             + "2>/dev/null | awk -F'\t' -v b='wt/\(slug)' '$1==b {print $2; exit}'); "
-        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
-            + "| iconv -f UTF-8 -t UTF-8 -c; fi"
         switch agent {
         case .claude:
             return "d=$(ls -td ~/.claude/projects/*-\(slug) 2>/dev/null | head -1); "
@@ -3732,10 +4075,29 @@ final class CodingTaskEngine {
     /// working?" probe. Project dir by worktree-slug glob, with the
     /// plain-tab fallback through the wt/ marker's cwd. Prints nothing
     /// when no transcript exists.
-    nonisolated static func transcriptAgeCommand(slug: String) -> String? {
+    ///
+    /// `agent`: Claude's and Kimi's trees are globbed by slug (below); the
+    /// other agents keep their sessions in stores of their own (Codex's
+    /// date-keyed rollouts, Grok's per-cwd updates, omp's per-cwd dirs), so
+    /// for them it's the age of the file `taskTranscriptCommand` reads. Only
+    /// globbing Claude's and Kimi's, the probe printed nothing for a Codex or
+    /// Grok run -- "quiet" at once -- and a watch agent's findings_done closed
+    /// its tab while it was still writing its last message (Finding, "Codex
+    /// and Grok findings_done lose their closing grace despite having no
+    /// supported quiet probe").
+    nonisolated static func transcriptAgeCommand(slug: String, agent: Profile.Tool? = nil) -> String? {
         guard !slug.isEmpty,
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
+        switch agent {
+        case .codex?, .grok?, .omp?:
+            return transcriptCommand(
+                branch: "wt/" + slug, agent: agent!,
+                emit: "if [ -n \"$f\" ]; then m=$(date -r \"$f\" +%s 2>/dev/null); "
+                    + "[ -n \"$m\" ] && echo $(( $(date +%s) - m )); fi")
+        case nil, .claude?, .kimi?:
+            break
+        }
         // Kimi Code's session store is keyed by an opaque workspace id
         // `wd_<dir-basename-slug>_<hash>` under ~/.kimi-code/sessions — and a
         // worktree's directory basename IS the slug (or "<slug>-N" on the
@@ -4410,9 +4772,17 @@ final class CodingTaskEngine {
     /// that never signal done.
     func moveToInProgress(_ taskID: UUID) {
         store.mutate(taskID) {
+            // It landed (its outcome recorded) but sits in Review: Done, not
+            // back to work — clearing its landing there lost the merge.
+            if $0.stage == .testing, $0.landing?.phase == .landed, $0.completion != nil {
+                $0.stage = .done
+                if $0.completedAt == nil { $0.completedAt = Date() }
+                return
+            }
             if $0.stage == .testing || $0.stage == .planning {
                 $0.stage = .inProgress
                 $0.landing = nil   // cancels a landing under way
+                $0.approvedTarget = nil
             }
         }
     }

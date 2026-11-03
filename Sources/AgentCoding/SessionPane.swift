@@ -532,6 +532,10 @@ final class SessionPane {
     /// the previous tab's transcript until the next poll); an unchanged index
     /// keeps re-mounts idempotent so roster ticks don't churn the live view.
     private var beautifiedTabIndex: Int?
+    /// The session the mounted chat is for: the next session to open in a
+    /// reused window index gets a chat of its own (its own history and
+    /// draft), not the previous session's live one.
+    private var beautifiedSessionID: UUID?
 
     /// What a host should focus when this pane mounts.
     var preferredFirstResponder: NSView {
@@ -610,7 +614,10 @@ final class SessionPane {
     /// provider pinned to that session's window.
     func makeBeautifiedModel(windowIndex: Int, provider: BeautifiedTranscriptProvider) -> BeautifiedSessionModel {
         let m = BeautifiedSessionModel(provider: provider)
-        m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)"
+        // Per session: the next session in a reused window must not open on
+        // the previous one's unsent draft.
+        let sid = acDelegate?.agentSessionStore.session(profileID: profile.id, windowIndex: windowIndex)?.id
+        m.draftKey = "local:\(profile.id.uuidString):\(windowIndex)" + (sid.map { ":\($0.uuidString)" } ?? "")
         if let seed = beautifiedSeeds.removeValue(forKey: windowIndex) { m.seedOpening(seed) }
         m.transcriptSink = transcriptSinks[windowIndex]
         m.cachedTranscript = SessionTranscriptCache.loadDetached
@@ -722,7 +729,15 @@ final class SessionPane {
             guard let self, let delegate = self.acDelegate,
                   let s = delegate.agentSessionStore.session(profileID: self.profile.id, windowIndex: windowIndex)
             else { return }
-            delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting)
+            // A dialog while its hooks still say working is the agent asking
+            // from inside its turn (omp's `ask`): a reply to read. Any other
+            // question was counted by its hook already (needsInput, or the
+            // turn's done) -- counting it again, a scan later, brought the
+            // mark back on clients that had read it.
+            if delegate.agentSessionStore.setAwaitingAnswer(s.id, waiting), waiting,
+               self.model.tabs.first(where: { $0.index == windowIndex })?.agentStatus == .working {
+                delegate.agentSessionStore.noteReply(s.id)
+            }
         }
         m.recordedFailureAppeared = { [weak self] in
             guard let self, let delegate = self.acDelegate,
@@ -815,7 +830,8 @@ final class SessionPane {
         // toggle away). `remountForSelection` clears the index so a pane that
         // was swapped out of the display slot always rebuilds too (a detached-
         // then-reattached SwiftUI host comes back blank).
-        if mountedBeautifiedHost != nil, beautifiedTabIndex == windowIndex { return }
+        let sessionID = acDelegate?.agentSessionStore.session(profileID: profile.id, windowIndex: windowIndex)?.id
+        if mountedBeautifiedHost != nil, beautifiedTabIndex == windowIndex, beautifiedSessionID == sessionID { return }
         unmountBeautified()
         mountedTerminalView?.removeFromSuperview()
         mountedTerminalView = nil
@@ -824,6 +840,7 @@ final class SessionPane {
         let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
+        beautifiedSessionID = sessionID
         m.start()
         let host = NSHostingView(rootView: BeautifiedSessionView(model: m))
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -853,6 +870,7 @@ final class SessionPane {
         beautifiedModel?.stop()
         beautifiedModel = nil
         beautifiedTabIndex = nil
+        beautifiedSessionID = nil
         mountedBeautifiedHost?.removeFromSuperview()
         mountedBeautifiedHost = nil
     }

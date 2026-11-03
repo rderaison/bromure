@@ -199,4 +199,14 @@ struct FileExplorerTests {
             #expect(colors.count > 1, "\(lang)")
         }
     }
+
+    /// Finding (CWE-754): with git status failed, the changed-files list —
+    /// empty, since nothing could be marked — still said "No changes", the
+    /// failure only in a small footer.
+    @Test("an empty changed-files list says git status failed, not \"No changes\", when it did")
+    func changedEmptyText() {
+        #expect(FileExplorerPane.changedEmptyText(statusFailed: false) == "No changes")
+        #expect(FileExplorerPane.changedEmptyText(statusFailed: true) == FileExplorerPane.statusFailedText)
+        #expect(FileExplorerModel.statusFailed(in: [(toplevel: "/r", porcelain: RepoGitPrograms.statusFailedLine + "\0")]))
+    }
 }

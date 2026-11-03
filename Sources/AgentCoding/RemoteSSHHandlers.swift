@@ -356,6 +356,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         if !channel.isWritable { pauseReadPump(channel) }
     }
 
+    /// The pumped fd hit EOF and the drain-then-finish is under way
+    /// (ioQueue only).
+    private var draining = false
+    private var drainCalls = 0
+    /// Tests: how many times the pumped fd's EOF reached the drain.
+    func drainCallsForTesting() -> Int { ioQueue.sync { drainCalls } }
+
     /// The read pump is suspended for backpressure (ioQueue only).
     private var pumpPaused = false
 
@@ -394,6 +401,15 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// finish() only after every queued pump write has actually left the
     /// channel — then back on ioQueue, where the pump state lives.
     private func finishAfterDrain(channel: Channel, pid: pid_t, master: Int32) {
+        // A read source stays readable at EOF and fires again on every pass
+        // until it's cancelled — and finish() only cancels it once the last
+        // write has left. Without this, each pass queued another event-loop
+        // task and another callback on that write: tens of millions while a
+        // slow client took it, gigabytes of RAM and a pegged SSH loop.
+        drainCalls += 1
+        guard !draining else { return }
+        draining = true
+        cancelReadSource()
         let pending = lastPumpWrite
         let el = channel.eventLoop
         el.execute { [weak self] in
@@ -590,10 +606,19 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
         var win = winsize(ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0)
         let home = NSHomeDirectory()
-        let env = ["TERM=\(term)",
+        var env = ["TERM=\(term)",
                    "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
                    "HOME=\(home)", "USER=\(user)", "LOGNAME=\(user)",
                    "LANG=en_US.UTF-8"]
+        // An instance running under a relocated home (CFFIXED_USER_HOME —
+        // HOME alone doesn't move Foundation's directories) must hand it on:
+        // otherwise the menu, and any agent it autostarts, resolves the REAL
+        // home and drives the other instance's workspaces and clusters.
+        let inherited = ProcessInfo.processInfo.environment
+        for key in ["CFFIXED_USER_HOME", "BROMURE_AC_AUTOMATION_PORT", "BROMURE_AC_REMOTE_PORT",
+                    "BROMURE_AC_NO_REMOTE"] {
+            if let v = inherited[key] { env.append("\(key)=\(v)") }
+        }
         let (pid, masterFD) = PTYSpawn.spawn(path: menuExe,
                                              argv: [menuExe, "__remote-menu"],
                                              env: env, win: &win)
@@ -941,6 +966,10 @@ enum PTYSpawn {
                     var fd = Int32(3)
                     let maxFD = getdtablesize()
                     while fd < maxFD { Darwin.close(fd); fd += 1 }
+                    // The app ignores SIGPIPE (its socket writes want EPIPE);
+                    // an ignored signal survives exec, and a shell leaves it
+                    // ignored for what it runs: `yes | head` never stopped.
+                    signal(SIGPIPE, SIG_DFL)
                     execve(cPath, argvPtr.baseAddress!, envPtr.baseAddress!)
                     _exit(127)
                 }

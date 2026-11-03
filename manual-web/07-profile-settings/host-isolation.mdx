@@ -20,8 +20,8 @@ The **Host Isolation** category ("Control how this browser interacts with your M
 | **Shared Clipboard** | Copy and paste text and images between your Mac and the browser. Off: the browser's clipboard is completely isolated. Default: off (on for **File › New Profile…** profiles and the built-in **Private Browsing** profile). |
 | **Match Keyboard Layout** | Switches the browser's keyboard layout whenever you change it on your Mac. Off: the browser always uses the layout set in **Settings › Input**. Default: on. |
 | **Use macOS Passkeys** | Sign in to websites with passkeys stored on your Mac. Each request needs Touch ID or your password. Default: off (on for **File › New Profile…** profiles). |
-| **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Turns off Chromium's built-in password manager. Default: off (on for **File › New Profile…** profiles). |
-| **Allow Printing** | ⌘P captures the current page as a PDF and hands it to the macOS print dialog, where you can pick a printer or save to a file. The PDF stays in memory; nothing is written to your Mac's disk. Default: off. Requires **Native Tabs**. |
+| **Use macOS Passwords** | Autofill usernames and passwords from your Mac's saved passwords and iCloud Keychain. Turns off Chromium's built-in password manager. Default: off. Turning it on, the Mac asks for a pairing code the first time a page needs a password after each launch of Bromure. |
+| **Allow Printing** | ⌘P captures the current page as a PDF and hands it to the macOS print dialog, where you can pick a printer or save to a file. The PDF stays in memory; nothing is written to your Mac's disk. Default: on for new profiles; profiles created before this setting existed keep it off. Requires **Native Tabs**. |
 
 All host-isolation settings apply to an open window after a restart.
 

@@ -1,0 +1,6 @@
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow:
+              method: POST
+              path: "/allowed"

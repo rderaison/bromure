@@ -1197,6 +1197,20 @@
 "Couldn't start the network tunnel" = "無法啟動網路通道";
 "%@\n\nBromure keeps working over its built-in per-app tunnel — this helper only adds direct access to the remote's VMs from other local apps." = "%@\n\nBromure 會繼續透過其內建的逐應用程式通道運作——此輔助程式只是讓其他本機應用程式能直接存取遠端虛擬機器。";
 "The privileged network helper isn't reachable. Check that “Bromure Agentic Coding” is allowed in System Settings › General › Login Items, then try again." = "無法連線特權網路輔助程式。請確認「系統設定 › 一般 › 登入項目」中已允許「Bromure Agentic Coding」，然後再試一次。";
+"The helper is running, but its socket only lets user %d in, not you (%d). Older versions of the helper hand the socket to whoever is logged in when it starts — and it starts at boot, before anyone logs in. Restart it: in System Settings › General › Login Items, turn “Bromure Agentic Coding” off and on again (or restart the Mac once this version is installed)." = "輔助程式正在執行，但它的通訊端只允許使用者 %d 存取，而不是你（%d）。舊版輔助程式會把通訊端交給啟動時已登入的使用者，而它在 Mac 開機時、還沒有人登入前就已啟動。請重新啟動它：在「系統設定 › 一般 › 登入項目」中關閉再開啟「Bromure Agentic Coding」（或在安裝此版本後重新啟動 Mac）。";
+"The helper isn't running. macOS has it registered from another copy of the app (%@) — it was approved there, and that copy was moved, replaced or deleted. Turn “Bromure Agentic Coding” off in Login Items, then turn the tunnel on again here to register this copy." = "輔助程式沒有執行。macOS 是從該 App 的另一個副本（%@）註冊它的——當時在那裡獲得了核准，而該副本已被移動、取代或刪除。請在「登入項目」中關閉「Bromure Agentic Coding」，然後在這裡重新開啟通道，以註冊目前的副本。";
+"The helper isn't running: macOS starts it and it stops right away (last exit: %@). This usually means the app was rebuilt or updated with a different signature than the one you approved. Turn “Bromure Agentic Coding” off and on again in Login Items." = "輔助程式沒有執行：macOS 啟動它後它立即結束（上次結束：%@）。這通常是因為 App 重新建置或更新後的簽署與你核准時不同。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper isn't loaded in launchd, although Login Items shows it. Turn “Bromure Agentic Coding” off and on again in Login Items." = "儘管「登入項目」中顯示了輔助程式，但它沒有載入 launchd。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper isn't running yet, so its socket isn't there." = "輔助程式尚未執行，因此它的通訊端不存在。";
+"The helper's socket is there but nobody answers: the helper stopped. Turn “Bromure Agentic Coding” off and on again in Login Items." = "輔助程式的通訊端存在，但沒有回應：輔助程式已停止。請在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"The helper didn't accept the connection." = "輔助程式沒有接受連線。";
+"The network helper closed the connection without an answer. If you just updated the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items." = "網路輔助程式未作回應就關閉了連線。如果你剛更新了 App，請重新啟動輔助程式：在「登入項目」中關閉再開啟「Bromure Agentic Coding」。";
+"This Mac already routes %@ somewhere else — usually its own workspaces, which use the same subnet as the remote's. The tunnel can't take it over.\n\nHelper: %@" = "這台 Mac 已經把 %@ 路由到別處——通常是它自己的工作區，它們與遠端的工作區使用相同的子網路。通道無法接管它。\n\n輔助程式：%@";
+"The network helper only serves the user logged in at the screen.\n\nHelper: %@" = "網路輔助程式只為在螢幕上登入的使用者服務。\n\n輔助程式：%@";
+"The network helper couldn't create the tunnel interface.\n\nHelper: %@" = "網路輔助程式無法建立通道介面。\n\n輔助程式：%@";
+"The network helper only routes a private /24 network (in 10/8, 172.16/12, 192.168/16 or 100.64/10), and the remote's subnet %@ isn't one.\n\nHelper: %@" = "網路輔助程式只路由私有 /24 網路（位於 10/8、172.16/12、192.168/16 或 100.64/10 內），而遠端主機的子網路 %@ 不在其中。\n\n輔助程式：%@";
+"The network helper only serves the copy of Bromure Agentic Coding it was installed from, signed the same way. If you just updated or rebuilt the app, restart the helper: turn “Bromure Agentic Coding” off and on again in Login Items.\n\nHelper: %@" = "網路輔助程式只為安裝它的那份 Bromure Agentic Coding（簽署相同）服務。如果你剛更新或重新建置了 App，請重新啟動輔助程式：在「登入項目」中關閉再開啟「Bromure Agentic Coding」。\n\n輔助程式：%@";
+"The network helper already holds %d tunnels, its limit. Close the window of a remote you aren't using, or quit and reopen the app.\n\nHelper: %@" = "網路輔助程式已持有 %d 條通道，達到上限。請關閉一個未使用的遠端主機視窗，或結束後重新開啟 App。\n\n輔助程式：%@";
 "The network helper couldn't create the tunnel interface." = "網路輔助程式無法建立通道介面。";
 
 /* Kanban boards — Automations + Coding Tasks (columns, cards, plan/review windows) */
@@ -1582,6 +1596,7 @@
 "Credential brokering" = "憑證中介";
 "Supply chain" = "供應鏈";
 "Firewall" = "防火牆";
+"Sandbox Policy" = "沙盒原則";
 "Credential used" = "憑證使用";
 "Upstream TLS" = "上游 TLS";
 "Prompt injection" = "提示注入";
@@ -1850,6 +1865,9 @@
 "Another sign-in is already in progress." = "另一個登入已在進行中。";
 "The Bromure proxy isn't running, so the sign-in can't be captured." = "Bromure 代理伺服器沒有執行，無法擷取登入。";
 "Couldn't start the sign-in machine." = "無法啟動登入機器。";
+"The sign-in was cancelled." = "登入已取消。";
+"The sign-in window was closed." = "登入視窗已關閉。";
+"The sign-in machine stopped." = "登入機器已停止。";
 "Finish signing in in your browser…" = "請在瀏覽器中完成登入…";
 "Almost there — your browser will open in a moment…" = "快好了 — 瀏覽器馬上打開…";
 "Sign in to %@…" = "登入 %@…";
@@ -2069,8 +2087,8 @@
 "VMs" = "虛擬機器";
 "New automation…" = "新增自動化…";
 "“%@” runs %@, which doesn't report finishing, so this chain will never fire." = "「%@」執行 %@，而它不會回報完成，所以這條鏈永遠不會觸發。";
-"Clone runs need an agent that reports completion (Claude Code or Kimi Code) — that signal is what tears the clone down." = "複製執行需要一個會回報完成的代理程式（Claude Code 或 Kimi Code）— 正是這個訊號拆除複製品。";
-"Only agents that report completion through a hook (Claude Code, Kimi Code) can close their tab; other agents' tabs stay open." = "只有透過鉤子回報完成的代理程式（Claude Code、Kimi Code）能關閉自己的分頁；其他代理程式的分頁保持開啟。";
+"Clone runs need an agent that reports completion (Claude Code, Codex, Grok or Kimi Code) — that signal is what tears the clone down." = "複製執行需要一個會回報完成的代理程式（Claude Code、Codex、Grok 或 Kimi Code）— 正是這個訊號拆除複製品。";
+"Only agents that report completion through a hook (Claude Code, Codex, Grok, Kimi Code) can close their tab; other agents' tabs stay open." = "只有透過鉤子回報完成的代理程式（Claude Code、Codex、Grok、Kimi Code）能關閉自己的分頁；其他代理程式的分頁保持開啟。";
 "The image catalog could not be downloaded." = "無法下載映像檔目錄。";
 "Unsupported image compression: %@" = "不支援的映像檔壓縮格式：%@";
 "Could not expand the downloaded image: %@" = "無法解壓縮下載的映像檔：%@";
@@ -2205,8 +2223,6 @@
 "The planning session failed: %@" = "規劃工作階段失敗：%@";
 "No git identity or credentials found." = "找不到 git 身分或憑證。";
 "Bromure flagged content the agent is about to send to the model (from %@). Allow it through, or block this request?\n\n%@" = "Bromure 標記了代理程式即將傳送給模型的內容（來自 %@）。放行，還是封鎖此請求？\n\n%@";
-"an unverified package" = "一個未經驗證的套件";
-"Bromure couldn't reach %@ to vet %@ %@@%@. Installing it means accepting a package that wasn't checked against your configured reputation sources.\n\nAllow this install anyway?" = "Bromure 無法連線到 %1$@ 來審查 %2$@ %3$@@%4$@。安裝它意味著接受一個未經你設定的信譽來源核查的套件。\n\n仍然允許此次安裝？";
 "to authenticate with the API server at %@" = "以向 %@ 的 API 伺服器驗證";
 "Activity only" = "僅活動";
 "AI request details" = "AI 請求詳細資訊";
@@ -2399,7 +2415,6 @@
 "sign-in expired" = "登入已過期";
 "Register a source on the left. Each agent runs its provider’s default model unless you pick one on the right." = "在左側註冊一個來源。除非你在右側另選，每個代理程式都使用其供應商的預設模型。";
 "Sign in to the providers you want to use, or paste API keys. Each agent then runs its provider’s default model — pick a specific one on the right if you like, now or later in Preferences → Models." = "登入你要使用的供應商，或貼上 API 金鑰。每個代理程式隨後使用其供應商的預設模型——如有需要，可在右側選擇特定模型，現在或之後在「偏好設定 → 模型」中設定。";
-
 
 /* Added 2026-09-25: Switchboard + Signal / WhatsApp connector (and earlier gaps) */
 "%d model(s)" = "%d 個模型";
@@ -2869,6 +2884,19 @@
 "%1$@ can’t use %2$@ models, so it runs on its own provider instead. Pick another model." = "%1$@ 無法使用 %2$@ 的模型，因此改用它自己的供應商。請選擇其他模型。";
 "%d sessions whose machine or folder is gone" = "%d 個工作階段的機器或檔案夾已不存在";
 "(empty)" = "（空白）";
+"The sign-in page the agent opened points at this Mac or its local network, so Bromure didn't open it." = "代理程式開啟的登入頁面指向這台 Mac 或其區域網路，因此 Bromure 沒有開啟它。";
+"Restore these workspaces and their sessions at next start" = "下次啟動時還原這些工作區及其工作階段";
+"Restoring your workspaces" = "正在還原你的工作區";
+"Restoring Workspaces" = "還原工作區";
+"Stop Restoring" = "停止還原";
+"Starting “%@”…" = "正在啟動「%@」…";
+"%1$d of %2$d" = "%1$d / %2$d";
+"did not start in time" = "未能及時啟動";
+/* VM dashboard: workspace notes */
+"Notes" = "備註";
+"Return saves · Shift-Return adds a line · Esc cancels" = "Return 儲存 · Shift-Return 換行 · Esc 取消";
+"Save the notes (Return)" = "儲存備註（Return）";
+"Edit the notes as markdown" = "以 Markdown 編輯備註";
 "-y @upstash/context7-mcp" = "-y @upstash/context7-mcp";
 "/Users/you/Projects/app" = "/Users/you/Projects/app";
 "/usr/local/bin/aws" = "/usr/local/bin/aws";
@@ -3122,6 +3150,7 @@
 "Erasing and restoring storage is done on the server Mac." = "儲存空間的清除與還原需在伺服器 Mac 上進行。";
 "Home folder size" = "主檔案夾大小";
 "From %d GB (its current size — a home can't shrink) up to 1024 GB. A bigger home takes effect the next time the workspace starts. The disk image only takes the space its files use." = "從 %d GB（目前大小——主檔案夾無法縮小）到 1024 GB。較大的主檔案夾會在工作區下次啟動時生效。磁碟映像只佔用其檔案實際使用的空間。";
+"From %d GB up to 1024 GB. The home is created at this size when the workspace first starts; after that it can grow but not shrink. The disk image only takes the space its files use." = "從 %d GB 到 1024 GB。主檔案夾會在工作區首次啟動時以此大小建立；之後只能增大，無法縮小。磁碟映像只佔用其檔案實際使用的空間。";
 "Queued — sent when the agent is done" = "佇列中 — 代理程式完成後傳送";
 "Queued — sent when %@ is done" = "佇列中 — %@ 完成後傳送";
 "Queued — the agent reads it next" = "佇列中 — 代理程式接下來會讀取";
@@ -3568,6 +3597,8 @@
 "The latest published image, then the recommended packages. A few minutes." = "取得最新發布的映像檔，然後安裝建議的套件。需要幾分鐘。";
 "Recommended" = "建議";
 "Rebuild locally" = "在本機重建";
+"Re-download and reinstall the agents" = "重新下載並重新安裝代理程式";
+"Otherwise, while the published image hasn't changed, the saved copy is reused: only new packages and your customize script run." = "否則，只要發布的映像檔沒有變更，就會重複使用已儲存的副本：只會執行新的套件和你的自訂指令碼。";
 "Built from scratch on this Mac with the full installer. About 10 minutes." = "在這台 Mac 上用完整安裝程式從頭建立。大約 10 分鐘。";
 "Your workspaces aren't touched — each one offers a reset onto the new image the next time it starts." = "你的工作區不會被更動——每個工作區下次啟動時都會提示重設到新映像檔。";
 "Download & Update" = "下載並更新";
@@ -4112,3 +4143,214 @@
 "Show the findings for %@" = "顯示 %@ 的發現項目";
 "Sent to %@ to fix" = "已傳送給 %@ 修正";
 "Sent to %@ — it works on the fix in its own session." = "已傳送給 %@ — 它會在自己的工作階段中進行修正。";
+
+/* Task landing: merge & push */
+"The repository has no remote to push to — merge it without pushing." = "儲存庫沒有可推送的遠端——請合併但不推送。";
+"Merged into %@, but couldn't reach the workspace to push it — is it running?" = "已合併到 %@，但無法連接工作區進行推送——它在執行嗎？";
+"Merge & Push" = "合併並推送";
+"Push %1$@ to %2$@" = "將 %1$@ 推送到 %2$@";
+"Done once %1$@/%2$@ has it. If %1$@ moved on, %3$@ pulls, resolves conflicts and pushes." = "%1$@/%2$@ 包含它即完成。如果 %1$@ 已有新提交，%3$@ 會拉取、解決衝突並推送。";
+
+/* Code review: handing a finding to a session failed */
+"Couldn't send it to %1$@: %2$@" = "無法傳送給 %1$@：%2$@";
+"that session is gone" = "該工作階段已不存在";
+"the server didn't answer" = "伺服器沒有回應";
+"the server runs an older Bromure — update it to hand findings to a session" = "伺服器執行的是舊版 Bromure——請更新後再將發現項目交給工作階段";
+"the server refused it" = "伺服器拒絕了";
+
+/* Code review: a hand-over that didn't reach the session */
+"Couldn't hand it to %1$@: %2$@" = "無法交給 %1$@：%2$@";
+"a menu or dialog stayed open in that session" = "該工作階段中有選單或對話框一直開著";
+"something else was typed in that session's input box" = "該工作階段的輸入框中已有其他內容";
+"Couldn't hand it to the Switchboard: %@" = "無法交給總機：%@";
+"the Switchboard session is gone" = "總機工作階段已不存在";
+"the message couldn't be typed into the Switchboard" = "無法將訊息輸入到總機";
+"the Switchboard's agent never started" = "總機的代理程式始終未啟動";
+"its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent" = "其文字被提示注入檢查標記 (%@) — 交給代理程式前請先確認";
+"Hand It Over Anyway" = "仍然交給它";
+"The prompt-injection screen flagged it (%@). It came from an agent reading repository content, and the agent you hand it to would read it too. Check it before handing it over." = "提示注入檢查標記了它 (%@)。它來自讀取儲存庫內容的代理程式，你交給的代理程式也會讀取它。交出前請先檢查。";
+"Couldn't start the fix: %@" = "無法開始修正：%@";
+"Couldn't ask the Switchboard: %@" = "無法詢問總機：%@";
+"that finding is gone" = "該發現項目已不存在";
+"couldn't start the fix" = "無法開始修正";
+"no Switchboard could be started" = "無法啟動總機";
+
+/* Automations: runs at a time */
+"Runs at a time" = "同時執行數";
+"No limit" = "不限";
+"A burst of events waits its turn, oldest first: the next one starts when a run finishes." = "一批事件會依從舊到新的順序排隊：一次執行結束後才開始下一個。";
+"Reviews at a time" = "同時審查數";
+"Commits and pull requests that arrive together wait their turn, oldest first, instead of all being reviewed at once." = "同時抵達的提交和拉取請求會依從舊到新的順序排隊，而不是同時全部審查。";
+
+/* Fat client: delete a workspace on the server */
+"Delete workspace “%@”?" = "刪除工作區「%@」？";
+"Removes its disk, settings, and SSH key. The mounted host folder is untouched." = "將刪除其磁碟、設定和 SSH 金鑰。掛載的主機檔案夾不受影響。";
+"Couldn't delete “%@”" = "無法刪除「%@」";
+
+/* Base image upgrade skipped (a boot started during the prompt) */
+"“%@” wasn't upgraded" = "「%@」未升級";
+"It started on its current disk while the question was up (an automation launched it). Shut it down and start it again to be asked again." = "在顯示此問題時，它已使用目前的磁碟啟動（由自動化啟動）。請將其關閉後重新啟動，以再次詢問。";
+
+/* automation editor */
+"This workspace has no github.com token." = "此工作區沒有 github.com 權杖。";
+
+/* automation editor */
+"This workspace has no Linear key." = "此工作區沒有 Linear 金鑰。";
+
+/* automation editor */
+"The host couldn't list them (HTTP %d)." = "主機無法列出它們（HTTP %d）。";
+
+/* task card: Merge/Send Back on a card whose branch isn't known yet */
+"The branch is still being recorded — try again in a moment." = "分支仍在記錄中——請稍後再試。";
+
+/* task card: Review is still looking for a delivered branch's checkout */
+"Looking for the worktree…" = "正在尋找工作樹…";
+
+/* task landing: git status fails with the repository's programs switched off */
+"Git can't read the task's checkout without running the repository's own filter program, so Bromure can't tell whether it's clean. Merge it yourself, then mark the task Done." = "不執行儲存庫自帶的過濾程式，Git 就無法讀取該任務的檢出，因此 Bromure 無法判斷它是否乾淨。請自行合併，然後將任務標記為完成。";
+
+/* files pane */
+"Git status failed here — changed files aren't marked" = "此處 git status 失敗 — 未標出已變更的檔案";
+
+/* review: git status/diff failed */
+"Git couldn't read the changes" = "Git 無法讀取變更";
+
+/* review: git status/diff failed */
+"Git fails in this checkout without the repository's own filter program, which Bromure doesn't run. Look at it in a terminal." = "在此檢出中，沒有儲存庫自帶的過濾程式（Bromure 不會執行它）Git 就會失敗。請在終端機中查看。";
+
+/* fat client title bar: requests on their way */
+"Sending %d…" = "正在傳送 %d 項…";
+
+/* fat client title bar: a request on its way */
+"Sending…" = "正在傳送…";
+
+/* fat client title bar */
+"Still sending to the host — the link is slow" = "仍在傳送到主機——連線較慢";
+
+/* describer: host time, host zone, local time, local zone */
+"%1$@ %2$@ (%3$@ %4$@ here)" = "%1$@ %2$@（本地 %3$@ %4$@）";
+
+/* automation editor: time zone */
+"%@ (the host's time)" = "%@（主機時間）";
+
+/* automation editor */
+"Each run starts here, on a fresh branch: pick the workspace's clone of the repository the trigger watches." = "每次執行都從這裡開始，在新分支上：請選擇工作區中該觸發條件所監看儲存庫的複製。";
+
+/* automation editor: %@ is owner/repo */
+"Each run starts here, on a fresh branch: pick the workspace's clone of %@." = "每次執行都從這裡開始，在新分支上：請選擇工作區中 %@ 的複製。";
+
+/* automation editor */
+"This window can't read the workspace's GitHub token — type the repository as owner/repo." = "此視窗無法讀取工作區的 GitHub 權杖——請以 擁有者/儲存庫 的形式輸入儲存庫。";
+"A merged branch fires once, for its merge commit — not for each of its commits. Diff a commit against its first parent to see what it brought: git diff {{commit.key}}^1 {{commit.key}}." = "合併的分支只觸發一次，針對其合併提交，而不是其中的每個提交。將提交與其第一個父提交比較，即可看到它帶來的變更：git diff {{commit.key}}^1 {{commit.key}}。";
+"Changes apply to a running workspace as you make them — no restart, no Save needed; Cancel puts back the rules as they were. Untick a rule to switch it off without deleting it, or use its clock menu to turn it on for a limited time." = "變更會在你修改時立即套用到執行中的工作區，無需重新啟動或儲存；按「取消」會將規則還原。取消勾選某條規則即可關閉它而不刪除，或使用其時鐘選單限時開啟。";
+
+/* Squelch */
+"Squelch" = "Squelch";
+"Trim the noise out of command output before the model reads it" = "在模型讀取之前，去除命令輸出中的雜訊";
+"Saved so far" = "至今節省";
+"%@ saved" = "節省 %@";
+"Squelch trims the noise out of command output before the model reads it — click for what it saved" = "Squelch 在模型讀取之前去除命令輸出中的雜訊——按一下查看節省了多少";
+"Squelch is off on this machine — click to trim the noise out of command output" = "此機器上的 Squelch 已關閉——按一下以去除命令輸出中的雜訊";
+"Trims passing tests, progress bars and repeated lines out of command output before the model reads it. Errors and warnings stay." = "在模型讀取之前，從命令輸出中移除通過的測試、進度列和重複行。錯誤和警告會保留。";
+"Inspired by" = "靈感來自";
+"Tokens are estimated as characters ÷ 4." = "token 數以字元數 ÷ 4 估算。";
+"Trim command output on “%@”" = "精簡「%@」上的命令輸出";
+"Off on “%@”: its agents' models read every command's output as printed." = "在「%@」上已關閉：其代理程式的模型會照原樣讀取每個命令的輸出。";
+"This conversation" = "此對話";
+"All of “%@”" = "「%@」全部";
+"Where it came from" = "來源";
+"%@ tokens · %@" = "%@ 個 token · %@";
+"~%@ tokens saved" = "約節省 %@ 個 token";
+"%@ of %@ tokens of command output · %d outputs, %d trimmed" = "命令輸出 %2$@ 個 token 中的 %1$@ · %3$d 個輸出，精簡 %4$d 個";
+"Last two weeks" = "最近兩週";
+"%@: %@ tokens saved" = "%@：節省 %@ 個 token";
+
+/* Supply chain: unverified packages (issue #43) */
+"socket.dev didn't answer." = "socket.dev 沒有回應。";
+"socket.dev refused the API key (HTTP %d) — check it in the workspace's Supply Chain settings." = "socket.dev 拒絕了 API 金鑰（HTTP %d）——請在工作區的供應鏈設定中檢查。";
+"socket.dev is rate-limiting this API key." = "socket.dev 正在限制此 API 金鑰的請求速率。";
+"socket.dev hasn't finished analysing this version yet." = "socket.dev 尚未完成此版本的分析。";
+"socket.dev doesn't know this version (it may be very new)." = "socket.dev 不認得此版本（它可能剛發布）。";
+"socket.dev's reply couldn't be read." = "無法讀取 socket.dev 的回應。";
+"socket.dev answered HTTP %d." = "socket.dev 回傳了 HTTP %d。";
+"the OSV vulnerability database didn't answer." = "OSV 漏洞資料庫沒有回應。";
+"Install %@ from workspace “%@” without a reputation check?" = "要在不檢查信譽的情況下從工作區「%2$@」安裝 %1$@ 嗎？";
+"Bromure couldn't vet %@ package %@: %@ Installing it means accepting a package that wasn't checked against your configured reputation sources." = "Bromure 無法核驗 %@ 套件 %@：%@ 安裝它代表接受一個未經你設定的信譽來源檢查的套件。";
+"%d more unverified packages are waiting for an answer." = "還有 %d 個未核驗的套件在等待答覆。";
+"Allow all unverified packages for 15 minutes" = "15 分鐘內允許所有未核驗的套件";
+"Don't allow unverified packages for the rest of the session" = "本次工作階段剩餘時間不允許未核驗的套件";
+"Don't allow %@" = "不允許 %@";
+"all unverified packages" = "所有未核驗的套件";
+
+/* Coding tasks: an answer for an earlier question */
+"The agent asked a new question since you wrote this. Change your answer to send it." = "你寫下這段內容後，代理又提出了新問題。修改你的回答後才能傳送。";
+"The agent asked a new question before your answer went. Read it and answer again." = "你的回答送出前，代理又提出了新問題。請閱讀後重新回答。";
+
+/* Coding tasks: an answer that didn't go */
+"The answer couldn't be sent." = "無法傳送回答。";
+"Your answer is already on its way." = "你的回答已在傳送中。";
+"“%@” wasn't wiped" = "「%@」未被抹除";
+"It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it." = "在問題顯示期間，它已用目前的磁碟啟動（由自動化啟動），因此未抹除任何內容，它仍被標記為已遭入侵。請將其關閉後重新啟動以進行抹除。";
+"Couldn't tell which program tried, and with Enforce binaries on a rule must name one. Try the connection again, then allow it." = "無法確定是哪個程式嘗試連線；啟用「Enforce binaries」時，規則必須指明程式。請重新嘗試連線，然後再允許。";
+
+/* Supply chain: per-package override of reputation blocks (issue #54) */
+"Install %@ from workspace “%@” despite its supply-chain warning?" = "儘管有供應鏈警告，仍要從工作區「%2$@」安裝 %1$@ 嗎？";
+"Bromure blocked %1$@ %2$@ %3$@: %4$@\n\nInstall it anyway only if you trust this package and its publisher." = "Bromure 已封鎖 %1$@ %2$@ %3$@：%4$@\n\n只有在你信任此套件及其發行者時，才應繼續安裝。";
+"Allow %@ for this session" = "在本次工作階段中允許 %@";
+"Always allow %@ in this workspace" = "在此工作區中一律允許 %@";
+"Don't allow %@, and don't ask again this session" = "不允許 %@，並且本次工作階段中不再詢問";
+"downloaded — allowed by you despite: %@" = "已下載 — 儘管有以下警告，你仍允許了：%@";
+"Trusted packages" = "受信任的套件";
+"When OSV or socket.dev blocks a package, Bromure asks whether to install it anyway (for this session, or always). Packages you always allow are listed here; their downloads skip those checks. A socket.dev malware verdict is never overridden." = "當 OSV 或 socket.dev 封鎖某個套件時，Bromure 會詢問是否仍要安裝（僅本次工作階段或一律）。你一律允許的套件列在這裡，它們的下載會略過這些檢查。socket.dev 的惡意軟體判定永遠不會被略過。";
+"Install despite reputation warnings (format: `npm:workerd`)" = "儘管有信譽警告仍安裝（格式：`npm:workerd`）";
+"Always Allow %@ in This Workspace" = "在此工作區中一律允許 %@";
+"Trust this package despite its reputation warning — later downloads in this workspace aren't blocked by it" = "儘管有信譽警告，仍信任此套件 — 此工作區中之後的下載不會再因此被封鎖";
+"Change this workspace's trusted packages in its settings on the Mac that runs it." = "請在執行此工作區的 Mac 上，於其設定中更改受信任的套件。";
+
+/* Added since 5.4.1: compromised-workspace remedies */
+"Shut the workspace down first: its disk is in use." = "請先關閉此工作區：它的磁碟正在使用中。";
+"Some of its files couldn't be erased (%@), so it's still marked compromised. Shut it down and try again." = "部分檔案無法清除（%@），因此它仍被標記為已遭入侵。請將其關閉後再試一次。";
+"Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk." = "在此期間，其已遭入侵標記已被清除，因此未清除任何內容：它將使用目前的磁碟啟動。";
+"It was already wiped: its disk and home were erased, and it boots fresh next time." = "它已被清除：其磁碟和主目錄已刪除，下次將全新啟動。";
+"Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk." = "在提示顯示期間，其已遭入侵標記已作為誤報被清除，因此未清除任何內容，也未啟動。請再次啟動，以使用目前的磁碟啟動它。";
+"Wipe “%@”?" = "要清除「%@」嗎？";
+"Its system disk, home, and saved state are erased; its settings and credentials stay, and so do the project folders it mounts. It's no longer marked compromised and boots fresh next time." = "它的系統磁碟、主目錄和已儲存的狀態將被清除；它的設定和憑證會保留，掛載的專案檔案夾也不受影響。它將不再被標示為遭入侵，下次啟動時為全新狀態。";
+"Wipe" = "清除";
+"Clear the compromised mark on “%@”?" = "要移除「%@」的遭入侵標記嗎？";
+"Only if it was a false alarm: the workspace starts on its current disk and home, without the wipe, as if nothing had happened. The leak itself was blocked either way; the Security Timeline keeps the event." = "僅在誤報時使用：工作區將以目前的磁碟和主目錄啟動，不做清除，就像什麼都沒發生過。外洩本身無論如何都已被阻擋；安全時間軸會保留該事件。";
+"Clear Mark" = "移除標記";
+"Couldn't wipe “%@”" = "無法清除「%@」";
+"Couldn't clear the mark on “%@”" = "無法移除「%@」的標記";
+"Marked compromised: Bromure caught this workspace sending a credential somewhere it shouldn't (the request was blocked). Starting it asks to wipe its disk and home first. Right-click to wipe it now, or to clear the mark if it was a false alarm." = "已標示為遭入侵：Bromure 發現此工作區試圖將憑證傳送到不應傳送的地方（請求已被阻擋）。啟動時會先詢問是否清除其磁碟和主目錄。按右鍵可立即清除，或在誤報時移除標記。";
+"Wipe and Restore…" = "清除並復原…";
+"Clear Compromised Mark…" = "移除遭入侵標記…";
+
+/* sandbox drawer: Allow help, no program known */
+"Add a rule for this host and port" = "為此主機和連接埠新增規則";
+/* sandbox drawer: Allow help, the program's full path */
+"Add a rule for this host and port, for %@" = "為此主機和連接埠新增規則，適用於 %@";
+/* workspace deleted by the other process (login agent or app) */
+"“%@” no longer exists: another Bromure process deleted it." = "「%@」已不存在：另一個 Bromure 程序已將其刪除。";
+
+/* AWS consent scope: the API call being signed, e.g. sts:AssumeRole */
+"for %@ (SigV4 signing on the host)" = "用於 %@（SigV4 在主機端簽章）";
+"“%@” is open in the other Bromure process (the app or its login agent). Use it there, or shut it down there first." = "「%@」已在另一個 Bromure 程序（App 或其登入代理程式）中開啟。請在那裡使用它，或先在那裡將其關閉。";
+"The workspace is open in the other Bromure process, which runs this automation there" = "工作區已在另一個 Bromure 程序中開啟，此自動化將在那裡執行";
+
+/* session list: the agent replied and the user hasn't looked */
+"Unread" = "未讀";
+
+/* sign-in: a guest's OAuth callback port is held by another workspace's sign-in */
+"Sign-in not opened: port %d is in use by another sign-in. Finish or cancel that one, then try again." = "未開啟登入：連接埠 %d 正被另一個登入使用。請先完成或取消該登入，然後再試一次。";
+
+/* guest URL open prompt */
+"Open a Page from the Workspace?" = "要打開來自工作區的頁面嗎？";
+
+/* guest URL open prompt: workspace name, URL */
+"Something in “%1$@” wants to open this page in your browser:\n\n%2$@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "「%1$@」中的某個程式想在你的瀏覽器中打開此頁面：\n\n%2$@\n\n只有在你預期如此時才打開：頁面可能把你的瀏覽器引向這台 Mac 或你網路上的服務。";
+
+/* guest URL open prompt: URL */
+"Something in a workspace wants to open this page in your browser:\n\n%@\n\nOpen it only if you expect it: a page can lead your browser to services on this Mac or your network." = "某個工作區中的程式想在你的瀏覽器中打開此頁面：\n\n%@\n\n只有在你預期如此時才打開：頁面可能把你的瀏覽器引向這台 Mac 或你網路上的服務。";
+
+/* guest URL open prompt */
+"Open in Browser" = "在瀏覽器中打開";

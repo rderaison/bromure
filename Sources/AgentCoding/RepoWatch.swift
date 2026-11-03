@@ -137,6 +137,10 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
     /// branch) → how far the scheduled review has got. Written by the
     /// engine when a review finishes, never by the editor.
     var reviewedThrough: [String: ReviewMark]
+    /// Commit and pull-request scans: how many review at once (0 = no
+    /// limit). 20 commits pushed together are reviewed one after the other
+    /// by default, not by 20 agents side by side.
+    var maxParallelScans: Int
 
     init(id: UUID = UUID(), repo: String, profileID: UUID,
          repoPath: String = "", tool: Profile.Tool = .claude,
@@ -150,7 +154,8 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
          createdAt: Date = Date(),
          scheduledScope: ReviewScope = .newCommits,
          firstRunBaseline: Bool = false,
-         reviewedThrough: [String: ReviewMark] = [:]) {
+         reviewedThrough: [String: ReviewMark] = [:],
+         maxParallelScans: Int = 1) {
         self.id = id
         self.repo = repo
         self.profileID = profileID
@@ -169,13 +174,14 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         self.scheduledScope = scheduledScope
         self.firstRunBaseline = firstRunBaseline
         self.reviewedThrough = reviewedThrough
+        self.maxParallelScans = max(0, maxParallelScans)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, repo, profileID, repoPath, tool, enabled, scans, focus
         case fullScanWeekday, fullScanHour, commitBranch, instructions
         case autoFixMinSeverity, automationIDs, createdAt
-        case scheduledScope, firstRunBaseline, reviewedThrough
+        case scheduledScope, firstRunBaseline, reviewedThrough, maxParallelScans
     }
 
     init(from decoder: Decoder) throws {
@@ -203,6 +209,7 @@ struct WatchedRepo: Codable, Identifiable, Equatable, Sendable {
         scheduledScope  = (try? c.decodeIfPresent(ReviewScope.self, forKey: .scheduledScope)) ?? .baseline
         firstRunBaseline = try c.decodeIfPresent(Bool.self, forKey: .firstRunBaseline) ?? false
         reviewedThrough = try c.decodeIfPresent([String: ReviewMark].self, forKey: .reviewedThrough) ?? [:]
+        maxParallelScans = max(0, try c.decodeIfPresent(Int.self, forKey: .maxParallelScans) ?? 1)
         if repoPath.isEmpty { repoPath = Self.defaultRepoPath(for: repo) }
     }
 
@@ -444,6 +451,26 @@ struct RepoFinding: Codable, Identifiable, Equatable, Sendable {
     /// Set when the finding's own text tripped the prompt-injection screen —
     /// it came from repository content, and a fix agent would read it.
     var screenWarning: String?
+    /// The hand-over to an agent that last marked it sent, while its
+    /// delivery may still fail. A failure applies only while it's still
+    /// this one: a later hand-over or any other status change replaces it.
+    var handOver: HandOverMark?
+
+    struct HandOverMark: Codable, Equatable, Sendable {
+        let id: UUID
+        /// The hand-over moved the status new → triaged (a failure moves it back).
+        let movedFromNew: Bool
+    }
+
+    /// Every hand-over of the finding's text to an agent (a fix, a session,
+    /// a Switchboard) needs the user's OK once it's flagged: why it's
+    /// refused without one, nil = go ahead.
+    func handOverRefusal(confirmed: Bool) -> String? {
+        guard let w = screenWarning, !confirmed else { return nil }
+        return String(format: NSLocalizedString(
+            "its text was flagged by the prompt-injection screen (%@) — confirm it before handing it to an agent",
+            comment: "finding hand-over refusal"), w)
+    }
 
     init(id: UUID = UUID(), watchID: UUID?, profileID: UUID, repo: String,
          fingerprint: String, title: String, severity: Severity = .medium,
@@ -800,10 +827,10 @@ enum RepoWatchPrompts {
         Look for \(focusText(w.focus)).
 
         How to work:
-        1. `git fetch origin` if needed, then `git log --oneline \(base)..\(tip)` to list the commits and `git diff --stat \(base)..\(tip)` to size the change.
-        2. If \(base) is unknown or is not an ancestor of \(tip) (`git merge-base --is-ancestor \(base) \(tip)` fails — the history was rewritten), review the last \(WatchedRepo.recentCommitWindow) commits instead (`git log -\(WatchedRepo.recentCommitWindow) \(tip)`), and say so in your summary.
-        3. Review the change — commit by commit (`git show <sha>`) when there are several, as one diff when it is small. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
-        4. If the range is very large (hundreds of commits), start with the commits that touch risky areas (request handling, authentication, input parsing, file / process / network / database access, cryptography, configuration) and say in your summary what you skipped.
+        1. `git fetch origin` if needed, then `git log --oneline --first-parent \(base)..\(tip)` to list what landed — each line is a commit made on \(branchName(w)) or a branch merged into it — and `git diff --stat \(base)..\(tip)` to size the change.
+        2. If \(base) is unknown or is not an ancestor of \(tip) (`git merge-base --is-ancestor \(base) \(tip)` fails — the history was rewritten), review the last \(WatchedRepo.recentCommitWindow) of them instead (`git log --oneline --first-parent -\(WatchedRepo.recentCommitWindow) \(tip)`), and say so in your summary.
+        3. Review the net change, `git diff \(base)..\(tip)`: what the branch holds now, not each step that led there. A merged branch's own commits are context (their messages say why), never reviewed one by one: a later one may already fix an earlier one. When the diff is too big to read at once, go through the first-parent list, each entry's diff against its first parent (`git diff <sha>^1 <sha>`, a merge's whole branch). Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+        4. If the range is very large (hundreds of entries), start with the ones that touch risky areas (request handling, authentication, input parsing, file / process / network / database access, cryptography, configuration) and say in your summary what you skipped.
 
         \(reportingRules(repo: w.repo, tool: tool))
         """ + ownerInstructions(w)
@@ -818,8 +845,8 @@ enum RepoWatchPrompts {
         Look for \(focusText(w.focus)).
 
         How to work:
-        1. `git log --oneline -\(count) \(tip)` to list the commits (fewer when the history is shorter), `git diff --stat` over the same range to size the change.
-        2. Review the change — commit by commit (`git show <sha>`) when there are several. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
+        1. `git log --oneline --first-parent -\(count) \(tip)` to list them — each line is a commit made on \(branchName(w)) or a branch merged into it (fewer when the history is shorter) — and `git diff --stat` over the same range to size the change.
+        2. Review each entry's diff against its first parent (`git diff <sha>^1 <sha>`): a merge is its whole branch, reviewed as one change — the branch's own commits are context, never reviewed one by one, since a later one may already fix an earlier one. Read the surrounding code to confirm each issue is reachable and what its impact is. Report what the changes introduce or make reachable; a pre-existing issue in code the changes touch counts too.
 
         \(reportingRules(repo: w.repo, tool: tool))
         """ + ownerInstructions(w)
@@ -836,7 +863,7 @@ enum RepoWatchPrompts {
         """
         Review a new commit on \(w.repo) for \(focusText(w.focus)). \(checkoutNote(w))
 
-        Inspect the change with `git fetch origin` then `git show {{commit.key}}` (the commit is described below). Focus on what the change introduces or makes reachable, reading surrounding code as needed to confirm impact.
+        Inspect the change with `git fetch origin`, then `git diff {{commit.key}}^1 {{commit.key}}`: what the commit (described below) brought to the branch. When it is a merge, that is the whole merged branch — review it as one change; `git log --oneline {{commit.key}}^1..{{commit.key}}` lists the branch's own commits as context only, never to review one by one, since a later one may already fix an earlier one. Focus on what the change introduces or makes reachable, reading surrounding code as needed to confirm impact.
 
         \(reportingRules(repo: w.repo, tool: w.tool))
 
@@ -1029,6 +1056,7 @@ final class FindingStore {
                                                  comment: "finding status note")
                 f.statusChangedAt = now
                 f.taskID = nil
+                f.handOver = nil
                 reopened = true
             }
             findings[i] = f
@@ -1053,17 +1081,84 @@ final class FindingStore {
     func mutate(_ id: UUID, _ change: (inout RepoFinding) -> Void) {
         guard let i = findings.firstIndex(where: { $0.id == id }) else { return }
         let before = findings[i].status
+        let mark = findings[i].handOver
         change(&findings[i])
-        if findings[i].status != before { findings[i].statusChangedAt = Date() }
+        if findings[i].status != before {
+            findings[i].statusChangedAt = Date()
+            // Moved by anything but a hand-over: a pending one's failure no
+            // longer speaks for the finding.
+            if findings[i].handOver == mark { findings[i].handOver = nil }
+        }
         save()
+    }
+
+    /// A hand-over to an agent marked it sent: `.new` → `.triaged`, the note
+    /// set. `generation` is what `handOverFailed` must name.
+    func markHandedOver(_ id: UUID, note: String, generation: UUID = UUID()) {
+        mutate(id) {
+            // A hand-over replacing a pending one inherits what to undo.
+            let moved = $0.status == .new || ($0.status == .triaged && $0.handOver?.movedFromNew == true)
+            if $0.status == .new { $0.status = .triaged }
+            $0.statusNote = note
+            $0.handOver = .init(id: generation, movedFromNew: moved)
+        }
+    }
+
+    /// That hand-over's delivery failed: say so, and undo the status it
+    /// moved — only while it's still the current one. A later hand-over, or
+    /// the user or a fix changing the finding since, wins.
+    /// That hand-over reached its agent: nothing is pending any more, so a
+    /// later hand-over's failure can't undo what this one already moved.
+    func handOverDelivered(_ id: UUID, generation: UUID) {
+        guard finding(id)?.handOver?.id == generation else { return }
+        mutate(id) { $0.handOver = nil }
+    }
+
+    func handOverFailed(_ id: UUID, generation: UUID, note: String) {
+        guard finding(id)?.handOver?.id == generation else { return }
+        mutate(id) {
+            if $0.handOver?.movedFromNew == true, $0.status == .triaged { $0.status = .new }
+            $0.statusNote = note
+            $0.handOver = nil
+        }
     }
 
     func setStatus(_ id: UUID, _ status: RepoFinding.Status, note: String? = nil) {
         mutate(id) {
+            $0.handOver = nil
             $0.status = status
             if let note { $0.statusNote = note }
             if status != .duplicate { $0.duplicateOf = nil }
         }
+    }
+
+    /// Hand a finding to a session ("Ask @foo"): it reads as sent only once
+    /// `stage` (its file written into the session) succeeds — a failure there
+    /// leaves the finding untouched and is returned. `deliver` (typing the
+    /// line, which can wait for a busy agent) runs on; if it fails, the note
+    /// says so and a status the hand-over moved goes back.
+    @discardableResult
+    func handOver<Staged>(_ id: UUID, to name: String,
+                          stage: () async throws -> Staged,
+                          deliver: @escaping @MainActor (Staged) async throws -> Void,
+                  why: @escaping (Error) -> String) async -> String? {
+        let staged: Staged
+        do { staged = try await stage() } catch { return why(error) }
+        guard finding(id) != nil else { return nil }
+        let generation = UUID()
+        markHandedOver(id, note: String(format: NSLocalizedString("Sent to %@ to fix", comment: "finding status note"), name),
+                       generation: generation)
+        Task { @MainActor [weak self] in
+            do {
+                try await deliver(staged)
+                self?.handOverDelivered(id, generation: generation)
+            } catch {
+                self?.handOverFailed(id, generation: generation, note: String(
+                    format: NSLocalizedString("Couldn't hand it to %1$@: %2$@", comment: "finding status note"),
+                    name, why(error)))
+            }
+        }
+        return nil
     }
 
     func markDuplicate(_ id: UUID, of original: UUID) {
@@ -1098,6 +1193,7 @@ final class FindingStore {
                     findings[i].status = .triaged
                     findings[i].statusChangedAt = Date()
                     findings[i].taskID = nil
+                    findings[i].handOver = nil
                     changed.append(findings[i].id)
                 }
                 continue
@@ -1110,6 +1206,7 @@ final class FindingStore {
                 if findings[i].status.isOpen {
                     findings[i].status = .triaged
                     findings[i].statusChangedAt = Date()
+                    findings[i].handOver = nil
                     findings[i].statusNote = NSLocalizedString(
                         "Fix closed without merging", comment: "finding status note")
                     findings[i].taskID = nil
@@ -1121,6 +1218,7 @@ final class FindingStore {
                findings[i].status != .dismissed, findings[i].status != .duplicate {
                 findings[i].status = target
                 findings[i].statusChangedAt = Date()
+                findings[i].handOver = nil
                 if target == .fixed {
                     findings[i].statusNote = NSLocalizedString(
                         "Fix merged", comment: "finding status note")

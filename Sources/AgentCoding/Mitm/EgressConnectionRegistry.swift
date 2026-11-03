@@ -26,6 +26,9 @@ final class EgressConnectionRegistry: @unchecked Sendable {
         let route: String
         /// The rule that allowed it when it opened (nil: the default action).
         let rule: String?
+        /// The program that opened it, when the guest's attestor named one:
+        /// a re-check under `binaries:` rules decides for it, not for nobody.
+        var identity: OpenShellPolicy.BinaryIdentity? = nil
         /// Close both sides. Called at most once, never under the lock.
         let cut: @Sendable () -> Void
     }
@@ -150,12 +153,14 @@ final class EgressConnectionRegistry: @unchecked Sendable {
     /// a reused descriptor.
     @discardableResult
     func register(profileID: UUID, host: String, port: Int, route: String, rule: String?,
+                  identity: OpenShellPolicy.BinaryIdentity? = nil,
                   cut: @escaping @Sendable () -> Void) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         let id = nextID
         nextID += 1
         entries[id] = Entry(id: id, profileID: profileID, host: host.lowercased(),
-                            port: UInt16(truncatingIfNeeded: port), route: route, rule: rule, cut: cut)
+                            port: UInt16(truncatingIfNeeded: port), route: route, rule: rule,
+                            identity: identity, cut: cut)
         return id
     }
 
@@ -176,7 +181,8 @@ final class EgressConnectionRegistry: @unchecked Sendable {
         lock.lock()
         var victims: [Entry] = []
         for (id, e) in entries where e.profileID == profileID {
-            if policy.verdict(ip: nil, hostnames: [e.host], proto: .tcp, port: e.port, now: now) == .deny {
+            if policy.verdict(ip: nil, hostnames: [e.host], proto: .tcp, port: e.port,
+                              identity: e.identity, now: now) == .deny {
                 victims.append(e)
                 entries.removeValue(forKey: id)
             }
@@ -222,15 +228,17 @@ final class EgressReportDeduper: @unchecked Sendable {
     static let shared = EgressReportDeduper()
     static let window: TimeInterval = 60
 
-    private struct Key: Hashable { let pid: UUID; let host: String; let port: Int; let denied: Bool }
+    /// `exe`: a deny for another program is its own row (its Allow names it).
+    private struct Key: Hashable { let pid: UUID; let host: String; let port: Int; let denied: Bool; let exe: String? }
     private let lock = NSLock()
     private var seen: [Key: Date] = [:]
 
     init() {}
 
     /// True when this verdict should be reported now (and records it).
-    func shouldReport(profileID: UUID, host: String, port: Int, denied: Bool, now: Date = Date()) -> Bool {
-        let k = Key(pid: profileID, host: host.lowercased(), port: port, denied: denied)
+    func shouldReport(profileID: UUID, host: String, port: Int, denied: Bool, exe: String? = nil,
+                      now: Date = Date()) -> Bool {
+        let k = Key(pid: profileID, host: host.lowercased(), port: port, denied: denied, exe: denied ? exe : nil)
         lock.lock(); defer { lock.unlock() }
         if let last = seen[k], now.timeIntervalSince(last) < Self.window { return false }
         if seen.count > 8192 { seen = seen.filter { now.timeIntervalSince($0.value) < Self.window } }
