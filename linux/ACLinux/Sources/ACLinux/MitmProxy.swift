@@ -608,7 +608,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 if let kept {
                     reply = kept
                 } else if status == 200 {
-                    reply = SignInCapture.response(status: 502, reason: "Bad Gateway", json: [
+                    reply = SignInCapture.response(status: 400, reason: "Bad Request", json: [
                         "error": "bromure_not_kept",
                         "error_description": "Bromure couldn't keep this sign-in on the host, so it wasn't saved and nothing was passed to the workspace. Sign in again from the session's card.",
                     ])

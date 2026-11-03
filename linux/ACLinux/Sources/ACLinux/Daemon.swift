@@ -199,6 +199,7 @@ public actor Daemon {
         case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
             return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
         case ("POST", "/agent-sessions/start"): return await agentSessionCommand(nil, "start", req.body)
+        case ("POST", "/agent-sessions/folders"): return await workspaceRoute(req.method, req.path, req.body)!
         case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"):
             guard let id = UUID(uuidString: String(p.dropFirst("/agent-sessions/".count).dropLast("/transcript".count))
                 .removingPercentEncoding ?? "") else { return .error(400, "Bad session id") }
@@ -230,6 +231,7 @@ public actor Daemon {
             if let r = await boardRoute(req.method, path, req.body) { return r }
             if let r = await preferencesRoute(req.method, path, req.body) { return r }
             if let r = await subscriptionsRoute(req.method, path, req.body) { return r }
+            if let r = await workspaceRoute(req.method, req.path, req.body) { return r }
             return .error(404, "Not found", ["path": .string(req.path)])
         }
     }
