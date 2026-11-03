@@ -559,6 +559,9 @@ protocol RemoteDelegationLink: AnyObject {
 /// recognises a typed notice by its prefix and draws it as the host's
 /// aside rather than as something the user said.
 enum DelegationNotice {
+    /// Several notices typed as one line are joined with this (a transcript
+    /// row then reads them as a line each: DelegationNoticeRow).
+    static let joiner = " ‖ "
     static let prefix = "[Delegation notice]"
 
     /// First eight characters of an id — enough for the store to find it
@@ -777,7 +780,7 @@ struct DelegationNoticeRow: View {
     let text: String
     /// A Switchboard notice rather than a delegation one.
     var switchboard = false
-    static let joiner = " ‖ "
+    static let joiner = DelegationNotice.joiner
 
     private var lines: [String] {
         text.components(separatedBy: Self.joiner)

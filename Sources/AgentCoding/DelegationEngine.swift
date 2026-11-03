@@ -152,11 +152,20 @@ final class DelegationEngine {
     /// Scans a text crossing between agents; a non-nil return is the snippet
     /// that tripped the detector and the message is withheld. Injected so
     /// the tests run without the model.
-    var scan: @MainActor (String) async -> String? = { text in
+    var scan: @MainActor (String) async -> String? = { text in await DelegationEngine.classifierScan(text) }
+
+    /// The on-device prompt-injection classifier's verdict on `text`. Where
+    /// the ONNX runtime isn't (the Linux server), nothing is withheld here:
+    /// the host sets `scan` to its own screen.
+    static func classifierScan(_ text: String) async -> String? {
+#if canImport(OnnxRuntimeBindings)
         let t0 = Date()
         let hit = await PromptInjectionClassifier.shared.detect(spans: [(id: nil, content: text)])
         BACDebug.log("delegation", "scan \(text.count) chars took=\(BACDebug.ms(t0))")
         return hit
+#else
+        return nil
+#endif
     }
     /// Every message, delivered or withheld, goes to the Security Timeline
     /// (and the cloud audit for enrolled installs).
@@ -1564,7 +1573,7 @@ final class DelegationEngine {
         let lines = items.map { d, m in
             m.to == .parent ? DelegationNotice.toParent(m, in: d) : DelegationNotice.toChild(m, in: d)
         }
-        let line = lines.count == 1 ? lines[0] : lines.joined(separator: DelegationNoticeRow.joiner)
+        let line = lines.count == 1 ? lines[0] : lines.joined(separator: DelegationNotice.joiner)
         func markNoticed() {
             store.markNoticed(items.map { $0.1.id })
             // A request the line carried whole is read: no read_inbox needed,
