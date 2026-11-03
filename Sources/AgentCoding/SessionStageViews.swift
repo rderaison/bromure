@@ -9,21 +9,9 @@ import UniformTypeIdentifiers
 /// A file dragged onto a composer (host bytes + name + whether it's an
 /// image, so the drop can show a thumbnail). Shared by the chat's composer
 /// and the new-session screen, on every platform.
-struct DroppedFile {
-    let name: String
-    let data: Data
-    let isImage: Bool
-    /// A dropped folder: no bytes, it's packed and copied when staged.
-    var folder: URL? = nil
-    /// `data` is a folder already packed (`FolderUpload.packed`) — how a
-    /// folder reaches a server with a remote new session.
-    var packedFolder = false
-
-    /// Largest file a drop attaches. Anything bigger is refused with a beep
-    /// rather than vanishing silently. Files are memory-mapped, so a pending
-    /// attachment doesn't hold a copy in RAM; staging writes it in chunks.
-    static let maxBytes = 512 * 1024 * 1024
-
+// DroppedFile itself (what a new session's request carries) is in
+// AgentSessions.swift; loading one from a drag is UI.
+extension DroppedFile {
     /// Load one dragged item as bytes. Uses `loadObject(ofClass: URL.self)` —
     /// the same call the file browser's working drop uses — for Finder file
     /// drags (any type), and falls back to a raw image representation for images
@@ -243,26 +231,6 @@ struct DroppedFile {
         return (cleaned, files)
     }
 
-    /// Wire form for the remote session API: {name, data (base64), isImage},
-    /// plus folder: true when `data` is a packed folder.
-    var wireDictionary: [String: Any] {
-        var d: [String: Any] = ["name": name, "data": data.base64EncodedString(), "isImage": isImage]
-        if packedFolder { d["folder"] = true }
-        return d
-    }
-
-    init(name: String, data: Data, isImage: Bool, folder: URL? = nil, packedFolder: Bool = false) {
-        self.name = name; self.data = data; self.isImage = isImage
-        self.folder = folder; self.packedFolder = packedFolder
-    }
-
-    init?(wire: [String: Any]) {
-        guard let name = wire["name"] as? String,
-              let b64 = wire["data"] as? String, let data = Data(base64Encoded: b64),
-              data.count <= Self.maxBytes else { return nil }
-        self.init(name: name, data: data, isImage: wire["isImage"] as? Bool ?? false,
-                  packedFolder: wire["folder"] as? Bool ?? false)
-    }
 }
 
 /// The files staged for the next send, as thumbnails with a remove badge.

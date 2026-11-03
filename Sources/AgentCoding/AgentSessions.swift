@@ -8,8 +8,48 @@ import Observation
 // window in that workspace's VM — the machinery the home screen hides. This
 // file is platform-neutral: the model, the store that remembers sessions
 // across launches and reconciles them with the live tab rosters, the
-// grouping the sidebar shows, and the shared row/section views. The macOS
-// engine that starts/resumes sessions lives in AgentSessionEngine.swift.
+// grouping the sidebar shows. The shared row/section views are in
+// AgentSessionViews.swift, and the macOS engine that starts/resumes sessions
+// in AgentSessionEngine.swift.
+
+/// A file (or folder) dropped onto a new session: the bytes it carries
+/// into the guest. Loading one from a drag is UI (SessionStageViews).
+struct DroppedFile {
+    let name: String
+    let data: Data
+    let isImage: Bool
+    /// A dropped folder: no bytes, it's packed and copied when staged.
+    var folder: URL? = nil
+    /// `data` is a folder already packed (`FolderUpload.packed`) — how a
+    /// folder reaches a server with a remote new session.
+    var packedFolder = false
+
+    /// Largest file a drop attaches. Anything bigger is refused with a beep
+    /// rather than vanishing silently. Files are memory-mapped, so a pending
+    /// attachment doesn't hold a copy in RAM; staging writes it in chunks.
+    static let maxBytes = 512 * 1024 * 1024
+
+    /// Wire form for the remote session API: {name, data (base64), isImage},
+    /// plus folder: true when `data` is a packed folder.
+    var wireDictionary: [String: Any] {
+        var d: [String: Any] = ["name": name, "data": data.base64EncodedString(), "isImage": isImage]
+        if packedFolder { d["folder"] = true }
+        return d
+    }
+
+    init(name: String, data: Data, isImage: Bool, folder: URL? = nil, packedFolder: Bool = false) {
+        self.name = name; self.data = data; self.isImage = isImage
+        self.folder = folder; self.packedFolder = packedFolder
+    }
+
+    init?(wire: [String: Any]) {
+        guard let name = wire["name"] as? String,
+              let b64 = wire["data"] as? String, let data = Data(base64Encoded: b64),
+              data.count <= Self.maxBytes else { return nil }
+        self.init(name: name, data: data, isImage: wire["isImage"] as? Bool ?? false,
+                  packedFolder: wire["folder"] as? Bool ?? false)
+    }
+}
 
 /// What the new-session screen hands to whoever starts sessions: the local
 /// engine on macOS, the mirror controller (→ the server's engine) on a
@@ -1458,8 +1498,8 @@ final class AgentSessionStore {
                 // A tab a waiting launch may still claim — named for it, or
                 // not named yet — is that launch's, not a stranger to adopt.
                 if pending.contains(where: { Self.mayBeLaunchTab(tab, of: $0) }) { continue }
-                guard let kind = BromureIcons.agentKind(forLabel: tab.label)
-                        ?? BromureIcons.agentKind(forLabel: tab.shownLabel),
+                guard let kind = AgentLabel.agentKind(forLabel: tab.label)
+                        ?? AgentLabel.agentKind(forLabel: tab.shownLabel),
                       let tool = Profile.Tool(rawValue: kind) else { continue }
                 let cwd = tab.cwd ?? "~"
                 // The agent's own name for it, minus its glyphs ("π > tmp"
@@ -1546,7 +1586,7 @@ final class AgentSessionStore {
         }
         guard soleLaunch else { return nil }
         let unnamed = candidates.filter { ($0.display ?? "").isEmpty }
-        return unnamed.first { BromureIcons.agentKind(forLabel: $0.shownLabel) == s.tool.rawValue }
+        return unnamed.first { AgentLabel.agentKind(forLabel: $0.shownLabel) == s.tool.rawValue }
             ?? unnamed.first
     }
 
@@ -1722,7 +1762,7 @@ final class AgentSessionStore {
     /// one, else the roster label.
     @MainActor
     static func agentRunning(_ s: AgentSession, in tab: TabsModel.Tab) -> Bool {
-        s.agentAlive ?? (BromureIcons.agentKind(forLabel: tab.label) != nil)
+        s.agentAlive ?? (AgentLabel.agentKind(forLabel: tab.label) != nil)
     }
 
     private func save() {

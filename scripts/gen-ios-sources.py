@@ -61,6 +61,7 @@ SHARED = [
     "GuestURLGate.swift",  # the guest-URL host gate (FatClientController opens a published sign-in URL)
     "FatClientConnect.swift",
     "AgentSessions.swift",      # session model/store (sessions home)
+    "AgentLabels.swift",        # which agent a tab label names (BromureIcons forwards)
     "AgentSessionViews.swift",  # shared row/section views (sessions home)
     "SubscriptionNotifications.swift",  # bromureSubscriptionStoresChanged (the profile editor observes it)
     "InstructionPresets.swift",  # session-instructions presets + editor (fat-client mirror)
