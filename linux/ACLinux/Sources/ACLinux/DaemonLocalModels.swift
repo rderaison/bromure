@@ -1,0 +1,252 @@
+import Foundation
+import NIOCore
+import NIOPosix
+
+/// Local models on a Linux server: a workspace's agents set to "Local model"
+/// reach a user-supplied external engine (vLLM, Ollama, LM Studio, …) the
+/// way macOS's do — the guest's bridge (127.0.0.1:11434) dials host vsock
+/// 8446, which goes to the tool-call repair proxy, which speaks the engine's
+/// OpenAI API. The built-in engine (MLX) is macOS-only: its downloads are
+/// refused, and a workspace that selects one of its models is told so.
+extension Daemon {
+    /// The profile a launch stages: the workspace with Preferences › Models
+    /// projected on (macOS: launch's overlaidWithGlobalModels), so the token
+    /// plan, the home seed, the meta share and the engine all see the models
+    /// and credentials the user configured. A sign-in VM's stays as made.
+    // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch)
+    func launchProfile(for rec: VMRecord) async -> Profile? {
+        guard let raw = profile(for: rec) else { return nil }
+        if rec.registration == true { return raw }
+        let subscribed = subscribedProviders(for: raw)
+        return await MainActor.run {
+            raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
+        }
+    }
+
+    /// The providers with a signed-in subscription the workspace can use.
+    // @port ACAppDelegate.subscribedProviders(for: Profile) h=6f587086eef888b7 @7057d502
+    func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
+        guard let e = mitm else { return [] }
+        var s = Set<ModelProvider>()
+        if e.claudeStore.hasCredential(for: profile.id) { s.insert(.anthropic) }
+        if e.codexStore.hasCredential(for: profile.id)  { s.insert(.openai) }
+        if e.grokStore.hasCredential(for: profile.id)   { s.insert(.xai) }
+        if e.kimiStore.hasCredential(for: profile.id)   { s.insert(.moonshot) }
+        return s
+    }
+
+    /// Register the workspace's external engine with the repair proxy and
+    /// probe it, for a launch whose agents use a local model. A workspace
+    /// on the built-in engine is told it's macOS-only (the daemon log; its
+    /// agents' calls get the proxy's wire-shaped "no engine" error).
+    // partial: external engines only (the built-in MLX engine is macOS-only); Bedrock without a pasted key (SigV4 with the workspace's AWS credentials) not yet; status to the daemon log (no pane)
+    // @port ACAppDelegate.startLocalEngineIfNeeded(for: Profile) h=f08c2a0c5693ee85 @7057d502
+    func startLocalEngineIfNeeded(for profile: Profile) {
+        let pid = profile.id
+        guard !profile.distinctLocalModelIDs.isEmpty else {
+            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+            return
+        }
+        guard let base = profile.localEngineBaseURL else {
+            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+            Self.inferenceLog("'\(profile.name)': its local model needs the built-in engine, which runs on macOS only — set an external engine (OpenAI-compatible server) in Preferences › Models")
+            return
+        }
+        let apiKey = profile.localEngineAPIKey
+        let config = ExternalEngine.Config(base: base, apiKey: apiKey)
+        if config.isBedrock, (apiKey ?? "").isEmpty {
+            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+            Self.inferenceLog("'\(profile.name)': Amazon Bedrock needs an API key on this server (signing with the workspace's AWS credentials isn't available yet)")
+            return
+        }
+        InferenceRepairProxy.shared.setExternalEngine(pid, config)
+        if let activeID = profile.activeModelID, !activeID.isEmpty {
+            InferenceRepairProxy.shared.setActiveModel(pid, repo: activeID)
+            if !config.isBedrock { EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID) }
+        }
+        InferenceRepairProxy.shared.startIfNeeded()
+        if config.isBedrock {
+            Self.inferenceLog("'\(profile.name)': Amazon Bedrock engine \(base.absoluteString) registered")
+            return
+        }
+        let label = profile.activeModelID ?? base.host ?? "external engine"
+        let name = profile.name
+        Task.detached(priority: .userInitiated) {
+            do {
+                let served = try await ExternalEngine.listModels(base: base, apiKey: apiKey)
+                Self.inferenceLog("'\(name)': external engine \(base.absoluteString) reachable — \(served.count) model(s), serving \(label)")
+            } catch {
+                Self.inferenceLog("'\(name)': external engine \(base.absoluteString) unreachable: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // @port-skip linux-only: the daemon log's share of InferenceLog
+    static func inferenceLog(_ line: String) {
+        InferenceLog.shared.record("[inference] " + line)
+        FileHandle.standardError.write(Data("[inference] \(line)\n".utf8))
+    }
+
+    /// The VM's inference bridge listener (`stored`: a restarted daemon's);
+    /// none for a sign-in VM (its token agent has 8446) or without a proxy.
+    // @port-skip linux-only: the per-VM inference listener (macOS: MitmEngine.register's inferenceListener)
+    func serveInference(_ rec: VMRecord, udsPath: String, stored: Int32?) -> InferenceBridgeListener? {
+        guard mitm != nil, rec.registration != true else { if let stored { close(stored) }; return nil }
+        do {
+            return try InferenceBridgeListener(udsPath: udsPath, fdStoreName: "llm-" + rec.shortId, stored: stored)
+        } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no inference listener: \(error)\n".utf8))
+            return nil
+        }
+    }
+
+    /// `/state`'s `localModels`: the server's memory (the client's fit gate)
+    /// and its installed built-in models — none here.
+    // partial: no built-in engine on Linux, so no models
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onLocalModels h=102d14ae0a7eef91 @7057d502
+    static func localModels() -> JSONValue {
+        let gb = Int((Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824).rounded())
+        return ["unifiedMemGB": .number(Double(gb)), "models": .object([:])]
+    }
+
+    /// `POST /models/{download,cancel,discard,remove}`: the built-in
+    /// engine's model files. Refused: that engine is macOS-only.
+    // partial: refused (the built-in MLX engine is macOS-only)
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", let p) where p.hasPrefix("/models/"): h=35249da0c5fa92e9 @7dd92fdf
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onModelAction h=17a44a9c542ea547 @7057d502
+    func modelAction(_ path: String, _ body: JSONValue) -> ControlResponse {
+        let action = String(path.dropFirst("/models/".count))
+        guard ["download", "cancel", "discard", "remove"].contains(action),
+              let repo = body["repo"]?.stringValue, !repo.isEmpty else {
+            return .error(400, "bad action or repo")
+        }
+        return ControlResponse(400, ["ok": false, "error": .string(
+            "This server has no built-in model engine: it runs on macOS only. Set an external engine (an OpenAI-compatible server) in Preferences › Models instead.")])
+    }
+}
+
+/// One VM's host end of the guest's inference bridge: Firecracker delivers
+/// the guest's vsock 8446 connections on `<v.sock>_8446`; each is spliced to
+/// the repair proxy on loopback, its port read per connection (macOS:
+/// InferenceListenerDelegate + InferenceVsockBridge.pump).
+// @port-skip linux-only: InferenceListenerDelegate over hybrid vsock (NIO)
+final class InferenceBridgeListener: @unchecked Sendable {
+    static let vsockPort: UInt32 = 8446
+    let path: String
+    let fdStoreName: String
+    private let channel: Channel
+
+    // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=3d8ba10919c7dc7d @20aad0d2
+    init(udsPath: String, fdStoreName: String, stored: Int32?) throws {
+        path = HybridVsockListener.path(uds: udsPath, port: Self.vsockPort)
+        self.fdStoreName = fdStoreName
+        let fd: Int32
+        if let stored { fd = stored } else {
+            fd = try HybridVsockListener.bindListening(path)
+            FDStore.store(fdStoreName, [fd])
+        }
+        channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+            .childChannelInitializer { guest in
+                // Paused until the proxy side is connected.
+                guest.setOption(ChannelOptions.autoRead, value: false).flatMap {
+                    ClientBootstrap(group: guest.eventLoop)
+                        .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+                        .connect(host: "127.0.0.1", port: InferenceRepairProxy.shared.listenPort)
+                }.flatMap { proxy in
+                    let (a, b) = SpliceHandler.matchedPair()
+                    return guest.pipeline.addHandler(a).flatMap { proxy.pipeline.addHandler(b) }.flatMap {
+                        guest.setOption(ChannelOptions.autoRead, value: true)
+                    }
+                }.flatMapErrorThrowing { error in
+                    guest.close(promise: nil)
+                    throw error
+                }
+            }
+            .withBoundSocket(fd).wait()
+    }
+
+    /// The VM is gone: the listener closed and its socket file removed.
+    // @port-skip linux-only: the per-VM inference listener
+    func stop() {
+        channel.close(promise: nil)
+        try? FileManager.default.removeItem(atPath: path)
+    }
+}
+
+/// Bytes both ways between two channels; each side's EOF half-closes the
+/// other, a close closes both.
+// @port-skip linux-only: NIO plumbing (macOS: InferenceVsockBridge's blocking pump)
+final class SpliceHandler: ChannelDuplexHandler, @unchecked Sendable {
+    typealias InboundIn = NIOAny
+    typealias OutboundIn = NIOAny
+    typealias OutboundOut = NIOAny
+
+    private var partner: SpliceHandler?
+    private var context: ChannelHandlerContext?
+    private var pendingRead = false
+
+    // @port-skip linux-only: NIO plumbing
+    static func matchedPair() -> (SpliceHandler, SpliceHandler) {
+        let a = SpliceHandler(), b = SpliceHandler()
+        a.partner = b
+        b.partner = a
+        return (a, b)
+    }
+
+    // @port-skip linux-only: NIO plumbing
+    func handlerAdded(context: ChannelHandlerContext) { self.context = context }
+
+    // @port-skip linux-only: NIO plumbing
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.context = nil
+        partner = nil
+    }
+
+    // @port-skip linux-only: NIO plumbing
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) { partner?.write(data) }
+
+    // @port-skip linux-only: NIO plumbing
+    func channelReadComplete(context: ChannelHandlerContext) { partner?.flush() }
+
+    // @port-skip linux-only: NIO plumbing
+    func channelInactive(context: ChannelHandlerContext) { partner?.closeChannel() }
+
+    // @port-skip linux-only: NIO plumbing
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let e = event as? ChannelEvent, case .inputClosed = e { partner?.halfClose() }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    // @port-skip linux-only: NIO plumbing
+    func errorCaught(context: ChannelHandlerContext, error: Error) { context.close(promise: nil) }
+
+    // Backpressure: read from this side only while the partner can write.
+    // @port-skip linux-only: NIO plumbing
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable { partner?.becameWritable() }
+    }
+
+    // @port-skip linux-only: NIO plumbing
+    func read(context: ChannelHandlerContext) {
+        if partner?.partnerWritable ?? false { context.read() } else { pendingRead = true }
+    }
+
+    // @port-skip linux-only: NIO plumbing
+    private var partnerWritable: Bool { context?.channel.isWritable ?? false }
+
+    // @port-skip linux-only: NIO plumbing
+    private func write(_ data: NIOAny) { context?.write(data, promise: nil) }
+    // @port-skip linux-only: NIO plumbing
+    private func flush() { context?.flush() }
+    // @port-skip linux-only: NIO plumbing
+    private func closeChannel() { context?.close(promise: nil) }
+    // @port-skip linux-only: NIO plumbing
+    private func halfClose() { context?.close(mode: .output, promise: nil) }
+    // @port-skip linux-only: NIO plumbing
+    private func becameWritable() {
+        guard pendingRead, let context else { return }
+        pendingRead = false
+        context.read()
+    }
+}

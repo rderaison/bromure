@@ -1600,3 +1600,30 @@ struct InstructionPresetTests {
         #expect(SessionStores(stateDir: d).instructionPresets.presets.map(\.name) == ["Terse"], "reloaded from disk")
     }
 }
+
+@Suite("Local models")
+struct LocalModelTests {
+    @Test("the local-inference sentinel goes to the repair proxy in clear; other hosts as asked")
+    func sentinelRoute() {
+        let local = MitmProxy.route(host: "Bromure.LLM", port: 443, tls: true)
+        #expect(local.local && !local.tls && local.host == "127.0.0.1" && local.port == InferenceService.repairProxyPort)
+        let cloud = MitmProxy.route(host: "api.anthropic.com", port: 443, tls: true)
+        #expect(!cloud.local && cloud.tls && cloud.host == "api.anthropic.com" && cloud.port == 443)
+    }
+
+    @Test("a workspace's Local-model agents get the engine's env in proxy.env; others none")
+    func proxyEnvLines() {
+        var p = Profile(name: "local", tool: .claude, authMode: .local)
+        p.activeModelID = "qwen3:32b"
+        let env = Daemon.localModelEnv(p)
+        #expect(env.contains("export ANTHROPIC_MODEL=qwen3:32b"))
+        #expect(env.contains("export ANTHROPIC_AUTH_TOKEN=" + EngineKey.perVM(profileID: p.id)))
+        #expect(Daemon.localModelEnv(Profile(name: "cloud", tool: .claude, authMode: .subscription)).isEmpty)
+    }
+
+    @Test("localModels reports the memory and no built-in models")
+    func refusals() {
+        guard case .object(let o) = Daemon.localModels() else { Issue.record("not an object"); return }
+        #expect((o["unifiedMemGB"]?.numberValue ?? 0) > 0 && o["models"] == .object([:]))
+    }
+}

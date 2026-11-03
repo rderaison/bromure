@@ -199,11 +199,24 @@ final class MitmProxy: @unchecked Sendable {
         return ctx
     }
 
+    /// Where a request to `host:port` goes: the local-inference sentinel
+    /// (`bromure.llm`, what agents on a local model call) to the repair proxy
+    /// on loopback, in clear (it fronts the workspace's external engine);
+    /// anything else as asked.
+    // partial: the sentinel only (no Local/Hybrid rerouting of real cloud hosts on Linux yet)
+    // @port LLMRouting.static decide(host: String, port: Int, context: LLMRoutingContext, sessionKey: String, localHost: String, localPort: Int, now: Double) h=35267377ff44b00e @d85ba771
+    static func route(host: String, port: Int, tls: Bool) -> (host: String, port: Int, tls: Bool, local: Bool) {
+        guard host.lowercased() == InferenceService.localMitmHost else { return (host, port, tls, false) }
+        return (InferenceService.engineHost, InferenceService.repairProxyPort, false, true)
+    }
+
     /// Connects to `host:port` (TLS, verified against the system roots, when
     /// `tls`) on `loop`; the channel is ready to write when the future holds.
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
-    func connectUpstream(host: String, port: Int, tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
-        let target = routeAllTo ?? (host, port)
+    func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
+        let routed = Self.route(host: host, port: port, tls: requestedTLS)
+        let tls = routed.tls
+        let target: (host: String, port: Int) = routed.local ? (routed.host, routed.port) : (routeAllTo ?? (host, port))
         let ctx = upstreamContext
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }
         let ready = OncePromise(loop.makePromise(of: Channel.self))

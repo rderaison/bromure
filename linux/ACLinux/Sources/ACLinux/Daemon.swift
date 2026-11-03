@@ -90,6 +90,8 @@ public actor Daemon {
         var mitm: MitmListener?
         /// The agents' MCP sockets: the coding board (:5831), automations (:5833).
         var mcp: [MCPLineListener] = []
+        /// The guest's local-model bridge (vsock :8446); nil for a sign-in VM.
+        var inference: InferenceBridgeListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -145,7 +147,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "dmcp-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "dmcp-", "llm-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -154,6 +156,9 @@ public actor Daemon {
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
+            // The local-model repair proxy, up before any VM (macOS: with
+            // the MITM engine): the bridges read its port per connection.
+            InferenceRepairProxy.shared.startIfNeeded()
         }
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
@@ -237,6 +242,7 @@ public actor Daemon {
         case ("GET", "/remote/authorized-keys"): return await remoteAuthorizedKeys()
         case ("POST", "/remote/code/check"): return remoteCodeCheck(req.body)
         case ("POST", "/fatclient/forward"): return await fatclientForward(req.body)
+        case ("POST", let p) where p.hasPrefix("/models/"): return modelAction(p, req.body)
         case ("POST", "/fatclient/browser-mcp"): return await fatclientBrowserMCP(req.body)
         case ("DELETE", let p) where p.hasPrefix("/remote/keys/"):
             let raw = String(p.dropFirst("/remote/keys/".count))
@@ -259,7 +265,7 @@ public actor Daemon {
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, localModels, kubeClusters, generation/epoch, or agent sessions yet
+    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, kubeClusters, generation/epoch, or agent sessions yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
 
@@ -373,6 +379,7 @@ public actor Daemon {
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
             "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
+            "localModels": Self.localModels(),
         ].merging(sessionEntries) { a, _ in a })
     }
 
@@ -746,7 +753,8 @@ public actor Daemon {
         // dotfiles, the agents' hooks (~/.bromure/agent-status.sh, omp's),
         // settings and the Claude spec. A VM with no Profile gets the
         // profile-independent subset.
-        if let profile = profile(for: rec) {
+        let staged = await launchProfile(for: rec)
+        if let profile = staged {
             let store = profileStore
             // The stand-ins the proxy turns into the real logins (Claude's in
             // the token plan, Codex's file beside the seed's), as macOS seeds them.
@@ -766,7 +774,7 @@ public actor Daemon {
             try HomeSeed.finalizeHomeSeed(seedDir: seed)
         }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
-        try writeProxyMeta(meta)
+        try writeProxyMeta(meta, profile: staged)
         // The agents' MCP shims (board, automations, delegation, …) and the
         // built-in browser and display servers, as macOS stages them.
         try SessionDisk.writeGuestMCPShims(into: meta)
@@ -810,6 +818,8 @@ public actor Daemon {
         l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         startTraceSession(rec)
         l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:])
+        l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
@@ -918,6 +928,9 @@ public actor Daemon {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
                 }
                 l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP)
+                l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath,
+                                             stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
+                if let staged = await launchProfile(for: rec) { startLocalEngineIfNeeded(for: staged) }
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
@@ -1056,7 +1069,10 @@ public actor Daemon {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
-        if let pid = UUID(uuidString: id) { mitm?.clearSessionTrace(for: pid) }
+        if let pid = UUID(uuidString: id) {
+            mitm?.clearSessionTrace(for: pid)
+            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+        }
         // A sign-in VM that stopped on its own ends its sign-in.
         if rec.registration == true, let pid = UUID(uuidString: id) {
             await MainActor.run { LinuxSessionHost.shared?.registrationVMStopped(pid) }
@@ -1102,8 +1118,9 @@ public actor Daemon {
         await l.vsock.close()
         await MainActor.run { [browser = l.browser] in browser.stop() }
         l.mitm?.stop()
+        l.inference?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-", "dmcp-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
+        for name in ["mitm-", "tbmcp-", "amcp-", "dmcp-", "llm-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))

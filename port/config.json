@@ -51,6 +51,7 @@
     "Sources/AgentCoding/Inference/AskArgsNormalizer.swift",
     "Sources/AgentCoding/Inference/CatalogStore.swift",
     "Sources/AgentCoding/Inference/EngineKey.swift",
+    "Sources/AgentCoding/Inference/EngineModelMeta.swift",
     "Sources/AgentCoding/Inference/ExternalEngine.swift",
     "Sources/AgentCoding/Inference/InferenceMetrics.swift",
     "Sources/AgentCoding/Inference/InferenceRepairProxy.swift",

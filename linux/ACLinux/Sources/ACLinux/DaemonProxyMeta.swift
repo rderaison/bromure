@@ -7,9 +7,9 @@ extension Daemon {
     /// (`proxy_port`, bridged to host vsock 8443) and `proxy.env`, which
     /// every shell sources: the proxy variables and the per-language CA
     /// bundles. Without a proxy, none of them: the guest goes out directly.
-    // partial: proxy.env has the proxy and CA lines only (no git/cloud token fakes, AWS region, local models, profile env vars, SSH agent)
+    // partial: proxy.env has the proxy, CA and local-model lines only (no git/cloud token fakes, AWS region, profile env vars, SSH agent)
     // @port-skip linux-only: SessionDisk.prepareMetadataShare's MITM share, for the Linux proxy (the full function is AppKit-side)
-    func writeProxyMeta(_ meta: URL) throws {
+    func writeProxyMeta(_ meta: URL, profile: Profile?) throws {
         let fm = FileManager.default
         let names = ["bromure-ca.pem", "proxy_port", "proxy.env"]
         guard let mitm else {
@@ -19,8 +19,9 @@ extension Daemon {
         let port = Self.guestProxyPort
         try mitm.ca.certificatePEM.write(to: meta.appendingPathComponent("bromure-ca.pem"), atomically: true, encoding: .utf8)
         try "\(port)".write(to: meta.appendingPathComponent("proxy_port"), atomically: true, encoding: .utf8)
-        try Self.proxyEnv(port: port, noProxy: ["localhost", "127.0.0.1", "::1", Self.vmSubnet])
-            .write(to: meta.appendingPathComponent("proxy.env"), atomically: true, encoding: .utf8)
+        let env = Self.proxyEnv(port: port, noProxy: ["localhost", "127.0.0.1", "::1", Self.vmSubnet])
+            + (profile.map(Self.localModelEnv) ?? "")
+        try env.write(to: meta.appendingPathComponent("proxy.env"), atomically: true, encoding: .utf8)
     }
 
     /// agentd's proxy bridge port on a fresh boot (macOS: guestProxyPort):
@@ -56,5 +57,23 @@ extension Daemon {
             "export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=\(ca)",
             "export SSL_CERT_DIR=/etc/ssl/certs",
         ]).joined(separator: "\n") + "\n"
+    }
+
+    /// `proxy.env`'s local-inference lines: each agent set to "Local model"
+    /// pinned at the engine through the guest's bridge (127.0.0.1:11434 →
+    /// vsock 8446 → the repair proxy), with the profile's per-VM engine key
+    /// and the active model's real name. 127.0.0.1 is in NO_PROXY, so these
+    /// bypass the intercepting proxy.
+    // @port-skip linux-only: the local-inference lines of SessionDisk.prepareMetadataShare's proxy.env
+    static func localModelEnv(_ profile: Profile) -> String {
+        guard let model = profile.localAgentModelName else { return "" }
+        let key = EngineKey.perVM(profileID: profile.id)
+        var lines: [String] = []
+        for spec in profile.allToolSpecs where spec.authMode == .local {
+            for export in spec.tool.localEnvExports(model: model, key: key) {
+                lines.append("export \(export.name)=\(shellQuote(export.value))")
+            }
+        }
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
     }
 }
