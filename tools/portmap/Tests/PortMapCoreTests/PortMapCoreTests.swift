@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import PortMapCore
 
@@ -159,5 +160,24 @@ struct PortMapCoreTests {
         #expect(s["Base.load()"] == .skipped)
         #expect(s["Sub.more()"] == .skipped)
         #expect(s["Model.compute()"] == .todo)
+    }
+
+    @Test("a shared file symlinked into a Linux root is scanned once, as shared, not as unclaimed Linux code")
+    func symlinkedSharedFile() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("portmap-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("mac"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("linux/_shared"), withIntermediateDirectories: true)
+        try "func shared() {}\n".write(to: root.appendingPathComponent("mac/Shared.swift"), atomically: true, encoding: .utf8)
+        try "func macOnly() {}\n".write(to: root.appendingPathComponent("mac/Other.swift"), atomically: true, encoding: .utf8)
+        try fm.createSymbolicLink(atPath: root.appendingPathComponent("linux/_shared/Shared.swift").path,
+                                  withDestinationPath: "../../mac/Shared.swift")
+        let config = PortConfig(macosRoots: ["mac"], linuxBuild: ["mac/Shared.swift"], linuxRoots: ["linux"], skip: [])
+        let r = try Ledger.build(config: config, root: root)
+        let s = Dictionary(r.entries.map { ($0.mac.id, $0.status) }, uniquingKeysWith: { a, _ in a })
+        #expect(s["shared()"] == .shared)
+        #expect(s["macOnly()"] == .todo)
+        #expect(r.unclaimedLinux.isEmpty)
     }
 }

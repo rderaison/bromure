@@ -79,6 +79,10 @@ public struct Report: Codable, Sendable {
 }
 
 public enum Ledger {
+    static func isLink(_ url: URL) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
+    }
+
     public static func sourceFiles(under roots: [String], root: URL) -> [String] {
         var out: [String] = []
         let fm = FileManager.default
@@ -95,7 +99,10 @@ public enum Ledger {
 
     public static func build(config: PortConfig, root: URL) throws -> Report {
         let macFiles = sourceFiles(under: config.macosRoots, root: root)
+        // A shared file can be reached from a Linux root through a symlink
+        // (ACLinux's _shared/ farm): it is scanned once, as the macOS file.
         let linuxOnlyFiles = sourceFiles(under: config.linuxRoots, root: root)
+            .filter { !isLink(root.appendingPathComponent($0)) }
         let linuxGlobs = config.linuxBuild.map(Glob.init)
         let (mac, inherits) = try Inventory.scanWithTypes(files: macFiles, root: root,
                                      linuxBuild: { f in linuxGlobs.contains { $0.matches(f) } })
