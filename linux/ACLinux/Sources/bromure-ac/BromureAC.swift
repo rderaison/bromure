@@ -266,6 +266,8 @@ struct Image: AsyncParsableCommand {
         @Option(help: "Installer vCPUs.") var cpus = 4
         @Option(help: "Installer NIC MTU.") var mtu = 1500
         @Option(name: .customLong("ubuntu-mirror"), help: "Ubuntu mirror. Default: setup.sh's for the arch.") var ubuntuMirror: String?
+        @Flag(name: .customLong("no-agent-clis"), help: "Leave out the image catalog's postinstall steps (Claude Code, Codex, Grok…).")
+        var noAgentCLIs = false
         @Option(name: .customLong("alpine-releases"), help: "Alpine netboot releases URL (HTTPS). Default: dl-cdn's.")
         var alpineReleases: String?
         @Flag(help: "Echo the installer's serial console.") var verbose = false
@@ -296,6 +298,8 @@ struct Image: AsyncParsableCommand {
             o.cpus = cpus
             o.mtu = mtu
             o.ubuntuMirror = ubuntuMirror
+            // The catalog beside vm-setup (Resources/img-catalog.json).
+            if !noAgentCLIs { o.catalogPath = ((setup as NSString).deletingLastPathComponent as NSString).appendingPathComponent("img-catalog.json") }
             if let alpineReleases { o.alpineReleasesBase = alpineReleases }
             let verbose = verbose
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },

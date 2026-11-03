@@ -1298,3 +1298,26 @@ struct BrowserMCPBridgeTests {
         #expect(bridge.relayedAgentCount == 0, "every closed agent left the relay")
     }
 }
+
+@Suite("Bake postinstall")
+struct BakePostinstallTests {
+    @Test("the image catalog's postinstall steps are staged as macOS stages them (NNNN-<uuid8>.sh, # description, set -e)")
+    func staging() throws {
+        let catalog = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json").path
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let uuids = try InterimBake.stagePostinstall(catalog: catalog, to: d)
+        let files = try FileManager.default.contentsOfDirectory(atPath: d + "/steps").sorted()
+        #expect(files.count == uuids.count && !files.isEmpty)
+        let claude = try #require(files.first { (try? String(contentsOfFile: d + "/steps/" + $0, encoding: .utf8))?
+            .contains("@anthropic-ai/claude-code") == true }, "Claude Code is one of the steps")
+        let body = try String(contentsOfFile: d + "/steps/" + claude, encoding: .utf8)
+        #expect(body.hasPrefix("# Claude Code"))
+        #expect(body.split(separator: "\n")[1] == "set -e")
+        #expect(claude.range(of: #"^\d{4}-[0-9a-f]{8}\.sh$"#, options: .regularExpression) != nil, "\(claude)")
+        #expect(files == files.sorted(), "lexical order is execution order")
+    }
+}
+

@@ -48,6 +48,11 @@ public enum InterimBake {
             "https://dl-cdn.alpinelinux.org/alpine/v\(InterimBake.alpineVersion)/releases/\(InterimBake.alpineArch)"
         public var ubuntuMirror: String?
         public var setupTimeout: Duration = .seconds(2700)
+        /// The image catalog whose postinstall steps (the agent CLIs: Claude
+        /// Code, Codex, Grok, …) go into the image after setup.sh, as macOS's
+        /// applyPostinstallSteps does. nil: none.
+        public var catalogPath: String?
+        public var postinstallTimeout: Duration = .seconds(1800)
         // @port-skip linux-only: interim bake options
         public init(outputDir: String, cacheDir: String, vmSetupDir: String, imageVersion: String) {
             self.outputDir = outputDir
@@ -103,9 +108,12 @@ public enum InterimBake {
         let shimmed = work + "/alpine-initramfs-shimmed"
         try InitrdShim.writeShimmedInitrd(original: URL(fileURLWithPath: initrd), mtu: o.mtu,
                                           to: URL(fileURLWithPath: shimmed))
-        // 3. The setup share and an empty target disk.
+        // 3. The setup share, the catalog's postinstall steps and an empty
+        // target disk.
         let setup = work + "/setup"
         try stageSetup(from: o.vmSetupDir, to: setup, alpineRepoBase: o.alpineCDN)
+        let postinstall = work + "/postinstall"
+        let steps = try o.catalogPath.map { try stagePostinstall(catalog: $0, to: postinstall) } ?? []
         let partial = o.outputDir + "/base.img.partial"
         try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
 
@@ -123,6 +131,7 @@ public enum InterimBake {
         // Root in the installer reads and writes as the bake's user.
         c.shares = [.init(tag: "setup", hostPath: setup, readOnly: true, guestOwner: nil),
                     .init(tag: "out", hostPath: work + "/out", guestOwner: nil)]
+        if !steps.isEmpty { c.shares.append(.init(tag: "postinstall", hostPath: postinstall, readOnly: true, guestOwner: nil)) }
         c.serialLog = work + "/firecracker-stderr.log"
         c.macAddress = "52:54:00:ba:4e:01"
         // The network the daemon's VMs have: passt behind the interim switch
@@ -146,7 +155,7 @@ public enum InterimBake {
         // 4-5. The console dialogue.
         var tSetup = ContinuousClock.now
         do {
-            tSetup = try await runInstaller(console, o, progress: progress)
+            tSetup = try await runInstaller(console, o, postinstallSteps: steps.count, progress: progress)
         } catch {
             await vm.kill()
             await passt.close()
@@ -168,6 +177,12 @@ public enum InterimBake {
 
         // Artefacts.
         let finalImage = o.outputDir + "/base.img"
+        // Firecracker's virtio-blk has no discard: setup.sh's fstrim freed
+        // nothing on the host, and the image is allocated to its full size.
+        // Its zero blocks become holes again (24 GiB -> ~7 GiB).
+        progress("Making the image sparse…")
+        do { try await ChildProcess.run("/usr/bin/fallocate", ["--dig-holes", partial]) }
+        catch { progress("fallocate --dig-holes failed (\(error)); the image stays fully allocated") }
         try? fm.removeItem(atPath: finalImage)
         try fm.moveItem(atPath: partial, toPath: finalImage)
         for f in ["vmlinuz", "initrd.img", "kernel-release"] {
@@ -179,6 +194,10 @@ public enum InterimBake {
         try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet ia32_emulation=0\n"
             .write(toFile: o.outputDir + "/cmdline", atomically: true, encoding: .utf8)
         try (o.imageVersion + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
+        // Which catalog steps the image has (macOS: BaseImageState's
+        // appliedStepUUIDs).
+        try (steps.joined(separator: "\n") + (steps.isEmpty ? "" : "\n"))
+            .write(toFile: o.outputDir + "/postinstall-steps", atomically: true, encoding: .utf8)
         try? fm.removeItem(atPath: o.outputDir + "/bake.log")
         try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log")
 
@@ -194,7 +213,7 @@ public enum InterimBake {
     /// `group.addTask` driver), plus the Linux-only kernel/initrd copy-out.
     /// Returns when setup.sh started.
     // @port-skip linux-only: interim stand-in for UbuntuImageManager.runProvisioner's dialogue (VZ-bound on macOS)
-    static func runInstaller(_ con: SerialConsole, _ o: Options,
+    static func runInstaller(_ con: SerialConsole, _ o: Options, postinstallSteps: Int = 0,
                              progress: @Sendable (String) -> Void) async throws -> ContinuousClock.Instant {
         let prompt = "localhost:~#"
         progress("Installer: waiting for the prompt…")
@@ -203,6 +222,11 @@ public enum InterimBake {
         con.send("root")
         try await con.buffer.wait(for: prompt, timeout: 30, failures: [])
         con.send("NIC=$(ip -o link show | awk -F': ' '/^[0-9]+: (eth|enp|ens)/ {print $2; exit}')")
+        try await con.buffer.wait(for: prompt, timeout: 10, failures: [])
+        // Firecracker gives the guest no RTC: its wall clock starts far in
+        // the past, and apt refuses the archive's Release files as "not
+        // valid yet". The host's time, before anything checks a date.
+        con.send("date -s @\(Int(Date().timeIntervalSince1970)) >/dev/null")
         try await con.buffer.wait(for: prompt, timeout: 10, failures: [])
         progress("Installer: configuring the network…")
         con.send("[ -n \"$NIC\" ] && ip link set dev \"$NIC\" mtu \(o.mtu) 2>/dev/null || true")
@@ -231,6 +255,14 @@ public enum InterimBake {
         con.send("\(mirror)ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/setup.sh \(o.displayScale)")
         try await con.buffer.wait(for: "SANDBOX_SETUP_DONE", timeout: o.setupTimeout.seconds,
                                   failures: ["SANDBOX_SETUP_FAILED:", "Kernel panic", "Internal error: Oops"])
+        if postinstallSteps > 0 {
+            // macOS runs postinstall.sh in a second installer boot on the
+            // finished disk; the same installer is still up here.
+            progress("Installer: installing the agent CLIs (\(postinstallSteps) catalog step(s))…")
+            con.send("sh /tmp/setup/postinstall.sh")
+            try await con.buffer.wait(for: "SANDBOX_POSTINSTALL_DONE", timeout: o.postinstallTimeout.seconds,
+                                      failures: ["SANDBOX_POSTINSTALL_FAILED:", "Kernel panic", "Internal error: Oops"])
+        }
         progress("Installer: copying the kernel and initrd out…")
         con.send("mkdir -p /mnt && mount -o ro /dev/vda2 /mnt && cp -L /mnt/boot/vmlinuz /tmp/out/vmlinuz && cp -L /mnt/boot/initrd.img /tmp/out/initrd.img && ls /mnt/lib/modules > /tmp/out/kernel-release && umount /mnt && sync && echo EXTRACT_\"OK\"")
         try await con.buffer.wait(for: "EXTRACT_OK", timeout: 120, failures: ["No such file", "mount:"])
@@ -263,6 +295,27 @@ public enum InterimBake {
     }
 
     // @port UbuntuImageManager.downloadAlpineNetboot(progress: @escaping(String)->Void) h=896d7225fec08f0a @84e171b8
+    /// The catalog's postinstall steps as `steps/NNNN-<uuid8>.sh` (lexical
+    /// order is execution order; line 1 is the description postinstall.sh
+    /// echoes), exactly as UbuntuImageManager.runPostinstall writes them.
+    /// Returns the steps' uuids, in order.
+    // @port-skip linux-only: the staging half of UbuntuImageManager.runPostinstall (SandboxEngine's ImageCatalog isn't in this build)
+    static func stagePostinstall(catalog: String, to dir: String) throws -> [String] {
+        struct Step: Decodable { let uuid: String; let seq: Int; let description: String; let command: String }
+        struct Catalog: Decodable { let postinstall: [Step] }
+        let cat = try JSONDecoder().decode(Catalog.self, from: Data(contentsOf: URL(fileURLWithPath: catalog)))
+        let stepsDir = dir + "/steps"
+        try FileManager.default.createDirectory(atPath: stepsDir, withIntermediateDirectories: true)
+        let ordered = cat.postinstall.sorted { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }
+        for step in ordered {
+            let title = step.description.replacingOccurrences(of: "\n", with: " ")
+            try "# \(title)\nset -e\n\(step.command)\n".write(
+                toFile: stepsDir + "/" + String(format: "%04d-%@.sh", step.seq, String(step.uuid.prefix(8))),
+                atomically: true, encoding: .utf8)
+        }
+        return ordered.map(\.uuid)
+    }
+
     static func downloadAlpineNetboot(cacheDir: String, releasesBase base: String,
                                       kernel: String, initrd: String) async throws {
         let tarballName = "alpine-netboot-\(alpineRelease)-\(alpineArch).tar.gz"
