@@ -207,6 +207,20 @@ public actor Daemon {
         }
     }
 
+    /// A VM's `/state` / `/vms` entry: the record, and for a running VM what
+    /// its agentd reports in the outbox: the tab roster (a fat client mounts
+    /// a terminal once it's non-empty: tmux is up) and its vitals.
+    // @port-skip linux-only: the per-VM half of ACAppDelegate.automationVMList (VMRecord.json, GuestOutbox)
+    func vmEntry(_ rec: VMRecord) -> JSONValue {
+        guard case .object(var o) = rec.json else { return rec.json }
+        o["attached"] = false                         // no attached pane on Linux
+        guard rec.state == .running else { o["tabs"] = []; return .object(o) }
+        let outbox = vmDir(rec.id) + "/outbox/"
+        o["tabs"] = .array(GuestOutbox.parseRoster(GuestOutbox.read(outbox + "tabs.txt") ?? "").map(GuestOutbox.tabJSON))
+        for (k, v) in GuestOutbox.vitalsJSON(GuestOutbox.read(outbox + "vmstat.txt") ?? "") { o[k] = v }
+        return .object(o)
+    }
+
     /// `/state` as the push compares it: without the VMs' `uptimeSeconds`.
     // @port-skip linux-only: change test for stateSubscribe
     static func withoutUptime(_ state: JSONValue) -> JSONValue {
@@ -226,7 +240,7 @@ public actor Daemon {
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
         let all = records
-        let vms = all.filter { $0.state == .running || $0.state == .starting }.map(\.json)
+        let vms = all.filter { $0.state == .running || $0.state == .starting }.map(vmEntry)
         return .object([
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
@@ -241,7 +255,7 @@ public actor Daemon {
     // partial: entries lack tabs, stats, ports, docker, disk and kube fields (see VMRecord.json)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/vms"): h=b80678b83121852e @7dd92fdf
     func listVMs() -> ControlResponse {
-        ControlResponse(200, ["vms": .array(records.map(\.json))])
+        ControlResponse(200, ["vms": .array(records.map(vmEntry))])
     }
 
     /// `POST /vms`: create and start a VM, detached. Body: `name?`,

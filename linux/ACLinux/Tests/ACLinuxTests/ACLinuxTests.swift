@@ -1441,3 +1441,26 @@ struct StatePushTests {
         #expect(Daemon.withoutUptime(a)["vms"] == [["id": "x"]])
     }
 }
+
+@Suite("Guest outbox")
+struct GuestOutboxTests {
+    @Test("tabs.txt: macOS's columns, older 4-column guests, sorted; as automationVMList's tab items")
+    func roster() {
+        let raw = "2\t0\tvim\t\t/home/ubuntu/p\twt/x\tmain\t/home/ubuntu/p\tFix it\t/home/ubuntu/p-wt\n0\t1\tbash\t\nbad\n"
+        let tabs = GuestOutbox.parseRoster(raw)
+        #expect(tabs.map(\.index) == [0, 2])
+        #expect(tabs[0].active && tabs[0].label == "bash" && tabs[0].cwd == nil)
+        #expect(GuestOutbox.tabJSON(tabs[0]) == ["index": 0, "title": "bash", "active": true])
+        #expect(GuestOutbox.tabJSON(tabs[1]) == ["index": 2, "title": "Fix it", "active": false, "cwd": "/home/ubuntu/p",
+                                                  "isWorktree": true, "worktreeBranch": "wt/x", "parentBranch": "main",
+                                                  "rootRepo": "/home/ubuntu/p"])
+        #expect(GuestOutbox.tabJSON(GuestTab(index: 1, active: false, label: "")) ["title"] == "shell")
+    }
+
+    @Test("vmstat.txt as the entry's vitals")
+    func vitals() {
+        let v = GuestOutbox.vitalsJSON("cpu 12.5\nmem_used_kb 1000\nmem_total_kb 2000\nload 0.3\ndisk_used_kb 5\ndisk_total_kb 9\njunk\n")
+        #expect(v["cpu"] == .number(12.5) && v["memTotalKB"] == .number(2000) && v["diskUsedKB"] == .number(5) && v["hasStats"] == .bool(true))
+        #expect(GuestOutbox.vitalsJSON("")["hasStats"] == .bool(false))
+    }
+}
