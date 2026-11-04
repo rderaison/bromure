@@ -108,11 +108,18 @@ extension Daemon {
     /// A launch's token plan, with Claude's subscription mode when a login
     /// is stored: its bogus key registered with the proxy, and with account
     /// features the OAuth stand-in. nil without a proxy (the guest then
-    /// runs on whatever it has).
+    /// runs on whatever it has). The plan only, as macOS's: the swap map is
+    /// set once, by the kubeconfig step (installKube) -- fresh at launch,
+    /// merged on a live refresh, so a token the map already holds (an exec
+    /// plugin's) is never dropped first.
     // partial: the plan's fakes are mapped, not yet exported to the guest (api_key.env / proxy.env's token lines)
     // @port ACAppDelegate.sessionTokenPlan(for: Profile, salt: Data) h=71b1ca7b397c2cf6 @dd7ba30d
     func sessionTokenPlan(for profile: Profile) -> SessionTokenPlan? {
-        guard let mitm else { return nil }
+        mitm.map { Self.makeSessionTokenPlan(for: profile, mitm: $0) }
+    }
+
+    // @port-skip linux-only: sessionTokenPlan's body over a given proxy (the refresh path's, testable)
+    static func makeSessionTokenPlan(for profile: Profile, mitm: MitmProxy) -> SessionTokenPlan {
         let available = mitm.claudeStore.hasCredential(for: profile.id)
         var plan = profile.makeTokenPlan(salt: mitm.fakeTokenSalt, claudeSubscriptionAvailable: available)
         if let bogus = plan.claudeSubscriptionBogusKey {
@@ -121,8 +128,6 @@ extension Daemon {
                 plan.claudeOAuthStandIn = ClaudeStandIn.credentialsJSON(ClaudeStandIn.mint(profileID: profile.id))
             }
         }
-        // The plan's fakes, swapped for their real values on the wire.
-        mitm.swapper.setMap(plan.tokenMap(), for: profile.id)
         return plan
     }
 

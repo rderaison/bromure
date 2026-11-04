@@ -200,34 +200,37 @@ extension Daemon {
     /// proxy's map for the workspace; imported kubeconfigs' client
     /// certificates and cluster CAs go to the proxy's kube trust (presented
     /// upstream, and the only anchor of that endpoint's server certificate).
-    // partial: no exec-plugin pollers or 1Password refresh
+    /// `live`: the VM runs (a refresh): the swap map is merged, as macOS's
+    /// pushLiveCredentials does -- an exec plugin's fetched token stays on
+    /// its unchanged fake, a still-running shell's old fake keeps working.
+    /// At launch the map is the fresh one.
+    // partial: no 1Password refresh
     // @port-skip linux-only: the kubeconfig step of ACAppDelegate.launch / pushLiveCredentials, on the Linux proxy
-    func kubeconfig(for profile: Profile, plan: SessionTokenPlan?) async -> String? {
+    func kubeconfig(for profile: Profile, plan: SessionTokenPlan?, live: Bool = false) async -> String? {
         guard let mitm else { return nil }
+        return await Self.kubeconfig(for: profile, plan: plan, live: live, mitm: mitm)
+    }
+
+    /// A running workspace's kubeconfig made again (the refresh's step, per
+    /// workspace): its plan, then the kubeconfig with the map merged.
+    // @port-skip linux-only: the per-workspace body of refreshKubeAccessForRunningWorkspaces → pushLiveCredentials
+    static func liveKubeconfig(for profile: Profile, mitm: MitmProxy) async -> String? {
+        await kubeconfig(for: profile, plan: makeSessionTokenPlan(for: profile, mitm: mitm), live: true, mitm: mitm)
+    }
+
+    // @port-skip linux-only: kubeconfig(for:plan:live:)'s body over a given proxy (testable)
+    static func kubeconfig(for profile: Profile, plan: SessionTokenPlan?, live: Bool, mitm: MitmProxy) async -> String? {
         let pem = mitm.ca.certificatePEM
         let pid = profile.id
+        let reusing = mitm.kubeExecContexts(for: pid)
         let mat = await MainActor.run {
             KubeconfigMaterializer().materialize(
                 profile: profile, bromureCAPEM: pem,
-                directClusters: SessionStores.shared?.kubeEngine?.directClusters(for: pid) ?? [])
+                directClusters: SessionStores.shared?.kubeEngine?.directClusters(for: pid) ?? [],
+                reusingExec: reusing)
         }
-        if let plan, !mat.bearerSwaps.isEmpty {
-            var map = plan.tokenMap()
-            for swap in mat.bearerSwaps {
-                map.entries.append(TokenMap.Entry(
-                    fake: swap.fakeToken, real: swap.realToken, host: swap.host,
-                    consentCredentialID: swap.consentCredentialID,
-                    consentDisplayName: swap.consentDisplayName))
-            }
-            mitm.swapper.setMap(map, for: pid)
-        }
-        // Launch and live refresh alike: what's added, edited or removed
-        // while the VM runs takes effect at once.
-        mitm.kubeTrust.apply(mat, profileID: pid)
-        if !mat.execContexts.isEmpty {
-            FileHandle.standardError.write(Data(
-                "bromure-ac daemon: '\(profile.name)': kubeconfig exec plugins aren't refreshed on this Linux server yet\n".utf8))
-        }
+        let base = plan?.tokenMap()
+        await MainActor.run { mitm.installKube(mat, base: base, profileID: pid, live: live) }
         return mat.yaml.isEmpty ? nil : mat.yaml
     }
 
@@ -240,8 +243,8 @@ extension Daemon {
     func refreshWorkspaceKubeconfigs() async {
         for rec in registry.records where rec.state == .running && !rec.managed {
             guard let profile = await launchProfile(for: rec) else { continue }
-            let plan = sessionTokenPlan(for: profile)
-            let yaml = await kubeconfig(for: profile, plan: plan) ?? ""
+            var yaml = ""
+            if let mitm { yaml = await Self.liveKubeconfig(for: profile, mitm: mitm) ?? "" }
             let b64 = Data(yaml.utf8).base64EncodedString()
             let cmd = yaml.isEmpty ? "rm -f ~/.kube/config && echo ok"
                 : "mkdir -p ~/.kube && chmod 700 ~/.kube && umask 077 && echo \(b64) | base64 -d > ~/.kube/config.tmp "

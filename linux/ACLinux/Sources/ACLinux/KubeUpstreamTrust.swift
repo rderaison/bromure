@@ -167,6 +167,59 @@ final class KubeUpstreamTrust: @unchecked Sendable {
     }
 }
 
+extension MitmProxy {
+    /// A workspace's kube material in force (macOS: MitmEngine's
+    /// applyKubeMaterial): its trust, and its exec pollers synced -- an
+    /// unchanged context keeps running (no second run of its plugin), a
+    /// changed one restarts, one no longer listed stops.
+    // @port MitmEngine.applyKubeMaterial(_: KubeconfigMaterializer.Materialized, profileID: UUID) h=ecbeb19cbf92d3cd @8e2543eb
+    @MainActor
+    func applyKubeMaterial(_ mat: KubeconfigMaterializer.Materialized, profileID: UUID) {
+        execContexts.withLockedValue { $0[profileID] = mat.execContexts.isEmpty ? nil : mat.execContexts }
+        kubeTrust.apply(mat, profileID: profileID)
+        execPoller.sync(mat.execContexts, profileID: profileID, swapper: swapper)
+    }
+
+    /// The kubeconfig step's proxy side, and the one place the workspace's
+    /// swap map is set: its token plan's map (`base`; none: no map, as a
+    /// sign-in VM) with the bearer and exec swaps, fresh at launch, merged
+    /// when `live` (macOS: pushLiveCredentials' liveMerge -- an exec token
+    /// already fetched stays on its unchanged fake); then the material
+    /// applied.
+    // @port-skip linux-only: the kubeconfig step of ACAppDelegate.launch / pushLiveCredentials, proxy side
+    @MainActor
+    func installKube(_ mat: KubeconfigMaterializer.Materialized, base: TokenMap?, profileID: UUID, live: Bool) {
+        if var map = base {
+            for swap in mat.bearerSwaps {
+                map.entries.append(TokenMap.Entry(
+                    fake: swap.fakeToken, real: swap.realToken, host: swap.host,
+                    consentCredentialID: swap.consentCredentialID,
+                    consentDisplayName: swap.consentDisplayName))
+            }
+            swapper.setMap(live ? TokenMap.liveMerge(fresh: map.entries, current: swapper.entries(for: profileID)) : map,
+                           for: profileID)
+        }
+        // Launch and live refresh alike: what's added, edited or removed
+        // while the VM runs takes effect at once (trust and exec pollers).
+        applyKubeMaterial(mat, profileID: profileID)
+    }
+
+    // @port MitmEngine.kubeExecContexts(for: UUID) h=641587bd0d2992de @8e2543eb
+    func kubeExecContexts(for profileID: UUID) -> [KubeconfigMaterializer.ExecContext] {
+        execContexts.withLockedValue { $0[profileID] ?? [] }
+    }
+
+    /// The VM stopped: its trust gone, its plugins no longer run (macOS:
+    /// MitmEngine.unregister's share).
+    // @port-skip linux-only: the kube share of MitmEngine.unregister(profileID:)
+    @MainActor
+    func clearKube(for profileID: UUID) {
+        kubeTrust.clearAll(for: profileID)
+        execPoller.stopAll(profileID: profileID)
+        execContexts.withLockedValue { $0[profileID] = nil }
+    }
+}
+
 /// The key both kinds of material file an upstream under: the lowercased
 /// host, then `:port` unless it's 443 (macOS: CloudCredentials.swift's,
 /// which the Linux build doesn't compile).

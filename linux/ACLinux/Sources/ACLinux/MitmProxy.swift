@@ -38,6 +38,13 @@ final class MitmProxy: @unchecked Sendable {
     let consent: ConsentBroker
     /// Imported kubeconfigs' client certificates and cluster CAs, per workspace.
     let kubeTrust: KubeUpstreamTrust
+    /// Imported kubeconfigs' exec plugins, run on the host on their interval;
+    /// each token goes into its workspace's swap map under its fake.
+    /// (The shared poller is main-actor: made there, on first use.)
+    @MainActor lazy var execPoller = ExecCredentialPoller()
+    /// The exec contexts the poller runs per workspace, so a live refresh
+    /// keeps their fakes (`materialize(reusingExec:)`).
+    let execContexts = NIOLockedValueBox<[UUID: [KubeconfigMaterializer.ExecContext]]>([:])
     let claudeStore: ClaudeSubscriptionStore
     let claudeRefresher: ClaudeSubscriptionRefresher
     let codexStore: CodexSubscriptionStore

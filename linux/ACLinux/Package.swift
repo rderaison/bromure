@@ -21,7 +21,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
         // The workspaces' intercepting proxy (TLS termination for the stand-in swaps).
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
+        // 2.37.6: an IP-literal upstream's certificate bound to the connected
+        // address under .fullVerification (MitmProxy, KubeUpstreamTrust rely on it).
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
         // SandboxEngine's policy parser, as the app builds it.
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     ],

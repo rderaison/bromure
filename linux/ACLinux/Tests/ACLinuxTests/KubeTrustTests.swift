@@ -84,7 +84,12 @@ private final class MTLSServer: @unchecked Sendable {
         typealias InboundIn = ByteBuffer
         typealias OutboundOut = ByteBuffer
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-            let body = "kube ok"
+            // The Authorization the upstream got, echoed (none: just "kube ok").
+            var req = unwrapInboundIn(data)
+            let text = req.readString(length: req.readableBytes) ?? ""
+            let auth = text.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
+                .map { $0.dropFirst("authorization:".count).trimmingCharacters(in: .whitespaces) }
+            let body = auth.map { "kube ok auth=\($0)" } ?? "kube ok"
             let r = "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
             let channel = context.channel
             context.writeAndFlush(wrapOutboundOut(channel.allocator.buffer(string: r)))
@@ -100,16 +105,17 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
     let target: String
+    let headers: String
     let tls: NIOSSLContext
     let done: EventLoopPromise<String>
     var buf = ""
     var tunneled = false
 
-    init(target: String, tls: NIOSSLContext, done: EventLoopPromise<String>) {
-        self.target = target; self.tls = tls; self.done = done
+    init(target: String, headers: String = "", tls: NIOSSLContext, done: EventLoopPromise<String>) {
+        self.target = target; self.headers = headers; self.tls = tls; self.done = done
     }
 
-    static func get(_ listener: String, target: String, proxyCA: NIOSSLCertificate) throws -> String {
+    static func get(_ listener: String, target: String, proxyCA: NIOSSLCertificate, headers: String = "") throws -> String {
         var cfg = TLSConfiguration.makeClientConfiguration()
         cfg.trustRoots = .certificates([proxyCA])
         cfg.certificateVerification = .noHostnameVerification
@@ -117,7 +123,7 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let done = loop.makePromise(of: String.self)
         let ch = try ClientBootstrap(group: loop)
-            .channelInitializer { $0.pipeline.addHandler(GuestClient(target: target, tls: ctx, done: done)) }
+            .channelInitializer { $0.pipeline.addHandler(GuestClient(target: target, headers: headers, tls: ctx, done: done)) }
             .connect(unixDomainSocketPath: listener).wait()
         loop.scheduleTask(in: .seconds(20)) { done.succeed("TIMEOUT"); ch.close(promise: nil) }
         return try done.futureResult.wait()
@@ -139,7 +145,7 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
                                                          position: .first)
         let host = target.split(separator: ":").first.map(String.init) ?? target
         context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
-            string: "GET /api HTTP/1.1\r\nHost: \(host)\r\n\r\n")), promise: nil)
+            string: "GET /api HTTP/1.1\r\nHost: \(host)\r\n\(headers)\r\n")), promise: nil)
     }
 
     func channelInactive(context: ChannelHandlerContext) { done.succeed(buf) }
@@ -188,9 +194,9 @@ private struct KubeRig {
     func client() throws -> (String, String) { try clientCA.leaf("system:admin", client: true) }
 
     /// One request as workspace A (or B), to the server by its IP literal.
-    func get(asB: Bool = false) throws -> String {
+    func get(asB: Bool = false, headers: String = "") throws -> String {
         try GuestClient.get(HybridVsockListener.path(uds: dir + (asB ? "/vmb.sock" : "/vm.sock"), port: MitmProxy.vsockPort),
-                            target: target, proxyCA: proxy.caNIO)
+                            target: target, proxyCA: proxy.caNIO, headers: headers)
     }
 
     func pin(host: String? = nil, ca: String? = nil, identity: (String, String)?, consent: String? = nil) {
@@ -382,5 +388,116 @@ struct UpstreamErrorTests {
         #expect(out.hasPrefix("HTTP/1.1 502")
                 && out.contains("X-Bromure-Upstream-Error: the host running Bromure AC could not connect to \(rig.ip)"),
                 "got: \(out.prefix(400))")
+    }
+}
+
+/// A kubeconfig whose user is an exec plugin: the poller runs it on the
+/// host and the guest's fake goes out as its token.
+@Suite("Kube exec plugins", .serialized)
+struct KubeExecPluginTests {
+    /// A stand-in plugin: an ExecCredential whose token names its argument
+    /// and its run count (counted in `dir/count`).
+    static func plugin(in dir: String) throws -> String {
+        let path = dir + "/kube-plugin.sh"
+        try """
+        #!/bin/sh
+        n=$(cat \(dir)/count 2>/dev/null || echo 0); n=$((n + 1)); echo $n > \(dir)/count
+        printf '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"real-%s-%s"}}' "$1" "$n"
+        """.write(toFile: path, atomically: true, encoding: .utf8)
+        chmod(path, 0o755)
+        return path
+    }
+
+    static func runs(_ dir: String) -> Int {
+        Int((try? String(contentsOfFile: dir + "/count", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+    }
+
+    /// The workspace's kubeconfig step through the daemon's own code: at
+    /// launch its plan then the kubeconfig (Daemon.kubeconfig), on a live
+    /// refresh the refresh's per-workspace body (Daemon.liveKubeconfig).
+    /// The exec contexts in force after it.
+    @MainActor
+    fileprivate static func install(_ rig: KubeRigHandle, args: [String], live: Bool) async -> (yaml: String, contexts: [KubeconfigMaterializer.ExecContext]) {
+        var p = Profile(name: "kt", tool: .claude, authMode: .local)
+        p.id = rig.rig.pid
+        p.kubeconfigs = [KubeconfigEntry(id: rig.entry, name: "lab", serverURL: "https://\(rig.rig.target)",
+                                         namespace: "default",
+                                         auth: .execPlugin(command: rig.plugin, args: args, refreshSeconds: 60))]
+        let proxy = rig.rig.proxy
+        let yaml = live ? await Daemon.liveKubeconfig(for: p, mitm: proxy)
+            : await Daemon.kubeconfig(for: p, plan: Daemon.makeSessionTokenPlan(for: p, mitm: proxy), live: false, mitm: proxy)
+        return (yaml ?? "", proxy.kubeExecContexts(for: p.id))
+    }
+
+    /// The real token in the map for `fake`, once the poller wrote it.
+    @MainActor fileprivate static func real(_ rig: KubeRig, _ fake: String, wait: Double = 5) async -> String? {
+        let end = Date().addingTimeInterval(wait)
+        while Date() < end {
+            if let e = rig.proxy.swapper.entries(for: rig.pid).first(where: { $0.fake == fake }), !e.real.isEmpty { return e.real }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return nil
+    }
+
+    @Test @MainActor func thePluginsTokenGoesOutUnderTheFake() async throws {
+        let h = try KubeRigHandle(); defer { h.rig.stop() }
+        let mat = await Self.install(h, args: ["a"], live: false)
+        let fake = try #require(mat.contexts.first?.fakeToken)
+        #expect(mat.yaml.contains("token: \(fake)") && !mat.yaml.contains("real-"), "the guest's kubeconfig has the fake only")
+        #expect(await Self.real(h.rig, fake) == "real-a-1", "the poller ran the plugin once, at once")
+        let out = try h.rig.get(headers: "Authorization: Bearer \(fake)\r\n")
+        #expect(out.hasSuffix("kube ok auth=Bearer real-a-1"), "the upstream got the plugin's token: \(out.suffix(200))")
+
+        // A live refresh (the daemon's refresh path: a cluster came or went)
+        // with the plugin unchanged: the same fake, and at once -- not a
+        // plugin tick later -- the same real token going out, no second run.
+        let again = await Self.install(h, args: ["a"], live: true)
+        #expect(again.contexts.first?.fakeToken == fake)
+        let right = try h.rig.get(headers: "Authorization: Bearer \(fake)\r\n")
+        #expect(right.hasSuffix("auth=Bearer real-a-1"), "the refresh kept the fetched token: \(right.suffix(200))")
+        #expect(h.rig.proxy.swapper.entries(for: h.rig.pid).first { $0.fake == fake }?.real == "real-a-1")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(Self.runs(h.rig.dir) == 1)
+
+        // Its arguments changed: a new fake, the plugin run again.
+        let changed = await Self.install(h, args: ["b"], live: true)
+        let fakeB = try #require(changed.contexts.first?.fakeToken)
+        #expect(fakeB != fake)
+        #expect(await Self.real(h.rig, fakeB) == "real-b-2")
+        #expect(try h.rig.get(headers: "Authorization: Bearer \(fakeB)\r\n").hasSuffix("auth=Bearer real-b-2"))
+
+        // The VM stops: no poller left for it.
+        h.rig.proxy.clearKube(for: h.rig.pid)
+        #expect(h.rig.proxy.execPoller.entries(for: h.rig.pid).isEmpty)
+        #expect(h.rig.proxy.kubeExecContexts(for: h.rig.pid).isEmpty)
+    }
+
+    @Test @MainActor func aFailingPluginNeverSendsARealToken() async throws {
+        let h = try KubeRigHandle(failing: true); defer { h.rig.stop() }
+        let mat = await Self.install(h, args: ["a"], live: false)
+        let fake = try #require(mat.contexts.first?.fakeToken)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(await Self.real(h.rig, fake, wait: 0.5) == nil, "no token: the placeholder stays empty")
+        let out = try h.rig.get(headers: "Authorization: Bearer \(fake)\r\n")
+        #expect(!out.contains("real-"), "got: \(out.suffix(200))")
+    }
+}
+
+/// A rig (the proxy's own roots, no client certificate: a bearer-token API
+/// server) and a plugin for it.
+private struct KubeRigHandle {
+    let rig: KubeRig
+    let plugin: String
+    let entry = UUID()
+    init(failing: Bool = false) throws {
+        rig = try KubeRig(publicRoots: true)
+        if failing {
+            let path = rig.dir + "/kube-plugin.sh"
+            try "#!/bin/sh\necho 'no credentials' >&2\nexit 1\n".write(toFile: path, atomically: true, encoding: .utf8)
+            chmod(path, 0o755)
+            plugin = path
+        } else {
+            plugin = try KubeExecPluginTests.plugin(in: rig.dir)
+        }
     }
 }
