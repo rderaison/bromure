@@ -1430,6 +1430,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if let sid = selectedSessionID, acDelegate?.sessionRecord(sid)?.profileID != id {
             clearSessionStage()
         }
+        // No session on stage: this is the machine itself. A pane left "on
+        // stage" by a move to another machine's session is a terminal again
+        // (and, its session's window gone since, would otherwise stay blank).
+        if selectedSessionID == nil { pane.sessionOnStage = false }
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)
