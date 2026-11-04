@@ -677,12 +677,12 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 case .failure(let e):
                     let reply = (e as? ProxyDestinationDenied).map {
                         MitmProxy.destinationDeniedResponse(host: $0.host, port: $0.port, reason: $0.reason)
-                    } ?? Self.simple(502, "Bad Gateway", body: "Bromure couldn't reach \(host):\(port): \(e)\n")
+                    } ?? MitmProxy.upstreamErrorResponse(e, host: host)
                     self.write(reply, to: channel, close: true)
                     if let trace { self.proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
                 case .success(let up):
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
-                                              capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace)
+                                              capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host)
                     up.pipeline.addHandler(relay).whenComplete { _ in
                         self.upstream = up
                         up.write(up.allocator.buffer(bytes: req), promise: nil)
@@ -752,6 +752,10 @@ final class ResponseRelay: ChannelInboundHandler {
     let trace: RequestReader.Trace?
     private var head = ByteBuffer()
     private var headDone = false
+    /// Whether any of the response reached the guest; the upstream's error, if any.
+    private var relayed = false
+    private let host: String
+    private var failure: Error?
     private var whole = Data()
     /// The trace's copy of what the guest got, up to `traceCap` (macOS:
     /// relayUpstream's bodyBufferCap); past it the record keeps no body.
@@ -762,8 +766,10 @@ final class ResponseRelay: ChannelInboundHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
-         capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil) {
+         capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
+         host: String = "") {
         self.guest = guest
+        self.host = host
         self.profileID = profileID
         self.injected = injected
         self.capture = capture
@@ -795,6 +801,7 @@ final class ResponseRelay: ChannelInboundHandler {
         if headDone || upgrade {
             headDone = true
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
+            relayed = true
             guest.write(b, promise: nil)
             return
         }
@@ -811,6 +818,7 @@ final class ResponseRelay: ChannelInboundHandler {
         noteStatus(h)
         let out = h + all.dropFirst(split)
         keepForTrace(out)
+        relayed = true
         guest.write(guest.allocator.buffer(bytes: out), promise: nil)
     }
 
@@ -848,6 +856,14 @@ final class ResponseRelay: ChannelInboundHandler {
             }
             return
         }
+        // Gone before a byte of its response: the guest is told why, as
+        // macOS answers a lost connection, not left with a bare close.
+        if !relayed {
+            let reply = MitmProxy.upstreamErrorResponse(failure ?? ChannelError.eof, host: host)
+            if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: 0, truncated: false) }
+            guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in self.guest.close(promise: nil) }
+            return
+        }
         if let proxy, let trace {
             proxy.emitTrace(trace, response: traceTruncated ? traceCopy : HTTPRequestFraming.dechunkedResponse(traceCopy),
                             wireBytes: traceWire, truncated: traceTruncated)
@@ -857,6 +873,7 @@ final class ResponseRelay: ChannelInboundHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        if failure == nil { failure = error }
         context.close(promise: nil)
     }
 

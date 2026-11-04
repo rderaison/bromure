@@ -224,6 +224,7 @@ struct KubeUpstreamTrustTests {
         let rig = try KubeRig(); defer { rig.stop() }
         let out = try rig.get()
         #expect(out.hasPrefix("HTTP/1.1 502"), "system roots must not trust the private cluster: \(out.prefix(300))")
+        #expect(out.contains("X-Bromure-Upstream-Error: the TLS certificate for \(rig.ip) is signed by a CA the host running Bromure AC does not trust"), "macOS's reason: \(out.prefix(400))")
     }
 
     @Test func caWithoutClientCertificateIsRefusedByTheServer() throws {
@@ -233,8 +234,10 @@ struct KubeUpstreamTrustTests {
         // TLS 1.3: the proxy's side of the handshake completes (the server's
         // certificate chained to the pinned CA), then the server refuses the
         // missing client certificate and the guest's connection just closes.
-        // (Unpinned, the proxy's own handshake fails first: its 502.)
-        #expect(out.isEmpty, "the server requires a client certificate: \(out.prefix(300))")
+        // Not the untrusted-CA 502 an unpinned dial gets: the server's
+        // refusal, after the proxy trusted it, as a lost or failed handshake.
+        #expect(out.hasPrefix("HTTP/1.1 502") && !out.contains("kube ok"), "got: \(out.prefix(300))")
+        #expect(!out.contains("signed by a CA the host running Bromure AC does not trust"), "the pinned CA was trusted: \(out.prefix(400))")
         #expect(rig.server.connections.value == 1, "the pinned handshake reached the server")
     }
 
@@ -335,5 +338,49 @@ struct KubeUpstreamTrustTests {
         #expect(t.endpoint(for: "k.example", port: 443, profileID: pid) == nil)
         t.replaceAll(identities: [], cas: [(pem: "garbage", host: "new.example")], for: UUID())
         #expect(t.endpoint(for: "new.example", port: 443, profileID: pid) == nil, "a new host whose CA doesn't parse stays unpinned")
+    }
+}
+
+@Suite("Upstream errors")
+struct UpstreamErrorTests {
+    @Test func classesAsMacOSGroupsThem() {
+        #expect(UpstreamFailure(ProxyDestinationUnresolved(host: "x.invalid", port: 443)) == .unresolved)
+        #expect(UpstreamFailure(IOError(errnoCode: ECONNREFUSED, reason: "connect")) == .cannotConnect)
+        #expect(UpstreamFailure(IOError(errnoCode: EHOSTUNREACH, reason: "connect")) == .cannotConnect)
+        #expect(UpstreamFailure(IOError(errnoCode: ETIMEDOUT, reason: "connect")) == .timedOut)
+        #expect(UpstreamFailure(ChannelError.connectTimeout(.seconds(15))) == .timedOut)
+        #expect(UpstreamFailure(IOError(errnoCode: ECONNRESET, reason: "read")) == .lost)
+        #expect(UpstreamFailure(ChannelError.eof) == .lost)
+        #expect(UpstreamFailure(NIOSSLError.uncleanShutdown) == .lost)
+        #expect(UpstreamFailure(NIOSSLExtraError.failedToValidateHostname) == .untrusted)
+        #expect(UpstreamFailure(NIOSSLError.handshakeFailed(.syscallError)) == .handshake)
+        struct Odd: Error {}
+        #expect(UpstreamFailure(Odd()) == .other)
+        let d = describeUpstreamError(IOError(errnoCode: ECONNREFUSED, reason: "connect"), host: "h.example")
+        #expect(d.reason == "the host running Bromure AC could not connect to h.example" && !d.isTrust)
+        #expect(!d.body.contains("Errno") && !d.body.contains("connect)"), "no library text: \(d.body)")
+    }
+
+    @Test func theGuestNeverSeesLibraryText() throws {
+        // A real failed handshake (an untrusted private CA): the 502 names
+        // the class, not BoringSSL's error stack or a source path.
+        let rig = try KubeRig(); defer { rig.stop() }
+        let out = try rig.get()
+        #expect(out.hasPrefix("HTTP/1.1 502"))
+        for leak in ["BoringSSL", "handshake.cc", ".build", "/home/", "sslError", "NIOSSL"] {
+            #expect(!out.contains(leak), "\(leak) in: \(out.prefix(600))")
+        }
+        #expect(out.contains("trust store"), "the trust advice: \(out.prefix(600))")
+    }
+
+    @Test func aRefusedConnectIsSaidSo() throws {
+        let rig = try KubeRig(); defer { rig.stop() }
+        let port = rig.server.port
+        rig.server.stop()   // nothing listens there now
+        let out = try GuestClient.get(HybridVsockListener.path(uds: rig.dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                      target: "\(rig.ip):\(port)", proxyCA: rig.proxy.caNIO)
+        #expect(out.hasPrefix("HTTP/1.1 502")
+                && out.contains("X-Bromure-Upstream-Error: the host running Bromure AC could not connect to \(rig.ip)"),
+                "got: \(out.prefix(400))")
     }
 }
