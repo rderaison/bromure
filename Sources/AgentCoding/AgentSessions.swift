@@ -943,8 +943,6 @@ final class AgentSessionStore {
         conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
     }
 
-    /// The uuid-named conversations sessions of `tool` on `profileID` other
-    /// than `besides` own, lowercased.
     /// Which conversation a chat for `s` may read — one rule for the app's own
     /// chat and the fat client's: the session's own, never the folder's newest
     /// (an archived session's, a second session's live one).
@@ -964,6 +962,8 @@ final class AgentSessionStore {
         return pin
     }
 
+    /// The uuid-named conversations sessions of `tool` on `profileID` other
+    /// than `besides` own, lowercased.
     func conversationsClaimed(tool: Profile.Tool, profileID: UUID, besides: UUID?) -> [String] {
         sessions.compactMap { o in
             guard o.id != besides, o.profileID == profileID, o.tool == tool, !o.isDeleted,
