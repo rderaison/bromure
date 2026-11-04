@@ -27,6 +27,7 @@ enum LibC {
     static func connect(_ fd: Int32, _ a: UnsafePointer<sockaddr>?, _ l: socklen_t) -> Int32 { Darwin.connect(fd, a, l) }
     static let sockStream = SOCK_STREAM
     static func socket(_ d: Int32, _ t: Int32, _ p: Int32) -> Int32 { Darwin.socket(d, t, p) }
+    @discardableResult static func fsync(_ fd: Int32) -> Int32 { Darwin.fsync(fd) }
     #else
     // @port-skip linux-only: the Glibc side of LibC (this file is shared with the Linux build)
     @discardableResult static func close(_ fd: Int32) -> Int32 { Glibc.close(fd) }
@@ -41,6 +42,8 @@ enum LibC {
     static let sockStream = Int32(SOCK_STREAM.rawValue)
     // @port-skip linux-only: the Glibc side of LibC
     static func socket(_ d: Int32, _ t: Int32, _ p: Int32) -> Int32 { Glibc.socket(d, t, p) }
+    // @port-skip linux-only: the Glibc side of LibC
+    @discardableResult static func fsync(_ fd: Int32) -> Int32 { Glibc.fsync(fd) }
     #endif
 }
 

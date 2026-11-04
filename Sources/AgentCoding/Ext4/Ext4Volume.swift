@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
 #endif
 
 // MARK: - Userland ext4 reader
@@ -210,7 +212,7 @@ final class Ext4Device {
         }
     }
 
-    func fsync() { _ = Darwin.fsync(fd) }
+    func fsync() { LibC.fsync(fd) }
 
     /// Raw byte size of the underlying image file (not the partition).
     func imageSize() -> UInt64 {
