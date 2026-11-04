@@ -3233,8 +3233,32 @@ struct TranscriptTableLayout: Layout {
     }
 }
 
+/// Bromure's colours (the website's tokens, from the 2026 brand guide). Flat and
+/// square: structure comes from hairlines and spacing, not shadows or rounding.
+enum BrandInk {
+    private static func rgb(_ v: Int) -> Color {
+        Color(.sRGB, red: Double(v >> 16 & 0xFF) / 255, green: Double(v >> 8 & 0xFF) / 255,
+              blue: Double(v & 0xFF) / 255, opacity: 1)
+    }
+    /// Fills, the accent rule, large emphasis.
+    static func accent(_ s: ColorScheme) -> Color { rgb(s == .dark ? 0x93AEFF : 0x5866FE) }
+    /// Small accent text: the indigo is too light for it on white.
+    static func accentStrong(_ s: ColorScheme) -> Color { rgb(s == .dark ? 0x93AEFF : 0x33497B) }
+    /// Text on an accent fill.
+    static func accentOn(_ s: ColorScheme) -> Color { rgb(s == .dark ? 0x000000 : 0xFFFFFF) }
+    static func secondary(_ s: ColorScheme) -> Color { rgb(s == .dark ? 0x9AA5C4 : 0x55618A) }
+    static func panel(_ s: ColorScheme) -> Color { rgb(s == .dark ? 0x0E1220 : 0xF4F6FD) }
+    /// The token's dark value (0x222840) assumes the site's pure black ground and
+    /// disappears on the app's grey window: its light blue-grey, thinned, instead.
+    static func hairline(_ s: ColorScheme) -> Color {
+        s == .dark ? rgb(0x9AA5C4).opacity(0.3) : rgb(0xDCE2F8)
+    }
+}
+
 struct TranscriptItemView: View {
     let item: TranscriptItem
+    /// A later piece of a long message of yours: the header is on its first.
+    var continuesMessage = false
     /// Pictures shown inside a user turn's bubble, under its words (the
     /// chat's dropped images), and the paths they stand for — left out of
     /// the words, since the picture says it.
@@ -3262,9 +3286,6 @@ struct TranscriptItemView: View {
     var body: some View {
         switch item.kind {
         case .userText(let text):
-            // No role label — the filled card (against the assistant's plain
-            // flowing prose) and the accent spine already read as "your turn",
-            // the way Codex/Claude desktop distinguish input from output.
             // A task prompt shows the brief only — the operating notes the
             // engine appends are plumbing, not conversation.
             // A line the host typed for a delegation (a delegate asked,
@@ -3275,25 +3296,29 @@ struct TranscriptItemView: View {
                 DelegationNoticeRow(text: notice, switchboard: true)
             } else {
                 let words = Self.withoutPaths(CodingTask.displayPrompt(text), hiddenPaths)
+                // Your turn is the one thing in the accent: a faint wash, the
+                // rule and a label, where a code block or a tool's output is
+                // grey. Findable at a glance when scrolling a long conversation.
                 VStack(alignment: .leading, spacing: 8) {
+                    if !continuesMessage { userHeader }
                     if !words.isEmpty {
                         Text(words)
-                            .font(.system(size: Self.userTextSize))
+                            .font(.system(size: Self.userTextSize, weight: .medium))
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if !attachments.isEmpty { DropPictureStrip(images: attachments) }
                 }
-                .padding(.vertical, 10)
+                .padding(.top, continuesMessage ? 10 : 12)
+                .padding(.bottom, 12)
                 .padding(.horizontal, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.10))
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.accentColor.opacity(0.5))
-                        .frame(width: 3)
+                .background(BrandInk.accent(colorScheme).opacity(colorScheme == .dark ? 0.12 : 0.07))
+                .overlay(alignment: .topLeading) {
+                    if !continuesMessage {
+                        Rectangle().fill(BrandInk.accent(colorScheme)).frame(width: 52, height: 2)
+                    }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
         case .assistantText(let text):
             assistantText(text)
@@ -3339,6 +3364,23 @@ struct TranscriptItemView: View {
                 }
             }
         }
+    }
+
+    /// "YOU · 3:42 PM", the brand's eyebrow over your message.
+    private var userHeader: some View {
+        HStack(spacing: 6) {
+            Text(NSLocalizedString("You", comment: "transcript: your own message"))
+                .foregroundStyle(BrandInk.accentStrong(colorScheme))
+            if let t = item.timestamp {
+                Text("·").foregroundStyle(BrandInk.secondary(colorScheme))
+                Text(t.formatted(date: .omitted, time: .shortened))
+                    .monospacedDigit()
+                    .foregroundStyle(BrandInk.secondary(colorScheme))
+            }
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .tracking(1.2)
+        .textCase(.uppercase)
     }
 
     /// Assistant prose, rendered as full markdown (Claude's answers are
