@@ -244,6 +244,15 @@ final class AgentSessionEngine {
             if $0.launchingSince == nil { $0.launchingSince = Date(); $0.launchBaselineIndex = nil }
         }
         BACDebug.log("sessions", "resume “\(s.title)”\(message == nil ? "" : " with a message")")
+        // Turned away for lack of memory before it ever started: this is that
+        // start again, opening message, attachments and all — a resume has no
+        // conversation to pick up, and would lose them.
+        if let refused = refusedLaunches.removeValue(forKey: id) {
+            let opening = [refused.prompt, message ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            launch(id, prompt: opening, flags: refused.flags, worktreeSlug: refused.worktreeSlug,
+                   attachments: refused.attachments, remotely: remotely)
+            return
+        }
         /// The resume didn't open a tab of its own (the agent was there, or
         /// it was relaunched in its tab): no launch to wait for.
         func settled() {
@@ -292,6 +301,14 @@ final class AgentSessionEngine {
                         self.holdForAgent(id, message, target: target, window: w)
                     }
                 } else {
+                    // Starting it again costs what any new agent does. What
+                    // the user just said stays for their next try.
+                    let message = message ?? self.refusedMessages.removeValue(forKey: id)
+                    if let refusal = self.memoryRefusal(for: s) {
+                        if let message { self.refusedMessages[id] = message }
+                        self.store.mutate(id) { $0.lastError = refusal }
+                        return
+                    }
                     // The agent exited, its shell is still there: relaunch
                     // in place so the conversation history is right at hand.
                     // Codex without a known conversation: its exit line names
@@ -642,6 +659,35 @@ final class AgentSessionEngine {
 
     /// `worktreeSlug`: branch the folder into a worktree (the guest's
     /// worktree-create) instead of opening the agent in it (agent-tab).
+    /// A start turned away for lack of memory, as asked for: what a retry needs.
+    private struct RefusedLaunch {
+        var prompt: String
+        var flags: String
+        var worktreeSlug: String?
+        var attachments: [DroppedFile]
+    }
+    private var refusedLaunches: [UUID: RefusedLaunch] = [:]
+    /// What the user said to an exited agent that couldn't be restarted.
+    private var refusedMessages: [UUID: String] = [:]
+
+    /// Why one more agent shouldn't start on `s`'s workspace, in the user's
+    /// words; nil if it fits. Only a VM whose guest reported recently can say
+    /// no: an attached machine, or one just booted, is let through as before.
+    private func memoryRefusal(for s: AgentSession, now: Date = Date()) -> String? {
+        guard let vm = delegate?.runningSessions[s.profileID], let at = vm.vmStatsAt,
+              now.timeIntervalSince(at) < 15 else { return nil }
+        let others = store.sessions.filter {
+            $0.profileID == s.profileID && $0.id != s.id && !$0.isDeleted && !$0.hasEnded
+                && ($0.windowIndex != nil || $0.isLaunching)
+        }
+        let verdict = MemoryAdmission.decide(
+            GuestMemorySnapshot(availableKB: vm.vmMemTotalKB - vm.vmMemUsedKB, totalKB: vm.vmMemTotalKB,
+                                pressureSome: vm.vmMemPressureSome, pressureFull: vm.vmMemPressureFull),
+            otherAgents: others.count,
+            launchingNow: others.filter { $0.isLaunching }.count)
+        return MemoryAdmission.refusal(verdict)
+    }
+
     private func launch(_ id: UUID, prompt: String, flags: String, alreadyUp: Bool = false,
                         worktreeSlug: String? = nil, attachments: [DroppedFile] = [],
                         remotely: Bool = false) {
@@ -659,6 +705,13 @@ final class AgentSessionEngine {
                     fail(NSLocalizedString("The workspace did not start in time", comment: "session start"))
                     return
                 }
+            }
+            if let refusal = self.memoryRefusal(for: s) {
+                BACDebug.log("sessions", "“\(s.title)” not started: \(refusal)")
+                self.refusedLaunches[id] = RefusedLaunch(prompt: prompt, flags: flags, worktreeSlug: worktreeSlug,
+                                                         attachments: attachments)
+                fail(refusal)
+                return
             }
             // Dropped files land in the machine before the agent starts, and
             // ride along as paths — the same shape a drop in the chat sends,

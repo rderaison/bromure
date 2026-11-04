@@ -183,6 +183,12 @@ On a rich client or a headless Mac, the prompt offers **Shut down** / **Block** 
 
 **Fix.** A machine marked compromised shows "Compromised — launching will prompt to wipe disk and home" and refuses to boot until you confirm the wipe in **⛔ “‹machine›” is marked as compromised**. **Wipe and Launch** removes the disk, home, and saved state, then boots a fresh VM — your credentials, SSH keys, and machine settings are kept. Shared project folders live outside Bromure's storage and are **not** wiped, so review them by hand for contaminated files. An automation or delegation can't confirm the wipe: its start is refused with "The workspace is marked compromised — start it yourself to confirm the wipe." The detection model is described in [Credentials & the Wire Boundary](08-credentials.mdx).
 
+### "This machine has too little memory for another agent"
+
+**Cause.** Every agent on a machine shares its memory, and each costs roughly a gigabyte once its helpers are counted. When the machine is short of memory, Bromure doesn't start another agent, because running out would have the system kill agents that are already working.
+
+**Fix.** End another session on the machine, or raise **VM RAM** in the machine's settings (the machine has to restart for that). Then send your message again: the session starts as you first asked, with your opening message and any files you dropped. If the machine runs out of memory anyway, the system ends an agent rather than the machine's own services, so the other sessions keep going and the one that stopped can be resumed.
+
 ### "The workspace did not boot in time" / "did not start in time"
 
 **Cause.** A session, automation, or coding task waited for its machine to come up and gave up. Common reasons:

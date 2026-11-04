@@ -1460,6 +1460,10 @@ final class RunningSession {
     var vmLoad: Double = 0
     var vmDiskUsedKB: Int = 0
     var vmDiskTotalKB: Int = 0
+    /// `/proc/pressure/memory` avg10, and when the guest last reported at all.
+    var vmMemPressureSome: Double = 0
+    var vmMemPressureFull: Double = 0
+    var vmStatsAt: Date?
 
     /// The profile the VM was BOOTED with — unlike `profile`, never moved by
     /// a live edit. A setting changed and then changed back to this value
@@ -16116,9 +16120,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerStats(stats)
             }
         }
+        sandbox.onVMMemoryPressure = { [weak self] some, full in
+            Task { @MainActor in
+                guard let s = self?.runningSessions[pid] else { return }
+                s.vmMemPressureSome = some; s.vmMemPressureFull = full
+            }
+        }
         sandbox.onVMStats = { [weak self] cpu, used, total, load, diskUsed, diskTotal in
             Task { @MainActor in
                 guard let self else { return }
+                self.runningSessions[pid]?.vmStatsAt = Date()
                 // Mirror into the session so /vms reports vitals even detached
                 // (a fat client reads these; there may be no local pane).
                 if let s = self.runningSessions[pid] {

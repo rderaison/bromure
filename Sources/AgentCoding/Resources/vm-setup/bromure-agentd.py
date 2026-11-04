@@ -5687,6 +5687,94 @@ def roster_loop_service():
 
 
 # ── vitals loops (vmstat / ports / docker), published to the outbox ──────────
+def memory_pressure(path="/proc/pressure/memory"):
+    """(some, full) avg10 from PSI, as strings; "0" where the kernel has none."""
+    found = {"some": "0", "full": "0"}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                cells = line.split()
+                if cells and cells[0] in found:
+                    for cell in cells[1:]:
+                        if cell.startswith("avg10="):
+                            float(cell[6:])
+                            found[cells[0]] = cell[6:]
+    except (OSError, ValueError):
+        pass
+    return found["some"], found["full"]
+
+
+# What the kernel's OOM killer should reach for first. Left alone, it picks by
+# size, and agentd is often the biggest process in the guest: one agent's
+# overshoot then costs the workspace its supervisor, or tmux and every session.
+# Raising a score needs no privilege, and unlike lowering the supervisor's, it
+# isn't inherited by what the supervisor goes on to start.
+OOM_SACRIFICE_ADJ = 300
+
+
+def _proc_table(proc_root):
+    """pid -> (comm, ppid) for every process under proc_root."""
+    table = {}
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return table
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, name, "stat"), "r", errors="replace") as f:
+                stat = f.read()
+            # comm can hold spaces and parentheses: ppid follows the LAST ")".
+            close = stat.rindex(")")
+            table[int(name)] = (stat[stat.index("(") + 1:close], int(stat[close + 2:].split()[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return table
+
+
+def oom_sacrifice_targets(table):
+    """What runs under a tab: descendants of a tmux server, but not the tab's
+    own shell (the tab outlives its agent, and a session can resume in it)."""
+    is_tmux = lambda pid: table[pid][0].startswith("tmux")
+    children = {}
+    for pid, (_, ppid) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    targets = set()
+    for server in [p for p in table if is_tmux(p)]:
+        stack = [g for shell in children.get(server, []) if not is_tmux(shell)
+                 for g in children.get(shell, [])]
+        while stack:
+            pid = stack.pop()
+            if pid in targets:
+                continue
+            if not is_tmux(pid):
+                targets.add(pid)
+            stack.extend(children.get(pid, []))
+    return targets
+
+
+def oom_sacrifice_pass(seen, proc_root="/proc"):
+    """Mark new processes under tabs. Returns the pids still alive and handled,
+    which the next pass is given as `seen`."""
+    targets = oom_sacrifice_targets(_proc_table(proc_root))
+    for pid in targets - seen:
+        try:
+            with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w") as f:
+                f.write(str(OOM_SACRIFICE_ADJ))
+        except OSError:
+            pass  # gone, or another uid's: nothing to do, and not worth retrying
+    return targets
+
+
+def oom_sacrifice_service():
+    """Every 5 s: see `OOM_SACRIFICE_ADJ`."""
+    seen = set()
+    while _RUNNING.is_set():
+        seen = oom_sacrifice_pass(seen)
+        time.sleep(5)
+
+
 def vmstat_loop_service():
     """Aggregate CPU% / mem / load / disk → vmstat.txt every 1.5s."""
     prev_idle = 0
@@ -5722,6 +5810,7 @@ def vmstat_loop_service():
         except Exception:
             pass
         memused = memtotal - memavail
+        psi_some, psi_full = memory_pressure()
         load = "0"
         try:
             with open("/proc/loadavg", "r") as f:
@@ -5739,7 +5828,9 @@ def vmstat_loop_service():
                 diskused = cells[2]
         content = ("cpu %s\nmem_used_kb %s\nmem_total_kb %s\nload %s\n"
                    "disk_used_kb %s\ndisk_total_kb %s\n"
-                   % (cpu, memused, memtotal, load, diskused, disktotal))
+                   "mem_psi_some %s\nmem_psi_full %s\n"
+                   % (cpu, memused, memtotal, load, diskused, disktotal,
+                      psi_some, psi_full))
         _atomic_publish(".vmstat.tmp", "vmstat.txt", content)
         time.sleep(1.5)
 
@@ -8167,6 +8258,7 @@ def main():
         ("loopback-relay", loopback_relay_service),
         ("roster", roster_loop_service),
         ("vmstat", vmstat_loop_service),
+        ("oom-sacrifice", oom_sacrifice_service),
         ("ports", ports_loop_service),
         ("docker", docker_loop_service),
         ("command", command_loop_service),
