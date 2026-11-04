@@ -478,14 +478,37 @@ final class Ext4Volume {
 
     /// List a directory inode's entries (linear parse; works for htree dirs too,
     /// whose leaf blocks are ordinary dir blocks). "." and ".." are omitted.
+    /// The most a directory's data may be read as: far past any real one (a
+    /// million entries are some tens of MB). i_size is the image's word, so
+    /// a corrupt one can't have the host allocate gigabytes.
+    static let maxDirectoryBytes: UInt64 = 64 << 20
+
     func listDir(_ ino: UInt32) throws -> [Ext4DirEntry] {
         let node = try inode(ino)
         guard node.isDir else { throw Ext4Error.notADirectory("inode \(ino)") }
         if node.isInline {
             return try inlineDirEntries(node)
         }
+        // Bounded by the filesystem's own size too: no real directory is larger.
+        guard node.size <= min(Self.maxDirectoryBytes, sb.blocksCount * UInt64(blockSize)) else {
+            throw Ext4Error.badInode(ino)
+        }
         let data = try readData(node)
         return parseDirBlock(data, includeDots: false)
+    }
+
+    /// A directory's own "." and ".." inode numbers, nil when missing. They
+    /// are always the first two entries of its logical block 0, which is
+    /// all that's read (never i_size's worth). An inline directory has no
+    /// "." entry (it is itself) and keeps ".." in the first four bytes of
+    /// its i_block area.
+    func dotEntries(_ ino: UInt32) throws -> (dot: UInt32?, dotdot: UInt32?) {
+        let node = try inode(ino)
+        guard node.isDir else { throw Ext4Error.notADirectory("inode \(ino)") }
+        if node.isInline { return (ino, le32(Array(node.iBlock), 0)) }
+        guard let phys = try blockMap(node, upTo: 1)[0], phys != 0, phys < sb.blocksCount else { return (nil, nil) }
+        let all = parseDirBlock(try readBlock(phys), includeDots: true)
+        return (all.first { $0.name == "." }?.ino, all.first { $0.name == ".." }?.ino)
     }
 
     private func parseDirBlock(_ data: [UInt8], includeDots: Bool) -> [Ext4DirEntry] {

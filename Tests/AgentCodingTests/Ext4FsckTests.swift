@@ -332,6 +332,49 @@ struct Ext4FsckTests {
         }
     }
 
+    @Test("a cleared root inode is not passed as clean")
+    func clearedRootInode() throws {
+        // What `debugfs -w -R "clri <2>"` does: inode 2's record zeroed. The
+        // walk would see one inode with nothing under it; the root check
+        // reports it, so a cluster machine goes on to the real e2fsck.
+        var img = Self.buildImage()
+        let o = Self.inodeOffset(2)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("root inode is not a directory"), "\(r.output)")
+        }
+    }
+
+    @Test("a root whose \"..\" points elsewhere is not passed as clean")
+    func rootDotDotElsewhere() throws {
+        var img = Self.buildImage()
+        putLE32(&img, Self.rootDirBlock * Self.blockSize + 12, 12)   // ".." → inode 12
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("don't both point at inode 2"), "\(r.output)")
+        }
+    }
+
+    @Test("a root claiming a huge size is refused, not read")
+    func rootWithHugeSize() throws {
+        // i_size is the image's word: ~4 GiB on a one-block root. "." and
+        // ".." come from block 0 alone, the listing is refused past the
+        // bound, and the check ends at once as unfixable.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(2) + 4, 0xFFFF_F000)
+        try withImage(img) { path in
+            let t0 = Date()
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("corrupt inode 2"), "\(r.output)")
+            #expect(!r.output.contains("don't both point"), "the dots still read from block 0: \(r.output)")
+            #expect(Date().timeIntervalSince(t0) < 5)
+        }
+    }
+
     @Test("real image (env-gated): native fsck parses, replays, and verifies")
     func realImage() throws {
         // Point BROMURE_EXT4_TEST_IMAGE at a *clone* of a real home/disk image

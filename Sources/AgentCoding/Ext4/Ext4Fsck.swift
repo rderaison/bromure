@@ -200,6 +200,12 @@ enum Ext4Fsck {
             issues += verifyGroupDescriptors(vol, log: &log)
         }
 
+        // The root itself. A cleared or clobbered inode 2 walks as one inode
+        // with nothing under it and would pass as clean (the engine would
+        // then reboot a cluster machine into the same failed fsck instead of
+        // going on to the real e2fsck).
+        issues += verifyRoot(vol, log: &log)
+
         // Reachability walk from the root: inode checksums + extent trees +
         // directory structure. The cap only exists so a pathological image
         // can't spin forever — it is sized off the filesystem's own inode
@@ -253,6 +259,33 @@ enum Ext4Fsck {
         log.append("verified \(visited.count) reachable inode(s)"
                    + (bad > 0 ? ", \(bad) bad" : ""))
         return (issues + bad, complete)
+    }
+
+    /// Inode 2 must be a directory with its own data (blocks, or inline),
+    /// whose "." and ".." are both inode 2. Returns the problem count (0/1).
+    private static func verifyRoot(_ vol: Ext4Volume, log: inout [String]) -> Int {
+        let root = Ext4Volume.rootInode
+        do {
+            let node = try vol.inode(root)
+            guard node.isDir else {
+                log.append("root inode is not a directory (mode \(String(node.mode, radix: 8)))")
+                return 1
+            }
+            if !node.isInline, try vol.blockMap(node, upTo: 1).isEmpty {
+                log.append("root directory has no data blocks")
+                return 1
+            }
+            let dots = try vol.dotEntries(root)
+            guard dots.dot == root, dots.dotdot == root else {
+                log.append("root directory's \".\" and \"..\" don't both point at inode \(root) "
+                           + "(\(dots.dot.map(String.init) ?? "none"), \(dots.dotdot.map(String.init) ?? "none"))")
+                return 1
+            }
+            return 0
+        } catch {
+            log.append("root inode: \(error)")
+            return 1
+        }
     }
 
     /// metadata_csum group-descriptor checksums: crc32c(seed → group# (le32) →
