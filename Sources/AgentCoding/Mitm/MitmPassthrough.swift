@@ -55,19 +55,8 @@ enum MitmPassthrough {
         pumpBothWays(appFD: appFD, upstream: upstream)
     }
 
-    /// Splice to `host:destPort`, resolving the hostname — for a proxied
-    /// CONNECT, where the guest named a host rather than an address (an
-    /// OpenShell `tls: skip` endpoint).
-    static func splice(appFD: Int32, host: String, destPort: Int) {
-        guard let upstream = connectRawTCP(ip: host, port: destPort, numericOnly: false) else {
-            close(appFD)
-            return
-        }
-        pumpBothWays(appFD: appFD, upstream: upstream)
-    }
-
-    /// Splice to addresses that already passed OpenShell's destination
-    /// checks (a `tls: skip` endpoint under an OpenShell policy).
+    /// Splice to addresses that already passed the destination checks (a
+    /// proxied CONNECT to a `tls: skip` endpoint) — never re-resolved.
     static func splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int) {
         guard let upstream = try? UpstreamPinning.connect(addresses, port: destPort) else {
             close(appFD)
@@ -112,10 +101,9 @@ enum MitmPassthrough {
         }
     }
 
-    /// Connect to a numeric IP literal (no DNS unless `numericOnly` is false).
-    /// Blocking.
-    private static func connectRawTCP(ip: String, port: Int, numericOnly: Bool = true) -> Int32? {
-        var hints = addrinfo(ai_flags: numericOnly ? AI_NUMERICHOST : 0, ai_family: AF_UNSPEC,
+    /// Connect to a numeric IP literal (never DNS). Blocking.
+    private static func connectRawTCP(ip: String, port: Int) -> Int32? {
+        var hints = addrinfo(ai_flags: AI_NUMERICHOST, ai_family: AF_UNSPEC,
                              ai_socktype: SOCK_STREAM, ai_protocol: IPPROTO_TCP,
                              ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
         var res: UnsafeMutablePointer<addrinfo>?
