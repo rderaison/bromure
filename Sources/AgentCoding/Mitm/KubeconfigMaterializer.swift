@@ -1,5 +1,4 @@
 import Foundation
-@preconcurrency import Security
 import Crypto
 import _CryptoExtras
 import X509
@@ -28,11 +27,23 @@ public final class KubeconfigMaterializer {
         public var clusterCAs: [(host: String, caPEM: String)]
     }
 
-    public struct ClientIdentitySpec: Sendable {
+    /// An imported kubeconfig's client certificate, as the proxy needs it
+    /// for upstream mTLS: the PEM material, made into the host's own
+    /// identity object where it's applied (macOS: a SecIdentity, in
+    /// MitmEngine.applyKubeMaterial). Held only as long as the
+    /// materialization; never Codable, never printed (the key is redacted
+    /// from every description).
+    public struct ClientIdentitySpec: Sendable, CustomStringConvertible, CustomDebugStringConvertible,
+                                      CustomReflectable {
         public let host: String
-        public let identity: SecIdentity
+        public let certPEM: String
+        public let keyPEM: String
         public let consentCredentialID: String?
         public let consentDisplayName: String?
+
+        public var description: String { "ClientIdentitySpec(host: \(host), key: <redacted>)" }
+        public var debugDescription: String { description }
+        public var customMirror: Mirror { Mirror(self, children: ["host": host]) }
     }
 
     public struct BearerSwap: Sendable {
@@ -158,13 +169,11 @@ public final class KubeconfigMaterializer {
                 // Real cert + key get registered with the proxy as
                 // a SecIdentity for upstream mTLS. The VM gets a
                 // throwaway pair so kubectl can load valid PEM.
-                if let id = makeSecIdentity(certPEM: certPEM, keyPEM: keyPEM) {
-                    identities.append(ClientIdentitySpec(
-                        host: entry.hostPattern,
-                        identity: id,
-                        consentCredentialID: consentID,
-                        consentDisplayName: consentDisplay))
-                }
+                identities.append(ClientIdentitySpec(
+                    host: entry.hostPattern,
+                    certPEM: certPEM, keyPEM: keyPEM,
+                    consentCredentialID: consentID,
+                    consentDisplayName: consentDisplay))
                 let throwaway = makeThrowawayClientCert(commonName: user)
                 let throwawayCert = Data(throwaway.cert.utf8).base64EncodedString()
                 let throwawayKey  = Data(throwaway.key.utf8).base64EncodedString()
@@ -280,21 +289,6 @@ public final class KubeconfigMaterializer {
         }
     }
 
-    /// Strip `-----BEGIN X-----` / `-----END X-----` and base64-decode
-    /// the body. Returns nil if the marker isn't found.
-    func pemDecode(_ pem: String, marker: String) -> Data? {
-        let begin = "-----BEGIN \(marker)-----"
-        let end   = "-----END \(marker)-----"
-        guard let beginRange = pem.range(of: begin),
-              let endRange   = pem.range(of: end, range: beginRange.upperBound..<pem.endIndex) else {
-            return nil
-        }
-        let b64 = pem[beginRange.upperBound..<endRange.lowerBound]
-            .replacingOccurrences(of: "\n", with: "")
-            .replacingOccurrences(of: "\r", with: "")
-            .replacingOccurrences(of: " ", with: "")
-        return Data(base64Encoded: b64)
-    }
 }
 
 // MARK: - Exec poller

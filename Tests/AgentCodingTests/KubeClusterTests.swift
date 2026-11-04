@@ -544,4 +544,25 @@ struct KubeClusterTests {
         let m = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM", directClusters: [])
         #expect(m.clientIdentities.map(\.host) == ["k8s.example.com:6443"])
     }
+
+    @Test("an imported client certificate becomes one proxy identity for its host; one that doesn't convert is left out, its key never printed")
+    @MainActor
+    func clientCertAppliedOnce() throws {
+        let (cert, key) = try Self.selfSigned(.ecSEC1)
+        var profile = Profile(name: "ws", tool: .claude, authMode: .token)
+        profile.kubeconfigs = [
+            KubeconfigEntry(name: "good", serverURL: "https://k8s.example.com:6443", auth: .clientCert(certPEM: cert, keyPEM: key)),
+            KubeconfigEntry(name: "bad", serverURL: "https://bad.example.com:6443",
+                            auth: .clientCert(certPEM: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+                                              keyPEM: "-----BEGIN PRIVATE KEY-----\nU0VDUkVUS0VZQllURVM=\n-----END PRIVATE KEY-----\n")),
+        ]
+        let mat = KubeconfigMaterializer().materialize(profile: profile, bromureCAPEM: "PEM")
+        let ids = ClientIdentityRegistry(), pid = UUID()
+        MitmEngine.applyKubeMaterial(mat, profileID: pid, identities: ids, clusterCAs: ClusterCATrustRegistry(),
+                                     poller: ExecCredentialPoller(), swapper: TokenSwapper(consent: ConsentBroker()))
+        #expect(ids.entry(for: "k8s.example.com", port: 6443, profileID: pid) != nil)
+        #expect(ids.entry(for: "bad.example.com", port: 6443, profileID: pid) == nil)
+        let printed = "\(mat.clientIdentities)" + String(reflecting: mat.clientIdentities) + "\(Mirror(reflecting: mat.clientIdentities[0]).children.map(\.label))"
+        #expect(!printed.contains("BEGIN PRIVATE KEY") && !printed.contains("U0VDUkVUS0VZQllURVM"))
+    }
 }

@@ -301,7 +301,7 @@ extension KubeconfigMaterializer {
     /// is the simplest cross-version path: assemble cert + key into a
     /// p12, import, fish out the identity. We use the SecIdentityCreate
     /// SPI from CertCache.swift instead — already proven.
-    func makeSecIdentity(certPEM: String, keyPEM: String) -> SecIdentity? {
+    nonisolated static func makeSecIdentity(certPEM: String, keyPEM: String) -> SecIdentity? {
         // Decode the PEM cert
         guard let certData = pemDecode(certPEM, marker: "CERTIFICATE"),
               let secCert = SecCertificateCreateWithData(nil, certData as CFData) else {
@@ -317,7 +317,7 @@ extension KubeconfigMaterializer {
 
     /// SecKeyCreateWithData takes PKCS#1 DER for RSA and X9.63
     /// (`04 || X || Y || K`) for EC, not SEC1 or PKCS#8 PEM.
-    func makeSecKey(keyPEM: String) -> SecKey? {
+    nonisolated static func makeSecKey(keyPEM: String) -> SecKey? {
         let ecAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
                                         kSecAttrKeyClass: kSecAttrKeyClassPrivate]
         let rsaAttrs: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA,
@@ -332,6 +332,22 @@ extension KubeconfigMaterializer {
             if let k = SecKeyCreateWithData(data as CFData, attrs as CFDictionary, nil) { return k }
         }
         return nil
+    }
+
+    /// Strip `-----BEGIN X-----` / `-----END X-----` and base64-decode
+    /// the body. Returns nil if the marker isn't found.
+    nonisolated static func pemDecode(_ pem: String, marker: String) -> Data? {
+        let begin = "-----BEGIN \(marker)-----"
+        let end   = "-----END \(marker)-----"
+        guard let beginRange = pem.range(of: begin),
+              let endRange   = pem.range(of: end, range: beginRange.upperBound..<pem.endIndex) else {
+            return nil
+        }
+        let b64 = pem[beginRange.upperBound..<endRange.lowerBound]
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        return Data(base64Encoded: b64)
     }
 }
 

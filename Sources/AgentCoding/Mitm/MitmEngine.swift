@@ -763,9 +763,15 @@ public final class MitmEngine {
                                   poller: ExecCredentialPoller, swapper: TokenSwapper) {
         // Each registry swapped in one locked step: a handshake on the
         // proxy's queue never sees the workspace cleared mid-rebuild.
-        identities.replaceAll(mat.clientIdentities.map {
-            (host: $0.host, entry: .init(identity: $0.identity, consentCredentialID: $0.consentCredentialID,
-                                         consentDisplayName: $0.consentDisplayName))
+        // Each imported client certificate made into its SecIdentity here,
+        // once per apply (launch and live refresh alike); one that doesn't
+        // convert is left out, as the materializer used to leave it out.
+        identities.replaceAll(mat.clientIdentities.compactMap { spec in
+            guard let identity = KubeconfigMaterializer.makeSecIdentity(certPEM: spec.certPEM, keyPEM: spec.keyPEM) else {
+                return nil
+            }
+            return (host: spec.host, entry: .init(identity: identity, consentCredentialID: spec.consentCredentialID,
+                                                  consentDisplayName: spec.consentDisplayName))
         }, for: profileID)
         clusterCAs.replaceAll(mat.clusterCAs.map { (pem: $0.caPEM, host: $0.host) }, for: profileID)
         // Unchanged contexts keep their poller (no second run of the same
