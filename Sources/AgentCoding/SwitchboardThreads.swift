@@ -33,9 +33,16 @@ struct ThreadedConversation: Equatable {
 
     func thread(_ id: String) -> SwitchboardThread? { threads.first { $0.id == id } }
 
+    /// `filter` if there's still such a thread. Picked, then gone (the transcript
+    /// replaced, the conversation caught up empty), it counts as no filter:
+    /// the chips to undo it may be gone with it, leaving a blank chat.
+    func effective(_ filter: String?) -> String? {
+        filter.flatMap { thread($0)?.id }
+    }
+
     /// The conversation as shown with `filter` picked (nil: all of it).
     func items(in filter: String?) -> [TranscriptItem] {
-        guard let filter else { return items }
+        guard let filter = effective(filter) else { return items }
         return items.filter { visibleIn[$0.id]?.contains(filter) == true }
     }
 
@@ -135,6 +142,11 @@ enum SwitchboardThreading {
         return s.hasPrefix("@") ? String(s.dropFirst()) : s
     }
 
+    private static func isJSONObject(_ s: String) -> Bool {
+        guard let d = s.data(using: .utf8) else { return false }
+        return (try? JSONSerialization.jsonObject(with: d)) is [String: Any]
+    }
+
     /// A notice names its session in quotes, even one no longer on this Mac.
     static func quotedName(_ text: String) -> String? {
         guard let a = text.firstIndex(of: "“"), let b = text[a...].firstIndex(of: "”") else { return nil }
@@ -150,7 +162,8 @@ enum SwitchboardThreading {
         var cur: [String] = []
         var fence = false
         func flush() { if !cur.isEmpty { blocks.append(cur.joined(separator: "\n")); cur = [] } }
-        for line in text.components(separatedBy: "\n") {
+        // "\r\n" is one Character to Swift: unfolded, a CRLF reply never splits.
+        for line in text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("```") || t.hasPrefix("~~~") { fence.toggle(); cur.append(line); continue }
             if fence { cur.append(line); continue }
@@ -225,9 +238,15 @@ enum SwitchboardThreading {
                     emit(item, turn)
                 }
             case .toolUse(_, _, let detail):
+                // Some agents keep a call's input as raw text, not an object: no
+                // `session` to read, so the names in it are the best evidence.
+                let raw = isJSONObject(detail) ? [] : known(mentions(in: detail, aliases: aliases))
                 if let s = sessionArgument(detail) {
                     lastTool = [resolve(s)]
                     if !turn.contains(lastTool[0]) { turn = turn.isEmpty ? lastTool : turn + lastTool }
+                } else if raw.count == 1 {
+                    lastTool = raw
+                    if !turn.contains(raw[0]) { turn = turn.isEmpty ? raw : turn + raw }
                 } else {
                     lastTool = turn.count == 1 ? turn : []
                 }
@@ -349,7 +368,7 @@ struct SwitchboardThreadBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                chip(selected: filter == nil, label: NSLocalizedString("All", comment: "switchboard threads"),
+                chip(selected: conversation.effective(filter) == nil, label: NSLocalizedString("All", comment: "switchboard threads"),
                      count: nil, thread: nil) { filter = nil }
                 ForEach(conversation.threads) { t in
                     chip(selected: filter == t.id, label: t.name, count: t.count, thread: t) {
@@ -477,7 +496,9 @@ struct SwitchboardNoticeLine: View {
 enum SwitchboardThreadsPreview {
     private static var retained: BeautifiedSessionModel?
     /// `BROMURE_SHOT_THREAD`: the shot shows this chain alone.
-    static var picked: String? { ProcessInfo.processInfo.environment["BROMURE_SHOT_THREAD"] }
+    static var picked: String? {
+        CommandLine.arguments.contains("__shot-ui") ? ProcessInfo.processInfo.environment["BROMURE_SHOT_THREAD"] : nil
+    }
 
     static func view() -> (AnyView, NSSize) {
         let now = Date()

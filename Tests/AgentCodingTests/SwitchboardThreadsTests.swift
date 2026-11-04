@@ -102,7 +102,34 @@ struct SwitchboardThreadsTests {
         #expect(c.items(in: "fix-login").map(\.id) == [1, 2])
         #expect(c.items(in: "infra").map(\.id) == [1, 3, 4, 5])
         #expect(c.items(in: nil).count == 5)
-        #expect(c.items(in: "nobody").isEmpty)
+    }
+
+    @Test("a filter whose thread has gone counts as no filter, not as a blank chat")
+    func strandedFilter() {
+        let c = run([tool(1, session: "fix-login"), reply(2, "Nothing else.")])
+        #expect(c.effective("fix-login") == "fix-login")
+        #expect(c.effective("nobody") == nil)
+        #expect(c.items(in: "nobody").count == c.items.count)
+        #expect(run([]).items(in: "fix-login").isEmpty && run([]).effective("fix-login") == nil)
+    }
+
+    @Test("a CRLF reply splits like any other")
+    func crlf() {
+        let c = run([reply(1, "• add-apple-pay waits\r\n\r\n• fix-login passes")])
+        #expect(c.items.count == 2)
+        #expect(c.threadsOf[c.items[1].id] == ["fix-login"])
+    }
+
+    @Test("a call whose input is raw text is placed by the name in it, when there's one")
+    func rawDetail() {
+        func raw(_ id: Int, _ s: String) -> TranscriptItem {
+            TranscriptItem(id: id, kind: .toolUse(name: "x", summary: "", detail: s), timestamp: nil)
+        }
+        let c = run([raw(1, "read_session fix-login"), raw(2, "fix-login and add-apple-pay"), raw(3, "ls -la")])
+        #expect(c.threadsOf[1] == ["fix-login"])
+        #expect(c.threadsOf[3] == ["fix-login"], "no name: the turn's thread, as ever")
+        let json = run([TranscriptItem(id: 1, kind: .toolUse(name: "start", summary: "", detail: #"{"message":"like fix-login"}"#), timestamp: nil)])
+        #expect(json.threadsOf[1] == nil, "an object says what it means: words in its text don't count")
     }
 
     @Test("a header marks each change of subject, not each row; your message ends the run")

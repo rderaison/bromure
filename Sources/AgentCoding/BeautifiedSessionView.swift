@@ -3276,6 +3276,8 @@ struct BeautifiedSessionView: View {
     @State private var threadMemo = SwitchboardThreadMemo()
     /// The Switchboard's chain on show alone (nil: the whole conversation).
     @State private var threadFilter: String?
+    /// The filter was cleared to show a search hit: stay there, not at the end.
+    @State private var keepPlaceOnFilterChange = false
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -3568,7 +3570,7 @@ struct BeautifiedSessionView: View {
                     }
                     // The resize preview, kept ready (at most 2 s behind).
                     while !Task.isCancelled {
-                        let tail = Self.resizeTail(model.items, limit: model.renderLimit)
+                        let tail = Self.resizeTail(threaded?.items(in: threadFilter) ?? model.items, limit: model.renderLimit)
                         if tail != previewItems { previewItems = tail }
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
@@ -3843,7 +3845,7 @@ struct BeautifiedSessionView: View {
                         // A reply cut into rows: Copy on ANY of its rows
                         // takes the whole reply (`layout.replies`).
                         // Filtered to one chain, every row is about it: no headers.
-                        let threadHeaders = threadFilter == nil ? (conversation?.headers(rows) ?? [:]) : [:]
+                        let threadHeaders = conversation?.effective(threadFilter) == nil ? (conversation?.headers(rows) ?? [:]) : [:]
                         ForEach(rows) { row in
                             if let conversation, let keys = threadHeaders[row.id] {
                                 SwitchboardThreadHeader(threads: keys.compactMap(conversation.thread),
@@ -4052,7 +4054,9 @@ struct BeautifiedSessionView: View {
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
-                .onChange(of: threadFilter) { _, _ in scrollToTail(proxy) }
+                .onChange(of: threadFilter) { _, _ in
+                    if keepPlaceOnFilterChange { keepPlaceOnFilterChange = false } else { scrollToTail(proxy) }
+                }
                 // `revision` is read off the publisher (it fires before the
                 // rows re-lay out), so "was it at the tail" is judged on the
                 // content BEFORE the append — a big answer landing would
@@ -4126,6 +4130,11 @@ struct BeautifiedSessionView: View {
         guard let q = pendingFind, !q.isEmpty,
               let i = model.items.firstIndex(where: { Self.says($0, q) }) else { return }
         pendingFind = nil
+        // The hit may be in another of the Switchboard's threads.
+        if threadFilter != nil {
+            keepPlaceOnFilterChange = true
+            threadFilter = nil
+        }
         let needed = model.items.count - i
         if needed > model.renderLimit { model.renderLimit = needed }
         let weight = Self.renderWeight(model.items.suffix(needed))
