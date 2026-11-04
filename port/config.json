@@ -71,6 +71,7 @@
     "Sources/AgentCoding/KubeCluster.swift",
     "Sources/AgentCoding/KubeClusterEngine.swift",
     "Sources/AgentCoding/KubeEmulatorReleases.swift",
+    "Sources/AgentCoding/KubeMCPServer.swift",
     "Sources/AgentCoding/KubeRegistryEngine.swift",
     "Sources/AgentCoding/KubeconfigImport.swift",
     "Sources/AgentCoding/LLMEventExtractor.swift",

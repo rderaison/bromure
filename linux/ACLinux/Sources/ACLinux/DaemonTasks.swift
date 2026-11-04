@@ -329,11 +329,12 @@ extension SessionStores {
 extension Daemon {
     /// The workspace's MCP sockets for its agents (macOS: the board's and the
     /// automations' TaskMCPVsockBridge per VM): the coding board on 5831,
-    /// the workspace's own automations and its findings on 5833,
-    /// delegations between agents on 5835. `stored`: a restarted
+    /// the workspace's own automations and its findings on 5833, the
+    /// clusters and registries it may use on 5834, delegations between
+    /// agents on 5835. `stored`: a restarted
     /// daemon's listeners, by fd-store prefix. One that can't listen is
     /// left out (its tools then fail in the guest), logged.
-    // partial: no infrastructure (5834) or Switchboard (5836) MCP on Linux yet
+    // partial: no Switchboard (5836) MCP on Linux yet
     // @port-skip linux-only: the per-VM MCP listeners (macOS: in ACAppDelegate's VM start, on the VZ socket device)
     func serveMCP(_ rec: VMRecord, udsPath: String, stored: [String: Int32]) async -> [MCPLineListener] {
         let pid = UUID(uuidString: rec.id) ?? UUID()
@@ -351,11 +352,15 @@ extension Daemon {
                 remove: { id in SessionStores.shared?.automations.remove(id) },
                 runNow: { id in _ = SessionStores.shared?.runAutomationNow(id) },
                 watches: { SessionStores.shared?.watchEngine })
+            let infra = KubeMCPServer(profileID: pid,
+                                      store: { SessionStores.shared?.kube },
+                                      engine: { SessionStores.shared?.kubeEngine })
             let delegation = DelegationMCPServer(profileID: pid,
                                                  sessions: { SessionStores.shared?.sessions },
                                                  engine: { SessionStores.shared?.delegationEngine })
             for (prefix, port, server) in [("tbmcp-", GuestPorts.taskBoardMCPVsockPort, board as any MCPLineHandler),
                                            ("amcp-", GuestPorts.automationMCPVsockPort, automations as any MCPLineHandler),
+                                           ("kmcp-", GuestPorts.kubeMCPVsockPort, infra as any MCPLineHandler),
                                            ("dmcp-", GuestPorts.delegationMCPVsockPort, delegation as any MCPLineHandler)] {
                 do {
                     out.append(try MCPLineListener(udsPath: udsPath, port: port, server: server,
