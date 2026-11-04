@@ -160,36 +160,59 @@ public final class LANHelper: @unchecked Sendable {
         }
     }
 
-    /// Withdraws each connection's publications its uid's grant no longer holds.
+    /// Withdraws each connection's publications its uid's grant no longer
+    /// holds. Under `addrLock`, as publish's whole check-then-bind is: a
+    /// publish that read the grants before this file is either finished
+    /// (its listeners are in the snapshot) or not started (it reads this file).
     // @port-skip linux-only: LAN helper
     func revokeOutside(_ file: LANPoolsFile) {
         struct Live: Hashable { let conn: Int; let ip: UInt32 }
+        addrLock.lock()
         lock.lock()
         let live = Set(listeners.map { Live(conn: $0.value.conn, ip: $0.key.ip) })
         let uids = conns.mapValues(\.uid)
         lock.unlock()
         var grants: [uid_t: Set<UInt32>] = [:]
+        var notices: [Notice] = []
         for l in live {
             guard let uid = uids[l.conn] else { continue }
             if grants[uid] == nil { grants[uid] = file.addresses(ofUID: uid) }
             if grants[uid]?.contains(l.ip) != true {
-                revoke(conn: l.conn, ip: l.ip, why: "\(VMNetSwitchText.ip(l.ip)) isn't in uid \(uid)'s LAN address pool any more")
+                notices += revokeLocked(conn: l.conn, ip: l.ip, why: "\(VMNetSwitchText.ip(l.ip)) isn't in uid \(uid)'s LAN address pool any more")
             }
         }
+        addrLock.unlock()
+        notify(notices)
     }
+
+    /// A line for a connection, sent once `addrLock` is released (a daemon
+    /// slow to read must never hold up everyone's publishing).
+    struct Notice { let conn: Int; let msg: [String: Any] }
 
     /// Ends connection `conn`'s publications on `ip` and tells it which.
     // @port-skip linux-only: LAN helper
     private func revoke(conn: Int, ip: UInt32, why: String) {
+        addrLock.lock()
+        let notices = revokeLocked(conn: conn, ip: ip, why: why)
+        addrLock.unlock()
+        notify(notices)
+    }
+
+    /// revoke's work, `addrLock` held; returns the lines to send.
+    // @port-skip linux-only: LAN helper
+    private func revokeLocked(conn: Int, ip: UInt32, why: String) -> [Notice] {
         lock.lock()
         let services = Set(listeners.filter { $0.key.ip == ip && $0.value.conn == conn }.map(\.value.service))
         lock.unlock()
-        guard !services.isEmpty else { return }
-        withdraw(conn: conn) { k, _ in k.ip == ip }
-        for svc in services.sorted() {
-            send(conn: conn, ["revoked": true, "ip": VMNetSwitchText.ip(ip), "service": svc, "error": why], fd: nil)
-        }
+        guard !services.isEmpty else { return [] }
+        withdrawLocked(conn: conn) { k, _ in k.ip == ip }
         log("revoked \(VMNetSwitchText.ip(ip)) (\(services.sorted().joined(separator: ", "))): \(why)")
+        return services.sorted().map { Notice(conn: conn, msg: ["revoked": true, "ip": VMNetSwitchText.ip(ip), "service": $0, "error": why]) }
+    }
+
+    // @port-skip linux-only: LAN helper
+    private func notify(_ notices: [Notice]) {
+        for n in notices { send(conn: n.conn, n.msg, fd: nil) }
     }
 
     // MARK: A daemon's connection
@@ -303,6 +326,7 @@ public final class LANHelper: @unchecked Sendable {
             return refuse("the LAN pools just changed; try again in a moment", ["retryAfter": wait])
         }
         guard let iface = file.resolvedInterface() else { return refuse("no LAN interface") }
+        if let pause = Self.publishPauseForTesting.withLockedValue({ $0 }) { Thread.sleep(forTimeInterval: pause) }
         lock.lock()
         let taken = listeners.contains { $0.key.ip == ip && $0.value.conn != conn }
         lock.unlock()
@@ -366,6 +390,12 @@ public final class LANHelper: @unchecked Sendable {
     private func withdraw(conn: Int, _ match: (Key, Listener) -> Bool) {
         addrLock.lock()
         defer { addrLock.unlock() }
+        withdrawLocked(conn: conn, match)
+    }
+
+    /// withdraw's work, `addrLock` held.
+    // @port-skip linux-only: LAN helper
+    private func withdrawLocked(conn: Int, _ match: (Key, Listener) -> Bool) {
         lock.lock()
         let gone = listeners.filter { $0.value.conn == conn && match($0.key, $0.value) }
         for (k, _) in gone { listeners[k] = nil }
@@ -398,6 +428,11 @@ public final class LANHelper: @unchecked Sendable {
     }
 
     // MARK: Host plumbing
+
+    /// Tests: a pause between publish's checks and its binding (the grants
+    /// changing in between), and a stand-in for `ip` (no CAP_NET_ADMIN).
+    static let publishPauseForTesting = NIOLockedValueBox<TimeInterval?>(nil)
+    static let ipForTesting = NIOLockedValueBox<(@Sendable ([String]) -> (Int32, String))?>(nil)
 
     /// The record of added /32s: [{"ip": …, "interface": …}].
     // @port-skip linux-only: LAN helper
@@ -458,6 +493,7 @@ public final class LANHelper: @unchecked Sendable {
     /// `ip …` (iproute2), its exit status and output.
     // @port-skip linux-only: LAN helper
     static func ip(_ args: [String]) -> (Int32, String) {
+        if let fake = ipForTesting.withLockedValue({ $0 }) { return fake(args) }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: FileManager.default.isExecutableFile(atPath: "/usr/sbin/ip") ? "/usr/sbin/ip" : "/sbin/ip")
         p.arguments = args

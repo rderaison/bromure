@@ -80,9 +80,15 @@ final class LANHelperClient: KubeLANPublishing, @unchecked Sendable {
                 (c["port"] as? Int).map { KubeLANPortKey(port: UInt16($0), udp: (c["udp"] as? Bool) ?? false) }
             }
         }
-        if reply["transient"] as? Bool == true || reply["retryAfter"] != nil { return keep() }
+        guard Self.refusedForGood(reply) else { return keep() }
         end(key)
         throw LANHelperError.refused((reply["error"] as? String) ?? "refused")
+    }
+
+    /// A refusal that won't pass: not `transient`, no `retryAfter`.
+    // @port-skip linux-only: LAN helper client
+    static func refusedForGood(_ reply: [String: Any]) -> Bool {
+        reply["ok"] as? Bool != true && reply["transient"] as? Bool != true && reply["retryAfter"] == nil
     }
 
     /// A publication over (refused for good, or revoked by the helper): its
@@ -189,8 +195,12 @@ final class LANHelperClient: KubeLANPublishing, @unchecked Sendable {
             let again = need && fd >= 0 ? published : [:]
             lock.unlock()
             for (pub, v) in again {
-                _ = try? request(["op": "publish", "ip": VMNetSwitch.ipString(pub.ip), "service": pub.service,
-                                  "owner": v.owner.uuidString, "ports": v.ports.keys.map { ["port": Int($0.port), "udp": $0.udp] }])
+                guard let reply = try? request(["op": "publish", "ip": VMNetSwitch.ipString(pub.ip), "service": pub.service,
+                                                "owner": v.owner.uuidString, "ports": v.ports.keys.map { ["port": Int($0.port), "udp": $0.udp] }])
+                else { continue }
+                // Refused for good (the grant went while the helper was away):
+                // over, as on publish's own path.
+                if Self.refusedForGood(reply) { end(pub) }
             }
         }
     }

@@ -1800,7 +1800,7 @@ struct KubeSweepGuardTests {
     }
 }
 
-@Suite("LAN pools (multi-user)")
+@Suite("LAN pools (multi-user)", .serialized)   // ipForTesting is process-wide
 struct LANPoolsTests {
     let net = (address: UInt32(10) << 24 | 250 << 16 | 1, mask: UInt32(0xFFFF_FF00))   // 10.250.0.1/24
 
@@ -1934,6 +1934,44 @@ struct LANPoolsTests {
         #expect(ContinuousClock.now - start >= .seconds(1), "the settle refusal was waited out, not returned")
     }
 
+    @Test("a publish that passed its grant check just before the grants changed is still revoked, at once")
+    func revokeRacesPublish() throws {
+        let me = try #require(LANAccount.name(of: getuid()))
+        guard me != "root" else { return }
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let pools = d + "/lan-pools.json", sock = d + "/lan.sock"
+        // 127.0.0.2 on lo: bindable without privileges; `ip` stood in for.
+        LANHelper.ipForTesting.withLockedValue { $0 = { _ in (0, "") } }
+        defer { LANHelper.ipForTesting.withLockedValue { $0 = nil } }
+        try LANPoolsAdmin.write(LANPoolsFile(interface: "lo", grants: [me: ["127.0.0.2"]]), to: pools)
+        var old = [timespec(tv_sec: time(nil) - 10, tv_nsec: 0), timespec(tv_sec: time(nil) - 10, tv_nsec: 0)]
+        utimensat(AT_FDCWD, pools, &old, 0)   // past the settle
+        let helper = LANHelper(poolsPath: pools, socketPath: sock, recordPath: d + "/added.json")
+        Thread.detachNewThread { try? helper.run() }
+        defer { helper.stop() }
+        for _ in 0..<100 where lanHelperRequest(sock, ["op": "whoami", "id": 0]) == nil { Thread.sleep(forTimeInterval: 0.02) }
+
+        // The publish passes its checks, then is held 1.5 s before binding;
+        // meanwhile the grant goes, and the watcher (0.5 s poll) sees it.
+        LANHelper.publishPauseForTesting.withLockedValue { $0 = 1.5 }
+        defer { LANHelper.publishPauseForTesting.withLockedValue { $0 = nil } }
+        let port = 20000 + Int(getpid() % 20000)
+        let held = HeldLANConnection(sock)
+        held.send(["op": "publish", "id": 1, "ip": "127.0.0.2", "service": "t/race",
+                   "owner": UUID().uuidString, "ports": [["port": port]]])
+        Thread.sleep(forTimeInterval: 0.3)
+        try LANPoolsAdmin.write(LANPoolsFile(interface: "lo", grants: [:]), to: pools)
+        let reply = held.line(containing: "\"id\":1", within: 5)
+        #expect(reply?.contains("\"ok\":true") == true, "the held publish binds: \(reply ?? "none")")
+        LANHelper.publishPauseForTesting.withLockedValue { $0 = nil }
+        // The fix: revoked within a watcher tick of the bind, not at the 5 s full pass.
+        let revoked = held.line(containing: "\"revoked\":true", within: 1.5)
+        #expect(revoked != nil, "revoked right after the bind")
+        #expect(!tcpConnects("127.0.0.2", port), "its listener is closed")
+        held.close()
+    }
+
     @Test("an address taken out of the grants stays blocked for the grace, then not")
     func blockListGrace() throws {
         let d = try shortTempDir()
@@ -2056,6 +2094,63 @@ private final class FakeLANHelper: @unchecked Sendable {
         lock.lock(); let cs = conns; conns = []; lock.unlock()
         for c in cs { shutdown(c, Int32(SHUT_RDWR)); close(c) }
     }
+}
+
+/// A connection to the LAN helper kept open: lines sent, lines read as they come.
+private final class HeldLANConnection: @unchecked Sendable {
+    private let fd: Int32
+    private let lock = NSLock()
+    private var lines: [String] = []
+    init(_ path: String) {
+        fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { b in for (i, c) in path.utf8.prefix(b.count - 1).enumerated() { b[i] = c } }
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        Thread.detachNewThread { [self] in
+            var acc = Data(), buf = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let n = read(fd, &buf, buf.count)
+                guard n > 0 else { return }
+                acc.append(contentsOf: buf[0..<n])
+                while let nl = acc.firstIndex(of: 0x0A) {
+                    let l = String(decoding: acc[acc.startIndex..<nl], as: UTF8.self)
+                    acc = Data(acc[(nl + 1)...])
+                    lock.lock(); lines.append(l); lock.unlock()
+                }
+            }
+        }
+    }
+    func send(_ msg: [String: Any]) {
+        guard var line = try? JSONSerialization.data(withJSONObject: msg) else { return }
+        line.append(0x0A)
+        _ = line.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    }
+    /// The first line holding `text`, waiting up to `seconds`.
+    func line(containing text: String, within seconds: Double) -> String? {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            lock.lock(); let hit = lines.first { $0.contains(text) }; lock.unlock()
+            if let hit { return hit }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return nil
+    }
+    func close() { shutdown(fd, Int32(SHUT_RDWR)); Glibc.close(fd) }
+}
+
+/// Whether a TCP connect to ip:port succeeds (1 s at most).
+private func tcpConnects(_ ip: String, _ port: Int) -> Bool {
+    let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    var tv = timeval(tv_sec: 1, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = in_port_t(UInt16(port).bigEndian)
+    inet_pton(AF_INET, ip, &addr.sin_addr)
+    return withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } } == 0
 }
 
 /// One request line to the LAN helper at `path`, and its reply.
