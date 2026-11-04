@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Gateway.self, Admin.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -556,12 +556,26 @@ struct Gateway: AsyncParsableCommand {
     }
 }
 
+/// `bromure-ac lan-helper` (bromure-lan.service): the multi-user server's
+/// LAN address pools (LANHelper).
+// @port-skip linux-only: multi-user LAN pools
+struct LANHelperCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lan-helper",
+        abstract: "Run the LAN address helper (bromure-lan.service: CAP_NET_ADMIN, CAP_NET_BIND_SERVICE).")
+    // @port-skip linux-only: multi-user LAN pools
+    func run() throws {
+        signal(SIGPIPE, SIG_IGN)
+        try LANHelper().run()
+    }
+}
+
 /// `bromure-ac admin` (root): the multi-user server's users.
 // @port-skip linux-only: multi-user Linux server administration
 struct Admin: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Multi-user server: add, remove and list Bromure users (root).",
-        subcommands: [Add.self, Remove.self, List.self, Code.self])
+        subcommands: [Add.self, Remove.self, List.self, Code.self, Pool.self])
 
     struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Add a Bromure user (a system account unless --existing).")
@@ -591,6 +605,70 @@ struct Admin: AsyncParsableCommand {
                 } else { vms = "daemon not answering" }
                 print(u.padding(toLength: 20, withPad: " ", startingAt: 0) + vms)
             }
+        }
+    }
+
+    /// The users' LAN address pools for their clusters' load balancers.
+    struct Pool: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "LAN address pools: where each user's cluster load balancers may be published (root).",
+            discussion: """
+            A granted address becomes one of this server's own addresses while a Service is published on it:             anything on the server listening on 0.0.0.0 (sshd, the gateway…) answers there too, as it already             does on the server's own LAN address.
+            """,
+            subcommands: [PoolAdd.self, PoolRemove.self, PoolList.self])
+    }
+
+    struct PoolAdd: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "add", abstract: "Grant a user a range (a.b.c.d-a.b.c.e, a CIDR, or addresses).")
+        @Argument(help: "Account name.") var user: String
+        @Argument(help: "The range.") var range: String
+        @Option(help: "The LAN interface for every pool (default: the default route's).") var interface: String?
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            guard geteuid() == 0 else { throw ValidationError("admin pool needs root") }
+            guard MultiUserAdmin.users().contains(user) else { throw ValidationError("\(user) isn't a Bromure user (bromure-ac admin add)") }
+            var file = try LANPoolsFile.load(requireInterface: interface == nil)
+            if let interface {
+                guard LANRoute.validInterfaceName(interface) else { throw ValidationError("'\(interface)' isn't an interface name") }
+                guard LANRoute.exists(interface) else { throw ValidationError("there's no interface \(interface)") }
+                file.interface = interface
+            }
+            guard let iface = file.resolvedInterface() else { throw ValidationError("no LAN interface (no default route; give --interface)") }
+            let gw = LANRoute.defaultRoute().flatMap { $0.interface == iface ? $0.gateway : nil }
+            let out = try LANPoolsAdmin.adding(range, for: user, to: file, hostAddresses: HostAddresses.read(),
+                                               gateway: gw, subnets: LANRoute.subnets(of: iface))
+            try LANPoolsAdmin.write(out)
+            print("\(user): \(out.grants[user]?.joined(separator: ", ") ?? "") on \(iface)")
+        }
+    }
+
+    struct PoolRemove: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "remove", abstract: "Take a range (or, without one, every range) back from a user.")
+        @Argument(help: "Account name.") var user: String
+        @Argument(help: "The range, as granted.") var range: String?
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            guard geteuid() == 0 else { throw ValidationError("admin pool needs root") }
+            var file = try LANPoolsFile.load(requireInterface: false)
+            if let range {
+                guard file.grants[user]?.contains(range) == true else { throw ValidationError("\(user) has no range '\(range)'") }
+                file.grants[user]?.removeAll { $0 == range }
+                if file.grants[user]?.isEmpty == true { file.grants[user] = nil }
+            } else {
+                file.grants[user] = nil
+            }
+            try LANPoolsAdmin.write(file)
+            print("\(user): \(file.grants[user]?.joined(separator: ", ") ?? "no pool")")
+        }
+    }
+
+    struct PoolList: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "list", abstract: "Every user's pool.")
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            let file = try LANPoolsFile.load(requireInterface: false)
+            print("interface: \(file.resolvedInterface() ?? "?")\(file.interface == nil ? " (default route)" : "")")
+            for (u, r) in file.grants.sorted(by: { $0.key < $1.key }) { print(u.padding(toLength: 20, withPad: " ", startingAt: 0) + r.joined(separator: ", ")) }
         }
     }
 

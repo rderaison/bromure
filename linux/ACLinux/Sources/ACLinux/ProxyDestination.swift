@@ -82,7 +82,7 @@ extension MitmProxy {
     // @port-skip linux-only: multi-user isolation
     static func isHostOwn(_ ip: IPAddress) -> Bool {
         switch ip {
-        case .v4(let v): return HostAddresses.shared.contains(v)
+        case .v4(let v): return HostAddresses.shared.contains(v) || LANPools.shared.contains(v)
         case .v6(let b): return HostAddresses.shared.contains6(b)
         }
     }

@@ -1,0 +1,50 @@
+# The multi-user server's LAN address helper: the one process that puts the
+# users' LAN pool addresses (bromure-ac admin pool) on the LAN interface, for
+# their clusters' load balancers. It holds CAP_NET_ADMIN and
+# CAP_NET_BIND_SERVICE and nothing else; a user's daemon connects to
+# /run/bromure-lan/lan.sock and may publish only inside its own grant
+# (SO_PEERCRED). It hands each connection to the owning daemon and never
+# reads the bytes. A published address is one of this server's own while it
+# is published: anything listening on 0.0.0.0 here (sshd, the gateway…)
+# answers on it too, as it does on the server's own LAN address.
+#
+# The socket is mode 0666 on purpose: any local account may connect, and
+# what it may do is decided only by its SO_PEERCRED uid matched against the
+# grants in /etc/bromure-ac/lan-pools.json (an account with no grant can
+# publish nothing). The /32s the helper adds are recorded in
+# /var/lib/bromure-lan/added.json; it only ever removes those.
+[Unit]
+Description=Bromure AC multi-user LAN address helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bromure-lan
+Group=bromure-lan
+ExecStart=/usr/local/lib/bromure-ac/bin/bromure-ac lan-helper
+Restart=on-failure
+RestartSec=2
+Environment=LD_LIBRARY_PATH=/usr/local/lib/bromure-ac/lib
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+RuntimeDirectory=bromure-lan
+RuntimeDirectoryMode=0755
+StateDirectory=bromure-lan
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

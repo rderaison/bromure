@@ -175,7 +175,9 @@ public actor Daemon {
         self.passt = passt
         self.sw = InterimSwitch(uplink: passt)
         if config.multiUser {
-            sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) } }
+            // The host's own addresses and every user's LAN pool, granted
+            // or published (LANPools: blocked before a first publish).
+            sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) || LANPools.shared.contains($0) } }
         }
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)
         self.registry = registry

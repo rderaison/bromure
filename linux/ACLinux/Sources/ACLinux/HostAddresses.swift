@@ -49,7 +49,7 @@ public final class HostAddresses: Sendable {
     }
 
     // @port-skip linux-only: multi-user isolation
-    static func read() -> Set<UInt32> {
+    public static func read() -> Set<UInt32> {
         var out = Set<UInt32>()
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0 else { return out }

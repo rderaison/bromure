@@ -522,7 +522,7 @@ final class LinuxKubeHost: KubeEngineHost {
     func parseKubeLANPool(_ text: String) -> [UInt32]? { Self.parsePool(text) }
 
     // @port-skip linux-only: KubeLANPool.parse
-    static func parsePool(_ text: String) -> [UInt32]? {
+    nonisolated static func parsePool(_ text: String) -> [UInt32]? {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
         var out: [UInt32] = []
@@ -558,7 +558,15 @@ final class LinuxKubeHost: KubeEngineHost {
     // @port-skip linux-only: ACAppDelegate.makeKubeLoadBalancer's Linux counterpart
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
                               serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? {
-        if daemon?.config.multiUser == true { return SharedServerLoadBalancer() }
+        if daemon?.config.multiUser == true {
+            // Only the admin's grant for this user; the cluster's lanPool,
+            // when set, narrows it. No grant: pending, saying so.
+            let grant = (try? LANPoolsFile.load())?.addresses(ofUID: getuid()) ?? []
+            let mine = pool.isEmpty ? grant.sorted() : pool.filter { grant.contains($0) }
+            guard !mine.isEmpty else { return SharedServerLoadBalancer() }
+            return KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
+                                    serverIP: serverIP, hostIP: nil, pool: mine, lan: lanClient)
+        }
         return KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
                                 serverIP: serverIP, hostIP: hostIP, pool: pool, lan: nil)
     }
@@ -573,6 +581,15 @@ final class LinuxKubeHost: KubeEngineHost {
     var connectorScriptURL: URL? { acResourceBundle.url(forResource: "vm-setup/bromure-msgbridge", withExtension: "sh") }
     // @port-skip linux-only: the resource bundle's script (macOS: ACAppDelegate's lazy connectorRelayURL)
     var connectorRelayURL: URL? { acResourceBundle.url(forResource: "vm-setup/bromure-msgbridge", withExtension: "py") }
+
+    /// The shared server's LAN helper connection, made on first use.
+    // @port-skip linux-only: the daemon's client of bromure-lan
+    private(set) lazy var lanClient = LANHelperClient(opener: { nodeID, header, done in
+        MainActor.assumeIsolated {
+            guard let engine = SessionStores.shared?.kubeEngine else { done(-1); return }
+            engine.openRelay(nodeID: nodeID, target: header, completion: done)
+        }
+    })
 
     /// A deleted cluster's or registry's machines, ended and removed.
     // @port-skip linux-only: macOS removes them with the cluster's folder

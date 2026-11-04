@@ -1799,3 +1799,282 @@ struct KubeSweepGuardTests {
         #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0) == nil, "an older store without registries")
     }
 }
+
+@Suite("LAN pools (multi-user)")
+struct LANPoolsTests {
+    let net = (address: UInt32(10) << 24 | 250 << 16 | 1, mask: UInt32(0xFFFF_FF00))   // 10.250.0.1/24
+
+    @Test("a grant must sit in the subnet, away from the host, the gateway and other users' grants")
+    func adminValidation() throws {
+        let host: Set<UInt32> = [net.address]
+        let gw = UInt32(10) << 24 | 250 << 16 | 254
+        var f = LANPoolsFile(interface: "lt0")
+        f = try LANPoolsAdmin.adding("10.250.0.100-10.250.0.103", for: "a", to: f, hostAddresses: host, gateway: gw, subnets: [net])
+        #expect(f.addresses(of: "a").count == 4)
+        func refused(_ r: String, _ user: String, _ why: String) {
+            do {
+                _ = try LANPoolsAdmin.adding(r, for: user, to: f, hostAddresses: host, gateway: gw, subnets: [net])
+                Issue.record("\(r) for \(user) accepted")
+            } catch { #expect("\(error)".contains(why), "\(r): \(error)") }
+        }
+        refused("10.250.1.5", "b", "subnet")
+        refused("10.250.0.1", "b", "own addresses")
+        refused("10.250.0.254", "b", "gateway")
+        refused("10.250.0.255", "b", "network or broadcast")
+        refused("10.250.0.102-10.250.0.110", "b", "already granted to a")
+        refused("not-a-range", "b", "isn't a range")
+        f = try LANPoolsAdmin.adding("10.250.0.110", for: "b", to: f, hostAddresses: host, gateway: gw, subnets: [net])
+        #expect(f.allAddresses.count == 5)
+    }
+
+    @Test("every daemon's block list follows the file, and keeps the last good one when it doesn't parse")
+    func blockListReload() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        let pools = LANPools(path: p)
+        let ip = UInt32(10) << 24 | 250 << 16 | 100
+        #expect(!pools.contains(ip))
+        try LANPoolsAdmin.write(LANPoolsFile(grants: ["a": ["10.250.0.100"]]), to: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.contains(ip), "a grant is blocked within the 0.5 s re-read")
+        try Data("garbage".utf8).write(to: URL(fileURLWithPath: p))
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.contains(ip), "a bad write never unblocks")
+        let mode = try FileManager.default.attributesOfItem(atPath: d + "/lan-pools.json")[.posixPermissions] as? NSNumber
+        #expect(mode != nil)
+        try FileManager.default.removeItem(atPath: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.contains(ip), "a deleted file never unblocks")
+    }
+
+    @Test("interface names: the kernel's characters, at most 15, no leading '-'; a bad one doesn't load")
+    func interfaceNames() throws {
+        for ok in ["eth0", "enp3s0", "br-lan", "vlan.10", "eth0:1", "a_b"] { #expect(LANRoute.validInterfaceName(ok), "\(ok)") }
+        for bad in ["", "-eth0", "eth0 up", "a/b", "eth0;x", "abcdefghijklmnop", ".", "..", "é"] { #expect(!LANRoute.validInterfaceName(bad), "\(bad)") }
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        try Data(#"{"interface": "-x", "grants": {}}"#.utf8).write(to: URL(fileURLWithPath: p))
+        #expect(throws: (any Error).self) { try LANPoolsFile.load(p, requireInterface: false) }
+        try Data(#"{"interface": "nosuchif0", "grants": {}}"#.utf8).write(to: URL(fileURLWithPath: p))
+        #expect(throws: (any Error).self) { try LANPoolsFile.load(p) }
+        #expect(try LANPoolsFile.load(p, requireInterface: false).interface == "nosuchif0")
+        #expect(throws: (any Error).self) { try LANPoolsFile.load(d + "/none.json", requireFile: true) }
+    }
+
+    @Test("grants match the caller's uid, from any number of threads at once")
+    func uidLookupsUnderLoad() throws {
+        let me = try #require(LANAccount.name(of: getuid()))
+        guard me != "root" else { return }
+        let f = LANPoolsFile(grants: [me: ["10.250.0.100"], "root": ["10.250.0.101"]])
+        let wrong = NIOLockedValueBoxShim(0)
+        DispatchQueue.concurrentPerform(iterations: 4000) { i in
+            let uid: uid_t = i % 2 == 0 ? getuid() : 0
+            let want: Set<UInt32> = [UInt32(10) << 24 | 250 << 16 | (i % 2 == 0 ? 100 : 101)]
+            if f.addresses(ofUID: uid) != want { wrong.mutate { $0 += 1 } }
+            _ = getpwuid(i % 3 == 0 ? 0 : getuid())   // the shared static buffer, churned meanwhile
+        }
+        #expect(wrong.value == 0)
+        #expect(f.addresses(ofUID: 4_000_000_000).isEmpty)
+    }
+
+    @Test("the helper labels every one of many parallel connections by its own uid, and refuses a missing pools file")
+    func helperLabelsParallelConnections() throws {
+        let me = try #require(LANAccount.name(of: getuid()))
+        guard me != "root" else { return }
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let pools = d + "/lan-pools.json", sock = d + "/lan.sock"
+        try LANPoolsAdmin.write(LANPoolsFile(grants: [me: ["10.250.0.100"], "root": ["10.250.0.101"]]), to: pools)
+        let helper = LANHelper(poolsPath: pools, socketPath: sock, recordPath: d + "/added.json")
+        Thread.detachNewThread { try? helper.run() }
+        defer { helper.stop() }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: sock) { Thread.sleep(forTimeInterval: 0.02) }
+        let bad = NIOLockedValueBoxShim<[String]>([])
+        DispatchQueue.concurrentPerform(iterations: 64) { _ in
+            guard let r = lanHelperRequest(sock, ["op": "whoami", "id": 1]) else { bad.mutate { $0.append("no reply") }; return }
+            if r["uid"] as? Int != Int(getuid()) || r["grants"] as? [String] != [me] { bad.mutate { $0.append("\(r)") } }
+        }
+        #expect(bad.value.isEmpty)
+        let owner = UUID().uuidString
+        let other = lanHelperRequest(sock, ["op": "publish", "id": 2, "ip": "10.250.0.101", "service": "s", "owner": owner, "ports": [["port": 8080]]])
+        #expect(other?["ok"] as? Bool == false && (other?["error"] as? String)?.contains("isn't in uid") == true, "\(other ?? [:])")
+        try FileManager.default.removeItem(atPath: pools)
+        let missing = lanHelperRequest(sock, ["op": "publish", "id": 3, "ip": "10.250.0.100", "service": "s", "owner": owner, "ports": [["port": 8080]]])
+        #expect(missing?["ok"] as? Bool == false && (missing?["error"] as? String)?.contains("missing") == true, "\(missing ?? [:])")
+    }
+
+    @Test("the daemon side keeps macOS's publish semantics: no error while the helper is down, the settle waited out once")
+    func clientPublishSemantics() throws {
+        let me = try #require(LANAccount.name(of: getuid()))
+        guard me != "root" else { return }
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let pools = d + "/lan-pools.json", sock = d + "/lan.sock"
+        let client = LANHelperClient(socketPath: sock) { _, _, _ in }
+        let ports = [KubeLANPortKey(port: 18080, udp: false): KubeLANTarget(nodeID: UUID(), nodeIP: "10.0.0.2", nodePort: 30080)]
+        let ip = UInt32(10) << 24 | 250 << 16 | 100
+        // No helper yet: not bound (every port a conflict), not a lasting refusal.
+        #expect(try client.publish(ip: ip, ports: ports, owner: UUID(), service: "default/web") == Array(ports.keys))
+        // A grant written just now: the helper says wait; the client waits
+        // once and gets the real answer (here: no CAP_NET_ADMIN to add it).
+        try LANPoolsAdmin.write(LANPoolsFile(interface: "lo", grants: [me: ["10.250.0.101"]]), to: pools)
+        let helper = LANHelper(poolsPath: pools, socketPath: sock, recordPath: d + "/added.json")
+        Thread.detachNewThread { try? helper.run() }
+        defer { helper.stop() }
+        for _ in 0..<100 where lanHelperRequest(sock, ["op": "whoami", "id": 0]) == nil { Thread.sleep(forTimeInterval: 0.02) }
+        let start = ContinuousClock.now
+        do {
+            _ = try client.publish(ip: ip + 1, ports: ports, owner: UUID(), service: "default/other")
+            Issue.record("published without CAP_NET_ADMIN")
+        } catch {
+            #expect(error.localizedDescription.contains("couldn't add"), "\(error)")
+        }
+        #expect(ContinuousClock.now - start >= .seconds(1), "the settle refusal was waited out, not returned")
+    }
+
+    @Test("an address taken out of the grants stays blocked for the grace, then not")
+    func blockListGrace() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        let pools = LANPools(path: p)
+        let ip = UInt32(10) << 24 | 250 << 16 | 100
+        try LANPoolsAdmin.write(LANPoolsFile(grants: ["a": ["10.250.0.100"]]), to: p)
+        #expect(pools.contains(ip))
+        try LANPoolsAdmin.write(LANPoolsFile(grants: ["a": ["10.250.0.101"]]), to: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.contains(ip), "still blocked right after the removal (the helper is withdrawing it)")
+        #expect(pools.contains(ip + 1))
+        Thread.sleep(forTimeInterval: 3)
+        #expect(!pools.contains(ip), "released after the grace")
+    }
+
+    @Test("the client ends a publication the helper revokes or refuses for good, keeps it through what passes")
+    func clientRevocationAndRefusalKinds() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let fake = try FakeLANHelper(path: d + "/lan.sock")
+        defer { fake.stop() }
+        let client = LANHelperClient(socketPath: fake.path) { _, _, _ in }
+        let ports = [KubeLANPortKey(port: 18080, udp: false): KubeLANTarget(nodeID: UUID(), nodeIP: "10.0.0.2", nodePort: 30080)]
+        let ip = UInt32(10) << 24 | 250 << 16 | 100, owner = UUID()
+        func publish() throws -> [KubeLANPortKey] { try client.publish(ip: ip, ports: ports, owner: owner, service: "default/web") }
+        func refusedForGood() -> Bool { do { _ = try publish(); return false } catch { return true } }
+
+        fake.answer = { _ in ["ok": true, "conflicts": []] }
+        #expect(try publish() == [])
+        // Live: what passes keeps it bound.
+        fake.answer = { _ in ["ok": false, "error": "missing", "transient": true] }
+        #expect(try publish() == [])
+        // Live, refused for good (the grant went): an error, and the next
+        // publish is a new one.
+        fake.answer = { _ in ["ok": false, "error": "not granted", "grantMiss": true] }
+        #expect(refusedForGood())
+        fake.answer = { _ in ["ok": false, "error": "missing", "transient": true] }
+        #expect(try publish() == Array(ports.keys), "new after the end: not bound, tried again")
+        // Another connection holds it: waited out once, then not bound (no lasting refusal).
+        fake.answer = { _ in ["ok": false, "error": "published by another connection", "retryAfter": 0.3] }
+        let t0 = ContinuousClock.now
+        #expect(try publish() == Array(ports.keys))
+        #expect(ContinuousClock.now - t0 >= .milliseconds(300))
+        #expect(fake.publishes.value >= 2, "retried once")
+        // Live again, then revoked by the helper: a refresh is a new publish.
+        fake.answer = { _ in ["ok": true, "conflicts": []] }
+        #expect(try publish() == [])
+        fake.push(["revoked": true, "ip": "10.250.0.100", "service": "default/web", "error": "regranted"])
+        Thread.sleep(forTimeInterval: 0.3)
+        fake.answer = { _ in ["ok": false, "error": "missing", "transient": true] }
+        #expect(try publish() == Array(ports.keys), "the revoked publication isn't live any more")
+    }
+}
+
+/// A stand-in LAN helper: answers each request line with `answer` (its
+/// `id` copied), and can push lines of its own.
+private final class FakeLANHelper: @unchecked Sendable {
+    let path: String
+    private let fd: Int32
+    private let lock = NSLock()
+    private var conns: [Int32] = []
+    private var _answer: @Sendable ([String: Any]) -> [String: Any] = { _ in ["ok": true] }
+    var answer: @Sendable ([String: Any]) -> [String: Any] {
+        get { lock.lock(); defer { lock.unlock() }; return _answer }
+        set { lock.lock(); _answer = newValue; lock.unlock() }
+    }
+    let publishes = NIOLockedValueBoxShim(0)
+
+    init(path: String) throws {
+        self.path = path
+        fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { b in for (i, c) in path.utf8.prefix(b.count - 1).enumerated() { b[i] = c } }
+        let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard rc == 0, listen(fd, 4) == 0 else { throw POSIXError(.EADDRINUSE) }
+        Thread.detachNewThread { [self] in
+            while true {
+                let c = accept(fd, nil, nil)
+                guard c >= 0 else { return }
+                lock.lock(); conns.append(c); lock.unlock()
+                Thread.detachNewThread { [self] in serve(c) }
+            }
+        }
+    }
+
+    private func serve(_ c: Int32) {
+        var acc = Data(), buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(c, &buf, buf.count)
+            guard n > 0 else { return }
+            acc.append(contentsOf: buf[0..<n])
+            while let nl = acc.firstIndex(of: 0x0A) {
+                let line = acc[acc.startIndex..<nl]
+                acc = Data(acc[(nl + 1)...])
+                guard let req = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
+                if req["op"] as? String == "publish" { publishes.mutate { $0 += 1 } }
+                var reply = answer(req)
+                reply["id"] = req["id"]
+                write(reply, to: c)
+            }
+        }
+    }
+
+    private func write(_ msg: [String: Any], to c: Int32) {
+        guard var line = try? JSONSerialization.data(withJSONObject: msg) else { return }
+        line.append(0x0A)
+        _ = line.withUnsafeBytes { Glibc.write(c, $0.baseAddress, $0.count) }
+    }
+
+    func push(_ msg: [String: Any]) {
+        lock.lock(); let cs = conns; lock.unlock()
+        for c in cs { write(msg, to: c) }
+    }
+
+    func stop() {
+        shutdown(fd, Int32(SHUT_RDWR)); close(fd)
+        lock.lock(); let cs = conns; conns = []; lock.unlock()
+        for c in cs { shutdown(c, Int32(SHUT_RDWR)); close(c) }
+    }
+}
+
+/// One request line to the LAN helper at `path`, and its reply.
+private func lanHelperRequest(_ path: String, _ req: [String: Any]) -> [String: Any]? {
+    let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &addr.sun_path) { b in for (i, c) in path.utf8.prefix(b.count - 1).enumerated() { b[i] = c } }
+    let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+    guard rc == 0, var line = try? JSONSerialization.data(withJSONObject: req) else { return nil }
+    line.append(0x0A)
+    guard line.withUnsafeBytes({ write(fd, $0.baseAddress, $0.count) }) == line.count else { return nil }
+    var acc = Data(), buf = [UInt8](repeating: 0, count: 4096)
+    while !acc.contains(0x0A) {
+        let n = read(fd, &buf, buf.count)
+        guard n > 0 else { return nil }
+        acc.append(contentsOf: buf[0..<n])
+    }
+    return (try? JSONSerialization.jsonObject(with: acc[..<acc.firstIndex(of: 0x0A)!])) as? [String: Any]
+}

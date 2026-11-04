@@ -40,10 +40,27 @@ getent group bromure >/dev/null || groupadd --system bromure
 getent passwd bromure >/dev/null || useradd --system --gid bromure --no-create-home --home-dir /var/lib/bromure-gw \
   --shell /usr/sbin/nologin --comment "Bromure SSH gateway" bromure
 
-install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bromure-gw.service" /etc/systemd/system/
+# The LAN address helper (bromure-lan.service) and its pools file. A user's
+# granted address (bromure-ac admin pool add) is one of this server's own
+# while a Service is published on it: anything listening on 0.0.0.0 here
+# (sshd, the gateway…) answers on it too, as it does on the server's own LAN
+# address. arp_notify announces an address the moment it's added.
+getent group bromure-lan >/dev/null || groupadd --system bromure-lan
+getent passwd bromure-lan >/dev/null || useradd --system --gid bromure-lan --no-create-home --home-dir /nonexistent \
+  --shell /usr/sbin/nologin --comment "Bromure LAN address helper" bromure-lan
+install -d -m 755 /etc/bromure-ac
+[ -e /etc/bromure-ac/lan-pools.json ] || { echo '{"grants": {}}' > /etc/bromure-ac/lan-pools.json; chmod 644 /etc/bromure-ac/lan-pools.json; }
+LANIF=$(python3 -c 'import json; print(json.load(open("/etc/bromure-ac/lan-pools.json")).get("interface") or "")')
+[ -n "$LANIF" ] || LANIF=$(ip -4 route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+# The name goes into a sysctl path: the same rule as bromure-ac's (LANRoute.validInterfaceName).
+case "$LANIF" in -*|.|..|*[!A-Za-z0-9_.:-]*) echo "install.sh: '$LANIF' isn't an interface name" >&2; exit 1;; esac
+[ ${#LANIF} -le 15 ] || { echo "install.sh: '$LANIF' is longer than 15 characters" >&2; exit 1; }
+[ -n "$LANIF" ] && { echo "net.ipv4.conf.$LANIF.arp_notify = 1" > /etc/sysctl.d/60-bromure-lan.conf; sysctl -q -p /etc/sysctl.d/60-bromure-lan.conf; }
+
+install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bromure-gw.service" "$HERE/bromure-lan.service" /etc/systemd/system/
 install -d -m 700 -o bromure -g bromure /var/lib/bromure-gw
 [ -e /var/lib/bromure-gw/gateway.json ] || { printf '{"port": %s, "bindAddress": "%s", "codeLogin": true, "socketDir": "/run/bromure-ac/sock"}\n' "$PORT" "$BIND" > /var/lib/bromure-gw/gateway.json; chown bromure:bromure /var/lib/bromure-gw/gateway.json; chmod 600 /var/lib/bromure-gw/gateway.json; }
 systemctl daemon-reload
-systemctl enable --now bromure-gw.service
-systemctl restart bromure-gw.service
-echo "installed; gateway: $(systemctl is-active bromure-gw.service). Add users: bromure-ac admin add <name>"
+systemctl enable --now bromure-gw.service bromure-lan.service
+systemctl restart bromure-gw.service bromure-lan.service
+echo "installed; gateway: $(systemctl is-active bromure-gw.service), LAN helper: $(systemctl is-active bromure-lan.service). Add users: bromure-ac admin add <name>; their LAN pools: bromure-ac admin pool add <name> <range>"
