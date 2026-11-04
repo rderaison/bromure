@@ -58,7 +58,7 @@ struct SnapshotTests {
     }
 }
 
-@Suite("passt uplink", .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/passt")))
+@Suite("passt uplink", .serialized, .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/passt")))
 struct PasstUplinkTests {
     @Test("passt answers ARP for the gateway on its MAC, and exits when we close")
     func arp() async throws {
