@@ -943,6 +943,25 @@ final class AgentSessionStore {
         conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
     }
 
+    /// Which conversation a chat for `s` may read — one rule for the app's own
+    /// chat and the fat client's: the session's own, never the folder's newest
+    /// (an archived session's, a second session's live one).
+    func chatTranscriptPin(for s: AgentSession?, profileID: UUID) -> TranscriptPin {
+        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return TranscriptPin(kimiSession: id)
+        }
+        if let s, s.tool == .grok || s.tool == .codex || s.tool == .omp {
+            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if pin != TranscriptPin() { return pin }
+            // Not pinned yet: never another session's conversation.
+            pin.foreignConversations = conversationsClaimed(tool: s.tool, profileID: profileID, besides: s.id)
+            return pin
+        }
+        var pin = TranscriptPin()
+        pin.kimiExclude = kimiSessionsClaimed(profileID: profileID, besides: s?.id)
+        return pin
+    }
+
     /// The uuid-named conversations sessions of `tool` on `profileID` other
     /// than `besides` own, lowercased.
     func conversationsClaimed(tool: Profile.Tool, profileID: UUID, besides: UUID?) -> [String] {

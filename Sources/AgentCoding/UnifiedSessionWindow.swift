@@ -3741,6 +3741,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // machine was picked: a pane removed and re-added while a room had
         // the stage (re-attached quietly, never mounted) kept `selectedID`,
         // and its sessions came back to a blank stage with no composer.
+        // The tab first: mounting the pane builds the chat of its active tab,
+        // which would be the session it showed last, not this one.
+        if let p = pane(id), p.model.tabs.indices.contains(index) { p.model.activeIndex = index }
         if selectedID != id || !isMounted(id) { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
