@@ -19,7 +19,9 @@ import NIOConcurrencyHelpers
 /// and unknown unicast are flooded to the peers and the uplink. Ports are
 /// one daemon's, so this never crosses users. One passt-specific deviation:
 /// an ARP request for a peer's leased address isn't sent to passt, which
-/// would answer for any address and draw the peer's traffic to the uplink.
+/// would answer for any address and draw the peer's traffic to the uplink;
+/// and a frame to the gateway's MAC whose IPv4 destination is a peer's
+/// lease (a guest that cached passt's answer) is delivered to the peer.
 /// No DNS snoop, no egress policy, no CDP pairing gate. Don't build on it.
 // @port-skip linux-only: interim stand-in for VMNetSwitch until ACCore ships it
 public final class InterimSwitch: Sendable {
@@ -97,6 +99,7 @@ public final class InterimSwitch: Sendable {
     /// the uplink too.
     // @port-skip linux-only: the bridgePeers half of VMNetSwitch's port read loop
     func toPeers(_ f: Data, from: MAC) -> Bool {
+        var f = f
         guard f.count >= 14 else { return true }
         // Read in place: no allocation on this per-frame path.
         let (dst, src) = f.withUnsafeBytes { b -> (MAC, MAC) in
@@ -105,7 +108,17 @@ public final class InterimSwitch: Sendable {
             return (MAC(raw: d), MAC(raw: s))
         }
         learned.withLockedValue { if $0[src] != from { $0[src] = from } }
-        if dst == gatewayMAC { return true }
+        if dst == gatewayMAC {
+            // A peer's address behind the gateway's MAC: the guest learned it
+            // when passt answered ARP for it (before the peer existed, or
+            // before this switch bridged peers). Delivered to the peer, its
+            // MAC written in place, as the frame would have been addressed.
+            guard let ip = Self.ipv4Destination(f), let peer = dhcp.mac(forIP: ip), peer != from,
+                  let p = ports.withLockedValue({ $0.first(where: { $0.mac == peer }) }) else { return true }
+            f.withUnsafeMutableBytes { peer.write(to: $0) }
+            _ = p.port.send(f)
+            return false
+        }
         let all = ports.withLockedValue { $0 }
         let multicast = f[f.startIndex] & 1 != 0
         if !multicast, let owner = learned.withLockedValue({ $0[dst] }) {
