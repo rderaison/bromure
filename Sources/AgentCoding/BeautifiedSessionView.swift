@@ -630,18 +630,36 @@ final class BeautifiedSessionModel: ObservableObject {
     /// `TranscriptRow.userCollapses`). Kept here so a remount of the chat
     /// (a layout switch, a zoom) doesn't fold them again.
     @Published var expandedMessages: Set<Int> = []
-    /// What's typed in the composer. Kept in its own observable
-    /// (`composer`), NOT published by the model: every model change
-    /// re-renders the whole chat, transcript included, and a keystroke — or
-    /// a 200 KB paste — must only re-render the composer (`ComposerObserver`).
+    /// What's typed in the composer. Kept in its own observable (`composer`),
+    /// NOT published by the model: every model change re-renders the whole
+    /// chat, transcript included. Setting this replaces what the field shows
+    /// (a send clearing it, a command completed, a draft brought back).
     var composerText: String {
         get { composer.text }
         set {
-            composer.text = newValue
+            composer.replace(newValue)
             if let draftKey { ComposerDrafts[draftKey].text = newValue }
         }
     }
     let composer = ComposerTextStore()
+
+    /// The field reports what was typed: it already shows it, so nothing needs
+    /// redrawing unless what's derived from the text changed (`ComposerTextStore`).
+    func composerTyped(_ text: String) {
+        let previous = composer.text
+        composer.typed(text)
+        if let draftKey { ComposerDrafts[draftKey].text = text }
+        // A file dropped on the field arrives as its path. A key typed can't be
+        // one, and telling needs a round trip to the pasteboard daemon per key.
+        guard ComposerText.mayBeDrop(from: previous, to: text) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.composer.text == text else { return }
+            let (rest, files) = DroppedFile.absorbHostPaths(in: text)
+            guard !files.isEmpty else { return }
+            self.drop(files)
+            self.composerText = rest
+        }
+    }
     /// Where this chat's unsent draft is kept (`ComposerDrafts`): the machine
     /// and tab it's for. Setting it brings the draft back.
     var draftKey: String? {
@@ -3332,16 +3350,14 @@ struct BeautifiedSessionView: View {
     /// What's typed after a leading "/" — the palette shows for it until a
     /// space (the command is chosen) or a newline.
     private var paletteQuery: String? {
-        let t = model.composerText
-        guard t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") else { return nil }
-        return String(t.dropFirst())
+        model.composer.shape.palette
     }
     /// "@…" being typed as the last word: the sessions with a nickname
     /// that match, for the composer to complete ("Ask @seclio to…"). Never
     /// inside a slash command; gone once the word is closed with a space.
     private var mentionQuery: String? {
         guard model.peerMentions != nil else { return nil }
-        return PeerMentionCompletion.query(in: model.composerText)
+        return model.composer.shape.mention
     }
     /// Every session but this one: by its nickname, or by the name it
     /// would get (tagged so), matched on the name or the title. Named
@@ -3612,7 +3628,7 @@ struct BeautifiedSessionView: View {
                     ? NSLocalizedString("Message the agent… (or drop files)", comment: "beautified composer")
                     : String(format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                              model.agentDisplayName)),
-                text: $model.composerText,
+                text: Binding(get: { model.composer.text }, set: { model.composerTyped($0) }),
                 autofocus: true,
                 busy: model.sending,
                 accent: model.accent,
@@ -3621,14 +3637,6 @@ struct BeautifiedSessionView: View {
                 onStop: { model.interrupt() },
                 onKey: { handlePaletteKey($0) },
                 onSend: { model.send() })
-            // A drop that lands ON the field pastes the file's host path
-            // (the field takes the drag first): turn it into a chip.
-            .onChange(of: model.composerText) { _, text in
-                let (rest, files) = DroppedFile.absorbHostPaths(in: text)
-                guard !files.isEmpty else { return }
-                model.drop(files)
-                model.composerText = rest
-            }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
     }
@@ -4242,8 +4250,48 @@ struct BeautifiedSessionView: View {
 
 /// The composer's text (`BeautifiedSessionModel.composer`), observed by the
 /// composer alone.
+///
+/// A keystroke publishes nothing. The text view has already drawn the letter;
+/// an update here would run SwiftUI's graph over the composer and, through its
+/// layout, the chat around it, at a cost that grew with the transcript. Only
+/// what the chat shows differently because of the text is published.
 final class ComposerTextStore: ObservableObject {
-    @Published var text = ""
+    /// What the chat's views take from the text.
+    struct Shape: Equatable {
+        /// Nothing to send (the send button).
+        var blank = true
+        /// "/…" being typed: the command palette's query.
+        var palette: String?
+        /// "@…" being typed as the last word: the session list's query.
+        var mention: String?
+
+        init() {}
+        init(_ t: String) {
+            blank = t.allSatisfy(\.isWhitespace)
+            if t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") { palette = String(t.dropFirst()) }
+            mention = PeerMentionCompletion.query(in: t)
+        }
+    }
+
+    private(set) var text = ""
+    @Published private(set) var shape = Shape()
+    /// Bumped when the text is replaced from outside, so the field picks it up.
+    @Published private(set) var replacements = 0
+
+    /// From the field, which is showing it already.
+    func typed(_ s: String) {
+        text = s
+        let new = Shape(s)
+        if new != shape { shape = new }
+    }
+
+    /// From anywhere else.
+    func replace(_ s: String) {
+        text = s
+        let new = Shape(s)
+        if new != shape { shape = new }
+        replacements &+= 1
+    }
 }
 
 /// Re-renders `content` when the composer's text changes — and only it: the
