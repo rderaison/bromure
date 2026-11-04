@@ -512,6 +512,14 @@ public final class MitmEngine {
         MitmTasks.spawn { [weak self] in
             guard let self else { close(appFD); return }
 
+            // A frame the guest addressed to loopback / link-local reaches
+            // the switch only if it was forged; never dial the Mac's own.
+            if let ip = OpenShellPolicy.IPAddress(destIP), UpstreamPinning.isAlwaysBlocked(ip) {
+                SupplyChainLog.shared.record(
+                    "[firewall] ✗ deny tcp \(destIP):\(destPort) — always-blocked address (\(profileID.uuidString.prefix(8)))")
+                close(appFD); return
+            }
+
             // Strict sandbox: ask the guest's root attestor which executable
             // opened this connection (by its source port), before any policy
             // decision. No answer = no identity = only provider rules apply.

@@ -12,11 +12,12 @@ enum UpstreamPinning {
     typealias IPAddress = OpenShellPolicy.IPAddress
 
     /// Addresses the upstream leg may use: `.success(nil)` = not pinned (no
-    /// OpenShell policy, or a Bromure-managed provider endpoint).
+    /// OpenShell policy, or a Bromure-managed provider endpoint). Without a
+    /// policy the destination is still checked (`defaultCheck`).
     static func pin(policy: OpenShellPolicy?, host: String, port: Int,
                     identity: OpenShellPolicy.BinaryIdentity?, enforceBinaries: Bool)
         -> Result<[IPAddress]?, OpenShellPolicy.DestinationDenial> {
-        guard let policy else { return .success(nil) }
+        guard let policy else { return defaultCheck(host: host, port: port).map { nil } }
         let p = UInt16(truncatingIfNeeded: port)
         if policy.networkPolicies.contains(where: { $0.endpoints.contains { $0.managed && $0.matches(host: host.lowercased(), port: p) } }) {
             return .success(nil)
@@ -26,6 +27,50 @@ enum UpstreamPinning {
         return policy.destinationPlan(host: host, port: p, identity: identity, enforceBinaries: enforceBinaries)
             .flatMap { OpenShellPolicy.validateDestination($0, host: host, port: p, resolved: resolved) }
             .map { Optional($0) }
+    }
+
+    /// Every workspace, policy or not: the proxy runs on the user's Mac, so a
+    /// guest must never get it to fetch the Mac's own loopback (dev servers,
+    /// the automation API), link-local (169.254/16, fe80::/10) or the
+    /// unspecified address — OpenShell's always-blocked set, IPv6 forms that
+    /// carry such an IPv4 address included. Every answer for the name is
+    /// checked; LAN addresses stay reachable. The upstream is still dialed by
+    /// name (the routing that follows, local models, may send it elsewhere),
+    /// so a name that doesn't resolve is left to fail at the dial, and names
+    /// the proxy answers itself (`bromure.llm`, hooks) keep working.
+    static func defaultCheck(host: String, port: Int,
+                             resolver: (String, Int) -> [IPAddress] = { resolve($0, port: $1) })
+        -> Result<Void, OpenShellPolicy.DestinationDenial> {
+        var lookup = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if lookup.hasSuffix(".") { lookup.removeLast() }
+        if lookup.lowercased() == InferenceService.localMitmHost { return .success(()) }
+        let resolved = IPAddress(lookup).map { [$0] } ?? resolver(lookup, port)
+        if let ip = resolved.first(where: isAlwaysBlocked) {
+            return .failure(.init(reason: "\(host) resolves to always-blocked address \(ip), connection rejected"))
+        }
+        return .success(())
+    }
+
+    /// OpenShell's always-blocked set, judging an IPv6 form that carries an
+    /// IPv4 address by that address.
+    static func isAlwaysBlocked(_ ip: IPAddress) -> Bool {
+        OpenShellPolicy.isAlwaysBlocked(ip) || embeddedV4(ip).map { OpenShellPolicy.isAlwaysBlocked(.v4($0)) } == true
+    }
+
+    /// The IPv4 address an IPv6 form carries: v4-mapped (::ffff:a.b.c.d),
+    /// IPv4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96, 64:ff9b:1::/48)
+    /// and 6to4 (2002:aabb:ccdd::/48).
+    static func embeddedV4(_ ip: IPAddress) -> UInt32? {
+        guard case .v6(let b) = ip, b.count == 16 else { return nil }
+        if let m = ip.mappedV4 { return m }
+        let tail = UInt32(b[12]) << 24 | UInt32(b[13]) << 16 | UInt32(b[14]) << 8 | UInt32(b[15])
+        if b[0..<12].allSatisfy({ $0 == 0 }), tail > 1 { return tail }        // not :: or ::1 (v6's own)
+        if Array(b[0..<12]) == [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] { return tail }
+        if Array(b[0..<6]) == [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01] { return tail }
+        if b[0] == 0x20, b[1] == 0x02 {
+            return UInt32(b[2]) << 24 | UInt32(b[3]) << 16 | UInt32(b[4]) << 8 | UInt32(b[5])
+        }
+        return nil
     }
 
     /// Host-side DNS (the system resolver), every A/AAAA answer.
