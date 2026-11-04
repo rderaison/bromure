@@ -3305,7 +3305,10 @@ struct BeautifiedSessionView: View {
     @State private var whileAway: UnseenSummary?
     @State private var newSince: Date?
     @State private var arrival = ChatArrivalTracker()
-    @StateObject private var scrub = ScrubLabelState()
+    /// Held, not observed: only `ScrubLabelView` observes it. As a @StateObject
+    /// here, each change of the label would re-run this whole view, and every
+    /// row's position report with it.
+    @State private var scrub = ScrubLabelState()
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -4174,7 +4177,9 @@ struct BeautifiedSessionView: View {
     /// window first, and the tail no longer followed.
     private func jumpToNew(_ summary: UnseenSummary, _ proxy: ScrollViewProxy) {
         whileAway = nil
-        let needed = model.items.count - summary.firstItemIndex
+        // New, but with no row of its own (a question up as a card): that's at the end.
+        guard let first = summary.firstItemIndex else { scrollToTail(proxy); return }
+        let needed = model.items.count - first
         if needed > model.renderLimit { model.renderLimit = needed }
         let weight = Self.renderWeight(model.items.suffix(needed))
         if weight > model.renderChars { model.renderChars = weight }

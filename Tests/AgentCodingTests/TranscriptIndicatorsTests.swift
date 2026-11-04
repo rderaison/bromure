@@ -66,6 +66,12 @@ struct TranscriptIndicatorsTests {
         let s = try #require(UnseenSummary.compute(items, since: t0))
         #expect(s.replies == 1 && s.steps == 1)
         #expect(s.firstItemIndex == 2)
+        // Something new with no row of its own: reported, nothing to jump to.
+        let q = TranscriptQuestion(question: "Which?", header: "", multiSelect: false, options: [])
+        let onlyQuestion = UnseenSummary.compute([reply(1, t0),
+            TranscriptItem(id: 2, kind: .question(q), timestamp: t0.addingTimeInterval(5))], since: t0)
+        #expect(onlyQuestion != nil)
+        #expect(onlyQuestion?.firstItemIndex == nil)
         #expect(s.latest == "Done, all green.")
         #expect(s.counts == "1 reply · 1 step")
     }
@@ -91,6 +97,10 @@ struct TranscriptIndicatorsTests {
         st.note(a, upTo: t0.addingTimeInterval(-50))
         #expect(st.seen(a) == t0)
         #expect(st.seen(b) == nil)
+        // Sessions don't overwrite each other's marks, also read back fresh.
+        st.note(b, upTo: t0.addingTimeInterval(7))
+        #expect(st.seen(a) == t0)
+        #expect(st.seen(b) == t0.addingTimeInterval(7))
         for i in 0..<320 { st.note(UUID(), upTo: t0.addingTimeInterval(Double(i + 1))) }
         #expect(st.seen(a) == nil, "the oldest entry should have made way")
     }

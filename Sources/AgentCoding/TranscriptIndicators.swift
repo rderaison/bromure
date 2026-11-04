@@ -75,13 +75,15 @@ struct UnseenSummary: Equatable {
     var steps: Int
     /// The newest reply's opening words: what's new, at a glance.
     var latest: String?
-    /// The first new item, for scrolling to it.
-    var firstItemIndex: Int
+    /// The first new item with a row of its own, for scrolling to it. nil when
+    /// what's new is only a plan or a question, which aren't drawn among the rows.
+    var firstItemIndex: Int?
 
     /// nil when there's nothing new. Times come from the transcript, so `since`
     /// must too: a guest's clock isn't this Mac's. Your own messages don't count.
     static func compute(_ items: [TranscriptItem], since: Date) -> UnseenSummary? {
         var first: Int?
+        var anything = false
         var replies = 0, steps = 0
         var latest: String?
         for (i, item) in items.enumerated() {
@@ -94,9 +96,14 @@ struct UnseenSummary: Equatable {
             case .toolUse: steps += 1
             default: break
             }
-            if first == nil { first = i }
+            anything = true
+            switch item.kind {
+            case .todo, .question: break
+            default: if first == nil { first = i }
+            }
         }
-        return first.map { UnseenSummary(since: since, replies: replies, steps: steps, latest: latest, firstItemIndex: $0) }
+        guard anything else { return nil }
+        return UnseenSummary(since: since, replies: replies, steps: steps, latest: latest, firstItemIndex: first)
     }
 
     /// The first line that says something, without its markdown marks.
