@@ -3220,7 +3220,7 @@ struct RemoteToolbarBar: View {
                     }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
-                    LinuxPill(back: false, action: onToggleLinux)
+                    LinuxPill(back: false, chat: model.sessionTerminalShown, action: onToggleLinux)
                 } else if terminalHostsSession {
                     LinuxPill(back: true, action: onToggleLinux)
                 }
@@ -3493,7 +3493,8 @@ final class RemoteHostWindow: NSWindow {
     /// The (session, batch of changes) the Files pane last popped up for —
     /// see `revealChangedFiles`.
     private var revealedChangesKey: String?
-    /// While a session is on stage: chat; a machine's tab: the terminal —
+    /// While a session is on stage: chat, or its terminal if the user chose
+    /// that (`SessionTerminalPreference`); a machine's tab: the terminal —
     /// never the app-wide default.
     private var sessionViewMode: SessionViewMode?
     private static let sessionHeaderHeightValue: CGFloat = 66
@@ -5921,10 +5922,14 @@ final class RemoteHostWindow: NSWindow {
         default: running = false
         }
         let liveChat = live != nil && running && bucket != .ended
+        let liveTerminal = SessionTerminalPreference.showsTerminal(
+            prefers: SessionTerminalPreference.enabled, tabLive: live != nil && running && s.windowIndex != nil,
+            launching: s.isLaunching)
+        model.sessionTerminalShown = liveTerminal
         revealChangedFiles(for: s, live: live != nil && running)
         let key: String
-        if liveChat, let w = s.windowIndex {
-            key = "live:\(s.profileID.uuidString):\(w)"
+        if liveChat || liveTerminal, let w = s.windowIndex {
+            key = SessionTerminalPreference.liveKey(terminal: liveTerminal, profileID: s.profileID, tab: w)
         } else if s.isLaunching {
             key = "launch"
         } else {
@@ -5937,7 +5942,7 @@ final class RemoteHostWindow: NSWindow {
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
-        if liveChat, let w = s.windowIndex {
+        if liveChat || liveTerminal, let w = s.windowIndex {
             sessionOverlayHost?.removeFromSuperview()
             sessionOverlayHost = nil
             let k = "\(s.profileID.uuidString):\(w)"
@@ -5948,7 +5953,7 @@ final class RemoteHostWindow: NSWindow {
                 seededSessions.insert(s.id)
                 sessionSeeds[k] = msg
             }
-            sessionViewMode = .beautified
+            sessionViewMode = liveTerminal ? .terminal : .beautified
             model.selectedID = s.profileID
             controller.selectTab(s.profileID, index: w)
             showWorkspace(s.profileID, window: w)
@@ -6029,6 +6034,7 @@ final class RemoteHostWindow: NSWindow {
     private func clearSessionStage() {
         clearRoom()
         let model = controller.listModel
+        model.sessionTerminalShown = false
         guard selectedSessionID != nil || model.newSessionSelected || sessionOverlayHost != nil else { return }
         selectedSessionID = nil
         model.selectedSessionID = nil
@@ -6251,16 +6257,32 @@ final class RemoteHostWindow: NSWindow {
         }
     }
 
-    /// Linux mode: the terminal for every tab, the machine's controls back,
-    /// the Machines list unfolded.
-    /// Toolbar / ⌥⌘U, as in the local window: from a session, the Linux
-    /// machine behind it — its terminal tab in the Machines list. From that
-    /// terminal, the session again.
+    /// Toolbar / ⌥⌘U, as in the local window: flip the session on stage
+    /// between its chat and its terminal, in place, and keep that choice. With
+    /// no tab to show, the machine's dashboard. From a machine's tab that
+    /// hosts a session, that session.
     func toggleLinux() {
         if let id = selectedSessionID {
-            showLinux(for: id)
+            let model = controller.listModel
+            if model.sessionTerminalShown {
+                SessionTerminalPreference.enabled = false
+                selectSession(id)
+            } else if let s = controller.sessionStore.session(id), !s.isLaunching, s.windowIndex != nil,
+                      SessionHome.liveTabPosition(for: s, in: model) != nil, isRunning(s.profileID) {
+                SessionTerminalPreference.enabled = true
+                selectSession(id)
+            } else {
+                showLinux(for: id)
+            }
         } else if let id = sessionOnShownTab {
             selectSession(id)
+        }
+    }
+
+    private func isRunning(_ id: Profile.ID) -> Bool {
+        switch controller.runState(for: id) {
+        case .running, .booting: return true
+        default: return false
         }
     }
 

@@ -334,13 +334,20 @@ final class SessionPane {
     var sessionOnStage = false {
         didSet {
             guard sessionOnStage != oldValue else { return }
+            if !sessionOnStage { sessionTerminalWindow = nil }
             // Before anything mounts (no roster yet, the chat's first layout),
             // the stage shows the chat's own background — a dark terminal-
             // coloured frame flashed for a second when a session was picked.
-            if sessionOnStage && !beautifierLocked { applyContainerBackground(chat: true) }
+            if sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil {
+                applyContainerBackground(chat: true)
+            }
             updateNativeTerminalMount()
         }
     }
+    /// The session on stage shows its terminal rather than its chat (the
+    /// Linux pill): the tmux window it runs in. Set before the session is
+    /// mounted, so the chat is never built just to be replaced.
+    var sessionTerminalWindow: Int?
 
     /// The container's backing: the chat's window background while the chat
     /// is (or is about to be) on show, the terminal's colour otherwise (a
@@ -571,8 +578,10 @@ final class SessionPane {
         let activeTab = model.tabs[model.activeIndex]
         let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
             || agentWindows.contains(activeTab.index)
-        if sessionOnStage && !beautifierLocked { mountBeautified(); return }
-        if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        if sessionTerminalWindow == nil {
+            if sessionOnStage && !beautifierLocked { mountBeautified(); return }
+            if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
         containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
@@ -897,7 +906,8 @@ final class SessionPane {
         // honors the profile's window translucency.
         let opacity = viewMode == .beautified ? 1.0 : min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
-        applyContainerBackground(chat: viewMode == .beautified || (sessionOnStage && !beautifierLocked))
+        applyContainerBackground(chat: viewMode == .beautified
+                                 || (sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil))
         terminalController?.applyProfile(newProfile)   // live appearance update
         updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)
@@ -1016,7 +1026,12 @@ final class SessionPane {
             if model.tabs[i].display != t.display { model.tabs[i].display = t.display }
             if model.tabs[i].repoRoot != t.repoRoot { model.tabs[i].repoRoot = t.repoRoot }
         }
-        if let activePos = tabs.firstIndex(where: { $0.active }) {
+        // A session's terminal on stage stays that session's: following the
+        // guest's active tab put another session's shell under its header,
+        // to be typed into.
+        if let held = sessionTerminalWindow, let pos = tabs.firstIndex(where: { $0.index == held }) {
+            if model.activeIndex != pos { model.activeIndex = pos }
+        } else if let activePos = tabs.firstIndex(where: { $0.active }) {
             if let pending = pendingActiveIndex {
                 if tabs[activePos].index == pending.index
                     || Date().timeIntervalSince(pending.at) > 3 {
