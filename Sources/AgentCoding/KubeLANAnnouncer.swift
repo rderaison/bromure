@@ -20,7 +20,7 @@ import Darwin
 // dropped. The kernel never learns these IPs, so nothing else on this Mac
 // becomes reachable through them.
 
-final class KubeLANAnnouncer: @unchecked Sendable {
+final class KubeLANAnnouncer: @unchecked Sendable, KubeLANPublishing {
     static let shared = KubeLANAnnouncer()
 
     typealias PortKey = KubeLANPortKey

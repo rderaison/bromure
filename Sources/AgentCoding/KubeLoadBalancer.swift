@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import SandboxEngine
 
@@ -55,8 +54,13 @@ final class KubeLoadBalancer {
     private var udpByNodePort: [UInt16: UDPListener] = [:]
     private var udpRelay: KubeUDPRelay?
 
+    /// What answers the cluster's LAN pool addresses (macOS: the
+    /// announcer); nil where there is none, and pool services stay pending.
+    private let lan: (any KubeLANPublishing)?
+
     init(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID, serverIP: String,
-         hostIP: String?, pool: [UInt32] = []) {
+         hostIP: String?, pool: [UInt32] = [], lan: (any KubeLANPublishing)?) {
+        self.lan = lan
         self.engine = engine
         self.clusterID = clusterID
         self.serverNodeID = serverNodeID
@@ -118,7 +122,7 @@ final class KubeLoadBalancer {
                 continue
             }
             let target = "\(serverIP):\(d.port.nodePort)"
-            let fd = FatForward.listen(port: d.port.port, bindAll: true)
+            let fd = LBSocket.listenTCP(port: d.port.port)
             if fd < 0 {
                 failures[key] = "port \(d.port.port) is in use on this Mac"
                 continue
@@ -167,7 +171,7 @@ final class KubeLoadBalancer {
     }
 
     private static func bindUDP(port: Int) -> Int32 {
-        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        let fd = LBSocket.udpSocket()
         guard fd >= 0 else { return -1 }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
@@ -177,16 +181,16 @@ final class KubeLoadBalancer {
         addr.sin_addr.s_addr = INADDR_ANY
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                LBSocket.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard rc == 0 else { Darwin.close(fd); return -1 }
+        guard rc == 0 else { LBSocket.close(fd); return -1 }
         return fd
     }
 
     private func closeUDP(_ l: UDPListener) {
-        Darwin.shutdown(l.fd, SHUT_RDWR)
-        Darwin.close(l.fd)
+        LBSocket.shutdownBoth(l.fd)
+        LBSocket.close(l.fd)
     }
 
     /// The one relay for every host-port UDP service of this cluster.
@@ -195,7 +199,7 @@ final class KubeLoadBalancer {
         let engine = self.engine, nodeID = serverNodeID, header = "UDP \(serverIP)"
         let relay = KubeUDPRelay(
             dial: {
-                let fd = KubeLANAnnouncer.openRelay({ n, h, done in
+                let fd = KubeLANRelay.open({ n, h, done in
                     DispatchQueue.main.async { MainActor.assumeIsolated { engine.openRelay(nodeID: n, target: h, completion: done) } }
                 }, nodeID: nodeID, header: header)
                 return fd >= 0 ? fd : nil
@@ -220,7 +224,7 @@ final class KubeLoadBalancer {
         _ = bytes.withUnsafeBytes { raw in
             withUnsafePointer(to: &addr) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.sendto(l.fd, raw.baseAddress, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    LBSocket.sendto(l.fd, raw.baseAddress, raw.count, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
         }
@@ -262,8 +266,8 @@ final class KubeLoadBalancer {
         udpRelay?.close()
         udpRelay = nil
         failures.removeAll()
-        KubeLANAnnouncer.shared.withdrawAll(owner: clusterID)
-        KubeLANAnnouncer.shared.closeRelays(nodeID: serverNodeID)
+        lan?.withdrawAll(owner: clusterID)
+        lan?.closeRelays(nodeID: serverNodeID)
         assigned.removeAll()
     }
 
@@ -273,10 +277,23 @@ final class KubeLoadBalancer {
     /// own IP on the wire. Returns the keys of the Services handled here.
     private func reconcileLAN(services: [KubeProbe.Service], endpoints: inout [KubeLBEndpoint]) -> Set<String> {
         var handled = Set<String>()
+        // Nothing to answer pool addresses here: a Service that would get
+        // one stays pending, saying so, and never falls back to host ports.
+        guard let lan else {
+            for svc in services where resolveLANIP(for: svc, key: "\(svc.namespace)/\(svc.name)") != nil {
+                handled.insert("\(svc.namespace)/\(svc.name)")
+                for p in svc.ports {
+                    endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
+                                                    nodePort: p.nodePort, protocolName: p.protocolName, bound: false,
+                                                    error: "LAN address pools aren't available on this server yet"))
+                }
+            }
+            return handled
+        }
         let live = Set(services.map { "\($0.namespace)/\($0.name)" })
         // Services gone → give their addresses back.
         for (key, ip) in assigned where !live.contains(key) {
-            KubeLANAnnouncer.shared.withdraw(ip: ip, owner: clusterID, service: key)
+            lan.withdraw(ip: ip, owner: clusterID, service: key)
             assigned[key] = nil
         }
         // Explicit requests first, then Services already holding one of our
@@ -298,7 +315,7 @@ final class KubeLoadBalancer {
             guard let ip = resolveLANIP(for: svc, key: key) else { continue }
             handled.insert(key)
             let ipText = VMNetSwitch.ipString(ip)
-            var ports: [KubeLANAnnouncer.PortKey: KubeLANAnnouncer.Target] = [:]
+            var ports: [KubeLANPortKey: KubeLANTarget] = [:]
             for p in svc.ports {
                 let proto = p.protocolName.uppercased()
                 guard proto == "TCP" || proto == "UDP" else {
@@ -313,26 +330,26 @@ final class KubeLoadBalancer {
                                                     bound: false, error: "no NodePort allocated", ip: ipText))
                     continue
                 }
-                ports[KubeLANAnnouncer.PortKey(port: UInt16(p.port), udp: proto == "UDP")] =
-                    KubeLANAnnouncer.Target(nodeID: serverNodeID, nodeIP: serverIP, nodePort: UInt16(p.nodePort))
+                ports[KubeLANPortKey(port: UInt16(p.port), udp: proto == "UDP")] =
+                    KubeLANTarget(nodeID: serverNodeID, nodeIP: serverIP, nodePort: UInt16(p.nodePort))
             }
             var error: String?
-            var conflicts: [KubeLANAnnouncer.PortKey] = []
+            var conflicts: [KubeLANPortKey] = []
             if let why = refused[ip] {
                 error = why
             } else {
                 do {
-                    conflicts = try KubeLANAnnouncer.shared.publish(ip: ip, ports: ports, owner: clusterID, service: key)
+                    conflicts = try lan.publish(ip: ip, ports: ports, owner: clusterID, service: key)
                     assigned[key] = ip
                 } catch {
                     let msg = "\(ipText): \(error.localizedDescription)"
                     refused[ip] = msg
-                    if case KubeLANAnnouncer.PublishError.inUse = error { assigned[key] = nil }
+                    if case KubeLANPublishError.inUse = error { assigned[key] = nil }
                 }
                 error = refused[ip]
             }
             for p in svc.ports where ["TCP", "UDP"].contains(p.protocolName.uppercased()) && p.nodePort > 0 {
-                let clash = conflicts.contains(KubeLANAnnouncer.PortKey(port: UInt16(p.port), udp: p.protocolName.uppercased() == "UDP"))
+                let clash = conflicts.contains(KubeLANPortKey(port: UInt16(p.port), udp: p.protocolName.uppercased() == "UDP"))
                 endpoints.append(KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port,
                                                 nodePort: p.nodePort, protocolName: p.protocolName,
                                                 bound: error == nil && !clash,
@@ -364,8 +381,8 @@ final class KubeLoadBalancer {
     }
 
     private func close(_ l: Listener) {
-        Darwin.shutdown(l.fd, SHUT_RDWR)
-        Darwin.close(l.fd)
+        LBSocket.shutdownBoth(l.fd)
+        LBSocket.close(l.fd)
     }
 
     private func startAccepting(_ l: Listener) {
@@ -382,14 +399,13 @@ final class KubeLoadBalancer {
                     if errno == EINTR { continue }
                     return   // listener closed
                 }
-                var one: Int32 = 1
-                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+                LBSocket.noSigPipe(client)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         engine.openRelay(nodeID: nodeID, target: target) { vfd in
-                            guard vfd >= 0 else { Darwin.close(client); return }
+                            guard vfd >= 0 else { LBSocket.close(client); return }
                             Thread.detachNewThread {
-                                FatForward.splice(vfd, client)
+                                LBSocket.splice(vfd, client)
                                 KubeRelayRetain.release(fd: vfd)
                             }
                         }
@@ -404,5 +420,3 @@ final class KubeLoadBalancer {
 }
 
 extension KubeLoadBalancer: KubeServicePublisher {}
-
-#endif

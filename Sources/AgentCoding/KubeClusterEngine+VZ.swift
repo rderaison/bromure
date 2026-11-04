@@ -139,7 +139,7 @@ extension ACAppDelegate: KubeEngineHost {
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
                               serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? {
         KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
-                         serverIP: serverIP, hostIP: hostIP, pool: pool)
+                         serverIP: serverIP, hostIP: hostIP, pool: pool, lan: KubeLANAnnouncer.shared)
     }
 
     func kubeMachineAnswers(_ nodeID: UUID) -> Bool { (shellBridges[nodeID]?.poolSize ?? 0) > 0 }

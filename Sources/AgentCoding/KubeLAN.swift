@@ -1,12 +1,109 @@
-#if os(macOS)
 import Foundation
 import SandboxEngine
 #if canImport(Darwin)
 import Darwin
+#else
+import Glibc
 #endif
 
 // The LAN-side types the load balancer and the announcer share
 // (KubeLANAnnouncer.swift keeps the announcer, with typealiases to these).
+
+/// What answers a cluster's LAN pool addresses on the wire (macOS:
+/// KubeLANAnnouncer, MetalLB-style ARP). The load balancer publishes
+/// through it; without one, pool services stay pending.
+protocol KubeLANPublishing: AnyObject {
+    func publish(ip: UInt32, ports: [KubeLANPortKey: KubeLANTarget], owner: UUID, service: String) throws -> [KubeLANPortKey]
+    func withdraw(ip: UInt32, owner: UUID, service: String)
+    func withdrawAll(owner: UUID)
+    func closeRelays(nodeID: UUID)
+}
+
+/// The load balancer's and the UDP relay's socket calls, one function per
+/// call that differs between platforms; on macOS each is the Darwin call
+/// it replaces, unchanged.
+enum LBSocket {
+    static func udpSocket() -> Int32 {
+        #if canImport(Darwin)
+        Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        #else
+        Glibc.socket(AF_INET, Int32(SOCK_DGRAM.rawValue), 0)
+        #endif
+    }
+    static func bind(_ fd: Int32, _ addr: UnsafePointer<sockaddr>, _ len: socklen_t) -> Int32 {
+        #if canImport(Darwin)
+        Darwin.bind(fd, addr, len)
+        #else
+        Glibc.bind(fd, addr, len)
+        #endif
+    }
+    @discardableResult
+    static func close(_ fd: Int32) -> Int32 {
+        #if canImport(Darwin)
+        Darwin.close(fd)
+        #else
+        Glibc.close(fd)
+        #endif
+    }
+    @discardableResult
+    static func shutdownBoth(_ fd: Int32) -> Int32 {
+        #if canImport(Darwin)
+        Darwin.shutdown(fd, SHUT_RDWR)
+        #else
+        Glibc.shutdown(fd, Int32(SHUT_RDWR))
+        #endif
+    }
+    /// A datagram; on Linux MSG_NOSIGNAL (no SIGPIPE from a dead socket).
+    static func sendto(_ fd: Int32, _ buf: UnsafeRawPointer?, _ len: Int, _ addr: UnsafePointer<sockaddr>, _ alen: socklen_t) -> Int {
+        #if canImport(Darwin)
+        Darwin.sendto(fd, buf, len, 0, addr, alen)
+        #else
+        Glibc.sendto(fd, buf, len, Int32(MSG_NOSIGNAL), addr, alen)
+        #endif
+    }
+    static func read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ len: Int) -> Int {
+        #if canImport(Darwin)
+        Darwin.read(fd, buf, len)
+        #else
+        Glibc.read(fd, buf, len)
+        #endif
+    }
+    /// On Linux MSG_NOSIGNAL through send(2) (a socket fd), so a peer gone
+    /// mid-relay can't SIGPIPE the process.
+    static func write(_ fd: Int32, _ buf: UnsafeRawPointer?, _ len: Int) -> Int {
+        #if canImport(Darwin)
+        Darwin.write(fd, buf, len)
+        #else
+        Glibc.send(fd, buf, len, Int32(MSG_NOSIGNAL))
+        #endif
+    }
+    /// A TCP listener on 0.0.0.0:`port` (macOS: FatForward.listen); -1 if
+    /// it can't bind.
+    static func listenTCP(port: Int) -> Int32 {
+        #if canImport(Darwin)
+        FatForward.listen(port: port, bindAll: true)
+        #else
+        LinuxTCPRelay.listen(port: port)
+        #endif
+    }
+    /// Bytes both ways between two sockets until both ends are done; closes
+    /// both (macOS: FatForward.splice).
+    static func splice(_ a: Int32, _ b: Int32) {
+        #if canImport(Darwin)
+        FatForward.splice(a, b)
+        #else
+        LinuxTCPRelay.splice(a, b)
+        #endif
+    }
+    /// No SIGPIPE from writing to `fd` once its peer is gone: SO_NOSIGPIPE
+    /// on macOS; Linux has no such option (its sends say MSG_NOSIGNAL).
+    static func noSigPipe(_ fd: Int32) {
+        #if canImport(Darwin)
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        #endif
+    }
+}
 
 /// A published LAN service port.
 struct KubeLANPortKey: Hashable {
@@ -89,7 +186,7 @@ final class KubeUDPRelay: @unchecked Sendable {
         closed = true
         let fd = rfd; rfd = -1
         lock.unlock()
-        if fd >= 0 { writeLock.lock(); Darwin.close(fd); writeLock.unlock() }
+        if fd >= 0 { writeLock.lock(); LBSocket.close(fd); writeLock.unlock() }
         onClosed(fd)
     }
 
@@ -100,13 +197,13 @@ final class KubeUDPRelay: @unchecked Sendable {
     private func dialAsync() {
         Thread.detachNewThread { [weak self] in
             let fd = self?.dial() ?? -1
-            guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+            guard let self else { if fd >= 0 { LBSocket.close(fd) }; return }
             self.lock.lock()
             if self.closed || fd < 0 {
                 self.connecting = false
                 self.closed = true
                 self.lock.unlock()
-                if fd >= 0 { Darwin.close(fd) }
+                if fd >= 0 { LBSocket.close(fd) }
                 self.onClosed(-1)
                 return
             }
@@ -122,7 +219,7 @@ final class KubeUDPRelay: @unchecked Sendable {
         var acc = [UInt8]()
         var buf = [UInt8](repeating: 0, count: 1 << 16)
         while true {
-            let n = Darwin.read(fd, &buf, buf.count)
+            let n = LBSocket.read(fd, &buf, buf.count)
             if n <= 0 { if n < 0 && errno == EINTR { continue }; break }
             acc.append(contentsOf: buf[0..<n])
             while acc.count >= 2 {
@@ -139,7 +236,7 @@ final class KubeUDPRelay: @unchecked Sendable {
         if alive { closed = true; rfd = -1 }
         lock.unlock()
         if alive {
-            writeLock.lock(); Darwin.close(fd); writeLock.unlock()
+            writeLock.lock(); LBSocket.close(fd); writeLock.unlock()
             onClosed(fd)
         }
     }
@@ -161,7 +258,7 @@ final class KubeUDPRelay: @unchecked Sendable {
         bytes.withUnsafeBytes { raw in
             let base = raw.baseAddress!
             while off < bytes.count {
-                let n = Darwin.write(fd, base + off, bytes.count - off)
+                let n = LBSocket.write(fd, base + off, bytes.count - off)
                 if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { break }
             }
         }
@@ -187,5 +284,3 @@ enum KubeLANRelay {
 
     final class FDBox: @unchecked Sendable { var fd: Int32 = -1 }
 }
-
-#endif
