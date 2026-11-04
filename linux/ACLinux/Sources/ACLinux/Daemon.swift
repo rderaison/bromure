@@ -832,7 +832,7 @@ public actor Daemon {
         sw.attach(l.port, mac: rec.mac)
         // The address is leased now and recorded, so a restarted daemon hands
         // the same one back (the guest keeps it).
-        rec.lease = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac)).map(String.init).joined(separator: ".")
+        rec.lease = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac))?.map(String.init).joined(separator: ".")
         let machine = l.machine
         let id = rec.id
         await machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }

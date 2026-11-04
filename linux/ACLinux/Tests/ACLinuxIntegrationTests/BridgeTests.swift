@@ -99,7 +99,7 @@ struct TapBridgeTests {
         let acked = try #require(sw.dhcp.ackedAt(mac), "\(v.label) no DHCPREQUEST answered")
         print("TIMING \(v.label) DHCP ACK at \(ms(acked - t0)), agentd dial on :\(agentPort) at \(ms(tDial))")
         #expect(tDial < .seconds(30), "\(v.label) the network-online stall is back")
-        let guestIP = ipString(sw.dhcp.lease(for: mac))
+        let guestIP = ipString(sw.dhcp.lease(for: mac)!)
 
         // Host side -> guest.
         let ping = Process()
@@ -195,7 +195,7 @@ struct PasstBridgeTests {
         #expect(tA < .seconds(30) && tB < .seconds(30))
 
         for (v, mtu) in [(a, bigMTU), (b, 1500)] {
-            let ip = ipString(sw.dhcp.lease(for: macBytes(v.mac)))
+            let ip = ipString(sw.dhcp.lease(for: macBytes(v.mac))!)
             // Lease, route, MTU; DNS through passt's --dns-forward to the
             // host's resolver; ICMP to the host's LAN address.
             let r = try await shell(v.conns, """

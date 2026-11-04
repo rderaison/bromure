@@ -252,15 +252,36 @@ extension Daemon {
     }
 
     /// Cluster machines whose owner is gone (a crash between deleting the
-    /// cluster and removing its machines): ended and removed, at startup.
+    /// cluster and removing its machines): ended and removed, at startup —
+    /// only when the store loaded cleanly (`storeFile` read back whole); a
+    /// store that's missing or didn't decode would make every machine look
+    /// orphaned, so then nothing is swept, and the daemon says why.
     // @port-skip linux-only: macOS removes them with the cluster's folder
-    func sweepKubeOrphans(owners: Set<String>) async {
+    func sweepKubeOrphans(owners: Set<String>, storeFile: String, loadedCounts: Int) async {
+        guard registry.records.contains(where: { $0.kube != nil }) else { return }
+        if let why = Self.kubeStoreLoadProblem(storeFile, loadedCounts: loadedCounts) {
+            FileHandle.standardError.write(Data("bromure-ac daemon: cluster machines not swept: \(why)\n".utf8))
+            return
+        }
         for rec in registry.records {
             guard let owner = rec.kube, !owners.contains(owner) else { continue }
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': its cluster is gone, removed\n".utf8))
             if live[rec.id] != nil { _ = await deleteVM(rec, action: "kill") }
             if let r = registry.find(rec.id) { _ = remove(r) }
         }
+    }
+
+    /// Why the cluster store at `path` didn't load cleanly (nil: it did):
+    /// missing, unreadable, or holding more clusters, registries and
+    /// connectors than the store decoded (`loadedCounts`).
+    // @port-skip linux-only: the sweep's guard
+    static func kubeStoreLoadProblem(_ path: String, loadedCounts: Int) -> String? {
+        guard let data = FileManager.default.contents(atPath: path) else { return "\(path) is missing" }
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return "\(path) isn't readable JSON"
+        }
+        let inFile = ["clusters", "registries", "connectors"].reduce(0) { $0 + (((obj[$1] as? [Any])?.count) ?? 0) }
+        return inFile == loadedCounts ? nil : "\(path) has \(inFile) entries, \(loadedCounts) decoded"
     }
 
     /// A connection to `target` ("ip:port") from inside the machine, over

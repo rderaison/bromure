@@ -835,7 +835,7 @@ struct SwitchRoutingTests {
         let sw = InterimSwitch(uplink: up)
         let port = RouteBench.SinkPort("vm")
         sw.attach(port, mac: "52:54:00:ab:cd:ef")
-        let ip = sw.dhcp.lease(for: m.bytes)
+        let ip = try #require(sw.dhcp.lease(for: m.bytes))
         var bytes = [UInt8](repeating: 0xff, count: 60)     // to the broadcast MAC (passt's single-guest MAC in reality)
         bytes[0] = 0x9a                                     // unicast, not ours
         bytes[12] = 0x08; bytes[13] = 0x00; bytes[14] = 0x45
@@ -1762,5 +1762,34 @@ struct InterimDHCPReservationTests {
         #expect(dhcp.lease(for: [2, 0, 0, 0, 0, 3]) == [10, 77, 0, 7])
         VMNetSwitch.shared.unreserveIPs(reserved)
         #expect(dhcp.lease(for: [2, 0, 0, 0, 0, 4]) == [10, 77, 0, 2], "unreserved: free again")
+    }
+
+    @Test("an exhausted pool leases nothing (.254 reserved included), and answers no DHCP offer")
+    func exhausted() {
+        let dhcp = InterimDHCP(server: [10, 78, 0, 1], dns: [10, 78, 0, 1], serverMAC: [2, 0, 0, 0, 0, 1], mtu: { _ in nil })
+        for h in 2...253 { #expect(dhcp.lease(for: [2, 0, 0, 0, 1, UInt8(h)]) != nil) }
+        let last = Set([UInt32(10) << 24 | 78 << 16 | 254])
+        VMNetSwitch.shared.reserveIPs(last)
+        defer { VMNetSwitch.shared.unreserveIPs(last) }
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 2, 1]) == nil, ".254 is reserved: nothing left")
+        VMNetSwitch.shared.unreserveIPs(last)
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 2, 1]) == [10, 78, 0, 254])
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 2, 2]) == nil, "all 253 taken")
+    }
+}
+
+@Suite("Kubernetes orphan sweep guard")
+struct KubeSweepGuardTests {
+    @Test("the sweep runs only on a store that loaded whole")
+    func loadProblem() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/clusters.json"
+        #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0)?.contains("missing") == true)
+        try Data("not json".utf8).write(to: URL(fileURLWithPath: p))
+        #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0)?.contains("readable") == true)
+        try Data(#"{"clusters":[{"id":"x"}],"registries":[],"connectors":[]}"#.utf8).write(to: URL(fileURLWithPath: p))
+        #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0)?.contains("1 entries, 0 decoded") == true)
+        #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 1) == nil)
     }
 }

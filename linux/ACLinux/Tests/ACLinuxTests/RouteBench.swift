@@ -46,7 +46,7 @@ struct RouteBench {
         let a = SinkPort("a"), b = SinkPort("b")
         sw.attach(a, mac: "52:54:00:00:00:0a")
         sw.attach(b, mac: "52:54:00:00:00:0b")
-        let ip = sw.dhcp.lease(for: InterimSwitch.mac("52:54:00:00:00:0a"))
+        let ip = sw.dhcp.lease(for: InterimSwitch.mac("52:54:00:00:00:0a"))!
         _ = sw.dhcp.lease(for: InterimSwitch.mac("52:54:00:00:00:0b"))
         var bytes = [UInt8](repeating: 0, count: 1514)
         bytes[12] = 0x08; bytes[13] = 0x00; bytes[14] = 0x45

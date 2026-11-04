@@ -184,9 +184,10 @@ public final class InterimDHCP: Sendable {
         self.server = server; self.dns = dns; self.serverMAC = serverMAC; self.mtu = mtu
     }
 
-    /// The lease for `mac`, assigned on first sight.
+    /// The lease for `mac`, assigned on first sight; nil when every address
+    /// (.2–.254) is leased or reserved (macOS's leaseIP answers none then).
     // @port-skip linux-only: interim DHCP
-    public func lease(for mac: [UInt8]) -> [UInt8] {
+    public func lease(for mac: [UInt8]) -> [UInt8]? {
         leases.withLockedValue { l in
             if let ip = l.byMAC[mac] { return ip }
             let used = Set(l.byMAC.values.map { $0[3] })
@@ -194,7 +195,10 @@ public final class InterimDHCP: Sendable {
             // (VMNetSwitch.reserveIPs, as macOS's allocator skips them).
             let base = Array(server[0..<3])
             var host: UInt8 = 2
-            while host < 254, used.contains(host) || VMNetSwitch.shared.isReserved(Self.u32(base + [host])) { host += 1 }
+            while host <= 254, used.contains(host) || VMNetSwitch.shared.isReserved(Self.u32(base + [host])) {
+                if host == 254 { return nil }
+                host += 1
+            }
             let ip = base + [host]
             l.byMAC[mac] = ip
             l.byIP[Self.u32(ip)] = MAC(mac)
@@ -259,7 +263,8 @@ public final class InterimDHCP: Sendable {
             i += 2 + Int(b[i + 1])
         }
         let chaddr = Array(b[bootp + 28..<bootp + 34])
-        let yiaddr = lease(for: chaddr)
+        // No free address: no offer (the client keeps asking).
+        guard let yiaddr = lease(for: chaddr) else { return nil }
         let reply: UInt8
         switch type {
         case 1: reply = 2                                     // DISCOVER -> OFFER
