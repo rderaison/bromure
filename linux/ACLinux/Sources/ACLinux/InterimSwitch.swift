@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 import NIOConcurrencyHelpers
 
 /// STAND-IN for the shared switch. The real one is VMNetSwitch (MAC learning,
@@ -137,9 +138,12 @@ public final class InterimDHCP: Sendable {
         leases.withLockedValue { l in
             if let ip = l.byMAC[mac] { return ip }
             let used = Set(l.byMAC.values.map { $0[3] })
+            // Never an address reserved for a cluster's MetalLB range
+            // (VMNetSwitch.reserveIPs, as macOS's allocator skips them).
+            let base = Array(server[0..<3])
             var host: UInt8 = 2
-            while used.contains(host) { host += 1 }
-            let ip = Array(server[0..<3]) + [host]
+            while host < 254, used.contains(host) || VMNetSwitch.shared.isReserved(Self.u32(base + [host])) { host += 1 }
+            let ip = base + [host]
             l.byMAC[mac] = ip
             l.byIP[Self.u32(ip)] = MAC(mac)
             return ip

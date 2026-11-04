@@ -5,6 +5,7 @@ import NIOCore
 import NIOPosix
 import Testing
 @testable import ACLinux
+import class SandboxEngine.VMNetSwitch
 
 func shortTempDir() throws -> String {
     let d = "/tmp/acl-\(UUID().uuidString.prefix(8))"
@@ -1746,5 +1747,20 @@ struct KubeStoreTests {
         let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
         #expect(mode?.intValue == 0o600)
         #expect(KubeClusterStore(fileURL: url).registries.map(\.name) == ["r1"])
+    }
+}
+
+@Suite("Interim DHCP reservations", .serialized)
+struct InterimDHCPReservationTests {
+    @Test("a MetalLB range reserved on the switch is never leased")
+    func skipsReserved() {
+        let dhcp = InterimDHCP(server: [10, 77, 0, 1], dns: [10, 77, 0, 1], serverMAC: [2, 0, 0, 0, 0, 1], mtu: { _ in nil })
+        let reserved = Set((2...5).map { UInt32(10) << 24 | 77 << 16 | UInt32($0) })
+        VMNetSwitch.shared.reserveIPs(reserved)
+        defer { VMNetSwitch.shared.unreserveIPs(reserved) }
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 0, 2]) == [10, 77, 0, 6])
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 0, 3]) == [10, 77, 0, 7])
+        VMNetSwitch.shared.unreserveIPs(reserved)
+        #expect(dhcp.lease(for: [2, 0, 0, 0, 0, 4]) == [10, 77, 0, 2], "unreserved: free again")
     }
 }
