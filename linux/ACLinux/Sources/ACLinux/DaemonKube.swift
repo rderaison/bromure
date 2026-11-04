@@ -296,7 +296,24 @@ extension Daemon {
         if rec.state == .suspended, !resume { _ = await deleteVM(rec, action: "stop") }
     }
 
-    /// Boot (or resume) a cluster machine; nil when it runs, else why not.
+    /// A stopped cluster machine's ext4 images for a disk repair: its
+    /// system disk and, when it has one, its data disk (macOS: disk.img and
+    /// data.img). nil while it runs, is starting or stopping, or another
+    /// repair has it:
+    /// never checked live. The machine is marked as repairing in the same
+    /// step (on the actor), so no start can take it until the caller's
+    /// `repairMarks.whileMarked` ends.
+    // @port-skip linux-only: the Linux machine layout for ACAppDelegate.repairKubeMachineDisks
+    func kubeMachineDiskImages(id: String) -> [String]? {
+        guard live[id] == nil, stopping[id] == nil, !starting.contains(id), repairMarks.insert(id) else { return nil }
+        let dir = vmDir(id)
+        var images = [dir + "/disk.raw"]
+        if FileManager.default.fileExists(atPath: dir + "/data.img") { images.append(dir + "/data.img") }
+        return images
+    }
+
+    /// Boot (or resume) a cluster machine; nil when it runs, else why not
+    /// (refused while its disks are being repaired: `start`).
     /// Already running (a restarted daemon took it back): nothing to do.
     // @port-skip linux-only: the daemon side of LinuxKubeHost.startKubeMachine
     func startKubeMachineVM(id: String) async -> String? {
@@ -467,9 +484,40 @@ final class LinuxKubeHost: KubeEngineHost {
         await daemon?.stopKubeMachineVM(id: Self.vmID(runtime.record.id), kill: true)
     }
 
-    // partial: no host-side disk repair on Linux yet
+    /// Replay the journal and repair the machine's system disk -- and its
+    /// data disk (Longhorn / registry storage), which the guest checks at
+    /// boot too -- with the ext4 checker macOS uses (Swift, on the host: the
+    /// images are guest-written, so no C parser runs on them here). True
+    /// when every ext4 image came out clean or repaired.
     // @port ACAppDelegate.repairKubeMachineDisks(_: KubeClusterEngine.MachineSpec) h=963ec6e7efbbfc72 @e0cc8f0b
-    func repairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec) async -> Bool { false }
+    func repairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec) async -> Bool {
+        let ownerID = m.ownerID, name = m.record.name
+        guard let daemon, let images = await daemon.kubeMachineDiskImages(id: Self.vmID(m.record.id)) else {
+            SessionStores.shared?.kubeEngine?.log(ownerID, "fsck: \(name) is running or already being repaired; its disks weren't checked")
+            return false
+        }
+        return await daemon.repairMarks.whileMarked(Self.vmID(m.record.id)) {
+            var ok = true
+            for path in images {
+                let file = (path as NSString).lastPathComponent
+                let result = await Task.detached(priority: .userInitiated) { () -> Result<Ext4Fsck.Result, Error> in
+                    do { return .success(try Ext4Fsck.check(imagePath: path, autoFix: true)) }
+                    catch { return .failure(error) }
+                }.value
+                switch result {
+                case .success(let r):
+                    if !(r.clean || r.repaired) { ok = false }
+                    SessionStores.shared?.kubeEngine?.log(ownerID, "fsck \(file): \(r.summary)")
+                    FileHandle.standardError.write(Data("[kube] fsck \(name) \(file): \(r.summary)\n\(r.output)\n".utf8))
+                case .failure(let error):
+                    // A data disk the guest never formatted is not ext4 yet --
+                    // nothing to check there.
+                    SessionStores.shared?.kubeEngine?.log(ownerID, "fsck \(file): skipped (\(error))")
+                }
+            }
+            return ok
+        }
+    }
 
     // partial: refused (no e2fsck rescue on Linux yet)
     // @port ACAppDelegate.deepRepairKubeMachineDisks(_: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) h=e0bac9aee8e9dff0 @e0cc8f0b
@@ -594,5 +642,36 @@ final class LinuxKubeHost: KubeEngineHost {
     // @port-skip linux-only: macOS removes them with the cluster's folder
     func removeMachines(ownedBy owner: UUID) async {
         await daemon?.removeKubeMachines(owner: owner)
+    }
+}
+
+/// The machines whose disks the host is repairing: never started meanwhile
+/// (Firecracker would attach disk.raw while the checker writes it). Marked
+/// on the Daemon actor with its live/stopping check (kubeMachineDiskImages),
+/// checked by `start` on the actor, unmarked however the repair ends.
+// @port-skip linux-only: the Linux daemon's repair gate
+final class RepairMarks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+
+    // @port-skip linux-only: the Linux daemon's repair gate
+    init() {}
+
+    /// False when `id` was marked already (a repair has it).
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func insert(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.insert(id).inserted }
+
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func remove(_ id: String) { lock.lock(); ids.remove(id); lock.unlock() }
+
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func contains(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ids.contains(id) }
+
+    /// Runs `body` for a machine already marked, and unmarks it however
+    /// `body` ends (a throw too).
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func whileMarked<T>(_ id: String, _ body: () async throws -> T) async rethrows -> T {
+        defer { remove(id) }
+        return try await body()
     }
 }

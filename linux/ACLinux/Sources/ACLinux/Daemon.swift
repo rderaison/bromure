@@ -1,6 +1,7 @@
 import Foundation
 import CACLinuxShims
 import NIOCore
+import NIOConcurrencyHelpers
 
 /// Where the daemon keeps things.
 // @port-skip linux-only: Linux daemon configuration (XDG layout)
@@ -110,7 +111,15 @@ public actor Daemon {
     /// when it couldn't start, and the guests then go out directly.
     let mitm: MitmProxy?
     /// VMs whose stop is being recorded (vmStopped).
-    private var stopping: [String: Task<Void, Never>] = [:]
+    private(set) var stopping: [String: Task<Void, Never>] = [:]
+    /// Cluster machines whose disks the host is repairing (never started meanwhile).
+    nonisolated let repairMarks = RepairMarks()
+    /// VMs between start's checks and their `live` entry: launch awaits in
+    /// between (releasing the actor), so a repair or a remove must see them.
+    private(set) var starting: Set<String> = []
+    /// Tests: called at the top of each launch (after the starting mark), so
+    /// a start can be held at an await; throwing aborts that launch.
+    static let launchHookForTesting = NIOLockedValueBox<(@Sendable (String) async throws -> Void)?>(nil)
     /// VMs being resumed from a snapshot: a failure leaves them suspended.
     private var restoring: Set<String> = []
     /// The sign-in VMs' Profiles (never saved), by VM id.
@@ -129,6 +138,25 @@ public actor Daemon {
         guard getrlimit(Int32(RLIMIT_NOFILE.rawValue), &l) == 0, l.rlim_cur < l.rlim_max else { return }
         l.rlim_cur = l.rlim_max
         _ = setrlimit(Int32(RLIMIT_NOFILE.rawValue), &l)
+    }
+
+    /// Tests: a record in the registry.
+    // @port-skip linux-only: Linux daemon core (tests)
+    func registerForTesting(_ rec: VMRecord) throws { try registry.upsert(rec) }
+
+    /// Tests: a daemon on its own uplink and directories, nothing else started
+    /// (no session engine, remote access or adoption). `uplink`: the
+    /// binary standing in for passt (tests that boot nothing give a no-op).
+    // @port-skip linux-only: Linux daemon core (tests)
+    static func makeForTesting(_ config: DaemonConfig, uplink: String) async throws -> Daemon {
+        for dir in [config.stateDir, config.runtimeDir] {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
+        var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
+        pc.binary = uplink
+        let passt = try await PasstUplink.start(pc)
+        return Daemon(config: config, passt: passt)
     }
 
     // @port-skip linux-only: Linux daemon core
@@ -542,16 +570,34 @@ public actor Daemon {
         return ControlResponse(200, ["status": "stopped"])
     }
 
+    /// Why `rec` may not be started now, or nil: not stopped or suspended, a
+    /// QEMU machine, or a cluster machine whose disks the host is repairing.
+    // @port-skip linux-only: start's guards (testable)
+    static func startRefusal(_ rec: VMRecord, repairing: RepairMarks) -> ControlResponse? {
+        guard rec.state == .stopped || rec.state == .suspended else {
+            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
+        }
+        guard rec.machine == machineType else {
+            return .error(409, "'\(rec.name)' was made for QEMU, which is gone: remove it (vm rm) and create a new one")
+        }
+        guard !repairing.contains(rec.id) else {
+            return .error(409, "'\(rec.name)' is having its disks repaired; start it once that's done")
+        }
+        return nil
+    }
+
     /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false) async -> ControlResponse {
-        guard rec.state == .stopped || rec.state == .suspended else {
-            return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
+        if let refusal = Self.startRefusal(rec, repairing: repairMarks) { return refusal }
+        // Marked in the same actor step as the check, before any await: a
+        // repair (kubeMachineDiskImages) or a remove sees the VM as busy
+        // until launch has it live, or failed.
+        guard starting.insert(rec.id).inserted else {
+            return .error(409, "VM '\(rec.name)' is already starting")
         }
-        guard rec.machine == Self.machineType else {
-            return .error(409, "'\(rec.name)' was made for QEMU, which is gone: remove it (vm rm) and create a new one")
-        }
+        defer { starting.remove(rec.id) }
         var r = rec
         // `homeGB`: a new home size, applied by this cold boot. Images don't shrink.
         if let gb = body["homeGB"]?.numberValue.map({ min(1024, max(8, Int($0))) }) {
@@ -620,6 +666,11 @@ public actor Daemon {
     func remove(_ rec: VMRecord) -> ControlResponse {
         guard rec.state == .stopped || rec.state == .suspended, live[rec.id] == nil else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue); stop it first", ["state": .string(rec.state.rawValue)])
+        }
+        // Its files are in use: the disk checker holds them, or a start is
+        // building on them.
+        guard !repairMarks.contains(rec.id), !starting.contains(rec.id) else {
+            return .error(409, "VM '\(rec.name)' is \(starting.contains(rec.id) ? "starting" : "having its disks repaired"); remove it once that's done")
         }
         do {
             try registry.remove(id: rec.id)
@@ -721,6 +772,7 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
+        if let hook = Self.launchHookForTesting.withLockedValue({ $0 }) { try await hook(rec.id) }
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
         let fm = FileManager.default
@@ -841,6 +893,12 @@ public actor Daemon {
         let machine = l.machine
         let id = rec.id
         await machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
+        // Belt and braces: a start that a repair overtook (its marks would
+        // have refused it) never attaches the disks.
+        if repairMarks.contains(id) {
+            await teardown(l, mac: rec.mac)
+            throw KubeClusterEngine.KubeError.message("'\(rec.name)' is having its disks repaired")
+        }
         live[id] = l
         do {
             try await machine.start()
