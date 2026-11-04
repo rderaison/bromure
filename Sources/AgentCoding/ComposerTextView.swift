@@ -188,6 +188,29 @@ enum ComposerText {
         return s
     }
 
+    /// Whether this edit could be a file dropped on the field, which arrives as
+    /// its path: more went in at one spot than one key inserts. By what was
+    /// inserted, not how the length moved, since a drop can replace a selection
+    /// longer than itself. Wrong the safe way: an emoji only costs one check.
+    static func mayBeDrop(from old: String, to new: String) -> Bool {
+        insertedBytes(from: old, to: new) > 4
+    }
+
+    /// How many bytes of `new` aren't in the prefix and suffix it shares with `old`.
+    static func insertedBytes(from old: String, to new: String) -> Int {
+        var old = old, new = new
+        return old.withUTF8 { a in
+            new.withUTF8 { b in
+                var prefix = 0
+                let limit = min(a.count, b.count)
+                while prefix < limit, a[prefix] == b[prefix] { prefix += 1 }
+                var suffix = 0
+                while suffix < limit - prefix, a[a.count - 1 - suffix] == b[b.count - 1 - suffix] { suffix += 1 }
+                return b.count - prefix - suffix
+            }
+        }
+    }
+
     /// Same characters, byte for byte — no Unicode normalization (a
     /// composed and a decomposed "é" differ, which is right for "did the
     /// field change?").

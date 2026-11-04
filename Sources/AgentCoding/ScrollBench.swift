@@ -149,7 +149,9 @@ enum ScrollBench {
 /// landing at the end hung it). `--real-host` mounts the view as the app
 /// does (constraints, no sizing), `--host-width W` sets its width,
 /// `--linger S` idles at the end (to `sample` it), `BENCH_KEYS=N` types N
-/// keys after the paste.
+/// keys after the paste. `--typing N` types N keys into the composer, as a
+/// typist does, and times each from its keyDown to drawn (`TypingBench`);
+/// `--quick` does it in the quick task view instead.
 enum ChatLayoutCheck {
     static func run(path: String, data: Data, args: [String]) {
         func value(_ flag: String) -> Double? {
@@ -180,6 +182,10 @@ enum ChatLayoutCheck {
         }
         if args.contains("--switch") {
             MainActor.assumeIsolated { runSwitch(data: data, args: args, value: value) }
+            exit(0)
+        }
+        if args.contains("--quick") {
+            MainActor.assumeIsolated { TypingBench.runQuickTask(keys: Int(value("--typing") ?? 100)) }
             exit(0)
         }
         MainActor.assumeIsolated {
@@ -301,6 +307,11 @@ enum ChatLayoutCheck {
                     pump(0.3)
                     print(String(format: "resize to %.0f pt: %.0f ms (incl. 300 ms idle)", w, Date().timeIntervalSince(t) * 1000))
                 }
+                exit(0)
+            }
+            if let n = value("--typing") {
+                let timings = TypingBench.type(Int(n), into: host, window: window) { pump($0) }
+                print(TypingBench.report(timings, label: "chat (\(model.items.count) items)"))
                 exit(0)
             }
             // `--paste KB [--send]`: paste that much text into the composer
@@ -750,3 +761,92 @@ private final class OSAllocatedUnfairLockBox<T>: @unchecked Sendable {
     func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
 }
 #endif
+
+
+/// Times typing the way it's felt: a real keyDown through the window, then what
+/// has to happen before the letter is on screen. All main-thread: nothing else
+/// can draw until it's done.
+@MainActor
+enum TypingBench {
+    struct Timing { var input: Double; var update: Double; var draw: Double
+        var total: Double { input + update + draw } }
+
+    static func type(_ n: Int, into host: NSView, window: NSWindow, focus: Bool = true,
+                     pump: (Double) -> Void) -> [Timing] {
+        func text(_ v: NSView) -> ComposerNSTextView? {
+            if let t = v as? ComposerNSTextView { return t }
+            for sub in v.subviews { if let t = text(sub) { return t } }
+            return nil
+        }
+        if focus {
+            guard let tv = text(host) else { print("no composer (pass --composer)"); exit(1) }
+            window.makeFirstResponder(tv)
+        }
+        pump(0.3)
+        let letters = Array("the quick brown fox jumps over the lazy dog ")
+        var out: [Timing] = []
+        for i in 0..<n {
+            let c = String(letters[i % letters.count])
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil,
+                                           characters: c, charactersIgnoringModifiers: c,
+                                           isARepeat: false, keyCode: 0) else { continue }
+            let t0 = CFAbsoluteTimeGetCurrent()
+            window.sendEvent(e)
+            let t1 = CFAbsoluteTimeGetCurrent()
+            // What's queued for this turn (SwiftUI's update of what observes the text).
+            RunLoop.current.run(mode: .default, before: Date())
+            let t2 = CFAbsoluteTimeGetCurrent()
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            CATransaction.flush()
+            let t3 = CFAbsoluteTimeGetCurrent()
+            out.append(Timing(input: t1 - t0, update: t2 - t1, draw: t3 - t2))
+            pump(0.05)   // a brisk typist: 20 keys a second at most
+        }
+        return out
+    }
+
+    static func report(_ t: [Timing], label: String) -> String {
+        func pct(_ v: [Double], _ p: Double) -> Double {
+            let s = v.sorted(); return s.isEmpty ? 0 : s[min(s.count - 1, Int(Double(s.count) * p))] * 1000
+        }
+        func row(_ name: String, _ v: [Double]) -> String {
+            String(format: "  %-7@ p50 %6.2f  p95 %6.2f  max %6.2f ms", name as NSString, pct(v, 0.5), pct(v, 0.95), pct(v, 1))
+        }
+        // The first keys pay for one-time setup; what's felt is the run of them.
+        let run = Array(t.dropFirst(min(5, t.count / 4)))
+        // Which keys were slow: all early (one-time setup) or spread out (stalls)?
+        let slow = t.enumerated().filter { $0.element.total > 0.016 }
+            .map { String(format: "#%d %.0f(i%.0f u%.0f d%.0f)", $0.offset, $0.element.total * 1000,
+                          $0.element.input * 1000, $0.element.update * 1000, $0.element.draw * 1000) }
+        return ([label + " — \(run.count) keys"] + [
+            row("input", run.map(\.input)), row("update", run.map(\.update)),
+            row("draw", run.map(\.draw)), row("total", run.map(\.total)),
+            "  over a frame: " + (slow.isEmpty ? "none" : slow.joined(separator: " ")),
+        ]).joined(separator: "\n")
+    }
+
+    static func runQuickTask(keys: Int) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let (view, size) = AutomationHubPreview.view("hub-quick-task")
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(origin: .zero, size: size)
+        let window = BenchKeyWindow(contentRect: host.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFront(nil)
+        func pump(_ s: Double) {
+            let until = Date().addingTimeInterval(s)
+            while Date() < until { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        }
+        pump(1)
+        guard window.firstResponder is NSTextView else {
+            print("the quick task's title field didn't take the keyboard: \(String(describing: window.firstResponder))"); exit(1)
+        }
+        let t = type(keys, into: host, window: window, focus: false, pump: pump)
+        print(report(t, label: "quick task"))
+        print("  field now holds \((window.firstResponder as? NSTextView)?.string.count ?? -1) characters")
+    }
+}
