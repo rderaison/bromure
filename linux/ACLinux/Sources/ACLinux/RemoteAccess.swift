@@ -299,13 +299,14 @@ extension Daemon {
     /// agents over it; the SSH channel gets the other.
     // @port ACAppDelegate.resolveBrowserMCP(vm: String, completion: @escaping@Sendable(Int32)->Void) h=2551198a14f37e59 @7dd92fdf
     func browserMCPFD(vm: String) async -> Int32 {
-        guard let l = live.first(where: { $0.key.caseInsensitiveCompare(vm) == .orderedSame })?.value else {
-            FatClientLog.log("browser-mcp-resolver: no running VM \(vm)")
+        guard let l = live.first(where: { $0.key.caseInsensitiveCompare(vm) == .orderedSame })?.value,
+              let browser = l.browser else {
+            FatClientLog.log("browser-mcp-resolver: no running VM with a browser MCP: \(vm)")
             return -1
         }
         var sp: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0, &sp) == 0 else { return -1 }
-        await MainActor.run { [browser = l.browser, fd = sp[0]] in browser.attachRemote(fd: fd) }
+        await MainActor.run { [browser, fd = sp[0]] in browser.attachRemote(fd: fd) }
         FatClientLog.log("browser-mcp-resolver: \(vm) attached")
         return sp[1]
     }

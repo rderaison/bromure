@@ -84,8 +84,9 @@ public actor Daemon {
         let config: MachineConfig
         /// The guest -> host vsock :5800 listener (agentd's shell pool).
         let vsock: HybridVsockListener
-        /// The agents' browser MCP (vsock :5830), relayed to a fat client.
-        let browser: BrowserMCPBridge
+        /// The agents' browser MCP (vsock :5830), relayed to a fat client;
+        /// none on a cluster machine.
+        let browser: BrowserMCPBridge?
         /// The workspace's intercepting proxy (vsock :8443); nil without one.
         var mitm: MitmListener?
         /// The agents' MCP sockets: the coding board (:5831), automations (:5833).
@@ -805,10 +806,12 @@ public actor Daemon {
             port.close()
             throw error
         }
-        let browser: BrowserMCPBridge
+        var browser: BrowserMCPBridge?
         do {
-            browser = try await MainActor.run { [qc] in
-                try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId)
+            if rec.kube == nil {
+                browser = try await MainActor.run { [qc] in
+                    try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId)
+                }
             }
         } catch {
             close(peer)
@@ -910,11 +913,15 @@ public actor Daemon {
                 // A VM started by a daemon from before the browser bridge has
                 // none stored: it gets a fresh listener.
                 let storedBrowser = storedNet.removeValue(forKey: "bmcp-" + rec.shortId)
-                let browser: BrowserMCPBridge
+                var browser: BrowserMCPBridge?
                 do {
-                    browser = try await MainActor.run { [qc] in
-                        try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
-                                             stored: storedBrowser)
+                    if rec.kube == nil {
+                        browser = try await MainActor.run { [qc] in
+                            try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
+                                                 stored: storedBrowser)
+                        }
+                    } else if let storedBrowser {
+                        close(storedBrowser)
                     }
                 } catch { await vsock.close(); port.close(); throw error }
                 let shell = await GuestShell(cid: rec.cid, connections: vsock.connections)
@@ -922,7 +929,7 @@ public actor Daemon {
                 do { machine = try await FirecrackerMachine.adopt(config: qc, pid: pid) } catch {
                     await shell.stop()
                     await vsock.close()
-                    await MainActor.run { browser.stop() }
+                    await MainActor.run { browser?.stop() }
                     port.close()
                     throw error
                 }
@@ -1130,7 +1137,7 @@ public actor Daemon {
         await l.shell.stop()
         l.port.close()
         await l.vsock.close()
-        await MainActor.run { [browser = l.browser] in browser.stop() }
+        await MainActor.run { [browser = l.browser] in browser?.stop() }
         l.mitm?.stop()
         l.inference?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }

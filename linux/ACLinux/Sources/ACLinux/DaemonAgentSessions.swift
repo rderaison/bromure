@@ -49,6 +49,10 @@ extension Daemon {
                                          rootDirectory: URL(fileURLWithPath: state, isDirectory: true)
                                             .appendingPathComponent("kube", isDirectory: true))
             stores.kubeEngine = kube
+            // Machines of a cluster, registry or connector that's gone.
+            let owners = Set((stores.kube.clusters.map(\.id) + stores.kube.registries.map(\.id)
+                              + stores.kube.connectors.map(\.id)).map { $0.uuidString.lowercased() })
+            Task { await me.sweepKubeOrphans(owners: owners) }
             kube.startAutoStartClusters()
             // Their timers are on RunLoop.main, which an async daemon never
             // runs: the same ticks, from here (30 s and 5 min, as macOS's).

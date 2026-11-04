@@ -1731,3 +1731,20 @@ struct ProxyDestinationTests {
         #expect(mode?.intValue == 0o600)
     }
 }
+
+@Suite("Kubernetes store")
+@MainActor
+struct KubeStoreTests {
+    @Test("the cluster list is written 0600 and reloads")
+    func storeMode() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let url = URL(fileURLWithPath: d + "/kube/clusters.json")
+        let store = KubeClusterStore(fileURL: url)
+        let reg = KubeRegistry(name: "r1")
+        store.upsert(reg)
+        let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
+        #expect(KubeClusterStore(fileURL: url).registries.map(\.name) == ["r1"])
+    }
+}

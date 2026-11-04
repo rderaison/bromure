@@ -51,6 +51,7 @@ extension Daemon {
     /// `POST /k8s/{id}/{action}` (fat-client cluster verbs).
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/k8s/"): h=ecf14d0915d2df82 @7dd92fdf
     func kubeCommand(_ method: String, _ path: String, _ doc: [String: Any]) async -> ControlResponse {
+        guard method == "POST" || method == "DELETE" else { return .error(405, "Method not allowed") }
         let rest = String(path.dropFirst("/k8s/".count))
         let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
         let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
@@ -71,6 +72,7 @@ extension Daemon {
 
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/registries/"): h=52a7426dba2a3e85 @7dd92fdf
     func registryCommand(_ method: String, _ path: String, _ doc: [String: Any]) async -> ControlResponse {
+        guard method == "POST" || method == "DELETE" else { return .error(405, "Method not allowed") }
         let rest = String(path.dropFirst("/registries/".count))
         let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
         let id = parts.first.flatMap { $0.removingPercentEncoding } ?? ""
@@ -244,6 +246,18 @@ extension Daemon {
     func removeKubeMachines(owner: UUID) async {
         let key = owner.uuidString.lowercased()
         for rec in registry.records where rec.kube == key {
+            if live[rec.id] != nil { _ = await deleteVM(rec, action: "kill") }
+            if let r = registry.find(rec.id) { _ = remove(r) }
+        }
+    }
+
+    /// Cluster machines whose owner is gone (a crash between deleting the
+    /// cluster and removing its machines): ended and removed, at startup.
+    // @port-skip linux-only: macOS removes them with the cluster's folder
+    func sweepKubeOrphans(owners: Set<String>) async {
+        for rec in registry.records {
+            guard let owner = rec.kube, !owners.contains(owner) else { continue }
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': its cluster is gone, removed\n".utf8))
             if live[rec.id] != nil { _ = await deleteVM(rec, action: "kill") }
             if let r = registry.find(rec.id) { _ = remove(r) }
         }
