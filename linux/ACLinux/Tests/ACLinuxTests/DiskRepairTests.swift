@@ -268,3 +268,64 @@ struct DaemonRepairGateTests {
         await d.shutdown()
     }
 }
+
+/// The boot console scan a cluster machine's start runs (the serial log
+/// appended to as the guest boots).
+@Suite("Boot console scan")
+struct BootConsoleScanTests {
+    static func append(_ path: String, _ text: String) {
+        let h = FileHandle(forWritingAtPath: path)!
+        h.seekToEndOfFile(); h.write(Data(text.utf8)); try? h.close()
+    }
+
+    @Test func theEmergencyPromptIsCaughtWithoutANewline() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let log = dir + "/serial.log"
+        // A previous boot's failure is before the offset: not this boot's.
+        _ = FileManager.default.createFile(atPath: log, contents: Data("old boot: RUN fsck MANUALLY\n".utf8))
+        let offset = UInt64(try FileManager.default.attributesOfItem(atPath: log)[.size] as! Int)
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(300))
+            Self.append(log, "[  OK  ] Started Journal Service.\n/dev/vda2 contains a file system with errors, check forced.\n")
+            try? await Task.sleep(for: .milliseconds(300))
+            Self.append(log, "/dev/vda2: UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY.\n\tGive root password for maintenance\n(or press Control-D to continue): ")
+        }
+        let t0 = Date()
+        let m = await BootConsoleScan.scan(path: log, from: offset, timeout: .seconds(10), poll: .milliseconds(50)) { true }
+        #expect(m?.contains("UNEXPECTED INCONSISTENCY") == true, "got \(m ?? "nil")")
+        #expect(Date().timeIntervalSince(t0) < 5)
+    }
+
+    @Test func aPromptWithoutAnyNewlineAtAll() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let log = dir + "/serial.log"
+        _ = FileManager.default.createFile(atPath: log, contents: Data("You are in emergency mode. After logging in, type".utf8))
+        let m = await BootConsoleScan.scan(path: log, from: 0, timeout: .seconds(5), poll: .milliseconds(50)) { true }
+        #expect(m?.contains("emergency mode") == true)
+    }
+
+    @Test func aCleanBootIsNotReportedAndTheScanStopsWhenTold() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let log = dir + "/serial.log"
+        _ = FileManager.default.createFile(atPath: log, contents: Data("[  OK  ] Reached target Multi-User System.\nbromure login: ".utf8))
+        let polls = NIOLockedValueBoxShim(0)
+        let m = await BootConsoleScan.scan(path: log, from: 0, timeout: .seconds(10), poll: .milliseconds(50)) {
+            polls.mutate { $0 += 1 }
+            return polls.value < 5      // the machine came up after a few polls
+        }
+        #expect(m == nil)
+        #expect(polls.value == 5, "it stopped when told, not at the timeout")
+    }
+
+    @Test func aMissingLogIsWaitedForAndAShrunkOneReadFromItsStart() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let log = dir + "/serial.log"
+        Task.detached {
+            try? await Task.sleep(for: .milliseconds(300))
+            _ = FileManager.default.createFile(atPath: log, contents: Data("Failed to check file system on /dev/vdc\n".utf8))
+        }
+        // An offset past the (recreated) file's end: read from its start.
+        let m = await BootConsoleScan.scan(path: log, from: 1 << 20, timeout: .seconds(5), poll: .milliseconds(50)) { true }
+        #expect(m?.contains("Failed to check file system") == true)
+    }
+}

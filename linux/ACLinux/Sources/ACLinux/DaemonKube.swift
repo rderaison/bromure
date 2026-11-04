@@ -296,6 +296,19 @@ extension Daemon {
         if rec.state == .suspended, !resume { _ = await deleteVM(rec, action: "stop") }
     }
 
+    /// A VM's serial console log and its size now: a boot's scan reads from
+    /// there (Firecracker appends to it).
+    // @port-skip linux-only: the Linux VM layout (machineConfig's serialLog)
+    func serialLog(id: String) -> (path: String, offset: UInt64)? {
+        guard let rec = registry.find(id) else { return nil }
+        let path = config.runtimeDir + "/vms/" + rec.shortId + "/serial.log"
+        var st = stat()
+        return (path, stat(path, &st) == 0 ? UInt64(st.st_size) : 0)
+    }
+
+    // @port-skip linux-only: the daemon's live table
+    func kubeMachineIsLive(id: String) -> Bool { live[id] != nil }
+
     /// A stopped cluster machine's ext4 images for a disk repair: its
     /// system disk and, when it has one, its data disk (macOS: disk.img and
     /// data.img). nil while it runs, is starting or stopping, or another
@@ -436,14 +449,21 @@ final class LinuxKubeHost: KubeEngineHost {
     /// The host's handle on a machine: its spec, for the start.
     final class Machine {
         let spec: KubeClusterEngine.MachineSpec
+        /// Where its boot's console scan reports a failed filesystem check.
+        let fsFailure: KubeClusterEngine.BootFSFailure
+        /// The scan of the boot under way.
+        var consoleScan: Task<Void, Never>?
         // @port-skip linux-only: LinuxKubeHost's handle
-        init(_ spec: KubeClusterEngine.MachineSpec) { self.spec = spec }
+        init(_ spec: KubeClusterEngine.MachineSpec, fsFailure: KubeClusterEngine.BootFSFailure) {
+            self.spec = spec
+            self.fsFailure = fsFailure
+        }
     }
 
     // @port-skip linux-only: VM ids are lowercased UUIDs
     private static func vmID(_ nodeID: UUID) -> String { nodeID.uuidString.lowercased() }
 
-    // partial: the record is made at start (the daemon's createVM is async); a boot-time filesystem failure isn't detected on Linux yet
+    // partial: the record is made at start (the daemon's createVM is async)
     // @port ACAppDelegate.makeKubeMachine(_: KubeClusterEngine.MachineSpec, runtime: KubeClusterEngine.NodeRuntime, fsFailure: KubeClusterEngine.BootFSFailure, engine: KubeClusterEngine) h=c08c904270224b9d @e0cc8f0b
     func makeKubeMachine(_ m: KubeClusterEngine.MachineSpec, runtime: KubeClusterEngine.NodeRuntime,
                          fsFailure: KubeClusterEngine.BootFSFailure, engine: KubeClusterEngine) throws {
@@ -453,7 +473,7 @@ final class LinuxKubeHost: KubeEngineHost {
         guard m.folders.isEmpty else {
             throw KubeClusterEngine.KubeError.message("\(m.record.name): shared folders aren't available for cluster machines on Linux yet")
         }
-        runtime.machine = Machine(m)
+        runtime.machine = Machine(m, fsFailure: fsFailure)
     }
 
     // partial: the IP comes from the guest (the engine's ipCommand), not a host callback
@@ -467,8 +487,26 @@ final class LinuxKubeHost: KubeEngineHost {
                                             memoryMiB: memMiB, dataDiskGB: m.dataDiskGB,
                                             scripts: m.scripts.compactMap { n, u in u.map { (n, $0) } },
                                             resume: m.restoreSavedState && !repairAttempted)
+        // The console from here on is this boot's (serial.log is appended).
+        let console = await daemon.serialLog(id: id)
         if let why = await daemon.startKubeMachineVM(id: id) {
             throw KubeClusterEngine.KubeError.message("\(m.record.name): \(why)")
+        }
+        // The console scanner (macOS: UbuntuSandboxVM.onBootFilesystemFailure):
+        // a boot dying on filesystem errors drops to an emergency shell nobody
+        // answers; the engine's boot wait sees fsFailure and repairs.
+        if let console, let machine = runtime.machine as? Machine {
+            machine.consoleScan?.cancel()
+            let fsFailure = machine.fsFailure
+            machine.consoleScan = Task.detached { [daemon] in
+                let match = await BootConsoleScan.scan(path: console.path, from: console.offset) {
+                    guard await daemon.kubeMachineIsLive(id: id) else { return false }
+                    return await MainActor.run { !runtime.up && fsFailure.detail == nil }
+                }
+                guard let match else { return }
+                FileHandle.standardError.write(Data("[kube] \(m.record.name): boot filesystem check failed: \(match)\n".utf8))
+                await MainActor.run { if fsFailure.detail == nil { fsFailure.detail = match } }
+            }
         }
     }
 
