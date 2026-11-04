@@ -115,11 +115,16 @@ struct HandedOverTests {
         func activeTabIndex() -> Int? { 3 }
         func execGuest(_ command: String, timeout: Int) async -> String? {
             if command.contains("base64 -d") { typed += 1; return typeReply }
-            if command.contains("display-message -p -t bromure:") { return "@41\n" }
+            // Most specific first: the read and the probe hold the window-id
+            // check's words too.
+            if command.hasPrefix("f=\"\";") {
+                guard let turn else { return "" }
+                let line = #"{"type":"user","message":{"role":"user","content":"\#(turn)"},"timestamp":"2026-11-04T16:24:00Z"}"# + "\n"
+                return "/home/ubuntu/.claude/projects/p/s.jsonl\n\n\(line.utf8.count)\n0\n\(line.utf8.count)\n" + line
+            }
             if command.contains("pane_current_path") { return "/home/ubuntu/w\n0\n" }
-            guard command.hasPrefix("f=\"\";"), let turn else { return "" }
-            let line = #"{"type":"user","message":{"role":"user","content":"\#(turn)"},"timestamp":"2026-11-04T16:24:00Z"}"# + "\n"
-            return "/home/ubuntu/.claude/projects/p/s.jsonl\n\n\(line.utf8.count)\n0\n\(line.utf8.count)\n" + line
+            if command.contains("display-message -p -t bromure:") { return "@41\n" }
+            return ""
         }
         func isWorking() -> Bool { true }
         func guestFileOp(_ op: [String: Any]) async -> [String: Any]? { nil }
@@ -183,16 +188,23 @@ struct HandedOverTests {
         m2.stop()
     }
 
-    @Test("the row goes as soon as the turn is there, without waiting for the next poll")
+    @Test("the row stays until its turn is in the transcript, then goes")
     func resolves() async {
         let p = Provider()
         let key = "handed-turn-\(UUID().uuidString)"
         let (m, store) = chat(p, agent: "claude", key: key)
         m.composerText = "the message I just sent"
-        p.turn = "the message I just sent"
         m.send()
+        // On the strip first: empty before the send has even queued it proves nothing.
+        await waitUntil { store.messages(key).first?.agentHasIt == true && !m.sending }
+        #expect(store.messages(key).count == 1)
+        #expect(p.typed == 1)
+        // The turn appears; `working` holds, so only the transcript can clear it.
+        p.turn = "the message I just sent"
+        m.start()
         await waitUntil { store.messages(key).isEmpty }
-        #expect(store.messages(key).isEmpty)
+        #expect(store.messages(key).isEmpty, "\(m.items.count) items")
+        #expect(m.items.contains { if case .userText(let t) = $0.kind { return t == "the message I just sent" } else { return false } })
         m.stop()
     }
 
@@ -202,6 +214,16 @@ struct HandedOverTests {
         #expect(!q.agentHasIt)
         q.handedOver = true
         #expect(q.agentHasIt)
+        // Taken back (omp's Esc) or found lost: on hold here again, and it says so.
+        q.held = true
+        #expect(!q.agentHasIt)
+        q.held = false
+        q.delivered = true
+        q.handedOver = nil
+        #expect(q.agentHasIt)
+        q.held = true
+        #expect(!q.agentHasIt)
+        q.held = false
         #expect(BeautifiedSessionModel.typedBecame(q.text, turn: "please look at the login page and fix the redirect[Pasted text]"))
     }
 
