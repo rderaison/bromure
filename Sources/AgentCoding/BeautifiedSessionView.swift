@@ -3078,6 +3078,11 @@ private struct DelegationPanelHost: View {
 /// tail moves — short of the view (stuck mid-chat) or past it (blank) —
 /// for seconds in a grid of busy cells. So it's the user's own wheel or
 /// drag over this scroll view that decides (`probe` marks where it is).
+/// `__shot-ui chat-indicators`: see `TailFollow.assumeUserScrolling`.
+enum ChatScrollDebug {
+    static func assumeUserScrolling() { TailFollow.assumeUserScrolling = true }
+}
+
 private final class TailFollow {
     /// Follow the tail through layout drift.
     var sticky = true
@@ -3087,7 +3092,10 @@ private final class TailFollow {
     var lastMarker: CGFloat?
     /// The user is scrolling this transcript: a wheel or drag over it
     /// just now (a wheel notch scrolls on for a few frames after it).
+    /// `__shot-ui chat-indicators`: scrolling from code counts as the user's.
+    static var assumeUserScrolling = false
     var userScrolling: Bool {
+        if Self.assumeUserScrolling { return true }
         guard let v = probe.view, let e = Self.lastEvent, e.window === v.window,
               Date().timeIntervalSince(e.at) < 0.4 else { return false }
         return v.bounds.contains(v.convert(e.location, from: nil))
@@ -3208,6 +3216,8 @@ final class LayoutShiftGuard {
 /// width step and expanded messages reuses them instead of cutting every
 /// reply again (the body runs on every model change).
 final class TranscriptRowsMemo {
+    /// Above which rows a day or a long pause is marked, for `cached`.
+    private(set) var markers: [Int: TranscriptTimeMarker] = [:]
     private var items: [TranscriptItem] = []
     private var chunkLimit = -1
     private var expanded: Set<Int> = []
@@ -3219,7 +3229,24 @@ final class TranscriptRowsMemo {
         self.chunkLimit = chunkLimit
         self.expanded = expanded
         cached = TranscriptRow.layout(items, chunkLimit: chunkLimit, expanded: expanded)
+        markers = TranscriptTimeline.markers(cached.rows)
         return cached
+    }
+}
+
+/// Reports where a timed row sits (`RowTimesKey`); nothing for an untimed one.
+private struct RowTimeProbe: ViewModifier {
+    let date: Date?
+    let space: String
+    func body(content: Content) -> some View {
+        if let date {
+            content.background(GeometryReader { g in
+                Color.clear.preference(key: RowTimesKey.self,
+                                       value: [.init(date: date, minY: g.frame(in: .named(space)).minY)])
+            })
+        } else {
+            content
+        }
     }
 }
 
@@ -3273,6 +3300,12 @@ struct BeautifiedSessionView: View {
     @State private var resizeFrozen: CGSize?
     /// The chat's rows, kept between renders (a reference: never re-renders).
     @State private var rowsMemo = TranscriptRowsMemo()
+    /// What's new on arriving (the panel), and where it begins (the divider,
+    /// which stays after the panel is put away).
+    @State private var whileAway: UnseenSummary?
+    @State private var newSince: Date?
+    @State private var arrival = ChatArrivalTracker()
+    @StateObject private var scrub = ScrubLabelState()
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -3822,10 +3855,19 @@ struct BeautifiedSessionView: View {
                         })?.id
                         // A reply cut into rows: Copy on ANY of its rows
                         // takes the whole reply (`layout.replies`).
+                        let markers = rowsMemo.markers
+                        let newRow = newSince.flatMap { UnseenSummary.firstRow(rows, since: $0) }
                         ForEach(rows) { row in
+                            if let marker = markers[row.id] {
+                                TranscriptTimeMarkerRow(marker: marker)
+                            }
+                            if row.id == newRow, let newSince {
+                                TranscriptNewDivider(since: newSince).id(Self.newDividerID)
+                            }
                             switch row {
                             case .item(let item):
                                 itemRow(item, lastUserID: lastUserID, layout: layout)
+                                    .modifier(RowTimeProbe(date: Self.scrubDate(item), space: Self.scrollSpace))
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
@@ -3955,6 +3997,10 @@ struct BeautifiedSessionView: View {
                     if r != viewportHeight { viewportHeight = r; tailFollow.resetBudget() }
                     model.debugGeometry["viewport"] = r
                 }
+                .onPreferenceChange(RowTimesKey.self) { rows in
+                    // Not a state of this view: the label redraws, the chat doesn't.
+                    scrub.rowsMoved(rows, following: tailFollow.sticky)
+                }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
                     // Runs inside the layout pass that moved the marker:
                     // record, decide, and leave every scroll to `snap`
@@ -3999,6 +4045,26 @@ struct BeautifiedSessionView: View {
                         snapToTail(proxy)
                     }
                 }
+                .task(id: parts == .all) {
+                    // What's new, once a moment: see `ChatArrivalTracker`.
+                    guard parts == .all else { return }
+                    while !Task.isCancelled {
+                        if let id = model.currentSession?()?.id {
+                            let window = tailFollow.probe.view?.window
+                            let found = arrival.tick(
+                                id: id, items: model.items, ready: settled && !model.catchingUp && !model.loading,
+                                active: NSApp.isActive && window?.isKeyWindow == true,
+                                atEnd: pinnedToBottom, store: .shared)
+                            if let found {
+                                newSince = found.since
+                                whileAway = found
+                            }
+                        }
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                }
+                // Said something yourself: you're here, and the panel has done its job.
+                .onChange(of: model.localRevision) { _, _ in whileAway = nil }
                 .task {
                     // Watchdog: following the tail, yet the tail isn't on
                     // screen (unloaded, or the offset drifted past it) and
@@ -4044,21 +4110,24 @@ struct BeautifiedSessionView: View {
                 }
                 .onChange(of: model.items.count) { _, _ in applyFind(proxy) }
                 // Scrolled up while it keeps going: one click back down.
+                .overlay(alignment: .top) {
+                  VStack(spacing: 8) {
+                    if let summary = whileAway {
+                        WhileAwayPanel(summary: summary,
+                                       onJump: { jumpToNew(summary, proxy) },
+                                       onDismiss: { whileAway = nil })
+                            .padding(.horizontal, 20)
+                            .padding(.top, 10)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                    ScrubLabelView(state: scrub).padding(.top, whileAway == nil ? 10 : 0)
+                  }
+                  .animation(.easeOut(duration: 0.15), value: whileAway == nil)
+                }
                 .overlay(alignment: .bottom) {
                   ZStack {
                     if !pinnedToBottom {
-                        Button {
-                            scrollToTail(proxy)
-                        } label: {
-                            Label(NSLocalizedString("Jump to latest", comment: "beautified"), systemImage: "arrow.down")
-                                .font(.system(size: 12, weight: .semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(.regularMaterial, in: Capsule())
-                                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
-                                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
-                        }
-                        .buttonStyle(.plain)
+                        JumpToLatestButton { scrollToTail(proxy) }
                         .padding(.bottom, 12)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
@@ -4098,6 +4167,29 @@ struct BeautifiedSessionView: View {
         tailFollow.sticky = false
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+
+    /// To where the new part begins: as `applyFind`, the rows have to be in the
+    /// window first, and the tail no longer followed.
+    private func jumpToNew(_ summary: UnseenSummary, _ proxy: ScrollViewProxy) {
+        whileAway = nil
+        let needed = model.items.count - summary.firstItemIndex
+        if needed > model.renderLimit { model.renderLimit = needed }
+        let weight = Self.renderWeight(model.items.suffix(needed))
+        if weight > model.renderChars { model.renderChars = weight }
+        tailFollow.sticky = false
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(Self.newDividerID, anchor: .top) }
+        }
+    }
+    private static let newDividerID = "beautified-new-divider"
+
+    /// The rows the floating label tells time by: your messages and the agent's.
+    static func scrubDate(_ item: TranscriptItem) -> Date? {
+        switch item.kind {
+        case .userText, .assistantText: return item.timestamp
+        default: return nil
         }
     }
 
@@ -4183,6 +4275,7 @@ struct BeautifiedSessionView: View {
                           onEdit: item.id == lastUserID ? { model.composerText = whole } : nil) {
                 VStack(alignment: .leading, spacing: 4) {
                     TranscriptItemView(item: item,
+                                       continuesMessage: long.map { $0.itemID != item.id } ?? false,
                                        attachments: paths.compactMap { model.imagesByPath[$0] },
                                        hiddenPaths: paths)
                     if let long, long.controls {

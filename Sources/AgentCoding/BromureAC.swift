@@ -245,6 +245,10 @@ struct BromureAC: ParsableCommand {
                         Spacer(minLength: 0)
                     }
                     .padding(22) })
+            case "chat-indicators":
+                // The real chat over a fixture: a conversation over two days,
+                // with this Mac having last read it before its final turn.
+                (view, size) = ChatIndicatorsPreview.view()
             case "machine-signin":
                 size = NSSize(width: 640, height: 640)
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
@@ -499,6 +503,9 @@ struct BromureAC: ParsableCommand {
             window.makeKeyAndOrderFront(nil)
             let end = Date().addingTimeInterval(1.5)
             while Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+            if which == "chat-indicators", let frac = ProcessInfo.processInfo.environment["BROMURE_SHOT_SCROLL"].flatMap(Double.init) {
+                ChatIndicatorsPreview.scrollBack(host, fraction: frac, window: window)
+            }
             let bounds = host.bounds
             // BROMURE_SHOT_WINDOW=1: capture the window as the window server
             // drew it. cacheDisplay leaves a split view's detail blank (the
