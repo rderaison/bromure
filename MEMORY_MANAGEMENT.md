@@ -64,6 +64,14 @@ No image change: everything ships through the meta share or the app.
   is inherited across fork. Nothing else is ranked: size still decides between an
   agent, a build and a database. A strict workspace has no sudo, so it gets none of
   this. A process that detaches in the seconds before a pass keeps the protection.
+  Only the workspace's own tmux server counts, not one an agent starts, and only an
+  inherited -500 is reset. Confirmed on a live guest with throwaway processes:
+  children inherit -500, and go back to 0 without privilege.
+
+  A process that inherited -500 can set it again, since it keeps the inherited
+  floor. Resetting through sudo would close that, at a privileged event per tab,
+  but where this runs sudo is passwordless, so an agent could do it regardless. It
+  isn't a boundary, and shouldn't be read as one.
 
   An earlier version raised everything under a tab to +300 instead, which needs no
   privilege. A dry run on a live guest showed why not: a 369 MB agent became the

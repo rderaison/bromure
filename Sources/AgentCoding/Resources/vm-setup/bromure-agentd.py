@@ -5712,7 +5712,9 @@ def memory_pressure(path="/proc/pressure/memory"):
 #
 # Protection is inherited across fork, so what the two go on to start would be
 # protected as well. Everything below them is set back to neutral, which needs no
-# privilege. A process that detaches in the moment before a pass keeps it.
+# privilege. A process that detaches in the moment before a pass keeps it, and one
+# could ask for it back: it keeps the inherited floor. Where this runs at all, sudo
+# is passwordless, so that's nothing an agent couldn't do anyway.
 OOM_PROTECT_ADJ = -500
 
 
@@ -5745,16 +5747,29 @@ def _oom_adj(proc_root, pid):
         return None
 
 
+def _is_workspace_tmux(proc_root, pid, session=TMUX_S):
+    """The tmux server the workspace's sessions live in, not one an agent started:
+    that would get protection on demand, by name alone."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            argv = f.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return False
+    return any(a == "-s" and b == session for a, b in zip(argv, argv[1:]))
+
+
 def oom_order_pass(agentd_pid, can_protect, protect, proc_root="/proc"):
     """Protect agentd and the tmux servers, and put what runs below them back to
     neutral. `protect(pid)` is the one privileged step; it returns False when
     there's no privilege to be had. Returns whether to go on trying it."""
     table = _proc_table(proc_root)
-    roots = {p for p, (comm, _) in table.items() if comm.startswith("tmux: server")}
+    roots = {p for p, (comm, _) in table.items()
+             if comm.startswith("tmux: server") and _is_workspace_tmux(proc_root, p)}
     if agentd_pid in table:
         roots.add(agentd_pid)
     for pid in sorted(roots):
-        if can_protect and (_oom_adj(proc_root, pid) or 0) > OOM_PROTECT_ADJ:
+        adj = _oom_adj(proc_root, pid)
+        if can_protect and adj is not None and adj > OOM_PROTECT_ADJ:
             can_protect = protect(pid)
     children = {}
     for pid, (_, ppid) in table.items():
@@ -5767,7 +5782,8 @@ def oom_order_pass(agentd_pid, can_protect, protect, proc_root="/proc"):
             below.add(pid)
             stack.extend(children.get(pid, []))
     for pid in below:
-        if (_oom_adj(proc_root, pid) or 0) < 0:
+        # Only what's been inherited: anything else negative was somebody's choice.
+        if _oom_adj(proc_root, pid) == OOM_PROTECT_ADJ:
             try:
                 with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w") as f:
                     f.write("0")

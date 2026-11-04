@@ -82,6 +82,13 @@ struct MemoryAdmissionTests {
                 d = os.path.join(root, str(pid)); os.mkdir(d)
                 open(os.path.join(d, "stat"), "w").write("%d (%s) S %d 0 0\n" % (pid, comm, ppid))
                 put(pid, value)
+        open(os.path.join(root, "3546", "cmdline"), "w").write("tmux\0new-session\0-d\0-s\0bromure\0")
+        # Started under a tab: a server of the agent's own, and a chosen score.
+        for pid, comm, ppid, value in ((8000, "tmux: server", 1, 0), (8001, "rootless-shim", 3600, -900)):
+            d = os.path.join(root, str(pid)); os.mkdir(d)
+            open(os.path.join(d, "stat"), "w").write("%d (%s) S %d 0 0\n" % (pid, comm, ppid))
+            open(os.path.join(d, "cmdline"), "w").write("tmux\0new-session\0-s\0mine\0")
+            put(pid, value)
         os.mkdir(os.path.join(root, "self"))
         calls = []
         def protect(pid):
@@ -90,6 +97,7 @@ struct MemoryAdmissionTests {
         print("protected", sorted(calls), adj(334), adj(3546))
         print("below", sorted({adj(p) for p in below}))
         print("others", sorted({adj(p) for p in others}))
+        print("own server", adj(8000), "chosen", adj(8001))
         calls.clear(); m.oom_order_pass(334, True, protect, root)
         print("again", calls)
         # No privilege: asks once, stops asking, and still neutralises.
@@ -115,6 +123,7 @@ struct MemoryAdmissionTests {
         #expect(out.contains("protected [334, 3546] -500 -500"), Comment(rawValue: out))
         #expect(out.contains("below ['0']"), Comment(rawValue: out))
         #expect(out.contains("others ['0']"), Comment(rawValue: out))
+        #expect(out.contains("own server 0 chosen -900"), Comment(rawValue: out))
         #expect(out.contains("again []"), Comment(rawValue: out))
         #expect(out.contains("refused False 1 0"), Comment(rawValue: out))
         #expect(out.contains("stopped False []"), Comment(rawValue: out))
