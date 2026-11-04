@@ -565,6 +565,13 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// until it lands as a turn. Optional so an older saved queue decodes.
     var delivered: Bool? = nil
     var isDelivered: Bool { delivered == true }
+    /// Typed straight into the agent's own queue when it was sent. Apart from
+    /// `delivered`: this one can still be recalled from the agent's queue, and
+    /// is never typed again if it seems lost.
+    var handedOver: Bool?
+    /// The agent has it: only its own turn is left to come. Nothing should say
+    /// it's still waiting to be sent.
+    var agentHasIt: Bool { isDelivered || handedOver == true }
     /// Times Bromure typed it in without the agent ever taking it (typed as
     /// a dialog closed, into a screen still redrawing): put back on hold
     /// once, then shown as not delivered — never silently dropped.
@@ -1326,7 +1333,7 @@ final class BeautifiedSessionModel: ObservableObject {
             // One Bromure typed in that came out a little changed (a
             // composer completion rewrote its end, the agent re-flowed it):
             // the turn it became still resolves the row.
-            if q.isDelivered, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
+            if q.agentHasIt, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
                 return true
             }
             // Or take it in as something other than a user turn (Claude's
@@ -2521,6 +2528,17 @@ final class BeautifiedSessionModel: ObservableObject {
                 let key = self.queueKey
                 self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
+                if native, outcome == .typed {
+                    self.queueStore.update(key) { l in
+                        guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
+                        l[i].handedOver = true
+                    }
+                    self.sending = false
+                    // The turn may already be there: an agent that had just
+                    // finished takes it at once. Look now, not at the next poll.
+                    await self.poll()
+                    return
+                }
                 if outcome != .typed {
                     // Never typed (a dialog came up, or typing failed):
                     // Bromure holds it, saying why when it can't retry.
@@ -6199,7 +6217,7 @@ struct QueuedMessagesStrip: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: q.failure != nil ? "exclamationmark.triangle"
                           : q.waitingOnDialog ? "hand.raised"
-                          : q.isDelivered ? "checkmark.circle"
+                          : q.agentHasIt ? "checkmark.circle"
                           : q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(q.failure != nil ? Color.red : accent)
@@ -6230,7 +6248,7 @@ struct QueuedMessagesStrip: View {
                                 .buttonStyle(.link)
                                 .font(.system(size: 11))
                             }
-                        } else if q.isDelivered {
+                        } else if q.agentHasIt {
                             Text(agent.isEmpty
                                  ? NSLocalizedString("Delivered — queued by the agent", comment: "queued message typed in, not yet a turn in the transcript")
                                  : String(format: NSLocalizedString("Delivered — queued by %@", comment: "queued message typed in, not yet a turn in the transcript"), agent))
