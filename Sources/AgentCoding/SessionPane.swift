@@ -797,23 +797,7 @@ final class SessionPane {
     /// never this tab's (two Kimi tabs in one folder).
     func chatTranscriptPin(window: Int) -> TranscriptPin {
         let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
-        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
-            return TranscriptPin(kimiSession: id)
-        }
-        // Grok / Codex: the session's own conversation, never the folder's
-        // newest (an archived session's, a second session's live one).
-        if let s, s.tool == .grok || s.tool == .codex || s.tool == .omp {
-            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
-            if pin != TranscriptPin() { return pin }
-            // Not pinned yet: never another session's conversation.
-            pin.foreignConversations = acDelegate?.agentSessionStore
-                .conversationsClaimed(tool: s.tool, profileID: profile.id, besides: s.id) ?? []
-            return pin
-        }
-        var pin = TranscriptPin()
-        pin.kimiExclude = acDelegate?.agentSessionStore
-            .kimiSessionsClaimed(profileID: profile.id, besides: s?.id) ?? []
-        return pin
+        return acDelegate?.agentSessionStore.chatTranscriptPin(for: s, profileID: profile.id) ?? TranscriptPin()
     }
 
     /// Mount (or keep) the beautified transcript view, unmounting the terminal
@@ -837,7 +821,7 @@ final class SessionPane {
         mountedTerminalView = nil
         containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
         applyContainerBackground(chat: true)
-        let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self))
+        let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self, window: windowIndex))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
         beautifiedSessionID = sessionID
@@ -1016,7 +1000,15 @@ final class SessionPane {
             if model.tabs[i].display != t.display { model.tabs[i].display = t.display }
             if model.tabs[i].repoRoot != t.repoRoot { model.tabs[i].repoRoot = t.repoRoot }
         }
-        if let activePos = tabs.firstIndex(where: { $0.active }) {
+        // A session on stage is pinned to its own window, as on the fat client
+        // (`refreshStageIfNeeded`). The guest's active tab is a poll behind and
+        // shared with whoever else drives the machine: following it mounted
+        // another session's chat under this one's header — on a quick A→B→A,
+        // whose stale "A" confirmed the switch and whose next snapshot said B.
+        if sessionOnStage, let held = beautifiedTabIndex,
+           let pos = tabs.firstIndex(where: { $0.index == held }) {
+            if model.activeIndex != pos { model.activeIndex = pos }
+        } else if let activePos = tabs.firstIndex(where: { $0.active }) {
             if let pending = pendingActiveIndex {
                 if tabs[activePos].index == pending.index
                     || Date().timeIntervalSince(pending.at) > 3 {

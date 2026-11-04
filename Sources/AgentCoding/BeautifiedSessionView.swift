@@ -1619,6 +1619,7 @@ final class BeautifiedSessionModel: ObservableObject {
             if let seedID { await self?.showCopy(seedID) }
             while !Task.isCancelled {
                 await self?.poll()
+                if Task.isCancelled { break }
                 if self?.catchingUp == true { self?.catchingUp = false }
                 let busy = self?.working ?? false
                 let background = self?.background ?? false
@@ -1630,6 +1631,8 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The downloaded history, parsed and shown before any network round trip.
     private func showCached() async {
         let parsed = await parseCurrent()
+        // Stopped meanwhile: the poll that replaced this one parses it again.
+        guard !Task.isCancelled else { parseDirty = true; return }
         guard !parsed.isEmpty else { return }
         applyParsed(parsed)
         rebuild()
@@ -1645,7 +1648,7 @@ final class BeautifiedSessionModel: ObservableObject {
         let parsed = await Task.detached(priority: .userInitiated) {
             GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
-        guard !parsed.isEmpty, parsedItems.isEmpty else { return }
+        guard !Task.isCancelled, !parsed.isEmpty, parsedItems.isEmpty else { return }
         applyParsed(parsed)
         rebuild()
         if loading { loading = false }
@@ -1723,6 +1726,10 @@ final class BeautifiedSessionModel: ObservableObject {
         // it must not sit behind the transcript fetch's early return. (Kept
         // warm off stage: skipped — nobody sees its cards until it's back.)
         if !background { await scanTerminal() } else { screenSaysBusy = false; await scanDialogOffStage() }
+        // Stopped mid-poll (the user switched away): an exec under way isn't
+        // interrupted by the cancel, so nothing after an await may assume
+        // this chat is still the one on show. No read, no sink, no parse.
+        if Task.isCancelled { return }
         // The session's own agent wins over the tab label's guess (an omp
         // under bun reads "bash", and fell back to the workspace's main
         // agent: "Message Kimi Code…" over an omp chat).
@@ -1735,6 +1742,7 @@ final class BeautifiedSessionModel: ObservableObject {
         // every 0.4–1.2 s — five chats in a room re-laid out their text
         // continuously for nothing.
         let read = await provider.readTranscript(known: known, mode: .tail, agent: agentKind)
+        if Task.isCancelled { return }
         let issue = loadTracker.record(read, at: Date(), showing: !parsedItems.isEmpty, working: isWorking)
         if issue != loadIssue { loadIssue = issue }
         guard case .fetched(let fetch) = read else {
@@ -1756,6 +1764,8 @@ final class BeautifiedSessionModel: ObservableObject {
         // of seconds — polls in between still bank the file's growth.
         if parseDirty, !(lastParseDuration > 0.25 && Date().timeIntervalSince(lastParseAt) < 2) {
             let parsed = await parseCurrent()
+            // Back on stage meanwhile (a warm chat): the new poll parses it.
+            guard !Task.isCancelled else { parseDirty = true; return }
             // Don't blank a populated transcript on a transient empty read (see
             // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
             // Keep the last good items until either real content returns or the
@@ -1788,7 +1798,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// `continuityPrompts` of the user's, or `continuityBytes`.
     private func backfillContinuity() async {
         for _ in 0..<8 {
-            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+            guard !Task.isCancelled, canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
                   held.data.count < Self.continuityBytes,
                   Self.userPrompts(in: parsedItems) < Self.continuityPrompts
             else { return }
@@ -2959,22 +2969,28 @@ final class BeautifiedSessionModel: ObservableObject {
 }
 
 /// Local provider: runs the transcript + type commands in the workspace VM over
-/// vsock (`guestExec`), resolving the active tab's guest cwd (the transcript
-/// store is keyed off it) and caching it per tmux window.
+/// vsock (`guestExec`), resolving its window's guest cwd (the transcript
+/// store is keyed off it).
 @MainActor
 final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     let accent: Color
     private weak var pane: SessionPane?
+    /// The tmux window this chat is FOR, never the pane's active tab: a poll
+    /// under way when the user switched sessions read the NEW tab's
+    /// transcript into the old chat, whose sink saved it as the old
+    /// session's copy — shown as that session's opening frame next time.
+    private let window: Int
 
-    init(pane: SessionPane) {
+    init(pane: SessionPane, window: Int) {
         self.pane = pane
+        self.window = window
         self.accent = Color(hex: pane.profile.color.hexInUI)
     }
 
+    /// The window while the roster still lists it (gone = nothing to read,
+    /// and nothing to type into — not somebody else's tab).
     func activeTabIndex() -> Int? {
-        guard let pane, pane.model.tabs.indices.contains(pane.model.activeIndex)
-        else { return nil }
-        return pane.model.tabs[pane.model.activeIndex].index
+        pane?.model.tabs.contains { $0.index == window } == true ? window : nil
     }
 
     func execGuest(_ command: String, timeout: Int) async -> String? {
@@ -2987,7 +3003,9 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
         return try? await delegate.guestFileOp(profileID: pane.profile.id, op: op, timeout: 30)
     }
 
-    func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
+    func isWorking() -> Bool {
+        pane?.model.tabs.first { $0.index == window }?.agentStatus == .working
+    }
 
     func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
 

@@ -3113,17 +3113,7 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     /// own journal, never the folder's newest (two Kimi tabs in one folder).
     func transcriptPin(window w: Int) -> TranscriptPin {
         let s = controller.sessionStore.session(profileID: workspaceID, windowIndex: w)
-        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
-            return TranscriptPin(kimiSession: id)
-        }
-        // Grok / Codex: the session's own conversation (see SessionPane).
-        if let s, s.tool == .grok || s.tool == .codex {
-            let pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
-            if pin != TranscriptPin() { return pin }
-        }
-        var pin = TranscriptPin()
-        pin.kimiExclude = controller.sessionStore.kimiSessionsClaimed(profileID: workspaceID, besides: s?.id)
-        return pin
+        return controller.sessionStore.chatTranscriptPin(for: s, profileID: workspaceID)
     }
 }
 
