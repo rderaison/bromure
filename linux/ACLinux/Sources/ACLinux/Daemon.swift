@@ -768,7 +768,9 @@ public actor Daemon {
             // A sign-in VM has none and no swap map: the real OAuth
             // handshake reaches upstream untouched (macOS: tokenPlan nil).
             let plan = rec.registration == true ? nil : sessionTokenPlan(for: profile)
-            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan)
+            let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
+            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
+                                         kubeconfigYAML: kubeYAML)
             // The agents' MCP configs (the built-ins and the workspace's own
             // servers, their tokens as stand-ins), as macOS writes them.
             try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
@@ -781,7 +783,8 @@ public actor Daemon {
             try HomeSeed.finalizeHomeSeed(seedDir: seed)
         }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
-        try writeProxyMeta(meta, profile: staged)
+        let extraNoProxy = staged == nil || rec.registration == true ? [] : await kubeNoProxy(for: UUID(uuidString: rec.id) ?? UUID())
+        try writeProxyMeta(meta, profile: staged, extraNoProxy: extraNoProxy)
         // The agents' MCP shims (board, automations, delegation, …) and the
         // built-in browser and display servers, as macOS stages them.
         try SessionDisk.writeGuestMCPShims(into: meta)

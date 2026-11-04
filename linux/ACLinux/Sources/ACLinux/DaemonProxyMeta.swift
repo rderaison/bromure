@@ -9,7 +9,7 @@ extension Daemon {
     /// bundles. Without a proxy, none of them: the guest goes out directly.
     // partial: proxy.env has the proxy, CA and local-model lines only (no git/cloud token fakes, AWS region, profile env vars, SSH agent)
     // @port-skip linux-only: SessionDisk.prepareMetadataShare's MITM share, for the Linux proxy (the full function is AppKit-side)
-    func writeProxyMeta(_ meta: URL, profile: Profile?) throws {
+    func writeProxyMeta(_ meta: URL, profile: Profile?, extraNoProxy: [String] = []) throws {
         let fm = FileManager.default
         let names = ["bromure-ca.pem", "proxy_port", "proxy.env"]
         guard let mitm else {
@@ -19,7 +19,11 @@ extension Daemon {
         let port = Self.guestProxyPort
         try mitm.ca.certificatePEM.write(to: meta.appendingPathComponent("bromure-ca.pem"), atomically: true, encoding: .utf8)
         try "\(port)".write(to: meta.appendingPathComponent("proxy_port"), atomically: true, encoding: .utf8)
-        let env = Self.proxyEnv(port: port, noProxy: ["localhost", "127.0.0.1", "::1", Self.vmSubnet])
+        // The VMs' subnet and the cluster machines the workspace may reach
+        // stay off the proxy (macOS: SessionDisk.extraNoProxy).
+        var noProxy = ["localhost", "127.0.0.1", "::1", Self.vmSubnet]
+        for x in extraNoProxy where !noProxy.contains(x) { noProxy.append(x) }
+        let env = Self.proxyEnv(port: port, noProxy: noProxy)
             + (profile.map(Self.localModelEnv) ?? "")
         try env.write(to: meta.appendingPathComponent("proxy.env"), atomically: true, encoding: .utf8)
     }

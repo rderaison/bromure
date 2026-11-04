@@ -191,6 +191,80 @@ extension Daemon {
         return try? JSONDecoder().decode(KubeWorkspaceAccess.self, from: data)
     }
 
+    // MARK: Workspaces' kubeconfigs
+
+    /// A workspace's ~/.kube/config at launch (macOS: launch's
+    /// KubeconfigMaterializer step): its own kubeconfigs with fakes, and the
+    /// Bromure clusters it may use as direct contexts (real CA and admin
+    /// cert, reached over the bridged switch). The bearer swaps join the
+    /// proxy's map for the workspace. Client certificates and private
+    /// cluster CAs of imported kubeconfigs need upstream mTLS / CA pinning
+    /// the Linux proxy doesn't do yet: they're logged and fail closed (the
+    /// proxy verifies the upstream against the system roots and presents
+    /// no client certificate).
+    // partial: no upstream client identities or cluster-CA pinning on Linux yet; no exec-plugin pollers or 1Password refresh
+    // @port-skip linux-only: the kubeconfig step of ACAppDelegate.launch / pushLiveCredentials, on the Linux proxy
+    func kubeconfig(for profile: Profile, plan: SessionTokenPlan?) async -> String? {
+        guard let mitm else { return nil }
+        let pem = mitm.ca.certificatePEM
+        let pid = profile.id
+        let mat = await MainActor.run {
+            KubeconfigMaterializer().materialize(
+                profile: profile, bromureCAPEM: pem,
+                directClusters: SessionStores.shared?.kubeEngine?.directClusters(for: pid) ?? [])
+        }
+        if let plan, !mat.bearerSwaps.isEmpty {
+            var map = plan.tokenMap()
+            for swap in mat.bearerSwaps {
+                map.entries.append(TokenMap.Entry(
+                    fake: swap.fakeToken, real: swap.realToken, host: swap.host,
+                    consentCredentialID: swap.consentCredentialID,
+                    consentDisplayName: swap.consentDisplayName))
+            }
+            mitm.swapper.setMap(map, for: pid)
+        }
+        let unsupported = Set(mat.clientIdentities.map(\.host) + mat.clusterCAs.map(\.host))
+        if !unsupported.isEmpty {
+            FileHandle.standardError.write(Data(
+                "bromure-ac daemon: '\(profile.name)': kubeconfig for \(unsupported.sorted().joined(separator: ", ")) needs a client certificate or its own cluster CA through the proxy, which this Linux server doesn't do yet; those calls will fail\n".utf8))
+        }
+        if !mat.execContexts.isEmpty {
+            FileHandle.standardError.write(Data(
+                "bromure-ac daemon: '\(profile.name)': kubeconfig exec plugins aren't refreshed on this Linux server yet\n".utf8))
+        }
+        return mat.yaml.isEmpty ? nil : mat.yaml
+    }
+
+    /// Every running workspace's ~/.kube/config and swap map, made again
+    /// (a cluster came up, went away, or changed who may use it) and
+    /// written into its guest (macOS: refreshKubeAccessForRunningWorkspaces →
+    /// pushLiveCredentials).
+    // partial: the kubeconfig and its swaps only (macOS restages every live credential)
+    // @port-skip linux-only: refreshKubeAccessForRunningWorkspaces on the Linux daemon
+    func refreshWorkspaceKubeconfigs() async {
+        for rec in registry.records where rec.state == .running && !rec.managed {
+            guard let profile = await launchProfile(for: rec) else { continue }
+            let plan = sessionTokenPlan(for: profile)
+            let yaml = await kubeconfig(for: profile, plan: plan) ?? ""
+            let b64 = Data(yaml.utf8).base64EncodedString()
+            let cmd = yaml.isEmpty ? "rm -f ~/.kube/config && echo ok"
+                : "mkdir -p ~/.kube && chmod 700 ~/.kube && umask 077 && echo \(b64) | base64 -d > ~/.kube/config.tmp "
+                    + "&& mv -f ~/.kube/config.tmp ~/.kube/config && echo ok"
+            let pid = profile.id
+            let out = try? await MainActor.run { LinuxSessionHost.shared }?.guestExec(profileID: pid, command: cmd, timeout: 20)
+            if out?.contains("ok") != true {
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': couldn't update its kubeconfig\n".utf8))
+            }
+        }
+    }
+
+    /// The node and registry addresses a workspace reaches directly (macOS:
+    /// extraNoProxy): kept off the proxy in its proxy.env.
+    // @port-skip linux-only: KubeClusterEngine.extraNoProxy into the Linux proxy.env
+    func kubeNoProxy(for profileID: UUID) async -> [String] {
+        await MainActor.run { SessionStores.shared?.kubeEngine?.extraNoProxy(for: profileID) ?? [] }
+    }
+
     // MARK: The machines, actor side
 
     /// A cluster machine's record, made (stopped) if it has none, with its
@@ -399,9 +473,12 @@ final class LinuxKubeHost: KubeEngineHost {
         Task { completion(await daemon.kubeRelayFD(id: id, target: target)) }
     }
 
-    // partial: kubeconfigs aren't staged into workspaces on Linux yet (round b)
-    // @port-skip linux-only: ACAppDelegate.refreshKubeAccessForRunningWorkspaces's Linux stand-in
-    func refreshKubeAccessForRunningWorkspaces() {}
+    // partial: the kubeconfig and its swaps only (macOS restages every live credential)
+    // @port-skip linux-only: ACAppDelegate.refreshKubeAccessForRunningWorkspaces on the Linux daemon
+    func refreshKubeAccessForRunningWorkspaces() {
+        guard let daemon else { return }
+        Task { await daemon.refreshWorkspaceKubeconfigs() }
+    }
 
     // @port-skip linux-only: HostNetwork.primaryIPv4 on macOS
     func kubeHostIPv4() -> String? { Daemon.primaryIPv4() }

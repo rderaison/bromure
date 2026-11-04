@@ -94,6 +94,7 @@
     "Sources/AgentCoding/Mitm/InstructionHeuristics.swift",
     "Sources/AgentCoding/Mitm/KimiProvisioning.swift",
     "Sources/AgentCoding/Mitm/KimiSubscriptionStore.swift",
+    "Sources/AgentCoding/Mitm/KubeconfigMaterializer.swift",
     "Sources/AgentCoding/Mitm/MintedCredential.swift",
     "Sources/AgentCoding/Mitm/MitmError.swift",
     "Sources/AgentCoding/Mitm/MitmUpstreamURL.swift",
