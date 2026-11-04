@@ -245,6 +245,9 @@ struct BromureAC: ParsableCommand {
                         Spacer(minLength: 0)
                     }
                     .padding(22) })
+            case "switchboard":
+                // The real chat over a fixture Switchboard: several sessions at once.
+                (view, size) = SwitchboardThreadsPreview.view()
             case "machine-signin":
                 size = NSSize(width: 640, height: 640)
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)

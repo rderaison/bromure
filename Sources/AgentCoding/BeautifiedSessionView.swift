@@ -3273,6 +3273,9 @@ struct BeautifiedSessionView: View {
     @State private var resizeFrozen: CGSize?
     /// The chat's rows, kept between renders (a reference: never re-renders).
     @State private var rowsMemo = TranscriptRowsMemo()
+    @State private var threadMemo = SwitchboardThreadMemo()
+    /// The Switchboard's chain on show alone (nil: the whole conversation).
+    @State private var threadFilter: String?
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -3495,8 +3498,23 @@ struct BeautifiedSessionView: View {
         }
     }
 
+    /// The Switchboard's conversation told apart by session; nil for any other chat.
+    private var threaded: ThreadedConversation? {
+        guard let me = model.currentSession?(), me.isSwitchboard, let store = model.sessionStore else { return nil }
+        let sessions = store.sessions
+        let aliases = SwitchboardThreading.aliases(handles: SwitchboardEngine.handles(of: sessions), sessions: sessions)
+        return threadMemo.conversation(model.items, aliases: aliases)
+    }
+
     @ViewBuilder
     private var transcriptParts: some View {
+            if let conversation = threaded, !conversation.threads.isEmpty {
+                SwitchboardThreadBar(
+                    conversation: conversation, filter: $threadFilter,
+                    waiting: Set((model.sessionStore?.sessions ?? []).filter { $0.awaitingAnswer == true }.map(\.id)),
+                    onOpen: model.openSession)
+                    .onAppear { if let picked = SwitchboardThreadsPreview.picked { threadFilter = picked } }
+            }
             transcript
                 // A window drag: the full transcript holds its size (no
                 // re-layout) and hides; a small preview of its tail — kept
@@ -3733,11 +3751,13 @@ struct BeautifiedSessionView: View {
                         // While the window is being resized, only the last
                         // couple of screens re-flow live; the rest comes back
                         // when the drag ends.
+                        let conversation = threaded
+                        let source = conversation?.items(in: threadFilter) ?? model.items
                         let visible = !settled
-                            ? Self.resizeTail(model.items, limit: model.renderLimit)
-                            : Self.renderWindow(model.items, limit: model.renderLimit, chars: model.renderChars,
+                            ? Self.resizeTail(source, limit: model.renderLimit)
+                            : Self.renderWindow(source, limit: model.renderLimit, chars: model.renderChars,
                                                 expanded: model.expandedMessages)
-                        let hidden = model.items.count - visible.count
+                        let hidden = source.count - visible.count
                         if hidden > 0 || model.canLoadEarlier {
                             HStack {
                                 Spacer()
@@ -3773,7 +3793,7 @@ struct BeautifiedSessionView: View {
                                         }
                                     } else if hidden > 0 {
                                         let n = max(1, Self.renderWindow(
-                                            model.items,
+                                            source,
                                             limit: model.renderLimit + BeautifiedSessionModel.renderStep,
                                             chars: model.renderChars + BeautifiedSessionModel.renderCharStep,
                                             expanded: model.expandedMessages).count
@@ -3822,10 +3842,25 @@ struct BeautifiedSessionView: View {
                         })?.id
                         // A reply cut into rows: Copy on ANY of its rows
                         // takes the whole reply (`layout.replies`).
+                        // Filtered to one chain, every row is about it: no headers.
+                        let threadHeaders = threadFilter == nil ? (conversation?.headers(rows) ?? [:]) : [:]
                         ForEach(rows) { row in
+                            if let conversation, let keys = threadHeaders[row.id] {
+                                SwitchboardThreadHeader(threads: keys.compactMap(conversation.thread),
+                                                        onPick: { threadFilter = $0 })
+                            }
                             switch row {
                             case .item(let item):
-                                itemRow(item, lastUserID: lastUserID, layout: layout)
+                                if let conversation, case .userText(let t) = item.kind,
+                                   let notice = DelegationNotice.stripSwitchboard(t) {
+                                    SwitchboardNoticeLine(
+                                        text: notice,
+                                        thread: conversation.threadsOf[item.id]?.first.flatMap(conversation.thread),
+                                        time: item.timestamp, onPick: { threadFilter = $0 })
+                                        .id(item.id)
+                                } else {
+                                    itemRow(item, lastUserID: lastUserID, layout: layout)
+                                }
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
@@ -4017,6 +4052,7 @@ struct BeautifiedSessionView: View {
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
+                .onChange(of: threadFilter) { _, _ in scrollToTail(proxy) }
                 // `revision` is read off the publisher (it fires before the
                 // rows re-lay out), so "was it at the tail" is judged on the
                 // content BEFORE the append — a big answer landing would
