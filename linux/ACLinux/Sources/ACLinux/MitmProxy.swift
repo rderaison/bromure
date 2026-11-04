@@ -33,6 +33,11 @@ final class MitmProxy: @unchecked Sendable {
     let ca: BromureCA
     let caNIO: NIOSSLCertificate
     let swapper: TokenSwapper
+    /// The token swaps' and the kube client certificates' consent (macOS:
+    /// MitmEngine's one ConsentBroker).
+    let consent: ConsentBroker
+    /// Imported kubeconfigs' client certificates and cluster CAs, per workspace.
+    let kubeTrust: KubeUpstreamTrust
     let claudeStore: ClaudeSubscriptionStore
     let claudeRefresher: ClaudeSubscriptionRefresher
     let codexStore: CodexSubscriptionStore
@@ -79,7 +84,10 @@ final class MitmProxy: @unchecked Sendable {
             try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: saltURL.path)
             fakeTokenSalt = fresh
         }
-        swapper = TokenSwapper(consent: ConsentBroker())
+        let broker = ConsentBroker()
+        consent = broker
+        swapper = TokenSwapper(consent: broker)
+        kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
         claudeStore = ClaudeSubscriptionStore()
         claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
         codexStore = CodexSubscriptionStore()
@@ -91,6 +99,11 @@ final class MitmProxy: @unchecked Sendable {
         self.group = group
         var cfg = TLSConfiguration.makeClientConfiguration()
         cfg.applicationProtocols = ["http/1.1"]
+        // The chain and the dialed name: a DNS name against the leaf's DNS
+        // SANs, an IP literal (no SNI) against its IP SANs -- NIOSSL matches
+        // those to the socket's remote address, before the handshake counts
+        // as complete (macOS: URLSession binds both the same way).
+        cfg.certificateVerification = .fullVerification
         if !extraRoots.isEmpty { cfg.additionalTrustRoots = [.certificates(extraRoots)] }
         upstreamContext = try NIOSSLContext(configuration: cfg)
         wireProviders()
@@ -213,44 +226,51 @@ final class MitmProxy: @unchecked Sendable {
         return (InferenceService.engineHost, InferenceService.repairProxyPort, false, true)
     }
 
-    /// Connects to `host:port` (TLS, verified against the system roots, when
-    /// `tls`) on `loop`; the channel is ready to write when the future holds.
+    /// Connects to `host:port` (TLS, when `tls`) on `loop`; the channel is
+    /// ready to write when the future holds. The server certificate is
+    /// verified against the system roots, or only against the cluster CA
+    /// `profileID`'s kubeconfig pins for that endpoint, which may also give
+    /// the client certificate presented.
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
-    func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
+    func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
+                         on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed = Self.route(host: host, port: port, tls: requestedTLS)
         if routed.local {
             guard let to = try? SocketAddress(ipAddress: routed.host, port: routed.port) else {
                 return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: port))
             }
-            return dial(host: host, to: [to], tls: routed.tls, on: loop)
+            return dial(host: host, to: [to], tls: routed.tls, ctx: upstreamContext, on: loop)
         }
+        let ctx = profileID.flatMap { kubeTrust.endpoint(for: host, port: port, profileID: $0) }?.context
+            ?? upstreamContext
         // Only to the addresses that passed the check, in order: the name is
         // never looked up again (a rebinding answer can't slip in between).
         return checkDestination(host: host, port: port, on: loop).flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
-                return dial(host: host, to: [to], tls: routed.tls, on: loop)
+                return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop)
             }
             let addrs = resolved.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
-            return dial(host: host, to: addrs, tls: routed.tls, on: loop)
+            return dial(host: host, to: addrs, tls: routed.tls, ctx: ctx, on: loop)
         }
     }
 
     /// Connects to the first of `addresses` that answers, for `host` (its
     /// SNI and certificate name when `tls`).
     // @port-skip linux-only: NIO upstream (macOS: UpstreamPinning.connect's race over the checked addresses)
-    private func dial(host: String, to addresses: [SocketAddress], tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
+    private func dial(host: String, to addresses: [SocketAddress], tls: Bool, ctx: NIOSSLContext,
+                      on loop: EventLoop) -> EventLoopFuture<Channel> {
         guard let first = addresses.first else {
             return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: 0))
         }
-        return dialOne(host: host, to: first, tls: tls, on: loop).flatMapError { [self] e in
-            addresses.count > 1 ? dial(host: host, to: Array(addresses.dropFirst()), tls: tls, on: loop)
+        return dialOne(host: host, to: first, tls: tls, ctx: ctx, on: loop).flatMapError { [self] e in
+            addresses.count > 1 ? dial(host: host, to: Array(addresses.dropFirst()), tls: tls, ctx: ctx, on: loop)
                                 : loop.makeFailedFuture(e)
         }
     }
 
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
-    private func dialOne(host: String, to target: SocketAddress, tls: Bool, on loop: EventLoop) -> EventLoopFuture<Channel> {
-        let ctx = upstreamContext
+    private func dialOne(host: String, to target: SocketAddress, tls: Bool, ctx: NIOSSLContext,
+                         on loop: EventLoop) -> EventLoopFuture<Channel> {
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }
         let ready = OncePromise(loop.makePromise(of: Channel.self))
         ClientBootstrap(group: loop)
@@ -259,6 +279,9 @@ final class MitmProxy: @unchecked Sendable {
             .channelInitializer { ch in
                 guard tls else { return ch.eventLoop.makeSucceededVoidFuture() }
                 do {
+                    // No SNI for an IP literal (RFC 6066); its certificate is
+                    // still bound to the address (`.fullVerification`: an IP SAN
+                    // equal to the connected address, or the handshake fails).
                     return ch.pipeline.addHandlers([
                         try NIOSSLClientHandler(context: ctx, serverHostname: isIP ? nil : host),
                         HandshakeWaiter(ready),
@@ -597,6 +620,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let swapped = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID)
         req = swapped.modified
         trace?.swaps = swapped.swaps
+        // An imported kubeconfig's client certificate flagged for approval:
+        // asked before it's presented (macOS asks at the server's challenge,
+        // and before an upgrade); refused with a real reply, not a close.
+        if tls, let id = proxy.kubeTrust.endpoint(for: host, port: port, profileID: profileID)?.identity,
+           let credID = id.consentCredentialID {
+            FileHandle.standardError.write(Data("[mitm] client-cert use on \(host) gated → consent \(credID)\n".utf8))
+            let allowed = await proxy.consent.consent(
+                profileID: profileID, credentialID: credID, credentialDisplayName: id.consentDisplayName ?? credID,
+                scopeHint: String(format: NSLocalizedString("to authenticate with the API server at %@", comment: ""), host))
+            if !allowed {
+                return .answer(simple(403, "Forbidden", body: "Bromure: client-certificate use denied for \(host)\n"))
+            }
+        }
         // 5f. A sign-in this workspace runs: its token exchange is the host's.
         var capture: SignInCapture?
         if tls, let c = SubscriptionProviders.signInCapture?(profileID),
@@ -636,7 +672,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
         case .forward(let req, let injected, let capture, let upgrade):
-            proxy.connectUpstream(host: host, port: port, tls: tls, on: channel.eventLoop).whenComplete { r in
+            proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
                     let reply = (e as? ProxyDestinationDenied).map {

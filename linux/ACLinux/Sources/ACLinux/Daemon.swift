@@ -1091,6 +1091,7 @@ public actor Daemon {
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
         if let pid = UUID(uuidString: id) {
             mitm?.clearSessionTrace(for: pid)
+            mitm?.kubeTrust.clearAll(for: pid)
             InferenceRepairProxy.shared.setExternalEngine(pid, nil)
         }
         // A sign-in VM that stopped on its own ends its sign-in.

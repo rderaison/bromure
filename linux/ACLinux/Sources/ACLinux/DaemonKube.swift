@@ -197,12 +197,10 @@ extension Daemon {
     /// KubeconfigMaterializer step): its own kubeconfigs with fakes, and the
     /// Bromure clusters it may use as direct contexts (real CA and admin
     /// cert, reached over the bridged switch). The bearer swaps join the
-    /// proxy's map for the workspace. Client certificates and private
-    /// cluster CAs of imported kubeconfigs need upstream mTLS / CA pinning
-    /// the Linux proxy doesn't do yet: they're logged and fail closed (the
-    /// proxy verifies the upstream against the system roots and presents
-    /// no client certificate).
-    // partial: no upstream client identities or cluster-CA pinning on Linux yet; no exec-plugin pollers or 1Password refresh
+    /// proxy's map for the workspace; imported kubeconfigs' client
+    /// certificates and cluster CAs go to the proxy's kube trust (presented
+    /// upstream, and the only anchor of that endpoint's server certificate).
+    // partial: no exec-plugin pollers or 1Password refresh
     // @port-skip linux-only: the kubeconfig step of ACAppDelegate.launch / pushLiveCredentials, on the Linux proxy
     func kubeconfig(for profile: Profile, plan: SessionTokenPlan?) async -> String? {
         guard let mitm else { return nil }
@@ -223,11 +221,9 @@ extension Daemon {
             }
             mitm.swapper.setMap(map, for: pid)
         }
-        let unsupported = Set(mat.clientIdentities.map(\.host) + mat.clusterCAs.map(\.host))
-        if !unsupported.isEmpty {
-            FileHandle.standardError.write(Data(
-                "bromure-ac daemon: '\(profile.name)': kubeconfig for \(unsupported.sorted().joined(separator: ", ")) needs a client certificate or its own cluster CA through the proxy, which this Linux server doesn't do yet; those calls will fail\n".utf8))
-        }
+        // Launch and live refresh alike: what's added, edited or removed
+        // while the VM runs takes effect at once.
+        mitm.kubeTrust.apply(mat, profileID: pid)
         if !mat.execContexts.isEmpty {
             FileHandle.standardError.write(Data(
                 "bromure-ac daemon: '\(profile.name)': kubeconfig exec plugins aren't refreshed on this Linux server yet\n".utf8))

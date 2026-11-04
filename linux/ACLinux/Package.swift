@@ -19,6 +19,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.9.0"),
         // Enrollment's X.509 handling, as the app builds it.
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-asn1.git", from: "1.0.0"),
         // The workspaces' intercepting proxy (TLS termination for the stand-in swaps).
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
         // SandboxEngine's policy parser, as the app builds it.
@@ -71,6 +72,9 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "X509", package: "swift-certificates"),
+                .product(name: "SwiftASN1", package: "swift-asn1"),
             ]),
         // Boots the baked amd64 image under KVM; skips itself without
         // /dev/kvm, /dev/vhost-vsock access, or the image.
