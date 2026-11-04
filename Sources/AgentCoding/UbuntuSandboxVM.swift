@@ -150,6 +150,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// allocation overstates real usage. 0/0 from an older guest agent.
     public var onVMStats: ((_ cpu: Double, _ memUsedKB: Int, _ memTotalKB: Int, _ load: Double,
                             _ diskUsedKB: Int, _ diskTotalKB: Int) -> Void)?
+    /// `/proc/pressure/memory` avg10, reported just before each `onVMStats`.
+    /// 0/0 from an older guest agent.
+    public var onVMMemoryPressure: ((_ some: Double, _ full: Double) -> Void)?
 
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
@@ -1217,6 +1220,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             let raw = Self.boundedText(entry) ?? ""
                             var cpu = 0.0, used = 0, total = 0, load = 0.0
                             var diskUsed = 0, diskTotal = 0
+                            var psiSome = 0.0, psiFull = 0.0
                             for line in raw.split(whereSeparator: \.isNewline) {
                                 let p = line.split(separator: " ")
                                 guard p.count == 2 else { continue }
@@ -1228,9 +1232,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                                 case "load":          load = Double(v) ?? 0
                                 case "disk_used_kb":  diskUsed = Int(v) ?? 0
                                 case "disk_total_kb": diskTotal = Int(v) ?? 0
+                                case "mem_psi_some":  psiSome = Double(v) ?? 0
+                                case "mem_psi_full":  psiFull = Double(v) ?? 0
                                 default: break
                                 }
                             }
+                            self?.onVMMemoryPressure?(psiSome, psiFull)
                             self?.onVMStats?(cpu, used, total, load, diskUsed, diskTotal)
                             continue
                         }

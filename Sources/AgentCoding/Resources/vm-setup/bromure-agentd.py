@@ -5687,6 +5687,133 @@ def roster_loop_service():
 
 
 # ── vitals loops (vmstat / ports / docker), published to the outbox ──────────
+def memory_pressure(path="/proc/pressure/memory"):
+    """(some, full) avg10 from PSI, as strings; "0" where the kernel has none."""
+    found = {"some": "0", "full": "0"}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                cells = line.split()
+                if cells and cells[0] in found:
+                    for cell in cells[1:]:
+                        if cell.startswith("avg10="):
+                            float(cell[6:])
+                            found[cells[0]] = cell[6:]
+    except (OSError, ValueError):
+        pass
+    return found["some"], found["full"]
+
+
+# Who the kernel's OOM killer must not take. It picks by size, and agentd is often
+# among the biggest processes in the guest; tmux going takes every session with
+# it. Those two are protected, and nothing else is ranked: size still decides
+# between an agent, a build and a database, and an agent's MCP helpers (a few MB
+# each) stay too small to be picked off under it.
+#
+# Protection is inherited across fork, so what the two go on to start would be
+# protected as well. Everything below them is set back to neutral, which needs no
+# privilege. A process that detaches in the moment before a pass keeps it, and one
+# could ask for it back: it keeps the inherited floor. Where this runs at all, sudo
+# is passwordless, so that's nothing an agent couldn't do anyway.
+OOM_PROTECT_ADJ = -500
+
+
+def _proc_table(proc_root):
+    """pid -> (comm, ppid) for every process under proc_root."""
+    table = {}
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return table
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, name, "stat"), "r", errors="replace") as f:
+                stat = f.read()
+            # comm can hold spaces and parentheses: ppid follows the LAST ")".
+            close = stat.rindex(")")
+            table[int(name)] = (stat[stat.index("(") + 1:close], int(stat[close + 2:].split()[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return table
+
+
+def _oom_adj(proc_root, pid):
+    try:
+        with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _is_workspace_tmux(proc_root, pid, session=TMUX_S):
+    """The tmux server the workspace's sessions live in, not one an agent started:
+    that would get protection on demand, by name alone."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            argv = f.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return False
+    return any(a == "-s" and b == session for a, b in zip(argv, argv[1:]))
+
+
+def oom_order_pass(agentd_pid, can_protect, protect, proc_root="/proc"):
+    """Protect agentd and the tmux servers, and put what runs below them back to
+    neutral. `protect(pid)` is the one privileged step; it returns False when
+    there's no privilege to be had. Returns whether to go on trying it."""
+    table = _proc_table(proc_root)
+    roots = {p for p, (comm, _) in table.items()
+             if comm.startswith("tmux: server") and _is_workspace_tmux(proc_root, p)}
+    if agentd_pid in table:
+        roots.add(agentd_pid)
+    for pid in sorted(roots):
+        adj = _oom_adj(proc_root, pid)
+        if can_protect and adj is not None and adj > OOM_PROTECT_ADJ:
+            can_protect = protect(pid)
+    children = {}
+    for pid, (_, ppid) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    stack = [c for root in roots for c in children.get(root, [])]
+    below = set()
+    while stack:
+        pid = stack.pop()
+        if pid not in below and pid not in roots:
+            below.add(pid)
+            stack.extend(children.get(pid, []))
+    for pid in below:
+        # Only what's been inherited: anything else negative was somebody's choice.
+        if _oom_adj(proc_root, pid) == OOM_PROTECT_ADJ:
+            try:
+                with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w") as f:
+                    f.write("0")
+            except OSError:
+                pass  # gone, or another uid's
+    return can_protect
+
+
+def _oom_protect(pid):
+    out = _sys_capture(["sudo", "-n", "sh", "-c",
+                        "echo %d > /proc/%d/oom_score_adj && echo ok" % (OOM_PROTECT_ADJ, pid)],
+                       "protect the supervisor and tmux from the OOM killer", timeout=10)
+    if out.strip() == "ok":
+        return True
+    # A strict workspace has no sudo, and asking again every pass would only
+    # make noise. Size alone then decides, as it always did.
+    log("agentd", "no privilege to protect pid %d from the OOM killer" % pid)
+    return False
+
+
+def oom_order_service():
+    """Every 5 s: see `OOM_PROTECT_ADJ`."""
+    # Known to have no sudo (a strict workspace): don't try, an attempt is a
+    # security event of its own.
+    can_protect = _have_sudo()
+    while _RUNNING.is_set():
+        can_protect = oom_order_pass(os.getpid(), can_protect, _oom_protect)
+        time.sleep(5)
+
+
 def vmstat_loop_service():
     """Aggregate CPU% / mem / load / disk → vmstat.txt every 1.5s."""
     prev_idle = 0
@@ -5722,6 +5849,7 @@ def vmstat_loop_service():
         except Exception:
             pass
         memused = memtotal - memavail
+        psi_some, psi_full = memory_pressure()
         load = "0"
         try:
             with open("/proc/loadavg", "r") as f:
@@ -5739,7 +5867,9 @@ def vmstat_loop_service():
                 diskused = cells[2]
         content = ("cpu %s\nmem_used_kb %s\nmem_total_kb %s\nload %s\n"
                    "disk_used_kb %s\ndisk_total_kb %s\n"
-                   % (cpu, memused, memtotal, load, diskused, disktotal))
+                   "mem_psi_some %s\nmem_psi_full %s\n"
+                   % (cpu, memused, memtotal, load, diskused, disktotal,
+                      psi_some, psi_full))
         _atomic_publish(".vmstat.tmp", "vmstat.txt", content)
         time.sleep(1.5)
 
@@ -8167,6 +8297,7 @@ def main():
         ("loopback-relay", loopback_relay_service),
         ("roster", roster_loop_service),
         ("vmstat", vmstat_loop_service),
+        ("oom-order", oom_order_service),
         ("ports", ports_loop_service),
         ("docker", docker_loop_service),
         ("command", command_loop_service),
