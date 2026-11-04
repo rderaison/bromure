@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(Glibc)
+import Glibc    // open / write / rename / unlink
+#endif
 
 // MARK: - Kubernetes clusters (shared models)
 //
@@ -1312,7 +1315,14 @@ public final class KubeClusterStore {
                                                      connectors: connectors)) else { return }
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: .atomic)
+        // The owner's alone from its first byte (clusters, their nodes and
+        // access lists): made 0600 beside it, then moved into place.
+        let tmp = fileURL.path + ".tmp-\(getpid())"
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else { return }
+        let written = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        close(fd)
+        guard written == data.count, rename(tmp, fileURL.path) == 0 else { unlink(tmp); return }
         var url = fileURL
         var values = URLResourceValues()
         values.isExcludedFromBackup = true

@@ -268,8 +268,6 @@ extension ACAppDelegate: KubeEngineHost {
 
     /// Same path the fat-client forward resolver uses (the app process can't
     /// TCP-dial its own guests; the guest's loopback relay can).
-    /// Same path the fat-client forward resolver uses (the app process can't
-    /// TCP-dial its own guests; the guest's loopback relay can).
     func openKubeRelay(nodeID: UUID, target: String, completion: @escaping @Sendable (Int32) -> Void) {
         guard let session = runningSessions[nodeID], let dev = session.sandbox.socketDevice else {
             completion(-1); return
