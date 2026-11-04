@@ -58,6 +58,8 @@ protocol KubeEngineHost: AnyObject {
     func refreshKubeAccessForRunningWorkspaces()
     /// This host's LAN IPv4 (where LoadBalancer services are answered).
     func kubeHostIPv4() -> String?
+    /// How this host is named in the load balancer's messages ("this Mac").
+    var kubeHostDisplayName: String { get }
     /// A cluster's LAN address pool ("a-b", CIDR or single addresses),
     /// host order; nil on garbage.
     func parseKubeLANPool(_ text: String) -> [UInt32]?

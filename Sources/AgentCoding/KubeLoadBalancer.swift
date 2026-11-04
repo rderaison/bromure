@@ -118,13 +118,13 @@ final class KubeLoadBalancer {
         // Open what's new.
         for (key, d) in desired where listeners[key] == nil {
             guard hostIP != nil else {
-                failures[key] = "this Mac has no LAN address"
+                failures[key] = "\(engine.host.kubeHostDisplayName) has no LAN address"
                 continue
             }
             let target = "\(serverIP):\(d.port.nodePort)"
             let fd = LBSocket.listenTCP(port: d.port.port)
             if fd < 0 {
-                failures[key] = "port \(d.port.port) is in use on this Mac"
+                failures[key] = "port \(d.port.port) is in use on \(engine.host.kubeHostDisplayName)"
                 continue
             }
             let l = Listener(fd: fd, key: key, target: target)
@@ -151,10 +151,10 @@ final class KubeLoadBalancer {
             failures[key] = nil
         }
         for (key, d) in desired where udpListeners[key] == nil {
-            guard hostIP != nil else { failures[key] = "this Mac has no LAN address"; continue }
+            guard hostIP != nil else { failures[key] = "\(engine.host.kubeHostDisplayName) has no LAN address"; continue }
             let fd = Self.bindUDP(port: d.port.port)
             if fd < 0 {
-                failures[key] = "UDP port \(d.port.port) is in use on this Mac"
+                failures[key] = "UDP port \(d.port.port) is in use on \(engine.host.kubeHostDisplayName)"
                 continue
             }
             let l = UDPListener(fd: fd, key: key, nodePort: UInt16(d.port.nodePort))

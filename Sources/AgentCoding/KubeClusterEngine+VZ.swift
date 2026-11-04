@@ -134,6 +134,8 @@ extension ACAppDelegate: KubeEngineHost {
 
     func kubeHostIPv4() -> String? { HostNetwork.primaryIPv4() }
 
+    var kubeHostDisplayName: String { "this Mac" }
+
     func parseKubeLANPool(_ text: String) -> [UInt32]? { KubeLANPool.parse(text) }
 
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
