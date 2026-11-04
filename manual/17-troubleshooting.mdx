@@ -187,7 +187,7 @@ On a rich client or a headless Mac, the prompt offers **Shut down** / **Block** 
 
 **Cause.** Every agent on a machine shares its memory, and each costs roughly a gigabyte once its helpers are counted. When the machine is short of memory, Bromure doesn't start another agent, because running out would have the system kill agents that are already working.
 
-**Fix.** End another session on the machine, or raise **VM RAM** in the machine's settings (the machine has to restart for that). Then send your message again: the session starts as you first asked, with your opening message and any files you dropped. If the machine runs out of memory anyway, the system ends an agent rather than the machine's own services, so the other sessions keep going and the one that stopped can be resumed.
+**Fix.** End another session on the machine, or raise **VM RAM** in the machine's settings (the machine has to restart for that). Then send your message again: the session starts as you first asked, with your opening message and any files you dropped. If the machine runs out of memory anyway, the system ends whichever program is using the most, but not tmux or Bromure's own service, so sessions it doesn't end keep going and one that stopped can be resumed.
 
 ### "The workspace did not boot in time" / "did not start in time"
 

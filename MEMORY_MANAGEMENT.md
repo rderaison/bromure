@@ -59,10 +59,16 @@ No image change: everything ships through the meta share or the app.
   survey above, not tuned on a 16 GB machine.
 - **Nothing is lost on refusal.** The session keeps the start as asked, and the
   next message or resume retries it.
-- **OOM order.** agentd raises `oom_score_adj` to 300 on what runs under a tab,
-  excluding the tab's shell, so the killer takes an agent or its helper before
-  agentd, tmux or a shell. Raising is unprivileged, and unlike lowering the
-  supervisor's score it doesn't pass down to the agents it starts.
+- **OOM order.** agentd protects itself and the tmux server (`oom_score_adj` -500,
+  through `sudo -n`) and sets what runs below them back to 0, because protection
+  is inherited across fork. Nothing else is ranked: size still decides between an
+  agent, a build and a database. A strict workspace has no sudo, so it gets none of
+  this. A process that detaches in the seconds before a pass keeps the protection.
+
+  An earlier version raised everything under a tab to +300 instead, which needs no
+  privilege. A dry run on a live guest showed why not: a 369 MB agent became the
+  first victim while a 1 GB ClickHouse survived, MCP helpers could be killed under
+  a live agent, and an unprivileged agentd could never undo the score.
 
 ## What this doesn't do
 
@@ -88,6 +94,7 @@ Smaller, and independent of the above:
 - **Find out why agentd is at 935 MB.** It may be a leak, and it's one of the
   largest processes in the guest.
 - **Share the MCP helpers.** At 1135 MB they cost more than the agents did.
-- **Per-agent cgroups**: attribution, and `memory.high` to throttle rather than kill.
+- **Per-agent cgroups**: attribution, `memory.high` to throttle rather than kill,
+  and `memory.oom.group` so an agent and its helpers go together.
 - **zram**: an image change; capacity inside the VM, nothing back for the Mac.
 - **Host pressure**: refuse to boot another VM when the Mac itself is short.

@@ -5704,12 +5704,16 @@ def memory_pressure(path="/proc/pressure/memory"):
     return found["some"], found["full"]
 
 
-# What the kernel's OOM killer should reach for first. Left alone, it picks by
-# size, and agentd is often the biggest process in the guest: one agent's
-# overshoot then costs the workspace its supervisor, or tmux and every session.
-# Raising a score needs no privilege, and unlike lowering the supervisor's, it
-# isn't inherited by what the supervisor goes on to start.
-OOM_SACRIFICE_ADJ = 300
+# Who the kernel's OOM killer must not take. It picks by size, and agentd is often
+# among the biggest processes in the guest; tmux going takes every session with
+# it. Those two are protected, and nothing else is ranked: size still decides
+# between an agent, a build and a database, and an agent's MCP helpers (a few MB
+# each) stay too small to be picked off under it.
+#
+# Protection is inherited across fork, so what the two go on to start would be
+# protected as well. Everything below them is set back to neutral, which needs no
+# privilege. A process that detaches in the moment before a pass keeps it.
+OOM_PROTECT_ADJ = -500
 
 
 def _proc_table(proc_root):
@@ -5733,45 +5737,62 @@ def _proc_table(proc_root):
     return table
 
 
-def oom_sacrifice_targets(table):
-    """What runs under a tab: descendants of a tmux server, but not the tab's
-    own shell (the tab outlives its agent, and a session can resume in it)."""
-    is_tmux = lambda pid: table[pid][0].startswith("tmux")
+def _oom_adj(proc_root, pid):
+    try:
+        with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def oom_order_pass(agentd_pid, can_protect, protect, proc_root="/proc"):
+    """Protect agentd and the tmux servers, and put what runs below them back to
+    neutral. `protect(pid)` is the one privileged step; it returns False when
+    there's no privilege to be had. Returns whether to go on trying it."""
+    table = _proc_table(proc_root)
+    roots = {p for p, (comm, _) in table.items() if comm.startswith("tmux: server")}
+    if agentd_pid in table:
+        roots.add(agentd_pid)
+    for pid in sorted(roots):
+        if can_protect and (_oom_adj(proc_root, pid) or 0) > OOM_PROTECT_ADJ:
+            can_protect = protect(pid)
     children = {}
     for pid, (_, ppid) in table.items():
         children.setdefault(ppid, []).append(pid)
-    targets = set()
-    for server in [p for p in table if is_tmux(p)]:
-        stack = [g for shell in children.get(server, []) if not is_tmux(shell)
-                 for g in children.get(shell, [])]
-        while stack:
-            pid = stack.pop()
-            if pid in targets:
-                continue
-            if not is_tmux(pid):
-                targets.add(pid)
+    stack = [c for root in roots for c in children.get(root, [])]
+    below = set()
+    while stack:
+        pid = stack.pop()
+        if pid not in below and pid not in roots:
+            below.add(pid)
             stack.extend(children.get(pid, []))
-    return targets
+    for pid in below:
+        if (_oom_adj(proc_root, pid) or 0) < 0:
+            try:
+                with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w") as f:
+                    f.write("0")
+            except OSError:
+                pass  # gone, or another uid's
+    return can_protect
 
 
-def oom_sacrifice_pass(seen, proc_root="/proc"):
-    """Mark new processes under tabs. Returns the pids still alive and handled,
-    which the next pass is given as `seen`."""
-    targets = oom_sacrifice_targets(_proc_table(proc_root))
-    for pid in targets - seen:
-        try:
-            with open(os.path.join(proc_root, str(pid), "oom_score_adj"), "w") as f:
-                f.write(str(OOM_SACRIFICE_ADJ))
-        except OSError:
-            pass  # gone, or another uid's: nothing to do, and not worth retrying
-    return targets
+def _oom_protect(pid):
+    out = _sys_capture(["sudo", "-n", "sh", "-c",
+                        "echo %d > /proc/%d/oom_score_adj && echo ok" % (OOM_PROTECT_ADJ, pid)],
+                       "protect the supervisor and tmux from the OOM killer", timeout=10)
+    if out.strip() == "ok":
+        return True
+    # A strict workspace has no sudo, and asking again every pass would only
+    # make noise. Size alone then decides, as it always did.
+    log("agentd", "no privilege to protect pid %d from the OOM killer" % pid)
+    return False
 
 
-def oom_sacrifice_service():
-    """Every 5 s: see `OOM_SACRIFICE_ADJ`."""
-    seen = set()
+def oom_order_service():
+    """Every 5 s: see `OOM_PROTECT_ADJ`."""
+    can_protect = True
     while _RUNNING.is_set():
-        seen = oom_sacrifice_pass(seen)
+        can_protect = oom_order_pass(os.getpid(), can_protect, _oom_protect)
         time.sleep(5)
 
 
@@ -8258,7 +8279,7 @@ def main():
         ("loopback-relay", loopback_relay_service),
         ("roster", roster_loop_service),
         ("vmstat", vmstat_loop_service),
-        ("oom-sacrifice", oom_sacrifice_service),
+        ("oom-order", oom_order_service),
         ("ports", ports_loop_service),
         ("docker", docker_loop_service),
         ("command", command_loop_service),

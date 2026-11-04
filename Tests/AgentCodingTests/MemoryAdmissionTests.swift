@@ -56,32 +56,49 @@ struct MemoryAdmissionTests {
         #expect(text.contains("1.5 GB") && text.contains("8 GB") && text.contains("End another session"))
     }
 
-    /// The guest side, on a fake /proc: a tmux server, its tabs' shells, agents
-    /// and their helpers, and everything that must be left alone.
-    @Test("an OOM reaches agents and their helpers first, never a tab's shell, tmux or the supervisor",
+    /// The guest side, on a fake /proc: agentd, a tmux server, what runs under
+    /// them, and what must be left to the killer's usual judgement.
+    @Test("an OOM spares agentd and tmux, and everything else is left to size",
           .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
-    func sacrificeOrder() throws {
+    func oomOrder() throws {
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/AgentCoding/Resources/vm-setup")
         let script = #"""
-        import importlib.util, os, sys, tempfile
+        import importlib.util, os, tempfile
         s = importlib.util.spec_from_file_location("agentd", "bromure-agentd.py")
         m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
         root = tempfile.mkdtemp()
-        procs = {1: ("systemd", 0), 334: ("python3", 1), 3546: ("tmux: server", 1), 3600: ("bash", 3546),
-                 4399: ("claude (odd) name", 3600), 4500: ("python3", 4399), 4501: ("node", 4500),
-                 3601: ("zsh", 3546), 3602: ("tmux: client", 3601), 1365: ("dockerd", 1)}
-        for pid, (comm, ppid) in procs.items():
-            d = os.path.join(root, str(pid)); os.mkdir(d)
-            open(os.path.join(d, "stat"), "w").write("%d (%s) S %d 0 0\n" % (pid, comm, ppid))
-            open(os.path.join(d, "oom_score_adj"), "w").write("0")
+        # Started after protection: all of it inherited -500.
+        below = {3600: ("bash", 3546), 4399: ("claude (odd) name", 3600), 4500: ("python3", 4399),
+                 3601: ("zsh", 3546), 3602: ("tmux: client", 3601), 3700: ("claude", 3546),
+                 335: ("ssh-bridge", 334)}
+        others = {1: ("systemd", 0), 2634: ("clickhouse-server", 2609), 2609: ("containerd-shim", 1),
+                  7000: ("detached", 1)}
+        roots = {334: ("python3", 1), 3546: ("tmux: server", 1)}
+        adj = lambda p: open(os.path.join(root, str(p), "oom_score_adj")).read().strip()
+        def put(p, v): open(os.path.join(root, str(p), "oom_score_adj"), "w").write(str(v))
+        for table, value in ((below, -500), (others, 0), (roots, 0)):
+            for pid, (comm, ppid) in table.items():
+                d = os.path.join(root, str(pid)); os.mkdir(d)
+                open(os.path.join(d, "stat"), "w").write("%d (%s) S %d 0 0\n" % (pid, comm, ppid))
+                put(pid, value)
         os.mkdir(os.path.join(root, "self"))
-        seen = m.oom_sacrifice_pass(set(), root)
-        print("targets", sorted(seen))
-        print("marked", sorted(p for p in procs if open(os.path.join(root, str(p), "oom_score_adj")).read() == "300"))
-        open(os.path.join(root, "4399", "oom_score_adj"), "w").write("7")
-        m.oom_sacrifice_pass(seen, root)
-        print("rewritten", open(os.path.join(root, "4399", "oom_score_adj")).read() != "7")
+        calls = []
+        def protect(pid):
+            calls.append(pid); put(pid, m.OOM_PROTECT_ADJ); return True
+        print("kept", m.oom_order_pass(334, True, protect, root))
+        print("protected", sorted(calls), adj(334), adj(3546))
+        print("below", sorted({adj(p) for p in below}))
+        print("others", sorted({adj(p) for p in others}))
+        calls.clear(); m.oom_order_pass(334, True, protect, root)
+        print("again", calls)
+        # No privilege: asks once, stops asking, and still neutralises.
+        put(334, 0); put(3546, 0); put(4399, -500); calls.clear()
+        def refuse(pid):
+            calls.append(pid); return False
+        kept = m.oom_order_pass(334, True, refuse, root)
+        print("refused", kept, len(calls), adj(4399))
+        calls.clear(); print("stopped", m.oom_order_pass(334, False, refuse, root), calls)
         psi = os.path.join(root, "psi")
         open(psi, "w").write("some avg10=12.50 avg60=0.00 avg300=0.00 total=1\nfull avg10=3.25 avg60=0.00 avg300=0.00 total=1\n")
         print("psi", m.memory_pressure(psi), m.memory_pressure(os.path.join(root, "absent")))
@@ -94,9 +111,13 @@ struct MemoryAdmissionTests {
         try p.run()
         let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         p.waitUntilExit()
-        #expect(out.contains("targets [4399, 4500, 4501]"), Comment(rawValue: out))
-        #expect(out.contains("marked [4399, 4500, 4501]"), Comment(rawValue: out))
-        #expect(out.contains("rewritten False"), Comment(rawValue: out))
+        #expect(out.contains("kept True"), Comment(rawValue: out))
+        #expect(out.contains("protected [334, 3546] -500 -500"), Comment(rawValue: out))
+        #expect(out.contains("below ['0']"), Comment(rawValue: out))
+        #expect(out.contains("others ['0']"), Comment(rawValue: out))
+        #expect(out.contains("again []"), Comment(rawValue: out))
+        #expect(out.contains("refused False 1 0"), Comment(rawValue: out))
+        #expect(out.contains("stopped False []"), Comment(rawValue: out))
         #expect(out.contains("psi ('12.50', '3.25') ('0', '0')"), Comment(rawValue: out))
     }
 }
