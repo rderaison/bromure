@@ -346,6 +346,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 try? writeAll(fd: fd, bytes: Array(connectDeniedResponse(host: host, port: port).utf8))
                 return
             }
+            // The destination check CONNECT gets (never the Mac's own loopback).
+            if case .failure(let denial) = checkDestination(host: host, port: port) {
+                try? writeAll(fd: fd, bytes: Array(destinationDeniedResponse(host: host, port: port,
+                                                                              reason: denial.reason).utf8))
+                return
+            }
             reportProxyAllowed(host: host, port: port)
             try await trackedForFirewall(host: host, port: port, route: "proxy") {
                 try await driveTLS(host: host, port: port, t0: t0, cleartext: true, prefix: rewritten)
@@ -679,7 +685,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
     /// OpenShell destination check for this connection's upstream (once per
     /// connection): resolve host-side, validate every address, remember the
-    /// survivors for the upstream legs. No OpenShell policy → nothing pinned.
+    /// survivors for the upstream legs. No OpenShell policy → nothing pinned,
+    /// but the Mac's own loopback / link-local is still refused
+    /// (`UpstreamPinning.defaultCheck`).
     private func checkDestination(host: String, port: Int) -> Result<Void, OpenShellPolicy.DestinationDenial> {
         if destinationChecked { return .success(()) }
         destinationChecked = true
@@ -894,7 +902,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
         }
         // Transparent flows reach here without a CONNECT: validate the
         // destination the upstream leg will dial (no-op if already done).
-        if openShellMode != nil, host.lowercased() != OpenShellAdvisor.host,
+        if host.lowercased() != OpenShellAdvisor.host,
            case .failure(let denial) = checkDestination(host: host, port: port) {
             if let bodyFile { try? FileManager.default.removeItem(at: bodyFile) }
             rejectBeforePolicy(tls: tls, status: 403, error: "destination_denied", detail: denial.reason,
@@ -4849,7 +4857,7 @@ private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @u
 /// evaluation against it instead of the system trust store. The CA
 /// override is what lets us reach private k8s API servers whose cert
 /// chains don't appear in macOS's roots.
-private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
+private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegate {
     let identityRegistry: ClientIdentityRegistry
     let caRegistry: ClusterCATrustRegistry
     let consent: ConsentBroker
@@ -4869,6 +4877,24 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
         dialer?.shutdownListener()
         dialer = nil
+    }
+
+    /// A redirect URLSession would follow by itself (the buffered relays)
+    /// gets the destination check the guest's own request got: one to the
+    /// Mac's loopback / link-local goes back to the guest as the 3xx instead.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        guard let next = request.url, let nextHost = next.host else { completionHandler(nil); return }
+        let nextPort = next.port ?? (next.scheme?.lowercased() == "http" ? 80 : 443)
+        if case .failure(let denial) = UpstreamPinning.defaultCheck(host: nextHost, port: nextPort) {
+            SupplyChainLog.shared.record(
+                "[firewall] ✗ deny redirect \(host) → \(nextHost):\(nextPort) — \(denial.reason) (\(profileID.uuidString.prefix(8)))")
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     init(identityRegistry: ClientIdentityRegistry,

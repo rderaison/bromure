@@ -185,7 +185,10 @@ extension OpenShellPolicy {
         case defaultPublicOnly
     }
 
-    public struct DestinationDenial: Error, Equatable, Sendable { public let reason: String }
+    public struct DestinationDenial: Error, Equatable, Sendable {
+        public let reason: String
+        public init(reason: String) { self.reason = reason }
+    }
 
     /// The address authorization OpenShell derives for an allowed
     /// connection (`build_validation_plan`): the first matching endpoint
