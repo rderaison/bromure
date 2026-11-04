@@ -513,6 +513,9 @@ final class LinuxKubeHost: KubeEngineHost {
     // @port-skip linux-only: HostNetwork.primaryIPv4 on macOS
     func kubeHostIPv4() -> String? { Daemon.primaryIPv4() }
 
+    // @port-skip linux-only: the load balancer's name for this host (macOS: "this Mac")
+    var kubeHostDisplayName: String { "this server" }
+
     /// "a-b", CIDR or single dotted quads, comma-separated (≤ 1024 each),
     /// host order; nil on garbage (macOS: KubeLANPool.parse).
     // @port-skip linux-only: KubeLANPool.parse (KubeLANAnnouncer.swift is macOS-only)
