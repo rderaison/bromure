@@ -80,6 +80,10 @@ No image change: everything ships through the meta share or the app.
 
 ## What this doesn't do
 
+Coding tasks and automations open their tabs without going through admission, so
+they can still pile agents onto a workspace. Refusing unattended work needs its
+own design: what should a nightly automation do when it's turned away?
+
 It keeps a workspace alive. It doesn't reduce what the VM costs the Mac: an 8 GB VM
 still ends up holding 8 GB once its page cache has filled.
 

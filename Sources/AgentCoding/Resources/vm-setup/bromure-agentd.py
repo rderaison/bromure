@@ -5806,7 +5806,9 @@ def _oom_protect(pid):
 
 def oom_order_service():
     """Every 5 s: see `OOM_PROTECT_ADJ`."""
-    can_protect = True
+    # Known to have no sudo (a strict workspace): don't try, an attempt is a
+    # security event of its own.
+    can_protect = _have_sudo()
     while _RUNNING.is_set():
         can_protect = oom_order_pass(os.getpid(), can_protect, _oom_protect)
         time.sleep(5)
