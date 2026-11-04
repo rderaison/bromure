@@ -378,6 +378,30 @@ extension Daemon {
     }
 }
 
+/// A shared (multi-user) server's load balancer: binds nothing; every
+/// LoadBalancer port is reported pending (no host-IP publishing on a shared
+/// server; LAN address pools come with the announcer).
+// @port-skip linux-only: the multi-user rule for KubeLoadBalancer
+@MainActor
+final class SharedServerLoadBalancer: KubeServicePublisher {
+    static let reason = "LoadBalancer services need a LAN address pool on a shared server"
+    // @port-skip linux-only: a shared server answers on no host address
+    var hostIP: String? { nil }
+
+    // @port-skip linux-only: the multi-user rule
+    func reconcile(services: [KubeProbe.Service]) -> [KubeLBEndpoint] {
+        services.filter { !$0.isVMScoped }.flatMap { svc in
+            svc.ports.map { p in
+                KubeLBEndpoint(namespace: svc.namespace, service: svc.name, port: p.port, nodePort: p.nodePort,
+                               protocolName: p.protocolName, bound: false, error: Self.reason)
+            }
+        }
+    }
+
+    // @port-skip linux-only: nothing to stop
+    func stopAll() {}
+}
+
 /// The engine's machine host on a Linux server (macOS: ACAppDelegate,
 /// KubeClusterEngine+VZ.swift): each machine a VM record of this daemon.
 // @port-skip linux-only: the daemon's KubeEngineHost (macOS: ACAppDelegate)
@@ -523,10 +547,18 @@ final class LinuxKubeHost: KubeEngineHost {
         return out.isEmpty ? nil : out
     }
 
-    // partial: no Bromure load balancer on Linux yet (round b): LoadBalancer services stay pending
-    // @port-skip linux-only: KubeLoadBalancer is macOS-only for now
+    /// The cluster's Bromure load balancer: on a single-user server
+    /// KubeLoadBalancer as macOS's (host listeners on 0.0.0.0); on a shared
+    /// one no host ports at all (the user's decision): every LoadBalancer
+    /// Service stays pending, saying it needs a LAN address pool.
+    // partial: no LAN address pools yet (no announcer on Linux): pool Services stay pending
+    // @port-skip linux-only: ACAppDelegate.makeKubeLoadBalancer's Linux counterpart
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
-                              serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? { nil }
+                              serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? {
+        if daemon?.config.multiUser == true { return SharedServerLoadBalancer() }
+        return KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
+                                serverIP: serverIP, hostIP: hostIP, pool: pool, lan: nil)
+    }
 
     // @port-skip linux-only: the resource bundle's script (macOS: ACAppDelegate's lazy kubeNodeScriptURL)
     var kubeNodeScriptURL: URL? { acResourceBundle.url(forResource: "vm-setup/bromure-k8s-node", withExtension: "sh") }

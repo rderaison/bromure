@@ -26,6 +26,10 @@ struct Daemon: AsyncParsableCommand {
         // Multi-user: systemd's socket unit made the control socket (owner,
         // group and mode its own) and passes it as "control".
         let inherited = FDStore.take()["control"]?.first
+        // A peer that closes mid-relay must end that relay, not the daemon:
+        // every write to a socket whose peer is gone would SIGPIPE (macOS
+        // sets SO_NOSIGPIPE per socket; Linux has no such option).
+        signal(SIGPIPE, SIG_IGN)
         let daemon = try await ACLinux.Daemon.start(config)
         let server = try await ControlServer.start(path: config.controlSocketPath, inherited: inherited,
                                                    peers: config.controlPeers) { req in await daemon.handle(req) }
