@@ -22,6 +22,18 @@ install -d -m 755 $L/bin $L/lib $L/vm-setup
 install -m 755 "$BIN" $L/bin/bromure-ac.new && mv -f $L/bin/bromure-ac.new $L/bin/bromure-ac
 install -m 755 "$FC" $L/bin/firecracker.new && mv -f $L/bin/firecracker.new $L/bin/firecracker
 install -m 644 "$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" $L/vm-setup/
+# The app's resources (catalog, vm-setup scripts: cluster nodes, registry,
+# probes, ...): the daemons can't read the source tree. Only what git
+# tracks, so a stray local file never becomes world-readable. Swapped in whole.
+rm -rf /usr/local/lib/bromure-ac/resources.new /usr/local/lib/bromure-ac/resources.old
+install -d -m 755 $L/resources.new
+git -c safe.directory="$ROOT" -C "$ROOT" ls-files -z Sources/AgentCoding/Resources \
+  | tar -C "$ROOT" --null -T - -cf - | tar -C $L/resources.new --strip-components=3 --no-same-owner -xf -
+[ -e $L/resources.new/catalog.json ] || { echo "install.sh: the resources didn't copy" >&2; exit 1; }
+chmod -R u=rwX,go=rX $L/resources.new
+[ -d $L/resources ] && mv $L/resources $L/resources.old
+mv $L/resources.new $L/resources
+rm -rf /usr/local/lib/bromure-ac/resources.old
 # The Swift runtime the binary was linked against (a static stdlib build
 # doesn't link Foundation on this toolchain).
 ldd "$BIN" | awk '/=> \// {print $3}' | grep -E '/swift/|libFoundation|libswift|lib_FoundationICU|libdispatch|libBlocksRuntime' \

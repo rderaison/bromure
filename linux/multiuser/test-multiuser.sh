@@ -41,6 +41,11 @@ import socket; s=socket.socket(socket.AF_UNIX); s.connect('/run/bromure-ac/sock/
 as $A $W/$A GET /health | grep -q '"status"' && ok "$A's key opens $A" || no "$A's key"
 [ -z "$(as $B $W/$A GET /health)" ] && ok "$A's key doesn't open $B" || no "$A's key opened $B"
 [ -z "$(as nobody-here $W/$A GET /health)" ] && ok "unknown account refused" || no "unknown account answered"
+# The daemons find the installed resources (cluster nodes need its scripts).
+systemctl show -p Environment bromure-ac@$A.service | grep -q 'BROMURE_AC_RESOURCES=/usr/local/lib/bromure-ac/resources' \
+  && sudo -n -u $A test -r /usr/local/lib/bromure-ac/resources/vm-setup/bromure-k8s-node.sh \
+  && sudo -n -u $A test -r /usr/local/lib/bromure-ac/resources/catalog.json \
+  && ok "$A's daemon gets the installed resources" || no "$A's daemon has no readable resources"
 # Same VM name in both; each sees only its own.
 for u in $A $B; do
   R=$(as $u $W/$u POST /vms '{"name":"same","machine":"firecracker"}')
