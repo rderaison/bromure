@@ -54,8 +54,10 @@ struct ComposerTypingTests {
         #expect(s.shape.mention == "sec")
         s.typed("ask @sec to")
         #expect(s.shape.mention == nil)
-        s.typed("line\\n/not")
+        s.typed("line\n/not")
         #expect(s.shape.palette == nil)
+        s.typed("/co\nmore")
+        #expect(s.shape.palette == nil, "a newline closes the palette")
     }
 
     @Test("text replaced from outside always reaches the field, even with the same shape")
@@ -80,7 +82,7 @@ struct ComposerTypingTests {
     @Test("what's typed goes in the draft, and setting the text replaces it")
     func model() {
         let m = BeautifiedSessionModel(provider: Provider())
-        let key = "composer-typing-\\(UUID().uuidString)"
+        let key = "composer-typing-\(UUID().uuidString)"
         m.draftKey = key
         m.composerTyped("hello")
         #expect(m.composerText == "hello")
