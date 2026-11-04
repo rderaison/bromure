@@ -1791,5 +1791,11 @@ struct KubeSweepGuardTests {
         try Data(#"{"clusters":[{"id":"x"}],"registries":[],"connectors":[]}"#.utf8).write(to: URL(fileURLWithPath: p))
         #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0)?.contains("1 entries, 0 decoded") == true)
         #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 1) == nil)
+        for shape in ["{}", #"{"clusters":{}}"#, #"{"clusters":[],"registries":3}"#, "[]"] {
+            try Data(shape.utf8).write(to: URL(fileURLWithPath: p))
+            #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0) != nil, "\(shape) is no store")
+        }
+        try Data(#"{"version":1,"clusters":[]}"#.utf8).write(to: URL(fileURLWithPath: p))
+        #expect(Daemon.kubeStoreLoadProblem(p, loadedCounts: 0) == nil, "an older store without registries")
     }
 }

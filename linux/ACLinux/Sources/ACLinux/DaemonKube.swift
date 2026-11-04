@@ -354,6 +354,12 @@ extension Daemon {
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return "\(path) isn't readable JSON"
         }
+        // The store's own shape: a clusters array (registries and connectors
+        // are absent in files older servers wrote, arrays when present).
+        guard obj["clusters"] is [Any],
+              ["registries", "connectors"].allSatisfy({ obj[$0] == nil || obj[$0] is [Any] }) else {
+            return "\(path) isn't a cluster store"
+        }
         let inFile = ["clusters", "registries", "connectors"].reduce(0) { $0 + (((obj[$1] as? [Any])?.count) ?? 0) }
         return inFile == loadedCounts ? nil : "\(path) has \(inFile) entries, \(loadedCounts) decoded"
     }
