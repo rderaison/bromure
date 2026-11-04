@@ -4146,6 +4146,20 @@ final class CodingTaskEngine {
             + "|| git init -q; } && " + ensureHeadFragment
     }
 
+    /// Waits (up to 30 s) for the guest's loopback proxy, when the command's
+    /// environment names one (HTTPS_PROXY=http://127.0.0.1:<port>, from
+    /// proxy.env). A workspace answers exec as soon as agentd is up, a few
+    /// seconds before agentd's proxy bridge listens: a clone fired on the
+    /// first answer (an automation on a freshly booted workspace) failed to
+    /// connect. No proxy named (OpenShell), or a port that never opens: no
+    /// wait, or the clone runs anyway and reports git's own error.
+    nonisolated static let proxyReadyFragment =
+        "_bp=\"${HTTPS_PROXY:-${https_proxy:-}}\"; "
+            + "case \"$_bp\" in http://127.0.0.1:[0-9]*) "
+            + "_bp=\"${_bp#http://127.0.0.1:}\"; _bp=\"${_bp%%/*}\"; _bi=0; "
+            + "until (: </dev/tcp/127.0.0.1/\"$_bp\") 2>/dev/null || [ \"$_bi\" -ge 60 ]; "
+            + "do _bi=$((_bi+1)); sleep 0.5; done;; esac; "
+
     /// The guest command that clones `quotedURL` into `quotedPath` for a task
     /// with a clone URL — only when the folder holds no repository yet: an
     /// existing repo is left untouched (restarts never re-clone over work),
@@ -4156,7 +4170,7 @@ final class CodingTaskEngine {
         "if git -C \(quotedPath) rev-parse --show-toplevel >/dev/null 2>&1; then :; "
             + "elif [ -e \(quotedPath) ] && [ -n \"$(ls -A \(quotedPath) 2>/dev/null)\" ]; then "
             + "echo 'the folder exists and is not a git repository' >&2; exit 3; "
-            + "else mkdir -p \"$(dirname \(quotedPath))\" && "
+            + "else " + proxyReadyFragment + "mkdir -p \"$(dirname \(quotedPath))\" && "
             + "GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes' "
             + "git clone --quiet \(quotedURL) \(quotedPath) 2>&1 | tail -5 >&2; "
             + "test \"${PIPESTATUS[0]}\" -eq 0; fi"
