@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // MARK: - Infrastructure MCP (per workspace)
@@ -168,7 +167,7 @@ final class KubeMCPServer: MCPLineHandler {
         switch name {
         case "infrastructure_overview":
             return textResult(Self.overviewText(clusters: visibleClusters(store), registries: visibleRegistries(store),
-                                                status: { store.status($0) }, hostIP: HostNetwork.primaryIPv4()))
+                                                status: { store.status($0) }, hostIP: engine()?.host.kubeHostIPv4()))
         case "cluster_status":
             guard let c = cluster(named: args["name"], in: store) else { return errorResult("no cluster with that name is available to this workspace") }
             return textResult(Self.clusterDetail(c, status: store.status(c.id)))
@@ -186,7 +185,7 @@ final class KubeMCPServer: MCPLineHandler {
                 spec.loadBalancer = kind
             }
             if let v = args["lanPool"] as? String, !v.trimmingCharacters(in: .whitespaces).isEmpty {
-                guard KubeLANPool.parse(v) != nil else { return errorResult("lanPool must look like 10.0.0.20-10.0.0.29, 10.0.0.32/28 or a comma list") }
+                guard engine.host.parseKubeLANPool(v) != nil else { return errorResult("lanPool must look like 10.0.0.20-10.0.0.29, 10.0.0.32/28 or a comma list") }
                 spec.lanPool = v
             }
             if let v = args["ingress"] as? Bool { spec.ingress = v }
@@ -476,4 +475,3 @@ final class KubeMCPServer: MCPLineHandler {
         return s
     }
 }
-#endif
