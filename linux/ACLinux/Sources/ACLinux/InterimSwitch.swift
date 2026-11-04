@@ -14,12 +14,22 @@ import NIOConcurrencyHelpers
 /// never paused: its reader hands each frame to the switch's receiver, which
 /// `send`s, so a slow VM drops at its own port's limit, counted in that
 /// port's `stats.dropped`, without slowing the others or passt.
-/// No VM-to-VM traffic, no DNS snoop, no egress policy. Don't build on it.
+/// VM-to-VM (macOS AC's VMNetSwitch with bridgePeers = true): source MACs
+/// are learned per port, known unicast goes to the learned port, broadcast
+/// and unknown unicast are flooded to the peers and the uplink. Ports are
+/// one daemon's, so this never crosses users. One passt-specific deviation:
+/// an ARP request for a peer's leased address isn't sent to passt, which
+/// would answer for any address and draw the peer's traffic to the uplink.
+/// No DNS snoop, no egress policy, no CDP pairing gate. Don't build on it.
 // @port-skip linux-only: interim stand-in for VMNetSwitch until ACCore ships it
 public final class InterimSwitch: Sendable {
     public let dhcp: InterimDHCP
     public let uplink: any Uplink
     private let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
+    /// Source MAC → the attached port (its MAC) it came from.
+    private let learned = NIOLockedValueBox<[MAC: MAC]>([:])
+    /// The uplink's (passt's) MAC: frames to it go to the uplink only.
+    private let gatewayMAC: MAC
     /// IPv4 destinations a guest may not send to (multi-user: the host's
     /// own addresses); their frames are dropped before the uplink.
     public let blockedDestination = NIOLockedValueBox<(@Sendable (UInt32) -> Bool)?>(nil)
@@ -28,6 +38,7 @@ public final class InterimSwitch: Sendable {
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
                 mtu: @escaping @Sendable ([UInt8]) -> Int? = { _ in nil }) {
         self.uplink = uplink
+        gatewayMAC = MAC(Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"))
         dhcp = InterimDHCP(server: Self.ipv4(gateway), dns: Self.ipv4(dns),
                            serverMAC: Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
         // The uplink calls this as it reads (no queue in between): it routes
@@ -68,14 +79,54 @@ public final class InterimSwitch: Sendable {
     // @port-skip linux-only: interim switch
     public func attach(_ port: any FramePort, mac: String) {
         let m = MAC(Self.mac(mac))
-        let t = Task { [dhcp, uplink, blockedDestination] in
+        let t = Task { [self, dhcp, uplink, blockedDestination] in
             for await f in port.inbound {
                 if let r = dhcp.handle(f) { port.send(r); continue }
+                guard self.toPeers(f, from: m) else { continue }
                 if let blocked = blockedDestination.withLockedValue({ $0 }), let dst = Self.ipv4Destination(f), blocked(dst) { continue }
                 await uplink.sendWaiting(f)
             }
         }
         ports.withLockedValue { $0.append((m, port, t)) }
+    }
+
+    /// A frame from the VM on port `from`, switched among the peers as
+    /// macOS's VMNetSwitch does: learn its source; a known peer's unicast is
+    /// delivered there (never waits: drops at that port's limit); broadcast
+    /// and unknown unicast are flooded to the other ports. True: it goes to
+    /// the uplink too.
+    // @port-skip linux-only: the bridgePeers half of VMNetSwitch's port read loop
+    func toPeers(_ f: Data, from: MAC) -> Bool {
+        guard f.count >= 14 else { return true }
+        // Read in place: no allocation on this per-frame path.
+        let (dst, src) = f.withUnsafeBytes { b -> (MAC, MAC) in
+            var d: UInt64 = 0, s: UInt64 = 0
+            for i in 0..<6 { d = d << 8 | UInt64(b[i]); s = s << 8 | UInt64(b[6 + i]) }
+            return (MAC(raw: d), MAC(raw: s))
+        }
+        learned.withLockedValue { if $0[src] != from { $0[src] = from } }
+        if dst == gatewayMAC { return true }
+        let all = ports.withLockedValue { $0 }
+        let multicast = f[f.startIndex] & 1 != 0
+        if !multicast, let owner = learned.withLockedValue({ $0[dst] }) {
+            if owner != from, let p = all.first(where: { $0.mac == owner }) { _ = p.port.send(f) }
+            return false
+        }
+        for p in all where p.mac != from { _ = p.port.send(f) }
+        // An ARP request for a peer's lease: the peer answers; passt would too.
+        if let target = Self.arpRequestTarget(f), dhcp.mac(forIP: target).map({ $0 != from }) == true {
+            return false
+        }
+        return true
+    }
+
+    /// The target IP (big-endian u32) of an ARP request; nil for anything else.
+    // @port-skip linux-only: interim switch
+    static func arpRequestTarget(_ f: Data) -> UInt32? {
+        f.withUnsafeBytes { b in
+            guard b.count >= 42, b[12] == 0x08, b[13] == 0x06, b[20] == 0, b[21] == 1 else { return nil }
+            return UInt32(b[38]) << 24 | UInt32(b[39]) << 16 | UInt32(b[40]) << 8 | UInt32(b[41])
+        }
     }
 
     // @port-skip linux-only: interim switch
@@ -85,6 +136,7 @@ public final class InterimSwitch: Sendable {
             for p in ps where p.mac == m { p.task.cancel() }
             ps.removeAll { $0.mac == m }
         }
+        learned.withLockedValue { l in l = l.filter { $0.value != m } }
     }
 
     /// The attached port for `mac`'s counters (`dropped` = frames toward that
@@ -243,6 +295,8 @@ public final class InterimDHCP: Sendable {
 // @port-skip linux-only: interim switch
 struct MAC: Hashable, Sendable {
     let raw: UInt64
+    // @port-skip linux-only: interim switch
+    init(raw: UInt64) { self.raw = raw }
     // @port-skip linux-only: interim switch
     init(_ b: [UInt8]) {
         var r: UInt64 = 0
