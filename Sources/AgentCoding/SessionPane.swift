@@ -347,7 +347,15 @@ final class SessionPane {
     /// The session on stage shows its terminal rather than its chat (the
     /// Linux pill): the tmux window it runs in. Set before the session is
     /// mounted, so the chat is never built just to be replaced.
-    var sessionTerminalWindow: Int?
+    var sessionTerminalWindow: Int? {
+        didSet { sessionTerminalGone = false }
+    }
+    /// That window closed under the session. The pane mounts nothing until the
+    /// stage has been planned again: anything mounted here would be another
+    /// session's, and takes the keyboard, behind the page that replaces it.
+    private(set) var sessionTerminalGone = false
+    /// The session's terminal on stage lost its window: plan the stage again.
+    var onSessionTerminalGone: (() -> Void)?
 
     /// The container's backing: the chat's window background while the chat
     /// is (or is about to be) on show, the terminal's colour otherwise (a
@@ -569,6 +577,7 @@ final class SessionPane {
     /// toggle safe to flip live. Falls back to the framebuffer silently if
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
+        guard !sessionTerminalGone else { return }
         guard model.tabs.indices.contains(model.activeIndex) else { return }
         // Beautified mode only applies to a tab that's actually running a coding
         // agent — a plain shell (or any non-agent) tab has no transcript to
@@ -1028,10 +1037,11 @@ final class SessionPane {
         }
         // A session's terminal on stage stays that session's: following the
         // guest's active tab put another session's shell under its header,
-        // to be typed into.
+        // to be typed into. Its window gone, it follows nothing either.
+        let heldGone = sessionTerminalWindow.map { held in !tabs.contains { $0.index == held } } ?? false
         if let held = sessionTerminalWindow, let pos = tabs.firstIndex(where: { $0.index == held }) {
             if model.activeIndex != pos { model.activeIndex = pos }
-        } else if let activePos = tabs.firstIndex(where: { $0.active }) {
+        } else if !heldGone, let activePos = tabs.firstIndex(where: { $0.active }) {
             if let pending = pendingActiveIndex {
                 if tabs[activePos].index == pending.index
                     || Date().timeIntervalSince(pending.at) > 3 {
@@ -1051,7 +1061,15 @@ final class SessionPane {
         // Windows tmux no longer reports are gone for good — drop their
         // surfaces; then make sure the active tab has a live surface.
         terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
-        updateNativeTerminalMount()
+        if heldGone {
+            sessionTerminalWindow = nil
+            sessionTerminalGone = true
+            mountedTerminalView?.removeFromSuperview()
+            mountedTerminalView = nil
+            onSessionTerminalGone?()
+        } else {
+            updateNativeTerminalMount()
+        }
         if !created.isEmpty, let onNewTerminals {
             let fresh = Set(created.map(\.index))
             onNewTerminals(model.tabs.filter { fresh.contains($0.index) })

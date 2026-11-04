@@ -1352,6 +1352,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.gridStore.autoAdd(profileID: profileID, windowIndex: tab.index, label: tab.shownLabel)
             }
         }
+        pane.onSessionTerminalGone = { [weak self] in self?.sessionStageDidChange() }
         listModel.entries.append(SessionListModel.VMEntry(
             id: pane.profile.id,
             name: pane.profile.name,

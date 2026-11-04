@@ -7870,7 +7870,15 @@ final class RemoteHostWindow: NSWindow {
         if shownWorkspace == id, let idx = shownWindowIndex, !liveWindows.contains(idx) {
             mountedTermView = nil          // retire already tore the view down
             shownWindowIndex = nil
-            showWorkspace(id)
+            // A session's terminal: its own next surface, not the machine's
+            // active tab — another session's shell, typeable, under this
+            // session's header.
+            if let sid = selectedSessionID, let s = controller.sessionStore.session(sid) {
+                sessionPresentationKey = nil
+                presentSession(s)
+            } else {
+                showWorkspace(id)
+            }
         }
         // Same fallback for a pop-out window the retire left empty.
         if let win = popOutWindows[id], let content = win.contentView,

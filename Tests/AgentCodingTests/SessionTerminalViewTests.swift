@@ -95,6 +95,34 @@ struct SessionTerminalViewTests {
         }
     }
 
+    @Test("a session's window closing mounts nobody else's tab, now or on a later roster, and asks for a new plan")
+    func windowGone() {
+        withClean {
+            let p = pane()
+            var replans = 0
+            p.onSessionTerminalGone = { replans += 1 }
+            p.applyTabList(roster([1, 2, 4], active: 4))
+            p.sessionTerminalWindow = 4
+            p.sessionOnStage = true
+            p.applyTabList(roster([1, 2], active: 2))
+            #expect(replans == 1)
+            #expect(p.beautifiedModel == nil, "another session's chat was mounted")
+            #expect(p.preferredFirstResponder === p.containerView, "another tab's surface was mounted")
+            // A later tick, with the rest page up: still nothing takes the keyboard.
+            p.applyTabList(roster([1, 2], active: 1))
+            #expect(replans == 1)
+            #expect(p.beautifiedModel == nil)
+            #expect(p.preferredFirstResponder === p.containerView)
+            // The next plan for this pane mounts again.
+            p.sessionTerminalWindow = nil
+            p.updateNativeTerminalMount()
+            #expect(p.beautifiedModel != nil)
+            p.sessionOnStage = false
+            p.setViewMode(.terminal, persist: false)
+            p.retireNativeTerminals()
+        }
+    }
+
     @Test("leaving the stage forgets the session's window, so the machine's tab follows the guest again")
     func leavingForgets() {
         withClean {
