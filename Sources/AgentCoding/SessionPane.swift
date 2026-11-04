@@ -334,13 +334,28 @@ final class SessionPane {
     var sessionOnStage = false {
         didSet {
             guard sessionOnStage != oldValue else { return }
+            if !sessionOnStage { sessionTerminalWindow = nil }
             // Before anything mounts (no roster yet, the chat's first layout),
             // the stage shows the chat's own background — a dark terminal-
             // coloured frame flashed for a second when a session was picked.
-            if sessionOnStage && !beautifierLocked { applyContainerBackground(chat: true) }
+            if sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil {
+                applyContainerBackground(chat: true)
+            }
             updateNativeTerminalMount()
         }
     }
+    /// The session on stage shows its terminal rather than its chat (the
+    /// Linux pill): the tmux window it runs in. Set before the session is
+    /// mounted, so the chat is never built just to be replaced.
+    var sessionTerminalWindow: Int? {
+        didSet { sessionTerminalGone = false }
+    }
+    /// That window closed under the session. The pane mounts nothing until the
+    /// stage has been planned again: anything mounted here would be another
+    /// session's, and takes the keyboard, behind the page that replaces it.
+    private(set) var sessionTerminalGone = false
+    /// The session's terminal on stage lost its window: plan the stage again.
+    var onSessionTerminalGone: (() -> Void)?
 
     /// The container's backing: the chat's window background while the chat
     /// is (or is about to be) on show, the terminal's colour otherwise (a
@@ -562,6 +577,7 @@ final class SessionPane {
     /// toggle safe to flip live. Falls back to the framebuffer silently if
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
+        guard !sessionTerminalGone else { return }
         guard model.tabs.indices.contains(model.activeIndex) else { return }
         // Beautified mode only applies to a tab that's actually running a coding
         // agent — a plain shell (or any non-agent) tab has no transcript to
@@ -571,8 +587,10 @@ final class SessionPane {
         let activeTab = model.tabs[model.activeIndex]
         let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
             || agentWindows.contains(activeTab.index)
-        if sessionOnStage && !beautifierLocked { mountBeautified(); return }
-        if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        if sessionTerminalWindow == nil {
+            if sessionOnStage && !beautifierLocked { mountBeautified(); return }
+            if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
         containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
@@ -881,7 +899,8 @@ final class SessionPane {
         // honors the profile's window translucency.
         let opacity = viewMode == .beautified ? 1.0 : min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
-        applyContainerBackground(chat: viewMode == .beautified || (sessionOnStage && !beautifierLocked))
+        applyContainerBackground(chat: viewMode == .beautified
+                                 || (sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil))
         terminalController?.applyProfile(newProfile)   // live appearance update
         updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)
@@ -1004,11 +1023,14 @@ final class SessionPane {
         // (`refreshStageIfNeeded`). The guest's active tab is a poll behind and
         // shared with whoever else drives the machine: following it mounted
         // another session's chat under this one's header — on a quick A→B→A,
-        // whose stale "A" confirmed the switch and whose next snapshot said B.
-        if sessionOnStage, let held = beautifiedTabIndex,
+        // whose stale "A" confirmed the switch and whose next snapshot said B —
+        // or, with its terminal showing, another session's shell, to be typed
+        // into. A terminal whose window has gone follows nothing either.
+        let heldGone = sessionTerminalWindow.map { held in !tabs.contains { $0.index == held } } ?? false
+        if let held = sessionTerminalWindow ?? (sessionOnStage ? beautifiedTabIndex : nil),
            let pos = tabs.firstIndex(where: { $0.index == held }) {
             if model.activeIndex != pos { model.activeIndex = pos }
-        } else if let activePos = tabs.firstIndex(where: { $0.active }) {
+        } else if !heldGone, let activePos = tabs.firstIndex(where: { $0.active }) {
             if let pending = pendingActiveIndex {
                 if tabs[activePos].index == pending.index
                     || Date().timeIntervalSince(pending.at) > 3 {
@@ -1028,7 +1050,15 @@ final class SessionPane {
         // Windows tmux no longer reports are gone for good — drop their
         // surfaces; then make sure the active tab has a live surface.
         terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
-        updateNativeTerminalMount()
+        if heldGone {
+            sessionTerminalWindow = nil
+            sessionTerminalGone = true
+            mountedTerminalView?.removeFromSuperview()
+            mountedTerminalView = nil
+            onSessionTerminalGone?()
+        } else {
+            updateNativeTerminalMount()
+        }
         if !created.isEmpty, let onNewTerminals {
             let fresh = Set(created.map(\.index))
             onNewTerminals(model.tabs.filter { fresh.contains($0.index) })
