@@ -3345,6 +3345,11 @@ struct BeautifiedSessionView: View {
     /// here, each change of the label would re-run this whole view, and every
     /// row's position report with it.
     @State private var scrub = ScrubLabelState()
+    @State private var threadMemo = SwitchboardThreadMemo()
+    /// The Switchboard's chain on show alone (nil: the whole conversation).
+    @State private var threadFilter: String?
+    /// The filter was cleared to show a search hit: stay there, not at the end.
+    @State private var keepPlaceOnFilterChange = false
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -3565,8 +3570,23 @@ struct BeautifiedSessionView: View {
         }
     }
 
+    /// The Switchboard's conversation told apart by session; nil for any other chat.
+    private var threaded: ThreadedConversation? {
+        guard let me = model.currentSession?(), me.isSwitchboard, let store = model.sessionStore else { return nil }
+        let sessions = store.sessions
+        let aliases = SwitchboardThreading.aliases(handles: SwitchboardEngine.handles(of: sessions), sessions: sessions)
+        return threadMemo.conversation(model.items, aliases: aliases)
+    }
+
     @ViewBuilder
     private var transcriptParts: some View {
+            if let conversation = threaded, !conversation.threads.isEmpty {
+                SwitchboardThreadBar(
+                    conversation: conversation, filter: $threadFilter,
+                    waiting: Set((model.sessionStore?.sessions ?? []).filter { $0.awaitingAnswer == true }.map(\.id)),
+                    onOpen: model.openSession)
+                    .onAppear { if let picked = SwitchboardThreadsPreview.picked { threadFilter = picked } }
+            }
             transcript
                 // A window drag: the full transcript holds its size (no
                 // re-layout) and hides; a small preview of its tail — kept
@@ -3620,7 +3640,7 @@ struct BeautifiedSessionView: View {
                     }
                     // The resize preview, kept ready (at most 2 s behind).
                     while !Task.isCancelled {
-                        let tail = Self.resizeTail(model.items, limit: model.renderLimit)
+                        let tail = Self.resizeTail(threaded?.items(in: threadFilter) ?? model.items, limit: model.renderLimit)
                         if tail != previewItems { previewItems = tail }
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
@@ -3795,11 +3815,13 @@ struct BeautifiedSessionView: View {
                         // While the window is being resized, only the last
                         // couple of screens re-flow live; the rest comes back
                         // when the drag ends.
+                        let conversation = threaded
+                        let source = conversation?.items(in: threadFilter) ?? model.items
                         let visible = !settled
-                            ? Self.resizeTail(model.items, limit: model.renderLimit)
-                            : Self.renderWindow(model.items, limit: model.renderLimit, chars: model.renderChars,
+                            ? Self.resizeTail(source, limit: model.renderLimit)
+                            : Self.renderWindow(source, limit: model.renderLimit, chars: model.renderChars,
                                                 expanded: model.expandedMessages)
-                        let hidden = model.items.count - visible.count
+                        let hidden = source.count - visible.count
                         if hidden > 0 || model.canLoadEarlier {
                             HStack {
                                 Spacer()
@@ -3835,7 +3857,7 @@ struct BeautifiedSessionView: View {
                                         }
                                     } else if hidden > 0 {
                                         let n = max(1, Self.renderWindow(
-                                            model.items,
+                                            source,
                                             limit: model.renderLimit + BeautifiedSessionModel.renderStep,
                                             chars: model.renderChars + BeautifiedSessionModel.renderCharStep,
                                             expanded: model.expandedMessages).count
@@ -3886,6 +3908,8 @@ struct BeautifiedSessionView: View {
                         // takes the whole reply (`layout.replies`).
                         let markers = rowsMemo.markers
                         let newRow = newSince.flatMap { UnseenSummary.firstRow(rows, since: $0) }
+                        // Filtered to one chain, every row is about it: no headers.
+                        let threadHeaders = conversation?.effective(threadFilter) == nil ? (conversation?.headers(rows) ?? [:]) : [:]
                         ForEach(rows) { row in
                             if let marker = markers[row.id] {
                                 TranscriptTimeMarkerRow(marker: marker)
@@ -3893,10 +3917,24 @@ struct BeautifiedSessionView: View {
                             if row.id == newRow, let newSince {
                                 TranscriptNewDivider(since: newSince).id(Self.newDividerID)
                             }
+                            if let conversation, let keys = threadHeaders[row.id] {
+                                SwitchboardThreadHeader(threads: keys.compactMap(conversation.thread),
+                                                        onPick: { threadFilter = $0 })
+                            }
                             switch row {
                             case .item(let item):
-                                itemRow(item, lastUserID: lastUserID, layout: layout)
-                                    .modifier(RowTimeProbe(date: Self.scrubDate(item), space: Self.scrollSpace))
+                                if let conversation, case .userText(let t) = item.kind,
+                                   let notice = DelegationNotice.stripSwitchboard(t) {
+                                    SwitchboardNoticeLine(
+                                        text: notice,
+                                        thread: conversation.threadsOf[item.id]?.first.flatMap(conversation.thread),
+                                        time: item.timestamp, onPick: { threadFilter = $0 })
+                                        .id(item.id)
+                                        .modifier(RowTimeProbe(date: item.timestamp, space: Self.scrollSpace))
+                                } else {
+                                    itemRow(item, lastUserID: lastUserID, layout: layout)
+                                        .modifier(RowTimeProbe(date: Self.scrubDate(item), space: Self.scrollSpace))
+                                }
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
@@ -4112,6 +4150,9 @@ struct BeautifiedSessionView: View {
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
+                .onChange(of: threadFilter) { _, _ in
+                    if keepPlaceOnFilterChange { keepPlaceOnFilterChange = false } else { scrollToTail(proxy) }
+                }
                 // `revision` is read off the publisher (it fires before the
                 // rows re-lay out), so "was it at the tail" is judged on the
                 // content BEFORE the append — a big answer landing would
@@ -4188,15 +4229,32 @@ struct BeautifiedSessionView: View {
         guard let q = pendingFind, !q.isEmpty,
               let i = model.items.firstIndex(where: { Self.says($0, q) }) else { return }
         pendingFind = nil
-        let needed = model.items.count - i
-        if needed > model.renderLimit { model.renderLimit = needed }
-        let weight = Self.renderWeight(model.items.suffix(needed))
-        if weight > model.renderChars { model.renderChars = weight }
         let id = model.items[i].id
+        showAllThreads()
+        widenWindow(toInclude: id)
         tailFollow.sticky = false
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
         }
+    }
+
+    /// Back to the whole conversation for a scroll to somewhere in it, staying
+    /// put rather than going to the end as picking a thread does.
+    private func showAllThreads() {
+        guard threadFilter != nil else { return }
+        keepPlaceOnFilterChange = true
+        threadFilter = nil
+    }
+
+    /// Lay out far enough back to reach `id`, counted in what's drawn: the
+    /// Switchboard's replies are cut into more items than the transcript has.
+    private func widenWindow(toInclude id: Int) {
+        let drawn = threaded?.items ?? model.items
+        guard let i = drawn.firstIndex(where: { $0.id == id }) else { return }
+        let needed = drawn.count - i
+        if needed > model.renderLimit { model.renderLimit = needed }
+        let weight = Self.renderWeight(drawn.suffix(needed))
+        if weight > model.renderChars { model.renderChars = weight }
     }
 
     /// To where the new part begins: as `applyFind`, the rows have to be in the
@@ -4204,11 +4262,13 @@ struct BeautifiedSessionView: View {
     private func jumpToNew(_ summary: UnseenSummary, _ proxy: ScrollViewProxy) {
         whileAway = nil
         // New, but with no row of its own (a question up as a card): that's at the end.
-        guard let first = summary.firstItemIndex else { scrollToTail(proxy); return }
-        let needed = model.items.count - first
-        if needed > model.renderLimit { model.renderLimit = needed }
-        let weight = Self.renderWeight(model.items.suffix(needed))
-        if weight > model.renderChars { model.renderChars = weight }
+        // What's new may be outside the Switchboard thread on show.
+        showAllThreads()
+        guard let first = summary.firstItemIndex, model.items.indices.contains(first) else {
+            scrollToTail(proxy)
+            return
+        }
+        widenWindow(toInclude: model.items[first].id)
         tailFollow.sticky = false
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(Self.newDividerID, anchor: .top) }

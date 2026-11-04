@@ -93,7 +93,10 @@ struct ChatLayoutLoopTests {
             .split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
         #expect(!code.contains("LazyVStack("))
-        #expect(code.contains("Self.renderWindow(model.items"))
+        // The rows go through the window: all of the chat's items, or (the
+        // Switchboard, one thread picked) those of the thread.
+        #expect(code.contains("Self.renderWindow(source"))
+        #expect(code.contains("let source = conversation?.items(in: threadFilter) ?? model.items"))
     }
 
     // MARK: The window

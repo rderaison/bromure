@@ -249,6 +249,9 @@ struct BromureAC: ParsableCommand {
                 // The real chat over a fixture: a conversation over two days,
                 // with this Mac having last read it before its final turn.
                 (view, size) = ChatIndicatorsPreview.view()
+            case "switchboard":
+                // The real chat over a fixture Switchboard: several sessions at once.
+                (view, size) = SwitchboardThreadsPreview.view()
             case "machine-signin":
                 size = NSSize(width: 640, height: 640)
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
