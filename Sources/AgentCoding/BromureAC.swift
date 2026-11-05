@@ -5864,7 +5864,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onListTasks = { [weak self] in
             MainActor.assumeIsolated {
-                ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
+                guard let self else { return ["tasks": []] }
+                return ["tasks": self.encodedRows(self.codingTaskStore.tasks, "tasks")]
             }
         }
         // Sessions-first home for a fat client: the records as stored (the
@@ -5874,16 +5875,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 // What Squelch saved in each conversation rides along: a
                 // client has no ledger of the host's.
-                self?.agentSessionStore.sessions.compactMap { s -> [String: Any]? in
+                guard let self else { return [] }
+                return self.encodedRows(self.agentSessionStore.sessions.map { s -> AgentSession in
                     var s = s
                     if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
-                    return Self.codableToDict(s)
-                } ?? []
+                    return s
+                }, "agentSessions")
             }
         }
         server.onListDelegations = { [weak self] in
             MainActor.assumeIsolated {
-                self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
+                guard let self else { return [] }
+                return self.encodedRows(self.delegationStore.delegations, "delegations")
             }
         }
         // Security Timeline rows carry the workspace's name.
@@ -5892,7 +5895,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onListAgentRooms = { [weak self] in
             MainActor.assumeIsolated {
-                self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []
+                guard let self else { return [] }
+                return self.encodedRows(self.agentRoomStore.rooms, "agentRooms")
             }
         }
         server.onListInstructionPresets = { [weak self] in
@@ -7206,21 +7210,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationScheduledList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         return [
-            "automations": scheduledAutomationStore.automations.compactMap(Self.codableToDict),
-            "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
+            "automations": encodedRows(scheduledAutomationStore.automations, "automations"),
+            "runs": encodedRows(scheduledAutomationStore.runs, "automationRuns"),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
             // The clock the schedules run on: a client in another zone
             // names it, and shows its own equivalent.
             "timeZone": TimeZone.current.identifier,
             // Repository watches + findings ride along for the fat client.
-            "watches": findingStore.watches.compactMap(Self.codableToDict),
-            "findings": findingStore.findings.compactMap(Self.codableToDict),
+            "watches": encodedRows(findingStore.watches, "watches"),
+            "findings": encodedRows(findingStore.findings, "findings"),
         ]
     }
+    /// `encodedRows`' memo, per list.
+    private let encodedRowMemo = EncodedRowMemo()
 
-    /// Encode a Codable value to a JSON object dict (ISO8601 dates) for the
-    /// `[String: Any]` HTTP responses.
+    /// `codableToDict` of each item, reusing what an unchanged one encoded to
+    /// last time (see `EncodedRowMemo`).
+    func encodedRows<T: Encodable & Equatable & Identifiable>(_ items: [T], _ key: String) -> [[String: Any]] {
+        encodedRowMemo.rows(items, key, encode: Self.codableToDict)
+    }
+
     static func codableToDict<T: Encodable>(_ value: T) -> [String: Any]? {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
