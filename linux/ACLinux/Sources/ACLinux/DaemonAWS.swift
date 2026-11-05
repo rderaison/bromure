@@ -1,5 +1,6 @@
 import CACLinuxShims
 import Foundation
+import NIOConcurrencyHelpers
 
 /// One VM's host end of a guest service on hybrid vsock: Firecracker
 /// delivers the guest's connections to `port` on `<v.sock>_<port>`; each
@@ -17,16 +18,21 @@ final class VsockFDListener: @unchecked Sendable {
     /// closed as it's accepted.
     private var active = 0
     let maxConnections: Int
-    /// The most a connection may sit without sending (SO_RCVTIMEO): an idle
-    /// one ends rather than holding its thread for good.
+    /// The most a connection may sit without sending, or without reading
+    /// what it's sent (SO_RCVTIMEO, SO_SNDTIMEO): it ends rather than
+    /// holding its thread for good.
     static let idleTimeout = 60
+    /// The most one connection lasts, however it trickles (a sign that
+    /// waits on the user's consent takes 120 s at most).
+    let connectionDeadline: TimeInterval
 
     // @port-skip linux-only: the VZVirtioSocketListener delegates over hybrid vsock
     init(udsPath: String, port: UInt32, fdStoreName: String, stored: Int32?,
-         maxConnections: Int = 16,
+         maxConnections: Int = 16, connectionDeadline: TimeInterval = 600,
          accept: @escaping @Sendable (Int32) -> Int32 = { acl_accept_cloexec($0) },
          serve: @escaping @Sendable (Int32) async -> Void) throws {
         self.maxConnections = maxConnections
+        self.connectionDeadline = connectionDeadline
         path = HybridVsockListener.path(uds: udsPath, port: port)
         self.fdStoreName = fdStoreName
         if let stored { fd = stored } else {
@@ -79,12 +85,26 @@ final class VsockFDListener: @unchecked Sendable {
         let ok = active < maxConnections
         if ok { active += 1 }
         lock.unlock()
+        // The server gets its own descriptor of the connection and closes
+        // it; ours stays open until the server is done, so the deadline's
+        // shutdown never lands on a reused number.
         guard ok else { close(c); return }
+        let theirs = fcntl(c, F_DUPFD_CLOEXEC, 0)
+        guard theirs >= 0 else {
+            lock.lock(); active -= 1; lock.unlock()
+            close(c); return
+        }
         var tv = timeval(tv_sec: Self.idleTimeout, tv_usec: 0)
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let done = NIOLockedValueBox(false)
+        DispatchQueue.global().asyncAfter(deadline: .now() + connectionDeadline) {
+            done.withLockedValue { if !$0 { shutdown(c, Int32(SHUT_RDWR)) } }
+        }
         let thread = ConnectionThread(name: "vsock-" + fdStoreName)
         Task(executorPreference: thread) { [self] in
-            await serve(c)
+            await serve(theirs)
+            done.withLockedValue { $0 = true; close(c) }
             lock.lock(); active -= 1; lock.unlock()
             thread.finish()
         }

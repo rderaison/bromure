@@ -1222,6 +1222,27 @@ struct VsockFDListenerTests {
         #expect(done.wait(timeout: .now() + 5) == .success, "the pool answers with \(n) idle connections open")
     }
 
+    /// A connection that trickles (or never reads its replies) ends at the
+    /// listener's deadline, and its place is freed.
+    @Test func aConnectionEndsAtItsDeadline() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let agent = SSHAgentServer(consent: ConsentBroker())
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9446, fdStoreName: "vt-dl", stored: nil,
+                                    connectionDeadline: 1) { await agent.serve(fd: $0, profileID: UUID()) }
+        defer { l.stop(); FDStore.remove("vt-dl") }
+        let fd = try #require(Self.dial(dir + "/v.sock_9446"))
+        defer { close(fd) }
+        var tv = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let t0 = Date()
+        var b: UInt8 = 0
+        #expect(read(fd, &b, 1) == 0, "closed by the deadline")
+        #expect(Date().timeIntervalSince(t0) < 5)
+        let until = Date().addingTimeInterval(5)
+        while l.activeConnections > 0 && Date() < until { usleep(20_000) }
+        #expect(l.activeConnections == 0, "its place is free")
+    }
+
     @Test func oneConnectionPastTheCapIsClosed() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let agent = SSHAgentServer(consent: ConsentBroker())

@@ -1066,6 +1066,11 @@ public actor Daemon {
             throw KubeClusterEngine.KubeError.message("'\(rec.name)' is having its disks repaired")
         }
         live[id] = l
+        // A save between this launch's profile read and now found the VM not
+        // running yet (profilesDidChange): its policy, as it is now.
+        if rec.registration != true, let pid = UUID(uuidString: id), let now = existingProfile(for: rec) {
+            mitm?.setPromptInjectionPolicy(now.promptInjection, for: pid)
+        }
         do {
             try await machine.start()
         } catch {
