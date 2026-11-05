@@ -438,6 +438,27 @@ struct LeftoverRescueTests {
         await d.shutdown()
     }
 
+    /// A machine a restarted daemon can't take back (here: no stored
+    /// network) is ended with its virtiofsds, and waited for: a boot right
+    /// after would fail on their pid-file locks.
+    @Test func aMachineNotTakenBackIsEndedWithItsVirtiofsds() async throws {
+        let (d, stopped, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var rec = stopped
+        rec.state = .running
+        let vm = try Stub("/bin/sh", ["-c", "read x", "sh", "--id", "bromure-\(rec.shortId)"])
+        rec.pid = vm.pid
+        rec.pidStart = Daemon.processStartTime(vm.pid)
+        try await d.registerForTesting(rec)
+        let fs = try Self.virtiofsd(in: dir, socket: dir + "/run/vms/\(rec.shortId)/fs1.sock")
+        usleep(100_000)
+        await d.adoptRunning()
+        #expect(vm.gone(within: 0.5), "its Firecracker is gone when adoption returns")
+        #expect(fs.gone(within: 0.5), "and its virtiofsd")
+        #expect(await d.registry.find(rec.id)?.state == .stopped)
+        await d.shutdown()
+    }
+
     /// The next deep repair clears a leftover first (unless a repair holds the machine).
     @Test func aRepairAfterALeftoverProceeds() async throws {
         let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()

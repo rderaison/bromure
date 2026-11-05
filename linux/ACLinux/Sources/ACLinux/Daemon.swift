@@ -1027,10 +1027,15 @@ public actor Daemon {
                 FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': took back its Firecracker (pid \(pid)), network and vsock from the fd store\n".utf8))
             } catch {
                 // A Firecracker left here would keep running and hold
-                // disk.raw and home.img. End it, if it's still the process
-                // we recorded.
-                if Self.killIfOurs(rec) {
-                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': not re-adopted (\(error)); killed its Firecracker (pid \(rec.pid ?? 0))\n".utf8))
+                // disk.raw and home.img, and its virtiofsds (unsupervised
+                // since the restart) their pid-file locks: a boot right
+                // after (a cluster's auto-start) fails on them. End them
+                // all, if still the processes we recorded, and wait.
+                let ours = Self.isOurVM(rec)
+                let gone = Self.killIfOursAndWait(rec)
+                    && Self.killVirtiofsds(under: config.runtimeDir + "/vms/" + rec.shortId)
+                if ours {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': not re-adopted (\(error)); killed its Firecracker (pid \(rec.pid ?? 0))\(gone ? "" : ", which or whose virtiofsds didn't exit in time")\n".utf8))
                 }
                 CIDAllocator.shared.release(rec.cid)
                 r.state = .stopped
