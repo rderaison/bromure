@@ -63,3 +63,63 @@ struct TranscriptIndexMemoryTests {
         #expect(title(#"{"type":"ai-title","aiTitle":"   "}"#) == nil)
     }
 }
+
+@Suite("A transcript past the cap is read for its start and its end")
+struct TranscriptIndexCapTests {
+    private func file(_ lines: [String]) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cap-\(UUID().uuidString).jsonl")
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url)
+        return url
+    }
+    private func user(_ t: String) -> String { #"{"type":"user","message":{"role":"user","content":"\#(t)"}}"# }
+    private func reply(_ t: String) -> String {
+        #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"\#(t)"}]}}"#
+    }
+    private func lines() -> [String] {
+        var l = [user("first ask"), reply("first answer")]
+        for i in 0..<400 { l += [user("middle ask \(i)"), reply(String(repeating: "padding ", count: 40))] }
+        l += [#"{"type":"ai-title","aiTitle":"Late title"}"#, user("last ask"), reply("last answer")]
+        return l
+    }
+
+    @Test("start and end are kept, the middle isn't, and no line is read in half")
+    func headAndTail() throws {
+        let url = try file(lines()); defer { try? FileManager.default.removeItem(at: url) }
+        let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        let e = try #require(TranscriptSearchIndex.entry(of: url, modified: Date(), cap: 8_000, head: 300))
+        #expect(size > 8_000)
+        #expect(e.firstPrompt == "first ask")
+        #expect(e.text.contains("first ask") && e.text.contains("last ask") && e.text.contains("last answer"))
+        #expect(!e.text.contains("middle ask 1\n") && !e.text.contains("middle ask 10\n"))
+        #expect(e.lastReply == "last answer")
+        #expect(e.agentTitle == "Late title")
+        // Every paragraph is a whole message: none starts or ends mid-line.
+        for p in e.text.components(separatedBy: "\n\n") where !p.isEmpty {
+            #expect(p.hasPrefix("first") || p.hasPrefix("middle ask") || p.hasPrefix("padding") || p.hasPrefix("last"), Comment(rawValue: p))
+        }
+    }
+
+    @Test("under the cap it's the same entry as reading the whole file")
+    func underTheCap() throws {
+        let url = try file(lines()); defer { try? FileManager.default.removeItem(at: url) }
+        let data = try Data(contentsOf: url)
+        let capped = try #require(TranscriptSearchIndex.entry(of: url, modified: Date(timeIntervalSince1970: 5), cap: data.count, head: 300))
+        let whole = TranscriptSearchIndex.entry(data, modified: Date(timeIntervalSince1970: 5))
+        #expect(capped.text == whole.text && capped.firstPrompt == whole.firstPrompt && capped.lastReply == whole.lastReply)
+        #expect(capped.turns == whole.turns && capped.agentTitle == whole.agentTitle && capped.tokens == whole.tokens)
+    }
+
+    @Test("a start with no complete line, or one long line, is read without crashing")
+    func degenerate() throws {
+        let long = try file([reply(String(repeating: "x", count: 20_000))]); defer { try? FileManager.default.removeItem(at: long) }
+        #expect(TranscriptSearchIndex.entry(of: long, modified: Date(), cap: 4_000, head: 300) != nil)
+        let tiny = try file([user("a"), reply("b")]); defer { try? FileManager.default.removeItem(at: tiny) }
+        #expect(TranscriptSearchIndex.entry(of: tiny, modified: Date(), cap: 40, head: 10)?.lastReply != nil)
+    }
+
+    @Test("the cap is 100 MB, with the first megabyte kept")
+    func sizes() {
+        #expect(TranscriptSearchIndex.indexCap == 100 * 1_048_576)
+        #expect(TranscriptSearchIndex.indexHead == 1_048_576)
+    }
+}

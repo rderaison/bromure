@@ -105,12 +105,42 @@ final class TranscriptSearchIndex {
     /// loop never drains them by itself: after a launch, with every transcript
     /// to read, they piled up to several times the transcripts' own size before
     /// the pass ended and they all went at once.
-    nonisolated static func entry(of url: URL, modified: Date) -> Entry? {
+    nonisolated static func entry(of url: URL, modified: Date,
+                                  cap: Int = indexCap, head: Int = indexHead) -> Entry? {
         autoreleasepool {
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return entry(data, modified: modified)
+            guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? h.close() }
+            guard let size = try? h.seekToEnd(), (try? h.seek(toOffset: 0)) != nil else { return nil }
+            guard size > UInt64(cap) else {
+                guard let data = try? h.readToEnd() else { return nil }
+                return entry(data, modified: modified)
+            }
+            // Its start, for what only the start says, and its end.
+            guard var start = try? h.read(upToCount: head) else { return nil }
+            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
+            guard (try? h.seek(toOffset: size - UInt64(cap - head))) != nil,
+                  var end = try? h.readToEnd() else { return nil }
+            end = end.firstIndex(of: 0x0A).map { Data(end[($0 + 1)...]) } ?? Data()
+            // The format comes from the start: the end of a file can look like
+            // another agent's lines.
+            let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
+            let first = entry(start, modified: modified, agent: agent)
+            var e = entry(end, modified: modified, agent: agent)
+            e.text = first.text + "\n\n" + e.text
+            e.firstPrompt = first.firstPrompt ?? e.firstPrompt
+            e.conversationID = first.conversationID ?? e.conversationID
+            e.agentTitle = e.agentTitle ?? first.agentTitle
+            e.model = e.model ?? first.model
+            return e
         }
     }
+
+    /// Past this, a transcript is read for its first `indexHead` bytes and the
+    /// rest of the cap from its end. Search, the timeline and the time worked
+    /// then cover those parts only. A 944 MB transcript peaked at 2.2 GB while
+    /// parsed, and kept 22 MB of text.
+    nonisolated static let indexCap = 100 * 1_048_576
+    nonisolated static let indexHead = 1_048_576
 
     /// Called with the sessions whose entries were just re-read.
     @ObservationIgnored var onUpdate: (([UUID]) -> Void)?
@@ -140,8 +170,8 @@ final class TranscriptSearchIndex {
             && !DelegationNotice.isHostAside(s) && DelegationNotice.strip(s) == nil
     }
 
-    nonisolated static func entry(_ data: Data, modified: Date) -> Entry {
-        let items = AgentTranscript.parse(data)
+    nonisolated static func entry(_ data: Data, modified: Date, agent: String? = nil) -> Entry {
+        let items = AgentTranscript.parse(data, agent: agent)
         var firstPrompt: String?
         var parts: [String] = []
         var last = ""
