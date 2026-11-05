@@ -2066,13 +2066,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the dashboard can render an off/suspended workspace's config.
     func profile(for id: Profile.ID) -> Profile? { profiles.first { $0.id == id } }
 
+    /// From `FileFacts`: never waits on the disk (0 until first read).
     func vmDashboardData(for id: Profile.ID) -> (diskAllocated: Int64, diskCapacity: Int64, startedAt: Date?) {
         var alloc: Int64 = 0, cap: Int64 = 0
         if let profile = profiles.first(where: { $0.id == id }),
-           let rv = try? store.diskURL(for: profile)
-               .resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) {
-            alloc = Int64(rv.totalFileAllocatedSize ?? 0)
-            cap = Int64(rv.fileSize ?? 0)
+           let f = FileFacts.shared.facts(store.diskURL(for: profile)), f.exists {
+            alloc = f.allocated
+            cap = f.size
         }
         return (alloc, cap, runningSessions[id]?.startedAt)
     }
@@ -2176,7 +2176,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Coarse run state for a profile, for the source-list badge: a live VM is
     /// running/booting; otherwise a saved snapshot on disk means suspended,
     /// else it's off.
-    private func runState(for profile: Profile) -> SessionListModel.RunState {
+    /// `cached`: read the saved state from `FileFacts` (the state snapshot,
+    /// which must never wait on the disk) instead of the disk itself.
+    private func runState(for profile: Profile, cached: Bool = false) -> SessionListModel.RunState {
         if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
         if bootsInFlight.contains(profile.id) { return .booting }
         if let session = runningSessions[profile.id] {
@@ -2188,6 +2190,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         let disk = SessionDisk(profile: profile, store: store,
                                baseDiskURL: imageManager.baseDiskURL)
+        if cached { return FileFacts.shared.facts(disk.savedStateURL)?.exists == true ? .suspended : .off }
         return disk.hasSavedState ? .suspended : .off
     }
 
@@ -7040,8 +7043,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return d
             }
             let diskURL = store.diskURL(for: s.profile)
-            let diskAllocated = (try? diskURL.resourceValues(
-                forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
+            let diskAllocated = FileFacts.shared.facts(diskURL)?.allocated ?? 0
             return [
                 "id": s.profileID.uuidString,
                 "shortId": Self.shortID(s.profileID),
@@ -7112,14 +7114,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// source list 1:1.
     /// home.img's size, or NSNull when there is none (the row says so, rather
     /// than leaving the key out like a server too old to report it).
-    nonisolated static func homeImageBytes(_ url: URL) -> Any {
-        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? NSNull()
+    /// From `FileFacts`: never waits on the disk. NSNull while not known yet,
+    /// as for an image that doesn't exist.
+    static func homeImageBytes(_ url: URL) -> Any {
+        guard let f = FileFacts.shared.facts(url), f.exists else { return NSNull() }
+        return Int(f.size)
     }
 
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
-            switch runState(for: p) {
+            switch runState(for: p, cached: true) {
             case .running:   state = "running"
             case .booting:   state = "booting"
             case .suspended: state = "suspended"
@@ -7136,7 +7141,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "tool": p.tool.rawValue,
                 "authMode": p.authMode.rawValue,
                 "state": state,
-                "compromised": SessionDisk.isCompromised(profile: p, store: store),
+                "compromised": FileFacts.shared.facts(SessionDisk.compromiseMarkURL(profile: p, store: store))?.exists ?? false,
                 "memoryGB": p.memoryGB,
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,

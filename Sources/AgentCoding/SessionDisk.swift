@@ -225,7 +225,7 @@ public final class SessionDisk {
     /// per-profile MAC + machine identifier files, so no sidecar JSON
     /// is needed.
     public var savedStateURL: URL {
-        store.profileDirectory(for: profile).appendingPathComponent("vm.state")
+        store.profileDirectory(for: profile).appendingPathComponent("vm.state", isDirectory: false)
     }
     public var hasSavedState: Bool {
         fm.fileExists(atPath: savedStateURL.path)
@@ -287,9 +287,11 @@ public final class SessionDisk {
     /// per-profile dir holds a compromised flag — saves the picker
     /// from having to construct a SessionDisk just to read one bit.
     public static func isCompromised(profile: Profile, store: ProfileStore) -> Bool {
-        let url = store.profileDirectory(for: profile)
-            .appendingPathComponent("compromised.flag")
-        return FileManager.default.fileExists(atPath: url.path)
+        FileManager.default.fileExists(atPath: compromiseMarkURL(profile: profile, store: store).path)
+    }
+
+    public static func compromiseMarkURL(profile: Profile, store: ProfileStore) -> URL {
+        store.profileDirectory(for: profile).appendingPathComponent("compromised.flag", isDirectory: false)
     }
 
     /// Wipe everything that could carry contamination from a
