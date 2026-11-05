@@ -908,6 +908,22 @@ struct GuestEnvTests {
         await d.shutdown()
     }
 
+    /// An omp extra provider whose base URL has no scheme ("10.0.0.5:8000/v1":
+    /// no host to swap its key in on) exports "none", never its real key.
+    @Test func anOmpProviderWithNoHostNeverExportsItsRealKey() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "omp", tool: .claude, authMode: .token)
+        let extra = Profile.OmpExtraProvider(provider: ModelProvider.allCases.first!, apiKey: "REAL-omp-key-not-for-the-guest",
+                                             baseURL: "10.0.0.5:8000/v1", models: ["m"])
+        #expect(extra.host == nil)
+        p.ompExtraProviders = [extra]
+        let plan = Daemon.makeSessionTokenPlan(for: p, mitm: proxy)
+        let lines = SessionDisk.apiKeyEnvLines(profile: p, tokenPlan: plan, registrationMode: false)
+        #expect(!lines.joined(separator: "\n").contains("REAL-omp-key"), "the real key never reaches api_key.env")
+        #expect(lines.contains("export \(extra.envVar)='none'"))
+    }
+
     /// No plan (no proxy: its CA didn't load): a workspace doesn't launch,
     /// and nothing real is ever written for the guest.
     @Test func withoutAPlanAWorkspaceIsRefusedAndNothingRealIsWritten() throws {
