@@ -917,27 +917,55 @@ final class KubeClusterEngine {
 
     /// e2fsck in the guest, over every ext4 filesystem in the images it is
     /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
-    /// Exit 0-3 = consistent now; 4+ = errors left.
-    static let rescueFsckScript = #"""
+    /// Every image gets a `fsck:` line: its check (exit 0-3 = consistent now;
+    /// 4+ = errors left), "no ext4", or "missing" (also a failure); blkid
+    /// failing on a device (anything but 0 or 2, nothing recognised) fails
+    /// the run too. Ends with the run's verdict as its exit code
+    /// (`rescueRepaired` reads both).
+    nonisolated static let rescueFsckScript = #"""
     set -u
     rc=0
     for img in "$@"; do
-      [ -f "$img" ] || continue
-      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
+      [ -f "$img" ] || { echo "fsck: $(basename "$img") missing"; rc=8; continue; }
+      L=$(sudo losetup -fP --show "$img") || { echo "fsck: $(basename "$img") cannot attach"; rc=8; continue; }
       sudo udevadm settle 2>/dev/null || sleep 1
+      found=0
       for dev in "$L" "$L"p*; do
         [ -b "$dev" ] || continue
-        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
+        t=$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null); b=$?
+        if [ "$b" -ne 0 ] && [ "$b" -ne 2 ]; then
+          echo "fsck: $(basename "$img") $(basename "$dev") blkid failed ($b)"; rc=8; continue
+        fi
+        [ "$t" = ext4 ] || continue
+        found=1
         sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
         echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
         tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
         [ "$r" -ge 4 ] && rc=4
       done
+      [ "$found" = 1 ] || echo "fsck: $(basename "$img") no ext4"
       sudo losetup -d "$L"
     done
     sync
     exit $rc
     """#
+
+    /// Whether a rescue's run (`rescueFsckScript`, then `echo "rc=$?"`) left
+    /// every image consistent: it ended with rc=0 and said something about
+    /// each of `images`, and "no ext4" only of those in `mayLackExt4` (a data
+    /// disk never formatted): a root disk whose partitions never showed up,
+    /// or that nothing was recognised on, isn't. A run cut short (set -u, a
+    /// missing tool) or one that found nothing (the share not mounted) is
+    /// not a repair either.
+    nonisolated static func rescueRepaired(_ out: String, images: [String], mayLackExt4: Set<String>) -> Bool {
+        let lines = out.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard lines.last(where: { $0.hasPrefix("rc=") }) == "rc=0" else { return false }
+        return images.allSatisfy { img in
+            let said = lines.filter { $0.hasPrefix("fsck: \(img) ") }
+            guard !said.isEmpty else { return false }
+            return !said.contains("fsck: \(img) no ext4") || mayLackExt4.contains(img)
+        }
+    }
 
     /// The Mac-side checker only replays journals and clears the error flag;
     /// anything past that needs the real e2fsck. Boot a throwaway machine
@@ -973,7 +1001,7 @@ final class KubeClusterEngine {
             for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { log(ownerID, String(line)) }
             FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(profile.name):\n\(out)\n".utf8))
             await app.stopSession(rescue.id, action: .shutdown)
-            if out.contains("rc=4") || out.contains("rc=8") {
+            if !Self.rescueRepaired(out, images: names, mayLackExt4: ["data.img"]) {
                 throw KubeError.message("e2fsck couldn't make \(profile.name)'s disk consistent")
             }
         } catch {
