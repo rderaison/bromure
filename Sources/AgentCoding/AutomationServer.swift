@@ -42,6 +42,9 @@ final class ACAutomationServer {
     // poll/exec entirely. A sub-cadence TTL bounds the build rate no matter how
     // many subscribers wake. Guarded by snapshotLock.
     private let snapshotLock = NSLock()
+    /// `stateFrame`'s: the frame of the build stamped `at`.
+    private let frameLock = NSLock()
+    private var frameCache: (at: Date, content: Data, frame: Data)?
     private var snapshotCache: [String: Any]?
     private var snapshotCacheAt = Date.distantPast
     /// The mutation generation the cached snapshot was captured at.
@@ -2525,7 +2528,10 @@ final class ACAutomationServer {
     /// automations + tasks + prompts. Shared by GET /state and the push loop.
     /// `supportsPush` tells a new client it can subscribe (see /state/subscribe)
     /// instead of polling; older clients ignore it and keep polling.
-    private func buildStateSnapshot() -> [String: Any] {
+    private func buildStateSnapshot() -> [String: Any] { stampedStateSnapshot().snapshot }
+
+    /// The snapshot, and when it was built: the same build, the same stamp.
+    private func stampedStateSnapshot() -> (snapshot: [String: Any], at: Date) {
         // Serve a recent cached build to any concurrent caller. Holding the lock
         // across the main.sync serializes builds too: a burst of subscribers waits
         // on the lock and then reuses the one fresh result instead of each firing
@@ -2539,7 +2545,7 @@ final class ACAutomationServer {
         let generation = Self.currentMutationGeneration
         if let cache = snapshotCache, snapshotCacheGeneration == generation,
            Date().timeIntervalSince(snapshotCacheAt) < 0.4 {
-            return cache
+            return (cache, snapshotCacheAt)
         }
         var snapshot: [String: Any] = DispatchQueue.main.sync {
             var d: [String: Any] = [
@@ -2602,7 +2608,37 @@ final class ACAutomationServer {
         snapshotCache = snapshot
         snapshotCacheAt = Date()
         snapshotCacheGeneration = generation
-        return snapshot
+        return (snapshot, snapshotCacheAt)
+    }
+
+    /// The push frame of the current snapshot, and what decides whether it
+    /// changed. Serialized and compressed once per build, however many fat
+    /// clients are subscribed: each used to encode the whole state twice and
+    /// compress it, every half second, two of them over 80% of a core.
+    private func stateFrame() -> (content: Data, frame: Data) {
+        let (snapshot, at) = stampedStateSnapshot()
+        frameLock.lock()
+        if let c = frameCache, c.at == at { frameLock.unlock(); return (c.content, c.frame) }
+        frameLock.unlock()
+        let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
+        // "Changed" is judged without what moves on its own: a VM's
+        // uptime ticks every second and the generation follows any
+        // request — an idle mirror got ~2 snapshots a second.
+        let content = (try? JSONSerialization.data(
+            withJSONObject: Self.pushComparable(snapshot), options: [.sortedKeys])) ?? json
+        var payload = json
+        var flag: UInt8 = 0
+        if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
+            payload = z; flag = 1
+        }
+        var lenBE = UInt32(payload.count + 1).bigEndian
+        var frame = Data(bytes: &lenBE, count: 4)
+        frame.append(flag)
+        frame.append(payload)
+        frameLock.lock()
+        if frameCache.map({ $0.at < at }) ?? true { frameCache = (at, content, frame) }
+        frameLock.unlock()
+        return (content, frame)
     }
 
     /// Write a 200 header, then PUSH framed snapshots whenever the state changes.
@@ -2633,26 +2669,11 @@ final class ACAutomationServer {
             // A held push stream is a connected fat client.
             PendingPromptBroker.recordFatClientContact()
             let alive = autoreleasepool { () -> Bool in
-                let snapshot = buildStateSnapshot()
-                let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
-                // "Changed" is judged without what moves on its own: a VM's
-                // uptime ticks every second and the generation follows any
-                // request — an idle mirror got ~2 snapshots a second.
-                let content = (try? JSONSerialization.data(
-                    withJSONObject: Self.pushComparable(snapshot), options: [.sortedKeys])) ?? json
+                let (content, frame) = stateFrame()
                 let now = Date()
                 if content != lastContent || now.timeIntervalSince(lastSentAt) > 15 {
                     lastContent = content
                     lastSentAt = now
-                    var payload = json
-                    var flag: UInt8 = 0
-                    if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
-                        payload = z; flag = 1
-                    }
-                    var lenBE = UInt32(payload.count + 1).bigEndian
-                    var frame = Data(bytes: &lenBE, count: 4)
-                    frame.append(flag)
-                    frame.append(payload)
                     guard Self.writeAllStreaming(fd, frame) else { return false }
                 }
                 return true
