@@ -112,7 +112,7 @@ extension Daemon {
     /// set once, by the kubeconfig step (installKube) -- fresh at launch,
     /// merged on a live refresh, so a token the map already holds (an exec
     /// plugin's) is never dropped first.
-    // partial: the plan's fakes are mapped, not yet exported to the guest (api_key.env / proxy.env's token lines)
+    // partial: proxy.env's token lines (local-model and per-host exports) aren't written yet; api_key.env is (Daemon's launch)
     // @port ACAppDelegate.sessionTokenPlan(for: Profile, salt: Data) h=71b1ca7b397c2cf6 @dd7ba30d
     func sessionTokenPlan(for profile: Profile) -> SessionTokenPlan? {
         mitm.map { Self.makeSessionTokenPlan(for: profile, mitm: $0) }

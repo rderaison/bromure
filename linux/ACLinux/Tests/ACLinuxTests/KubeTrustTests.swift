@@ -838,3 +838,24 @@ struct AWSProxyTests {
         #expect(rig.server.connections.value == 0)
     }
 }
+
+/// api_key.env, macOS's builder shared: the plan's fakes under their env
+/// vars, never a real value.
+@Suite("Guest credential environment")
+struct GuestEnvTests {
+    @Test func manualTokensAndAPIKeysAreExportedAsFakes() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "env", tool: .claude, authMode: .token)
+        p.apiKey = "sk-ant-api03-REAL-KEY-not-for-the-guest"
+        p.manualTokens = [ManualToken(name: "stripe", realValue: "sk_live_REAL", envVarName: "STRIPE_API_KEY",
+                                      hostFilters: ["api.stripe.com"])]
+        let plan = Daemon.makeSessionTokenPlan(for: p, mitm: proxy)
+        let text = SessionDisk.apiKeyEnvLines(profile: p, tokenPlan: plan, registrationMode: false).joined(separator: "\n")
+        let stripeFake = try #require(plan.manualEnvExports.first { $0.0 == "STRIPE_API_KEY" }?.1)
+        #expect(text.contains("export STRIPE_API_KEY='\(stripeFake)'"))
+        #expect(text.contains("export ANTHROPIC_API_KEY='\(plan.fakeForAnthropic() ?? "")'"))
+        #expect(!text.contains("REAL"), "no real value: \(text)")
+        #expect(text.contains("export BROMURE_AC_TOOL=claude"))
+    }
+}

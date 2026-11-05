@@ -903,6 +903,12 @@ public actor Daemon {
                 seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
             }
             try store.finalizeHomeSeed(for: profile, seedDir: seed)
+            // The guest's credential environment, sourced by its .bashrc: the
+            // plan's fakes under their env vars (API keys, manual tokens,
+            // MCP bearers), as macOS's session disk writes it.
+            try SessionDisk.apiKeyEnvLines(profile: profile, tokenPlan: plan, registrationMode: rec.registration == true)
+                .joined(separator: "\n").appending("\n")
+                .write(to: meta.appendingPathComponent("api_key.env"), atomically: true, encoding: .utf8)
             if rec.registration != true { pushAWSCredentials(for: profile, meta: meta.path) }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)

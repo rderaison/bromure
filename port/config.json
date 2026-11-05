@@ -48,6 +48,7 @@
     "Sources/AgentCoding/FirewallRuleActions.swift",
     "Sources/AgentCoding/FolderUpload.swift",
     "Sources/AgentCoding/GuestCommandEncoding.swift",
+    "Sources/AgentCoding/GuestEnv.swift",
     "Sources/AgentCoding/GuestExecError.swift",
     "Sources/AgentCoding/GuestMCPShims.swift",
     "Sources/AgentCoding/GuestPorts.swift",
