@@ -42,9 +42,6 @@ final class ACAutomationServer {
     // poll/exec entirely. A sub-cadence TTL bounds the build rate no matter how
     // many subscribers wake. Guarded by snapshotLock.
     private let snapshotLock = NSLock()
-    /// `stateFrame`'s: the frame of the build stamped `at`.
-    private let frameLock = NSLock()
-    private var frameCache: (at: Date, content: Data, frame: Data)?
     private var snapshotCache: [String: Any]?
     private var snapshotCacheAt = Date.distantPast
     /// The mutation generation the cached snapshot was captured at.
@@ -641,6 +638,13 @@ final class ACAutomationServer {
         // Read in: what follows (a subscription, a terminal, a machine link
         // waiting for its verb) reads as long as its stream lives.
         Self.setReceiveTimeout(fd, 0)
+        // A client that merges sections gets only those that changed; an
+        // older one (no header) the whole state each time, as before.
+        if method == "GET", path == "/state/subscribe",
+           headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil {
+            handleStateSubscribe(fd: fd, delta: true)
+            return
+        }
         route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
     }
 
@@ -2611,50 +2615,31 @@ final class ACAutomationServer {
         return (snapshot, snapshotCacheAt)
     }
 
-    /// The push frame of the current snapshot, and what decides whether it
-    /// changed. Serialized and compressed once per build, however many fat
-    /// clients are subscribed: each used to encode the whole state twice and
-    /// compress it, every half second, two of them over 80% of a core.
-    private func stateFrame() -> (content: Data, frame: Data) {
-        let (snapshot, at) = stampedStateSnapshot()
-        frameLock.lock()
-        if let c = frameCache, c.at == at { frameLock.unlock(); return (c.content, c.frame) }
-        frameLock.unlock()
-        let json = (try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data()
-        // "Changed" is judged without what moves on its own: a VM's
-        // uptime ticks every second and the generation follows any
-        // request — an idle mirror got ~2 snapshots a second.
-        let content = (try? JSONSerialization.data(
-            withJSONObject: Self.pushComparable(snapshot), options: [.sortedKeys])) ?? json
-        var payload = json
-        var flag: UInt8 = 0
-        if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
-            payload = z; flag = 1
-        }
-        var lenBE = UInt32(payload.count + 1).bigEndian
-        var frame = Data(bytes: &lenBE, count: 4)
-        frame.append(flag)
-        frame.append(payload)
-        frameLock.lock()
-        if frameCache.map({ $0.at < at }) ?? true { frameCache = (at, content, frame) }
-        frameLock.unlock()
-        return (content, frame)
-    }
 
     // MARK: The push feed: one producer, any number of subscribers
 
-    /// Each subscriber used to build, encode and compress the state on its own
-    /// half-second clock; two of them never shared a build (each found the
-    /// other's older than the cache allows) and took a core between them. Now
-    /// one thread builds while anyone is subscribed, and subscribers wait for
-    /// what it changed.
+    /// One thread builds the state while anyone is subscribed; subscribers wait
+    /// for what it changed. Each section of the state (the VMs, the
+    /// delegations, the sessions…) is compared with the last build's, and a
+    /// change is one delta frame of the sections that changed: a VM's CPU
+    /// figure moving no longer resends every delegation and session. A client
+    /// that asks for deltas (`x-bromure-state-delta: 1`) is sent those; it
+    /// gets a whole frame to start from, as a keepalive, and whenever it fell
+    /// behind the deltas kept. An older client gets the whole state on every
+    /// change, as before. Whole frames are built only when one is sent.
     private let feedCondition = NSCondition()
     private var feedSeq = 0
-    private var feedChanged: Data?
-    private var feedLatest: Data?
-    private var feedContent = Data()
+    /// The latest build, the change it's at, and its whole frame once built.
+    private var feedSnapshot: [String: Any]?
+    private var feedSnapshotSeq = 0
+    private var feedWhole: (seq: Int, frame: Data)?
+    /// Each section's comparable bytes in the latest build.
+    private var feedSections: [String: Data] = [:]
+    /// The last deltas, by the change they make.
+    private var feedDeltas: [(seq: Int, frame: Data)] = []
     private var feedSubscribers = 0
     private var feedRunning = false
+    nonisolated static let feedDeltasKept = 16
 
     private func feedSubscribe() {
         feedCondition.lock()
@@ -2680,22 +2665,36 @@ final class ACAutomationServer {
             feedCondition.lock()
             if feedSubscribers <= 0 {
                 feedRunning = false
-                feedContent = Data()
-                feedChanged = nil
-                feedLatest = nil
+                feedSnapshot = nil
+                feedWhole = nil
+                feedSections = [:]
+                feedDeltas = []
                 feedCondition.unlock()
                 return
             }
+            let previous = feedSections
             feedCondition.unlock()
             autoreleasepool {
-                let (content, frame) = stateFrame()
+                let snapshot = buildStateSnapshot()
+                let sections = Self.comparableSections(snapshot)
+                let (set, unset) = Self.changedSections(from: previous, to: sections)
                 feedCondition.lock()
-                feedLatest = frame
-                if content != feedContent {
-                    feedContent = content
-                    feedChanged = frame
+                feedSnapshot = snapshot
+                feedSections = sections
+                if !set.isEmpty || !unset.isEmpty || feedSnapshotSeq == 0 {
                     feedSeq += 1
+                    feedSnapshotSeq = feedSeq
+                    feedWhole = nil
+                    feedCondition.unlock()
+                    let frame = Self.deltaFrame(snapshot: snapshot, set: set, unset: unset)
+                    feedCondition.lock()
+                    feedDeltas.append((feedSnapshotSeq, frame))
+                    if feedDeltas.count > Self.feedDeltasKept { feedDeltas.removeFirst(feedDeltas.count - Self.feedDeltasKept) }
                     feedCondition.broadcast()
+                } else {
+                    // Unchanged but for what moves on its own (uptime): the
+                    // next whole frame (a keepalive) is built from this one.
+                    feedWhole = nil
                 }
                 feedCondition.unlock()
             }
@@ -2703,29 +2702,84 @@ final class ACAutomationServer {
         }
     }
 
-    /// The frame of a change newer than `seq`, waiting up to `timeout` for one.
-    private func nextFeedFrame(after seq: Int, timeout: TimeInterval) -> (seq: Int, frame: Data)? {
+    /// Wait up to `timeout` for a change past `seq`; the change it's at now.
+    private func waitForFeed(after seq: Int, timeout: TimeInterval) -> Int {
         feedCondition.lock()
         defer { feedCondition.unlock() }
         let deadline = Date().addingTimeInterval(timeout)
-        while feedSeq <= seq || feedChanged == nil {
+        while feedSeq <= seq {
             if !feedCondition.wait(until: deadline) { break }
         }
-        guard feedSeq > seq, let f = feedChanged else { return nil }
-        return (feedSeq, f)
+        return feedSeq
     }
 
-    /// The latest build and the change it's at.
-    private func currentFeedFrame() -> (seq: Int, frame: Data)? {
+    /// The deltas that take a client from `seq` to now, in order; nil when
+    /// some are no longer kept (it needs a whole frame).
+    private func feedDeltas(after seq: Int) -> [Data]? {
         feedCondition.lock()
         defer { feedCondition.unlock() }
-        return feedLatest.map { (feedSeq, $0) }
+        let wanted = feedDeltas.filter { $0.seq > seq }
+        guard let first = wanted.first, first.seq == seq + 1, wanted.last?.seq == feedSeq else { return nil }
+        return wanted.map(\.frame)
     }
 
-    private func latestFeedFrame() -> Data? {
+    /// The whole frame of the latest build, and the change it's at.
+    private func feedWholeFrame() -> (seq: Int, frame: Data)? {
         feedCondition.lock()
-        defer { feedCondition.unlock() }
-        return feedLatest
+        if let w = feedWhole { feedCondition.unlock(); return w }
+        guard let snapshot = feedSnapshot else { feedCondition.unlock(); return nil }
+        let seq = feedSnapshotSeq
+        feedCondition.unlock()
+        let frame = Self.wholeFrame(snapshot)
+        feedCondition.lock()
+        if feedSnapshotSeq == seq { feedWhole = (seq, frame) }
+        feedCondition.unlock()
+        return (seq, frame)
+    }
+
+    /// The comparable bytes of each top-level section (`pushComparable`).
+    nonisolated static func comparableSections(_ snapshot: [String: Any]) -> [String: Data] {
+        var out: [String: Data] = [:]
+        for (key, value) in pushComparable(snapshot) {
+            out[key] = (try? JSONSerialization.data(withJSONObject: [value], options: [.sortedKeys])) ?? Data()
+        }
+        return out
+    }
+
+    nonisolated static func changedSections(from old: [String: Data], to new: [String: Data]) -> (set: [String], unset: [String]) {
+        let set = new.compactMap { k, v in old[k] == v ? nil : k }.sorted()
+        let unset = old.keys.filter { new[$0] == nil }.sorted()
+        return (set, unset)
+    }
+
+    /// Frame: [len:u32be][flag:u8][payload], len covering flag and payload.
+    /// Flag bit 0: zlib-compressed. Bit 1: a delta,
+    /// `{"set": {section: value}, "unset": [section]}`, else the whole state.
+    nonisolated static func frame(_ json: Data, delta: Bool) -> Data {
+        var payload = json
+        var flag: UInt8 = delta ? 2 : 0
+        if let z = try? (json as NSData).compressed(using: .zlib) as Data, z.count < json.count {
+            payload = z; flag |= 1
+        }
+        var lenBE = UInt32(payload.count + 1).bigEndian
+        var out = Data(bytes: &lenBE, count: 4)
+        out.append(flag)
+        out.append(payload)
+        return out
+    }
+
+    nonisolated static func wholeFrame(_ snapshot: [String: Any]) -> Data {
+        frame((try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])) ?? Data(), delta: false)
+    }
+
+    /// What changed, with the stamps that move on every build (they're not
+    /// compared, but a client orders snapshots by them).
+    nonisolated static func deltaFrame(snapshot: [String: Any], set: [String], unset: [String]) -> Data {
+        var values: [String: Any] = [:]
+        for k in set { values[k] = snapshot[k] }
+        for k in ["generation", "epoch"] { if let v = snapshot[k] { values[k] = v } }
+        let delta: [String: Any] = ["set": values, "unset": unset]
+        return frame((try? JSONSerialization.data(withJSONObject: delta, options: [.sortedKeys])) ?? Data(), delta: true)
     }
 
     /// Write a 200 header, then PUSH framed snapshots whenever the state changes.
@@ -2735,17 +2789,19 @@ final class ACAutomationServer {
     /// so an idle workspace sends nothing — plus a ~15s keepalive re-push for
     /// liveness/self-heal. Runs on the caller's global-queue worker until the
     /// client disconnects. Idle clients that never subscribe still poll /state.
-    private func handleStateSubscribe(fd: Int32) {
+    private func handleStateSubscribe(fd: Int32, delta: Bool = false) {
         let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
         guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
         feedSubscribe()
         defer { feedUnsubscribe() }
-        var seen = 0
-        var lastSentAt = Date()
-        // What there is already, at once: a new client mustn't wait for a change.
-        if let now = currentFeedFrame() {
-            guard Self.writeAllStreaming(fd, now.frame) else { Darwin.close(fd); return }
-            seen = now.seq
+        var seen = -1
+        var lastSentAt = Date.distantPast
+        func sendWhole() -> Bool {
+            guard let w = feedWholeFrame() else { return true }
+            guard Self.writeAllStreaming(fd, w.frame) else { return false }
+            seen = w.seq
+            lastSentAt = Date()
+            return true
         }
         while true {
             // Exit as soon as the client hangs up, even while the snapshot is
@@ -2758,19 +2814,22 @@ final class ACAutomationServer {
                (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
             // A held push stream is a connected fat client.
             PendingPromptBroker.recordFatClientContact()
-            // What the one producer built since, or after 15 s its latest
-            // (a keepalive: a VM's uptime moves on in it).
-            var send: Data?
-            if let f = nextFeedFrame(after: seen, timeout: 0.5) {
-                seen = f.seq
-                send = f.frame
-            } else if Date().timeIntervalSince(lastSentAt) > 15 {
-                send = latestFeedFrame()
+            let now = waitForFeed(after: max(seen, 0), timeout: 0.5)
+            var ok = true
+            autoreleasepool {
+                if seen < 0 || Date().timeIntervalSince(lastSentAt) > 15 {
+                    // The start, and a keepalive (a VM's uptime moves on in it).
+                    ok = sendWhole()
+                } else if now > seen {
+                    if delta, let frames = feedDeltas(after: seen) {
+                        for f in frames where ok { ok = Self.writeAllStreaming(fd, f) }
+                        if ok { seen = now; lastSentAt = Date() }
+                    } else {
+                        ok = sendWhole()
+                    }
+                }
             }
-            if let send {
-                guard Self.writeAllStreaming(fd, send) else { break }
-                lastSentAt = Date()
-            }
+            if !ok { break }
         }
         Darwin.close(fd)
     }

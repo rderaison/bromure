@@ -8466,7 +8466,9 @@ final class StateStream: @unchecked Sendable {
         // iOS) instead of the short-request control path.
         let client = RemoteTransport.client(for: host, interactive: true)
         let fd: Int32
-        do { fd = try client.openStream("GET", "/state/subscribe", body: [:]) }
+        // Sections that changed, merged here; a server that doesn't know the
+        // header sends the whole state, which reads the same.
+        do { fd = try client.openStream("GET", "/state/subscribe", body: [:], headers: ["X-Bromure-State-Delta": "1"]) }
         catch { return false }
         lock.lock(); currentFD = fd; lock.unlock()
         // The server re-pushes at least every 15 s even when nothing changed,
@@ -8485,6 +8487,8 @@ final class StateStream: @unchecked Sendable {
 
         var buf = [UInt8](); buf.reserveCapacity(1 << 17)
         var rbuf = [UInt8](repeating: 0, count: 1 << 16)
+        // The state as of the last frame: deltas apply to it, in order.
+        var state: [String: Any]?
         while !isStopped {
             let n = rbuf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if n <= 0 { break }
@@ -8495,19 +8499,28 @@ final class StateStream: @unchecked Sendable {
             // terminal refresh pushes a frame) pinned tens of GB over hours.
             var bogus = false
             autoreleasepool {
-                // Each frame is the whole state: of those that have arrived,
-                // only the newest is worth inflating and parsing.
-                let frames = SnapshotFrames.takeLatest(from: &buf)
+                // A whole frame replaces what came before it, so only the last
+                // whole one and the deltas after it are read; each delta merges
+                // into the state, in order.
+                let frames = SnapshotFrames.takeAll(from: &buf)
                 bogus = frames.bogus
-                if var data = frames.latest?.payload {
-                    if frames.latest?.compressed == true,
-                       let inflated = try? (data as NSData).decompressed(using: .zlib) {
+                var changed = false
+                for frame in SnapshotFrames.fromLastWhole(frames.frames) {
+                    var data = frame.payload
+                    if frame.compressed, let inflated = try? (data as NSData).decompressed(using: .zlib) {
                         data = inflated as Data
                     }
-                    if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                        deliverSnapshot(snap)
+                    guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                    if frame.delta {
+                        // A delta with nothing to apply to: the stream is out of step.
+                        guard let base = state else { bogus = true; break }
+                        state = SnapshotFrames.merge(base, delta: obj)
+                    } else {
+                        state = obj
                     }
+                    changed = true
                 }
+                if changed, let state { deliverSnapshot(state) }
             }
             if bogus { return true }
         }
@@ -8745,23 +8758,51 @@ final class InOrder<Key: Hashable, Value> {
 
 /// The push stream's framing: a 4-byte length, a compression flag, the payload.
 enum SnapshotFrames {
-    struct Frame: Equatable { var compressed: Bool; var payload: Data }
+    struct Frame: Equatable {
+        var compressed: Bool
+        var payload: Data
+        /// Only the sections that changed (`merge`), not the whole state.
+        var delta = false
+    }
 
-    /// Takes every complete frame off `buf` and returns the last. `bogus`: a
-    /// length no frame could have, so the stream can't be trusted any further.
-    static func takeLatest(from buf: inout [UInt8]) -> (latest: Frame?, bogus: Bool) {
-        var latest: Frame?
+    /// Takes every complete frame off `buf`, in order.
+    static func takeAll(from buf: inout [UInt8]) -> (frames: [Frame], bogus: Bool) {
+        var frames: [Frame] = []
         var at = 0
         var bogus = false
         while buf.count - at >= 4 {
             let len = (Int(buf[at]) << 24) | (Int(buf[at + 1]) << 16) | (Int(buf[at + 2]) << 8) | Int(buf[at + 3])
             if len < 1 || len > 32 * 1024 * 1024 { bogus = true; break }
             if buf.count - at < 4 + len { break }
-            latest = Frame(compressed: buf[at + 4] == 1, payload: Data(buf[(at + 5) ..< (at + 4 + len)]))
+            let flag = buf[at + 4]
+            frames.append(Frame(compressed: flag & 1 != 0, payload: Data(buf[(at + 5) ..< (at + 4 + len)]),
+                                delta: flag & 2 != 0))
             at += 4 + len
         }
         if at > 0 { buf.removeFirst(at) }
-        return (latest, bogus)
+        return (frames, bogus)
+    }
+
+    /// What has to be read of `frames`: the last whole one and the deltas
+    /// after it, or every delta when there's no whole one among them.
+    static func fromLastWhole(_ frames: [Frame]) -> ArraySlice<Frame> {
+        guard let i = frames.lastIndex(where: { !$0.delta }) else { return frames[...] }
+        return frames[i...]
+    }
+
+    /// `state` with a delta's sections set and removed.
+    static func merge(_ state: [String: Any], delta: [String: Any]) -> [String: Any] {
+        var out = state
+        for (k, v) in delta["set"] as? [String: Any] ?? [:] { out[k] = v }
+        for k in delta["unset"] as? [String] ?? [] { out[k] = nil }
+        return out
+    }
+
+    /// Takes every complete frame off `buf` and returns the last. `bogus`: a
+    /// length no frame could have, so the stream can't be trusted any further.
+    static func takeLatest(from buf: inout [UInt8]) -> (latest: Frame?, bogus: Bool) {
+        let all = takeAll(from: &buf)
+        return (all.frames.last, all.bogus)
     }
 }
 

@@ -37,16 +37,16 @@ struct StateFeedCostTests {
             let rest = s[r.upperBound...]
             return rest[..<(rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex)]
         }
-        let loop = try body("private func handleStateSubscribe(fd: Int32) {")
-        for build in ["stateFrame()", "buildStateSnapshot()", "stampedStateSnapshot()", "JSONSerialization.data", "compressed(using:"] {
+        let loop = try body("private func handleStateSubscribe(fd: Int32, delta: Bool = false) {")
+        for build in ["buildStateSnapshot()", "stampedStateSnapshot()", "JSONSerialization.data", "compressed(using:"] {
             #expect(!loop.contains(build), Comment(rawValue: build))
         }
         #expect(loop.contains("feedSubscribe()") && loop.contains("defer { feedUnsubscribe() }"))
-        #expect(loop.contains("nextFeedFrame(after: seen, timeout: 0.5)") && loop.contains("currentFeedFrame()"))
+        #expect(loop.contains("waitForFeed(after:") && loop.contains("feedDeltas(after: seen)"))
         let producer = try body("private func feedLoop() {")
-        #expect(producer.contains("stateFrame()") && producer.contains("feedCondition.broadcast()"))
+        #expect(producer.contains("buildStateSnapshot()") && producer.contains("feedCondition.broadcast()"))
         #expect(producer.contains("if feedSubscribers <= 0 {"))
-        #expect(s.contains("if let c = frameCache, c.at == at { frameLock.unlock(); return (c.content, c.frame) }"))
+        #expect(!producer.contains("wholeFrame("))   // whole frames only when one is sent
     }
 
     @Test("the native sidebar never sizes the window, and the reaper is paced")
