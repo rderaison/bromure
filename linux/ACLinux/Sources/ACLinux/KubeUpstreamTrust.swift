@@ -198,10 +198,21 @@ extension MitmProxy {
             }
             swapper.setMap(live ? TokenMap.liveMerge(fresh: map.entries, current: swapper.entries(for: profileID)) : map,
                            for: profileID)
+            Self.debugLogMap(profileID, swapper.entries(for: profileID), live: live)
         }
         // Launch and live refresh alike: what's added, edited or removed
         // while the VM runs takes effect at once (trust and exec pollers).
         applyKubeMaterial(mat, profileID: profileID)
+    }
+
+    /// Debug builds: the map installed (fakes' first 8 characters and hosts,
+    /// never a real value), for the VM e2es. A release build logs nothing.
+    // @port-skip linux-only: e2e diagnostics of the Linux proxy
+    nonisolated static func debugLogMap(_ profileID: UUID, _ entries: [TokenMap.Entry], live: Bool) {
+        #if DEBUG
+        let list = entries.map { "\($0.fake.prefix(8))…@\($0.host ?? "*")\($0.real.isEmpty ? "(empty)" : "")" }.joined(separator: " ")
+        FileHandle.standardError.write(Data("[mitm] DEBUG: map for \(profileID) (\(live ? "live" : "launch")): \(entries.count): \(list)\n".utf8))
+        #endif
     }
 
     // @port MitmEngine.kubeExecContexts(for: UUID) h=641587bd0d2992de @8e2543eb

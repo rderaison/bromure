@@ -244,9 +244,15 @@ extension Daemon {
     /// pushLiveCredentials).
     // partial: the kubeconfig and its swaps only (macOS restages every live credential)
     // @port-skip linux-only: refreshKubeAccessForRunningWorkspaces on the Linux daemon
-    func refreshWorkspaceKubeconfigs() async {
+    @discardableResult
+    func refreshWorkspaceKubeconfigs() async -> Int {
+        var n = 0
         for rec in registry.records where rec.state == .running && !rec.managed {
-            guard let profile = await launchProfile(for: rec) else { continue }
+            guard let profile = await launchProfile(for: rec) else {
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no workspace profile; its credentials aren't refreshed\n".utf8))
+                continue
+            }
+            n += 1
             var yaml = ""
             if let mitm { yaml = await Self.liveKubeconfig(for: profile, mitm: mitm) ?? "" }
             let b64 = Data(yaml.utf8).base64EncodedString()
@@ -259,6 +265,7 @@ extension Daemon {
                 FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': couldn't update its kubeconfig\n".utf8))
             }
         }
+        return n
     }
 
     /// The node and registry addresses a workspace reaches directly (macOS:

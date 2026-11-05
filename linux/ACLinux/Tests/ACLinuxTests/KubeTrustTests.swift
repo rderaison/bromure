@@ -796,6 +796,36 @@ struct AWSProxyTests {
         #expect(rig.server.lastRequest.value.contains(Self.guestAuth), "unchanged")
     }
 
+    /// A key the VM minted (STS) is the credential server's again whenever
+    /// the map is installed -- a launch, a live refresh, a restarted daemon's
+    /// taken-back workspace -- so it's re-signed with its own secret, not
+    /// the workspace's base keys, and refused once expired.
+    @Test func aMintedKeyIsRegisteredWithTheMap() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "minted-aws", tool: .claude, authMode: .token)
+        p.mintedCredentials = [
+            MintedCredential(kind: .sigV4, source: "sts:AssumeRole", hosts: ["sts.amazonaws.com"],
+                             accessKeyID: "ASIAMINTEDLIVE000001", secret: "minted-secret", sessionToken: "tok",
+                             expiresAt: Date().addingTimeInterval(3600)),
+            MintedCredential(kind: .sigV4, source: "sts:GetSessionToken", hosts: ["sts.amazonaws.com"],
+                             accessKeyID: "ASIAMINTEDGONE000002", secret: "old", sessionToken: "tok",
+                             expiresAt: Date().addingTimeInterval(-60)),
+        ]
+        if case .none = proxy.awsCreds.minted(accessKeyID: "ASIAMINTEDLIVE000001", host: "sts.amazonaws.com", profileID: p.id) {} else {
+            Issue.record("registered before any map")
+        }
+        _ = await Daemon.liveKubeconfig(for: p, mitm: proxy)          // what start's refresh runs per workspace
+        guard case .material(let c, _) = proxy.awsCreds.minted(accessKeyID: "ASIAMINTEDLIVE000001", host: "sts.amazonaws.com",
+                                                                 profileID: p.id) else {
+            Issue.record("the live minted key isn't registered"); return
+        }
+        #expect(c.secretAccessKey == "minted-secret")
+        if case .expired = proxy.awsCreds.minted(accessKeyID: "ASIAMINTEDGONE000002", host: "sts.amazonaws.com", profileID: p.id) {} else {
+            Issue.record("an expired minted key must answer expired (a 403), not fall back to the base keys")
+        }
+    }
+
     /// A malformed SigV4 header is answered here, not sent.
     @Test func aMalformedSignatureIsAnsweredBeforeItGoesOut() throws {
         let rig = try CredentialMintProxyTests.Rig(host: "sts.amazonaws.com",

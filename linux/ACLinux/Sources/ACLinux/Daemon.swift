@@ -170,6 +170,9 @@ public actor Daemon {
         try FileManager.default.createDirectory(atPath: config.runtimeDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         Self.placeEngineKey(stateDir: config.stateDir)
+        // The workspaces' store, before anything reads a Profile: adoption
+        // and the refresh below do (setUpRemoteAccess sets the same root).
+        ProfileStore.defaultRootDir = URL(fileURLWithPath: config.stateDir + "/profiles", isDirectory: true)
         // Under systemd with a fd store, the previous daemon's passt (and the
         // flows it holds) is taken back rather than replaced.
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
@@ -201,6 +204,13 @@ public actor Daemon {
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
         await d.startSessionEngine()
+        // Taken-back workspaces: the proxy's state for each was the previous
+        // daemon's. Their swap maps (the plan's fakes, stable with the salt;
+        // minted credentials), kube trust, exec pollers and 1Password loops
+        // are set up again, and their kubeconfigs rewritten (its kube fakes
+        // are made anew) -- the launch's step, as a live refresh runs it.
+        let n = await d.refreshWorkspaceKubeconfigs()
+        if n > 0 { FileHandle.standardError.write(Data("bromure-ac daemon: \(n) taken-back workspace(s): credentials set up again\n".utf8)) }
         await d.setUpRemoteAccess()
         return d
     }
@@ -1080,7 +1090,8 @@ public actor Daemon {
                                              stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
                 l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
-                // The credential server's state was the previous daemon's.
+                // The credential server's state was the previous daemon's (the
+                // swap map and the rest: start's refresh, once the session host is up).
                 if l.aws != nil, let profile = await launchProfile(for: rec) {
                     pushAWSCredentials(for: profile, meta: vmDir(rec.id) + "/meta")
                 }
