@@ -30,10 +30,18 @@ extension ControlResponse {
                     .channelInitializer { ch in ch.pipeline.addHandler(SpliceToClient(s)) }
                     .withConnectedSocket(sp[0]).get()
             } catch {
-                close(sp[0]); close(theirs)
+                // NIO took sp[0] over as it made the channel, and closes it
+                // on any failure after that; the one failure before it
+                // (BaseSocket's ignoreSIGPIPE) can't happen on Linux, where
+                // there's no SO_NOSIGPIPE to set. Ours is only `theirs`.
+                close(theirs)
                 return
             }
             Thread.detachNewThread { body(theirs) }
+            // The client gone for good (not just done sending): the pair
+            // goes too, so a machine-side stream that ignores EOF can't pin
+            // the hub's thread, its link and the pair.
+            s.channel.closeFuture.whenComplete { _ in pair.close(promise: nil) }
             // The client's bytes to `body`; its end of input is `body`'s.
             let toBody = Task {
                 for await b in s.inbound { try? await pair.writeAndFlush(b) }
@@ -47,15 +55,26 @@ extension ControlResponse {
 }
 
 /// `body`'s bytes to the client; the pair closing (or failing) ends it.
+/// With backpressure: while the client's channel isn't writable (a slow fat
+/// client), the pair isn't read, so nothing piles up here; `body`'s writes
+/// then wait in the socketpair's buffer, as a raw fd's would on macOS.
 // @port-skip linux-only: NIO stream handoff
-private final class SpliceToClient: ChannelInboundHandler, @unchecked Sendable {
+final class SpliceToClient: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
-    let client: ControlStream
+    let client: Channel
     // @port-skip linux-only: NIO stream handoff
-    init(_ client: ControlStream) { self.client = client }
+    init(_ client: ControlStream) { self.client = client.channel }
+    // @port-skip linux-only: NIO stream handoff
+    init(channel: Channel) { client = channel }
     // @port-skip linux-only: NIO stream handoff
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        client.channel.writeAndFlush(unwrapInboundIn(data), promise: nil)
+        let written = client.writeAndFlush(unwrapInboundIn(data))
+        guard !client.isWritable else { return }
+        // Stop reading the pair until this write is out; then read on.
+        let pair = context.channel
+        pair.setOption(ChannelOptions.autoRead, value: false).whenComplete { _ in
+            written.whenComplete { _ in _ = pair.setOption(ChannelOptions.autoRead, value: true) }
+        }
     }
     // @port-skip linux-only: NIO stream handoff
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
