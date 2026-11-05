@@ -431,7 +431,8 @@ public actor Daemon {
     /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
     /// false only registers it (stopped).
     func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true,
-                  registration: Bool = false, kube: String? = nil, dataDiskGB: Int? = nil) async -> ControlResponse {
+                  registration: Bool = false, kube: String? = nil, dataDiskGB: Int? = nil,
+                  folders: [String]? = nil, rescueFor: String? = nil) async -> ControlResponse {
         let id = fixedID?.lowercased() ?? UUID().uuidString.lowercased()
         let name = body["name"]?.stringValue ?? "vm-\(id.prefix(8))"
         // `find` matches id, short id and name: a name equal to any of them
@@ -457,6 +458,8 @@ public actor Daemon {
         if registration { rec.registration = true }
         rec.kube = kube
         rec.dataDiskGB = dataDiskGB
+        rec.folders = folders?.isEmpty == true ? nil : folders
+        rec.rescueFor = rescueFor
         if !boot {
             rec.state = .stopped
             CIDAllocator.shared.release(cid)
@@ -571,16 +574,17 @@ public actor Daemon {
     }
 
     /// Why `rec` may not be started now, or nil: not stopped or suspended, a
-    /// QEMU machine, or a cluster machine whose disks the host is repairing.
+    /// QEMU machine, or a cluster machine whose disks the host is repairing
+    /// (marked, or a rescue for it still on record: `rescued`).
     // @port-skip linux-only: start's guards (testable)
-    static func startRefusal(_ rec: VMRecord, repairing: RepairMarks) -> ControlResponse? {
+    static func startRefusal(_ rec: VMRecord, repairing: RepairMarks, rescued: Bool = false) -> ControlResponse? {
         guard rec.state == .stopped || rec.state == .suspended else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
         guard rec.machine == machineType else {
             return .error(409, "'\(rec.name)' was made for QEMU, which is gone: remove it (vm rm) and create a new one")
         }
-        guard !repairing.contains(rec.id) else {
+        guard !repairing.contains(rec.id), !rescued else {
             return .error(409, "'\(rec.name)' is having its disks repaired; start it once that's done")
         }
         return nil
@@ -590,7 +594,7 @@ public actor Daemon {
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false) async -> ControlResponse {
-        if let refusal = Self.startRefusal(rec, repairing: repairMarks) { return refusal }
+        if let refusal = Self.startRefusal(rec, repairing: repairMarks, rescued: hasRescue(for: rec.id)) { return refusal }
         // Marked in the same actor step as the check, before any await: a
         // repair (kubeMachineDiskImages) or a remove sees the VM as busy
         // until launch has it live, or failed.
@@ -669,7 +673,7 @@ public actor Daemon {
         }
         // Its files are in use: the disk checker holds them, or a start is
         // building on them.
-        guard !repairMarks.contains(rec.id), !starting.contains(rec.id) else {
+        guard !repairMarks.contains(rec.id), !starting.contains(rec.id), !hasRescue(for: rec.id) else {
             return .error(409, "VM '\(rec.name)' is \(starting.contains(rec.id) ? "starting" : "having its disks repaired"); remove it once that's done")
         }
         do {
@@ -784,7 +788,7 @@ public actor Daemon {
         try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
-        for tag in ["bromure-meta", "bromure-outbox"] {
+        for tag in ["bromure-meta", "bromure-outbox"] + (rec.folders ?? []).prefix(8).indices.map({ "share-\($0 + 1)" }) {
             _ = fm.createFile(atPath: dir + "/meta/virtiofs-tags/" + tag, contents: nil)
         }
         // The guest MTU rule (PasstUplink.Config.mtu): 65520 behind passt;
@@ -935,6 +939,10 @@ public actor Daemon {
         qc.memoryMiB = rec.memoryMiB
         qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
                      .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
+        // A managed machine's host folders: the fstab's share-<N> slots.
+        for (i, folder) in (rec.folders ?? []).prefix(8).enumerated() {
+            qc.shares.append(.init(tag: "share-\(i + 1)", hostPath: folder))
+        }
         qc.macAddress = rec.mac
         qc.extraDisks = [.init(path: dir + "/home.img")]
         // A cluster machine's data disk (Longhorn, a registry's storage): vdc.
@@ -952,7 +960,8 @@ public actor Daemon {
         var storedNet = storedNet
         defer { for (_, fd) in storedNet { close(fd) } }
         dropLeftoverRegistrations()
-        for rec in registry.records where rec.state == .running || rec.state == .starting {
+        await dropLeftoverRescues()
+        for rec in registry.records where (rec.state == .running || rec.state == .starting) && rec.rescueFor == nil {
             var r = rec
             do {
                 guard let pid = rec.pid else { throw MachineError.notRunning }
@@ -1046,6 +1055,60 @@ public actor Daemon {
         // now is the process the signal goes to.
         guard isOurVM(rec) else { return false }
         return acl_pidfd_send_signal(fd, SIGKILL) == 0
+    }
+
+    /// killIfOurs, then waits (≤ `timeout`) for the process to be gone.
+    /// True when it's gone (or wasn't ours to begin with: not running).
+    // @port-skip linux-only: Linux process identity
+    static func killIfOursAndWait(_ rec: VMRecord, timeout: Duration = .seconds(10)) -> Bool {
+        guard let pid = rec.pid else { return true }
+        let fd = acl_pidfd_open(pid)
+        guard fd >= 0 else { return true }                 // no such process
+        defer { close(fd) }
+        guard isOurVM(rec) else { return true }            // a recycled pid: ours is gone
+        guard acl_pidfd_send_signal(fd, SIGKILL) == 0 else { return false }
+        return waitExit(pidfd: fd, timeout: timeout)
+    }
+
+    /// Whether the process behind `pidfd` exited within `timeout` (a pidfd
+    /// is readable once it has).
+    // @port-skip linux-only: Linux process identity
+    static func waitExit(pidfd: Int32, timeout: Duration) -> Bool {
+        var p = pollfd(fd: pidfd, events: Int16(POLLIN), revents: 0)
+        let deadline = ContinuousClock.now + timeout
+        while true {
+            let left = deadline - ContinuousClock.now
+            guard left > .zero else { return false }
+            let ms = Int32(min(left.components.seconds * 1000 + left.components.attoseconds / 1_000_000_000_000_000, 60_000))
+            let n = poll(&p, 1, max(ms, 1))
+            if n > 0 { return true }
+            if n < 0, errno != EINTR { return false }
+        }
+    }
+
+    /// This user's virtiofsd processes serving a socket in `dir` (a VM's run
+    /// directory), SIGKILLed through pidfds; true when every one is gone
+    /// within `timeout`. A taken-back VM's virtiofsds aren't supervised.
+    // @port-skip linux-only: Linux process identity
+    static func killVirtiofsds(under dir: String, timeout: Duration = .seconds(10)) -> Bool {
+        let me = getuid()
+        var allGone = true
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? [] {
+            guard let pid = Int32(entry) else { continue }
+            var st = stat()
+            guard stat("/proc/\(pid)", &st) == 0, st.st_uid == me else { continue }
+            let fd = acl_pidfd_open(pid)
+            guard fd >= 0 else { continue }
+            defer { close(fd) }
+            // Checked with the pidfd open: a match is the process signalled.
+            guard let comm = try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8),
+                  comm.trimmingCharacters(in: .newlines) == "virtiofsd",
+                  let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { continue }
+            let args = cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            guard zip(args, args.dropFirst()).contains(where: { $0 == "--socket-path" && $1.hasPrefix(dir + "/") }) else { continue }
+            if acl_pidfd_send_signal(fd, SIGKILL) != 0 || !waitExit(pidfd: fd, timeout: timeout) { allGone = false }
+        }
+        return allGone
     }
 
     /// /proc/<pid>/stat's starttime (field 22), nil if there's no such process.

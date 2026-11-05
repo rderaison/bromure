@@ -271,11 +271,13 @@ extension Daemon {
     /// that may not resume is shut down (its snapshot dropped).
     // @port-skip linux-only: the daemon side of LinuxKubeHost.startKubeMachine
     func prepareKubeMachine(id: String, name: String, owner: UUID, cpus: Int, memoryMiB: Int,
-                            dataDiskGB: Int?, scripts: [(String, URL)], resume: Bool) async throws {
+                            dataDiskGB: Int?, scripts: [(String, URL)], resume: Bool,
+                            folders: [String] = [], rescueFor: String? = nil) async throws {
         if registry.find(id) == nil {
             let r = await createVM(.object(["name": .string(name), "cpus": .number(Double(cpus)),
                                             "memoryGB": .number(Double(memoryMiB) / 1024)]),
-                                   id: id, boot: false, kube: owner.uuidString.lowercased(), dataDiskGB: dataDiskGB)
+                                   id: id, boot: false, kube: owner.uuidString.lowercased(), dataDiskGB: dataDiskGB,
+                                   folders: folders, rescueFor: rescueFor)
             guard r.status == 201 else {
                 throw KubeClusterEngine.KubeError.message("\(name): \(r.body["error"]?.stringValue ?? "couldn't make the machine")")
             }
@@ -318,7 +320,8 @@ extension Daemon {
     /// `repairMarks.whileMarked` ends.
     // @port-skip linux-only: the Linux machine layout for ACAppDelegate.repairKubeMachineDisks
     func kubeMachineDiskImages(id: String) -> [String]? {
-        guard live[id] == nil, stopping[id] == nil, !starting.contains(id), repairMarks.insert(id) else { return nil }
+        guard live[id] == nil, stopping[id] == nil, !starting.contains(id), !hasRescue(for: id),
+              repairMarks.insert(id) else { return nil }
         let dir = vmDir(id)
         var images = [dir + "/disk.raw"]
         if FileManager.default.fileExists(atPath: dir + "/data.img") { images.append(dir + "/data.img") }
@@ -342,6 +345,59 @@ extension Daemon {
         guard let rec = registry.find(id) else { return }
         if kill { try? FileManager.default.removeItem(atPath: snapshotDir(id)) }
         _ = await deleteVM(rec, action: kill ? "kill" : "stop")
+    }
+
+    /// One managed machine (a disk repair's throwaway rescue): ended and
+    /// removed with its files. Nothing when it's already gone.
+    // @port-skip linux-only: macOS removes the rescue's folder
+    func removeKubeMachine(id: String) async {
+        guard let rec = registry.find(id) else { return }
+        if live[id] != nil { _ = await deleteVM(rec, action: "kill") }
+        if let r = registry.find(id) { _ = remove(r) }
+    }
+
+    /// A disk-repair rescue for `id` is on record (live or not).
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func hasRescue(for id: String) -> Bool { registry.records.contains { $0.rescueFor == id } }
+
+    /// Rescues a previous daemon left (killed mid-repair): never taken back.
+    /// Each is ended -- its Firecracker, then the virtiofsds that served the
+    /// damaged machine's folder -- and removed, before adoption and before
+    /// any cluster starts; its machine stays marked until the rescue is gone
+    /// (and refused while its record is: hasRescue).
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func dropLeftoverRescues() async {
+        for rec in registry.records {
+            guard let target = rec.rescueFor else { continue }
+            _ = repairMarks.insert(target)
+            let ended = Self.killIfOursAndWait(rec)
+                && Self.killVirtiofsds(under: config.runtimeDir + "/vms/" + rec.shortId)
+            var r = rec
+            if ended {
+                r.state = .stopped
+                r.pid = nil
+                try? registry.upsert(r)
+                _ = remove(r)
+            }
+            if registry.find(rec.id) == nil {
+                repairMarks.remove(target)
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': a disk-repair machine from before the restart, ended and removed\n".utf8))
+            } else {
+                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': a disk-repair machine from before the restart couldn't be ended; its machine stays refused\n".utf8))
+            }
+        }
+    }
+
+    /// Rescues for `id` left from an earlier repair (one whose removal
+    /// failed), removed before a new one; false while a repair has `id`
+    /// marked (its rescue is in use) or one couldn't be removed.
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func removeStaleRescues(for id: String) async -> Bool {
+        guard !repairMarks.contains(id) else { return false }
+        for rec in registry.records where rec.rescueFor == id {
+            await removeKubeMachine(id: rec.id)
+        }
+        return !hasRescue(for: id)
     }
 
     /// Every machine `owner` (a deleted cluster or registry) had: ended and removed.
@@ -439,6 +495,9 @@ final class LinuxKubeHost: KubeEngineHost {
     static var shared: LinuxKubeHost?
     private weak var daemon: Daemon?
     private let session: LinuxSessionHost
+    /// A deep repair's rescue node -> the machine it repairs (its record's
+    /// rescueFor, written as the record is made).
+    private var rescueTargets: [UUID: String] = [:]
 
     // @port-skip linux-only: daemon wiring
     init(daemon: Daemon, session: LinuxSessionHost) {
@@ -470,9 +529,6 @@ final class LinuxKubeHost: KubeEngineHost {
         for (name, url) in m.scripts where url == nil {
             throw KubeClusterEngine.KubeError.message("\(name) missing from the resources")
         }
-        guard m.folders.isEmpty else {
-            throw KubeClusterEngine.KubeError.message("\(m.record.name): shared folders aren't available for cluster machines on Linux yet")
-        }
         runtime.machine = Machine(m, fsFailure: fsFailure)
     }
 
@@ -486,7 +542,8 @@ final class LinuxKubeHost: KubeEngineHost {
         try await daemon.prepareKubeMachine(id: id, name: m.record.name, owner: m.ownerID, cpus: m.cpus,
                                             memoryMiB: memMiB, dataDiskGB: m.dataDiskGB,
                                             scripts: m.scripts.compactMap { n, u in u.map { (n, $0) } },
-                                            resume: m.restoreSavedState && !repairAttempted)
+                                            resume: m.restoreSavedState && !repairAttempted,
+                                            folders: m.folders, rescueFor: rescueTargets[m.record.id])
         // The console from here on is this boot's (serial.log is appended).
         let console = await daemon.serialLog(id: id)
         if let why = await daemon.startKubeMachineVM(id: id) {
@@ -557,10 +614,81 @@ final class LinuxKubeHost: KubeEngineHost {
         }
     }
 
-    // partial: refused (no e2fsck rescue on Linux yet)
+    /// e2fsck in the guest, over every ext4 filesystem in the images it is
+    /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
+    /// Exit 0-3 = consistent now; 4+ = errors left. (macOS's, verbatim.)
+    static let kubeRescueFsckScript = #"""
+    set -u
+    rc=0
+    for img in "$@"; do
+      [ -f "$img" ] || continue
+      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
+      sudo udevadm settle 2>/dev/null || sleep 1
+      for dev in "$L" "$L"p*; do
+        [ -b "$dev" ] || continue
+        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
+        sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
+        echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
+        tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
+        [ "$r" -ge 4 ] && rc=4
+      done
+      sudo losetup -d "$L"
+    done
+    sync
+    exit $rc
+    """#
+
+    /// The host-side checker only replays journals and clears the error flag
+    /// (and on Linux the guest's own preen already does both); anything past
+    /// that needs the real e2fsck. Boot a throwaway machine from the base
+    /// image with the damaged machine's folder shared in (virtiofs
+    /// share-1), and check its images through loop devices set up after
+    /// boot -- never as block devices at boot: every machine's disk carries
+    /// the base's filesystem label, so the rescue could come up on the
+    /// damaged disk. The damaged machine stays repair-marked (no start, no
+    /// remove) throughout; the throwaway is removed afterwards either way.
     // @port ACAppDelegate.deepRepairKubeMachineDisks(_: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) h=e0bac9aee8e9dff0 @e0cc8f0b
     func deepRepairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) async throws {
-        throw KubeClusterEngine.KubeError.message("\(m.record.name): disk repair isn't available on this Linux server yet")
+        let name = m.record.name, ownerID = m.ownerID, id = Self.vmID(m.record.id)
+        guard let daemon else { throw KubeClusterEngine.KubeError.message("the daemon is stopping") }
+        // A rescue an earlier repair couldn't remove holds the folder: gone first.
+        guard await daemon.removeStaleRescues(for: id),
+              let images = await daemon.kubeMachineDiskImages(id: id) else {
+            throw KubeClusterEngine.KubeError.message("\(name) is running or already being repaired")
+        }
+        let dir = (images[0] as NSString).deletingLastPathComponent
+        let names = images.map { ($0 as NSString).lastPathComponent }
+        try await daemon.repairMarks.whileMarked(id) {
+            // Its own name (a leftover's can't collide) and its record marked
+            // as this machine's rescue from the moment it's made.
+            let rescueID = UUID()
+            let rescue = KubeNodeRecord(id: rescueID, name: "rescue-\(name)-\(rescueID.uuidString.prefix(8).lowercased())",
+                                        role: .agent, index: 0)
+            rescueTargets[rescueID] = id
+            defer { rescueTargets[rescueID] = nil }
+            let scratch = KubeClusterEngine.ClusterRuntime(id: ownerID)   // keep it out of the cluster's node list
+            do {
+                _ = try await engine.bootMachine(KubeClusterEngine.MachineSpec(
+                    ownerID: ownerID, record: rescue, cpus: 2, memoryGB: 2, dataDiskGB: nil,
+                    comment: "Disk repair for \(name) — managed by Bromure, deleted when done.",
+                    scripts: [], ipCommand: "hostname -I | awk '{print $1}'",
+                    restoreSavedState: false, folders: [dir]), rt: scratch, repairAttempted: true)
+                let args = names.map { "/mnt/bromure-share-1/\($0)" }.joined(separator: " ")
+                let b64 = Data(Self.kubeRescueFsckScript.utf8).base64EncodedString()
+                let out = try await engine.exec(rescue.id,
+                    "echo \(b64) | base64 -d > /tmp/bromure-rescue-fsck.sh && bash /tmp/bromure-rescue-fsck.sh \(args); echo \"rc=$?\"",
+                    timeout: 900)
+                for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { engine.log(ownerID, String(line)) }
+                FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(name):\n\(out)\n".utf8))
+                await daemon.removeKubeMachine(id: Self.vmID(rescue.id))
+                if out.contains("rc=4") || out.contains("rc=8") {
+                    throw KubeClusterEngine.KubeError.message("e2fsck couldn't make \(name)'s disk consistent")
+                }
+            } catch {
+                await daemon.removeKubeMachine(id: Self.vmID(rescue.id))
+                throw error
+            }
+        }
     }
 
     // @port-skip linux-only: the daemon's shutdown of a cluster machine

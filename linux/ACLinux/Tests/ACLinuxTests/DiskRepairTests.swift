@@ -329,3 +329,131 @@ struct BootConsoleScanTests {
         #expect(m?.contains("Failed to check file system") == true)
     }
 }
+
+/// A managed machine's host folders (a disk repair's rescue): the base
+/// image's virtiofs share-<N> slots, read-write.
+@Suite("Managed machine folders",
+       .enabled(if: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.local/share/bromure-ac/image-amd64/cmdline")))
+struct ManagedFolderTests {
+    @Test func foldersBecomeShareSlots() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let standIn = dir + "/uplink-standin"
+        try "#!/bin/sh\nexec cat >/dev/null\n".write(toFile: standIn, atomically: true, encoding: .utf8)
+        chmod(standIn, 0o755)
+        let d = try await Daemon.makeForTesting(DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run",
+                                                             imageDir: NSHomeDirectory() + "/.local/share/bromure-ac/image-amd64",
+                                                             agentdPath: dir + "/agentd.py"), uplink: standIn)
+        var rec = RepairMarksTests.stopped()
+        rec.folders = ["/srv/a", "/srv/b"]
+        let shares = try await d.machineConfig(rec).shares
+        #expect(shares.map(\.tag) == ["bromure-meta", "bromure-outbox", "share-1", "share-2"])
+        #expect(shares.first { $0.tag == "share-1" }?.hostPath == "/srv/a")
+        #expect(shares.first { $0.tag == "share-2" }?.readOnly == false, "the rescue's e2fsck writes through it")
+        rec.folders = nil
+        #expect(try await d.machineConfig(rec).shares.count == 2, "no folders, no slots")
+        await d.shutdown()
+    }
+}
+
+/// A daemon restarted in the middle of a deep repair: the rescue it left
+/// (live or stopped) is never taken back, and its machine stays refused
+/// until the rescue is gone.
+@Suite("Leftover rescues", .serialized)
+struct LeftoverRescueTests {
+    /// A stand-in for a process: `sh` blocked on a pipe, `argv` as given.
+    final class Stub {
+        let p = Process(), stdin = Pipe()
+        init(_ exe: String, _ args: [String]) throws {
+            p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
+            p.standardInput = stdin; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try p.run()
+        }
+        var pid: Int32 { p.processIdentifier }
+        func gone(within s: Double = 5) -> Bool {
+            let end = Date().addingTimeInterval(s)
+            while p.isRunning, Date() < end { usleep(20_000) }
+            return !p.isRunning
+        }
+        deinit { if p.isRunning { kill(p.processIdentifier, SIGKILL) } }
+    }
+
+    static func rescue(for target: VMRecord, state: VMRecord.State) -> VMRecord {
+        let id = UUID().uuidString.lowercased()
+        var r = VMRecord(id: id, name: "rescue-\(target.name)-\(id.prefix(8))", machine: "firecracker", cid: 4,
+                         mac: "52:54:00:00:00:0a", state: state, ip: nil, cpus: 1, memoryMiB: 512,
+                         createdAt: Date(), bootedAt: nil, statePath: nil)
+        r.kube = UUID().uuidString.lowercased()
+        r.rescueFor = target.id
+        return r
+    }
+
+    /// A fake virtiofsd (its comm is the script's name) serving `socket`.
+    static func virtiofsd(in dir: String, socket: String) throws -> Stub {
+        let exe = dir + "/virtiofsd"
+        if !FileManager.default.fileExists(atPath: exe) {
+            try "#!/bin/sh\nread x\n".write(toFile: exe, atomically: true, encoding: .utf8)
+            chmod(exe, 0o755)
+        }
+        return try Stub(exe, ["--socket-path", socket])
+    }
+
+    @Test func aLiveRescueIsEndedAndRemovedBeforeAdoptionAndItsMachineIsHeldTillThen() async throws {
+        let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var rescue = Self.rescue(for: damaged, state: .running)
+        let vm = try Stub("/bin/sh", ["-c", "read x", "sh", "--id", "bromure-\(rescue.shortId)"])
+        rescue.pid = vm.pid
+        rescue.pidStart = Daemon.processStartTime(vm.pid)
+        try await d.registerForTesting(rescue)
+        let fs = try Self.virtiofsd(in: dir, socket: dir + "/run/vms/\(rescue.shortId)/fs2.sock")
+        let decoy = try Self.virtiofsd(in: dir, socket: dir + "/run/vms/0000abcd/fs2.sock")
+        usleep(100_000)
+
+        // As a restarted daemon finds it: the damaged machine refused.
+        let held = Daemon.startRefusal(damaged, repairing: d.repairMarks, rescued: await d.hasRescue(for: damaged.id))
+        #expect(held?.status == 409 && held?.body["error"]?.stringValue?.contains("disks repaired") == true)
+        #expect(await d.remove(damaged).status == 409, "nor removed")
+        #expect(await d.kubeMachineDiskImages(id: damaged.id) == nil, "nor repaired")
+
+        await d.adoptRunning()
+        #expect(vm.gone(), "the rescue's Firecracker was ended")
+        #expect(fs.gone(), "and the virtiofsd serving its share")
+        #expect(!decoy.gone(within: 0.3), "another VM's virtiofsd is left alone")
+        #expect(await d.registry.find(rescue.id) == nil, "its record removed")
+        #expect(!d.repairMarks.contains(damaged.id))
+        #expect(Daemon.startRefusal(damaged, repairing: d.repairMarks, rescued: await d.hasRescue(for: damaged.id)) == nil,
+                "the machine may start (auto-start runs after adoption)")
+        await d.shutdown()
+    }
+
+    @Test func aStoppedRescueIsRemovedToo() async throws {
+        let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let rescue = Self.rescue(for: damaged, state: .stopped)
+        try await d.registerForTesting(rescue)
+        await d.adoptRunning()
+        #expect(await d.registry.find(rescue.id) == nil)
+        #expect(await !d.hasRescue(for: damaged.id))
+        #expect(Daemon.startRefusal(damaged, repairing: d.repairMarks, rescued: false) == nil)
+        await d.shutdown()
+    }
+
+    /// The next deep repair clears a leftover first (unless a repair holds the machine).
+    @Test func aRepairAfterALeftoverProceeds() async throws {
+        let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let rescue = Self.rescue(for: damaged, state: .stopped)
+        try await d.registerForTesting(rescue)
+        #expect(await d.kubeMachineDiskImages(id: damaged.id) == nil, "refused while the leftover is on record")
+        #expect(d.repairMarks.insert(damaged.id))
+        #expect(await !d.removeStaleRescues(for: damaged.id), "a repair in flight keeps its rescue")
+        #expect(await d.registry.find(rescue.id) != nil)
+        d.repairMarks.remove(damaged.id)
+        #expect(await d.removeStaleRescues(for: damaged.id))
+        #expect(await d.registry.find(rescue.id) == nil)
+        let images = await d.kubeMachineDiskImages(id: damaged.id)
+        #expect(images?.first?.hasSuffix("/disk.raw") == true, "the repair gets the disks")
+        d.repairMarks.remove(damaged.id)
+        await d.shutdown()
+    }
+}

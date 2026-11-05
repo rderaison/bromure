@@ -39,6 +39,15 @@ public struct VMRecord: Codable, Sendable, Equatable {
     public var kube: String?
     /// The managed machine's data disk (data.img, vdc) in GiB, if it has one.
     public var dataDiskGB: Int?
+    /// Host folders shared into a managed machine at /mnt/bromure-share-<N>
+    /// (virtiofs tags share-1...; the base image's fstab slots), read-write.
+    /// macOS: KubeClusterEngine.MachineSpec.folders (a disk-repair rescue's).
+    public var folders: [String]?
+    /// A disk-repair rescue's: the id of the machine whose disks it checks
+    /// (that machine's folder is shared in read-write). Never taken back by
+    /// a restarted daemon (ended and removed at startup), and while it
+    /// exists that machine may not start or be removed.
+    public var rescueFor: String?
 
     /// Not a workspace: a sign-in VM or a cluster's machine.
     // @port-skip linux-only: VM record
