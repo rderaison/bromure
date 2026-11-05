@@ -209,6 +209,7 @@ final class SessionPane {
             })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []   // pinned to the pane: never size the window
         // Topmost — above the terminal surface AND the suspended tint.
         containerView.addSubview(host, positioned: .above, relativeTo: suspendedTintView)
         NSLayoutConstraint.activate([
