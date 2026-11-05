@@ -626,30 +626,6 @@ final class LinuxKubeHost: KubeEngineHost {
         }
     }
 
-    /// e2fsck in the guest, over every ext4 filesystem in the images it is
-    /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
-    /// Exit 0-3 = consistent now; 4+ = errors left. (macOS's, verbatim.)
-    static let kubeRescueFsckScript = #"""
-    set -u
-    rc=0
-    for img in "$@"; do
-      [ -f "$img" ] || continue
-      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
-      sudo udevadm settle 2>/dev/null || sleep 1
-      for dev in "$L" "$L"p*; do
-        [ -b "$dev" ] || continue
-        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
-        sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
-        echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
-        tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
-        [ "$r" -ge 4 ] && rc=4
-      done
-      sudo losetup -d "$L"
-    done
-    sync
-    exit $rc
-    """#
-
     /// The host-side checker only replays journals and clears the error flag
     /// (and on Linux the guest's own preen already does both); anything past
     /// that needs the real e2fsck. Boot a throwaway machine from the base
@@ -659,7 +635,7 @@ final class LinuxKubeHost: KubeEngineHost {
     /// the base's filesystem label, so the rescue could come up on the
     /// damaged disk. The damaged machine stays repair-marked (no start, no
     /// remove) throughout; the throwaway is removed afterwards either way.
-    // @port ACAppDelegate.deepRepairKubeMachineDisks(_: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) h=e0bac9aee8e9dff0 @e0cc8f0b
+    // @port ACAppDelegate.deepRepairKubeMachineDisks(_: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) h=8d6dbd8cdffa8a36 @4ae141ef
     func deepRepairKubeMachineDisks(_ m: KubeClusterEngine.MachineSpec, engine: KubeClusterEngine) async throws {
         let name = m.record.name, ownerID = m.ownerID, id = Self.vmID(m.record.id)
         guard let daemon else { throw KubeClusterEngine.KubeError.message("the daemon is stopping") }
@@ -686,14 +662,14 @@ final class LinuxKubeHost: KubeEngineHost {
                     scripts: [], ipCommand: "hostname -I | awk '{print $1}'",
                     restoreSavedState: false, folders: [dir]), rt: scratch, repairAttempted: true)
                 let args = names.map { "/mnt/bromure-share-1/\($0)" }.joined(separator: " ")
-                let b64 = Data(Self.kubeRescueFsckScript.utf8).base64EncodedString()
+                let b64 = Data(KubeClusterEngine.rescueFsckScript.utf8).base64EncodedString()
                 let out = try await engine.exec(rescue.id,
                     "echo \(b64) | base64 -d > /tmp/bromure-rescue-fsck.sh && bash /tmp/bromure-rescue-fsck.sh \(args); echo \"rc=$?\"",
                     timeout: 900)
                 for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { engine.log(ownerID, String(line)) }
                 FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(name):\n\(out)\n".utf8))
                 await daemon.removeKubeMachine(id: Self.vmID(rescue.id))
-                if out.contains("rc=4") || out.contains("rc=8") {
+                if !KubeClusterEngine.rescueRepaired(out, images: names, mayLackExt4: ["data.img"]) {
                     throw KubeClusterEngine.KubeError.message("e2fsck couldn't make \(name)'s disk consistent")
                 }
             } catch {

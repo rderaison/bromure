@@ -572,3 +572,47 @@ struct VMIdentityTests {
         await d.shutdown()
     }
 }
+
+/// The rescue's verdict (shared with macOS): repaired only when the script
+/// ran to its end (rc=0) and said something about every image.
+@Suite("Rescue verdict")
+struct RescueVerdictTests {
+    let images = ["disk.raw", "data.img"]
+
+    @Test func eachImageCheckedAndRc0IsARepair() {
+        let out = "fsck: disk.raw loop0p2 exit=1\n  root: ***** FILE SYSTEM WAS MODIFIED *****\nfsck: data.img loop1 exit=0\nrc=0\n"
+        #expect(KubeClusterEngine.rescueRepaired(out, images: images, mayLackExt4: ["data.img"]))
+        #expect(KubeClusterEngine.rescueRepaired("fsck: disk.raw loop0p2 exit=0\nfsck: data.img no ext4\nrc=0", images: images, mayLackExt4: ["data.img"]),
+                "a data disk never formatted is said so, and passes")
+    }
+
+    @Test func anythingElseIsNot() {
+        let cases = [
+            ("rc=0\n", "nothing reported: the share wasn't mounted, or every image skipped"),
+            ("fsck: disk.raw loop0p2 exit=1\nrc=0\n", "an image not reported"),
+            ("fsck: disk.raw loop0p2 exit=4\nfsck: data.img loop1 exit=0\nrc=4\n", "errors left"),
+            ("fsck: disk.raw missing\nfsck: data.img loop1 exit=0\nrc=8\n", "an image missing"),
+            ("/tmp/bromure-rescue-fsck.sh: line 9: x: unbound variable\nrc=1\n", "cut short by set -u"),
+            ("fsck: disk.raw loop0p2 exit=0\nfsck: data.img loop1 exit=0\n", "no rc: the exec ended early"),
+            ("fsck: disk.raw no ext4\nfsck: data.img loop1 exit=0\nrc=0\n", "the root disk with no ext4 (its partitions never showed up)"),
+            ("fsck: disk.raw loop0p2 blkid failed (127)\nfsck: data.img loop1 exit=0\nrc=8\n", "blkid failed"),
+        ]
+        for (out, why) in cases { #expect(!KubeClusterEngine.rescueRepaired(out, images: images, mayLackExt4: ["data.img"]), "\(why)") }
+    }
+
+    /// The script itself, up to where it needs root: a missing image is
+    /// reported and fails the run.
+    @Test func theScriptReportsAMissingImage() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let script = dir + "/fsck.sh"
+        try KubeClusterEngine.rescueFsckScript.write(toFile: script, atomically: true, encoding: .utf8)
+        let p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", "bash \(script) \(dir)/none.img; echo \"rc=$?\""]
+        p.standardOutput = pipe
+        try p.run(); p.waitUntilExit()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(out.contains("fsck: none.img missing") && out.contains("rc=8"), "\(out)")
+        #expect(!KubeClusterEngine.rescueRepaired(out, images: ["none.img"], mayLackExt4: ["none.img"]))
+    }
+}
