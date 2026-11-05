@@ -97,18 +97,40 @@ final class VsockFDListener: @unchecked Sendable {
         var tv = timeval(tv_sec: Self.idleTimeout, tv_usec: 0)
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        let done = NIOLockedValueBox(false)
-        DispatchQueue.global().asyncAfter(deadline: .now() + connectionDeadline) {
-            done.withLockedValue { if !$0 { shutdown(c, Int32(SHUT_RDWR)) } }
+        // The deadline: one timer per connection, cancelled as the server
+        // finishes (a guest looping connect/close must not leave one behind
+        // each time).
+        let done = NIOLockedValueBox(false), disarmed = NIOLockedValueBox(false)
+        let deadline = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        // Once, whichever comes first: the deadline or the server's end.
+        let disarmOnce: @Sendable () -> Void = { [weak self] in
+            guard disarmed.withLockedValue({ let was = $0; $0 = true; return !was }) else { return }
+            deadline.cancel()
+            self?.disarm()
         }
+        deadline.schedule(deadline: .now() + connectionDeadline)
+        deadline.setEventHandler {
+            done.withLockedValue { if !$0 { shutdown(c, Int32(SHUT_RDWR)) } }
+            disarmOnce()
+        }
+        lock.lock(); armed += 1; lock.unlock()
+        deadline.resume()
         let thread = ConnectionThread(name: "vsock-" + fdStoreName)
         Task(executorPreference: thread) { [self] in
             await serve(theirs)
             done.withLockedValue { $0 = true; close(c) }
+            disarmOnce()
             lock.lock(); active -= 1; lock.unlock()
             thread.finish()
         }
     }
+
+    /// Deadline timers armed and not yet fired or cancelled (tests).
+    private var armed = 0
+    // @port-skip linux-only: the per-VM vsock listeners
+    private func disarm() { lock.lock(); armed -= 1; lock.unlock() }
+    // @port-skip linux-only: the per-VM vsock listeners
+    var armedDeadlines: Int { lock.lock(); defer { lock.unlock() }; return armed }
 
     /// Connections being served (tests).
     // @port-skip linux-only: the per-VM vsock listeners

@@ -1243,6 +1243,25 @@ struct VsockFDListenerTests {
         #expect(l.activeConnections == 0, "its place is free")
     }
 
+    /// A guest looping connect/close on 8445 (whose server answers and
+    /// closes at once, so the cap never bites) leaves no deadline timer
+    /// behind.
+    @Test func quickConnectionsLeaveNoDeadlineTimers() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9447, fdStoreName: "vt-quick", stored: nil) { close($0) }
+        defer { l.stop(); FDStore.remove("vt-quick") }
+        for _ in 0..<300 {
+            guard let fd = Self.dial(dir + "/v.sock_9447") else { continue }
+            var b: UInt8 = 0
+            _ = read(fd, &b, 1)   // its close
+            close(fd)
+        }
+        let until = Date().addingTimeInterval(10)
+        while (l.activeConnections > 0 || l.armedDeadlines > 0) && Date() < until { usleep(20_000) }
+        #expect(l.activeConnections == 0)
+        #expect(l.armedDeadlines == 0, "every connection's deadline was cancelled as it ended")
+    }
+
     @Test func oneConnectionPastTheCapIsClosed() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let agent = SSHAgentServer(consent: ConsentBroker())
