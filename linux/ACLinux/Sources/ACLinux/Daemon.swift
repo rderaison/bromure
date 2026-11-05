@@ -2,6 +2,7 @@ import Foundation
 import CACLinuxShims
 import NIOCore
 import NIOConcurrencyHelpers
+import NIOSSL
 
 /// Where the daemon keeps things.
 // @port-skip linux-only: Linux daemon configuration (XDG layout)
@@ -215,12 +216,40 @@ public actor Daemon {
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)
         self.registry = registry
         do {
-            mitm = try MitmProxy(caDirectory: URL(fileURLWithPath: config.stateDir + "/mitm", isDirectory: true))
+            mitm = try MitmProxy(caDirectory: URL(fileURLWithPath: config.stateDir + "/mitm", isDirectory: true),
+                                 extraRoots: Self.testUpstreamRoots())
             mitm?.blocksHostAddresses = config.multiUser
+            mitm?.routeAllTo = Self.testUpstream()
         } catch {
             mitm = nil
             FileHandle.standardError.write(Data("bromure-ac daemon: no intercepting proxy: \(error)\n".utf8))
         }
+    }
+
+    /// Debug builds, VM e2e only: every upstream connection goes to a test
+    /// server (`BROMURE_AC_TEST_UPSTREAM=ip:port`), whose CA the proxy trusts
+    /// (`BROMURE_AC_TEST_ROOTS`, a PEM file). A release build has neither.
+    // @port-skip linux-only: e2e hook of the Linux proxy
+    static func testUpstream() -> (host: String, port: Int)? {
+        #if DEBUG
+        guard let v = ProcessInfo.processInfo.environment["BROMURE_AC_TEST_UPSTREAM"],
+              let colon = v.lastIndex(of: ":"), let port = Int(v[v.index(after: colon)...]) else { return nil }
+        FileHandle.standardError.write(Data("bromure-ac daemon: DEBUG: every upstream goes to \(v)\n".utf8))
+        return (String(v[..<colon]), port)
+        #else
+        return nil
+        #endif
+    }
+
+    // @port-skip linux-only: e2e hook of the Linux proxy
+    static func testUpstreamRoots() -> [NIOSSLCertificate] {
+        #if DEBUG
+        guard let path = ProcessInfo.processInfo.environment["BROMURE_AC_TEST_ROOTS"],
+              let pem = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return (try? NIOSSLCertificate.fromPEMBytes(Array(pem.utf8))) ?? []
+        #else
+        return []
+        #endif
     }
 
     // @port-skip linux-only: Linux daemon core
