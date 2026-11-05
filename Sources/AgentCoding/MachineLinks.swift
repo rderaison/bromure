@@ -25,6 +25,9 @@ final class MachineLinkHub: @unchecked Sendable {
 
     private let cond = NSCondition()
     private var parked: [UUID: [Int32]] = [:]
+    /// Each attached machine's foreignSessionIDs (AttachedMachine), for a
+    /// session start's reply: ids that belong to someone else.
+    private var foreignChecks: [UUID: @MainActor () -> Set<UUID>] = [:]
     /// Machines in the fleet with links here, by name. Only these are
     /// listed, routed to and served delegation.
     private var names: [UUID: String] = [:]
@@ -392,7 +395,7 @@ final class MachineLinkHub: @unchecked Sendable {
                 instructions: body["instructions"] as? String, room: body["room"] as? String,
                 attachments: ((body["attachments"] as? [[String: Any]]) ?? []).map(SessionStartCoalescer.attachment(wire:)))
             var status = 502
-            let json = SessionStartCoalescer.shared.run(key) { () -> [String: Any] in
+            var json = SessionStartCoalescer.shared.run(key) { () -> [String: Any] in
                 let r = request(id, method, path, body: body, timeout: 60,
                                 total: SessionStartCoalescer.machineStartBudget)
                 status = r?.status ?? 502
@@ -401,7 +404,14 @@ final class MachineLinkHub: @unchecked Sendable {
                 return j
             }
             // Routed here from now on — the first start's answer or a repeat's.
-            if json["error"] == nil, let sid = (json["id"] as? String)?.uppercased() {
+            if json["error"] == nil, let sid = (json["id"] as? String)?.uppercased(),
+               let u = UUID(uuidString: sid), isForeign(u, machine: id) {
+                // A session someone else owns (this host's, another
+                // machine's): routing its commands here would hand it to
+                // this machine. Poll drops such an entry; so does the start.
+                status = 502
+                json = ["error": "That machine named a session that isn't its own"]
+            } else if json["error"] == nil, let sid = (json["id"] as? String)?.uppercased() {
                 status = 200
                 cond.lock(); fragments[id]?.sessionIDs.insert(sid); cond.unlock()
                 if let u = UUID(uuidString: sid) { onSessionStarted?(u, body) }
@@ -507,6 +517,21 @@ final class MachineLinkHub: @unchecked Sendable {
         shutdown(client, SHUT_RDWR)
         shutdown(machine, SHUT_RDWR)
         done.wait()
+    }
+
+    /// The attached machine `id`'s check for session ids it can't claim
+    /// (nil: it's gone).
+    func setForeignCheck(_ id: UUID, _ check: (@MainActor () -> Set<UUID>)?) {
+        cond.lock(); foreignChecks[id] = check; cond.unlock()
+    }
+
+    /// Whether `sid` belongs to someone other than machine `id` (asked on
+    /// the main actor, where the session stores are).
+    func isForeign(_ sid: UUID, machine id: UUID) -> Bool {
+        cond.lock(); let check = foreignChecks[id]; cond.unlock()
+        guard let check else { return false }
+        if Thread.isMainThread { return MainActor.assumeIsolated { check().contains(sid) } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { check().contains(sid) } }
     }
 
     /// Is this request for an attached machine? Its id when it is: a VM route
@@ -664,6 +689,8 @@ final class AttachedMachine {
             makeServer: { [weak self] in self.flatMap { makeServer($0) } })
         self.relay = relay
         relay.start()
+        // A session start's reply is held to the same rule as a poll.
+        MachineLinkHub.shared.setForeignCheck(id) { [weak self] in self?.foreignSessionIDs() ?? [] }
         poller = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
@@ -673,6 +700,7 @@ final class AttachedMachine {
     }
 
     func stop() {
+        MachineLinkHub.shared.setForeignCheck(id, nil)
         poller?.cancel()
         relay?.stop()
         relay = nil
