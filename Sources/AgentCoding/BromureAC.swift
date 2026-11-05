@@ -3923,6 +3923,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as

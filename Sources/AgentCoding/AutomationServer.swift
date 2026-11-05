@@ -2633,8 +2633,11 @@ final class ACAutomationServer {
     private var feedSnapshot: [String: Any]?
     private var feedSnapshotSeq = 0
     private var feedWhole: (seq: Int, frame: Data)?
-    /// Each section's comparable bytes in the latest build.
-    private var feedSections: [String: Data] = [:]
+    /// Each section's comparable value in the latest build.
+    private var feedSections: [String: NSObject] = [:]
+    /// When the cached whole frame was built: a keepalive older than this is
+    /// rebuilt (a VM's uptime moves on in it).
+    private var feedWholeAt = Date.distantPast
     /// The last deltas, by the change they make.
     private var feedDeltas: [(seq: Int, frame: Data)] = []
     private var feedSubscribers = 0
@@ -2691,10 +2694,6 @@ final class ACAutomationServer {
                     feedDeltas.append((feedSnapshotSeq, frame))
                     if feedDeltas.count > Self.feedDeltasKept { feedDeltas.removeFirst(feedDeltas.count - Self.feedDeltasKept) }
                     feedCondition.broadcast()
-                } else {
-                    // Unchanged but for what moves on its own (uptime): the
-                    // next whole frame (a keepalive) is built from this one.
-                    feedWhole = nil
                 }
                 feedCondition.unlock()
             }
@@ -2726,28 +2725,32 @@ final class ACAutomationServer {
     /// The whole frame of the latest build, and the change it's at.
     private func feedWholeFrame() -> (seq: Int, frame: Data)? {
         feedCondition.lock()
-        if let w = feedWhole { feedCondition.unlock(); return w }
+        // Built once per change and shared, and again for a keepalive only
+        // when it's older than one (a VM's uptime moves on in it).
+        if let w = feedWhole, w.seq == feedSnapshotSeq, Date().timeIntervalSince(feedWholeAt) < 10 {
+            feedCondition.unlock(); return w
+        }
         guard let snapshot = feedSnapshot else { feedCondition.unlock(); return nil }
         let seq = feedSnapshotSeq
         feedCondition.unlock()
         let frame = Self.wholeFrame(snapshot)
         feedCondition.lock()
-        if feedSnapshotSeq == seq { feedWhole = (seq, frame) }
+        if feedSnapshotSeq == seq { feedWhole = (seq, frame); feedWholeAt = Date() }
         feedCondition.unlock()
         return (seq, frame)
     }
 
-    /// The comparable bytes of each top-level section (`pushComparable`).
-    nonisolated static func comparableSections(_ snapshot: [String: Any]) -> [String: Data] {
-        var out: [String: Data] = [:]
-        for (key, value) in pushComparable(snapshot) {
-            out[key] = (try? JSONSerialization.data(withJSONObject: [value], options: [.sortedKeys])) ?? Data()
-        }
+    /// Each top-level section as it's compared (`pushComparable`). Compared
+    /// by value: serializing each one every half second to compare the bytes
+    /// was a fifth of a core on a busy server.
+    nonisolated static func comparableSections(_ snapshot: [String: Any]) -> [String: NSObject] {
+        var out: [String: NSObject] = [:]
+        for (key, value) in pushComparable(snapshot) { out[key] = value as AnyObject as? NSObject ?? NSNull() }
         return out
     }
 
-    nonisolated static func changedSections(from old: [String: Data], to new: [String: Data]) -> (set: [String], unset: [String]) {
-        let set = new.compactMap { k, v in old[k] == v ? nil : k }.sorted()
+    nonisolated static func changedSections(from old: [String: NSObject], to new: [String: NSObject]) -> (set: [String], unset: [String]) {
+        let set = new.compactMap { k, v in old[k].map { $0.isEqual(v) } == true ? nil : k }.sorted()
         let unset = old.keys.filter { new[$0] == nil }.sorted()
         return (set, unset)
     }
