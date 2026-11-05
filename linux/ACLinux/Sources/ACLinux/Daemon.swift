@@ -186,6 +186,11 @@ public actor Daemon {
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
+            // What a VM mints is saved with its workspace: the next boot's
+            // swap map has it (macOS: credentialMinter.sink).
+            mitm.credentialMinter.sink = { pid, minted in
+                Task { @MainActor in Self.saveMintedCredential(minted, profileID: pid, store: ProfileStore()) }
+            }
             // The local-model repair proxy, up before any VM (macOS: with
             // the MITM engine): the bridges read its port per connection.
             InferenceRepairProxy.shared.startIfNeeded()
@@ -1066,6 +1071,18 @@ public actor Daemon {
                 r.pidStart = nil
             }
             try? registry.upsert(r)
+        }
+    }
+
+    /// A credential the VM minted, added to its workspace's (expired ones
+    /// past their retention pruned).
+    // partial: no live session or staged-profile copies to update (the daemon reads the store at each launch)
+    // @port ACAppDelegate.saveMintedCredential(_: MintedCredential, profileID: Profile.ID) h=23a3ae42b9bdece5 @d2db8346
+    @MainActor static func saveMintedCredential(_ minted: MintedCredential, profileID: UUID, store: ProfileStore) {
+        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
+        p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
+        do { _ = try store.update(p) } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: minted credential: couldn't save profile: \(error)\n".utf8))
         }
     }
 

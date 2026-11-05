@@ -54,10 +54,13 @@ private struct TestCA {
 private final class MTLSServer: @unchecked Sendable {
     let channel: Channel
     let connections = NIOLockedValueBoxShim(0)
+    /// The last request it read, as it read it.
+    let lastRequest = NIOLockedValueBoxShim("")
     var port: Int { channel.localAddress!.port! }
 
     /// `clientCA` nil: no client certificate asked for (a public API).
-    init(host: String, leaf: (String, String), clientCA: NIOSSLCertificate?) throws {
+    /// `reply`: sent as it is to every request, instead of "kube ok".
+    init(host: String, leaf: (String, String), clientCA: NIOSSLCertificate?, reply: String? = nil) throws {
         var cfg = TLSConfiguration.makeServerConfiguration(
             certificateChain: try NIOSSLCertificate.fromPEMBytes(Array(leaf.0.utf8)).map { .certificate($0) },
             privateKey: .privateKey(try NIOSSLPrivateKey(bytes: Array(leaf.1.utf8), format: .pem)))
@@ -66,13 +69,14 @@ private final class MTLSServer: @unchecked Sendable {
             cfg.trustRoots = .certificates([clientCA])
         }
         let ctx = try NIOSSLContext(configuration: cfg)
-        let counter = connections
+        let counter = connections, last = lastRequest
         channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { ch in
                 counter.mutate { $0 += 1 }
                 return ch.eventLoop.makeCompletedFuture {
-                    try ch.pipeline.syncOperations.addHandlers([NIOSSLServerHandler(context: ctx), Responder()])
+                    try ch.pipeline.syncOperations.addHandlers([NIOSSLServerHandler(context: ctx),
+                                                                Responder(reply: reply, last: last)])
                 }
             }
             .bind(host: host, port: 0).wait()
@@ -83,14 +87,18 @@ private final class MTLSServer: @unchecked Sendable {
     final class Responder: ChannelInboundHandler {
         typealias InboundIn = ByteBuffer
         typealias OutboundOut = ByteBuffer
+        let reply: String?
+        let last: NIOLockedValueBoxShim<String>
+        init(reply: String?, last: NIOLockedValueBoxShim<String>) { self.reply = reply; self.last = last }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             // The Authorization the upstream got, echoed (none: just "kube ok").
             var req = unwrapInboundIn(data)
             let text = req.readString(length: req.readableBytes) ?? ""
+            last.mutate { $0 = text }
             let auth = text.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
                 .map { $0.dropFirst("authorization:".count).trimmingCharacters(in: .whitespaces) }
             let body = auth.map { "kube ok auth=\($0)" } ?? "kube ok"
-            let r = "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+            let r = reply ?? "HTTP/1.1 200 OK\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
             let channel = context.channel
             context.writeAndFlush(wrapOutboundOut(channel.allocator.buffer(string: r)))
                 .whenComplete { _ in channel.close(promise: nil) }
@@ -105,17 +113,23 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
     let target: String
+    let path: String
+    let method: String
+    let body: String
     let headers: String
     let tls: NIOSSLContext
     let done: EventLoopPromise<String>
     var buf = ""
     var tunneled = false
 
-    init(target: String, headers: String = "", tls: NIOSSLContext, done: EventLoopPromise<String>) {
-        self.target = target; self.headers = headers; self.tls = tls; self.done = done
+    init(target: String, path: String = "/api", method: String = "GET", body: String = "", headers: String = "",
+         tls: NIOSSLContext, done: EventLoopPromise<String>) {
+        self.target = target; self.path = path; self.method = method; self.body = body
+        self.headers = headers; self.tls = tls; self.done = done
     }
 
-    static func get(_ listener: String, target: String, proxyCA: NIOSSLCertificate, headers: String = "") throws -> String {
+    static func get(_ listener: String, target: String, proxyCA: NIOSSLCertificate, path: String = "/api",
+                    method: String = "GET", body: String = "", headers: String = "") throws -> String {
         var cfg = TLSConfiguration.makeClientConfiguration()
         cfg.trustRoots = .certificates([proxyCA])
         cfg.certificateVerification = .noHostnameVerification
@@ -123,7 +137,10 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let done = loop.makePromise(of: String.self)
         let ch = try ClientBootstrap(group: loop)
-            .channelInitializer { $0.pipeline.addHandler(GuestClient(target: target, headers: headers, tls: ctx, done: done)) }
+            .channelInitializer {
+                $0.pipeline.addHandler(GuestClient(target: target, path: path, method: method, body: body,
+                                                   headers: headers, tls: ctx, done: done))
+            }
             .connect(unixDomainSocketPath: listener).wait()
         loop.scheduleTask(in: .seconds(20)) { done.succeed("TIMEOUT"); ch.close(promise: nil) }
         return try done.futureResult.wait()
@@ -145,7 +162,8 @@ private final class GuestClient: ChannelInboundHandler, @unchecked Sendable {
                                                          position: .first)
         let host = target.split(separator: ":").first.map(String.init) ?? target
         context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
-            string: "GET /api HTTP/1.1\r\nHost: \(host)\r\n\(headers)\r\n")), promise: nil)
+            string: "\(method) \(path) HTTP/1.1\r\nHost: \(host)\r\n\(headers)"
+                + (body.isEmpty ? "" : "Content-Length: \(body.utf8.count)\r\n") + "\r\n\(body)")), promise: nil)
     }
 
     func channelInactive(context: ChannelHandlerContext) { done.succeed(buf) }
@@ -499,5 +517,173 @@ private struct KubeRigHandle {
         } else {
             plugin = try KubeExecPluginTests.plugin(in: rig.dir)
         }
+    }
+}
+
+/// Calls that issue a credential, through the proxy: the guest gets fakes,
+/// the host keeps the real values (macOS: driveTLS's CredentialMint step).
+/// The upstream is a local TLS server every connection is routed to,
+/// presenting the API's name under a test CA the proxy trusts.
+@Suite("Credential minting through the proxy", .serialized)
+struct CredentialMintProxyTests {
+    fileprivate struct Rig {
+        let dir: String, proxy: MitmProxy, listener: MitmListener, server: MTLSServer
+        let pid = UUID()
+        init(host: String, reply: String) throws {
+            guard let ip = Daemon.primaryIPv4() else { throw KubeRig.RigSkip() }
+            dir = try shortTempDir()
+            let ca = try TestCA("test public CA")
+            server = try MTLSServer(host: ip, leaf: try ca.leaf(host, dns: [host], client: false), clientCA: nil, reply: reply)
+            proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true), extraRoots: [ca.nio])
+            proxy.routeAllTo = (ip, server.port)
+            listener = try proxy.serve(udsPath: dir + "/vm.sock", profileID: pid, fdStoreName: "cm-\(pid)")
+        }
+        func get(_ target: String, path: String) throws -> String {
+            try GuestClient.get(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                target: target, proxyCA: proxy.caNIO, path: path)
+        }
+        func request(_ target: String, path: String, method: String = "GET", body: String = "",
+                     headers: String) throws -> String {
+            try GuestClient.get(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                target: target, proxyCA: proxy.caNIO, path: path, method: method, body: body, headers: headers)
+        }
+        func stop() { server.stop(); listener.stop(); try? FileManager.default.removeItem(atPath: dir) }
+    }
+
+    static let real = "dop_v1_" + String(repeating: "5e", count: 32)
+    static func chunked(_ body: String) -> String {
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            + String(body.utf8.count, radix: 16) + "\r\n" + body + "\r\n0\r\n\r\n"
+    }
+
+    @Test func aRegistryTokenTheVMFetchesReachesItAsAFakeAndIsKept() async throws {
+        let auth = Data("\(Self.real):\(Self.real)".utf8).base64EncodedString()
+        let rig = try Rig(host: "api.digitalocean.com",
+                          reply: Self.chunked(#"{"auths":{"registry.digitalocean.com":{"auth":"\#(auth)"}}}"#))
+        defer { rig.stop() }
+        let saved = NIOLockedValueBoxShim<[MintedCredential]>([])
+        let pid = rig.pid
+        rig.proxy.credentialMinter.sink = { p, m in if p == pid { saved.mutate { $0.append(m) } } }
+
+        let out = try rig.get("api.digitalocean.com:443", path: "/v2/registry/docker-credentials")
+        #expect(out.hasPrefix("HTTP/1.1 200"), "got \(out.prefix(120))")
+        #expect(!out.contains(Self.real) && !out.contains(auth), "the real token never reaches the guest")
+        let fake = MintedCredential.bearerFake(for: Self.real, salt: rig.proxy.fakeTokenSalt)
+        #expect(out.contains(Data("\(fake):\(fake)".utf8).base64EncodedString()), "the guest's docker config holds the fake")
+        #expect(!out.lowercased().contains("transfer-encoding"), "de-chunked, framed by its length")
+        #expect(rig.server.lastRequest.value.lowercased().contains("accept-encoding: identity"))
+        #expect(saved.value.map(\.secret) == [Self.real] && saved.value.first?.hosts == ["registry.digitalocean.com"],
+                "the host keeps it, for the workspace")
+        // And the fake goes back out as the real token, to the registry only.
+        let push = Data("GET /v2/ HTTP/1.1\r\nHost: registry.digitalocean.com\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8)
+        let swapped = await rig.proxy.swapper.swap(rawRequest: push, host: "registry.digitalocean.com", port: 443, profileID: pid)
+        #expect(String(decoding: swapped.modified, as: UTF8.self).contains("Bearer \(Self.real)"))
+        let elsewhere = await rig.proxy.swapper.swap(rawRequest: push, host: "example.com", port: 443, profileID: pid)
+        #expect(!String(decoding: elsewhere.modified, as: UTF8.self).contains(Self.real))
+    }
+
+    /// Interim 1xx heads before the final response (URLSession consumes
+    /// them on macOS) must not carry the real credential past the rewrite.
+    static let interims = ["HTTP/1.1 100 Continue\r\n\r\n",
+                           "HTTP/1.1 103 Early Hints\r\nLink: </x.css>; rel=preload\r\n\r\n"]
+
+    @Test func aMintReplyAfterInterimHeadsIsStillRewritten() throws {
+        let auth = Data("\(Self.real):\(Self.real)".utf8).base64EncodedString()
+        let final = Self.chunked(#"{"auths":{"registry.digitalocean.com":{"auth":"\#(auth)"}}}"#)
+        for interim in Self.interims {
+            let rig = try Rig(host: "api.digitalocean.com", reply: interim + final)
+            defer { rig.stop() }
+            let out = try rig.request("api.digitalocean.com:443", path: "/v2/registry/docker-credentials",
+                                      headers: "Expect: 100-continue\r\n")
+            #expect(!out.contains(Self.real) && !out.contains(auth), "\(interim.prefix(16)): the real token reached the guest")
+            let fake = MintedCredential.bearerFake(for: Self.real, salt: rig.proxy.fakeTokenSalt)
+            #expect(out.hasPrefix("HTTP/1.1 200") && out.contains(Data("\(fake):\(fake)".utf8).base64EncodedString()),
+                    "\(interim.prefix(16)): \(out.prefix(120))")
+            #expect(!rig.server.lastRequest.value.lowercased().contains("expect:"), "no Expect upstream")
+        }
+    }
+
+    @Test func aMintCallAnsweredWithAProtocolSwitchIsRefused() throws {
+        let rig = try Rig(host: "api.digitalocean.com",
+                          reply: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\(Self.real)")
+        defer { rig.stop() }
+        let out = try rig.request("api.digitalocean.com:443", path: "/v2/registry/docker-credentials",
+                                  headers: "Upgrade: websocket\r\nConnection: Upgrade\r\n")
+        #expect(out.hasPrefix("HTTP/1.1 502") && !out.contains(Self.real), "\(out.prefix(120))")
+        #expect(!rig.server.lastRequest.value.lowercased().contains("upgrade:"), "no Upgrade upstream")
+    }
+
+    /// A sign-in's token exchange the host captures: the same 1xx hole.
+    @Test func aSignInExchangeAfterInterimHeadsIsStillCaptured() throws {
+        let tokens = #"{"access_token":"REAL-ACCESS","refresh_token":"REAL-REFRESH"}"#
+        let final = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(tokens.utf8.count)\r\n\r\n" + tokens
+        for (reply, expectKept) in [(Self.interims[0] + final, true), (Self.interims[1] + final, true),
+                                    ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n" + tokens, false)] {
+            let rig = try Rig(host: "auth.openai.com", reply: reply)
+            defer { rig.stop() }
+            let kept = SignInCapture.response(status: 200, reason: "OK", json: ["kept": "on the host"])
+            rig.proxy.captures.arm(SignInCapture(profileID: rig.pid, hosts: ["auth.openai.com"], pathPrefix: "/oauth/token",
+                                                 handle: { status, body in
+                status == 200 && String(decoding: body, as: UTF8.self).contains("REAL-ACCESS") ? kept : nil
+            }))
+            let out = try rig.request("auth.openai.com:443", path: "/oauth/token", method: "POST", body: "grant_type=authorization_code&code=c",
+                                   headers: "Expect: 100-continue\r\nContent-Type: application/x-www-form-urlencoded\r\n")
+            #expect(!out.contains("REAL-ACCESS") && !out.contains("REAL-REFRESH"), "\(reply.prefix(16)): real tokens reached the guest")
+            #expect(expectKept ? out.contains("on the host") : out.contains("bromure_not_kept"), "\(reply.prefix(16)): \(out.prefix(140))")
+        }
+    }
+
+    @Test func aCallThatIssuesAnUnswappableCredentialIsRefusedBeforeItGoesOut() throws {
+        let rig = try Rig(host: "iam.amazonaws.com", reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nno")
+        defer { rig.stop() }
+        let out = try rig.get("iam.amazonaws.com:443", path: "/?Action=CreateLoginProfile&UserName=a&Password=b")
+        #expect(out.hasPrefix("HTTP/1.1 403"), "got \(out.prefix(120))")
+        #expect(out.contains("iam:CreateLoginProfile"))
+        #expect(rig.server.connections.value == 0, "nothing reached the upstream")
+    }
+
+    @Test func aReplyStillCompressedIsNotPassedOn() throws {
+        let rig = try Rig(host: "api.digitalocean.com",
+                          reply: "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\u{1f}\u{8b}xxxxxx")
+        defer { rig.stop() }
+        let out = try rig.get("api.digitalocean.com:443", path: "/v2/registry/docker-credentials")
+        #expect(out.hasPrefix("HTTP/1.1 502"), "got \(out.prefix(120))")
+        #expect(out.contains("creates a credential"))
+    }
+
+    /// What the proxy mints is saved with the workspace, expired ones past
+    /// retention dropped. (No secret here: the store puts secrets in the
+    /// process-wide vault, which another suite reconfigures; the VM e2e
+    /// shows the secret kept across a restart.)
+    @Test @MainActor func aMintedCredentialIsSavedWithItsWorkspace() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = ProfileStore(rootDir: URL(fileURLWithPath: dir, isDirectory: true))
+        var p = try store.save(Profile(name: "minted", tool: .claude, authMode: .token))
+        p.mintedCredentials = [MintedCredential(kind: .bearer, source: "old", hosts: ["a.example"], secret: "",
+                                                createdAt: Date(timeIntervalSinceNow: -400 * 86400),
+                                                expiresAt: Date(timeIntervalSinceNow: -365 * 86400))]
+        _ = try store.update(p)
+        let m = MintedCredential(kind: .bearer, source: "DigitalOcean registry token",
+                                 hosts: ["registry.digitalocean.com"], secret: "", createdAt: Date())
+        Daemon.saveMintedCredential(m, profileID: p.id, store: store)
+        let back = try #require(ProfileStore(rootDir: URL(fileURLWithPath: dir, isDirectory: true)).loadAll().first { $0.id == p.id })
+        #expect(back.mintedCredentials.map(\.source) == ["DigitalOcean registry token"], "the long-expired one pruned")
+        #expect(back.mintedCredentials.first?.hosts == ["registry.digitalocean.com"])
+        #expect(!FileManager.default.fileExists(atPath: dir + "/\(p.id.uuidString)/secrets.enc"), "the vault untouched")
+        Daemon.saveMintedCredential(m, profileID: UUID(), store: store)     // an unknown workspace: nothing
+        #expect(store.loadAll().count == 1)
+    }
+
+    /// A credential minted in an earlier boot is in the next one's swap map
+    /// (macOS's launch and restage add MintedCredential.tokenEntries).
+    @Test func aCredentialMintedEarlierIsSwappedAfterAReboot() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "minted", tool: .claude, authMode: .token)
+        p.mintedCredentials = [MintedCredential(kind: .bearer, source: "DigitalOcean registry token",
+                                                hosts: ["registry.digitalocean.com"], secret: Self.real, createdAt: Date())]
+        _ = await Daemon.kubeconfig(for: p, plan: Daemon.makeSessionTokenPlan(for: p, mitm: proxy), live: false, mitm: proxy)
+        let fake = MintedCredential.bearerFake(for: Self.real, salt: proxy.fakeTokenSalt)
+        #expect(proxy.swapper.entries(for: p.id).contains { $0.fake == fake && $0.real == Self.real && $0.host == "registry.digitalocean.com" })
     }
 }

@@ -229,8 +229,12 @@ extension Daemon {
                 directClusters: SessionStores.shared?.kubeEngine?.directClusters(for: pid) ?? [],
                 reusingExec: reusing)
         }
-        let base = plan?.tokenMap()
-        await MainActor.run { mitm.installKube(mat, base: base, profileID: pid, live: live) }
+        var base = plan?.tokenMap()
+        // Credentials the VM minted earlier (`MintedCredential`), as macOS's
+        // launch and restage compose the map.
+        base?.entries += MintedCredential.tokenEntries(profile.mintedCredentials, salt: mitm.fakeTokenSalt)
+        mitm.awsCreds.setMinted(profile.mintedCredentials, for: pid)
+        await MainActor.run { [base] in mitm.installKube(mat, base: base, profileID: pid, live: live) }
         return mat.yaml.isEmpty ? nil : mat.yaml
     }
 

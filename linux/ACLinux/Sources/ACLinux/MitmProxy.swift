@@ -38,6 +38,11 @@ final class MitmProxy: @unchecked Sendable {
     let consent: ConsentBroker
     /// Imported kubeconfigs' client certificates and cluster CAs, per workspace.
     let kubeTrust: KubeUpstreamTrust
+    /// The AWS keys a workspace's VM minted (macOS: MitmEngine.awsCreds).
+    let awsCreds: AWSCredentialServer
+    /// Credentials the guest mints through the proxy: replaced by fakes in
+    /// the response, kept on the host (macOS: MitmEngine.credentialMinter).
+    let credentialMinter: CredentialMinter
     /// Imported kubeconfigs' exec plugins, run on the host on their interval;
     /// each token goes into its workspace's swap map under its fake.
     /// (The shared poller is main-actor: made there, on first use.)
@@ -94,6 +99,7 @@ final class MitmProxy: @unchecked Sendable {
         let broker = ConsentBroker()
         consent = broker
         swapper = TokenSwapper(consent: broker)
+        awsCreds = AWSCredentialServer(consent: broker)
         kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
         claudeStore = ClaudeSubscriptionStore()
         claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
@@ -104,6 +110,7 @@ final class MitmProxy: @unchecked Sendable {
         kimiStore = KimiSubscriptionStore()
         kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
         self.group = group
+        credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
         var cfg = TLSConfiguration.makeClientConfiguration()
         cfg.applicationProtocols = ["http/1.1"]
         // The chain and the dialed name: a DNS name against the leaf's DNS
@@ -138,6 +145,7 @@ final class MitmProxy: @unchecked Sendable {
         SubscriptionProviders.grok = { live().map { ($0.grokStore, $0.grokRefresher) } }
         SubscriptionProviders.kimi = { live().map { ($0.kimiStore, $0.kimiRefresher) } }
         SubscriptionProviders.signInCapture = { pid in live()?.captures.capture(for: pid) }
+        SubscriptionProviders.credentialMinter = { live()?.credentialMinter }
     }()
 
     // @port MitmEngine.setSessionTrace(_: SessionTrace, for: UUID) h=488811aacd2e89b1 @8866f904
@@ -595,7 +603,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 
     enum Plan {
         case answer(Data)
-        case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool)
+        case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
+                     mint: CredentialMint.Kind? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -622,7 +631,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let line = head.prefix { $0 != "\r" && $0 != "\n" }.split(separator: " ")
         let method = line.first.map(String.init) ?? ""
         let path = line.count > 1 ? String(line[1]) : "/"
-        let upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
+        var upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
         var injected = SubscriptionAuthRewrite.Injected()
         // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace
         // (our own stand-ins aren't leaks).
@@ -653,9 +662,28 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 return .answer(simple(403, "Forbidden", body: "Bromure: client-certificate use denied for \(host)\n"))
             }
         }
+        // A call that issues a credential (sts:AssumeRole, ecr:GetAuthorizationToken,
+        // doctl registry/kubernetes …): its response is read whole and the
+        // credentials in it replaced by fakes before the guest sees it; one
+        // whose secret no fake can stand in for is refused (macOS: driveTLS's
+        // CredentialMint step). The reply is asked for uncompressed.
+        var mint: CredentialMint.Kind?
+        switch CredentialMint.classify(rawRequest: req, host: host) {
+        case .deny(let action)?:
+            FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
+            return .answer(CredentialMint.denial(action))
+        case .mint(let kind)?:
+            mint = kind
+            req = Self.readWhole(req)
+            upgrade = false
+        case nil:
+            break
+        }
         // 5f. A sign-in this workspace runs: its token exchange is the host's.
         var capture: SignInCapture?
-        if tls, let c = SubscriptionProviders.signInCapture?(profileID),
+        // This proxy's own captures (macOS reads them through the provider,
+        // which answers for the one engine; here the proxy is at hand).
+        if tls, let c = proxy.captures.capture(for: profileID),
            let bodyStart = req.range(of: Data("\r\n\r\n".utf8)) {
             let body = req.subdata(in: bodyStart.upperBound..<req.count)
             // An ended sign-in's late exchange (this capture spent, or any
@@ -671,9 +699,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     return .answer(await c.handle(status, body) ?? sim)
                 }
                 capture = c
-                // The exchange's reply is read here, not relayed: ask for it
-                // uncompressed (nothing here decodes gzip or br).
-                req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
+                // The exchange's reply is read here, not relayed.
+                req = Self.readWhole(req)
+                upgrade = false
             }
         }
         // A trace that keeps this host's bodies reads them as text: the
@@ -682,7 +710,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if capture == nil, !upgrade, let t = trace, t.session.level.capturesBodyForHost(host) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
-        return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade)
+        return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade, mint: mint)
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -691,7 +719,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade):
+        case .forward(let req, let injected, let capture, let upgrade, let mint):
             proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
@@ -702,7 +730,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     if let trace { self.proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
                 case .success(let up):
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
-                                              capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host)
+                                              capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
+                                              mint: mint.map { (self.proxy.credentialMinter, $0) })
                     up.pipeline.addHandler(relay).whenComplete { _ in
                         self.upstream = up
                         up.write(up.allocator.buffer(bytes: req), promise: nil)
@@ -731,6 +760,16 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     static func simple(_ status: Int, _ reason: String, body: String = "") -> Data {
         Data("HTTP/1.1 \(status) \(reason)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)".utf8)
+    }
+
+    /// A request whose reply is read whole and rewritten before the guest
+    /// sees any of it (a credential mint, a sign-in's exchange): asked for
+    /// uncompressed (nothing here decodes gzip or br) and as one plain
+    /// response, no Expect (a 100 Continue first) nor Upgrade (a 101):
+    /// URLSession consumes those on macOS.
+    // @port-skip linux-only: what URLSession settles before macOS's rewrite sees a reply
+    static func readWhole(_ req: Data) -> Data {
+        HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding", "expect", "upgrade"], add: "Accept-Encoding: identity")
     }
 
     /// An absolute-form request line (`GET http://h/p HTTP/1.1`) in origin
@@ -767,6 +806,8 @@ final class ResponseRelay: ChannelInboundHandler {
     let profileID: UUID
     let injected: SubscriptionAuthRewrite.Injected
     let capture: SignInCapture?
+    /// A credential-minting call's: its response is read whole and rewritten.
+    let mint: (CredentialMinter, CredentialMint.Kind)?
     let upgrade: Bool
     let proxy: MitmProxy?
     let trace: RequestReader.Trace?
@@ -777,6 +818,10 @@ final class ResponseRelay: ChannelInboundHandler {
     private let host: String
     private var failure: Error?
     private var whole = Data()
+    /// A read-whole reply past this is refused, not kept (a credential
+    /// response is a few KiB).
+    static let wholeCap = 8 << 20
+    private var overflowed = false
     /// The trace's copy of what the guest got, up to `traceCap` (macOS:
     /// relayUpstream's bodyBufferCap); past it the record keeps no body.
     private var traceCopy = Data()
@@ -787,8 +832,9 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
-         host: String = "") {
+         host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil) {
         self.guest = guest
+        self.mint = mint
         self.host = host
         self.profileID = profileID
         self.injected = injected
@@ -814,7 +860,12 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
-        if capture != nil {
+        if capture != nil || mint != nil {
+            if whole.count + b.readableBytes > Self.wholeCap {
+                overflowed = true
+                context.close(promise: nil)
+                return
+            }
             whole.append(contentsOf: b.readableBytesView)
             return
         }
@@ -847,8 +898,37 @@ final class ResponseRelay: ChannelInboundHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
-        if let capture {
+        if let (minter, kind) = mint {
+            // Rewritten before any byte reaches the guest, the credentials in
+            // it kept on the host; a reply it can't account for (still encoded,
+            // though identity was asked for) is a 502 (macOS:
+            // relayUpstreamBuffered's rewrite of URLSession's decoded reply).
+            // Only the final response is rewritten: interim 1xx heads before it
+            // (URLSession consumes them on macOS) would carry it past the
+            // rewrite, which reads the first head's status.
             let raw = whole
+            noteStatus(raw)
+            let rewritten: Data
+            if overflowed {
+                rewritten = CredentialMint.refusal("a response over \(Self.wholeCap >> 20) MiB")
+            } else if let final = HTTPRequestFraming.finalResponse(raw) {
+                rewritten = Self.isEncoded(final) ? CredentialMint.refusal("an encoded response")
+                    : minter.process(response: HTTPRequestFraming.dechunkedResponse(final), kind: kind, profileID: profileID)
+            } else {
+                rewritten = CredentialMint.refusal("no final response (a 1xx only, or a protocol switch)")
+            }
+            let reply = HTTPRequestFraming.replacingHeaders(rewritten, drop: ["connection", "keep-alive"], add: "Connection: close")
+            let guest = self.guest
+            guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
+            // The trace keeps what the guest got, never the real credentials.
+            if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: raw.count, truncated: false) }
+            return
+        }
+        if let capture {
+            // The final response only (its 1xx heads skipped), or none: a
+            // switched protocol, a reply over the cap.
+            let raw = overflowed ? SignInCapture.notKeptReply
+                : (HTTPRequestFraming.finalResponse(whole) ?? SignInCapture.notKeptReply)
             let (status, body) = HTTPRequestFraming.responseStatusAndBody(raw)
             noteStatus(raw)
             let guest = self.guest

@@ -116,6 +116,27 @@ enum HTTPRequestFraming {
         return (status, Data(raw[end.upperBound...]))
     }
 
+    /// A buffered reply past its interim heads: 100 Continue, 102 and 103
+    /// Early Hints come before the final response on the same bytes. nil
+    /// for a 101 (a switched protocol has no final response) or a reply
+    /// that's interim heads only; anything else as it is from the first
+    /// non-1xx head on.
+    // @port-skip linux-only: URLSession consumes 1xx on macOS
+    static func finalResponse(_ raw: Data) -> Data? {
+        var start = raw.startIndex
+        while true {
+            let rest = raw[start...]
+            guard rest.starts(with: Data("HTTP/".utf8)),
+                  let end = rest.range(of: Data("\r\n\r\n".utf8)) else { return Data(rest) }
+            let line = String(decoding: rest[rest.startIndex..<(rest.firstIndex(of: 13) ?? end.lowerBound)], as: UTF8.self)
+            let status = line.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
+            guard (100...199).contains(status) else { return Data(rest) }
+            if status == 101 { return nil }
+            start = end.upperBound
+            if start == raw.endIndex { return nil }
+        }
+    }
+
     /// A whole response with a chunked body decoded (its Transfer-Encoding
     /// dropped), as macOS's URLSession hands the trace its response; any
     /// other response, or one that doesn't decode, as it is.
