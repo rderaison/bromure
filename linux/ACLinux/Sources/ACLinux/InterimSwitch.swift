@@ -199,14 +199,24 @@ public final class InterimDHCP: Sendable {
 
     /// The lease for `mac`, assigned on first sight; nil when every address
     /// (.2–.254) is leased or reserved (macOS's leaseIP answers none then).
+    /// `preferring`: the address it held last (its VM record's), taken when
+    /// it's still free, as macOS's leaseIP prefers its lease store's: a
+    /// cluster's nodes keep their addresses across cold starts (a moved
+    /// control plane leaves k3s's certificates and node objects behind).
     // @port-skip linux-only: interim DHCP
-    public func lease(for mac: [UInt8]) -> [UInt8]? {
+    public func lease(for mac: [UInt8], preferring: [UInt8]? = nil) -> [UInt8]? {
         leases.withLockedValue { l in
             if let ip = l.byMAC[mac] { return ip }
             let used = Set(l.byMAC.values.map { $0[3] })
             // Never an address reserved for a cluster's MetalLB range
             // (VMNetSwitch.reserveIPs, as macOS's allocator skips them).
             let base = Array(server[0..<3])
+            if let p = preferring, p.count == 4, Array(p[0..<3]) == base, (2...254).contains(p[3]),
+               !used.contains(p[3]), !VMNetSwitch.shared.isReserved(Self.u32(p)) {
+                l.byMAC[mac] = p
+                l.byIP[Self.u32(p)] = MAC(mac)
+                return p
+            }
             var host: UInt8 = 2
             while host <= 254, used.contains(host) || VMNetSwitch.shared.isReserved(Self.u32(base + [host])) {
                 if host == 254 { return nil }

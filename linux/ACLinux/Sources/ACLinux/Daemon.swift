@@ -911,10 +911,12 @@ public actor Daemon {
         if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:]) }
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
+        // The address it had last, if still free (macOS's lease store), leased
+        // before the switch sees it; recorded, so a restarted daemon hands the
+        // same one back (the guest keeps it) and so does its next boot.
+        let leased = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac), preferring: rec.lease.map(InterimSwitch.ipv4))
         sw.attach(l.port, mac: rec.mac)
-        // The address is leased now and recorded, so a restarted daemon hands
-        // the same one back (the guest keeps it).
-        rec.lease = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac))?.map(String.init).joined(separator: ".")
+        rec.lease = leased?.map(String.init).joined(separator: ".")
         let machine = l.machine
         let id = rec.id
         await machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }

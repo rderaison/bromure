@@ -1776,6 +1776,32 @@ struct InterimDHCPReservationTests {
         #expect(dhcp.lease(for: [2, 0, 0, 0, 2, 1]) == [10, 78, 0, 254])
         #expect(dhcp.lease(for: [2, 0, 0, 0, 2, 2]) == nil, "all 253 taken")
     }
+
+    /// A cluster's nodes booted in any order keep the addresses they had (as
+    /// macOS's lease store): the control plane doesn't move on a cold start.
+    @Test("a VM gets back the address it had, when that's still free and leasable")
+    func prefersTheLastAddress() {
+        let dhcp = InterimDHCP(server: [10, 79, 0, 1], dns: [10, 79, 0, 1], serverMAC: [2, 0, 0, 0, 0, 1], mtu: { _ in nil })
+        let a: [UInt8] = [2, 0, 0, 0, 3, 1], b: [UInt8] = [2, 0, 0, 0, 3, 2], c: [UInt8] = [2, 0, 0, 0, 3, 3]
+        // Booted in the other order than last time: each its own again.
+        #expect(dhcp.lease(for: b, preferring: [10, 79, 0, 3]) == [10, 79, 0, 3])
+        #expect(dhcp.lease(for: a, preferring: [10, 79, 0, 2]) == [10, 79, 0, 2])
+        #expect(dhcp.lease(for: a, preferring: [10, 79, 0, 9]) == [10, 79, 0, 2], "a held lease wins")
+        #expect(dhcp.mac(for: [10, 79, 0, 3]) == b, "the reverse index follows")
+        // Not taken when another holds it, it's reserved, or it's off the subnet's pool.
+        #expect(dhcp.lease(for: c, preferring: [10, 79, 0, 3]) == [10, 79, 0, 4])
+        dhcp.release(mac: "02:00:00:00:03:03")
+        let r = Set([UInt32(10) << 24 | 79 << 16 | 7])
+        VMNetSwitch.shared.reserveIPs(r)
+        defer { VMNetSwitch.shared.unreserveIPs(r) }
+        #expect(dhcp.lease(for: c, preferring: [10, 79, 0, 7]) == [10, 79, 0, 4])
+        dhcp.release(mac: "02:00:00:00:03:03")
+        #expect(dhcp.lease(for: c, preferring: [10, 80, 0, 9]) == [10, 79, 0, 4], "another subnet's")
+        dhcp.release(mac: "02:00:00:00:03:03")
+        #expect(dhcp.lease(for: c, preferring: [10, 79, 0, 1]) == [10, 79, 0, 4], "the gateway's")
+        dhcp.release(mac: "02:00:00:00:03:03")
+        #expect(dhcp.lease(for: c, preferring: [10, 79, 0, 255]) == [10, 79, 0, 4], "broadcast")
+    }
 }
 
 @Suite("Kubernetes orphan sweep guard")
