@@ -49,12 +49,13 @@ struct StateFeedCostTests {
         #expect(!producer.contains("wholeFrame("))   // whole frames only when one is sent
     }
 
-    @Test("the native sidebar never sizes the window, and the reaper is paced")
+    @Test("the native sidebar keeps its default sizing (the window can be resized), and the reaper is paced")
     func sidebarAndReaper() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let w = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/UnifiedSessionWindow.swift"), encoding: .utf8)
         let host = try #require(w.range(of: "let sidebarHost = NonMovableHostingView(rootView: sidebar)"))
-        #expect(w[host.upperBound...].prefix(700).contains("sidebarHost.sizingOptions = []"))
+        // Default sizing: without it the window collapsed and couldn't be grown.
+        #expect(!w[host.upperBound...].prefix(700).contains("sidebarHost.sizingOptions = []"))
         let p = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
         #expect(p.contains("stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000"))
     }

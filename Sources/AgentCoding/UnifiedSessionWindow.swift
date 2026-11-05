@@ -531,11 +531,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // whole window (the window is isMovableByWindowBackground).
         let sidebarHost = NonMovableHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
-        // Never let SwiftUI size the window from the sidebar, as the fat
-        // client's doesn't: with its default sizing, every frame of a working
-        // dot's pulse re-measured the whole sidebar for the window's minimum
-        // size, most of a busy server's main thread while it showed a terminal.
-        sidebarHost.sizingOptions = []
+        // Default sizing, unlike the fat client's sidebar: without it the
+        // window collapsed to its header (118 pt) and couldn't be resized, even
+        // past a contentMinSize. The cost: every frame of a working dot's pulse
+        // re-measures the sidebar for the window's minimum size.
         self.sidebarHost = sidebarHost
 
         // Empty stage — shows the selected off/suspended profile's Start card.
@@ -554,6 +553,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         paneSlot.clipsToBounds = true
         paneSlot.translatesAutoresizingMaskIntoConstraints = false
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
+        // Pinned to the stage on all sides, hidden or not: never size the window.
+        emptyStateHost.sizingOptions = []
         stage.addSubview(paneSlot)
         stage.addSubview(emptyStateHost)
         // Tasks-first: the header strip above a live session's pane. Height 0
