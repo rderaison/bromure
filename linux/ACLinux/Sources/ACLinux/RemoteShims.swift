@@ -5,14 +5,6 @@ import NIOConcurrencyHelpers
 // (_shared/RemoteAccessServer.swift, _shared/RemoteSSHHandlers.swift) reach
 // for, as Sources/AgentHost/Shims.swift provides them for the agent host.
 
-/// The server's audit breadcrumbs go to the daemon's log.
-// @port-skip linux-only: stand-in for the macOS MITM supply-chain log
-final class SupplyChainLog: Sendable {
-    static let shared = SupplyChainLog()
-    // @port-skip linux-only: stand-in
-    func record(_ line: String) { FileHandle.standardError.write(Data("bromure-ac daemon: \(line)\n".utf8)) }
-}
-
 /// The terminal half of RemoteConsent (macOS: a numbered menu in the
 /// attached tmux, through the automation server's pump). bromure-ac has no
 /// such pump yet: no terminal counts as attached, so consent goes to the

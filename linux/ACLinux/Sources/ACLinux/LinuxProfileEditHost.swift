@@ -102,7 +102,11 @@ extension LinuxSessionHost: ProfileEditHost {
         return d
     }
 
-    /// Nothing on a server follows a save (no sidebar, no launch agent).
+    /// A save's live part (no sidebar or launch agent on a server): the
+    /// prompt-injection policy, as macOS applies it to a running workspace.
+    // partial: the prompt-injection policy only (macOS: the egress, supply-chain, PII and credential restage too)
     // @port-skip linux-only: no app surfaces to refresh on a server
-    func profilesDidChange(saved: Profile?, editing: Profile?) {}
+    func profilesDidChange(saved: Profile?, editing: Profile?) {
+        if let saved { daemon?.mitm?.setPromptInjectionPolicy(saved.promptInjection, for: saved.id) }
+    }
 }

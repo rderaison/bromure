@@ -40,6 +40,9 @@ final class MitmProxy: @unchecked Sendable {
     let kubeTrust: KubeUpstreamTrust
     /// The AWS keys a workspace's VM minted (macOS: MitmEngine.awsCreds).
     let awsCreds: AWSCredentialServer
+    /// Each workspace's prompt-injection policy (macOS: MitmEngine's
+    /// promptInjectionPolicies), read when a traced conversation is parsed.
+    private let promptInjectionPolicies = NIOLockedValueBox<[UUID: PromptInjectionPolicy]>([:])
     /// The workspaces' SSH agent (macOS: MitmEngine.sshAgent): their keys
     /// stay on the host; guests sign through vsock 8444.
     let sshAgent: SSHAgentServer
@@ -191,9 +194,25 @@ final class MitmProxy: @unchecked Sendable {
         return s
     }
 
+    // @port MitmEngine.setPromptInjectionPolicy(_: PromptInjectionPolicy, for: UUID) h=f909a47d707e5e1d @8e2543eb
+    func setPromptInjectionPolicy(_ policy: PromptInjectionPolicy, for profileID: UUID) {
+        promptInjectionPolicies.withLockedValue { $0[profileID] = policy }
+    }
+    // @port MitmEngine.promptInjectionPolicy(for: UUID) h=e80d49232134d71c @8e2543eb
+    func promptInjectionPolicy(for profileID: UUID) -> PromptInjectionPolicy? {
+        promptInjectionPolicies.withLockedValue { $0[profileID] }
+    }
+    // @port MitmEngine.clearPromptInjectionPolicy(for: UUID) h=b926618e76eae15c @8e2543eb
+    func clearPromptInjectionPolicy(for profileID: UUID) {
+        promptInjectionPolicies.withLockedValue { $0[profileID] = nil }
+    }
+
     /// One request's trace record (macOS: HTTPMitmConnection.emitTrace),
-    /// off the event loop.
-    // partial: no prompt-injection log scan (onConversation)
+    /// off the event loop. A parsed conversation gets the prompt-injection
+    /// log scan when the workspace's policy is on with "log but continue"
+    /// (ask and block run before the request is forwarded: not on Linux yet).
+    // partial: the log scan's rules pass only (RulesFileScanner); the ModernBERT passes (PromptInjectionClassifier: tool output, CLAUDE.md) need onnxruntime, which the Linux build hasn't
+
     // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=22ed0216edbd064f @cb7cdd6a
     func emitTrace(_ t: RequestReader.Trace, response: Data, wireBytes: Int, truncated: Bool) {
         guard let store = traces.withLockedValue({ $0 }) else { return }
@@ -202,8 +221,21 @@ final class MitmProxy: @unchecked Sendable {
             await TraceEmitter.emit(
                 session: t.session, store: store, profileID: t.profileID, host: t.host, port: t.port,
                 preSwapRequest: t.request, upstreamResponse: response, upstreamWireBytes: wireBytes,
-                responseTruncated: truncated, swaps: t.swaps, leaks: t.leaks, latencyMs: latency)
+                responseTruncated: truncated, swaps: t.swaps, leaks: t.leaks, latencyMs: latency,
+                onConversation: { [weak self] conv in self?.logPromptInjection(in: conv, host: t.host, profileID: t.profileID) })
         }
+    }
+
+    /// The "log but continue" scan of a conversation (macOS:
+    /// HTTPMitmConnection.logPromptInjection): the instruction files it
+    /// carries through the rules scanner, never delaying the traffic.
+    // partial: the rules pass only (the source-injection and semantic passes are PromptInjectionClassifier's: onnxruntime)
+    // @port HTTPMitmConnection.static logPromptInjection(in: Conversation, policy: PromptInjectionPolicy, host: String, profileID: UUID) h=362b005a39f1838a @141c77e1
+    func logPromptInjection(in conv: Conversation, host: String, profileID: UUID) {
+        guard let pi = promptInjectionPolicy(for: profileID), pi.isActive, pi.onDetection == .log,
+              pi.detectRulesInjection else { return }
+        let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
+        RulesFileScanner.shared.scanAndLog(systemPrompt: conv.systemPrompt, extraSpans: extra, host: host, profileID: profileID)
     }
 
     /// Serves one VM's `<udsPath>_8443` (or `stored`, a restarted daemon's
