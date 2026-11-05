@@ -72,7 +72,7 @@ extension SessionDisk {
         for extra in profile.ompExtraProviders where !exported.contains(extra.envVar) {
             let value = extra.apiKey.isEmpty
                 ? "none"
-                : (extra.host.flatMap { tokenPlan?.fakeForCloud(host: $0) } ?? extra.apiKey)
+                : (extra.host.flatMap { tokenPlan?.fakeForCloud(host: $0) } ?? "none")
             lines.append("export \(extra.envVar)=\(shellQuote(value))")
             exported.insert(extra.envVar)
         }
