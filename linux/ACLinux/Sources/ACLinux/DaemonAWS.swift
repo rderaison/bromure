@@ -1,3 +1,4 @@
+import CACLinuxShims
 import Foundation
 
 /// One VM's host end of a guest service on hybrid vsock: Firecracker
@@ -10,9 +11,12 @@ final class VsockFDListener: @unchecked Sendable {
     let path: String
     let fdStoreName: String
     private let fd: Int32
+    private let lock = NSLock()
+    private var stopped = false
 
     // @port-skip linux-only: the VZVirtioSocketListener delegates over hybrid vsock
     init(udsPath: String, port: UInt32, fdStoreName: String, stored: Int32?,
+         accept: @escaping @Sendable (Int32) -> Int32 = { acl_accept_cloexec($0) },
          serve: @escaping @Sendable (Int32) async -> Void) throws {
         path = HybridVsockListener.path(uds: udsPath, port: port)
         self.fdStoreName = fdStoreName
@@ -20,24 +24,44 @@ final class VsockFDListener: @unchecked Sendable {
             fd = try HybridVsockListener.bindListening(path)
             FDStore.store(fdStoreName, [fd])
         }
-        // Accepts until stop() shuts the socket down; the thread owns the
-        // close, so no accept ever runs on a reused descriptor number.
-        let listening = fd
-        let t = Thread {
-            while true {
-                let c = accept(listening, nil, nil)
-                if c < 0 {
-                    if errno == EINTR || errno == ECONNABORTED { continue }
-                    close(listening)
-                    return
-                }
-                _ = fcntl(c, F_SETFD, FD_CLOEXEC)
-                Task.detached(priority: .userInitiated) { await serve(c) }
-            }
-        }
+        let t = Thread { [self] in acceptLoop(accept, serve) }
         t.name = "vsock-" + fdStoreName
         t.start()
     }
+
+    /// Accepts until stop() has shut the socket down, and only then closes
+    /// it, so neither an accept nor stop's shutdown runs on a reused
+    /// descriptor number. A resource error (no descriptor, buffer or memory
+    /// to spare) is waited out rather than ending the loop, which would
+    /// leave the guest's helpers queued on a socket no one accepts on.
+    // @port-skip linux-only: the per-VM vsock listeners
+    private func acceptLoop(_ accept: (Int32) -> Int32, _ serve: @escaping @Sendable (Int32) async -> Void) {
+        var backoff: UInt32 = 10_000
+        while true {
+            // CLOEXEC from the start: a Firecracker or virtiofsd spawned
+            // meanwhile mustn't inherit the guest's connection.
+            let c = accept(fd)  // the descriptor, or -errno
+            if c >= 0 {
+                backoff = 10_000
+                Task.detached(priority: .userInitiated) { await serve(c) }
+                continue
+            }
+            let err = -c
+            if isStopped {
+                close(fd)
+                return
+            }
+            if err == EINTR || err == ECONNABORTED { continue }
+            if err != EMFILE && err != ENFILE && err != ENOBUFS && err != ENOMEM && backoff == 10_000 {
+                FileHandle.standardError.write(Data("bromure-ac daemon: \(fdStoreName): accept: errno \(err); retrying\n".utf8))
+            }
+            usleep(backoff)
+            backoff = min(backoff * 2, 1_000_000)
+        }
+    }
+
+    // @port-skip linux-only: the per-VM vsock listeners
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
 
     /// The AWS credential_process helper's end (vsock 8445): the server
     /// writes the workspace's key id and a fake secret, and closes.
@@ -45,6 +69,10 @@ final class VsockFDListener: @unchecked Sendable {
     static func awsCreds(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID,
                          server: AWSCredentialServer) throws -> VsockFDListener {
         try VsockFDListener(udsPath: udsPath, port: 8445, fdStoreName: fdStoreName, stored: stored) {
+            if AWSSSORefusals.contains(profileID) {
+                AWSSSORefusals.refuse(fd: $0)
+                return
+            }
             await server.serve(fd: $0, profileID: profileID)
         }
     }
@@ -64,8 +92,14 @@ final class VsockFDListener: @unchecked Sendable {
     /// socket file removed.
     // @port-skip linux-only: the per-VM vsock listeners
     func stop() {
-        shutdown(fd, Int32(SHUT_RDWR))
-        try? FileManager.default.removeItem(atPath: path)
+        // Under the lock: the accept thread closes the socket only once it
+        // sees `stopped`, which is after this shutdown.
+        lock.lock()
+        let first = !stopped
+        stopped = true
+        if first { shutdown(fd, Int32(SHUT_RDWR)) }
+        lock.unlock()
+        if first { try? FileManager.default.removeItem(atPath: path) }
     }
 }
 
@@ -87,15 +121,22 @@ extension Daemon {
     /// The workspace's AWS credentials, handed to the host-side credential
     /// server (static keys as they are), and the helper ~/.aws/config names
     /// staged in its meta share.
-    // partial: no SSO resolution or refresh loop (AWSSSOResolver isn't shared yet): an SSO profile's stored keys are used, as macOS falls back when resolution fails
+    // partial: no SSO resolution or refresh loop (AWSSSOResolver isn't shared yet): an SSO profile's helper gets an error payload
+    // partial: no re-push when a running workspace moves onto Bedrock (macOS: LiveModelRefresh); its keys are pushed at launch and adoption
     // @port ACAppDelegate.pushAWSCredentials(for: Profile, engine: MitmEngine) h=08b3dd4f6296a0b4 @d2db8346
     func pushAWSCredentials(for profile: Profile, meta: String) {
         guard let mitm else { return }
         if profile.awsCredentials.authMode == .ssoProfile {
+            // No keys to vend (an SSO profile's are resolved on the host):
+            // the helper is told why, rather than signing with empty keys.
             FileHandle.standardError.write(Data(
-                "[sso] SSO profile '\(profile.awsCredentials.ssoProfileName)': not resolved on this Linux server yet; its stored keys are used\n".utf8))
+                "[sso] SSO profile '\(profile.awsCredentials.ssoProfileName)': not resolved on this Linux server yet; the guest's AWS helper is refused\n".utf8))
+            AWSSSORefusals.set(true, for: profile.id)
+            mitm.awsCreds.setCredentials(AWSCredentials(), for: profile.id)
+        } else {
+            AWSSSORefusals.set(false, for: profile.id)
+            mitm.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
         }
-        mitm.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
         Self.stageAWSCredsHelper(meta: meta)
     }
 
@@ -137,13 +178,58 @@ extension Daemon {
             FileHandle.standardError.write(Data("bromure-ac daemon: bromure-aws-creds.py missing from the resources\n".utf8))
             return
         }
-        let dest = meta + "/bromure-aws-creds.py"
-        try? FileManager.default.removeItem(atPath: dest)
+        // Copied beside it and renamed over it: a running VM's helper (a
+        // taken-back one's) is never missing, even for a moment.
+        let dest = meta + "/bromure-aws-creds.py", staging = meta + "/.bromure-aws-creds.py.new"
+        try? FileManager.default.removeItem(atPath: staging)
         do {
-            try FileManager.default.copyItem(atPath: src.path, toPath: dest)
-            try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dest)
+            try FileManager.default.copyItem(atPath: src.path, toPath: staging)
+            try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: staging)
+            guard rename(staging, dest) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         } catch {
+            try? FileManager.default.removeItem(atPath: staging)
             FileHandle.standardError.write(Data("bromure-ac daemon: couldn't stage the AWS helper: \(error)\n".utf8))
         }
+    }
+}
+
+/// The workspaces whose AWS helper is refused (an SSO profile, which this
+/// server can't resolve yet), and the refusal it gets: the helper's
+/// `{"Version":1,"Error":…}`, as AWSCredentialServer reports its errors.
+// @port-skip linux-only: stands in for macOS's AWSSSOResolver until it's shared
+enum AWSSSORefusals {
+    static let message = "SSO isn't supported on this server yet"
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var ids: Set<UUID> = []
+
+    // @port-skip linux-only: the SSO stand-in
+    static func set(_ refused: Bool, for id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if refused { ids.insert(id) } else { ids.remove(id) }
+    }
+
+    // @port-skip linux-only: the SSO stand-in
+    static func contains(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ids.contains(id)
+    }
+
+    // @port-skip linux-only: the SSO stand-in
+    static var payload: Data {
+        (try? JSONSerialization.data(withJSONObject: ["Version": 1, "Error": message] as [String: Any],
+                                     options: [.sortedKeys])) ?? Data()
+    }
+
+    // @port-skip linux-only: the SSO stand-in
+    static func refuse(fd: Int32) {
+        let data = payload
+        data.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(fd, raw.baseAddress! + off, raw.count - off)
+                if n > 0 { off += n } else if n < 0 && errno == EINTR { continue } else { break }
+            }
+        }
+        close(fd)
     }
 }

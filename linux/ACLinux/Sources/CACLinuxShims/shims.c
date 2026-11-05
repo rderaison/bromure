@@ -170,6 +170,18 @@ int acl_pipe_cloexec(int fds[2]) { return pipe2(fds, O_CLOEXEC) == 0 ? 0 : -errn
 int acl_pipe_cloexec(int fds[2]) { return pipe(fds) == 0 ? 0 : -errno; }
 #endif
 
+#include <sys/socket.h>
+#ifdef __linux__
+int acl_accept_cloexec(int fd) { int c = accept4(fd, NULL, NULL, SOCK_CLOEXEC); return c >= 0 ? c : -errno; }
+#else
+int acl_accept_cloexec(int fd) {
+    int c = accept(fd, NULL, NULL);
+    if (c < 0) return -errno;
+    fcntl(c, F_SETFD, FD_CLOEXEC);
+    return c;
+}
+#endif
+
 #include <pthread.h>
 int acl_unblock_term_signals(void) {
     sigset_t set;

@@ -1397,6 +1397,9 @@ public actor Daemon {
         if let pid = UUID(uuidString: id) {
             mitm?.clearSessionTrace(for: pid)
             mitm?.sshAgent.clearKeys(for: pid)
+            // Its static and minted AWS keys (macOS: MitmEngine.unregister).
+            mitm?.awsCreds.clearCredentials(for: pid)
+            AWSSSORefusals.set(false, for: pid)
             mitm?.clearPromptInjectionPolicy(for: pid)
             if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
             InferenceRepairProxy.shared.setExternalEngine(pid, nil)

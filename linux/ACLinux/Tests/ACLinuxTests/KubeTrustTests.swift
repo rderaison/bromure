@@ -1,3 +1,4 @@
+import CACLinuxShims
 import Crypto
 import Foundation
 import NIOCore
@@ -1070,5 +1071,109 @@ struct PromptInjectionLogScanTests {
         #expect(lines.contains { $0.contains("FLAG") }, "a high-severity flag in the security log: \(lines)")
         proxy.clearPromptInjectionPolicy(for: pid)
         #expect(proxy.promptInjectionPolicy(for: pid) == nil)
+    }
+}
+
+/// The per-VM vsock listeners' accept loop (AWS 8445, SSH agent 8444): it
+/// outlives resource errors, ends only at stop, and the AWS helper of an
+/// SSO workspace is told why it gets no keys.
+@Suite("Vsock listeners")
+struct VsockFDListenerTests {
+    final class Box: @unchecked Sendable {
+        let lock = NSLock(); var calls = 0; var served: [Int32] = []
+        func bump() -> Int { lock.lock(); defer { lock.unlock() }; calls += 1; return calls }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+    }
+
+    /// Connects to `path` and reads to EOF (5 s at most).
+    static func readAll(_ path: String) -> Data? {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in let b = Array(path.utf8); p.copyBytes(from: b); p[b.count] = 0 }
+        guard withUnsafePointer(to: &addr, {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }) == 0 else { return nil }
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var out = Data(), buf = [UInt8](repeating: 0, count: 4096)
+        while true { let r = read(fd, &buf, buf.count); if r <= 0 { break }; out.append(contentsOf: buf[0..<r]) }
+        return out
+    }
+
+    static func reply(_ fd: Int32, _ s: String) { _ = Array(s.utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }; close(fd) }
+
+    @Test func resourceErrorsAreWaitedOutAndTheConnectionIsCloseOnExec() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let box = Box()
+        // The first three accepts fail as if out of descriptors and memory.
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9001, fdStoreName: "vt-res", stored: nil,
+                                    accept: { fd in
+                                        switch box.bump() {
+                                        case 1: return -EMFILE
+                                        case 2: return -ENFILE
+                                        case 3: return -ENOMEM
+                                        default: return acl_accept_cloexec(fd)
+                                        }
+                                    }) { c in
+            let cloexec = fcntl(c, F_GETFD) & FD_CLOEXEC != 0
+            Self.reply(c, cloexec ? "cloexec" : "inheritable")
+        }
+        defer { l.stop(); FDStore.remove("vt-res") }
+        let got = Self.readAll(dir + "/v.sock_9001").map { String(decoding: $0, as: UTF8.self) }
+        #expect(got == "cloexec", "served after the resource errors, on a close-on-exec descriptor")
+        #expect(box.count >= 4)
+    }
+
+    @Test func stopEndsTheLoopAndRemovesTheSocket() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let box = Box()
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9002, fdStoreName: "vt-stop", stored: nil,
+                                    accept: { _ = box.bump(); return acl_accept_cloexec($0) }) { Self.reply($0, "ok") }
+        defer { FDStore.remove("vt-stop") }
+        #expect(Self.readAll(dir + "/v.sock_9002") == Data("ok".utf8))
+        l.stop()
+        l.stop()  // a second stop touches nothing
+        #expect(!FileManager.default.fileExists(atPath: dir + "/v.sock_9002"))
+        usleep(300_000)
+        let after = box.count
+        usleep(1_500_000)
+        #expect(box.count == after, "no accept after stop (the loop ended rather than backing off)")
+    }
+
+    @Test func anSSOWorkspacesHelperIsRefusedWithAReason() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let server = AWSCredentialServer(consent: ConsentBroker())
+        let pid = UUID()
+        server.setCredentials(AWSCredentials(accessKeyID: "AKIDSTATICTEST", secretAccessKey: "not-a-real-secret"), for: pid)
+        let l = try VsockFDListener.awsCreds(udsPath: dir + "/v.sock", fdStoreName: "vt-sso", stored: nil,
+                                             profileID: pid, server: server)
+        defer { l.stop(); FDStore.remove("vt-sso"); AWSSSORefusals.set(false, for: pid) }
+        let path = dir + "/v.sock_8445"
+
+        AWSSSORefusals.set(true, for: pid)
+        let refused = try #require(Self.readAll(path))
+        let r = try #require(try JSONSerialization.jsonObject(with: refused) as? [String: Any])
+        #expect(r["Error"] as? String == "SSO isn't supported on this server yet")
+        #expect(r["AccessKeyId"] == nil)
+
+        AWSSSORefusals.set(false, for: pid)
+        let served = try #require(Self.readAll(path))
+        let s = try #require(try JSONSerialization.jsonObject(with: served) as? [String: Any])
+        #expect(s["AccessKeyId"] as? String == "AKIDSTATICTEST")
+        #expect(s["SecretAccessKey"] as? String != "not-a-real-secret", "the guest gets a fake secret")
+    }
+
+    @Test func theHelperIsReplacedInPlace() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        Daemon.stageAWSCredsHelper(meta: dir)
+        let dest = dir + "/bromure-aws-creds.py"
+        let first = try FileManager.default.attributesOfItem(atPath: dest)
+        Daemon.stageAWSCredsHelper(meta: dir)
+        let second = try FileManager.default.attributesOfItem(atPath: dest)
+        #expect((second[.posixPermissions] as? NSNumber)?.intValue == 0o755)
+        #expect((second[.size] as? NSNumber) == (first[.size] as? NSNumber))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir) == ["bromure-aws-creds.py"], "no staging file left")
     }
 }

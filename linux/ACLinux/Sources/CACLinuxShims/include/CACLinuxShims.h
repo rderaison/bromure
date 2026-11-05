@@ -46,6 +46,10 @@ int acl_set_nondumpable(void);
 /// pipe2(fds, O_CLOEXEC). Returns 0, or -errno.
 int acl_pipe_cloexec(int fds[2]);
 
+/// accept4(fd, NULL, NULL, SOCK_CLOEXEC): no spawned child inherits the
+/// connection. Returns the descriptor, or -errno.
+int acl_accept_cloexec(int fd);
+
 /// sd_notify(3) without libsystemd: sends `state` (e.g. "READY=1") as one
 /// datagram to $NOTIFY_SOCKET (path or @abstract). 1 if sent, 0 if there's
 /// no NOTIFY_SOCKET (not under systemd), or -errno.
