@@ -185,11 +185,13 @@ struct SessionTitleTests {
 struct TranscriptActivityTests {
     private func item(_ id: Int, _ k: TranscriptItem.Kind) -> TranscriptItem { TranscriptItem(id: id, kind: k, timestamp: nil) }
 
-    @Test("Runs of tool calls and thinking fold between messages")
+    @Test("Runs of tool calls and empty thoughts fold between messages")
     func grouping() {
+        // A thought with words in it is the agent's commentary, shown as a row
+        // of its own (ThinkingNarrationTests); an empty one is activity.
         let rows = TranscriptRow.rows([
             item(1, .userText("go")),
-            item(2, .thinking("hmm")),
+            item(2, .thinking("")),
             item(3, .toolUse(name: "Bash", summary: "ls", detail: "")),
             item(4, .toolResult(tool: "Bash", content: "a", isError: false)),
             item(5, .assistantText("done")),
