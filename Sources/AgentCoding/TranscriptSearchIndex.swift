@@ -88,8 +88,7 @@ final class TranscriptSearchIndex {
                 present.insert(id)
                 let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
                 if let k = known[id], k >= date { continue }
-                guard let data = try? Data(contentsOf: url) else { continue }
-                updates[id] = Self.entry(data, modified: date)
+                if let e = Self.entry(of: url, modified: date) { updates[id] = e }
             }
             let found = updates, seen = present
             await MainActor.run {
@@ -101,18 +100,31 @@ final class TranscriptSearchIndex {
         }
     }
 
+    /// One transcript's entry, leaving nothing behind but the entry. Parsing
+    /// autoreleases Foundation objects by the million, and a detached task's
+    /// loop never drains them by itself: after a launch, with every transcript
+    /// to read, they piled up to several times the transcripts' own size before
+    /// the pass ended and they all went at once.
+    nonisolated static func entry(of url: URL, modified: Date) -> Entry? {
+        autoreleasepool {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return entry(data, modified: modified)
+        }
+    }
+
     /// Called with the sessions whose entries were just re-read.
     @ObservationIgnored var onUpdate: (([UUID]) -> Void)?
 
     /// Claude's own title for the conversation, the latest one it logged:
     /// a `/rename` (custom-title) wins over the generated ai-title.
     nonisolated static func agentTitle(in data: Data) -> String? {
-        let raw = String(decoding: data, as: UTF8.self)
+        // In the bytes: the title is one line, and a string of the whole file
+        // to find it cost more than parsing the transcript did.
         func last(_ type: String, _ key: String) -> String? {
-            guard let r = raw.range(of: "\"type\":\"\(type)\"", options: .backwards) else { return nil }
-            let start = raw[..<r.lowerBound].lastIndex(of: "\n").map { raw.index(after: $0) } ?? raw.startIndex
-            let end = raw[r.upperBound...].firstIndex(of: "\n") ?? raw.endIndex
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(raw[start..<end].utf8)) as? [String: Any],
+            guard let r = data.range(of: Data("\"type\":\"\(type)\"".utf8), options: .backwards) else { return nil }
+            let start = data[..<r.lowerBound].lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
+            let end = data[r.upperBound...].firstIndex(of: 0x0A) ?? data.endIndex
+            guard let obj = try? JSONSerialization.jsonObject(with: data[start..<end]) as? [String: Any],
                   let t = (obj[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty
             else { return nil }
             return String(t.prefix(60))
