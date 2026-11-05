@@ -26,7 +26,7 @@ struct FatClientMirrorFixTests {
     }
 
     @Test("a self-mirror's report wins over older local input, loses to newer")
-    func selfMirrorArbitration() {
+    nonisolated func selfMirrorArbitration() async {
         let p = ConsolePresence()
         p.noteLocal()
         Thread.sleep(forTimeInterval: 0.005)   // distinct instants under a loaded runner
@@ -155,7 +155,7 @@ struct FatClientMirrorFixTests {
 
     @Test("the guest shim forwards a CDP tool to the host when told cdp-via-host",
           .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
-    func shimForwardsCDPViaHost() throws {
+    nonisolated func shimForwardsCDPViaHost() async throws {
         let script = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/AgentCoding/Resources/vm-setup")
         let proc = Process()

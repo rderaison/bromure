@@ -111,7 +111,7 @@ struct LiveQAS2KimiFolderTests {
     }
 
     @Test("S2-1: the guest's shell computes the same bucket as Kimi for a CJK folder")
-    func shellBucketMatches() throws {
+    nonisolated func shellBucketMatches() async throws {
         guard FileManager.default.isExecutableFile(atPath: "/sbin/sha256sum")
                 || FileManager.default.isExecutableFile(atPath: "/usr/bin/sha256sum") else { return }
         for d in ["/home/ubuntu/请用一句话解释什么是哈希表-1004-2143", "/home/ubuntu/Café-déjà", "/home/ubuntu/plain-dir"] {
