@@ -134,7 +134,7 @@ struct HomeSizeAfterImageTests {
     /// the row off (only `compromised` clears), and a reset or rollback
     /// changes nothing in the row at all: only a run-state change remeasured.
     @Test("a fat client remeasures when the server's home image or compromised flag changes, not only its run state")
-    func fatClientHomeImageMoves() throws {
+    @MainActor func fatClientHomeImageMoves() throws {
         typealias Row = SessionListModel.ProfileRow
         let a = UUID(), b = UUID(), c = UUID()
         func row(_ id: UUID, _ s: SessionListModel.RunState = .off, compromised: Bool = false) -> Row {
