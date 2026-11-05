@@ -58,6 +58,11 @@ extension Daemon {
         var doc = doc
         if parts.count > 1, !parts[1].isEmpty { doc["action"] = parts[1] }
         if method == "DELETE" { doc["action"] = "delete" }
+        // A node's disks under repair: its rescue would be killed mid-e2fsck
+        // and the node itself (marked) left behind with its disks.
+        if doc["action"] as? String == "delete", let owner = UUID(uuidString: id), kubeOwnerUnderRepair(owner) {
+            return .error(409, "A node of this cluster is having its disks repaired; delete it once that's done")
+        }
         let result = await MainActor.run { [doc] in Self.kubeCommand(id: id, doc: doc) }
         return ControlResponse((result["ok"] as? Bool) == true ? 200 : 400, JSONValue(foundation: result) ?? .object([:]))
     }
@@ -79,6 +84,10 @@ extension Daemon {
         var doc = doc
         if parts.count > 1, !parts[1].isEmpty { doc["action"] = parts[1] }
         if method == "DELETE" { doc["action"] = "delete" }
+        // Its machine's disks under repair, as a cluster's (kubeCommand).
+        if doc["action"] as? String == "delete", let owner = UUID(uuidString: id), kubeOwnerUnderRepair(owner) {
+            return .error(409, "This registry's machine is having its disks repaired; delete it once that's done")
+        }
         let result = await MainActor.run { [doc] in Self.registryCommand(id: id, doc: doc) }
         return ControlResponse((result["ok"] as? Bool) == true ? 200 : 400, JSONValue(foundation: result) ?? .object([:]))
     }
@@ -412,11 +421,23 @@ extension Daemon {
         return !hasRescue(for: id)
     }
 
+    /// Whether a machine of `owner` is being repaired: marked, or with a
+    /// rescue on record.
+    // @port-skip linux-only: the Linux daemon's repair gate
+    func kubeOwnerUnderRepair(_ owner: UUID) -> Bool {
+        let key = owner.uuidString.lowercased()
+        return registry.records.contains { $0.kube == key && (repairMarks.contains($0.id) || hasRescue(for: $0.id)) }
+    }
+
     /// Every machine `owner` (a deleted cluster or registry) had: ended and removed.
     // @port-skip linux-only: macOS removes them with the cluster's folder
     func removeKubeMachines(owner: UUID) async {
         let key = owner.uuidString.lowercased()
         for rec in registry.records where rec.kube == key {
+            // A repair that began after the delete was accepted keeps its
+            // rescue: once it ends, the startup sweep takes what's left
+            // (its owner gone).
+            if let target = rec.rescueFor, repairMarks.contains(target) { continue }
             if live[rec.id] != nil { _ = await deleteVM(rec, action: "kill") }
             if let r = registry.find(rec.id) { _ = remove(r) }
         }

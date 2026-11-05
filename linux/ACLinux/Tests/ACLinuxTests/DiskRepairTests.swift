@@ -616,3 +616,49 @@ struct RescueVerdictTests {
         #expect(!KubeClusterEngine.rescueRepaired(out, images: ["none.img"], mayLackExt4: ["none.img"]))
     }
 }
+
+/// Deleting a cluster while one of its nodes is being repaired.
+@Suite("Cluster delete during a repair", .serialized)
+struct DeleteDuringRepairTests {
+    @Test func theDeleteIsRefusedWhileANodeIsMarkedOrRescued() async throws {
+        let (d, node, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let owner = UUID()
+        var n = node; n.kube = owner.uuidString.lowercased()
+        try await d.registerForTesting(n)
+        let path = "/k8s/\(owner.uuidString)"
+        #expect(await d.kubeCommand("DELETE", path, [:]).status != 409, "nothing under repair: not refused here")
+        #expect(d.repairMarks.insert(n.id))
+        let r = await d.kubeCommand("DELETE", path, [:])
+        #expect(r.status == 409 && r.body["error"]?.stringValue?.contains("disks repaired") == true)
+        #expect(await d.kubeCommand("POST", path + "/delete", [:]).status == 409, "the POST form too")
+        d.repairMarks.remove(n.id)
+        var rescue = LeftoverRescueTests.rescue(for: n, state: .stopped)
+        rescue.kube = n.kube
+        try await d.registerForTesting(rescue)
+        #expect(await d.kubeCommand("DELETE", path, [:]).status == 409, "a rescue on record for a node")
+        // A registry's machine too (the same owner key).
+        let reg = await d.registryCommand("DELETE", "/registries/\(owner.uuidString)", [:])
+        #expect(reg.status == 409 && reg.body["error"]?.stringValue?.contains("disks repaired") == true)
+        await d.shutdown()
+    }
+
+    @Test func theRemovalLeavesARepairUnderWayAlone() async throws {
+        let (d, node, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let owner = UUID(), key = owner.uuidString.lowercased()
+        var n = node; n.kube = key
+        try await d.registerForTesting(n)
+        var rescue = LeftoverRescueTests.rescue(for: n, state: .stopped); rescue.kube = key
+        try await d.registerForTesting(rescue)
+        var other = RepairMarksTests.stopped(); other.name = "k8s-r-2"; other.cid = 5; other.mac = "52:54:00:00:00:0b"; other.kube = key
+        try await d.registerForTesting(other)
+        #expect(d.repairMarks.insert(n.id))
+        await d.removeKubeMachines(owner: owner)
+        #expect(await d.registry.find(rescue.id) != nil, "the rescue of a machine under repair is kept")
+        #expect(await d.registry.find(n.id) != nil, "the machine under repair too (refused)")
+        #expect(await d.registry.find(other.id) == nil, "the cluster's other machines go")
+        d.repairMarks.remove(n.id)
+        await d.shutdown()
+    }
+}
