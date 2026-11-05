@@ -199,30 +199,6 @@ extension ACAppDelegate: KubeEngineHost {
         return ok
     }
 
-    /// e2fsck in the guest, over every ext4 filesystem in the images it is
-    /// given (whole-disk or partitioned, attached as loop devices AFTER boot).
-    /// Exit 0-3 = consistent now; 4+ = errors left.
-    static let kubeRescueFsckScript = #"""
-    set -u
-    rc=0
-    for img in "$@"; do
-      [ -f "$img" ] || continue
-      L=$(sudo losetup -fP --show "$img") || { echo "fsck: cannot attach $img"; rc=8; continue; }
-      sudo udevadm settle 2>/dev/null || sleep 1
-      for dev in "$L" "$L"p*; do
-        [ -b "$dev" ] || continue
-        [ "$(sudo blkid -p -o value -s TYPE "$dev" 2>/dev/null)" = ext4 ] || continue
-        sudo e2fsck -fy "$dev" >/tmp/bromure-fsck.log 2>&1; r=$?
-        echo "fsck: $(basename "$img") $(basename "$dev") exit=$r"
-        tail -n 3 /tmp/bromure-fsck.log | sed 's/^/  /'
-        [ "$r" -ge 4 ] && rc=4
-      done
-      sudo losetup -d "$L"
-    done
-    sync
-    exit $rc
-    """#
-
     /// The Mac-side checker only replays journals and clears the error flag;
     /// anything past that needs the real e2fsck. Boot a throwaway machine
     /// from the base image with the damaged machine's folder shared in, and
@@ -252,14 +228,14 @@ extension ACAppDelegate: KubeEngineHost {
                 scripts: [], ipCommand: "hostname -I | awk '{print $1}'",
                 restoreSavedState: false, folders: [dir.path]), rt: scratch, repairAttempted: true)
             let args = names.map { "/mnt/bromure-share-1/\($0)" }.joined(separator: " ")
-            let b64 = Data(Self.kubeRescueFsckScript.utf8).base64EncodedString()
+            let b64 = Data(KubeClusterEngine.rescueFsckScript.utf8).base64EncodedString()
             let out = try await engine.exec(rescue.id,
                 "echo \(b64) | base64 -d > /tmp/bromure-rescue-fsck.sh && bash /tmp/bromure-rescue-fsck.sh \(args); echo \"rc=$?\"",
                 timeout: 900)
             for line in out.split(separator: "\n") where line.hasPrefix("fsck:") { kubeClusterEngine.log(ownerID, String(line)) }
             FileHandle.standardError.write(Data("[kube] rescue e2fsck for \(profile.name):\n\(out)\n".utf8))
             await stopSession(rescue.id, action: .shutdown)
-            if out.contains("rc=4") || out.contains("rc=8") {
+            if !KubeClusterEngine.rescueRepaired(out, images: names, mayLackExt4: ["data.img"]) {
                 throw KubeClusterEngine.KubeError.message("e2fsck couldn't make \(profile.name)'s disk consistent")
             }
         } catch {
