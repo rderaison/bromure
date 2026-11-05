@@ -745,7 +745,7 @@ struct AWSProxyTests {
         let server = AWSCredentialServer(consent: ConsentBroker())
         let pid = UUID()
         server.setCredentials(AWSCredentials(accessKeyID: Self.akid, secretAccessKey: Self.secret, region: "us-east-1"), for: pid)
-        let l = try AWSCredsListener(udsPath: dir + "/v.sock", fdStoreName: "aws-test", stored: nil, profileID: pid, server: server)
+        let l = try VsockFDListener.awsCreds(udsPath: dir + "/v.sock", fdStoreName: "aws-test", stored: nil, profileID: pid, server: server)
         defer { FDStore.remove("aws-test") }
         let json = try #require(Self.readHelper(dir + "/v.sock_8445"))
         let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
@@ -921,5 +921,87 @@ struct GuestEnvTests {
         #expect(text.contains("export ANTHROPIC_API_KEY='\(plan.fakeForAnthropic() ?? "")'"))
         #expect(!text.contains("REAL"), "no real value: \(text)")
         #expect(text.contains("export BROMURE_AC_TOOL=claude"))
+    }
+}
+
+/// The SSH agent on a Linux server (macOS's SSHAgentServer, shared): the
+/// guest's /tmp/bromure-agent.sock reaches it over vsock 8444; the
+/// workspace's key is listed and signs, and its seed never leaves the host.
+@Suite("SSH agent over vsock", .serialized)
+struct SSHAgentVsockTests {
+    /// One agent request over the guest's side of hybrid vsock; the reply's body.
+    static func roundTrip(_ path: String, _ msg: Data) -> Data? {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in let b = Array(path.utf8); p.copyBytes(from: b); p[b.count] = 0 }
+        guard withUnsafePointer(to: &addr, {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }) == 0 else { return nil }
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let framed = u32(UInt32(msg.count)) + msg
+        guard framed.withUnsafeBytes({ write(fd, $0.baseAddress, framed.count) }) == framed.count else { return nil }
+        var head = [UInt8](repeating: 0, count: 4)
+        guard read(fd, &head, 4) == 4 else { return nil }
+        let n = Int(head[0]) << 24 | Int(head[1]) << 16 | Int(head[2]) << 8 | Int(head[3])
+        var body = Data(), buf = [UInt8](repeating: 0, count: 4096)
+        while body.count < n { let r = read(fd, &buf, min(buf.count, n - body.count)); if r <= 0 { break }; body.append(contentsOf: buf[0..<r]) }
+        return body.count == n ? body : nil
+    }
+    static func u32(_ v: UInt32) -> Data { Data([UInt8(v >> 24 & 0xff), UInt8(v >> 16 & 0xff), UInt8(v >> 8 & 0xff), UInt8(v & 0xff)]) }
+    static func str(_ d: Data) -> Data { u32(UInt32(d.count)) + d }
+    static func take(_ d: Data, _ i: inout Int) -> Data {
+        let n = Int(d[i]) << 24 | Int(d[i + 1]) << 16 | Int(d[i + 2]) << 8 | Int(d[i + 3]); i += 4
+        defer { i += n }; return d.subdata(in: i..<(i + n))
+    }
+
+    @Test func theWorkspacesKeyIsListedAndSignsOverVsock() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let agent = SSHAgentServer(consent: ConsentBroker())
+        let key = Curve25519.Signing.PrivateKey()
+        let pid = UUID(), other = UUID()
+        let ak = AgentKey(comment: "bromure-ac", publicKey: key.publicKey.rawRepresentation, seed: key.rawRepresentation,
+                          requireApproval: false, consentCredentialID: nil)
+        agent.setKeys([ak], for: pid)
+        agent.setKeys([AgentKey(comment: "someone else", publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+                                seed: Data(count: 32), requireApproval: false, consentCredentialID: nil)], for: other)
+        let l = try VsockFDListener.sshAgent(udsPath: dir + "/v.sock", fdStoreName: "ssh-test", stored: nil, profileID: pid, agent: agent)
+        defer { l.stop(); FDStore.remove("ssh-test") }
+        let path = dir + "/v.sock_8444"
+
+        let ids = try #require(Self.roundTrip(path, Data([11])))          // REQUEST_IDENTITIES
+        #expect(ids.first == 12, "IDENTITIES_ANSWER")
+        var i = 1
+        let count = Int(ids[i]) << 24 | Int(ids[i + 1]) << 16 | Int(ids[i + 2]) << 8 | Int(ids[i + 3]); i += 4
+        #expect(count == 1, "only this workspace's key")
+        let blob = Self.take(ids, &i)
+        #expect(blob == ak.publicKeyBlob)
+
+        let data = Data("challenge-\(UUID())".utf8)
+        let resp = try #require(Self.roundTrip(path, Data([13]) + Self.str(blob) + Self.str(data) + Self.u32(0)))
+        #expect(resp.first == 14, "SIGN_RESPONSE")
+        var j = 1
+        let sigBlob = Self.take(resp, &j)
+        var k = 0
+        #expect(Self.take(sigBlob, &k) == Data("ssh-ed25519".utf8))
+        let sig = Self.take(sigBlob, &k)
+        #expect(key.publicKey.isValidSignature(sig, for: data), "signed with the workspace's key")
+    }
+
+    @Test func aWorkspacesKeyFileIsLoaded() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = ProfileStore(rootDir: URL(fileURLWithPath: dir, isDirectory: true))
+        let p = try store.save(Profile(name: "ssh", tool: .claude, authMode: .token))
+        #expect(Daemon.loadAgentKeys(for: p, store: store).isEmpty, "no key: none")
+        let key = Curve25519.Signing.PrivateKey()
+        let agentDir = store.profileDirectory(for: p).appendingPathComponent("agent", isDirectory: true)
+        try FileManager.default.createDirectory(at: agentDir, withIntermediateDirectories: true)
+        try (key.rawRepresentation + key.publicKey.rawRepresentation).write(to: agentDir.appendingPathComponent("id_ed25519.raw"))
+        let keys = Daemon.loadAgentKeys(for: p, store: store)
+        #expect(keys.count == 1 && keys.first?.publicKey == key.publicKey.rawRepresentation && keys.first?.seed == key.rawRepresentation)
+        try Data(count: 10).write(to: agentDir.appendingPathComponent("id_ed25519.raw"))
+        #expect(Daemon.loadAgentKeys(for: p, store: store).isEmpty, "malformed: none")
     }
 }

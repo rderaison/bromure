@@ -40,6 +40,9 @@ final class MitmProxy: @unchecked Sendable {
     let kubeTrust: KubeUpstreamTrust
     /// The AWS keys a workspace's VM minted (macOS: MitmEngine.awsCreds).
     let awsCreds: AWSCredentialServer
+    /// The workspaces' SSH agent (macOS: MitmEngine.sshAgent): their keys
+    /// stay on the host; guests sign through vsock 8444.
+    let sshAgent: SSHAgentServer
     /// AWS requests re-signed with the real keys (macOS: MitmEngine.awsResigner).
     let awsResigner: AWSResigner
     /// Credentials the guest mints through the proxy: replaced by fakes in
@@ -105,6 +108,7 @@ final class MitmProxy: @unchecked Sendable {
         consent = broker
         swapper = TokenSwapper(consent: broker)
         awsCreds = AWSCredentialServer(consent: broker)
+        sshAgent = SSHAgentServer(consent: broker)
         awsResigner = AWSResigner(credServer: awsCreds)
         kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
         claudeStore = ClaudeSubscriptionStore()

@@ -96,7 +96,9 @@ public actor Daemon {
         /// The guest's local-model bridge (vsock :8446); nil for a sign-in VM.
         var inference: InferenceBridgeListener?
         /// The guest's AWS credential_process helper's end (vsock 8445).
-        var aws: AWSCredsListener?
+        var aws: VsockFDListener?
+        /// The guest's SSH agent socket's end (vsock 8444).
+        var ssh: VsockFDListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -183,7 +185,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-", "ssh-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -911,7 +913,12 @@ public actor Daemon {
             try SessionDisk.apiKeyEnvLines(profile: profile, tokenPlan: plan, registrationMode: rec.registration == true)
                 .joined(separator: "\n").appending("\n")
                 .write(to: meta.appendingPathComponent("api_key.env"), atomically: true, encoding: .utf8)
-            if rec.registration != true { pushAWSCredentials(for: profile, meta: meta.path) }
+            if rec.registration != true {
+                pushAWSCredentials(for: profile, meta: meta.path)
+                // The workspace's SSH key, signing for the guest through the
+                // host's agent (macOS: launch's sshAgent.setKeys).
+                mitm?.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: store), for: profile.id)
+            }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
             try HomeSeed.finalizeHomeSeed(seedDir: seed)
@@ -967,6 +974,7 @@ public actor Daemon {
         if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:]) }
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
         // The address it had last, if still free (macOS's lease store), leased
         // before the switch sees it; recorded, so a restarted daemon hands the
@@ -1099,10 +1107,13 @@ public actor Daemon {
                                              stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
                 l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
+                l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath,
+                                      stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
                 // The credential server's state was the previous daemon's (the
                 // swap map and the rest: start's refresh, once the session host is up).
-                if l.aws != nil, let profile = await launchProfile(for: rec) {
-                    pushAWSCredentials(for: profile, meta: vmDir(rec.id) + "/meta")
+                if let profile = await launchProfile(for: rec) {
+                    if l.aws != nil { pushAWSCredentials(for: profile, meta: vmDir(rec.id) + "/meta") }
+                    if l.ssh != nil, let mitm { mitm.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: profileStore), for: profile.id) }
                 }
                 if let staged = await launchProfile(for: rec) { startLocalEngineIfNeeded(for: staged) }
                 sw.attach(l.port, mac: rec.mac)
@@ -1339,6 +1350,7 @@ public actor Daemon {
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
         if let pid = UUID(uuidString: id) {
             mitm?.clearSessionTrace(for: pid)
+            mitm?.sshAgent.clearKeys(for: pid)
             if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
             InferenceRepairProxy.shared.setExternalEngine(pid, nil)
         }
@@ -1395,8 +1407,9 @@ public actor Daemon {
         l.mitm?.stop()
         l.inference?.stop()
         l.aws?.stop()
+        l.ssh?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
+        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-", "ssh-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))
