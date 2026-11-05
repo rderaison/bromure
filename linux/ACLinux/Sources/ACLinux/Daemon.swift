@@ -879,6 +879,33 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
+        do {
+            try await launchVM(&rec, restoreFrom: restoreFrom)
+        } catch {
+            // What it set up for the proxy goes with it, as a stop's does.
+            if let pid = UUID(uuidString: rec.id) { await clearWorkspaceProxyState(pid) }
+            throw error
+        }
+    }
+
+    /// A VM's state in the proxy, gone with the VM (finishStop) or with a
+    /// launch that failed: its trace session, SSH keys, static and minted
+    /// AWS keys (macOS: MitmEngine.unregister), prompt-injection policy,
+    /// swap map and kube trust, and its local engine route.
+    // @port-skip linux-only: the Linux share of macOS's cleanupSessionRegistrations and MitmEngine.unregister
+    func clearWorkspaceProxyState(_ pid: UUID) async {
+        // macOS: cleanupSessionRegistrations' clearSessionTrace.
+        mitm?.clearSessionTrace(for: pid)
+        mitm?.sshAgent.clearKeys(for: pid)
+        mitm?.awsCreds.clearCredentials(for: pid)
+        AWSSSORefusals.set(false, for: pid)
+        mitm?.clearPromptInjectionPolicy(for: pid)
+        if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
+        InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+    }
+
+    // @port-skip linux-only: Linux daemon VM lifecycle
+    private func launchVM(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         if let hook = Self.launchHookForTesting.withLockedValue({ $0 }) { try await hook(rec.id) }
         let dir = vmDir(rec.id)
         let run = config.runtimeDir + "/vms/" + rec.shortId
@@ -1140,7 +1167,10 @@ public actor Daemon {
                 // a connection (they were the previous daemon's): its swap map
                 // (minted credentials and their AWS keys, so a minted key never
                 // signs as the base keys), kube trust, the AWS credential server
-                // and its SSH key. start then rewrites its kubeconfig.
+                // and its SSH key. Trust for this server's own clusters comes
+                // with start's refresh, once the session engine (and its
+                // cluster engine) is up: until then they fail closed. start
+                // then rewrites its kubeconfig.
                 let adoptedProfile = rec.managed ? nil : await launchProfile(for: rec, create: false)
                 if let profile = adoptedProfile {
                     await setUpWorkspaceCredentials(profile, meta: vmDir(rec.id) + "/meta")
@@ -1393,17 +1423,7 @@ public actor Daemon {
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
-        // macOS: cleanupSessionRegistrations' clearSessionTrace.
-        if let pid = UUID(uuidString: id) {
-            mitm?.clearSessionTrace(for: pid)
-            mitm?.sshAgent.clearKeys(for: pid)
-            // Its static and minted AWS keys (macOS: MitmEngine.unregister).
-            mitm?.awsCreds.clearCredentials(for: pid)
-            AWSSSORefusals.set(false, for: pid)
-            mitm?.clearPromptInjectionPolicy(for: pid)
-            if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
-            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
-        }
+        if let pid = UUID(uuidString: id) { await clearWorkspaceProxyState(pid) }
         // A sign-in VM that stopped on its own ends its sign-in.
         if rec.registration == true, let pid = UUID(uuidString: id) {
             await MainActor.run { LinuxSessionHost.shared?.registrationVMStopped(pid) }
@@ -1442,7 +1462,7 @@ public actor Daemon {
     /// under (a fresh session per launch, as macOS's).
     // @port-skip linux-only: the trace step of ACAppDelegate.launch (engine.setSessionTrace), per Linux launch and re-adoption
     private func startTraceSession(_ rec: VMRecord) {
-        guard let mitm, let pid = UUID(uuidString: rec.id), let profile = profile(for: rec) else { return }
+        guard let mitm, let pid = UUID(uuidString: rec.id), let profile = existingProfile(for: rec) else { return }
         mitm.setSessionTrace(TraceSession(sessionID: UUID(), level: profile.traceLevel), for: pid)
     }
 

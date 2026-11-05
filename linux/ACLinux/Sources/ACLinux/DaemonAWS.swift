@@ -13,11 +13,20 @@ final class VsockFDListener: @unchecked Sendable {
     private let fd: Int32
     private let lock = NSLock()
     private var stopped = false
+    /// Connections being served, and the most at once: one past it is
+    /// closed as it's accepted.
+    private var active = 0
+    let maxConnections: Int
+    /// The most a connection may sit without sending (SO_RCVTIMEO): an idle
+    /// one ends rather than holding its thread for good.
+    static let idleTimeout = 60
 
     // @port-skip linux-only: the VZVirtioSocketListener delegates over hybrid vsock
     init(udsPath: String, port: UInt32, fdStoreName: String, stored: Int32?,
+         maxConnections: Int = 16,
          accept: @escaping @Sendable (Int32) -> Int32 = { acl_accept_cloexec($0) },
          serve: @escaping @Sendable (Int32) async -> Void) throws {
+        self.maxConnections = maxConnections
         path = HybridVsockListener.path(uds: udsPath, port: port)
         self.fdStoreName = fdStoreName
         if let stored { fd = stored } else {
@@ -43,7 +52,7 @@ final class VsockFDListener: @unchecked Sendable {
             let c = accept(fd)  // the descriptor, or -errno
             if c >= 0 {
                 backoff = 10_000
-                Task.detached(priority: .userInitiated) { await serve(c) }
+                admit(c, serve)
                 continue
             }
             let err = -c
@@ -59,6 +68,31 @@ final class VsockFDListener: @unchecked Sendable {
             backoff = min(backoff * 2, 1_000_000)
         }
     }
+
+    /// Serves `c` on a thread of its own: the shared servers read their
+    /// connection with a blocking read(), which on Swift's cooperative pool
+    /// would let a guest's idle connections take every thread of it (the
+    /// daemon actor, the control API and every other VM with them).
+    // @port-skip linux-only: the per-VM vsock listeners
+    private func admit(_ c: Int32, _ serve: @escaping @Sendable (Int32) async -> Void) {
+        lock.lock()
+        let ok = active < maxConnections
+        if ok { active += 1 }
+        lock.unlock()
+        guard ok else { close(c); return }
+        var tv = timeval(tv_sec: Self.idleTimeout, tv_usec: 0)
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let thread = ConnectionThread(name: "vsock-" + fdStoreName)
+        Task(executorPreference: thread) { [self] in
+            await serve(c)
+            lock.lock(); active -= 1; lock.unlock()
+            thread.finish()
+        }
+    }
+
+    /// Connections being served (tests).
+    // @port-skip linux-only: the per-VM vsock listeners
+    var activeConnections: Int { lock.lock(); defer { lock.unlock() }; return active }
 
     // @port-skip linux-only: the per-VM vsock listeners
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
@@ -189,6 +223,45 @@ extension Daemon {
         } catch {
             try? FileManager.default.removeItem(atPath: staging)
             FileHandle.standardError.write(Data("bromure-ac daemon: couldn't stage the AWS helper: \(error)\n".utf8))
+        }
+    }
+}
+
+/// A task executor on one thread of its own, for one connection: what the
+/// task runs between its awaits (blocking reads included) runs here, off
+/// the cooperative pool. The thread ends once finish() is called and its
+/// jobs are done.
+// @port-skip linux-only: the per-VM vsock listeners
+final class ConnectionThread: TaskExecutor, @unchecked Sendable {
+    private let cond = NSCondition()
+    private var jobs: [UnownedJob] = []
+    private var finished = false
+
+    // @port-skip linux-only: the per-VM vsock listeners
+    init(name: String) {
+        let t = Thread { [self] in run() }
+        t.name = name
+        t.start()
+    }
+
+    // @port-skip linux-only: the per-VM vsock listeners
+    func enqueue(_ job: consuming ExecutorJob) {
+        let j = UnownedJob(job)
+        cond.lock(); jobs.append(j); cond.signal(); cond.unlock()
+    }
+
+    // @port-skip linux-only: the per-VM vsock listeners
+    func finish() { cond.lock(); finished = true; cond.signal(); cond.unlock() }
+
+    // @port-skip linux-only: the per-VM vsock listeners
+    private func run() {
+        while true {
+            cond.lock()
+            while jobs.isEmpty && !finished { cond.wait() }
+            if jobs.isEmpty { cond.unlock(); return }
+            let j = jobs.removeFirst()
+            cond.unlock()
+            j.runSynchronously(on: asUnownedTaskExecutor())
         }
     }
 }

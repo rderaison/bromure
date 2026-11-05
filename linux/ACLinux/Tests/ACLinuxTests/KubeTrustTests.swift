@@ -1165,6 +1165,71 @@ struct VsockFDListenerTests {
         #expect(s["SecretAccessKey"] as? String != "not-a-real-secret", "the guest gets a fake secret")
     }
 
+    /// Connects to `path`; the descriptor (nil when it can't).
+    static func dial(_ path: String) -> Int32? {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in let b = Array(path.utf8); p.copyBytes(from: b); p[b.count] = 0 }
+        guard withUnsafePointer(to: &addr, {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }) == 0 else { close(fd); return nil }
+        return fd
+    }
+
+    actor Pinger { func ping() -> Int { 1 } }
+
+    /// A guest's idle SSH agent connections (each a blocking read in the
+    /// shared server) don't take Swift's cooperative pool: an actor and a
+    /// detached task still answer at once.
+    @Test func idleAgentConnectionsLeaveTheCooperativePoolFree() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let agent = SSHAgentServer(consent: ConsentBroker())
+        let n = 2 * ProcessInfo.processInfo.activeProcessorCount + 8
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9444, fdStoreName: "vt-pool", stored: nil,
+                                    maxConnections: n + 1) { await agent.serve(fd: $0, profileID: UUID()) }
+        var fds: [Int32] = []
+        defer { fds.forEach { close($0) }; l.stop(); FDStore.remove("vt-pool") }
+        for _ in 0..<n { if let fd = Self.dial(dir + "/v.sock_9444") { fds.append(fd) } }
+        #expect(fds.count == n)
+        // Every one accepted and in its server's read.
+        let until = Date().addingTimeInterval(10)
+        while l.activeConnections < n && Date() < until { usleep(20_000) }
+        #expect(l.activeConnections == n, "all \(n) idle connections are being served")
+        let done = DispatchSemaphore(value: 0)
+        let pinger = Pinger()
+        Task.detached {
+            let a = await pinger.ping()
+            let b = await Task.detached { 1 }.value
+            if a + b == 2 { done.signal() }
+        }
+        #expect(done.wait(timeout: .now() + 5) == .success, "the pool answers with \(n) idle connections open")
+    }
+
+    @Test func oneConnectionPastTheCapIsClosed() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let agent = SSHAgentServer(consent: ConsentBroker())
+        let l = try VsockFDListener(udsPath: dir + "/v.sock", port: 9445, fdStoreName: "vt-cap", stored: nil,
+                                    maxConnections: 3) { await agent.serve(fd: $0, profileID: UUID()) }
+        var fds: [Int32] = []
+        defer { fds.forEach { close($0) }; l.stop(); FDStore.remove("vt-cap") }
+        for _ in 0..<3 { if let fd = Self.dial(dir + "/v.sock_9445") { fds.append(fd) } }
+        let until = Date().addingTimeInterval(10)
+        while l.activeConnections < 3 && Date() < until { usleep(20_000) }
+        #expect(l.activeConnections == 3)
+        let extra = try #require(Self.dial(dir + "/v.sock_9445"))
+        fds.append(extra)
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(extra, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var b: UInt8 = 0
+        #expect(read(extra, &b, 1) == 0, "the fourth is closed at once")
+        // One that ends frees its place.
+        close(fds.removeFirst())
+        let freed = Date().addingTimeInterval(5)
+        while l.activeConnections > 2 && Date() < freed { usleep(20_000) }
+        #expect(l.activeConnections == 2)
+    }
+
     @Test func theHelperIsReplacedInPlace() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         Daemon.stageAWSCredsHelper(meta: dir)

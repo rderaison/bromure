@@ -7,7 +7,6 @@ extension Daemon {
     /// (`proxy_port`, bridged to host vsock 8443) and `proxy.env`, which
     /// every shell sources: the proxy variables and the per-language CA
     /// bundles. Without a proxy, none of them: the guest goes out directly.
-    // partial: SSH_AUTH_SOCK is exported as on macOS, but nothing on the host serves its bridge (vsock 8444) yet
     // @port-skip linux-only: SessionDisk.prepareMetadataShare's MITM share, for the Linux proxy (the full function is AppKit-side)
     func writeProxyMeta(_ meta: URL, profile: Profile?, tokenPlan: SessionTokenPlan? = nil,
                         extraNoProxy: [String] = [], registries: [String] = []) throws {
