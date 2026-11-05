@@ -3699,6 +3699,9 @@ struct BeautifiedSessionView: View {
                         .opacity(liveResizing ? 1 : 0)
                         .allowsHitTesting(false)
                 }
+                .overlay(alignment: .top) {
+                    GuestUnresponsiveBanner(profileID: model.currentSession?()?.profileID)
+                }
                 // Shown from what was on hand; the latest round is on its way.
                 // In the top-right corner, clear of where a line begins (centred
                 // it sat on the first transcript line right after a switch).

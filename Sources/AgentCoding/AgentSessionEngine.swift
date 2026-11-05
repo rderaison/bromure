@@ -674,6 +674,9 @@ final class AgentSessionEngine {
     /// words; nil if it fits. Only a VM whose guest reported recently can say
     /// no: an attached machine, or one just booted, is let through as before.
     private func memoryRefusal(for s: AgentSession, now: Date = Date()) -> String? {
+        if delegate?.runningSessions[s.profileID]?.guestUnresponsive == true {
+            return NSLocalizedString("This workspace isn't responding", comment: "beautified: the guest has gone silent")
+        }
         guard let vm = delegate?.runningSessions[s.profileID], let at = vm.vmStatsAt,
               now.timeIntervalSince(at) < 15 else { return nil }
         let others = store.sessions.filter {

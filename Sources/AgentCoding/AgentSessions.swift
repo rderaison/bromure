@@ -2014,6 +2014,11 @@ enum SessionHome {
         if s.hasEnded { return !(s.lastError ?? "").isEmpty && !s.isArchived ? .needsYou : .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
+        #if os(macOS)
+        // Its guest has gone silent: nothing it last said about this agent can
+        // still be trusted, "working" least of all.
+        guard !GuestLivenessStore.shared.isUnresponsive(s.profileID) else { return .asleep }
+        #endif
         // Up, but tmux hasn't reported yet (a boot, a resume): still asleep
         // as far as the session can tell — not "Ended" for a few seconds.
         guard rosterLive(for: s.profileID, in: model) else { return .asleep }

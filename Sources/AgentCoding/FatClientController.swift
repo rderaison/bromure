@@ -112,6 +112,10 @@ final class RemoteHostController {
     /// Per-workspace tab models (live, shared into `VMEntry` by reference so the
     /// sidebar tab rows and the grid update together).
     private var tabsModels: [Profile.ID: TabsModel] = [:]
+#if os(macOS)
+    /// The server's VMs whose guest it reports as gone silent.
+    private var unresponsiveIDs = Set<Profile.ID>()
+#endif
     /// Called after a running workspace's tab roster is applied, with the tmux
     /// window indices that exist right now. The mirror window retires cached
     /// surfaces for dead windows — a killed window's grouped view session
@@ -716,9 +720,28 @@ final class RemoteHostController {
 #endif
     }
 
+#if os(macOS)
+    /// What the store says about this server's VMs follows what the server
+    /// reports, for as long as this controller is the one listening.
+    func noteUnresponsive(_ now: Set<Profile.ID>) {
+        for id in unresponsiveIDs.subtracting(now) { GuestLivenessStore.shared.clear(id) }
+        for id in now.subtracting(unresponsiveIDs) {
+            GuestLivenessStore.shared.mark(id, unresponsive: true) { [weak self] in
+                guard let self else { return }
+                let name = self.profile(for: id)?.name ?? "workspace"
+                if ACAppDelegate.confirmReboot(name, force: true) { self.hardRebootWorkspace(id) }
+            }
+        }
+        unresponsiveIDs = now
+    }
+#endif
+
     func stop() {
         Self.liveHosts[host.id] = nil
 #if os(macOS)
+        // Nobody will report these again, and a reopened window is a new
+        // controller that doesn't know it has them to clear.
+        noteUnresponsive([])
         delegationRelay?.stop()
         delegationRelay = nil
 #endif
@@ -1154,6 +1177,9 @@ final class RemoteHostController {
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
+#if os(macOS)
+        var unresponsiveNow = Set<Profile.ID>()
+#endif
         var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
         let offset = Self.wallClockOffset()
         let step = Self.clockStep(last: lastWallClockOffset, now: offset)
@@ -1179,6 +1205,9 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+#if os(macOS)
+            if vm["guestUnresponsive"] as? Bool == true { unresponsiveNow.insert(id) }
+#endif
             let stamp = vm["bootedAt"] as? Double
             var stampMoved = false
             if let stamp {
@@ -1264,6 +1293,9 @@ final class RemoteHostController {
                 accentHex: model.accentHex, model: model))
         }
         tabsModels = tabsModels.filter { liveIDs.contains($0.key) }
+#if os(macOS)
+        noteUnresponsive(unresponsiveNow)
+#endif
         // Keep bootTimes across a brief running-absence (a reboot drops the VM
         // from /state for a few polls), so the uptime-reset comparison still
         // fires when it returns — only forget it when the workspace itself is

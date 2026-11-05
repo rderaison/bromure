@@ -1474,6 +1474,8 @@ final class RunningSession {
     var vmMemPressureSome: Double = 0
     var vmMemPressureFull: Double = 0
     var vmStatsAt: Date?
+    /// The guest has stopped proving it can run a process (`GuestLiveness`).
+    var guestUnresponsive = false
 
     /// The profile the VM was BOOTED with — unlike `profile`, never moved by
     /// a live edit. A setting changed and then changed back to this value
@@ -3007,6 +3009,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a sign-in's port (the next one couldn't bind it, and the browser's
         // redirect would be reset or relayed into a VM shutting down).
         if let dev = runningSessions[id]?.sandbox.socketDevice { stopLoopbackForwarders(of: dev) }
+        GuestLivenessStore.shared.clear(id)
         runningSessions.removeValue(forKey: id)
         releaseLeaseIfIdle(id)
         updateStatusMenu()
@@ -7066,6 +7069,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "diskUsedKB": pane(for: s.profileID)?.model.vmDiskUsedKB ?? s.vmDiskUsedKB,
                 "diskTotalKB": pane(for: s.profileID)?.model.vmDiskTotalKB ?? s.vmDiskTotalKB,
                 "hasStats": (pane(for: s.profileID)?.model.vmMemTotalKB ?? s.vmMemTotalKB) > 0,
+                "guestUnresponsive": s.guestUnresponsive,
                 "networkMode": s.profile.networkMode.rawValue,
                 "macAddress": MACBindings.shared.macAddress(for: s.profileID),
                 "diskPath": diskURL.path,
@@ -16134,6 +16138,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             Task { @MainActor in
                 guard let s = self?.runningSessions[pid] else { return }
                 s.vmMemPressureSome = some; s.vmMemPressureFull = full
+            }
+        }
+        sandbox.onGuestResponsive = { [weak self] responsive in
+            Task { @MainActor in
+                self?.runningSessions[pid]?.guestUnresponsive = !responsive
+                GuestLivenessStore.shared.mark(pid, unresponsive: !responsive) { [weak self] in
+                    self?.restartProfile(pid, force: true)
+                }
             }
         }
         sandbox.onVMStats = { [weak self] cpu, used, total, load, diskUsed, diskTotal in
