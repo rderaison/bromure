@@ -53,8 +53,9 @@ public enum OnePasswordCLI {
     /// Throws `.notInstalled` when `op` is missing, `.readFailed` on any op error
     /// (not signed in, item/field not found, etc.). Host-side only: resolution
     /// shells out to `op`, which doesn't exist on iOS — clients only ever carry
-    /// the reference (`reference(in:)` above), never the secret.
-    #if os(macOS)
+    /// the reference (`reference(in:)` above), never the secret. (A Linux
+    /// server is a host too.)
+    #if os(macOS) || os(Linux)
     public static func read(_ ref: String) async throws -> String {
         guard let op = locate() else { throw OpError.notInstalled }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Swift.Error>) in
