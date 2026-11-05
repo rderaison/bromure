@@ -304,6 +304,19 @@ enum SwitchboardThreading {
     }
 }
 
+/// What threading needs from the session store.
+struct SwitchboardThreadingInputs: Equatable {
+    var aliases: [SwitchboardThreading.Alias]
+    /// Sessions waiting on the user, for their chips.
+    var waiting: Set<UUID>
+
+    @MainActor
+    init(sessions: [AgentSession]) {
+        aliases = SwitchboardThreading.aliases(handles: SwitchboardEngine.handles(of: sessions), sessions: sessions)
+        waiting = Set(sessions.filter { $0.awaitingAnswer == true }.map(\.id))
+    }
+}
+
 /// Keeps the analysis for the last inputs: the body runs on every model change.
 final class SwitchboardThreadMemo {
     private var items: [TranscriptItem] = []

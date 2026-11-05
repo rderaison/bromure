@@ -582,7 +582,7 @@ final class RemoteHostController {
     /// `applyWorkspaces` until the server confirms them gone, so an in-flight
     /// stale poll can't flash the chip back. Cleared per-window once a snapshot
     /// no longer lists it (or a reboot legitimately rebuilds it).
-    private var pendingTabDrops: [Profile.ID: Set<Int>] = [:]
+    private var pendingTabDrops: [Profile.ID: [Int: Date]] = [:]
 
     /// The 0.75 s poll timer, held in a non-isolated box so it can be
     /// invalidated when the controller deallocates — a `@MainActor` class can't
@@ -1247,14 +1247,9 @@ final class RemoteHostController {
             // once it's confirmed absent (or a reboot legitimately rebuilt it).
             if let pending = pendingTabDrops[id], !pending.isEmpty {
                 let present = Set(tabDicts.compactMap { $0["index"] as? Int })
-                let confirmed = pending.subtracting(present)   // server no longer lists it
-                if !confirmed.isEmpty {
-                    let remaining = pending.subtracting(confirmed)
-                    pendingTabDrops[id] = remaining.isEmpty ? nil : remaining
-                }
-                if let stillPending = pendingTabDrops[id] {
-                    tabDicts = tabDicts.filter { !stillPending.contains($0["index"] as? Int ?? -1) }
-                }
+                let stillPending = TabDrops.stillPending(pending, listed: present)
+                pendingTabDrops[id] = stillPending.isEmpty ? nil : stillPending
+                tabDicts = tabDicts.filter { stillPending[$0["index"] as? Int ?? -1] == nil }
             }
             applyRemoteTabs(model, tabDicts)
             // The server sends its guests' own rosters — live whenever there
@@ -1491,13 +1486,9 @@ final class RemoteHostController {
         kubeStore.mirror(clusters: decoded.clusters, status: decoded.status, registries: decoded.registries)
     }
 
+    private let taskDecoder = SnapshotDecodeMemo<CodingTask>()
     private func applyTasks(_ payload: [String: Any]) {
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let tasks = ((payload["tasks"] as? [[String: Any]]) ?? []).compactMap { dict -> CodingTask? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(CodingTask.self, from: data)
-        }
-        taskStore.mirror(tasks: tasks)
+        taskStore.mirror(tasks: taskDecoder.decode((payload["tasks"] as? [[String: Any]]) ?? []))
     }
 
     // MARK: Sessions (the sessions-first home, mirrored)
@@ -1533,15 +1524,11 @@ final class RemoteHostController {
     }
 #endif
 
+    private let sessionDecoder = SnapshotDecodeMemo<AgentSession>()
     private func applySessions(_ list: [[String: Any]]?) {
         guard let list else { supportsSessions = false; return }
         supportsSessions = true
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let sessions = list.compactMap { dict -> AgentSession? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(AgentSession.self, from: data)
-        }
-        var mirrored = sessions
+        var mirrored = sessionDecoder.decode(list)
         // A rename just sent: keep showing it until the server says so too
         // (a few seconds at most) instead of the old title for a round trip.
         for (id, pending) in pendingTitles {
@@ -1650,13 +1637,10 @@ final class RemoteHostController {
 
     /// Only when present: an older server sends none, and the mirror keeps
     /// what it has rather than reading that as "none".
+    private let delegationDecoder = SnapshotDecodeMemo<Delegation>()
     private func applyDelegations(_ list: [[String: Any]]?) {
         guard let list else { return }
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let items = list.compactMap { dict -> Delegation? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(Delegation.self, from: data)
-        }
+        let items = delegationDecoder.decode(list)
         let before = delegationStore.delegations
         delegationStore.applyMirror(items)
         if before != delegationStore.delegations { onDelegationsMirrored?(self) }
@@ -1989,7 +1973,7 @@ final class RemoteHostController {
     /// `applyWorkspaces`) until the server confirms it gone, so an in-flight
     /// stale poll can't flash the chip back. Kicks an immediate poll to confirm.
     func dropTabLocally(_ id: Profile.ID, index: Int) {
-        pendingTabDrops[id, default: []].insert(index)
+        pendingTabDrops[id, default: [:]][index] = Date()
         if let m = tabsModels[id], let pos = m.tabs.firstIndex(where: { $0.index == index }) {
             m.tabs.remove(at: pos)
             if m.activeIndex >= m.tabs.count { m.activeIndex = max(0, m.tabs.count - 1) }
@@ -3631,6 +3615,7 @@ final class RemoteHostWindow: NSWindow {
         showGrid()
         controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
         controller.onSnapshotApplied = { [weak self] in
+            self?.preloadNextChat()
             guard let self else { return }
             self.syncSessionsHome()
             self.refreshDashboardProfile()
@@ -8201,6 +8186,36 @@ final class RemoteHostWindow: NSWindow {
         return m
     }
 
+    // MARK: Preloading conversations
+
+    private var preloading = false
+    private var preloaded: [UUID: ChatPreload.Done] = [:]
+
+    /// A snapshot came in: fetch the next conversation that's worth having ready,
+    /// one at a time. Quiet on a slow link, where it would compete with what the
+    /// user is doing.
+    private func preloadNextChat() {
+        guard !preloading, controller.connected, !controller.linkSlow else { return }
+        let warm = Set(warmChats.values.compactMap { $0.currentSession?()?.id })
+        let running = Set(controller.listModel.profileRows.filter { $0.state == .running }.map(\.id))
+        let list = controller.sessionStore.sessions.filter { running.contains($0.profileID) }
+        guard let s = ChatPreload.next(list, done: preloaded, skipping: warm.union(selectedSessionID.map { [$0] } ?? []),
+                                       activity: SessionHome.lastActivity(_:)),
+              let w = s.windowIndex else { return }
+        preloading = true
+        let provider = RemoteTranscriptProvider(controller: controller, workspaceID: s.profileID, windowIndex: w,
+                                                sessionID: s.id, accent: .accentColor)
+        let activity = SessionHome.lastActivity(s)
+        Task { [weak self] in
+            await BeautifiedSessionModel.preloadHistory(provider: provider, agent: s.tool.rawValue, profileID: s.profileID)
+            guard let self else { return }
+            // Tried is done, whatever came of it: a machine that can't be read
+            // isn't asked again until the session does something.
+            self.preloaded[s.id] = ChatPreload.Done(activity: activity, at: Date())
+            self.preloading = false
+        }
+    }
+
     /// Chats recently on stage, kept streaming in the background (see
     /// `BeautifiedSessionModel.setBackground`), most recent last.
     private var warmChats: [String: BeautifiedSessionModel] = [:]
@@ -8448,14 +8463,13 @@ final class StateStream: @unchecked Sendable {
             // terminal refresh pushes a frame) pinned tens of GB over hours.
             var bogus = false
             autoreleasepool {
-                while buf.count >= 4 {
-                    let len = (Int(buf[0]) << 24) | (Int(buf[1]) << 16) | (Int(buf[2]) << 8) | Int(buf[3])
-                    if len < 1 || len > 32 * 1024 * 1024 { bogus = true; return }   // bogus frame → drop + reconnect
-                    if buf.count < 4 + len { break }
-                    let flag = buf[4]
-                    var data = Data(buf[5 ..< 4 + len])
-                    buf.removeFirst(4 + len)
-                    if flag == 1, let inflated = try? (data as NSData).decompressed(using: .zlib) {
+                // Each frame is the whole state: of those that have arrived,
+                // only the newest is worth inflating and parsing.
+                let frames = SnapshotFrames.takeLatest(from: &buf)
+                bogus = frames.bogus
+                if var data = frames.latest?.payload {
+                    if frames.latest?.compressed == true,
+                       let inflated = try? (data as NSData).decompressed(using: .zlib) {
                         data = inflated as Data
                     }
                     if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -8469,9 +8483,23 @@ final class StateStream: @unchecked Sendable {
         return true
     }
 
+    /// Newest wins: a main thread behind on snapshots catches up to the latest
+    /// instead of applying every state it missed, which kept it behind for good.
+    private var pendingSnapshot: [String: Any]?
     private func deliverSnapshot(_ snap: [String: Any]) {
+        lock.lock()
+        let scheduled = pendingSnapshot != nil
+        pendingSnapshot = snap
+        lock.unlock()
+        guard !scheduled else { return }
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.controller?.applyPushedSnapshot(snap) }
+            guard let self else { return }
+            self.lock.lock()
+            let latest = self.pendingSnapshot
+            self.pendingSnapshot = nil
+            self.lock.unlock()
+            guard let latest else { return }
+            MainActor.assumeIsolated { self.controller?.applyPushedSnapshot(latest) }
         }
     }
     private func deliverActive(_ active: Bool) {
@@ -8680,4 +8708,99 @@ final class InOrder<Key: Hashable, Value> {
     }
 
     var idle: Bool { tails.isEmpty }
+}
+
+
+/// The push stream's framing: a 4-byte length, a compression flag, the payload.
+enum SnapshotFrames {
+    struct Frame: Equatable { var compressed: Bool; var payload: Data }
+
+    /// Takes every complete frame off `buf` and returns the last. `bogus`: a
+    /// length no frame could have, so the stream can't be trusted any further.
+    static func takeLatest(from buf: inout [UInt8]) -> (latest: Frame?, bogus: Bool) {
+        var latest: Frame?
+        var at = 0
+        var bogus = false
+        while buf.count - at >= 4 {
+            let len = (Int(buf[at]) << 24) | (Int(buf[at + 1]) << 16) | (Int(buf[at + 2]) << 8) | Int(buf[at + 3])
+            if len < 1 || len > 32 * 1024 * 1024 { bogus = true; break }
+            if buf.count - at < 4 + len { break }
+            latest = Frame(compressed: buf[at + 4] == 1, payload: Data(buf[(at + 5) ..< (at + 4 + len)]))
+            at += 4 + len
+        }
+        if at > 0 { buf.removeFirst(at) }
+        return (latest, bogus)
+    }
+}
+
+/// Decoding the same records out of every snapshot is most of what applying one
+/// costs on the main thread: a record whose raw form hasn't changed since the
+/// last snapshot keeps its decoded value. What's applied is exactly what a fresh
+/// decode would give.
+final class SnapshotDecodeMemo<T: Decodable> {
+    private var known: [String: (raw: NSDictionary, value: T)] = [:]
+    private let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+
+    func decode(_ list: [[String: Any]]) -> [T] {
+        var next: [String: (raw: NSDictionary, value: T)] = [:]
+        next.reserveCapacity(list.count)
+        let out = list.compactMap { dict -> T? in
+            let raw = dict as NSDictionary
+            let id = dict["id"] as? String
+            if let id, let hit = known[id], hit.raw.isEqual(raw) {
+                next[id] = hit
+                return hit.value
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let value = try? decoder.decode(T.self, from: data) else { return nil }
+            if let id { next[id] = (raw, value) }
+            return value
+        }
+        known = next
+        return out
+    }
+}
+
+
+/// Which conversation to have ready next, before the user asks for it.
+enum ChatPreload {
+    struct Done: Equatable { var activity: Date; var at: Date }
+    /// The sessions a user is likely to switch to: the most recently active.
+    static let candidates = 8
+    /// However busy a session is, it's fetched at most this often: a working
+    /// agent would otherwise be read back to back, for a chat nobody has open.
+    static let minimumInterval: TimeInterval = 20
+
+    @MainActor
+    static func next(_ sessions: [AgentSession], done: [UUID: Done], skipping: Set<UUID>,
+                     activity: (AgentSession) -> Date, now: Date = Date()) -> AgentSession? {
+        let live = sessions.filter { $0.windowIndex != nil && !$0.hasEnded && !$0.isDeleted && !$0.isArchived }
+            .sorted { activity($0) > activity($1) }
+            .prefix(candidates)
+        return live.first { s in
+            guard !skipping.contains(s.id) else { return false }
+            guard let d = done[s.id] else { return true }
+            return activity(s) > d.activity && now.timeIntervalSince(d.at) >= minimumInterval
+        }
+    }
+}
+
+
+/// Tabs closed here that the server hasn't confirmed gone yet.
+enum TabDrops {
+    /// How long a closed tab's index stays hidden while the server still lists it.
+    /// Long enough for a stale snapshot to pass. It can't be until the server
+    /// confirms: tmux reuses the lowest free index, so a new tab can take the
+    /// number before any snapshot without it is applied (only the newest of a
+    /// batch is), and it would stay hidden for as long as it exists.
+    static let patience: TimeInterval = 8
+
+    /// What of `pending` to keep hiding, given the indices the server lists.
+    static func stillPending(_ pending: [Int: Date], listed: Set<Int>, now: Date = Date()) -> [Int: Date] {
+        pending.filter { index, at in listed.contains(index) && now.timeIntervalSince(at) < patience }
+    }
 }
