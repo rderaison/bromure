@@ -24,23 +24,6 @@ import SandboxEngine
 
 // MARK: - Prompt-injection helpers (shared with the HTTP path)
 
-/// One prompt-injection detection, ready to record / ask about.
-struct PromptInjectionFlag: Sendable, Equatable {
-    /// "prompt injection" (tool output) or "rogue instructions" (CLAUDE.md…).
-    let detector: String
-    /// "model" or "heuristic".
-    let method: String
-    let source: String
-    let preview: String
-    /// The tool output that was scanned (source detections): what a block
-    /// redacts from later requests (`PromptInjectionRedactions`).
-    var spans: [String] = []
-    /// The instruction-file bodies that tripped a rules detection: what a
-    /// block withholds from later requests (`blockInstructions`).
-    var ruleSpans: [String] = []
-    var detectorCode: String { detector == "rogue instructions" ? "rules" : "source" }
-}
-
 extension HTTPMitmConnection {
     /// The enforcement scan (ask / block): fresh tool output through the
     /// source model, then the instructions through the rules scanner + model.
