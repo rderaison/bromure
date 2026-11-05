@@ -3569,6 +3569,87 @@ public final class MACBindings: @unchecked Sendable {
     }
 }
 
+
+/// Deletes old checkpoints one at a time, at background priority, in small steps.
+///
+/// Cloning an image is instant, but deleting a clone isn't: APFS has to walk its
+/// extents, which took 7-18 s for a 6 GB allocation on an idle Mac. A panic on a
+/// Mac running 8 VMs caught this happening with the APFS transaction flusher, the
+/// VMs' disk threads and logd all stuck on one lock until the watchdog rebooted the
+/// machine. Nothing showed the delete held that lock, but it's work we can pace.
+///
+/// A retired image is renamed first, so it's out of the list at once and a crash
+/// can't leave a shortened file passing for a checkpoint. It then shrinks by
+/// `step` at a time, a short transaction each (the longest call fell from about
+/// 7 s to about 110 ms). Truncating a clone leaves the image it shares blocks with
+/// alone, as APFS copies on write.
+public final class CheckpointReaper: @unchecked Sendable {
+    public static let shared = CheckpointReaper()
+    static let retiredExtension = "deleting"
+
+    private let queue = DispatchQueue(label: "io.bromure.checkpoint-reaper", qos: .background)
+    private let lock = NSLock()
+    private var queued = Set<String>()
+    private let step: off_t
+    private let stepPause: useconds_t
+    private let filePause: useconds_t
+
+    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 50_000, filePause: useconds_t = 1_000_000) {
+        self.step = step
+        self.stepPause = stepPause
+        self.filePause = filePause
+    }
+
+    /// Take a checkpoint out of the list now, and delete it when its turn comes.
+    public func retire(_ url: URL) {
+        let retired = url.appendingPathExtension(Self.retiredExtension)
+        guard rename(url.path, retired.path) == 0 else { return }
+        enqueue(retired)
+    }
+
+    /// Queue whatever is already retired in `dir`.
+    public func sweep(_ dir: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for url in names where url.pathExtension == Self.retiredExtension { enqueue(url) }
+    }
+
+    /// Wait for everything queued so far.
+    func drain() { queue.sync {} }
+
+    private func enqueue(_ url: URL) {
+        lock.lock()
+        let isNew = queued.insert(url.path).inserted
+        lock.unlock()
+        guard isNew else { return }
+        queue.async { [self] in
+            remove(url)
+            lock.lock()
+            queued.remove(url.path)
+            lock.unlock()
+            usleep(filePause)
+        }
+    }
+
+    private func remove(_ url: URL) {
+        // O_NOFOLLOW and a single link: shrinking must only ever touch this one
+        // file. Anything else just gets unlinked.
+        let fd = open(url.path, O_WRONLY | O_NOFOLLOW)
+        if fd >= 0 {
+            var st = stat()
+            if fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_nlink == 1 {
+                var size = st.st_size
+                while size > 0 {
+                    size = max(0, size - step)
+                    guard ftruncate(fd, size) == 0 else { break }
+                    usleep(stepPause)
+                }
+            }
+            close(fd)
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
 /// Reads / writes profiles under ~/Library/Application Support/BromureAC/profiles/<id>/.
 /// Each profile dir holds:
 ///   profile.json   — the Profile struct
@@ -3577,6 +3658,7 @@ public final class MACBindings: @unchecked Sendable {
 public final class ProfileStore {
     private let rootDir: URL
     private let fm = FileManager.default
+    private let reaper = CheckpointReaper.shared
 
     public init(rootDir: URL? = nil) {
         if let rootDir {
@@ -3785,7 +3867,9 @@ public final class ProfileStore {
     }
 
     public func diskURL(for profile: Profile) -> URL {
-        profileDirectory(for: profile).appendingPathComponent("disk.img")
+        // `isDirectory:`: without it, building the path stats the file, and the
+        // main thread asks for this path constantly.
+        profileDirectory(for: profile).appendingPathComponent("disk.img", isDirectory: false)
     }
 
     /// The host-side dir mounted as /home/ubuntu in the guest (legacy
@@ -3801,7 +3885,7 @@ public final class ProfileStore {
     /// allocated size ~0); the guest agent formats it on first boot and
     /// fstrim/discard punches freed blocks back out of the host file.
     public func homeImageURL(for profile: Profile) -> URL {
-        profileDirectory(for: profile).appendingPathComponent("home.img")
+        profileDirectory(for: profile).appendingPathComponent("home.img", isDirectory: false)
     }
 
     /// Tiny host dir attached as the `bromure-home` virtiofs tag for
@@ -4309,8 +4393,9 @@ public final class ProfileStore {
         let all = list(in: dir)
         let keep = Self.checkpointRetention(all.map(\.createdAt), now: now)
         for cp in all where !keep.contains(cp.createdAt) {
-            try? fm.removeItem(at: cp.url)
+            reaper.retire(cp.url)
         }
+        reaper.sweep(dir)   // what a quit left half deleted
     }
 
     /// Restore a checkpoint over the live disk. The VM MUST be stopped first (the
