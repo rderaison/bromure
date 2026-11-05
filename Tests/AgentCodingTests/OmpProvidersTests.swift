@@ -93,4 +93,28 @@ struct OmpProvidersTests {
         #expect(yaml.contains("apiKey: BROMURE_OMP_OPENROUTER_API_KEY"))
         #expect(!yaml.contains("bromure-zai"))
     }
+
+    @Test("an extra provider's key with no host to swap on never reaches the VM as itself")
+    @MainActor
+    func extraKeyWithoutHostStaysOut() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omp-extra-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        var p = Profile(name: "ws", tool: .omp, authMode: .token, apiKey: "sk-own-key")
+        p.ompExtraProviders = [
+            .init(provider: .custom, apiKey: "sk-real-noscheme", baseURL: "10.0.0.5:8000/v1", models: ["m"]),
+            .init(provider: .openrouter, apiKey: "sk-real-openrouter", baseURL: "https://openrouter.ai/api/v1", models: ["x"]),
+        ]
+        try store.save(p)
+        let disk = SessionDisk(profile: p, store: store, baseDiskURL: root.appendingPathComponent("base.img"))
+        let plan = p.makeTokenPlan(salt: Data(repeating: 3, count: 32))
+        disk.tokenPlan = plan
+        let env = try String(contentsOf: disk.prepareMetadataShare().appendingPathComponent("api_key.env"), encoding: .utf8)
+        #expect(!env.contains("sk-real-noscheme") && !env.contains("sk-real-openrouter") && !env.contains("sk-own-key"))
+        #expect(env.contains("export BROMURE_OMP_CUSTOM_API_KEY=none") || env.contains("export BROMURE_OMP_CUSTOM_API_KEY='none'"))
+        let orFake = try #require(plan.fakeForCloud(host: "openrouter.ai"))
+        #expect(env.contains(orFake))
+    }
 }
