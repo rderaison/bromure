@@ -5814,6 +5814,32 @@ def oom_order_service():
         time.sleep(5)
 
 
+# A long-lived guest's agentd was seen holding 934 MB, 84% of it in glibc's
+# per-thread arenas and only 43 MB in the main heap: freed memory that long-lived
+# threads keep, and nothing else returns. On a guest that is running out of memory
+# that is several agents' worth. See MEMORY_MANAGEMENT.md.
+MALLOC_TRIM_INTERVAL = 60
+
+
+def malloc_trim():
+    """Give freed heap back to the kernel. True if any was released; False also
+    where there is no such call (it is glibc's)."""
+    try:
+        if not _LIBC:
+            import ctypes
+            _LIBC.append(ctypes.CDLL(None, use_errno=True))
+        import ctypes
+        return _LIBC[0].malloc_trim(ctypes.c_size_t(0)) == 1
+    except Exception:
+        return False
+
+
+def malloc_trim_service():
+    while _RUNNING.is_set():
+        time.sleep(MALLOC_TRIM_INTERVAL)
+        malloc_trim()
+
+
 def vmstat_loop_service():
     """Aggregate CPU% / mem / load / disk → vmstat.txt every 1.5s."""
     prev_idle = 0
@@ -8298,6 +8324,7 @@ def main():
         ("roster", roster_loop_service),
         ("vmstat", vmstat_loop_service),
         ("oom-order", oom_order_service),
+        ("malloc-trim", malloc_trim_service),
         ("ports", ports_loop_service),
         ("docker", docker_loop_service),
         ("command", command_loop_service),

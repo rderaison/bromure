@@ -103,8 +103,12 @@ It needs:
 
 Smaller, and independent of the above:
 
-- **Find out why agentd is at 935 MB.** It may be a leak, and it's one of the
-  largest processes in the guest.
+- **See whether agentd stays small.** A 7-day-old agentd held 934 MB: 782 MB in
+  glibc arenas across 28 threads' worth, 43 MB in the main heap, with threads and
+  fds flat. So it is freed memory that isn't returned, not a growing structure.
+  agentd now calls `malloc_trim(0)` every minute, which released 92% in a
+  simulation (178 MB to 15 MB). That hasn't been measured on a real agentd yet.
+  If it isn't enough, `mallopt(M_ARENA_MAX, 2)` at the top of `main()` is next.
 - **Share the MCP helpers.** At 1135 MB they cost more than the agents did.
 - **Per-agent cgroups**: attribution, `memory.high` to throttle rather than kill,
   and `memory.oom.group` so an agent and its helpers go together.
