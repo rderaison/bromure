@@ -15,10 +15,12 @@ struct TranscriptIndexMemoryTests {
         let source = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/TranscriptSearchIndex.swift"), encoding: .utf8)
         let refresh = try #require(source.range(of: "    func refresh() {"))
         let body = source[refresh.upperBound...].prefix(1_400)
-        #expect(body.contains("Self.entry(of: url, modified: date)"))
+        #expect(body.contains("Self.read(url, modified: date, known: known[id])"))
         #expect(!body.contains("Data(contentsOf"))
-        let reader = try #require(source.range(of: "nonisolated static func entry(of url: URL"))
-        #expect(source[reader.upperBound...].prefix(200).contains("autoreleasepool {"))
+        for sig in ["nonisolated static func entry(of url: URL", "nonisolated static func read(_ url: URL"] {
+            let reader = try #require(source.range(of: sig))
+            #expect(source[reader.upperBound...].prefix(300).contains("autoreleasepool {"), Comment(rawValue: sig))
+        }
     }
 
     @Test("reading from a file gives the same entry, and nothing for a missing one")

@@ -287,8 +287,13 @@ struct TranscriptQuestion: Equatable {
 /// writes under ~/.claude/projects/…). Unknown line types and malformed
 /// lines are skipped, not fatal — the format is Claude Code's to evolve.
 enum ClaudeTranscriptParser {
-    static func parse(_ data: Data) -> [TranscriptItem] {
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
+    static func parse(_ data: Data) -> [TranscriptItem] { parseNotingClear(data).items }
+
+    /// The items, and whether a `/clear` emptied the conversation on the way
+    /// (what was before it isn't shown).
+    static func parseNotingClear(_ data: Data) -> (items: [TranscriptItem], cleared: Bool) {
+        var cleared = false
+        guard let text = String(data: data, encoding: .utf8) else { return ([], false) }
         var items: [TranscriptItem] = []
         /// tool_use id → tool name, so results can name their tool.
         var toolNames: [String: String] = [:]
@@ -364,7 +369,7 @@ enum ClaudeTranscriptParser {
                     if type == "user", isLocalRecord(trimmed) {
                         // `/clear` empties the conversation on screen; older
                         // Claude Codes kept writing to the same file after it.
-                        if isClearCommand(trimmed) { items.removeAll() }
+                        if isClearCommand(trimmed) { items.removeAll(); cleared = true }
                         continue
                     }
                     if !trimmed.isEmpty {
@@ -380,7 +385,7 @@ enum ClaudeTranscriptParser {
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !s.isEmpty else { continue }
                         if type == "user", isLocalRecord(s) {
-                            if isClearCommand(s) { items.removeAll() }
+                            if isClearCommand(s) { items.removeAll(); cleared = true }
                             continue
                         }
                         add(type == "user" ? .userText(unwrapPasted(s)) : .assistantText(s))
@@ -445,7 +450,7 @@ enum ClaudeTranscriptParser {
                                             kind: .question($0), timestamp: nil))
             }
         }
-        return items
+        return (items, cleared)
     }
 
     /// Claude Code records what happened in the terminal as user turns
@@ -659,6 +664,12 @@ enum GuestSharePaths {
 /// keep rendering after the caller lost track of which tool wrote them.
 enum AgentTranscript {
     static func parse(_ data: Data, agent: String? = nil) -> [TranscriptItem] {
+        parseNotingClear(data, agent: agent).items
+    }
+
+    /// The items, and whether the conversation started over in them (Claude's
+    /// `/clear`): what came before isn't part of it.
+    static func parseNotingClear(_ data: Data, agent: String? = nil) -> (items: [TranscriptItem], cleared: Bool) {
         let kind: String
         if let agent, ["claude", "codex", "grok", "kimi", "omp"].contains(agent) {
             kind = agent
@@ -666,14 +677,15 @@ enum AgentTranscript {
             kind = sniff(data)
         }
         let items: [TranscriptItem]
+        var cleared = false
         switch kind {
         case "codex": items = CodexTranscriptParser.parse(data)
         case "grok": items = GrokTranscriptParser.parse(data)
         case "kimi": items = KimiTranscriptParser.parse(data)
         case "omp": items = OmpTranscriptParser.parse(data)
-        default: items = ClaudeTranscriptParser.parse(data)
+        default: (items, cleared) = ClaudeTranscriptParser.parseNotingClear(data)
         }
-        return stableIDs(items)
+        return (stableIDs(items), cleared)
     }
 
     /// Re-key items so an item keeps its id when the bytes in front of it
@@ -704,9 +716,24 @@ enum AgentTranscript {
     /// a long time, so undecidable files are overwhelmingly Claude's).
     /// A tail-cut read may start mid-line — unparseable lines are skipped,
     /// exactly as the parsers themselves do.
+    /// How many of a transcript's first lines `sniff` reads: with fewer, a
+    /// longer copy of the same file can read as another format.
+    static let sniffLines = 200
+
+    /// Whether `sniff` saw all it reads in `data`, so a longer copy of the same
+    /// file will read as the same format.
+    static func sniffIsSettled(_ data: Data) -> Bool {
+        var lines = 0
+        for b in data where b == 0x0A {
+            lines += 1
+            if lines >= sniffLines { return true }
+        }
+        return false
+    }
+
     static func sniff(_ data: Data) -> String {
         guard let text = String(data: data, encoding: .utf8) else { return "claude" }
-        for line in text.split(whereSeparator: \.isNewline).prefix(200) {
+        for line in text.split(whereSeparator: \.isNewline).prefix(sniffLines) {
             guard let obj = try? JSONSerialization.jsonObject(
                 with: Data(line.utf8)) as? [String: Any] else { continue }
             // Grok: persisted ACP notifications — {"method":"session/update",
