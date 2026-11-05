@@ -603,6 +603,26 @@ struct CredentialMintProxyTests {
         }
     }
 
+    /// What follows an interim head must be a head itself.
+    @Test func finalResponseSkipsInterimHeadsOnly() {
+        let final = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        let f = { (s: String) in HTTPRequestFraming.finalResponse(Data(s.utf8)).map { String(decoding: $0, as: UTF8.self) } }
+        #expect(f("HTTP/1.1 100 Continue\r\n\r\n" + final) == final)
+        #expect(f("HTTP/1.1 100 Continue\r\n\r\nxyz" + final) == nil, "junk after a 1xx: no final response")
+        #expect(f("not http at all") == "not http at all", "no interim head: as it is (the rewrite refuses it)")
+        #expect(f("HTTP/1.1 101 Switching Protocols\r\n\r\n") == nil)
+        #expect(f("HTTP/1.1 103 Early Hints\r\n\r\n") == nil, "interim heads only")
+    }
+
+    @Test func junkAfterAnInterimHeadIsNotPassedOn() throws {
+        let auth = Data("\(Self.real):\(Self.real)".utf8).base64EncodedString()
+        let final = Self.chunked(#"{"auths":{"registry.digitalocean.com":{"auth":"\#(auth)"}}}"#)
+        let rig = try Rig(host: "api.digitalocean.com", reply: "HTTP/1.1 100 Continue\r\n\r\nX" + final)
+        defer { rig.stop() }
+        let out = try rig.get("api.digitalocean.com:443", path: "/v2/registry/docker-credentials")
+        #expect(out.hasPrefix("HTTP/1.1 502") && !out.contains(Self.real) && !out.contains(auth), "\(out.prefix(120))")
+    }
+
     @Test func aMintCallAnsweredWithAProtocolSwitchIsRefused() throws {
         let rig = try Rig(host: "api.digitalocean.com",
                           reply: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\(Self.real)")

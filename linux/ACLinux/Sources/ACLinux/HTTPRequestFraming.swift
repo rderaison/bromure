@@ -118,20 +118,27 @@ enum HTTPRequestFraming {
 
     /// A buffered reply past its interim heads: 100 Continue, 102 and 103
     /// Early Hints come before the final response on the same bytes. nil
-    /// for a 101 (a switched protocol has no final response) or a reply
-    /// that's interim heads only; anything else as it is from the first
+    /// for a 101 (a switched protocol has no final response), a reply
+    /// that's interim heads only, or one whose interim heads are followed
+    /// by anything but a head; anything else as it is from the first
     /// non-1xx head on.
     // @port-skip linux-only: URLSession consumes 1xx on macOS
     static func finalResponse(_ raw: Data) -> Data? {
         var start = raw.startIndex
+        var afterInterim = false
         while true {
             let rest = raw[start...]
             guard rest.starts(with: Data("HTTP/".utf8)),
-                  let end = rest.range(of: Data("\r\n\r\n".utf8)) else { return Data(rest) }
+                  let end = rest.range(of: Data("\r\n\r\n".utf8)) else {
+                // After an interim head, anything but another head isn't a
+                // final response (whatever real reply hides behind it).
+                return afterInterim ? nil : Data(rest)
+            }
             let line = String(decoding: rest[rest.startIndex..<(rest.firstIndex(of: 13) ?? end.lowerBound)], as: UTF8.self)
             let status = line.split(separator: " ").dropFirst().first.flatMap { Int($0) } ?? 0
             guard (100...199).contains(status) else { return Data(rest) }
             if status == 101 { return nil }
+            afterInterim = true
             start = end.upperBound
             if start == raw.endIndex { return nil }
         }
