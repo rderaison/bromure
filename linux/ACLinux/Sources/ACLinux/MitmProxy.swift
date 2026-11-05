@@ -40,6 +40,8 @@ final class MitmProxy: @unchecked Sendable {
     let kubeTrust: KubeUpstreamTrust
     /// The AWS keys a workspace's VM minted (macOS: MitmEngine.awsCreds).
     let awsCreds: AWSCredentialServer
+    /// AWS requests re-signed with the real keys (macOS: MitmEngine.awsResigner).
+    let awsResigner: AWSResigner
     /// Credentials the guest mints through the proxy: replaced by fakes in
     /// the response, kept on the host (macOS: MitmEngine.credentialMinter).
     let credentialMinter: CredentialMinter
@@ -100,6 +102,7 @@ final class MitmProxy: @unchecked Sendable {
         consent = broker
         swapper = TokenSwapper(consent: broker)
         awsCreds = AWSCredentialServer(consent: broker)
+        awsResigner = AWSResigner(credServer: awsCreds)
         kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
         claudeStore = ClaudeSubscriptionStore()
         claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
@@ -710,7 +713,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if capture == nil, !upgrade, let t = trace, t.session.level.capturesBodyForHost(host) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
-        return .forward(upgrade ? req : closing(req), injected, capture: capture, upgrade: upgrade, mint: mint)
+        var out = upgrade ? req : closing(req)
+        // An AWS request (SigV4 with the guest's fake keys) re-signed with the
+        // real ones, last, over the headers as they go out; a use the user
+        // refused is answered here (macOS: driveTLS's AWSResigner step).
+        switch await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
+        case .unchanged: break
+        case .resigned(let bytes): out = framedLikeURLSession(bytes, host: host)
+        case .denied(let response): return .answer(response)
+        case .failed(let reason, let response):
+            FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
+            return .answer(response)
+        }
+        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint)
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -770,6 +785,18 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     // @port-skip linux-only: what URLSession settles before macOS's rewrite sees a reply
     static func readWhole(_ req: Data) -> Data {
         HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding", "expect", "upgrade"], add: "Accept-Encoding: identity")
+    }
+
+    /// A re-signed request as macOS's URLSession puts it on the wire: the
+    /// resigner leaves Host, Content-Length and Connection to it (Host is
+    /// the name it signed; the body is already framed by its length, the
+    /// reader de-chunks).
+    // @port-skip linux-only: what URLSession adds to AWSResigner's bytes on macOS
+    static func framedLikeURLSession(_ raw: Data, host: String) -> Data {
+        guard let end = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
+        let body = raw.count - (end.upperBound - raw.startIndex)
+        return HTTPRequestFraming.replacingHeaders(raw, drop: ["host", "content-length", "connection"],
+                                                   add: "Host: \(host)\r\nContent-Length: \(body)\r\nConnection: close")
     }
 
     /// An absolute-form request line (`GET http://h/p HTTP/1.1`) in origin

@@ -547,6 +547,10 @@ struct CredentialMintProxyTests {
             try GuestClient.get(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
                                 target: target, proxyCA: proxy.caNIO, path: path, method: method, body: body, headers: headers)
         }
+        func getWith(_ target: String, path: String, headers: String) throws -> String {
+            try GuestClient.get(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                target: target, proxyCA: proxy.caNIO, path: path, headers: headers)
+        }
         func stop() { server.stop(); listener.stop(); try? FileManager.default.removeItem(atPath: dir) }
     }
 
@@ -705,5 +709,102 @@ struct CredentialMintProxyTests {
         _ = await Daemon.kubeconfig(for: p, plan: Daemon.makeSessionTokenPlan(for: p, mitm: proxy), live: false, mitm: proxy)
         let fake = MintedCredential.bearerFake(for: Self.real, salt: proxy.fakeTokenSalt)
         #expect(proxy.swapper.entries(for: p.id).contains { $0.fake == fake && $0.real == Self.real && $0.host == "registry.digitalocean.com" })
+    }
+}
+
+/// AWS on a Linux server: the guest's credential_process helper gets the
+/// workspace's key id and a fake secret over vsock 8445, and the proxy
+/// re-signs its SigV4 requests with the real one (macOS: MitmEngine's
+/// AWSCredentialServer, AWSCredsListenerDelegate and AWSResigner).
+@Suite("AWS credentials and re-signing", .serialized)
+struct AWSProxyTests {
+    static let akid = "AKIAIOSFODNN7EXAMPLE"
+    static let secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+    /// The guest's side of Firecracker's hybrid vsock: a connection to
+    /// `<v.sock>_8445`, read to EOF.
+    static func readHelper(_ path: String) -> String? {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in let b = Array(path.utf8); p.copyBytes(from: b); p[b.count] = 0 }
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard ok == 0 else { return nil }
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var out = Data(), buf = [UInt8](repeating: 0, count: 4096)
+        while true { let n = read(fd, &buf, buf.count); if n <= 0 { break }; out.append(contentsOf: buf[0..<n]) }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    @Test func theHelperGetsTheKeyIdAndAFakeSecretOverVsock() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let server = AWSCredentialServer(consent: ConsentBroker())
+        let pid = UUID()
+        server.setCredentials(AWSCredentials(accessKeyID: Self.akid, secretAccessKey: Self.secret, region: "us-east-1"), for: pid)
+        let l = try AWSCredsListener(udsPath: dir + "/v.sock", fdStoreName: "aws-test", stored: nil, profileID: pid, server: server)
+        defer { FDStore.remove("aws-test") }
+        let json = try #require(Self.readHelper(dir + "/v.sock_8445"))
+        let obj = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(obj["Version"] as? Int == 1 && obj["AccessKeyId"] as? String == Self.akid)
+        #expect((obj["SecretAccessKey"] as? String)?.isEmpty == false && !json.contains(Self.secret), "never the real secret")
+        #expect(Self.readHelper(dir + "/v.sock_8445") != nil, "each run of the helper is answered")
+        l.stop()
+        usleep(100_000)
+        #expect(Self.readHelper(dir + "/v.sock_8445") == nil, "stopped: nothing listens")
+        #expect(!FileManager.default.fileExists(atPath: dir + "/v.sock_8445"))
+    }
+
+    static let guestAuth = "AWS4-HMAC-SHA256 Credential=\(akid)/20261105/us-east-1/sts/aws4_request, "
+        + "SignedHeaders=host;x-amz-date, Signature=" + String(repeating: "0", count: 64)
+    static let headers = "Authorization: \(guestAuth)\r\nX-Amz-Date: 20261105T120000Z\r\n"
+
+    @Test func aSigV4RequestGoesOutReSignedWithTheRealKey() throws {
+        let rig = try CredentialMintProxyTests.Rig(host: "sts.amazonaws.com",
+                                                   reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        defer { rig.stop() }
+        rig.proxy.awsCreds.setCredentials(AWSCredentials(accessKeyID: Self.akid, secretAccessKey: Self.secret,
+                                                         region: "us-east-1"), for: rig.pid)
+        let out = try rig.getWith("sts.amazonaws.com:443", path: "/?Action=GetCallerIdentity&Version=2011-06-15", headers: Self.headers)
+        #expect(out.hasPrefix("HTTP/1.1 200"), "got \(out.prefix(160))")
+        let up = rig.server.lastRequest.value
+        let auth = up.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }.map(String.init) ?? ""
+        #expect(auth.contains("Credential=\(Self.akid)/"), "signed as the workspace's key: \(auth)")
+        #expect(!auth.contains(String(repeating: "0", count: 64)), "with a signature the host computed, not the guest's")
+        #expect(!up.contains(Self.secret))
+        // Framed as URLSession frames it on macOS (the resigner leaves these to it).
+        let head = up.components(separatedBy: "\r\n\r\n")[0].lowercased().components(separatedBy: "\r\n")
+        #expect(head.filter { $0.hasPrefix("host:") } == ["host: sts.amazonaws.com"], "one Host, the signed name: \(head)")
+        #expect(head.contains("content-length: 0") && head.contains("connection: close"))
+        // A guest's Expect: 100-continue isn't carried into the re-signed request.
+        _ = try rig.getWith("sts.amazonaws.com:443", path: "/?Action=GetCallerIdentity&Version=2011-06-15",
+                            headers: Self.headers + "Expect: 100-continue\r\n")
+        #expect(!rig.server.lastRequest.value.lowercased().contains("expect:"))
+    }
+
+    /// As on macOS: a workspace with no AWS keys at all gets its request
+    /// through as it signed it (AWS answers InvalidClientTokenId, which says
+    /// more than a refusal here); nothing real was in it.
+    @Test func withoutKeysForTheWorkspaceTheRequestGoesAsTheGuestSignedIt() throws {
+        let rig = try CredentialMintProxyTests.Rig(host: "sts.amazonaws.com",
+                                                   reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        defer { rig.stop() }
+        _ = try rig.getWith("sts.amazonaws.com:443", path: "/?Action=GetCallerIdentity&Version=2011-06-15", headers: Self.headers)
+        #expect(rig.server.lastRequest.value.contains(Self.guestAuth), "unchanged")
+    }
+
+    /// A malformed SigV4 header is answered here, not sent.
+    @Test func aMalformedSignatureIsAnsweredBeforeItGoesOut() throws {
+        let rig = try CredentialMintProxyTests.Rig(host: "sts.amazonaws.com",
+                                                   reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        defer { rig.stop() }
+        rig.proxy.awsCreds.setCredentials(AWSCredentials(accessKeyID: Self.akid, secretAccessKey: Self.secret,
+                                                         region: "us-east-1"), for: rig.pid)
+        let out = try rig.getWith("sts.amazonaws.com:443", path: "/", headers: "Authorization: AWS4-HMAC-SHA256 nonsense\r\n")
+        #expect(out.hasPrefix("HTTP/1.1 502"), "got \(out.prefix(160))")
+        #expect(rig.server.connections.value == 0)
     }
 }

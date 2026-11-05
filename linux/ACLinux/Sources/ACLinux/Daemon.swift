@@ -95,6 +95,8 @@ public actor Daemon {
         var mcp: [MCPLineListener] = []
         /// The guest's local-model bridge (vsock :8446); nil for a sign-in VM.
         var inference: InferenceBridgeListener?
+        /// The guest's AWS credential_process helper's end (vsock 8445).
+        var aws: AWSCredsListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -178,7 +180,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -891,6 +893,7 @@ public actor Daemon {
                 seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
             }
             try store.finalizeHomeSeed(for: profile, seedDir: seed)
+            if rec.registration != true { pushAWSCredentials(for: profile, meta: meta.path) }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
             try HomeSeed.finalizeHomeSeed(seedDir: seed)
@@ -944,6 +947,7 @@ public actor Daemon {
         startTraceSession(rec)
         if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:]) }
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
         // The address it had last, if still free (macOS's lease store), leased
         // before the switch sees it; recorded, so a restarted daemon hands the
@@ -1074,6 +1078,12 @@ public actor Daemon {
                 if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP) }
                 l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath,
                                              stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
+                l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath,
+                                      stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
+                // The credential server's state was the previous daemon's.
+                if l.aws != nil, let profile = await launchProfile(for: rec) {
+                    pushAWSCredentials(for: profile, meta: vmDir(rec.id) + "/meta")
+                }
                 if let staged = await launchProfile(for: rec) { startLocalEngineIfNeeded(for: staged) }
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
@@ -1341,8 +1351,9 @@ public actor Daemon {
         await MainActor.run { [browser = l.browser] in browser?.stop() }
         l.mitm?.stop()
         l.inference?.stop()
+        l.aws?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
+        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))
