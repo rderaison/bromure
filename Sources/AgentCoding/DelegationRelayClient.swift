@@ -1,6 +1,12 @@
 import Foundation
+#if canImport(os)
 import os
-import Darwin
+/// The relay's locks: OSAllocatedUnfairLock where Apple's `os` is there,
+/// LockedState (PlatformCompat) elsewhere.
+private typealias RelayLock<State> = OSAllocatedUnfairLock<State>
+#else
+private typealias RelayLock<State> = LockedState<State>
+#endif
 
 // MARK: - Delegation-MCP relay (fat-client side, Bromure Agent Host)
 
@@ -24,7 +30,7 @@ final class DelegationRelayClient: @unchecked Sendable {
     private let label: String
     private let makeServer: @MainActor () -> DelegationMCPServer?
     private let parkedFor: TimeInterval
-    private let state = OSAllocatedUnfairLock(initialState: (running: false, fds: Set<Int32>()))
+    private let state = RelayLock(initialState: (running: false, fds: Set<Int32>()))
 
     init(dial: @escaping @Sendable () -> Int32?, label: String, parkedFor: TimeInterval = 180,
          makeServer: @escaping @MainActor () -> DelegationMCPServer?) {
@@ -44,11 +50,11 @@ final class DelegationRelayClient: @unchecked Sendable {
         Thread.detachNewThread { [weak self] in
             while self?.isRunning == true {
                 // One pool per dial: a raw Thread never drains its implicit pool.
-                let go = autoreleasepool { () -> Bool in
+                let go = threadAutoreleasepool { () -> Bool in
                     guard let fd = dial(), fd >= 0 else {
                         Thread.sleep(forTimeInterval: 2); return true
                     }
-                    guard let self, self.track(fd) else { Darwin.close(fd); return false }
+                    guard let self, self.track(fd) else { LibC.close(fd); return false }
                     // Parked until an agent opens its MCP: its hello comes first.
                     switch Self.readLine(fd, within: parkedFor) {
                     case .line(let hello, let rest):
@@ -79,7 +85,7 @@ final class DelegationRelayClient: @unchecked Sendable {
         state.withLock { s in
             s.running = false
             // Wakes every read; each thread does its own close.
-            for fd in s.fds { Darwin.shutdown(fd, SHUT_RDWR) }
+            for fd in s.fds { LibC.shutdown(fd, SHUT_RDWR) }
         }
     }
 
@@ -98,7 +104,7 @@ final class DelegationRelayClient: @unchecked Sendable {
     private func release(_ fd: Int32) {
         state.withLock { s in
             s.fds.remove(fd)
-            Darwin.close(fd)
+            LibC.close(fd)
         }
     }
 
@@ -124,7 +130,7 @@ final class DelegationRelayClient: @unchecked Sendable {
                 if r == 0 { return .expired }
                 if r < 0 { if errno == EINTR { continue }; return .closed }
             }
-            let n = Darwin.read(fd, &buf, buf.count)
+            let n = LibC.read(fd, &buf, buf.count)
             if n <= 0 { return .closed }
             data.append(contentsOf: buf[0..<n])
             if let nl = data.firstIndex(of: 0x0A) {
@@ -139,7 +145,7 @@ final class DelegationRelayClient: @unchecked Sendable {
 
     /// JSON-RPC lines in, the local server's answers out, in order.
     private func pump(_ fd: Int32, hello: String, pending initial: Data) {
-        let serverBox = OSAllocatedUnfairLock<DelegationMCPServer?>(initialState: nil)
+        let serverBox = RelayLock<DelegationMCPServer?>(initialState: nil)
         let sem0 = DispatchSemaphore(value: 0)
         let make = makeServer
         Task { @MainActor in
@@ -152,13 +158,13 @@ final class DelegationRelayClient: @unchecked Sendable {
         var buf = [UInt8](repeating: 0, count: 65536)
         var pending = initial
         while true {
-            let stop = autoreleasepool { () -> Bool in
+            let stop = threadAutoreleasepool { () -> Bool in
                 while let nl = pending.firstIndex(of: 0x0A) {
                     let lineData = Data(pending[pending.startIndex..<nl])
                     pending = Data(pending[(nl + 1)...])
                     guard !lineData.isEmpty, let line = String(data: lineData, encoding: .utf8) else { continue }
                     let sem = DispatchSemaphore(value: 0)
-                    let out = OSAllocatedUnfairLock<String?>(initialState: nil)
+                    let out = RelayLock<String?>(initialState: nil)
                     Task { @MainActor in
                         let r = await server.handle(line: line, branch: hello)
                         out.withLock { $0 = r }
@@ -174,7 +180,7 @@ final class DelegationRelayClient: @unchecked Sendable {
                     }
                 }
                 if pending.count > 16 << 20 { return true }
-                let n = Darwin.read(fd, &buf, buf.count)
+                let n = LibC.read(fd, &buf, buf.count)
                 if n <= 0 { return true }
                 pending.append(contentsOf: buf[0..<n])
                 return false
@@ -188,7 +194,7 @@ final class DelegationRelayClient: @unchecked Sendable {
             guard var base = raw.baseAddress else { return true }
             var rem = raw.count
             while rem > 0 {
-                let w = Darwin.write(fd, base, rem)
+                let w = LibC.write(fd, base, rem)
                 if w <= 0 { return false }
                 base += w; rem -= w
             }
@@ -199,6 +205,9 @@ final class DelegationRelayClient: @unchecked Sendable {
 
 // MARK: - The agent host as a delegation party
 
+// A fat client's mirror of a remote agent host (FatClientController.swift,
+// which a Linux server doesn't build).
+#if os(macOS)
 extension RemoteHostController: AgentHostLink {
     var agentHostID: UUID? { isAgentHost ? listModel.profileRows.first?.id : nil }
     var hostSessions: AgentSessionStore { sessionStore }
@@ -232,3 +241,4 @@ extension RemoteHostController: AgentHostLink {
         return await startSession(profileID: id, tool: tool, cwd: cwd, cloneURL: nil, message: message)
     }
 }
+#endif

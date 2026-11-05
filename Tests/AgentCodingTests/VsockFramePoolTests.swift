@@ -110,7 +110,7 @@ struct LongLivedLoopPoolTests {
             ("Sources/AgentCoding/BrowserCDP.swift", "private func receiveLoop()", "autoreleasepool { handleMessage(payload) }"),
             ("Sources/AgentCoding/Inference/InferenceRepairProxy.swift", "private func handle(clientFD: Int32, enginePort: Int)", "while threadAutoreleasepool("),
             ("Sources/AgentCoding/Inference/MLXServer.swift", "private func handle(clientFD: Int32)", "while autoreleasepool(invoking:"),
-            ("Sources/AgentCoding/DelegationRelayClient.swift", "func start()", "let go = autoreleasepool {"),
+            ("Sources/AgentCoding/DelegationRelayClient.swift", "func start()", "let go = threadAutoreleasepool {"),
             ("Sources/AgentCoding/BrowserMCPRelayClient.swift", "func start()", "let go = autoreleasepool {"),
             ("Sources/SandboxEngine/VMNetSwitch.swift", "private func readVMLoop(", "autoreleasepool { handleFromVM(port.id, buf, n) }"),
             ("Sources/AgentCoding/P2P/TurnTLS.swift", "private static func startUplink(", "while autoreleasepool(invoking:"),
