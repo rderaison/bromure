@@ -1067,9 +1067,16 @@ public actor Daemon {
         }
         live[id] = l
         // A save between this launch's profile read and now found the VM not
-        // running yet (profilesDidChange): its policy, as it is now.
-        if rec.registration != true, let pid = UUID(uuidString: id), let now = existingProfile(for: rec) {
-            mitm?.setPromptInjectionPolicy(now.promptInjection, for: pid)
+        // running yet (profilesDidChange skipped it): its policy, as it is
+        // now. Read and applied in one step on the main actor, where
+        // profilesDidChange runs, so no save lands between the two: an
+        // earlier save is in the store by then, a later one applies its own.
+        if rec.registration != true, rec.kube == nil, let pid = UUID(uuidString: id), let mitm {
+            await MainActor.run {
+                if let now = ProfileStore().loadAll().first(where: { $0.id == pid }) {
+                    mitm.setPromptInjectionPolicy(now.promptInjection, for: pid)
+                }
+            }
         }
         do {
             try await machine.start()
