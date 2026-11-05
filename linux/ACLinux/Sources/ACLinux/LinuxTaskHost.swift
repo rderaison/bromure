@@ -208,14 +208,16 @@ extension LinuxSessionHost: TaskDispatchHost {
     var codingTaskEngine: CodingTaskEngine { SessionStores.shared!.codingTaskEngine! }
     // @port-skip linux-only: the daemon's engines (set at start, before the dispatcher runs)
     var delegationEngine: DelegationEngine { SessionStores.shared!.delegationEngine! }
-    /// No attached machines here: the daemon's own sessions.
-    // @port-skip linux-only: no attached machines on Linux
-    var allSessionRecords: [AgentSession] { agentSessionStore.sessions }
+    /// This server's sessions and the attached machines'.
+    // @port ACAppDelegate.var allSessionRecords h=465c6e879255dab4 @d2db8346
+    var allSessionRecords: [AgentSession] {
+        agentSessionStore.sessions + (LinuxMachines.shared?.attached.values.flatMap(\.sessionStore.sessions) ?? [])
+    }
     /// No window: every live session is free unless its agent is mid-turn.
     // @port-skip linux-only: no session list window on a server
     var sessionListModel: SessionListModel? { nil }
-    // @port-skip linux-only: no attached machines on Linux
-    func attachedMachineName(_ id: Profile.ID) -> String? { nil }
+    // @port ACAppDelegate.attachedMachineName(_: Profile.ID) h=2b2c216aa08778df @fa0f94e5
+    func attachedMachineName(_ id: Profile.ID) -> String? { LinuxMachines.shared?.attached[id]?.name }
     /// No Switchboard on Linux yet: a room's task has nowhere to go.
     // partial: no Switchboard on Linux yet
     // @port-skip linux-only: no Switchboard on Linux yet

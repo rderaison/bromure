@@ -111,7 +111,8 @@ extension Daemon {
 }
 
 /// Rooms on the daemon (macOS: ACAppDelegate's room* members): the room
-/// store and the sessions in them. No attached machines, no Switchboard.
+/// store and the sessions in them, this server's and attached machines'.
+/// No Switchboard.
 extension LinuxSessionHost {
     // partial: no Switchboard for a room on Linux yet
     // @port ACAppDelegate.roomCommand(_: UUID?, _: String, _: [String:Any]) h=980cca82c30fb700 @b10aa434
@@ -168,19 +169,21 @@ extension LinuxSessionHost {
         return r
     }
 
-    /// Into a room, or out of any (nil). A Switchboard never moves.
+    /// Into a room, or out of any (nil). A Switchboard never moves. An
+    /// attached machine's session too: its room is kept here, not on the
+    /// machine (LinuxMachines.sessionRooms).
     // @port ACAppDelegate.roomMove(_: UUID, to: UUID?) h=cbdf2c070e68527c @b10aa434
     func roomMove(_ sid: UUID, to room: UUID?) {
-        guard let s = agentSessionStore.session(sid), !s.isSwitchboard,
+        guard let s = sessionRecord(sid), !s.isSwitchboard,
               room == nil || agentRoomStore.room(room) != nil else { return }
-        agentSessionStore.mutate(sid) { $0.roomID = room }
+        setRoom(sid, room)
     }
 
     /// One session dropped on another: into the other's room, or a new room
     /// (named after it) holding both.
     // @port ACAppDelegate.roomGroup(dragged: UUID, onto: UUID) h=27733cfa54b5cfee @b10aa434
     func roomGroup(dragged: UUID, onto: UUID) -> UUID? {
-        guard let target = agentSessionStore.session(onto), let moved = agentSessionStore.session(dragged),
+        guard let target = sessionRecord(onto), let moved = sessionRecord(dragged),
               !target.isSwitchboard, !moved.isSwitchboard, dragged != onto else { return nil }
         if let rid = target.roomID, agentRoomStore.room(rid) != nil {
             roomMove(dragged, to: rid)
@@ -194,10 +197,9 @@ extension LinuxSessionHost {
     /// The room goes; its sessions stay, its Switchboard is archived.
     // @port ACAppDelegate.roomUngroup(_: UUID) h=402cf5259b8dff07 @b10aa434
     func roomUngroup(_ id: UUID) {
-        let engine = SessionStores.shared?.engine
-        for s in agentSessionStore.sessions where s.roomID == id {
-            if s.isSwitchboard { engine?.archive(s.id) }
-            agentSessionStore.mutate(s.id) { $0.roomID = nil }
+        for s in allSessionRecords where s.roomID == id {
+            if s.isSwitchboard { SessionStores.shared?.engine?.archive(s.id) }
+            setRoom(s.id, nil)
         }
         agentRoomStore.remove(id)
     }
@@ -205,8 +207,8 @@ extension LinuxSessionHost {
     /// Put the room away with every session in it.
     // @port ACAppDelegate.roomArchive(_: UUID) h=ec026fb0e975fa0c @b10aa434
     func roomArchive(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted && !s.isArchived {
-            SessionStores.shared?.engine?.archive(s.id)
+        for s in allSessionRecords where s.roomID == id && !s.isDeleted && !s.isArchived {
+            sessionAction(s.id, "archive")
         }
         agentRoomStore.setArchived(id, true)
     }
@@ -214,8 +216,8 @@ extension LinuxSessionHost {
     /// Bring an archived room back, with its sessions.
     // @port ACAppDelegate.roomUnarchive(_: UUID) h=46e2d33c0aa70cc0 @b10aa434
     func roomUnarchive(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && s.isArchived && !s.isDeleted {
-            SessionStores.shared?.engine?.unarchive(s.id)
+        for s in allSessionRecords where s.roomID == id && s.isArchived && !s.isDeleted {
+            sessionAction(s.id, "unarchive")
         }
         agentRoomStore.setArchived(id, false)
     }
@@ -223,9 +225,34 @@ extension LinuxSessionHost {
     /// Delete the room and every session in it.
     // @port ACAppDelegate.roomDelete(_: UUID) h=d8eb693198e25857 @b10aa434
     func roomDelete(_ id: UUID) {
-        for s in agentSessionStore.sessions where s.roomID == id && !s.isDeleted {
-            SessionStores.shared?.engine?.delete(s.id)
+        for s in allSessionRecords where s.roomID == id && !s.isDeleted {
+            sessionAction(s.id, "delete")
+            if LinuxMachines.shared?.machine(forSession: s.id) != nil { setRoom(s.id, nil) }
         }
         agentRoomStore.remove(id)
+    }
+
+    /// A session's room, wherever the session lives.
+    // @port ACAppDelegate.setRoom(_: UUID, _: UUID?) h=ab9fdf6cf4f2c477 @d2db8346
+    func setRoom(_ sid: UUID, _ room: UUID?) {
+        if let machines = LinuxMachines.shared, let m = machines.machine(forSession: sid) {
+            machines.setSessionRoom(sid, room)
+            m.sessionStore.mutate(sid) { $0.roomID = room }   // at once; the next poll agrees
+            return
+        }
+        agentSessionStore.mutate(sid) { $0.roomID = room }
+    }
+
+    /// archive / unarchive / delete, on this server's engine or the machine's.
+    // @port ACAppDelegate.sessionAction(_: UUID, _: String) h=d51c6211e992559f @d2db8346
+    func sessionAction(_ sid: UUID, _ action: String) {
+        if let m = LinuxMachines.shared?.machine(forSession: sid) { m.hostSessionCommand(sid, action, [:]); return }
+        let engine = SessionStores.shared?.engine
+        switch action {
+        case "archive": engine?.archive(sid)
+        case "unarchive": engine?.unarchive(sid)
+        case "delete": engine?.delete(sid)
+        default: break
+        }
     }
 }

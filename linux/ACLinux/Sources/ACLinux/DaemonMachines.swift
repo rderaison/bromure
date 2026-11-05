@@ -105,13 +105,26 @@ final class LinuxMachines {
     static var shared: LinuxMachines?
     private(set) var attached: [UUID: AttachedMachine] = [:]
     private var observer: NSObjectProtocol?
+    /// Session -> room for sessions on attached machines. This server decides
+    /// them (a machine's own word isn't taken: it could seat itself in any
+    /// room) and stamps them on what it reads from the machine.
+    private(set) var sessionRooms: [UUID: UUID] = [:]
+    private let sessionRoomsURL: URL
 
     /// Follow machines attaching and detaching; the user's answers to
     /// machines asking to join are kept in the state dir.
     // @port ACAppDelegate.watchAttachedMachines() h=4225ae8ed5d459db @d2db8346
     init(stateDir: String) {
-        MachineLinkHub.shared.storeURL = URL(fileURLWithPath: stateDir, isDirectory: true)
-            .appendingPathComponent("machines.json")
+        let dir = URL(fileURLWithPath: stateDir, isDirectory: true)
+        MachineLinkHub.shared.storeURL = dir.appendingPathComponent("machines.json")
+        sessionRoomsURL = dir.appendingPathComponent("machine-session-rooms.json")
+        sessionRooms = Self.loadSessionRooms(sessionRoomsURL)
+        // A session a remote client starts on a machine straight into a room
+        // ("Add to Room"): the room is recorded here.
+        MachineLinkHub.shared.onSessionStarted = { sid, body in
+            let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
+            Task { @MainActor in LinuxMachines.shared?.assignRoom(sid, room) }
+        }
         observer = NotificationCenter.default.addObserver(
             forName: MachineLinkHub.machinesChanged, object: nil, queue: nil) { note in
             guard let id = note.object as? UUID else { return }
@@ -139,6 +152,12 @@ final class LinuxMachines {
                 }
                 return ids
             }
+            // Its sessions' rooms are this server's to say.
+            m.roomOf = { sid in
+                guard let r = LinuxMachines.shared?.sessionRooms[sid], SessionStores.shared?.rooms.room(r) != nil
+                else { return nil }
+                return r
+            }
             attached[id] = m
         } else if let m = attached.removeValue(forKey: id) {
             m.stop()
@@ -150,6 +169,43 @@ final class LinuxMachines {
     func machine(forSession id: UUID) -> AttachedMachine? {
         guard SessionStores.shared?.sessions.session(id) == nil else { return nil }
         return attached.values.first { $0.sessionStore.session(id) != nil }
+    }
+
+    /// A machine session's room (nil: none), kept across restarts.
+    // @port-skip linux-only: setRoom's machine branch, the store half (macOS: machineSessionRooms + saveMachineSessionRooms)
+    func setSessionRoom(_ sid: UUID, _ room: UUID?) {
+        sessionRooms[sid] = room
+        save()
+    }
+
+    /// A session just started on an attached machine, into `room`: recorded
+    /// at once (the machine's mirror may not list it yet; the next poll
+    /// stamps it).
+    // @port ACAppDelegate.assignMachineRoom(_: UUID, _: UUID?) h=04712b4dc53c7211 @d2db8346
+    func assignRoom(_ sid: UUID, _ room: UUID?) {
+        guard let room, SessionStores.shared?.rooms.room(room) != nil else { return }
+        setSessionRoom(sid, room)
+        for m in attached.values where m.sessionStore.session(sid) != nil {
+            m.sessionStore.mutate(sid) { $0.roomID = room }
+        }
+    }
+
+    // @port-skip linux-only: machineSessionRooms' lazy initializer (not a function portmap tracks), at the state dir
+    private static func loadSessionRooms(_ url: URL) -> [UUID: UUID] {
+        guard let data = try? Data(contentsOf: url),
+              let d = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: d.compactMap { k, v in
+            UUID(uuidString: k).flatMap { key in UUID(uuidString: v).map { (key, $0) } }
+        })
+    }
+
+    // @port ACAppDelegate.saveMachineSessionRooms() h=fa53d569bfb04b21 @d2db8346
+    private func save() {
+        // Rooms that no longer exist drop out.
+        let live = Set(SessionStores.shared?.rooms.rooms.map(\.id) ?? [])
+        sessionRooms = sessionRooms.filter { live.contains($0.value) }
+        let d = Dictionary(uniqueKeysWithValues: sessionRooms.map { ($0.key.uuidString, $0.value.uuidString) })
+        if let data = try? JSONEncoder().encode(d) { try? data.write(to: sessionRoomsURL, options: .atomic) }
     }
 
     /// `command` on the attached machine `profileID`; nil when it isn't one.
