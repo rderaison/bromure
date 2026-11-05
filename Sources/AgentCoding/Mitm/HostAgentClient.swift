@@ -190,7 +190,7 @@ final class HostAgentClient: @unchecked Sendable {
     /// With a `timeout`, the socket is non-blocking and one deadline
     /// covers connect, both writes, and the body read.
     func request(_ payload: Data) -> Data? {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socket(AF_UNIX, LibC.sockStream, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
 
