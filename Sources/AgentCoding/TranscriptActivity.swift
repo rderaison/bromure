@@ -53,9 +53,22 @@ enum TranscriptRow: Identifiable {
         // activity: folded into "3 commands · …" it would never be seen.
         case .toolUse(let name, _, let detail):
             return DisplayRequest.parse(name: name, detail: detail) == nil
-        case .toolResult, .thinking: return true
+        case .toolResult: return true
+        // What the agent says between its calls, logged as a short thought,
+        // is what its terminal prints as prose: folded, it was never seen.
+        case .thinking(let t): return !isNarration(t)
         default: return false
         }
+    }
+
+    /// Longer than this, a thought is reasoning and folds with the activity.
+    /// Claude Code's own (a sentence or two, 380 characters at most in a
+    /// long session) stay in the conversation.
+    static let narrationLimit = 600
+
+    static func isNarration(_ thought: String) -> Bool {
+        let t = thought.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !t.isEmpty && t.count <= narrationLimit
     }
 
     /// A long reply cut into rows of about this many characters, so no row

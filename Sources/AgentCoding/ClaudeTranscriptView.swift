@@ -3335,6 +3335,16 @@ struct TranscriptItemView: View {
             assistantText(text)
         case .question(let q):
             TranscriptQuestionCard(question: q)
+        case .thinking(let text) where TranscriptRow.isNarration(text):
+            // The agent's running commentary: in the conversation, quieter
+            // than what it answers.
+            Text(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                .font(.system(size: 13))
+                .italic()
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         case .thinking(let text):
             CollapsibleRow(icon: "brain",
                            title: NSLocalizedString("Thinking", comment: "transcript"),
