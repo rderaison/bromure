@@ -252,21 +252,26 @@ extension Daemon {
     /// pushLiveCredentials).
     // partial: the kubeconfig and its swaps only (macOS restages every live credential)
     // @port-skip linux-only: refreshKubeAccessForRunningWorkspaces on the Linux daemon
+    /// `create`: as launchProfile (a restarted daemon's refresh: false).
+    /// A workspace with no kube contexts gets nothing written, and the
+    /// guest's file is never removed: a user's own ~/.kube/config (kind,
+    /// doctl …) stays.
     @discardableResult
-    func refreshWorkspaceKubeconfigs() async -> Int {
+    func refreshWorkspaceKubeconfigs(create: Bool = true) async -> Int {
         var n = 0
         for rec in registry.records where rec.state == .running && !rec.managed {
-            guard let profile = await launchProfile(for: rec) else {
-                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no workspace profile; its credentials aren't refreshed\n".utf8))
-                continue
-            }
+            guard let profile = await launchProfile(for: rec, create: create) else { continue }
             n += 1
             var yaml = ""
             if let mitm { yaml = await Self.liveKubeconfig(for: profile, mitm: mitm) ?? "" }
+            // No kube contexts (nothing imported, no Bromure cluster it may
+            // use): the materializer's skeleton isn't written over whatever
+            // the guest has.
+            let direct = await MainActor.run { SessionStores.shared?.kubeEngine?.directClusters(for: profile.id).isEmpty ?? true }
+            guard !yaml.isEmpty, !profile.kubeconfigs.isEmpty || !direct else { continue }
             let b64 = Data(yaml.utf8).base64EncodedString()
-            let cmd = yaml.isEmpty ? "rm -f ~/.kube/config && echo ok"
-                : "mkdir -p ~/.kube && chmod 700 ~/.kube && umask 077 && echo \(b64) | base64 -d > ~/.kube/config.tmp "
-                    + "&& mv -f ~/.kube/config.tmp ~/.kube/config && echo ok"
+            let cmd = "mkdir -p ~/.kube && chmod 700 ~/.kube && umask 077 && echo \(b64) | base64 -d > ~/.kube/config.tmp "
+                + "&& mv -f ~/.kube/config.tmp ~/.kube/config && echo ok"
             let pid = profile.id
             let out = try? await MainActor.run { LinuxSessionHost.shared }?.guestExec(profileID: pid, command: cmd, timeout: 20)
             if out?.contains("ok") != true {

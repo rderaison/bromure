@@ -206,13 +206,12 @@ public actor Daemon {
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
         await d.startSessionEngine()
-        // Taken-back workspaces: the proxy's state for each was the previous
-        // daemon's. Their swap maps (the plan's fakes, stable with the salt;
-        // minted credentials), kube trust, exec pollers and 1Password loops
-        // are set up again, and their kubeconfigs rewritten (its kube fakes
-        // are made anew) -- the launch's step, as a live refresh runs it.
-        let n = await d.refreshWorkspaceKubeconfigs()
-        if n > 0 { FileHandle.standardError.write(Data("bromure-ac daemon: \(n) taken-back workspace(s): credentials set up again\n".utf8)) }
+        // Taken-back workspaces: their credentials were set up as adoption
+        // took them (before their proxy listeners served); their kubeconfigs
+        // are rewritten now that the session host is up (the kube fakes were
+        // made anew), as a live refresh does.
+        let n = await d.refreshWorkspaceKubeconfigs(create: false)
+        if n > 0 { FileHandle.standardError.write(Data("bromure-ac daemon: \(n) taken-back workspace(s): kubeconfigs refreshed\n".utf8)) }
         await d.setUpRemoteAccess()
         return d
     }
@@ -481,6 +480,19 @@ public actor Daemon {
     static func identityTaken(by records: [VMRecord]) -> (UInt32) -> Bool {
         let cids = Set(records.map(\.cid)), macs = Set(records.map { $0.mac.lowercased() })
         return { cids.contains($0) || macs.contains(mac(forCID: $0)) }
+    }
+
+    /// A taken-back workspace's proxy state, as its launch set it up: the
+    /// swap map (Daemon.kubeconfig: the plan's fakes, minted credentials,
+    /// setMinted, kube trust, exec pollers, 1Password), the AWS credential
+    /// server and the SSH agent's key. The guest's files are left as they
+    /// are (its kubeconfig: start's refresh).
+    // @port-skip linux-only: a restarted daemon's share of ACAppDelegate.launch's proxy wiring
+    func setUpWorkspaceCredentials(_ profile: Profile, meta: String) async {
+        guard let mitm else { return }
+        _ = await kubeconfig(for: profile, plan: sessionTokenPlan(for: profile))
+        pushAWSCredentials(for: profile, meta: meta)
+        mitm.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: profileStore), for: profile.id)
     }
 
     /// Why a VM may not launch with `plan`: a workspace's needs one (no proxy
@@ -1122,6 +1134,17 @@ public actor Daemon {
                 }
                 var l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, browser: browser,
                              storedNet: storeName)
+                // The workspace's credentials, before its proxy listener accepts
+                // a connection (they were the previous daemon's): its swap map
+                // (minted credentials and their AWS keys, so a minted key never
+                // signs as the base keys), kube trust, the AWS credential server
+                // and its SSH key. start then rewrites its kubeconfig.
+                let adoptedProfile = rec.managed ? nil : await launchProfile(for: rec, create: false)
+                if let profile = adoptedProfile {
+                    await setUpWorkspaceCredentials(profile, meta: vmDir(rec.id) + "/meta")
+                } else if !rec.managed {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no workspace profile; its credentials aren't set up\n".utf8))
+                }
                 l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
                 startTraceSession(rec)
@@ -1136,13 +1159,7 @@ public actor Daemon {
                                       stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
                 l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
-                // The credential server's state was the previous daemon's (the
-                // swap map and the rest: start's refresh, once the session host is up).
-                if let profile = await launchProfile(for: rec) {
-                    if l.aws != nil { pushAWSCredentials(for: profile, meta: vmDir(rec.id) + "/meta") }
-                    if l.ssh != nil, let mitm { mitm.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: profileStore), for: profile.id) }
-                }
-                if let staged = await launchProfile(for: rec) { startLocalEngineIfNeeded(for: staged) }
+                if let staged = adoptedProfile { startLocalEngineIfNeeded(for: staged) }
                 sw.attach(l.port, mac: rec.mac)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id

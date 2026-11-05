@@ -14,8 +14,10 @@ extension Daemon {
     /// plan, the home seed, the meta share and the engine all see the models
     /// and credentials the user configured. A sign-in VM's stays as made.
     // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch)
-    func launchProfile(for rec: VMRecord) async -> Profile? {
-        guard let raw = profile(for: rec) else { return nil }
+    /// `create` false: only a Profile the VM already has (a restarted
+    /// daemon's lookups never make one).
+    func launchProfile(for rec: VMRecord, create: Bool = true) async -> Profile? {
+        guard let raw = create ? profile(for: rec) : existingProfile(for: rec) else { return nil }
         if rec.registration == true { return raw }
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {

@@ -14,16 +14,24 @@ extension Daemon {
     // @port-skip linux-only: Linux workspaces are VM records with a Profile each
     func profile(for rec: VMRecord) -> Profile? {
         guard let uuid = UUID(uuidString: rec.id) else { return nil }
-        // A sign-in VM's Profile is the daemon's alone, never saved.
-        if rec.registration == true { return registrationProfiles[rec.id] }
-        // A cluster's machine has no workspace Profile.
-        if rec.kube != nil { return nil }
+        if let p = existingProfile(for: rec) { return p }
+        if rec.registration == true || rec.kube != nil { return nil }
         let store = profileStore
-        if let p = store.loadAll().first(where: { $0.id == uuid }) { return p }
         var p = store.newProfileFromTemplate(name: rec.name)
         p.id = uuid
         p.createdAt = rec.createdAt
         return try? store.save(p)
+    }
+
+    /// The Profile `rec` has, never one made for it: a sign-in VM's (the
+    /// daemon's alone, never saved), a workspace's from the store; a
+    /// cluster's machine has none.
+    // @port-skip linux-only: Linux workspaces are VM records with a Profile each
+    func existingProfile(for rec: VMRecord) -> Profile? {
+        guard let uuid = UUID(uuidString: rec.id) else { return nil }
+        if rec.registration == true { return registrationProfiles[rec.id] }
+        if rec.kube != nil { return nil }
+        return profileStore.loadAll().first(where: { $0.id == uuid })
     }
 
     /// The Profile and VM record for `key`: a profile id (any case), its
