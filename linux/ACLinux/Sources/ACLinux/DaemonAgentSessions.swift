@@ -34,6 +34,10 @@ extension Daemon {
             delegations.profiles = { ProfileStore().loadAll() }
             delegations.hostLabel = { ProcessInfo.processInfo.hostName }
             delegations.scan = { text in Daemon.heuristicScan(text) }
+            // Machines attached here: their sessions are delegation parties
+            // like ours (macOS: agentHostLinks, its attached machines).
+            LinuxMachines.shared = LinuxMachines(stateDir: state)
+            delegations.agentHostLinks = { LinuxMachines.shared?.attached.values.filter(\.connected) ?? [] }
             stores.delegationEngine = delegations
             let dispatcher = TaskDispatcher(delegate: host)
             stores.taskDispatcher = dispatcher

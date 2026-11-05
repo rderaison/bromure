@@ -282,6 +282,9 @@ public actor Daemon {
     // @port-skip linux-only: the Linux router (each route below carries its own @port)
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         let path = String(req.path.split(separator: "?", maxSplits: 1).first ?? "")
+        // An attached machine parks its links here, and requests aimed at it
+        // go down one (DaemonMachines.swift).
+        if let r = machineRoute(req, path) { return r }
         switch (req.method, path) {
         case ("GET", "/health"): return health()
         case ("GET", "/state"):
@@ -451,7 +454,7 @@ public actor Daemon {
             })
             return .object(o)
         }
-        return .object([
+        let body: [String: JSONValue] = [
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
             "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(\.workspaceJSON)),
@@ -462,13 +465,16 @@ public actor Daemon {
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
             "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
             "localModels": Self.localModels(),
-        ].merging(sessionEntries) { a, _ in a })
+        ].merging(sessionEntries) { a, _ in a }
+        return .object(Self.withMachines(body))
     }
 
     // partial: entries lack tabs, stats, ports, docker, disk and kube fields (see VMRecord.json)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/vms"): h=b80678b83121852e @7dd92fdf
     func listVMs() -> ControlResponse {
-        ControlResponse(200, ["vms": .array(records.map(vmEntry))])
+        let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
+        guard case .array(let more) = machines else { return ControlResponse(200, ["vms": .array(records.map(vmEntry))]) }
+        return ControlResponse(200, ["vms": .array(records.map(vmEntry) + more)])
     }
 
     /// Whether a new VM may not have `cid`: another record has it, or has

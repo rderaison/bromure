@@ -24,15 +24,19 @@ public struct ControlResponse: Sendable {
     /// octet-stream header and then belongs to this closure (raw bytes both
     /// ways) until it returns; the connection is closed after it.
     public let stream: (@Sendable (ControlStream) async -> Void)?
+    /// What a streaming reply writes before the stream (nil: the
+    /// octet-stream header; "": nothing, the stream answers in full).
+    public let streamHead: String?
     // @port-skip linux-only: response value type
-    public init(_ status: Int, _ body: JSONValue) { self.status = status; self.body = body; self.stream = nil }
+    public init(_ status: Int, _ body: JSONValue) { self.status = status; self.body = body; self.stream = nil; self.streamHead = nil }
     // @port-skip linux-only: response value type
-    public static func streaming(_ body: @escaping @Sendable (ControlStream) async -> Void) -> ControlResponse {
-        ControlResponse(stream: body)
+    public static func streaming(head: String? = nil,
+                                 _ body: @escaping @Sendable (ControlStream) async -> Void) -> ControlResponse {
+        ControlResponse(stream: body, head: head)
     }
     // @port-skip linux-only: response value type
-    private init(stream: @escaping @Sendable (ControlStream) async -> Void) {
-        status = 200; body = .null; self.stream = stream
+    private init(stream: @escaping @Sendable (ControlStream) async -> Void, head: String?) {
+        status = 200; body = .null; self.stream = stream; streamHead = head
     }
     // @port-skip linux-only: response helpers
     public static func error(_ status: Int, _ message: String, _ extra: [String: JSONValue] = [:]) -> ControlResponse {
@@ -253,7 +257,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         promise.futureResult.whenSuccess { r in
             let (handler, context) = bound.value
             if let stream = r.stream {
-                handler.startStream(context, leftover: headLen + length, stream)
+                handler.startStream(context, leftover: headLen + length, head: r.streamHead, stream)
             } else {
                 handler.reply(context, r)
             }
@@ -263,7 +267,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     /// The octet-stream header, then the connection is `body`'s: bytes the
     /// client sent after the request (and all later ones) go to its inbound.
     // @port-skip linux-only: NIO stream handoff (macOS: handleInteractiveExec writes the header on the fd)
-    private func startStream(_ context: ChannelHandlerContext, leftover consumed: Int,
+    private func startStream(_ context: ChannelHandlerContext, leftover consumed: Int, head: String?,
                              _ body: @escaping @Sendable (ControlStream) async -> Void) {
         let (inbound, cont) = AsyncStream<ByteBuffer>.makeStream()
         streamIn = cont
@@ -271,8 +275,10 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         if buf.readableBytes > 0 { cont.yield(buf.slice()) }
         buf = ByteBuffer()
         if !context.channel.isActive { cont.finish() }
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
-        context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(string: head)), promise: nil)
+        let head = head ?? "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+        if !head.isEmpty {
+            context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(string: head)), promise: nil)
+        }
         let channel = context.channel
         Task {
             await body(ControlStream(inbound: inbound, channel: channel))

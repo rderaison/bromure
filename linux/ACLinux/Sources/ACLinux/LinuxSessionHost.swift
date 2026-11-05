@@ -197,16 +197,16 @@ final class LinuxSessionHost: AgentSessionHost {
         return try await daemon.guestFileOp(profileID: profileID, op: op, timeout: timeout)
     }
 
-    /// The session's transcript from the guest (macOS's body, without the
-    /// attached-machine branch).
-    // partial: no attached machines on Linux
+    /// The session's transcript from the guest, or from the attached
+    /// machine it runs on.
     // @port ACAppDelegate.fetchSessionTranscript(_: AgentSession) h=fc500b26504a893e @9936e30c
     func fetchSessionTranscript(_ s: AgentSession) async -> String? {
         let cwd = SessionHome.guestPath(s.cwd)
         var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
         if s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
             pin.kimiSession = id
-        } else if s.tool == .kimi, let store = SessionStores.shared?.sessions {
+        } else if s.tool == .kimi, let store = LinuxMachines.shared?.attached[s.profileID]?.sessionStore ?? SessionStores.shared?.sessions {
+            // Not pinned: at least never another session's own journal.
             pin.kimiExclude = store.kimiSessionsClaimed(profileID: s.profileID, besides: s.id)
         }
         guard let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: 0,
@@ -289,12 +289,18 @@ final class LinuxSessionHost: AgentSessionHost {
         }
     }
 
-    // @port-skip linux-only: no attached machines on Linux
-    func isAttachedMachine(_ id: Profile.ID) -> Bool { false }
-    // @port-skip linux-only: the daemon's session store
-    func sessionRecord(_ id: UUID) -> AgentSession? { SessionStores.shared?.sessions.session(id) }
-    // @port-skip linux-only: no attached machines on Linux
-    func attachedMachineExec(sessionID id: UUID, command: String, timeout: Int) async throws -> String? { nil }
+    // @port ACAppDelegate.isAttachedMachine(_: Profile.ID) h=aa5e35128f21b4d7 @d2e3e97f
+    func isAttachedMachine(_ id: Profile.ID) -> Bool { LinuxMachines.shared?.attached[id] != nil }
+    // @port ACAppDelegate.sessionRecord(_: UUID) h=d3c22e99cc85bf05 @d2db8346
+    func sessionRecord(_ id: UUID) -> AgentSession? {
+        SessionStores.shared?.sessions.session(id)
+            ?? LinuxMachines.shared?.attached.values.lazy.compactMap { $0.sessionStore.session(id) }.first
+    }
+    // @port ACAppDelegate.attachedMachineExec(sessionID: UUID, command: String, timeout: Int) h=9198a0e7c4994035 @d2e3e97f
+    func attachedMachineExec(sessionID id: UUID, command: String, timeout: Int) async throws -> String? {
+        guard let machine = LinuxMachines.shared?.machine(forSession: id) else { return nil }
+        return try await machine.hostExec(command, timeout: timeout)
+    }
 
     // MARK: App state
 

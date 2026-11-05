@@ -20,9 +20,13 @@ extension Daemon {
 
     /// `command` in the workspace's guest (bash, as the workspace user); its
     /// stdout. A non-zero exit throws with stderr, as on macOS.
-    // partial: no attached-machine (Sidecar) branch
     // @port-skip linux-only: ACAppDelegate.guestExec over VZ vsock; this one is GuestShell's
     func guestExec(profileID: UUID, command: String, timeout: Int = 30) async throws -> String {
+        // An attached machine (Bromure Sidecar) runs it on that machine: the
+        // board's worktree lookups and reviews reach its sessions too.
+        if let out = try await LinuxMachines.exec(profileID: profileID, command: command, timeout: timeout) {
+            return out
+        }
         guard let l = live.first(where: { $0.key.caseInsensitiveCompare(profileID.uuidString) == .orderedSame })?.value else {
             throw GuestCommandError.unavailable("workspace \(profileID.uuidString.prefix(8)) isn't running")
         }
