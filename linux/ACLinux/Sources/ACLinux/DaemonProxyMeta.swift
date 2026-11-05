@@ -7,11 +7,12 @@ extension Daemon {
     /// (`proxy_port`, bridged to host vsock 8443) and `proxy.env`, which
     /// every shell sources: the proxy variables and the per-language CA
     /// bundles. Without a proxy, none of them: the guest goes out directly.
-    // partial: proxy.env has the proxy, CA and local-model lines only (no git/cloud token fakes, AWS region, profile env vars, SSH agent)
+    // partial: SSH_AUTH_SOCK is exported as on macOS, but nothing on the host serves its bridge (vsock 8444) yet
     // @port-skip linux-only: SessionDisk.prepareMetadataShare's MITM share, for the Linux proxy (the full function is AppKit-side)
-    func writeProxyMeta(_ meta: URL, profile: Profile?, extraNoProxy: [String] = []) throws {
+    func writeProxyMeta(_ meta: URL, profile: Profile?, tokenPlan: SessionTokenPlan? = nil,
+                        extraNoProxy: [String] = [], registries: [String] = []) throws {
         let fm = FileManager.default
-        let names = ["bromure-ca.pem", "proxy_port", "proxy.env"]
+        let names = ["bromure-ca.pem", "proxy_port", "proxy.env", "docker-registries.txt"]
         guard let mitm else {
             for n in names { try? fm.removeItem(at: meta.appendingPathComponent(n)) }
             return
@@ -23,8 +24,22 @@ extension Daemon {
         // stay off the proxy (macOS: SessionDisk.extraNoProxy).
         var noProxy = ["localhost", "127.0.0.1", "::1", Self.vmSubnet]
         for x in extraNoProxy where !noProxy.contains(x) { noProxy.append(x) }
-        let env = Self.proxyEnv(port: port, noProxy: noProxy)
-            + (profile.map(Self.localModelEnv) ?? "")
+        let env: String
+        if let profile {
+            // A workspace's: macOS's lines (shared), its tokens' fakes, local
+            // models and own variables with them. Always cooperative: Linux
+            // has no transparent interception to fall back on.
+            env = SessionDisk.proxyEnvLines(profile: profile, tokenPlan: tokenPlan, proxyPort: port,
+                                            extraNoProxy: Array(noProxy.dropFirst(3)),
+                                            extraInsecureRegistries: registries, cooperativeAlways: true)
+                .joined(separator: "\n") + "\n"
+            // The registries dockerd may talk plain HTTP to (agentd →
+            // /etc/docker/daemon.json); written even when empty, so a removal lands.
+            try (registries.joined(separator: "\n") + "\n").write(to: meta.appendingPathComponent("docker-registries.txt"),
+                                                                 atomically: true, encoding: .utf8)
+        } else {
+            env = Self.proxyEnv(port: port, noProxy: noProxy)
+        }
         try env.write(to: meta.appendingPathComponent("proxy.env"), atomically: true, encoding: .utf8)
     }
 
@@ -61,24 +76,5 @@ extension Daemon {
             "export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=\(ca)",
             "export SSL_CERT_DIR=/etc/ssl/certs",
         ]).joined(separator: "\n") + "\n"
-    }
-
-    /// `proxy.env`'s local-inference lines: each agent set to "Local model"
-    /// pinned at the engine, with the profile's per-VM engine key and the
-    /// active model's real name. The base the models overlay gives them is
-    /// the `https://bromure.llm` sentinel, reached through the intercepting
-    /// proxy (MitmProxy.route sends it to the repair proxy); a base on the
-    /// guest's own 127.0.0.1:11434 bridge (vsock 8446) works as well.
-    // @port-skip linux-only: the local-inference lines of SessionDisk.prepareMetadataShare's proxy.env
-    static func localModelEnv(_ profile: Profile) -> String {
-        guard let model = profile.localAgentModelName else { return "" }
-        let key = EngineKey.perVM(profileID: profile.id)
-        var lines: [String] = []
-        for spec in profile.allToolSpecs where spec.authMode == .local {
-            for export in spec.tool.localEnvExports(model: model, key: key) {
-                lines.append("export \(export.name)=\(shellQuote(export.value))")
-            }
-        }
-        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
     }
 }

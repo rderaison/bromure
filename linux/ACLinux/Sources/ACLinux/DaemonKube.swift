@@ -283,6 +283,13 @@ extension Daemon {
         await MainActor.run { SessionStores.shared?.kubeEngine?.extraNoProxy(for: profileID) ?? [] }
     }
 
+    /// The Bromure registries a workspace may push to and pull from (macOS:
+    /// registryAddresses into the session disk's docker-registries.txt).
+    // @port-skip linux-only: KubeClusterEngine.registryAddresses into the Linux meta share
+    func kubeRegistries(for profileID: UUID) async -> [String] {
+        await MainActor.run { SessionStores.shared?.kubeEngine?.registryAddresses(for: profileID) ?? [] }
+    }
+
     // MARK: The machines, actor side
 
     /// A cluster machine's record, made (stopped) if it has none, with its

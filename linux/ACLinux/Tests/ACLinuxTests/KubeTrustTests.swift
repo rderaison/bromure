@@ -886,6 +886,27 @@ struct OnePasswordRefreshTests {
 /// vars, never a real value.
 @Suite("Guest credential environment")
 struct GuestEnvTests {
+    /// Through the daemon's writer: the shared lines, always cooperative
+    /// (no transparent interception on Linux), the VM subnet and the
+    /// cluster addresses off the proxy, the registries for dockerd.
+    @Test func theDaemonWritesAWorkspacesProxyEnv() async throws {
+        let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let meta = URL(fileURLWithPath: dir + "/meta", isDirectory: true)
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        var p = Profile(name: "strict", tool: .claude, authMode: .token)
+        p.strictSandbox = true
+        p.environmentVariables = [EnvironmentVariable(name: "MY_FLAG", value: "on")]
+        try await d.writeProxyMeta(meta, profile: p, tokenPlan: nil, extraNoProxy: ["192.168.64.7"],
+                                   registries: ["192.168.64.9:5000"])
+        let env = try String(contentsOf: meta.appendingPathComponent("proxy.env"), encoding: .utf8)
+        #expect(env.contains("export HTTPS_PROXY=http://127.0.0.1:\(Daemon.guestProxyPort)"), "always cooperative")
+        #expect(env.contains("192.168.64.0/24") && env.contains("192.168.64.7"))
+        #expect(env.contains("export MY_FLAG='on'") && env.contains("export BROMURE_REGISTRY='192.168.64.9:5000'"))
+        #expect(try String(contentsOf: meta.appendingPathComponent("docker-registries.txt"), encoding: .utf8) == "192.168.64.9:5000\n")
+        await d.shutdown()
+    }
+
     @Test func manualTokensAndAPIKeysAreExportedAsFakes() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))

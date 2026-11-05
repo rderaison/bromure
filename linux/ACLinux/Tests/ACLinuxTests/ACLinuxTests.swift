@@ -1615,14 +1615,40 @@ struct LocalModelTests {
         #expect(!cloud.local && cloud.tls && cloud.host == "api.anthropic.com" && cloud.port == 443)
     }
 
-    @Test("a workspace's Local-model agents get the engine's env in proxy.env; others none")
+    @Test("proxy.env (macOS's builder, shared): local-model agents get the engine's env; others none")
     func proxyEnvLines() {
         var p = Profile(name: "local", tool: .claude, authMode: .local)
         p.activeModelID = "qwen3:32b"
-        let env = Daemon.localModelEnv(p)
-        #expect(env.contains("export ANTHROPIC_MODEL=qwen3:32b"))
-        #expect(env.contains("export ANTHROPIC_AUTH_TOKEN=" + EngineKey.perVM(profileID: p.id)))
-        #expect(Daemon.localModelEnv(Profile(name: "cloud", tool: .claude, authMode: .subscription)).isEmpty)
+        func env(_ p: Profile, plan: SessionTokenPlan? = nil, always: Bool = true) -> String {
+            SessionDisk.proxyEnvLines(profile: p, tokenPlan: plan, proxyPort: 65534, extraNoProxy: ["192.168.64.0/24"],
+                                      extraInsecureRegistries: [], cooperativeAlways: always).joined(separator: "\n")
+        }
+        #expect(env(p).contains("export ANTHROPIC_MODEL='qwen3:32b'"))
+        #expect(env(p).contains("export ANTHROPIC_AUTH_TOKEN='" + EngineKey.perVM(profileID: p.id) + "'"))
+        #expect(!env(Profile(name: "cloud", tool: .claude, authMode: .subscription)).contains("ANTHROPIC_MODEL"))
+    }
+
+    @Test("proxy.env: a forge token's fake, the user's variables, the proxy always (no transparent path here)")
+    func proxyEnvTokensAndVariables() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "forge", tool: .claude, authMode: .token)
+        p.gitHTTPSCredentials = [GitHTTPSCredential(host: "github.com", username: "me", token: "ghp_REALTOKEN")]
+        p.environmentVariables = [EnvironmentVariable(name: "MY_FLAG", value: "on")]
+        p.strictSandbox = true
+        let plan = Daemon.makeSessionTokenPlan(for: p, mitm: proxy)
+        func env(always: Bool) -> String {
+            SessionDisk.proxyEnvLines(profile: p, tokenPlan: plan, proxyPort: 65534, extraNoProxy: ["192.168.64.0/24"],
+                                      extraInsecureRegistries: [], cooperativeAlways: always).joined(separator: "\n")
+        }
+        let text = env(always: true)
+        let fake = try #require(plan.fakeForGitHTTPS(host: "github.com", username: "me"))
+        #expect(text.contains("export GH_TOKEN='\(fake)'") && text.contains("export GITHUB_TOKEN='\(fake)'"))
+        #expect(!text.contains("ghp_REALTOKEN"))
+        #expect(text.contains("export MY_FLAG='on'"))
+        #expect(text.contains("export HTTPS_PROXY=http://127.0.0.1:65534") && text.contains("192.168.64.0/24"),
+                "a strict sandbox still gets the proxy on Linux")
+        #expect(!env(always: false).contains("HTTPS_PROXY"), "macOS's rule, unchanged: transparent interception there")
     }
 
     @Test("localModels reports the memory and no built-in models")

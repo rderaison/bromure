@@ -886,6 +886,7 @@ public actor Daemon {
         // settings and the Claude spec. A VM with no Profile gets the
         // profile-independent subset.
         let staged = await launchProfile(for: rec)
+        var launchPlan: SessionTokenPlan?
         if let profile = staged {
             let store = profileStore
             // The stand-ins the proxy turns into the real logins (Claude's in
@@ -893,6 +894,7 @@ public actor Daemon {
             // A sign-in VM has none and no swap map: the real OAuth
             // handshake reaches upstream untouched (macOS: tokenPlan nil).
             let plan = rec.registration == true ? nil : sessionTokenPlan(for: profile)
+            launchPlan = plan
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
             try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
                                          kubeconfigYAML: kubeYAML)
@@ -916,7 +918,8 @@ public actor Daemon {
         }
         HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
         let extraNoProxy = staged == nil || rec.registration == true ? [] : await kubeNoProxy(for: UUID(uuidString: rec.id) ?? UUID())
-        try writeProxyMeta(meta, profile: staged, extraNoProxy: extraNoProxy)
+        let registries = staged == nil || rec.registration == true ? [] : await kubeRegistries(for: UUID(uuidString: rec.id) ?? UUID())
+        try writeProxyMeta(meta, profile: staged, tokenPlan: launchPlan, extraNoProxy: extraNoProxy, registries: registries)
         // The agents' MCP shims (board, automations, delegation, …) and the
         // built-in browser and display servers, as macOS stages them.
         try SessionDisk.writeGuestMCPShims(into: meta)
