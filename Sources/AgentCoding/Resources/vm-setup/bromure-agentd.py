@@ -5900,6 +5900,45 @@ def vmstat_loop_service():
         time.sleep(1.5)
 
 
+# How the host tells a guest that is alive from one that has frozen. A process
+# has to be spawned for the beat to go out: under memory exhaustion agentd itself
+# (protected from the OOM killer, see oom_order_service) can keep running while
+# nothing new can start, and a loop that only read /proc would go on reporting.
+# A wedged spawn stops the beats too, which is the point. GuestLiveness.swift
+# reads the file and counts on it changing about this often.
+LIVENESS_INTERVAL = 60
+LIVENESS_SPAWN_TIMEOUT = 30
+
+
+def liveness_probe(argv=("/usr/bin/true",)):
+    """Milliseconds it took to run a small process, or None if it couldn't."""
+    started = time.monotonic()
+    try:
+        subprocess.run(list(argv), stdin=_DEVNULL, stdout=_DEVNULL, stderr=_DEVNULL,
+                       timeout=LIVENESS_SPAWN_TIMEOUT, check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("liveness", "couldn't run a process: %s" % e)
+        return None
+    return int((time.monotonic() - started) * 1000)
+
+
+def liveness_beat(seq, probe=liveness_probe):
+    """Publish a heartbeat, only if a process could be run."""
+    ms = probe()
+    if ms is None:
+        return False
+    return _atomic_publish(".liveness.tmp", "liveness.txt",
+                           "%d %d %d\n" % (os.getpid(), seq, ms))
+
+
+def liveness_service():
+    seq = 0
+    while _RUNNING.is_set():
+        seq += 1
+        liveness_beat(seq)
+        time.sleep(LIVENESS_INTERVAL)
+
+
 def ports_loop_service():
     """Listening sockets → ports.txt every 3s (`ss -tulnpH`, sudo if possible).
 
@@ -8323,6 +8362,7 @@ def main():
         ("loopback-relay", loopback_relay_service),
         ("roster", roster_loop_service),
         ("vmstat", vmstat_loop_service),
+        ("liveness", liveness_service),
         ("oom-order", oom_order_service),
         ("malloc-trim", malloc_trim_service),
         ("ports", ports_loop_service),

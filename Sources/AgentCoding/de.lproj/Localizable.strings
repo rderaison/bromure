@@ -4351,3 +4351,9 @@
 
 /* guest URL open prompt */
 "Open in Browser" = "Im Browser öffnen";
+
+/* beautified: the guest has gone silent */
+"This workspace isn't responding" = "Dieser Arbeitsbereich reagiert nicht";
+
+/* beautified: the guest has gone silent */
+"It may be out of memory. What's shown here may be out of date." = "Möglicherweise ist der Speicher voll. Die Anzeige ist eventuell nicht aktuell.";

@@ -153,6 +153,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// `/proc/pressure/memory` avg10, reported just before each `onVMStats`.
     /// 0/0 from an older guest agent.
     public var onVMMemoryPressure: ((_ some: Double, _ full: Double) -> Void)?
+    /// Whether the guest still proves it can run a process (`GuestLiveness`).
+    /// Told `true` whenever polling starts, as a new boot owes nothing yet.
+    public var onGuestResponsive: ((Bool) -> Void)?
 
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
@@ -281,6 +284,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
 
     private var outboxPollTask: Task<Void, Never>?
+    private var guestLiveness = GuestLiveness()
+    private var guestSilent = false
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
     public static let runtimeCPUs: Int = 4
@@ -641,6 +646,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
                 try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
             }
+            // The last boot's heartbeat isn't this one's.
+            try? FileManager.default.removeItem(at: outbox.appendingPathComponent("liveness.txt"))
         }
         try await vm.start()
         state = .running
@@ -1032,6 +1039,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     private func startOutboxPolling() {
         guard let outbox = sessionDisk?.outboxDirectory else { return }
         outboxPollTask?.cancel()
+        guestLiveness = GuestLiveness()
+        guestSilent = false
+        onGuestResponsive?(true)
         outboxPollTask = Task { @MainActor [weak self] in
             let fm = FileManager.default
             // Roster mtime seen last, so the fast tick can re-parse tabs.txt
@@ -1086,6 +1096,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     if !ip.isEmpty, ip != self?.lastReportedIP {
                         self?.lastReportedIP = ip
                         self?.onIPUpdate?(ip)
+                    }
+                }
+                // Read first, so a tick the host itself delayed judges the
+                // guest on what it has written since.
+                if let self {
+                    let silent = self.guestLiveness.observe(
+                        Self.boundedText(outbox.appendingPathComponent("liveness.txt"), max: 256),
+                        running: self.vm?.state == .running,
+                        now: ProcessInfo.processInfo.systemUptime)
+                    if silent != self.guestSilent {
+                        self.guestSilent = silent
+                        self.onGuestResponsive?(!silent)
                     }
                 }
                 // Bound how much guest-driven URL relay work happens

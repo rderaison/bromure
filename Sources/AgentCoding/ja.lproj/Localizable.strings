@@ -4351,3 +4351,9 @@
 
 /* guest URL open prompt */
 "Open in Browser" = "ブラウザで開く";
+
+/* beautified: the guest has gone silent */
+"This workspace isn't responding" = "このワークスペースは応答していません";
+
+/* beautified: the guest has gone silent */
+"It may be out of memory. What's shown here may be out of date." = "メモリ不足の可能性があります。表示内容は最新でない場合があります。";

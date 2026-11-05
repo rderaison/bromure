@@ -4351,3 +4351,9 @@
 
 /* guest URL open prompt */
 "Open in Browser" = "在浏览器中打开";
+
+/* beautified: the guest has gone silent */
+"This workspace isn't responding" = "此工作区没有响应";
+
+/* beautified: the guest has gone silent */
+"It may be out of memory. What's shown here may be out of date." = "可能内存不足。此处显示的内容可能已过时。";

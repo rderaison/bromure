@@ -46,6 +46,15 @@ agent; 17 MCP helpers totalling 1135 MB; agentd itself at 935 MB; all in one
 cgroup, with `oom_score_adj` 0 everywhere. agentd scored highest for the OOM
 killer. `zram` is not in the image, and there is no swap.
 
+## Telling a frozen guest from a live one
+
+agentd spawns `/usr/bin/true` once a minute and rewrites `liveness.txt` only if that
+worked. After 150 s without a change the host treats the guest as unresponsive:
+a banner over the chat, agents no longer shown as active, and new agents refused.
+It doesn't reboot on its own, because a guest can recover once the OOM killer has
+run. The banner clears on the next beat. A guest that has never beaten (an older
+agentd) is never flagged.
+
 ## What this change does
 
 No image change: everything ships through the meta share or the app.
