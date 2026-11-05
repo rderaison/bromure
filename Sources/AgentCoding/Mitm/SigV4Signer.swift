@@ -74,7 +74,8 @@ public enum SigV4Signer {
         /// `AWS4-HMAC-SHA256 Credential=…, SignedHeaders=…, Signature=…`
         public let authorization: String
         /// Hex SHA256 of the body — or `UNSIGNED-PAYLOAD` when the
-        /// caller passed `unsignedPayload: true`.
+        /// caller passed `unsignedPayload: true`, or the caller's
+        /// `payloadHash` (a sentinel such as an unsigned aws-chunked mode).
         public let payloadHash: String
         /// `YYYYMMDDTHHMMSSZ` — the `X-Amz-Date` header value.
         public let amzDate: String
@@ -91,12 +92,15 @@ public enum SigV4Signer {
         credentials: Credentials,
         scope: Scope,
         date: Date = Date(),
-        unsignedPayload: Bool = false
+        unsignedPayload: Bool = false,
+        payloadHash literal: String? = nil
     ) -> SignedOutput {
         let amzDate = isoBasic(date)
 
         let payloadHash: String
-        if unsignedPayload {
+        if let literal {
+            payloadHash = literal
+        } else if unsignedPayload {
             payloadHash = "UNSIGNED-PAYLOAD"
         } else {
             payloadHash = hexSHA256(request.body)
