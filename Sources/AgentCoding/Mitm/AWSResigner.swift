@@ -157,7 +157,7 @@ public final class AWSResigner: @unchecked Sendable {
                  "x-amz-security-token",
                  "host", "content-length",
                  "connection", "proxy-connection", "transfer-encoding",
-                 "keep-alive", "te", "upgrade", "proxy-authorization":
+                 "keep-alive", "te", "upgrade", "proxy-authorization", "expect":
                 continue
             default:
                 keep.append((n, v))
