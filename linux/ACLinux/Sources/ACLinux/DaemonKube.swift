@@ -382,6 +382,7 @@ extension Daemon {
             guard let target = rec.rescueFor else { continue }
             _ = repairMarks.insert(target)
             let ended = Self.killIfOursAndWait(rec)
+                && Self.killFirecrackers(shortId: rec.shortId)
                 && Self.killVirtiofsds(under: config.runtimeDir + "/vms/" + rec.shortId)
             var r = rec
             if ended {

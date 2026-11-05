@@ -426,6 +426,37 @@ struct LeftoverRescueTests {
         await d.shutdown()
     }
 
+    /// A stand-in Firecracker (its comm is the script's name) for VM `short`.
+    static func firecracker(in dir: String, short: String) throws -> Stub {
+        let sub = dir + "/fcbin"
+        try FileManager.default.createDirectory(atPath: sub, withIntermediateDirectories: true)
+        let exe = sub + "/firecracker"
+        if !FileManager.default.fileExists(atPath: exe) {
+            try "#!/bin/sh\nread x\n".write(toFile: exe, atomically: true, encoding: .utf8)
+            chmod(exe, 0o755)
+        }
+        return try Stub(exe, ["--id", "bromure-" + short, "--api-sock", dir + "/run/vms/" + short + "/fc.sock"])
+    }
+
+    /// A crash between a rescue's spawn and its pid's save: the record has
+    /// no pid, its Firecracker runs. Found by its `--id`, ended, then removed.
+    @Test func aRescueWhosePidWasNeverSavedIsEndedToo() async throws {
+        let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var rescue = Self.rescue(for: damaged, state: .starting)
+        rescue.pid = nil
+        try await d.registerForTesting(rescue)
+        let fc = try Self.firecracker(in: dir, short: rescue.shortId)
+        let other = try Self.firecracker(in: dir, short: "0000abcd")
+        usleep(100_000)
+        await d.adoptRunning()
+        #expect(fc.gone(), "its unrecorded Firecracker was ended")
+        #expect(!other.gone(within: 0.3), "another VM's is left alone")
+        #expect(await d.registry.find(rescue.id) == nil)
+        #expect(!d.repairMarks.contains(damaged.id))
+        await d.shutdown()
+    }
+
     @Test func aStoppedRescueIsRemovedToo() async throws {
         let (d, damaged, dir) = try await DaemonRepairGateTests.daemon()
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -441,6 +472,22 @@ struct LeftoverRescueTests {
     /// A machine a restarted daemon can't take back (here: no stored
     /// network) is ended with its virtiofsds, and waited for: a boot right
     /// after would fail on their pid-file locks.
+    /// The same window for any VM: starting, no pid saved, its Firecracker up.
+    @Test func aVMWhosePidWasNeverSavedIsEndedAtAdoption() async throws {
+        let (d, stopped, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var rec = stopped
+        rec.state = .starting
+        rec.pid = nil
+        try await d.registerForTesting(rec)
+        let fc = try Self.firecracker(in: dir, short: rec.shortId)
+        usleep(100_000)
+        await d.adoptRunning()
+        #expect(fc.gone(within: 0.5), "gone when adoption returns")
+        #expect(await d.registry.find(rec.id)?.state == .stopped)
+        await d.shutdown()
+    }
+
     @Test func aMachineNotTakenBackIsEndedWithItsVirtiofsds() async throws {
         let (d, stopped, dir) = try await DaemonRepairGateTests.daemon()
         defer { try? FileManager.default.removeItem(atPath: dir) }

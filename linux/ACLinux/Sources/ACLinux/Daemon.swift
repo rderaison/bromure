@@ -1111,6 +1111,7 @@ public actor Daemon {
                 // all, if still the processes we recorded, and wait.
                 let ours = Self.isOurVM(rec)
                 let gone = Self.killIfOursAndWait(rec)
+                    && Self.killFirecrackers(shortId: rec.shortId)
                     && Self.killVirtiofsds(under: config.runtimeDir + "/vms/" + rec.shortId)
                 if ours {
                     FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': not re-adopted (\(error)); killed its Firecracker (pid \(rec.pid ?? 0))\(gone ? "" : ", which or whose virtiofsds didn't exit in time")\n".utf8))
@@ -1186,6 +1187,27 @@ public actor Daemon {
     /// within `timeout`. A taken-back VM's virtiofsds aren't supervised.
     // @port-skip linux-only: Linux process identity
     static func killVirtiofsds(under dir: String, timeout: Duration = .seconds(10)) -> Bool {
+        killProcesses(comm: "virtiofsd", timeout: timeout) { args in
+            zip(args, args.dropFirst()).contains { $0 == "--socket-path" && $1.hasPrefix(dir + "/") }
+        }
+    }
+
+    /// This user's Firecracker for the VM `shortId` (`--id bromure-<short>`),
+    /// whether or not its record has the pid: a crash between its spawn and
+    /// the record's save leaves it running unrecorded. SIGKILLed and waited
+    /// for as killVirtiofsds.
+    // @port-skip linux-only: Linux process identity
+    static func killFirecrackers(shortId: String, timeout: Duration = .seconds(10)) -> Bool {
+        killProcesses(comm: "firecracker", timeout: timeout) { args in
+            zip(args, args.dropFirst()).contains { $0 == "--id" && $1 == "bromure-" + shortId }
+        }
+    }
+
+    /// This user's processes named `comm` whose arguments `matches`, each
+    /// SIGKILLed through a pidfd (checked with it open: a match is the
+    /// process signalled) and waited for; true when all are gone in time.
+    // @port-skip linux-only: Linux process identity
+    static func killProcesses(comm: String, timeout: Duration, matches: ([String]) -> Bool) -> Bool {
         let me = getuid()
         var allGone = true
         for entry in (try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? [] {
@@ -1195,12 +1217,13 @@ public actor Daemon {
             let fd = acl_pidfd_open(pid)
             guard fd >= 0 else { continue }
             defer { close(fd) }
-            // Checked with the pidfd open: a match is the process signalled.
-            guard let comm = try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8),
-                  comm.trimmingCharacters(in: .newlines) == "virtiofsd",
+            // Checked again with the pidfd open: it pins this process (a pid
+            // recycled since the first look can't be the one signalled).
+            guard stat("/proc/\(pid)", &st) == 0, st.st_uid == me,
+                  let c = try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8),
+                  c.trimmingCharacters(in: .newlines) == comm,
                   let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { continue }
-            let args = cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
-            guard zip(args, args.dropFirst()).contains(where: { $0 == "--socket-path" && $1.hasPrefix(dir + "/") }) else { continue }
+            guard matches(cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }) else { continue }
             if acl_pidfd_send_signal(fd, SIGKILL) != 0 || !waitExit(pidfd: fd, timeout: timeout) { allGone = false }
         }
         return allGone
