@@ -10,8 +10,8 @@ import Testing
 @Suite("A chat keeps to its own session across a switch", .serialized)
 @MainActor
 struct ChatSwitchIsolationTests {
-    /// Holds the poll in its terminal scan — the first await of every poll —
-    /// until the test lets it go, and counts the transcript reads after it.
+    /// Holds the poll in its probe for the transcript — an await on the way to
+    /// every read — until the test lets it go, and counts the reads after it.
     private final class GatedProvider: BeautifiedTranscriptProvider {
         var accent: Color { .blue }
         var gate: CheckedContinuation<Void, Never>?
@@ -22,14 +22,14 @@ struct ChatSwitchIsolationTests {
         func isWorking() -> Bool { false }
         func guestFileOp(_ op: [String: Any]) async -> [String: Any]? { nil }
         func execGuest(_ command: String, timeout: Int) async -> String? {
-            if command.contains("capture-pane") {
+            if command.contains("capture-pane") { return "" }
+            if command.contains("pane_current_path") {
                 if holdScan {
                     scanning = true
                     await withCheckedContinuation { gate = $0 }
                 }
-                return ""
+                return "/home/ubuntu/b\n0\n"
             }
-            if command.contains("pane_current_path") { return "/home/ubuntu/b\n0\n" }
             guard command.hasPrefix("f=\"\";") else { return "" }
             reads += 1
             let file = Data((#"{"type":"user","message":{"role":"user","content":"session B's question"},"timestamp":"2026-11-04T16:00:00Z"}"# + "\n").utf8)
@@ -52,7 +52,7 @@ struct ChatSwitchIsolationTests {
         m.start()
         await wait { provider.scanning && provider.gate != nil }
         #expect(provider.gate != nil)
-        // The user switches away while the scan's exec is on the wire — which
+        // The user switches away while the probe's exec is on the wire — which
         // a cancel doesn't interrupt.
         m.stop()
         provider.gate?.resume()

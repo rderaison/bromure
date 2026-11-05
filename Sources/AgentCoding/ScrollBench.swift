@@ -184,6 +184,12 @@ enum ChatLayoutCheck {
             MainActor.assumeIsolated { runSwitch(data: data, args: args, value: value) }
             exit(0)
         }
+        if args.contains("--open") {
+            MainActor.assumeIsolated {
+                ChatOpenBench.run(transcript: data, rttMs: value("--rtt") ?? 0, mbps: value("--mbps") ?? 0)
+            }
+            exit(0)
+        }
         if args.contains("--quick") {
             MainActor.assumeIsolated { TypingBench.runQuickTask(keys: Int(value("--typing") ?? 100)) }
             exit(0)
@@ -848,5 +854,94 @@ enum TypingBench {
         let t = type(keys, into: host, window: window, focus: false, pump: pump)
         print(report(t, label: "quick task"))
         print("  field now holds \((window.firstResponder as? NSTextView)?.string.count ?? -1) characters")
+    }
+}
+
+
+/// `__bench-scroll <transcript> --chat --open [--rtt ms --mbps n]`: how long a
+/// chat takes to show a conversation, cold and then reopened, over a simulated
+/// tunnel: each guest command costs a round trip, plus its output at that rate.
+@MainActor
+enum ChatOpenBench {
+    final class TunnelProvider: BeautifiedTranscriptProvider {
+        let base: FixtureTranscriptProvider
+        let rtt: Double, mbps: Double
+        let key: String
+        var execs = 0
+        var bytes = 0
+        init(transcript: Data, rtt: Double, mbps: Double, key: String) {
+            base = FixtureTranscriptProvider(accent: .blue, transcript: transcript, working: false)
+            self.rtt = rtt; self.mbps = mbps; self.key = key
+        }
+        var accent: Color { base.accent }
+        var historyCacheKey: String? { key }
+        var historyBytesHint: Int? { 1_500_000 }
+        func activeTabIndex() -> Int? { 1 }
+        func isWorking() -> Bool { false }
+        func guestFileOp(_ op: [String: Any]) async -> [String: Any]? { nil }
+        func execGuest(_ command: String, timeout: Int) async -> String? {
+            let out = await base.execGuest(command, timeout: timeout) ?? ""
+            execs += 1
+            bytes += out.utf8.count
+            let wire = mbps > 0 ? Double(out.utf8.count) * 8 / (mbps * 1_000_000) : 0
+            try? await Task.sleep(nanoseconds: UInt64((rtt / 1000 + wire) * 1_000_000_000))
+            return out
+        }
+    }
+
+    static func run(transcript: Data, rttMs: Double, mbps: Double) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        var key = "bench-open-\(UUID().uuidString)"
+        func pump(until done: () -> Bool, limit: Double = 30) {
+            let end = Date().addingTimeInterval(limit)
+            while !done(), Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.002)) }
+        }
+        func open(_ label: String) {
+            let provider = TunnelProvider(transcript: transcript, rtt: rttMs, mbps: mbps, key: key)
+            let model = BeautifiedSessionModel(provider: provider)
+            let frame = NSRect(x: 0, y: 0, width: 900, height: 760)
+            let t0 = CFAbsoluteTimeGetCurrent()
+            model.start()
+            let host = NSHostingView(rootView: BeautifiedSessionView(model: model))
+            host.frame = frame
+            let window = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.orderFront(nil)
+            let t1 = CFAbsoluteTimeGetCurrent()
+            pump(until: { !model.items.isEmpty })
+            let t2 = CFAbsoluteTimeGetCurrent()
+            host.layoutSubtreeIfNeeded(); window.displayIfNeeded(); CATransaction.flush()
+            let t3 = CFAbsoluteTimeGetCurrent()
+            let execsAtFirst = provider.execs, bytesAtFirst = provider.bytes
+            pump(until: { !model.catchingUp }, limit: 15)
+            let t4 = CFAbsoluteTimeGetCurrent()
+            print(String(format: "%-8@ mount %4.0f ms · items at %5.0f ms (%d execs, %.2f MB) · drawn at %5.0f ms · current at %5.0f ms",
+                         label as NSString, (t1 - t0) * 1000, (t2 - t0) * 1000, execsAtFirst,
+                         Double(bytesAtFirst) / 1_048_576, (t3 - t0) * 1000, (t4 - t0) * 1000))
+            fflush(stdout)
+            model.stop()
+            window.contentView = nil
+            window.close()
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+        }
+        open("cold")
+        open("reopen")
+        open("reopen")
+        // Another conversation, preloaded in the background before it's opened.
+        let other = "bench-open-\(UUID().uuidString)"
+        var finished = false
+        let t0 = CFAbsoluteTimeGetCurrent()
+        Task {
+            await BeautifiedSessionModel.preloadHistory(
+                provider: TunnelProvider(transcript: transcript, rtt: rttMs, mbps: mbps, key: other),
+                agent: "claude", profileID: nil)
+            finished = true
+        }
+        pump(until: { finished })
+        print(String(format: "preload  in the background: %.0f ms, then:", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+        key = other
+        open("opened")
     }
 }

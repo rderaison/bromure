@@ -238,6 +238,9 @@ extension BeautifiedTranscriptProvider {
         guard let idx = activeTabIndex() else { return .none }
         guard let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
         else { return .failed }
+        // Switched away while that was on the wire: don't fetch a megabyte or
+        // two of conversation for a chat nobody's looking at.
+        if Task.isCancelled { return .none }
         guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return .none }
         let cwd = probe.cwd
         let since = probe.since
@@ -1031,6 +1034,7 @@ final class BeautifiedSessionModel: ObservableObject {
     private static let maxBuffers = 3
     private var currentPath: String?
     private var pqLine = Data()
+    private var firstScanRunning = false
     /// The history changed since the last parse.
     private var parseDirty = false
     private var lastParseAt = Date.distantPast
@@ -1612,8 +1616,19 @@ final class BeautifiedSessionModel: ObservableObject {
             buffers[hit.path] = hit.buffer
             bufferOrder = [hit.path]
             currentPath = hit.path
-            parseDirty = true
-            restored = true
+            if hit.parsed.isEmpty {
+                parseDirty = true
+                restored = true
+            } else {
+                // Already parsed: on show in this very frame, not after a parse
+                // that takes hundreds of milliseconds on a long conversation.
+                // With the pending question those items were parsed with, or a
+                // question answered since would never be parsed away.
+                pqLine = hit.pq
+                applyParsed(hit.parsed)
+                rebuild()
+                loading = false
+            }
         }
         // The history on hand shows at once — over a tunnel the first poll
         // (terminal scan, then the fetch) is seconds away — with a quiet
@@ -1697,17 +1712,18 @@ final class BeautifiedSessionModel: ObservableObject {
         detachQueue()
         flushSink(force: true)
         if let key = provider.historyCacheKey, let path = currentPath, let buf = buffers[path] {
-            Self.remember(key, path: path, buffer: buf)
+            // Parsed only if it's what the buffer holds: a parse can be pending.
+            Self.remember(key, path: path, buffer: buf, parsed: parseDirty ? [] : parsedItems, pq: pqLine)
         }
     }
 
     /// Downloaded history kept across chat models, by `historyCacheKey`,
     /// most recent last, within `historyCacheLimit` bytes.
-    private static var historyCache: [String: (path: String, buffer: TranscriptBuffer)] = [:]
+    private static var historyCache: [String: (path: String, buffer: TranscriptBuffer, parsed: [TranscriptItem], pq: Data)] = [:]
     private static var historyCacheOrder: [String] = []
     private static let historyCacheLimit = 96_000_000
-    private static func remember(_ key: String, path: String, buffer: TranscriptBuffer) {
-        historyCache[key] = (path, buffer)
+    private static func remember(_ key: String, path: String, buffer: TranscriptBuffer, parsed: [TranscriptItem], pq: Data) {
+        historyCache[key] = (path, buffer, parsed, pq)
         historyCacheOrder.removeAll { $0 == key }
         historyCacheOrder.append(key)
         var total = historyCache.values.reduce(0) { $0 + $1.buffer.data.count }
@@ -1715,6 +1731,39 @@ final class BeautifiedSessionModel: ObservableObject {
             let old = historyCacheOrder.removeFirst()
             total -= historyCache.removeValue(forKey: old)?.buffer.data.count ?? 0
         }
+    }
+
+    /// Fetch and parse a conversation into `historyCache` with no chat open, so
+    /// opening it shows it at once. Only reads: no scan, no queue, no sink.
+    /// False when the machine couldn't be asked or there's nothing to read.
+    @discardableResult
+    static func preloadHistory(provider: BeautifiedTranscriptProvider, agent: String?, profileID: UUID?) async -> Bool {
+        guard let key = provider.historyCacheKey else { return false }
+        let held = historyCache[key]
+        let known = held.map { ($0.path, $0.buffer.end) }
+        guard case .fetched(let f) = await provider.readTranscript(known: known, mode: .tail, agent: agent) else {
+            return false
+        }
+        // A chat that opened meanwhile has moved on from what this read extends.
+        guard historyCache[key]?.buffer.end == held?.buffer.end else { return false }
+        var buf: TranscriptBuffer
+        if let held, held.path == f.path, f.start == held.buffer.end {
+            guard !f.chunk.isEmpty else { return true }   // nothing new: what's held stands
+            buf = held.buffer
+            buf.data.append(f.chunk)
+            buf.end = f.end
+        } else {
+            buf = TranscriptBuffer(data: f.chunk, base: f.start, end: f.end)
+        }
+        if buf.data.count > buf.budget { trimHead(&buf) }
+        let input = buf.data
+        let names = provider.guestPathNames
+        let items = await Task.detached(priority: .utility) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(input), names: names)
+        }.value
+        guard historyCache[key]?.buffer.end == held?.buffer.end else { return false }
+        remember(key, path: f.path, buffer: buf, parsed: BromureBlockLog.shared.annotate(items, profileID: profileID), pq: Data())
+        return true
     }
 
     /// Set `working`, tracking when a working spell begins (for the elapsed
@@ -1743,7 +1792,24 @@ final class BeautifiedSessionModel: ObservableObject {
         // an auth error) can be on screen before any transcript store exists, so
         // it must not sit behind the transcript fetch's early return. (Kept
         // warm off stage: skipped — nobody sees its cards until it's back.)
-        if !background { await scanTerminal() } else { screenSaysBusy = false; await scanDialogOffStage() }
+        if background {
+            screenSaysBusy = false
+            await scanDialogOffStage()
+        } else if parsedItems.isEmpty {
+            // Nothing on show: over a tunnel the scan is a whole round trip the
+            // conversation shouldn't wait behind. Side by side, not skipped: a
+            // card still appears when the scan answers, as it did. One at a time,
+            // for a chat that stays empty over a link slower than the scan interval.
+            if !firstScanRunning {
+                firstScanRunning = true
+                Task { [weak self] in
+                    await self?.scanTerminal()
+                    self?.firstScanRunning = false
+                }
+            }
+        } else {
+            await scanTerminal()
+        }
         // Stopped mid-poll (the user switched away): an exec under way isn't
         // interrupted by the cancel, so nothing after an await may assume
         // this chat is still the one on show. No read, no sink, no parse.
@@ -3346,6 +3412,7 @@ struct BeautifiedSessionView: View {
     /// row's position report with it.
     @State private var scrub = ScrubLabelState()
     @State private var threadMemo = SwitchboardThreadMemo()
+    @State private var threading: SwitchboardThreadingInputs?
     /// The Switchboard's chain on show alone (nil: the whole conversation).
     @State private var threadFilter: String?
     /// The filter was cleared to show a search hit: stay there, not at the end.
@@ -3571,11 +3638,22 @@ struct BeautifiedSessionView: View {
     }
 
     /// The Switchboard's conversation told apart by session; nil for any other chat.
+    /// Reads no store: a store read in a body re-runs the whole transcript on every
+    /// change to it, and over a fat client that's every snapshot (see `refreshThreading`).
     private var threaded: ThreadedConversation? {
-        guard let me = model.currentSession?(), me.isSwitchboard, let store = model.sessionStore else { return nil }
-        let sessions = store.sessions
-        let aliases = SwitchboardThreading.aliases(handles: SwitchboardEngine.handles(of: sessions), sessions: sessions)
-        return threadMemo.conversation(model.items, aliases: aliases)
+        guard let threading else { return nil }
+        return threadMemo.conversation(model.items, aliases: threading.aliases)
+    }
+
+    /// What threading takes from the session store, looked at once a moment off
+    /// the render path, and written only when it has changed.
+    private func refreshThreading() {
+        guard let me = model.currentSession?(), me.isSwitchboard, let store = model.sessionStore else {
+            if threading != nil { threading = nil }
+            return
+        }
+        let next = SwitchboardThreadingInputs(sessions: store.sessions)
+        if next != threading { threading = next }
     }
 
     @ViewBuilder
@@ -3583,7 +3661,7 @@ struct BeautifiedSessionView: View {
             if let conversation = threaded, !conversation.threads.isEmpty {
                 SwitchboardThreadBar(
                     conversation: conversation, filter: $threadFilter,
-                    waiting: Set((model.sessionStore?.sessions ?? []).filter { $0.awaitingAnswer == true }.map(\.id)),
+                    waiting: threading?.waiting ?? [],
                     onOpen: model.openSession)
                     .onAppear { if let picked = SwitchboardThreadsPreview.picked { threadFilter = picked } }
             }
@@ -4110,6 +4188,13 @@ struct BeautifiedSessionView: View {
                     // Snap back to the tail.
                     if viewportHeight > 0, tailFollow.contentHeight > viewportHeight, tailY < viewportHeight - 40 {
                         snapToTail(proxy)
+                    }
+                }
+                .onAppear { refreshThreading() }   // no unthreaded first frame
+                .task {
+                    while !Task.isCancelled {
+                        refreshThreading()
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
                     }
                 }
                 .task(id: parts == .all) {
