@@ -118,14 +118,27 @@ final class MitmProxy: @unchecked Sendable {
 
     /// The swaps reach the stores through SubscriptionProviders (macOS:
     /// MitmEngine.register sets the same closures).
+    /// Those closures are unlocked process globals, so they're set once (a
+    /// static let runs once, thread-safe) and read the proxy built last
+    /// under a lock: proxies built at once (the tests) used to overwrite
+    /// them concurrently, and the closure replaced was released twice.
     // @port-skip linux-only: MitmEngine.register's provider wiring
     private func wireProviders() {
-        SubscriptionProviders.claude = { [weak self] in self.map { ($0.claudeStore, $0.claudeRefresher) } }
-        SubscriptionProviders.codex = { [weak self] in self.map { ($0.codexStore, $0.codexRefresher) } }
-        SubscriptionProviders.grok = { [weak self] in self.map { ($0.grokStore, $0.grokRefresher) } }
-        SubscriptionProviders.kimi = { [weak self] in self.map { ($0.kimiStore, $0.kimiRefresher) } }
-        SubscriptionProviders.signInCapture = { [weak self] pid in self?.captures.capture(for: pid) }
+        Self.current.withLockedValue { $0.proxy = self }
+        _ = Self.providersWired
     }
+
+    // @port-skip linux-only: MitmEngine.register's provider wiring
+    private struct WeakProxy: @unchecked Sendable { weak var proxy: MitmProxy? }
+    private static let current = NIOLockedValueBox(WeakProxy())
+    private static let providersWired: Void = {
+        let live: @Sendable () -> MitmProxy? = { current.withLockedValue { $0.proxy } }
+        SubscriptionProviders.claude = { live().map { ($0.claudeStore, $0.claudeRefresher) } }
+        SubscriptionProviders.codex = { live().map { ($0.codexStore, $0.codexRefresher) } }
+        SubscriptionProviders.grok = { live().map { ($0.grokStore, $0.grokRefresher) } }
+        SubscriptionProviders.kimi = { live().map { ($0.kimiStore, $0.kimiRefresher) } }
+        SubscriptionProviders.signInCapture = { pid in live()?.captures.capture(for: pid) }
+    }()
 
     // @port MitmEngine.setSessionTrace(_: SessionTrace, for: UUID) h=488811aacd2e89b1 @8866f904
     func setSessionTrace(_ trace: TraceSession, for profileID: UUID) {

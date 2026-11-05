@@ -2199,3 +2199,23 @@ private func lanHelperRequest(_ path: String, _ req: [String: Any]) -> [String: 
     }
     return (try? JSONSerialization.jsonObject(with: acc[..<acc.firstIndex(of: 0x0A)!])) as? [String: Any]
 }
+
+@Suite("Proxy providers")
+struct ProxyProviderTests {
+    /// SubscriptionProviders' closures are process globals: proxies built at
+    /// once (parallel tests) used to overwrite them unlocked, and the closure
+    /// they replaced was released twice (a crash in the side table's
+    /// unowned count, ~1 gate run in 16).
+    @Test func proxiesBuiltAtOnceDontRaceOnTheProviders() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ca = URL(fileURLWithPath: dir + "/mitm", isDirectory: true)
+        try FileManager.default.createDirectory(at: ca, withIntermediateDirectories: true)
+        _ = try MitmProxy(caDirectory: ca)       // the CA and salt made once; the rest only load them
+        for _ in 0..<20 {
+            try await withThrowingTaskGroup(of: Void.self) { g in
+                for _ in 0..<32 { g.addTask { _ = try MitmProxy(caDirectory: ca) } }
+                try await g.waitForAll()
+            }
+        }
+    }
+}
