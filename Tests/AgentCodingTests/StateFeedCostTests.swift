@@ -28,15 +28,35 @@ struct StateFeedCostTests {
         #expect(memo.rows(items, "d", encode: encode).first?["text"] as? String == "m1")
     }
 
-    @Test("every subscriber sends the frame built once per snapshot, not its own")
-    func oneFramePerBuild() throws {
+    @Test("one producer builds the state, however many subscribe; a subscriber only sends")
+    func oneProducer() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let s = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/AutomationServer.swift"), encoding: .utf8)
-        let sub = try #require(s.range(of: "private func handleStateSubscribe(fd: Int32) {"))
-        let loop = s[sub.upperBound...].prefix(2_400)
-        #expect(loop.contains("let (content, frame) = stateFrame()"))
-        #expect(!loop.contains("JSONSerialization.data") && !loop.contains("compressed(using:"))
+        func body(_ sig: String) throws -> Substring {
+            let r = try #require(s.range(of: sig))
+            let rest = s[r.upperBound...]
+            return rest[..<(rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex)]
+        }
+        let loop = try body("private func handleStateSubscribe(fd: Int32) {")
+        for build in ["stateFrame()", "buildStateSnapshot()", "stampedStateSnapshot()", "JSONSerialization.data", "compressed(using:"] {
+            #expect(!loop.contains(build), Comment(rawValue: build))
+        }
+        #expect(loop.contains("feedSubscribe()") && loop.contains("defer { feedUnsubscribe() }"))
+        #expect(loop.contains("nextFeedFrame(after: seen, timeout: 0.5)") && loop.contains("currentFeedFrame()"))
+        let producer = try body("private func feedLoop() {")
+        #expect(producer.contains("stateFrame()") && producer.contains("feedCondition.broadcast()"))
+        #expect(producer.contains("if feedSubscribers <= 0 {"))
         #expect(s.contains("if let c = frameCache, c.at == at { frameLock.unlock(); return (c.content, c.frame) }"))
+    }
+
+    @Test("the native sidebar never sizes the window, and the reaper is paced")
+    func sidebarAndReaper() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let w = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/UnifiedSessionWindow.swift"), encoding: .utf8)
+        let host = try #require(w.range(of: "let sidebarHost = NonMovableHostingView(rootView: sidebar)"))
+        #expect(w[host.upperBound...].prefix(700).contains("sidebarHost.sizingOptions = []"))
+        let p = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
+        #expect(p.contains("stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000"))
     }
 
     @Test("the snapshot's big lists go through the memo")
