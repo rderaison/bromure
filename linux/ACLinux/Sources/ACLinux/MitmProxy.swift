@@ -49,6 +49,9 @@ final class MitmProxy: @unchecked Sendable {
     /// each token goes into its workspace's swap map under its fake.
     /// (The shared poller is main-actor: made there, on first use.)
     @MainActor lazy var execPoller = ExecCredentialPoller()
+    /// The 1Password `op://` refresh loops, one per workspace (macOS:
+    /// MitmEngine.opRefresher; main-actor too).
+    @MainActor lazy var opRefresher = OnePasswordRefresher()
     /// The exec contexts the poller runs per workspace, so a live refresh
     /// keeps their fakes (`materialize(reusingExec:)`).
     let execContexts = NIOLockedValueBox<[UUID: [KubeconfigMaterializer.ExecContext]]>([:])

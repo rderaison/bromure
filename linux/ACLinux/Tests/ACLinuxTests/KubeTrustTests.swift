@@ -839,6 +839,49 @@ struct AWSProxyTests {
     }
 }
 
+/// A credential whose value is a 1Password `op://` reference: resolved on
+/// the host under the plan's stable fake (macOS: MitmEngine.opRefresher,
+/// started at launch and restage). `op read` stands in through the
+/// refresher's own test seam.
+@Suite("1Password references on the host", .serialized)
+@MainActor
+struct OnePasswordRefreshTests {
+    @Test func aReferenceIsResolvedOnTheHostUnderTheGuestsFake() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let reads = NIOLockedValueBoxShim<[String]>([])
+        proxy.opRefresher = OnePasswordRefresher(read: { ref in reads.mutate { $0.append(ref) }; return "sk_live_resolved\n" })
+        var p = Profile(name: "op", tool: .claude, authMode: .token)
+        p.manualTokens = [ManualToken(name: "stripe", realValue: "op://vault/stripe/credential",
+                                      envVarName: "STRIPE_API_KEY", hostFilters: ["api.stripe.com"])]
+        let plan = Daemon.makeSessionTokenPlan(for: p, mitm: proxy)
+        let planned = try #require(plan.tokenMap().entries.first { $0.host == "api.stripe.com" })
+        _ = await Daemon.kubeconfig(for: p, plan: plan, live: false, mitm: proxy)
+        for _ in 0..<150 where !proxy.swapper.entries(for: p.id).contains(where: { $0.real == "sk_live_resolved" }) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let installed = proxy.swapper.entries(for: p.id).filter { $0.host == "api.stripe.com" }
+        #expect(installed.contains { $0.real == "sk_live_resolved" && $0.fake == planned.fake },
+                "resolved (newline trimmed) under the fake the guest holds: \(installed.map(\.real))")
+        #expect(!installed.contains { $0.real.contains("op://") }, "the reference never goes out as the credential")
+        #expect(reads.value == ["op://vault/stripe/credential"], "op read once, now (then every 120 s)")
+        proxy.clearKube(for: p.id)
+    }
+
+    @Test func aWorkspaceWithoutReferencesNeverRunsOp() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let reads = NIOLockedValueBoxShim(0)
+        proxy.opRefresher = OnePasswordRefresher(read: { _ in reads.mutate { $0 += 1 }; return "x" })
+        var p = Profile(name: "plain", tool: .claude, authMode: .token)
+        p.manualTokens = [ManualToken(name: "t", realValue: "plain-secret", envVarName: "T", hostFilters: ["api.example.com"])]
+        _ = await Daemon.kubeconfig(for: p, plan: Daemon.makeSessionTokenPlan(for: p, mitm: proxy), live: false, mitm: proxy)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(reads.value == 0)
+        #expect(proxy.swapper.entries(for: p.id).contains { $0.real == "plain-secret" })
+    }
+}
+
 /// api_key.env, macOS's builder shared: the plan's fakes under their env
 /// vars, never a real value.
 @Suite("Guest credential environment")

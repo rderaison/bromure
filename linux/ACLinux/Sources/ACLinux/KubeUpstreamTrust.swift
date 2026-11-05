@@ -199,6 +199,15 @@ extension MitmProxy {
             swapper.setMap(live ? TokenMap.liveMerge(fresh: map.entries, current: swapper.entries(for: profileID)) : map,
                            for: profileID)
             Self.debugLogMap(profileID, swapper.entries(for: profileID), live: live)
+            // 1Password: a credential whose value is an `op://` reference keeps
+            // the plan's stable fake; the real secret is resolved on the host,
+            // now and every 120 s, and only the reference is ever on disk. A
+            // live refresh follows the new references (macOS: launch's and
+            // restage's opRefresher.start).
+            opRefresher.start(profileID: profileID, refs: OnePasswordRefresher.refs(in: map.entries), swapper: swapper,
+                              onFirstError: { err in
+                FileHandle.standardError.write(Data("[1password] \(err.errorDescription ?? "\(err)") — workspace \(profileID)\n".utf8))
+            })
         }
         // Launch and live refresh alike: what's added, edited or removed
         // while the VM runs takes effect at once (trust and exec pollers).
@@ -227,6 +236,7 @@ extension MitmProxy {
     func clearKube(for profileID: UUID) {
         kubeTrust.clearAll(for: profileID)
         execPoller.stopAll(profileID: profileID)
+        opRefresher.stop(profileID: profileID)
         execContexts.withLockedValue { $0[profileID] = nil }
     }
 }

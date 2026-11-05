@@ -107,6 +107,7 @@
     "Sources/AgentCoding/Mitm/MitmError.swift",
     "Sources/AgentCoding/Mitm/MitmUpstreamURL.swift",
     "Sources/AgentCoding/Mitm/OnePasswordCLI.swift",
+    "Sources/AgentCoding/Mitm/OnePasswordRefresher.swift",
     "Sources/AgentCoding/Mitm/PIIPolicy.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionCloudEvent.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionPolicy.swift",

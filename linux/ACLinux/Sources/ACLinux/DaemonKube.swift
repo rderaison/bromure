@@ -213,7 +213,6 @@ extension Daemon {
     /// pushLiveCredentials does -- an exec plugin's fetched token stays on
     /// its unchanged fake, a still-running shell's old fake keeps working.
     /// At launch the map is the fresh one.
-    // partial: no 1Password refresh
     // @port-skip linux-only: the kubeconfig step of ACAppDelegate.launch / pushLiveCredentials, on the Linux proxy
     func kubeconfig(for profile: Profile, plan: SessionTokenPlan?, live: Bool = false) async -> String? {
         guard let mitm else { return nil }
