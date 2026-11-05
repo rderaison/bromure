@@ -32,7 +32,7 @@ struct TaskDeliveryTests {
     }
 
     /// Run the probe's filter over sample `ps -o args=` lines.
-    private func filter(_ lines: [String]) throws -> String {
+    nonisolated private func filter(_ lines: [String]) throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         let input = lines.joined(separator: "\n") + "\n"
@@ -46,7 +46,7 @@ struct TaskDeliveryTests {
     }
 
     @Test("a Kimi started from .bashrc (same process group as bash) is seen running")
-    func kimiInShellGroup() throws {
+    nonisolated func kimiInShellGroup() async throws {
         #expect(try filter(["-bash", "bash -l",
                             "/home/ubuntu/.local/share/uv/tools/kimi-cli/bin/python /home/ubuntu/.local/bin/kimi --auto"]) == "kimi")
         #expect(try filter(["bash -l", "/usr/bin/node /usr/local/bin/claude --dangerously-skip-permissions"]) == "claude")
@@ -54,7 +54,7 @@ struct TaskDeliveryTests {
     }
 
     @Test("only shells, helpers and look-alike words are no agent")
-    func noAgent() throws {
+    nonisolated func noAgent() async throws {
         #expect(try filter(["-bash", "bash -l"]) == "")
         #expect(try filter(["bash -l", "sh /home/ubuntu/.bromure/agent-status.sh done"]) == "")
         #expect(try filter(["bash -l", "make compile", "vim example.txt"]) == "")
