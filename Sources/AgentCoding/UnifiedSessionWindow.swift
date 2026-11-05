@@ -531,6 +531,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // whole window (the window is isMovableByWindowBackground).
         let sidebarHost = NonMovableHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
+        // Never let SwiftUI size the window from the sidebar, as the fat
+        // client's doesn't: with its default sizing, every frame of a working
+        // dot's pulse re-measured the whole sidebar for the window's minimum
+        // size, most of a busy server's main thread while it showed a terminal.
+        sidebarHost.sizingOptions = []
         self.sidebarHost = sidebarHost
 
         // Empty stage — shows the selected off/suspended profile's Start card.

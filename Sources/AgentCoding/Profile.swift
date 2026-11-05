@@ -3594,7 +3594,10 @@ public final class CheckpointReaper: @unchecked Sendable {
     private let stepPause: useconds_t
     private let filePause: useconds_t
 
-    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 50_000, filePause: useconds_t = 1_000_000) {
+    /// Paced so a backlog (every checkpoint a long-running server should have
+    /// let go of) drains in the background: at 50 ms a step it held two thirds
+    /// of a core while it lasted.
+    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000) {
         self.step = step
         self.stepPause = stepPause
         self.filePause = filePause

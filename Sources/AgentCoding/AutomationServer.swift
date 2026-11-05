@@ -2641,6 +2641,93 @@ final class ACAutomationServer {
         return (content, frame)
     }
 
+    // MARK: The push feed: one producer, any number of subscribers
+
+    /// Each subscriber used to build, encode and compress the state on its own
+    /// half-second clock; two of them never shared a build (each found the
+    /// other's older than the cache allows) and took a core between them. Now
+    /// one thread builds while anyone is subscribed, and subscribers wait for
+    /// what it changed.
+    private let feedCondition = NSCondition()
+    private var feedSeq = 0
+    private var feedChanged: Data?
+    private var feedLatest: Data?
+    private var feedContent = Data()
+    private var feedSubscribers = 0
+    private var feedRunning = false
+
+    private func feedSubscribe() {
+        feedCondition.lock()
+        feedSubscribers += 1
+        let start = !feedRunning
+        feedRunning = true
+        feedCondition.unlock()
+        if start {
+            let t = Thread { [weak self] in self?.feedLoop() }
+            t.name = "ac-state-feed"
+            t.start()
+        }
+    }
+
+    private func feedUnsubscribe() {
+        feedCondition.lock()
+        feedSubscribers -= 1
+        feedCondition.unlock()
+    }
+
+    private func feedLoop() {
+        while true {
+            feedCondition.lock()
+            if feedSubscribers <= 0 {
+                feedRunning = false
+                feedContent = Data()
+                feedChanged = nil
+                feedLatest = nil
+                feedCondition.unlock()
+                return
+            }
+            feedCondition.unlock()
+            autoreleasepool {
+                let (content, frame) = stateFrame()
+                feedCondition.lock()
+                feedLatest = frame
+                if content != feedContent {
+                    feedContent = content
+                    feedChanged = frame
+                    feedSeq += 1
+                    feedCondition.broadcast()
+                }
+                feedCondition.unlock()
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// The frame of a change newer than `seq`, waiting up to `timeout` for one.
+    private func nextFeedFrame(after seq: Int, timeout: TimeInterval) -> (seq: Int, frame: Data)? {
+        feedCondition.lock()
+        defer { feedCondition.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while feedSeq <= seq || feedChanged == nil {
+            if !feedCondition.wait(until: deadline) { break }
+        }
+        guard feedSeq > seq, let f = feedChanged else { return nil }
+        return (feedSeq, f)
+    }
+
+    /// The latest build and the change it's at.
+    private func currentFeedFrame() -> (seq: Int, frame: Data)? {
+        feedCondition.lock()
+        defer { feedCondition.unlock() }
+        return feedLatest.map { (feedSeq, $0) }
+    }
+
+    private func latestFeedFrame() -> Data? {
+        feedCondition.lock()
+        defer { feedCondition.unlock() }
+        return feedLatest
+    }
+
     /// Write a 200 header, then PUSH framed snapshots whenever the state changes.
     /// Frame: [len:u32be][flag:u8][payload] where flag 1 = zlib-compressed and
     /// len covers flag+payload. Wakes every 500ms (≈ the old poll cadence, so no
@@ -2651,12 +2738,15 @@ final class ACAutomationServer {
     private func handleStateSubscribe(fd: Int32) {
         let header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
         guard Self.writeAllStreaming(fd, Data(header.utf8)) else { Darwin.close(fd); return }
-        var lastSentAt = Date.distantPast
-        var lastContent = Data()
-        // Pool per wake: this loop never returns to the GCD worker while the
-        // subscriber is connected, so the work item's pool never drains — and
-        // every wake autoreleases a snapshot build + JSON encode (+ zlib on
-        // change). Days of one subscriber pinned GBs on the server.
+        feedSubscribe()
+        defer { feedUnsubscribe() }
+        var seen = 0
+        var lastSentAt = Date()
+        // What there is already, at once: a new client mustn't wait for a change.
+        if let now = currentFeedFrame() {
+            guard Self.writeAllStreaming(fd, now.frame) else { Darwin.close(fd); return }
+            seen = now.seq
+        }
         while true {
             // Exit as soon as the client hangs up, even while the snapshot is
             // unchanged — otherwise a dead subscription is only noticed on the
@@ -2668,18 +2758,19 @@ final class ACAutomationServer {
                (pfd.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 { break }
             // A held push stream is a connected fat client.
             PendingPromptBroker.recordFatClientContact()
-            let alive = autoreleasepool { () -> Bool in
-                let (content, frame) = stateFrame()
-                let now = Date()
-                if content != lastContent || now.timeIntervalSince(lastSentAt) > 15 {
-                    lastContent = content
-                    lastSentAt = now
-                    guard Self.writeAllStreaming(fd, frame) else { return false }
-                }
-                return true
+            // What the one producer built since, or after 15 s its latest
+            // (a keepalive: a VM's uptime moves on in it).
+            var send: Data?
+            if let f = nextFeedFrame(after: seen, timeout: 0.5) {
+                seen = f.seq
+                send = f.frame
+            } else if Date().timeIntervalSince(lastSentAt) > 15 {
+                send = latestFeedFrame()
             }
-            if !alive { break }
-            Thread.sleep(forTimeInterval: 0.5)
+            if let send {
+                guard Self.writeAllStreaming(fd, send) else { break }
+                lastSentAt = Date()
+            }
         }
         Darwin.close(fd)
     }
