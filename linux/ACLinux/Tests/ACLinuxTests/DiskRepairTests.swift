@@ -478,3 +478,50 @@ struct LeftoverRescueTests {
         await d.shutdown()
     }
 }
+
+/// A VM's MAC (52:54:00:<cid>, fixed at its creation) is its identity on
+/// the switch and in the DHCP: no new VM may take a stopped one's, though
+/// a restarted daemon's allocator has leased none of them.
+@Suite("VM identity across restarts")
+struct VMIdentityTests {
+    static func rec(cid: UInt32, mac: String) -> VMRecord {
+        var r = RepairMarksTests.stopped(); r.cid = cid; r.mac = mac; return r
+    }
+
+    @Test func aNewVMTakesNeitherARecordsCIDNorItsMAC() throws {
+        // As a restarted daemon finds them: stopped, none leased. One kept its
+        // creation MAC (…:05) after a start moved it to CID 9.
+        let records = [Self.rec(cid: 3, mac: "52:54:00:00:00:03"), Self.rec(cid: 4, mac: "52:54:00:00:00:04"),
+                       Self.rec(cid: 9, mac: "52:54:00:00:00:05")]
+        let alloc = CIDAllocator(range: 3...12)
+        var got: [UInt32] = []
+        while let c = try? alloc.allocate(skip: Daemon.identityTaken(by: records)) { got.append(c) }
+        #expect(got.sorted() == [6, 7, 8, 10, 11, 12], "3, 4 and 9 are records' CIDs; 5 would be …:05's MAC")
+        let macs = Set(records.map(\.mac))
+        #expect(got.allSatisfy { !macs.contains(Daemon.mac(forCID: $0)) })
+        // Without the rule, the first new VM would have been node 1's twin.
+        #expect(try CIDAllocator(range: 3...12).allocate() == 3)
+    }
+
+    @Test func aMACIsTheCIDsLowBytes() {
+        #expect(Daemon.mac(forCID: 3) == "52:54:00:00:00:03")
+        #expect(Daemon.mac(forCID: 0x01_02_03) == "52:54:00:01:02:03")
+    }
+
+    /// Through the daemon: VMs created after a "restart" (records it never
+    /// leased) all have MACs and CIDs of their own.
+    @Test func createdVMsNeverShareAMAC() async throws {
+        let (d, _, dir) = try await DaemonRepairGateTests.daemon()          // CID 3, MAC …:09
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var two = Self.rec(cid: 4, mac: "52:54:00:00:00:04"); two.name = "k8s-r-2"
+        try await d.registerForTesting(two)
+        for i in 0..<6 {
+            let r = await d.createVM(.object(["name": .string("idt-\(i)")]), boot: false)
+            #expect(r.status == 201, "\(r.body)")
+        }
+        let recs = await d.registry.records
+        #expect(Set(recs.map(\.mac)).count == recs.count, "no two VMs share a MAC: \(recs.map(\.mac))")
+        #expect(Set(recs.map(\.cid)).count == recs.count)
+        await d.shutdown()
+    }
+}

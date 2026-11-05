@@ -29,17 +29,19 @@ public final class CIDAllocator: Sendable {
         self.state = NIOLockedValueBox((leased: [], next: range.lowerBound))
     }
 
-    /// The next CID that is neither leased here nor in use on the host.
-    /// When the host can't be probed, only this process's leases are
-    /// skipped (the VM's start then reports a clash).
+    /// The next CID that is neither leased here nor in use on the host,
+    /// nor one `skip` refuses (another VM record's, which this process may
+    /// not have leased: a stopped VM's). When the host can't be probed,
+    /// only this process's leases are skipped (the VM's start then reports
+    /// a clash).
     // @port-skip linux-only: CID allocation
-    public func allocate() throws -> UInt32 {
+    public func allocate(skip: (UInt32) -> Bool = { _ in false }) throws -> UInt32 {
         try state.withLockedValue { s in
             let span = UInt64(range.upperBound - range.lowerBound) + 1
             var cid = s.next
             for _ in 0..<min(span, 65_536) {
                 defer { cid = cid == range.upperBound ? range.lowerBound : cid + 1 }
-                if s.leased.contains(cid) { continue }
+                if s.leased.contains(cid) || skip(cid) { continue }
                 if probe(cid) == .inUse { continue }
                 s.leased.insert(cid)
                 s.next = cid == range.upperBound ? range.lowerBound : cid + 1

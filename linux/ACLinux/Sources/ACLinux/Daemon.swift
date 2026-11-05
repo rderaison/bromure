@@ -424,6 +424,23 @@ public actor Daemon {
         ControlResponse(200, ["vms": .array(records.map(vmEntry))])
     }
 
+    /// Whether a new VM may not have `cid`: another record has it, or has
+    /// the MAC it would give. A stopped VM keeps both across daemon restarts
+    /// (the allocator knows only this process's leases), and keeps its MAC
+    /// when a start moves it to a fresh CID; the MAC is its identity on the
+    /// switch and in the DHCP.
+    // @port-skip linux-only: Linux VM identity
+    static func identityTaken(by records: [VMRecord]) -> (UInt32) -> Bool {
+        let cids = Set(records.map(\.cid)), macs = Set(records.map { $0.mac.lowercased() })
+        return { cids.contains($0) || macs.contains(mac(forCID: $0)) }
+    }
+
+    /// A new VM's MAC, from its CID at creation (it keeps it after).
+    // @port-skip linux-only: Linux VM identity
+    static func mac(forCID cid: UInt32) -> String {
+        String(format: "52:54:00:%02x:%02x:%02x", cid >> 16 & 0xFF, cid >> 8 & 0xFF, cid & 0xFF)
+    }
+
     /// `POST /vms`: create and start a VM, detached. Body: `name?`,
     /// `machine?` (q35|microvm), `memoryGB?`, `cpus?`. 201 `{id, shortId, name, detached}`.
     // partial: no profile, tool, auth, apiKey, mounts or rm; takes name/machine/memoryGB/cpus; always detached
@@ -450,8 +467,9 @@ public actor Daemon {
         let memMiB = Int((body["memoryGB"]?.numberValue ?? 2) * 1024)
         let cpus = Int(body["cpus"]?.numberValue ?? 2)
         let homeGB = body["homeGB"]?.numberValue.map { min(1024, max(8, Int($0))) }
-        guard let cid = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
-        let mac = String(format: "52:54:00:%02x:%02x:%02x", cid >> 16 & 0xFF, cid >> 8 & 0xFF, cid & 0xFF)
+        guard let cid = try? CIDAllocator.shared.allocate(skip: Self.identityTaken(by: registry.records))
+        else { return .error(503, "No free vsock CID") }
+        let mac = Self.mac(forCID: cid)
         var rec = VMRecord(id: id, name: name, machine: machine, cid: cid, mac: mac, state: .starting, ip: nil,
                            cpus: cpus, memoryMiB: memMiB, createdAt: Date(), bootedAt: nil, statePath: nil)
         rec.homeGB = homeGB
@@ -629,7 +647,10 @@ public actor Daemon {
         if !CIDAllocator.shared.claim(rec.cid) {
             // The snapshot's vsock device keeps its CID.
             if restoreFrom != nil { return .error(503, "VM '\(rec.name)''s vsock CID \(rec.cid) is taken; can't resume it") }
-            guard let fresh = try? CIDAllocator.shared.allocate() else { return .error(503, "No free vsock CID") }
+            let others = Set(registry.records.filter { $0.id != rec.id }.map(\.cid))
+            guard let fresh = try? CIDAllocator.shared.allocate(skip: { others.contains($0) }) else {
+                return .error(503, "No free vsock CID")
+            }
             r.cid = fresh
         }
         if let dir = restoreFrom {
