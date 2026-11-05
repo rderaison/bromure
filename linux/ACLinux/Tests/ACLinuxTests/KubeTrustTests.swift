@@ -907,6 +907,27 @@ struct GuestEnvTests {
         await d.shutdown()
     }
 
+    /// No plan (no proxy: its CA didn't load): a workspace doesn't launch,
+    /// and nothing real is ever written for the guest.
+    @Test func withoutAPlanAWorkspaceIsRefusedAndNothingRealIsWritten() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        var p = Profile(name: "noproxy", tool: .claude, authMode: .token)
+        p.apiKey = "sk-ant-api03-REAL-KEY-not-for-the-guest"
+        p.manualTokens = [ManualToken(name: "stripe", realValue: "sk_live_REAL", envVarName: "STRIPE_API_KEY",
+                                      hostFilters: ["api.stripe.com"])]
+        #expect(Daemon.launchRefusal(registration: false, plan: nil)?.contains("intercepting proxy") == true)
+        #expect(Daemon.launchRefusal(registration: true, plan: nil) == nil, "a sign-in VM has none by design")
+        #expect(Daemon.launchRefusal(registration: false, plan: Daemon.makeSessionTokenPlan(for: p, mitm: proxy)) == nil)
+        let text = SessionDisk.apiKeyEnvLines(profile: Daemon.envProfile(p, plan: nil), tokenPlan: nil,
+                                              registrationMode: true).joined(separator: "\n")
+        #expect(!text.contains("REAL"), "stripped: \(text)")
+        #expect(text.contains("BROMURE_AC_REGISTER=1"), "a sign-in VM keeps its own lines")
+        // Without the strip, the shared builder would have written the real key.
+        #expect(SessionDisk.apiKeyEnvLines(profile: p, tokenPlan: nil, registrationMode: false)
+                    .joined(separator: "\n").contains("REAL"))
+    }
+
     @Test func manualTokensAndAPIKeysAreExportedAsFakes() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))

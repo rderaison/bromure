@@ -483,6 +483,27 @@ public actor Daemon {
         return { cids.contains($0) || macs.contains(mac(forCID: $0)) }
     }
 
+    /// Why a VM may not launch with `plan`: a workspace's needs one (no proxy
+    /// would hand its credentials to the guest as they are); a sign-in VM
+    /// has none by design.
+    // @port-skip linux-only: the Linux launch's proxy gate
+    static func launchRefusal(registration: Bool, plan: SessionTokenPlan?) -> String? {
+        guard !registration, plan == nil else { return nil }
+        return "this server's intercepting proxy isn't running (its CA in the state dir didn't load); "
+            + "a workspace can't start without it: its credentials would reach the VM as they are"
+    }
+
+    /// The profile the guest's credential environment is built from: as it
+    /// is with a plan (its fakes), stripped of every secret without one (a
+    /// sign-in VM's), so no real value can fall through to the guest.
+    // @port-skip linux-only: the Linux launch's proxy gate
+    static func envProfile(_ profile: Profile, plan: SessionTokenPlan?) -> Profile {
+        guard plan == nil else { return profile }
+        var p = profile
+        _ = ProfileSecrets.extract(stripping: &p)
+        return p
+    }
+
     /// A new VM's MAC, from its CID at creation (it keeps it after).
     // @port-skip linux-only: Linux VM identity
     static func mac(forCID cid: UInt32) -> String {
@@ -897,6 +918,11 @@ public actor Daemon {
             // handshake reaches upstream untouched (macOS: tokenPlan nil).
             let plan = rec.registration == true ? nil : sessionTokenPlan(for: profile)
             launchPlan = plan
+            // No plan means no proxy (its CA didn't load): every credential
+            // would reach the guest as itself. macOS always has one.
+            if let why = Self.launchRefusal(registration: rec.registration == true, plan: plan) {
+                throw MachineError.invalidConfig(why)
+            }
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
             try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
                                          kubeconfigYAML: kubeYAML)
@@ -910,7 +936,8 @@ public actor Daemon {
             // The guest's credential environment, sourced by its .bashrc: the
             // plan's fakes under their env vars (API keys, manual tokens,
             // MCP bearers), as macOS's session disk writes it.
-            try SessionDisk.apiKeyEnvLines(profile: profile, tokenPlan: plan, registrationMode: rec.registration == true)
+            try SessionDisk.apiKeyEnvLines(profile: Self.envProfile(profile, plan: plan), tokenPlan: plan,
+                                           registrationMode: rec.registration == true)
                 .joined(separator: "\n").appending("\n")
                 .write(to: meta.appendingPathComponent("api_key.env"), atomically: true, encoding: .utf8)
             if rec.registration != true {
