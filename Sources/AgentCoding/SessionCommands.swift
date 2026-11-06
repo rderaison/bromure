@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 
 /// The Switchboard's launch flags and its brief: what a session engine (macOS
@@ -26,14 +27,99 @@ enum SwitchboardLaunch {
 
     /// The shell line that writes the brief into the Switchboard's folder
     /// before its agent starts (AgentSessionEngine.launch). A room's
-    /// Switchboard gets the room section on top of the common brief.
-    static func briefCommand(guestFolder: String, roomName: String? = nil) -> String {
+    /// Switchboard gets the room section on top of the common brief. With
+    /// `token`, the session's MCP token goes beside it (SwitchboardToken),
+    /// 0600, for the guest's shim to present.
+    static func briefCommand(guestFolder: String, roomName: String? = nil, token: String? = nil) -> String {
         let q = "'" + guestFolder.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let text = roomName.map { SwitchboardBrief.text + SwitchboardBrief.roomSection($0) } ?? SwitchboardBrief.text
         let b64 = Data(text.utf8).base64EncodedString()
         // CLAUDE.md for Claude, AGENTS.md for the others (Codex, Kimi, omp):
         // whichever agent runs finds it again after a resume.
-        return "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md && cp \(q)/CLAUDE.md \(q)/AGENTS.md"
+        var cmd = "mkdir -p \(q) && echo \(b64) | base64 -d > \(q)/CLAUDE.md && cp \(q)/CLAUDE.md \(q)/AGENTS.md"
+        // Hex only (a token can't carry shell syntax); written with umask 077.
+        if let token, !token.isEmpty, token.allSatisfy(\.isHexDigit) {
+            cmd += " && (umask 077 && printf %s \(token) > \(q)/\(SwitchboardToken.fileName).new"
+                + " && mv -f \(q)/\(SwitchboardToken.fileName).new \(q)/\(SwitchboardToken.fileName))"
+        }
+        return cmd
+    }
+}
+
+/// The Switchboard's MCP (vsock 5836) answers only its own session: the
+/// caller's tmux window has to be the Switchboard's, and it has to present
+/// that session's token, which the host writes into the Switchboard's folder
+/// at each launch (0600, `.bromure-switchboard-token`; never on a command
+/// line or in an environment). The token is HMAC-SHA256(host key, session
+/// id): nothing to store, and a token can't be turned into another session's.
+///
+/// It's still a secret held by the guest's user: it stops an unrelated agent
+/// tab that only guesses or claims a window index, not one that goes looking
+/// for the file (every agent in the guest runs as the same user).
+// TODO: bind the Switchboard's MCP connection host-side to the process in
+// its tmux pane, which agentd can vouch for (it knows which pid runs in which
+// window); a token readable by the guest's user can't keep out an agent of
+// that user that reads it.
+enum SwitchboardToken {
+    static let fileName = ".bromure-switchboard-token"
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cachedKey: SymmetricKey?
+    /// Where the key lives instead of the support folder (tests); setting it
+    /// forgets the key in memory.
+    nonisolated(unsafe) static var keyFolder: URL? {
+        didSet { lock.lock(); cachedKey = nil; lock.unlock() }
+    }
+
+    /// This host's key: 32 random bytes, made once, 0600 in its support folder
+    /// (macOS Application Support; on Linux the daemon's user's data folder).
+    static func key() -> SymmetricKey {
+        lock.lock(); defer { lock.unlock() }
+        if let k = cachedKey { return k }
+        let dir = keyFolder ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BromureAC", isDirectory: true)
+        let url = dir.appendingPathComponent("switchboard-token.key")
+        if let d = try? Data(contentsOf: url), d.count == 32 {
+            cachedKey = SymmetricKey(data: d)
+            return cachedKey!
+        }
+        let k = SymmetricKey(size: .bits256)
+        let bytes = k.withUnsafeBytes { Data($0) }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        // Written whole beside it, then linked into place: link() fails when
+        // another process made the key first, and then theirs is used.
+        let tmp = url.appendingPathExtension("new.\(getpid())")
+        _ = FileManager.default.createFile(atPath: tmp.path, contents: bytes, attributes: [.posixPermissions: 0o600])
+        _ = link(tmp.path, url.path)
+        _ = unlink(tmp.path)
+        if let d = try? Data(contentsOf: url), d.count == 32 { cachedKey = SymmetricKey(data: d) } else { cachedKey = k }
+        return cachedKey!
+    }
+
+    /// The Switchboard session's token (hex).
+    static func token(for sessionID: UUID) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(sessionID.uuidString.uppercased().utf8), using: key())
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether `presented` is the session's token (compared in constant time).
+    static func matches(_ presented: String?, sessionID: UUID) -> Bool {
+        guard let presented, !presented.isEmpty else { return false }
+        let want = Array(token(for: sessionID).utf8), got = Array(presented.utf8)
+        guard want.count == got.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<want.count { diff |= want[i] ^ got[i] }
+        return diff == 0
+    }
+
+    /// The window and the token of a shim's hello, `w<index> t<token>`.
+    static func parseHello(_ hello: String?) -> (window: Int?, token: String?) {
+        let parts = (hello ?? "").split(separator: " ").map(String.init)
+        // "w<index>", as DelegationMCPServer.windowIndex(fromHello:) reads it.
+        let window = parts.first.flatMap { $0.hasPrefix("w") ? Int($0.dropFirst()) : nil }.flatMap { $0 >= 0 ? $0 : nil }
+        let token = parts.dropFirst().first { $0.hasPrefix("t") }.map { String($0.dropFirst()) }
+        return (window, token)
     }
 }
 

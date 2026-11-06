@@ -167,7 +167,8 @@ final class SwitchboardMCPServer: MCPLineHandler {
 
     private func callTool(name: String, args: [String: Any], hello: String?) async -> [String: Any] {
         guard let engine = engine() else { return errorResult("The Switchboard isn't available on this host.") }
-        guard let w = DelegationMCPServer.windowIndex(fromHello: hello) else {
+        let presented = SwitchboardToken.parseHello(hello)
+        guard let w = presented.window else {
             return errorResult("These tools belong to the Switchboard session only.")
         }
         // Right after the app restarts (or the machine resumes), tab
@@ -185,7 +186,10 @@ final class SwitchboardMCPServer: MCPLineHandler {
         guard let me = found else {
             return errorResult("Bromure is still reconnecting to this session (the app or the machine just restarted). Try again in a few seconds.")
         }
-        guard me.isSwitchboard else {
+        // The window must be the Switchboard's, and the caller must present
+        // that session's token (SwitchboardToken): a tab that only claims the
+        // window index gets the same answer as any other tab.
+        guard me.isSwitchboard, SwitchboardToken.matches(presented.token, sessionID: me.id) else {
             return errorResult("These tools belong to the Switchboard session only.")
         }
         let iso = ISO8601DateFormatter()

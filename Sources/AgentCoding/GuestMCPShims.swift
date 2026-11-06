@@ -54,7 +54,37 @@ extension SessionDisk {
             .replacingOccurrences(of: "PORT = \(delegationMCPVsockPort)", with: "PORT = \(switchboardMCPVsockPort)")
             .replacingOccurrences(of: "bromure-delegation-mcp", with: "bromure-switchboard-mcp")
             .replacingOccurrences(of: "delegation MCP", with: "switchboard MCP")
+            .replacingOccurrences(of: "HELLO = _hello()\n", with: "HELLO = _hello()\n" + switchboardTokenBlock)
     }
+    /// The Switchboard's token (SwitchboardToken), from its folder: the
+    /// pane's directory, else the agent's (the shim inherits its cwd). Never
+    /// from the command line or the environment.
+    static let switchboardTokenBlock = """
+    def _token():
+        dirs = []
+        pane = os.environ.get("TMUX_PANE", "")
+        if pane:
+            try:
+                d = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{pane_current_path}"],
+                                   capture_output=True, text=True, timeout=5).stdout.strip()
+                if d: dirs.append(d)
+            except Exception:
+                pass
+        dirs.append(os.getcwd())
+        for d in dirs:
+            try:
+                with open(os.path.join(d, ".bromure-switchboard-token")) as f:
+                    t = f.read().strip()
+                if t and all(c in "0123456789abcdef" for c in t):
+                    return t
+            except Exception:
+                pass
+        return ""
+    _TOKEN = _token()
+    if HELLO and _TOKEN:
+        HELLO = HELLO + " t" + _TOKEN
+
+    """
     static var switchboardMCPConfigJSON: String {
         let cfg: [String: Any] = ["mcpServers": ["switchboard": [
             "command": "python3", "args": [switchboardMCPShimGuestPath],

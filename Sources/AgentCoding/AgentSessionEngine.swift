@@ -326,7 +326,8 @@ final class AgentSessionEngine {
                             profileID: s.profileID,
                             command: SwitchboardLaunch.briefCommand(
                                 guestFolder: SessionHome.guestPath(s.cwd),
-                                roomName: delegate.agentRoomStore.room(s.roomID)?.name),
+                                roomName: delegate.agentRoomStore.room(s.roomID)?.name,
+                                token: SwitchboardToken.token(for: s.id)),
                             timeout: 15)
                     }
                     // Ours, from this moment: the agent process the probe is
@@ -762,7 +763,8 @@ final class AgentSessionEngine {
                 _ = try? await delegate.guestExec(
                     profileID: s.profileID,
                     command: SwitchboardLaunch.briefCommand(
-                        guestFolder: guestPath, roomName: delegate.agentRoomStore.room(s.roomID)?.name),
+                        guestFolder: guestPath, roomName: delegate.agentRoomStore.room(s.roomID)?.name,
+                        token: SwitchboardToken.token(for: s.id)),
                     timeout: 15)
             } else {
                 // A folder that doesn't exist yet is created — and starts as
