@@ -132,6 +132,31 @@ struct LinuxMachineTests {
         await srv.close()
     }
 
+    /// While the handler is still working on the request, what the client
+    /// sends past it waits for the stream, a bounded amount: the connection
+    /// stops reading, so the client's sends wait rather than piling up here.
+    @Test func whileTheHandlerWorksTheClientIsHeldBack() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let path = dir + "/c.sock"
+        let srv = try await ControlServer.start(path: path) { _ in
+            try? await Task.sleep(for: .seconds(6))     // the handler takes its time
+            return .descriptor(head: "") { fd in close(fd) }
+        }
+        let fd = try #require(Self.dial(path)); defer { close(fd) }
+        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        Self.say(fd, "POST /slow HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        let chunk = [UInt8](repeating: 67, count: 65536)
+        var sent = 0
+        for _ in 0..<1024 {                  // 64 MiB at most
+            let n = chunk.withUnsafeBytes { Glibc.send(fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+            if n <= 0 { break }
+            sent += n
+        }
+        #expect(sent < 24 << 20, "held back at \(sent) bytes while the handler worked, not the whole 64 MiB")
+        await srv.close()
+    }
+
     static func request(_ method: String, _ path: String, _ body: [String: Any] = [:]) -> ControlRequest {
         ControlRequest(method: method, path: path, body: JSONValue(foundation: body) ?? .object([:]))
     }

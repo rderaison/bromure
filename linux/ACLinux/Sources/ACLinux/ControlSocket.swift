@@ -219,6 +219,13 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     /// Set once a streaming reply has taken the connection over.
     private var streamIn: AsyncStream<ByteBuffer>.Continuation?
     private var gate: InboundGate?
+    /// The request's own bytes, once it's being handled: what the client
+    /// sends past them waits in `buf` for a stream (`leftover`), up to
+    /// `pendingSlack` more, and then the connection stops reading until the
+    /// handler answers.
+    private var requestBytes = 0
+    private var pausedForHandler = false
+    static let pendingSlack = 256 << 10
     /// nil until SO_PEERCRED has answered: nothing is served before that.
     private var authorized: Bool?
     /// The client sent EOF: an incomplete request can't complete any more.
@@ -255,6 +262,16 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         var b = unwrapInboundIn(data)
         if let streamIn { gate?.added(b.readableBytes); streamIn.yield(b); return }
         buf.writeBuffer(&b)
+        if started {
+            // The handler is still working on the request.
+            if !pausedForHandler, buf.readableBytes > requestBytes + Self.pendingSlack {
+                pausedForHandler = true
+                context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
+            }
+            return
+        }
+        // Not authorized yet (SO_PEERCRED pending): no more than a whole request.
+        if authorized == nil, buf.readableBytes > Self.maxHeader + Self.maxBody { context.close(promise: nil); return }
         process(context)
     }
 
@@ -303,6 +320,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
             return
         }
         started = true
+        requestBytes = headLen + length
         let line = head.split(separator: "\r\n").first?.split(separator: " ") ?? []
         guard line.count >= 2 else { reply(context, .error(400, "Bad request")); return }
         let bodyBytes = buf.getBytes(at: buf.readerIndex + headLen, length: length) ?? []
@@ -333,6 +351,13 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         let gate = InboundGate(channel: context.channel)
         streamIn = cont
         self.gate = gate
+        // Reading again: the gate decides from here (it pauses again below
+        // if what's waiting is already past its mark).
+        if pausedForHandler {
+            pausedForHandler = false
+            context.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+            context.read()
+        }
         buf.moveReaderIndex(forwardBy: consumed)
         if buf.readableBytes > 0 { gate.added(buf.readableBytes); cont.yield(buf.slice()) }
         buf = ByteBuffer()
