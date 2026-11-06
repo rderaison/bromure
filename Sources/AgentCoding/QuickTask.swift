@@ -22,6 +22,8 @@ final class QuickTaskPanel {
     /// assignee is on.
     private var target: Target?
     private var targets: [Target] = []
+    /// The folder the panel opened on: the session in front's, on `target`.
+    private var folder = "~"
 
     /// The board a quick task lands on: this Mac's, or — when a fat-client
     /// window is in front — the host it mirrors (its workspaces, its
@@ -173,6 +175,7 @@ final class QuickTaskPanel {
         }
         let initial = standing ?? here
         let folder = current?.cwd ?? "~"
+        self.folder = folder
         let tool = current?.tool ?? target.profile(workspace)?.tool ?? .claude
         let view = QuickTaskView(
             choices: choices,
@@ -251,7 +254,11 @@ final class QuickTaskPanel {
         // machine, the assignee's (or that machine's first).
         let own = target.profile(t.profileID) != nil ? t.profileID : (target.profiles.first?.id ?? t.profileID)
         t.profileID = target.workspace(for: t.assignment, else: own)
-        if target.key != main.key, let p = target.profile(t.profileID) { t.tool = p.tool }
+        if target.key != main.key {
+            if let p = target.profile(t.profileID) { t.tool = p.tool }
+            // The editor started on this board's folder, a path on another machine.
+            if t.repoPath == folder { t.repoPath = "~" }
+        }
         target.save(t)
         if plan {
             target.plan(t.id)
