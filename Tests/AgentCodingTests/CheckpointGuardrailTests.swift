@@ -161,6 +161,31 @@ struct CheckpointGuardrailTests {
         #expect(keep == [now, dayBefore])
     }
 
+    /// The finding: a delete renames each checkpoint out of the list first, so
+    /// one a quit interrupted was hidden and kept its space until that
+    /// workspace's next session start pruned it. Once the ladder had settled,
+    /// launch looked no more.
+    @Test("every launch unlinks what a quit left half deleted, and nothing else")
+    func launchSweeps() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "quit", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        let disk = store.checkpointsDirectory(for: p), home = store.homeCheckpointsDirectory(for: p)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = disk.appendingPathComponent("\(Int(Date().timeIntervalSince1970)).img")
+        let left = [disk.appendingPathComponent("1700000000.img.deleting"), home.appendingPathComponent("1700000100.img.deleting")]
+        for u in [kept] + left { try Data("x".utf8).write(to: u) }
+        try Data(ProfileStore.ladderGeneration.utf8).write(to: store.checkpointLadderMark)   // settled long ago
+        #expect(store.settleCheckpointBacklog([p]) == 1)
+        try await waitForPurge(p.id)
+        #expect(left.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(FileManager.default.fileExists(atPath: kept.path))
+        #expect(FileManager.default.fileExists(atPath: store.diskURL(for: p).path))
+        #expect(try String(contentsOf: store.checkpointLadderMark, encoding: .utf8) == ProfileStore.ladderGeneration)
+        #expect(store.settleCheckpointBacklog([p]) == 0)   // nothing left
+    }
+
     @Test("launch settles the backlog; a session start takes its checkpoints as automatic")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
