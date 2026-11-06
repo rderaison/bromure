@@ -6111,7 +6111,7 @@ struct LinuxPill: View {
                     .font(.system(size: 12))
                 Text(back ? NSLocalizedString("Session", comment: "toolbar")
                      : chat ? NSLocalizedString("Chat", comment: "toolbar")
-                     : NSLocalizedString("Linux", comment: "toolbar"))
+                     : NSLocalizedString("Terminal", comment: "toolbar"))
                     .font(.system(size: 12, weight: .medium))
             }
             .foregroundStyle(.secondary)
@@ -6125,7 +6125,7 @@ struct LinuxPill: View {
         .onHover { hovering = $0 }
         .help(back ? NSLocalizedString("Back to the session this terminal hosts (⌥⌘U)", comment: "toolbar")
                    : chat ? NSLocalizedString("Show this session as a chat (⌥⌘U)", comment: "toolbar")
-                   : NSLocalizedString("Show this session's Linux terminal (⌥⌘U)", comment: "toolbar"))
+                   : NSLocalizedString("Show this session's terminal (⌥⌘U)", comment: "toolbar"))
     }
 }
 

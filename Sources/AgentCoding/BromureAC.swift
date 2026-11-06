@@ -1157,7 +1157,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 
     // The Linux machine behind the selected session: its terminal tab — and
     // from that terminal, the session again.
-    let hoodItem = NSMenuItem(title: L("Linux"),
+    let hoodItem = NSMenuItem(title: L("Terminal"),
                               action: #selector(ACAppDelegate.toggleLinuxAction(_:)),
                               keyEquivalent: "u")
     hoodItem.keyEquivalentModifierMask = [.command, .option]

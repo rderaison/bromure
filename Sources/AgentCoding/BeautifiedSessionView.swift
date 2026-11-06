@@ -5563,7 +5563,7 @@ private struct PromptCard: View {
                                    comment: "Grok data-retention banner hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         } else {
-            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            Text(NSLocalizedString("Open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
     }
@@ -5587,7 +5587,7 @@ private struct PromptCard: View {
             }
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
         } else {
-            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            Text(NSLocalizedString("Open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
     }
@@ -5638,7 +5638,7 @@ private struct PromptCard: View {
             .buttonStyle(.plain)
             .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
-        Text(NSLocalizedString("Or open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+        Text(NSLocalizedString("Or open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
             .font(.system(size: 11)).foregroundStyle(.tertiary)
     }
 

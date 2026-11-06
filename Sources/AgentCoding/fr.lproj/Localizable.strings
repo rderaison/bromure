@@ -1825,7 +1825,7 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "Tourne dans une machine isolée rien qu’à elle. Rien sur votre Mac n’est touché.";
 "Ask for anything — or just press Return to open %@." = "Demandez ce que vous voulez — ou appuyez simplement sur Retour pour ouvrir %@.";
 "Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "Ouvrez Linux (⌥⌘U) pour répondre dans le terminal.";
+"Open the terminal (⌥⌘U) to answer there." = "Ouvrez le terminal (⌥⌘U) pour y répondre.";
 "Waking up…" = "Réveil…";
 "Almost there…" = "Presque prêt…";
 "Asleep. Your next message wakes it up and carries on from here." = "En veille. Votre prochain message la réveille et reprend d’ici.";
@@ -2371,7 +2371,7 @@
 "Session" = "Session";
 "Back to the session this terminal hosts (⌥⌘U)" = "Revenir à la session hébergée par ce terminal (⌥⌘U)";
 "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "La machine Linux derrière cette session : son onglet de terminal dans la liste des machines (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "Ou ouvrez Linux (⌥⌘U) pour répondre dans le terminal.";
+"Or open the terminal (⌥⌘U) to answer there." = "Ou ouvrez le terminal (⌥⌘U) pour y répondre.";
 "New machine…" = "Nouvelle machine…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -4357,3 +4357,4 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "Il manque peut-être de mémoire. Ce qui est affiché n'est peut-être plus à jour.";
+"Show this session's terminal (⌥⌘U)" = "Afficher le terminal de cette session (⌥⌘U)";

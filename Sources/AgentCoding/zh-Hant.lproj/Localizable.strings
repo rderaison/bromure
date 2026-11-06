@@ -1828,7 +1828,7 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "在一台專屬的隔離機器裡執行。你 Mac 上的任何東西都不會被碰到。";
 "Ask for anything — or just press Return to open %@." = "想要什麼都可以問 — 或者直接按 Return 打開 %@。";
 "Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "打開 Linux (⌥⌘U) 在終端機中回答。";
+"Open the terminal (⌥⌘U) to answer there." = "打開終端機 (⌥⌘U) 在那裡回答。";
 "Waking up…" = "正在喚醒…";
 "Almost there…" = "快好了…";
 "Asleep. Your next message wakes it up and carries on from here." = "睡眠中。你的下一則訊息會喚醒它並從這裡繼續。";
@@ -2374,7 +2374,7 @@
 "Session" = "工作階段";
 "Back to the session this terminal hosts (⌥⌘U)" = "返回此終端機承載的工作階段 (⌥⌘U)";
 "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "此工作階段背後的 Linux 機器：它在機器列表中的終端機分頁 (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "或打開 Linux (⌥⌘U) 在終端機中回答。";
+"Or open the terminal (⌥⌘U) to answer there." = "或打開終端機 (⌥⌘U) 在那裡回答。";
 "New machine…" = "新增機器…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -4360,3 +4360,4 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "可能記憶體不足。此處顯示的內容可能已過時。";
+"Show this session's terminal (⌥⌘U)" = "顯示此工作階段的終端機 (⌥⌘U)";

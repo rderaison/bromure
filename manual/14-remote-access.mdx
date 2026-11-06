@@ -140,7 +140,7 @@ Once you are signed in, every device you enroll shares its SSH identity through 
 
 The mirror window opens automatically after a successful connect. It is the [sessions home](05-sessions-home.mdx) of the remote Mac: the same sidebar (sessions, rooms, the Switchboard, tasks, automations, **Virtual Machines** with any Kubernetes clusters and registries), the same stage and the same header. Start a session with **New session** (⌘N), chat with it, answer its questions, open a [room](06b-rooms.mdx) with its grid of chats, or talk to the remote's [Switchboard](06e-switchboard.mdx) — it all happens on the remote, and the ⌘K palette works too.
 
-The header has the same controls as the local window: the **Linux** pill for a session's terminal, the **machine menu** named after the machine (**Settings…**, **Machine Details**, **Copy IP Address**, **Inspect Trace**, **Pop Out to Its Own Window**, **Reboot**), the Fusion bolt, **Show or hide the agentic browser (⌃⌘B)** and **Show or hide the Files pane (⌃⌘E)**. A mirror window adds one control of its own, the network-tunnel toggle (see [The system-wide network tunnel](#the-system-wide-network-tunnel)). Terminals render with the machine's own [appearance](07-settings/appearance.mdx).
+The header has the same controls as the local window: the **Terminal** pill for a session's terminal, the **machine menu** named after the machine (**Settings…**, **Machine Details**, **Copy IP Address**, **Inspect Trace**, **Pop Out to Its Own Window**, **Reboot**), the Fusion bolt, **Show or hide the agentic browser (⌃⌘B)** and **Show or hide the Files pane (⌃⌘E)**. A mirror window adds one control of its own, the network-tunnel toggle (see [The system-wide network tunnel](#the-system-wide-network-tunnel)). Terminals render with the machine's own [appearance](07-settings/appearance.mdx).
 
 A few things behave specially over the mirror:
 
@@ -198,7 +198,7 @@ A few operations are **not** available from the rich client:
 
 Bromure Remote is a client-only mirror, reached exactly the same way (sign in and pick a server, or add one by address). It is sessions-first like the Mac:
 
-- **iPhone** — a **Sessions** list with a count of sessions that need you, a new-session screen ("What can I help you with?"), and a screen per session: its chat, a **Linux** button for its terminal, and a menu with **Resume**, **Rename…**, **New worktree…**, the machine's settings, **Archive** (or **End & Archive**), **End session** and **Delete session**. A room opens as a tab per session, swiping between them, with the room's Switchboard.
+- **iPhone** — a **Sessions** list with a count of sessions that need you, a new-session screen ("What can I help you with?"), and a screen per session: its chat, a **Terminal** button for its terminal, and a menu with **Resume**, **Rename…**, **New worktree…**, the machine's settings, **Archive** (or **End & Archive**), **End session** and **Delete session**. A room opens as a tab per session, swiping between them, with the room's Switchboard.
 - **iPad** — a persistent sidebar with sessions, rooms and machines; a room shows its grid of chats like the Mac.
 
 On both, the list is ordered as on the Mac's sidebar: **New session** first, **Coding Tasks** and **Automations** right under it, then the sessions. Machines are split into **Virtual Machines** (with the Grid) and **Native Machines** — the Sidecar Macs the remote has attached, shown only when there is one; a native machine offers **New Terminal**. On iPad, **New Session** stays visible above the foldable Sessions section.

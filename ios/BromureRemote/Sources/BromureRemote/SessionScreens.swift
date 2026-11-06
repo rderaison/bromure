@@ -5,7 +5,7 @@ import SwiftUI
 // The mobile counterpart of the desktop's sessions-first stage
 // (RemoteHostWindow on macOS): a session — an agent, in a folder, on a
 // machine — is what the user picks; the workspace/tmux plumbing stays one
-// tap away ("Linux"). Everything reads the same `RemoteHostController`
+// tap away ("Terminal"). Everything reads the same `RemoteHostController`
 // mirror (`sessionStore`) and drives the server through its session API
 // (`startSession` / `sessionCommand` / `fetchSessionTranscript`). Gated on
 // `controller.supportsSessions`, so an older server without the endpoints
@@ -238,7 +238,7 @@ struct MobileSessionScreen: View {
             if !gone {
                 if s.windowIndex != nil, !s.hasEnded {
                     Button { showLinux = true } label: {
-                        Label("Linux", systemImage: "terminal")
+                        Label("Terminal", systemImage: "terminal")
                     }
                 }
                 if s.hasEnded || SessionHome.bucket(for: s, in: model) == .asleep {

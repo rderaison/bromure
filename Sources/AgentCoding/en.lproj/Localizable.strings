@@ -1839,7 +1839,7 @@
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "Runs in an isolated machine of its own. Nothing on your Mac is touched.";
 "Ask for anything — or just press Return to open %@." = "Ask for anything — or just press Return to open %@.";
 "Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "Open Linux (⌥⌘U) to answer in the terminal.";
+"Open the terminal (⌥⌘U) to answer there." = "Open the terminal (⌥⌘U) to answer there.";
 "Waking up…" = "Waking up…";
 "Almost there…" = "Almost there…";
 "Asleep. Your next message wakes it up and carries on from here." = "Asleep. Your next message wakes it up and carries on from here.";
@@ -2405,7 +2405,7 @@
 "Session" = "Session";
 "Back to the session this terminal hosts (⌥⌘U)" = "Back to the session this terminal hosts (⌥⌘U)";
 "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "Or open Linux (⌥⌘U) to answer in the terminal.";
+"Or open the terminal (⌥⌘U) to answer there." = "Or open the terminal (⌥⌘U) to answer there.";
 "New machine…" = "New machine…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -4391,3 +4391,4 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "It may be out of memory. What's shown here may be out of date.";
+"Show this session's terminal (⌥⌘U)" = "Show this session's terminal (⌥⌘U)";
