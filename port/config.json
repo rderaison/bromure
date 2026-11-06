@@ -140,6 +140,7 @@
     "Sources/AgentCoding/Mitm/SubscriptionStoreFile.swift",
     "Sources/AgentCoding/Mitm/SupplyChainLog.swift",
     "Sources/AgentCoding/Mitm/SupplyChainPolicy.swift",
+    "Sources/AgentCoding/Mitm/SwitchEgressReport.swift",
     "Sources/AgentCoding/Mitm/TokenSwap.swift",
     "Sources/AgentCoding/Mitm/ToolResultSpans.swift",
     "Sources/AgentCoding/Mitm/TraceEmitter.swift",
@@ -222,6 +223,8 @@
     "Sources/SandboxEngine/SandboxError.swift",
     "Sources/SandboxEngine/TraceEvent.swift",
     "Sources/SandboxEngine/VMConfig.swift",
+    "Sources/SandboxEngine/VMNetSwitch+EgressEvent.swift",
+    "Sources/SandboxEngine/VMNetSwitch+Packets.swift",
     "Sources/SandboxEngine/VPNConnectionState.swift",
     "Sources/SandboxEngine/VPNKeychain.swift",
     "Sources/SandboxEngine/VmnetSubnet.swift"

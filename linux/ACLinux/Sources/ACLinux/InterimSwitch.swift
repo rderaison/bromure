@@ -22,12 +22,17 @@ import NIOConcurrencyHelpers
 /// would answer for any address and draw the peer's traffic to the uplink;
 /// and a frame to the gateway's MAC whose IPv4 destination is a peer's
 /// lease (a guest that cached passt's answer) is delivered to the peer.
-/// No DNS snoop, no egress policy, no CDP pairing gate. Don't build on it.
+/// Egress: every off-subnet frame from a session VM goes through its
+/// workspace's firewall (SwitchEgressFirewall, macOS's handleEgress), and
+/// the guests' DNS answers are snooped for its hostname rules.
+/// No CDP pairing gate. Don't build on it.
 // @port-skip linux-only: interim stand-in for VMNetSwitch until ACCore ships it
 public final class InterimSwitch: Sendable {
     public let dhcp: InterimDHCP
     public let uplink: any Uplink
-    private let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
+    private let ports: NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>
+    /// The egress firewall (and, once set, the transparent interception).
+    let egress: SwitchEgressFirewall
     /// Source MAC → the attached port (its MAC) it came from.
     private let learned = NIOLockedValueBox<[MAC: MAC]>([:])
     /// The uplink's (passt's) MAC: frames to it go to the uplink only.
@@ -40,13 +45,29 @@ public final class InterimSwitch: Sendable {
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
                 mtu: @escaping @Sendable ([UInt8]) -> Int? = { _ in nil }) {
         self.uplink = uplink
-        gatewayMAC = MAC(Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"))
-        dhcp = InterimDHCP(server: Self.ipv4(gateway), dns: Self.ipv4(dns),
-                           serverMAC: Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
+        let gwMAC = MAC(Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"))
+        gatewayMAC = gwMAC
+        let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
+        self.ports = ports
+        // A packet the switch answers a VM with (a RST, an interceptor's
+        // reply), framed from the gateway's MAC as macOS's injectIPToPort does.
+        let dhcp = InterimDHCP(server: Self.ipv4(gateway), dns: Self.ipv4(dns),
+                               serverMAC: Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
+        self.dhcp = dhcp
+        egress = SwitchEgressFirewall(gatewayIP: InterimDHCP.u32(Self.ipv4(gateway)),
+                                      isLeased: { ip in dhcp.mac(forIP: ip) != nil },
+                                      closesSubnet: uplink.natsSubnet) { mac, ip in
+            guard let p = ports.withLockedValue({ $0.first(where: { $0.mac == mac }) }) else { return }
+            var frame = Data(mac.bytes + gwMAC.bytes + [0x08, 0x00])
+            frame.append(contentsOf: ip)
+            _ = p.port.send(frame)
+        }
         // The uplink calls this as it reads (no queue in between): it routes
         // and `send`s, which never waits, so the uplink never stops reading
         // and a full VM port drops (counted there) instead.
-        uplink.setReceiver { [ports, dhcp] (f: inout Data) in
+        uplink.setReceiver { [ports, dhcp, egress] (f: inout Data) in
+            // The guests' DNS answers, for the firewall's hostname rules.
+            egress.snoop(f)
             // Read the header in place: no copy for a frame that ends up
             // dropped at a full port (a paused VM's retransmit bursts).
             let (target, broadcast) = f.withUnsafeBytes { b -> (UInt32?, Bool) in
@@ -81,9 +102,14 @@ public final class InterimSwitch: Sendable {
     // @port-skip linux-only: interim switch
     public func attach(_ port: any FramePort, mac: String) {
         let m = MAC(Self.mac(mac))
-        let t = Task { [self, dhcp, uplink, blockedDestination] in
+        let t = Task { [self, dhcp, uplink, blockedDestination, egress] in
             for await f in port.inbound {
                 if let r = dhcp.handle(f) { port.send(r); continue }
+                switch egress.handle(f, from: m) {
+                case .consumed: continue
+                case .peersOnly: _ = self.toPeers(f, from: m); continue
+                case .pass: break
+                }
                 guard self.toPeers(f, from: m) else { continue }
                 if let blocked = blockedDestination.withLockedValue({ $0 }), let dst = Self.ipv4Destination(f), blocked(dst) { continue }
                 await uplink.sendWaiting(f)
@@ -150,6 +176,7 @@ public final class InterimSwitch: Sendable {
             ps.removeAll { $0.mac == m }
         }
         learned.withLockedValue { l in l = l.filter { $0.value != m } }
+        egress.portClosed(m)
     }
 
     /// The attached port for `mac`'s counters (`dropped` = frames toward that

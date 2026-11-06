@@ -114,3 +114,10 @@ public final class TapUplink: FramePort {
         Glibc.close(fd)
     }
 }
+
+extension TapUplink {
+    /// A tap's subnet is the host's own interface: the kernel routes it
+    /// (setup-network.sh), so it is left open, as vmnet's subnet on macOS.
+    // @port-skip linux-only: tap uplink
+    public var natsSubnet: Bool { false }
+}

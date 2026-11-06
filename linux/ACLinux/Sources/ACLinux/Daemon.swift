@@ -1002,6 +1002,8 @@ public actor Daemon {
                 // host's agent (macOS: launch's sshAgent.setKeys).
                 mitm?.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: store), for: profile.id)
                 mitm?.applyWorkspacePolicies(profile)
+                // Its VM's port, governed before the VM runs (macOS: attachPort's policy).
+                sw.egress.govern(MAC(InterimSwitch.mac(rec.mac)), .init(profile))
             }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
@@ -1085,6 +1087,7 @@ public actor Daemon {
             await MainActor.run {
                 if let now = ProfileStore().loadAll().first(where: { $0.id == pid }) {
                     mitm.applyWorkspacePolicies(now)
+                    sw.egress.update(.init(now))
                 }
             }
         }
@@ -1202,6 +1205,7 @@ public actor Daemon {
                 let adoptedProfile = rec.managed ? nil : await launchProfile(for: rec, create: false)
                 if let profile = adoptedProfile {
                     await setUpWorkspaceCredentials(profile, meta: vmDir(rec.id) + "/meta")
+                    if rec.registration != true { sw.egress.govern(MAC(InterimSwitch.mac(rec.mac)), .init(profile)) }
                 } else if !rec.managed {
                     FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no workspace profile; its credentials aren't set up\n".utf8))
                 }

@@ -10,6 +10,12 @@ public protocol Uplink: FramePort {
     /// The largest frame payload (L3 MTU) the uplink carries well; the
     /// switch's DHCP advertises at most this.
     var mtu: Int { get }
+    /// Whether the uplink turns what it gets for the VMs' subnet into
+    /// connections on the server's own network (passt: a host connect() to
+    /// that address): then the switch keeps the subnet closed, as vmnet's
+    /// is on macOS. False for a tap, whose subnet is a real interface the
+    /// host's kernel routes.
+    var natsSubnet: Bool { get }
     /// Inbound frames go to `r` as they are read, instead of `inbound`: the
     /// uplink never stops reading. Used by the switch, which routes each
     /// frame and drops at the destination VM's port when that port is full.
@@ -35,4 +41,10 @@ extension TapUplink: Uplink {
         Int((try? String(contentsOfFile: "/sys/class/net/\(name)/mtu", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 1500
     }
+}
+
+extension Uplink {
+    /// Closed unless the uplink says otherwise (fail safe).
+    // @port-skip linux-only: Uplink default
+    public var natsSubnet: Bool { true }
 }
