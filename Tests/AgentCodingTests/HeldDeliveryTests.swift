@@ -227,7 +227,39 @@ struct HandedOverTests {
         #expect(BeautifiedSessionModel.typedBecame(q.text, turn: "please look at the login page and fix the redirect[Pasted text]"))
     }
 
-    @Test("an old saved queue, with no such field, still loads")
+    @Test("a message sent with files resolves once its turn is in, though the paths became attachments")
+    func withFiles() {
+        typealias M = BeautifiedSessionModel
+        let dir = GuestDrop.baseDir
+        let typed = "look at this screenshot \(dir)/20261105_shot.png \(dir)/20261105_log.txt"
+        // Claude's turn: the image as a placeholder, the other path kept or dropped.
+        #expect(M.attachmentTurnArrived(typed, since: ["look at this screenshot [Image #1] \(dir)/20261105_log.txt"][...]))
+        #expect(M.attachmentTurnArrived(typed, since: ["look at this screenshot"][...]))
+        // Not a turn that says something else, nor no turn at all.
+        #expect(!M.attachmentTurnArrived(typed, since: ["something else entirely"][...]))
+        #expect(!M.attachmentTurnArrived(typed, since: [][...]))
+        // Only files: any turn since is it.
+        let onlyFiles = "\(dir)/20261105_shot.png"
+        #expect(M.attachmentTurnArrived(onlyFiles, since: ["[Image #1]"][...]))
+        #expect(!M.attachmentTurnArrived(onlyFiles, since: [][...]))
+        // A message without files is matched as before, not by this.
+        #expect(!M.attachmentTurnArrived("look at this screenshot", since: ["look at this screenshot"][...]))
+        #expect(M.withoutAttachments("a [Image #12] b \(dir)/x.png  c") == "a b c")
+    }
+
+        @Test("the While you were away panel goes by itself after 3 s, not while the pointer is on it")
+    func awayPanelTimesOut() throws {
+        #expect(BeautifiedSessionView.whileAwayShownNanos == 3_000_000_000)
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let v = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
+        let panel = try #require(v.range(of: "WhileAwayPanel(summary: summary,"))
+        let around = v[panel.upperBound...].prefix(1_200)
+        #expect(around.contains(".onHover { hoveringAway = $0 }"))
+        #expect(around.contains(".task(id: summary) {") && around.contains("while hoveringAway, !Task.isCancelled {"))
+        #expect(around.contains("guard !Task.isCancelled, whileAway == summary else { return }"))
+    }
+
+        @Test("an old saved queue, with no such field, still loads")
     func oldRows() throws {
         let q = QueuedMessage(text: "x", held: true, editable: true, baseline: 0)
         var o = try JSONSerialization.jsonObject(with: JSONEncoder().encode(q)) as! [String: Any]
