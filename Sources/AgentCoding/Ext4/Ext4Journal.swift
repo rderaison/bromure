@@ -105,6 +105,9 @@ final class Ext4Journal {
             throw Ext4JournalError.unsupported("external journal device")
         }
         let jnode = try volume.inode(jino)
+        guard jnode.size <= volume.byteSize, jnode.size <= UInt64(Int.max) else {     // i_size is the image's word
+            throw Ext4JournalError.corrupt("journal inode claims \(jnode.size) bytes, more than the filesystem")
+        }
         let jblocks = Int(jnode.size) / volume.blockSize
         guard jblocks >= 2 else {
             throw Ext4JournalError.corrupt("journal inode is only \(jnode.size) bytes")

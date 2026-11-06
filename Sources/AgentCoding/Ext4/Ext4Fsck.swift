@@ -231,7 +231,8 @@ enum Ext4Fsck {
                 // huge tree can't blow up memory — walkExtents materializes one
                 // dict entry per block, not per extent.
                 if !node.isInline && (node.isDir || node.isRegular) {
-                    let want = (Int(node.size) + vol.blockSize - 1) / vol.blockSize
+                    let head = min(node.size, UInt64(12 * vol.blockSize))   // i_size is the image's word
+                    let want = (Int(head) + vol.blockSize - 1) / vol.blockSize
                     for (_, phys) in try vol.blockMap(node, upTo: min(max(want, 1), 12))
                     where phys != 0 && phys >= vol.sb.blocksCount {
                         bad += 1
