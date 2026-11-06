@@ -28,8 +28,11 @@ final class LinuxAccountKeys {
 
     struct LastSync: Equatable { var at: Date; var keys: Int; var machineKeys: Int; var error: String? }
     private(set) var last: LastSync?
-    private var timer: DispatchSourceTimer?
+    private var ticker: Task<Void, Never>?
     private var inFlight = false
+    /// A sign-in is under way (the daemon is an actor, and enrolling awaits
+    /// bromure.io twice: a second one would enroll this server twice).
+    private var signingIn = false
 
     /// Pull the owner's devices' SSH keys into authorized_keys. No-op unless
     /// signed in. A failed pull keeps the keys there are (as macOS does).
@@ -60,22 +63,44 @@ final class LinuxAccountKeys {
 
     /// Sync now and every few minutes, so a device enrolled later is
     /// authorized without a restart (the reconcile only rewrites on a change).
+    /// Each wait is the interval ±10%, so many servers that started together
+    /// don't all ask bromure.io at once.
     // @port ACAppDelegate.startAccountKeySync() h=28b067a8cf48e804 @d2db8346
     func start(every interval: TimeInterval = 180) {
         Task { await sync() }
-        guard timer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: .global())
-        t.schedule(deadline: .now() + interval, repeating: interval)
-        t.setEventHandler { Task { @MainActor in await LinuxAccountKeys.shared.sync() } }
-        t.resume()
-        timer = t
+        guard ticker == nil else { return }
+        ticker = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.jittered(interval)))
+                if Task.isCancelled { break }
+                await LinuxAccountKeys.shared.sync()
+            }
+        }
+    }
+
+    // @port-skip linux-only: the 180 s tick's jitter (macOS: a plain Timer)
+    nonisolated static func jittered(_ interval: TimeInterval) -> TimeInterval {
+        interval * Double.random(in: 0.9...1.1)
     }
 
     // @port ACAppDelegate.stopAccountKeySync() h=5fc6970b829fd009 @d2db8346
     func stop() {
-        timer?.cancel()
-        timer = nil
+        ticker?.cancel()
+        ticker = nil
     }
+
+    /// Claim the one sign-in: false when one is under way or this server is
+    /// signed in already (both asked here, on the main actor, together).
+    // @port-skip linux-only: the daemon's reentrancy guard
+    func beginSignIn() -> String? {
+        if signingIn { return "A sign-in is already under way" }
+        if case .found = DeviceIdentityStore.load() { return "Already signed in; sign out first" }
+        signingIn = true
+        return nil
+    }
+
+    // @port-skip linux-only: the daemon's reentrancy guard
+    func endSignIn() { signingIn = false }
 
     /// Signed out: no more pulls. The keys it brought in stay, as on macOS.
     // @port-skip linux-only: status line
@@ -128,9 +153,11 @@ extension Daemon {
         guard let raw = body["link"]?.stringValue, let link = EnrollLink(parsing: raw) else {
             return .error(400, "That isn't a bromure.io enrollment code or link")
         }
-        if case .found = DeviceIdentityStore.load() { return .error(409, "Already signed in; sign out first") }
+        if let busy = await MainActor.run(body: { LinuxAccountKeys.shared.beginSignIn() }) { return .error(409, busy) }
         let name = ProcessInfo.processInfo.hostName
-        switch await P2PEnroll.enroll(link: link, deviceName: name) {
+        let result = await P2PEnroll.enroll(link: link, deviceName: name)
+        await MainActor.run { LinuxAccountKeys.shared.endSignIn() }
+        switch result {
         case .success(let r):
             await MainActor.run { LinuxAccountKeys.shared.start() }
             var o: [String: JSONValue] = ["ok": .bool(true), "deviceId": .string(r.record.deviceId)]
