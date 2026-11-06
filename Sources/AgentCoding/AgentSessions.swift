@@ -1294,8 +1294,11 @@ final class AgentSessionStore {
             if now.timeIntervalSince(first) < Self.deadGrace, sessions[i].agentAlive != false { return }
         }
         let changed = sessions[i].agentAlive != alive
-        sessions[i].agentAlive = alive
-        if alive { sessions[i].agentSeenAt = now }
+        // Written only when it moves: any write to `sessions` re-renders the sidebar.
+        if changed { sessions[i].agentAlive = alive }
+        if alive, Self.restamp(sessions[i].agentSeenAt, now, since: Self.started(sessions[i])) {
+            sessions[i].agentSeenAt = now
+        }
         if changed { save() }
     }
 
@@ -1304,6 +1307,26 @@ final class AgentSessionStore {
     /// the session is "ended" (a roster still loading shows nothing at all).
     static let deadGrace: TimeInterval = 6
     static let missingGrace: TimeInterval = 8
+
+    /// How stale `lastSeenAt` / `agentSeenAt` get before a pass restamps
+    /// them. Every pass used to (the state feed alone runs one up to 2.5
+    /// times a second), so the store always changed: each pass re-rendered
+    /// and re-measured the whole sidebar and rewrote sessions.json, most of a
+    /// busy server's main thread. Both read in seconds-to-minutes.
+    nonisolated static let seenStride: TimeInterval = 30
+
+    /// Whether a seen-stamp is due: never set, `seenStride` old, or from
+    /// before `since` (a restart or resume: "has the agent run since?"
+    /// must answer yes on the first pass that sees it).
+    nonisolated static func restamp(_ stamp: Date?, _ now: Date, since: Date = .distantPast) -> Bool {
+        guard let stamp else { return true }
+        return stamp < since || now.timeIntervalSince(stamp) >= seenStride
+    }
+
+    /// The session's last (re)start, as `agentExited` counts it.
+    nonisolated static func started(_ s: AgentSession) -> Date {
+        max(s.createdAt, s.resumedAt ?? .distantPast)
+    }
     private var deadSince: [UUID: Date] = [:]
     private var missingSince: [UUID: Date] = [:]
 
@@ -1396,9 +1419,10 @@ final class AgentSessionStore {
                     if indices.contains(w) {
                         missingSince[s.id] = nil
                         if s.endedAt != nil { s.endedAt = nil }
-                        s.lastSeenAt = now
+                        if Self.restamp(s.lastSeenAt, now) { s.lastSeenAt = now }
                         if let tab = tabs.first(where: { $0.index == w }) {
-                            if Self.agentRunning(s, in: tab) { s.agentSeenAt = now }
+                            if Self.agentRunning(s, in: tab),
+                               Self.restamp(s.agentSeenAt, now, since: Self.started(s)) { s.agentSeenAt = now }
                             // Not while its agent is known gone: a title in
                             // the tab then is a new run's (`checkAgentProcess`
                             // hands that tab to a session of its own).

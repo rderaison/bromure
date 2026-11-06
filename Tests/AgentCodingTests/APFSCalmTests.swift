@@ -34,12 +34,15 @@ struct APFSCalmTests {
         await gate.acquire(); await gate.acquire()
         #expect(gate.inUse == 2)
         let box = Box()
-        let third = Task { @MainActor in await gate.acquire(); box.order.append(3) }
-        let fourth = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 20_000_000)   // queued after the third
-            await gate.acquire(); box.order.append(4)
+        // Waits on the gate's own state, not a sleep: under a full suite the
+        // main actor can be busy for seconds.
+        func waitFor(_ n: Int) async throws {
+            for _ in 0..<600 where gate.waiting < n { try await Task.sleep(nanoseconds: 50_000_000) }
         }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        let third = Task { @MainActor in await gate.acquire(); box.order.append(3) }
+        try await waitFor(1)   // the fourth queues after the third
+        let fourth = Task { @MainActor in await gate.acquire(); box.order.append(4) }
+        try await waitFor(2)
         #expect(box.order.isEmpty && gate.waiting == 2)
         gate.release()
         await third.value

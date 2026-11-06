@@ -162,6 +162,12 @@ final class SessionEngine: @unchecked Sendable {
         reconcileLocked(windows: windows, agents: agents)
     }
 
+    static let seenStride: TimeInterval = 30
+    static func restamp(_ stamp: Date?, _ now: Date, since: Date = .distantPast) -> Bool {
+        guard let stamp else { return true }
+        return stamp < since || now.timeIntervalSince(stamp) >= seenStride
+    }
+
     private func reconcileLocked(windows: [Tmux.Window], agents: [Int: String]) {
         let before = sessions
         let now = Date()
@@ -172,9 +178,17 @@ final class SessionEngine: @unchecked Sendable {
                 let tool = agents[w.index]
                 s.windowIndex = w.index
                 s.endedAt = nil
-                s.lastSeenAt = now
+                // Restamped every 30 s, not every pass: a store that changed
+                // on every pass made each attached server rebuild its sidebar
+                // once a second.
+                if Self.restamp(s.lastSeenAt, now) { s.lastSeenAt = now }
                 s.agentAlive = tool != nil
-                if tool != nil { s.agentSeenAt = now; s.launchingSince = nil }
+                if tool != nil {
+                    if Self.restamp(s.agentSeenAt, now, since: max(s.createdAt, s.resumedAt ?? .distantPast)) {
+                        s.agentSeenAt = now
+                    }
+                    s.launchingSince = nil
+                }
                 if !w.agentSessionID.isEmpty { s.agentTranscriptID = w.agentSessionID }
                 if !w.transcriptPath.isEmpty { s.transcriptPath = w.transcriptPath }
                 if let a = w.activeAt, a > (s.activeAt ?? .distantPast) { s.activeAt = a }

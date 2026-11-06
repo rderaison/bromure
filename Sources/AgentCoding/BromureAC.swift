@@ -2085,7 +2085,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func refreshSidebar() {
         guard let w = unifiedWindow else { return }
         let machines = attachedMachines.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        w.listModel.profileRows = profiles.map { p in
+        // Assigned only when different: the model is @Observable, so even an
+        // equal assignment re-renders and re-measures the whole sidebar (and
+        // an attached machine calls this on every change it reports).
+        let rows = profiles.map { p in
             SessionListModel.ProfileRow(
                 id: p.id,
                 name: p.name,
@@ -2099,6 +2102,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
         }
+        if w.listModel.profileRows != rows { w.listModel.profileRows = rows }
         // Attached machines: a row always, a tab entry while connected (its
         // roster, like a VM's). Kept out of every local reconcile/probe.
         let former = w.listModel.machineIDs

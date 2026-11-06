@@ -52,7 +52,9 @@ struct SidebarRedrawTests {
         let reference = await measures(TimelineOrb())
         let orb = await measures(UnreadMark())
         let working = await measures(AgentStatusDot(status: .working))
-        #expect(reference > 100, "the probe measures a per-frame redraw: \(reference)")
+        // Hundreds alone; far fewer while a full suite keeps the main thread
+        // busy. Only proves the probe catches a per-frame redraw at all.
+        #expect(reference > 5, "the probe measures a per-frame redraw: \(reference)")
         #expect(orb == 0, "UnreadMark: \(orb) measure passes")
         #expect(working == 0, "AgentStatusDot: \(working) measure passes")
     }
