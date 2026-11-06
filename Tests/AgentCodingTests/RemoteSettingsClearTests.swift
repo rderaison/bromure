@@ -72,5 +72,10 @@ struct RemoteSettingsClearTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
         #expect(src.contains("guard var doc = RemoteHostController.settingsDocument(edited: edited, opened: original) else { return }"))
+        // The iOS app builds this file but not ProfileDocument's.
+        let shared = try #require(src.range(of: "static func settingsDocument("))
+        #expect(!src[shared.upperBound...].prefix(1500).contains("ProfileDocument.editedDocument(fetched"))
+        let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/WorkspaceEditor.swift"), encoding: .utf8)
+        #expect(ios.contains("built = RemoteHostController.settingsDocument(edited: edited, opened: original)"))
     }
 }

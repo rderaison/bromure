@@ -1922,10 +1922,13 @@ final class RemoteHostController {
     /// explicit null, which the host takes as "clear" (its default), as the
     /// CLI's `workspaces edit` does (`ProfileDocument.editedDocument`). Notes
     /// and the Squelch switch left as they opened stay out (`dropUnedited`).
+    /// For an existing workspace only: a new one's absent reach must stay the
+    /// host's default (none), not be sent as "every workspace".
     static func settingsDocument(edited: Profile, opened: Profile?) -> [String: Any]? {
         guard var doc = ACAppDelegate.codableToDict(edited) else { return nil }
         if let opened, let was = ACAppDelegate.codableToDict(opened) {
-            doc = ProfileDocument.editedDocument(fetched: was, edited: doc)
+            // `ProfileDocument.editedDocument`, which the iOS app doesn't build.
+            for key in was.keys where doc[key] == nil { doc[key] = NSNull() }
         }
         // Without a baseline, at least the two whose absence was read as
         // "unchanged": the last kube context removed, reach to every workspace.
