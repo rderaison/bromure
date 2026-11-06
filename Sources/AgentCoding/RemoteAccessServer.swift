@@ -189,6 +189,8 @@ final class RemoteAccessServer {
                 let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
                 let delegate = authFactory.make(peerIP: peerIP)
                 let grant = delegate.grant
+                // What this connection's channels may hold together.
+                let budget = RemoteConnectionBudget()
                 return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
                         NIOSSHHandler(
@@ -201,6 +203,11 @@ final class RemoteAccessServer {
                                 guard channelType == .session else {
                                     return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.invalidChannelType)
                                 }
+                                guard budget.openChannel() else {
+                                    FatClientLog.log("srv: \(RemoteConnectionBudget.maxChannels) channels open on this connection: refusing another")
+                                    return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.tooManyChannels)
+                                }
+                                childChannel.closeFuture.whenComplete { _ in budget.closeChannel() }
                                 return childChannel.eventLoop.makeCompletedFuture {
                                     try childChannel.pipeline.syncOperations.addHandler(
                                         SSHPTYSessionHandler(menuExe: exe, user: user,
@@ -209,7 +216,7 @@ final class RemoteAccessServer {
                                                              udpForwardResolver: udpForwardResolver,
                                                              browserMCPResolver: browserMCPResolver,
                                                              delegationMCPResolver: delegationMCPResolver,
-                                                             grant: grant, router: router))
+                                                             grant: grant, router: router, budget: budget))
                                 }
                             }),
                         RemoteErrorHandler(),
