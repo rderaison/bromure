@@ -141,6 +141,7 @@ final class RemoteAccessServer {
 
         try ensureLayout()
         let hostKey = try loadOrCreateHostKey()
+        noteKeysReadability()   // what it loads below, said or cleared
         let authorized = config.pubkeyAuth ? loadAuthorizedNIOKeys() : []
         let machineOnly = config.pubkeyAuth ? loadMachineOnlyKeys() : [:]
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
@@ -405,18 +406,13 @@ final class RemoteAccessServer {
         // the live listener mustn't keep the keys it read before: a device
         // taken off the account would still get in. It reloads the file as
         // what it can read of it, nothing, until it's fixed.
-        if authKeysUnreadable {
-            let why = "\(paths.authKeys.path) can't be read (it isn't UTF-8 text): "
-                + "the account's device keys can't be synced, and public-key sign-in is off until it's fixed"
-            if authorizedKeysProblem != why { NSLog("[remote-access] %@", why) }
-            authorizedKeysProblem = why
-            reloadIfRunning()
-            return
-        }
         // Readable again after it wasn't: the listener holds no key, so it
         // takes the file back even if the account's keys are as they were.
         let wasUnreadable = authorizedKeysProblem != nil
-        authorizedKeysProblem = nil
+        if noteKeysReadability() {
+            reloadIfRunning()
+            return
+        }
         let current = listAuthorizedKeys()
         let managedNow = Set(current.filter { $0.comment.hasPrefix(marker) }.map(\.line))
         let manual = current.filter { !$0.comment.hasPrefix(marker) }
@@ -442,6 +438,18 @@ final class RemoteAccessServer {
             .write(to: paths.authKeys, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.authKeys.path)
         reloadIfRunning()
+    }
+
+    /// Whether authorized_keys can't be read, said in `authorizedKeysProblem`
+    /// (and the log, once), or cleared when it can.
+    @discardableResult
+    private func noteKeysReadability() -> Bool {
+        guard authKeysUnreadable else { authorizedKeysProblem = nil; return false }
+        let why = "\(paths.authKeys.path) can't be read (it isn't UTF-8 text): "
+            + "the account's device keys can't be synced, and public-key sign-in is off until it's fixed"
+        if authorizedKeysProblem != why { NSLog("[remote-access] %@", why) }
+        authorizedKeysProblem = why
+        return true
     }
 
     /// The "type blob" identity of an authorized_keys line (ignoring the comment).

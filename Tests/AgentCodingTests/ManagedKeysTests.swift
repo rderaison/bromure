@@ -102,5 +102,14 @@ struct ManagedKeysTests {
         #expect(srv.liveAuthorizedKeys.count == 1)
         #expect(srv.authorizedKeysProblem == nil)
         #expect(try String(contentsOf: file, encoding: .utf8) == Self.manual + "\n")
+
+        // A (re)start says so too: on a bad file, and clears it on a good one.
+        var bad = try Data(contentsOf: file); bad.append(0xE9); try bad.write(to: file)
+        let port = Int.random(in: 40_000...60_000)
+        try? srv.start(.init(port: port, bindAddress: "127.0.0.1", passwordAuth: false, pubkeyAuth: true))
+        #expect(srv.authorizedKeysProblem != nil)
+        try (Self.manual + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try? srv.start(.init(port: port + 1, bindAddress: "127.0.0.1", passwordAuth: false, pubkeyAuth: true))
+        #expect(srv.authorizedKeysProblem == nil)
     }
 }
