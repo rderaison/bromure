@@ -462,12 +462,30 @@ struct FirewallLiveQATests {
     @Test("The proxy's connection checks pass the attested program to the verdict")
     func proxyChecksPassIdentity() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let src = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/Mitm/HTTPProxy.swift"), encoding: .utf8)
+        func source(_ path: String) throws -> String {
+            try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+        }
+        // Each call's arguments, up to its matching close paren.
+        func calls(of name: String, in src: String) -> [String] {
+            src.components(separatedBy: name).dropFirst().map { rest in
+                var depth = 1
+                return String(rest.prefix { c in
+                    if c == "(" { depth += 1 } else if c == ")" { depth -= 1 }
+                    return depth > 0
+                })
+            }
+        }
         // Without it, `binaries:` rules match nothing and a strict workspace's
-        // allowed flows were closed in `trackedForFirewall`, unlogged.
-        let calls = src.components(separatedBy: "policy.verdict(").dropFirst()
-            .map { String($0.prefix { $0 != ")" }) }
-        #expect(!calls.isEmpty)
-        for call in calls { #expect(call.contains("identity: binaryIdentity"), "\(call)") }
+        // allowed flows were closed in `trackedForFirewall`, unlogged. The
+        // checks live in ProxyPolicy (shared with the Linux proxy), which
+        // HTTPProxy hands the connection's identity.
+        let shared = calls(of: "policy.verdict(", in: try source("Sources/AgentCoding/Mitm/ProxyPolicy.swift"))
+        #expect(!shared.isEmpty)
+        for call in shared { #expect(call.contains("identity: identity"), "\(call)") }
+        let proxy = try source("Sources/AgentCoding/Mitm/HTTPProxy.swift")
+        #expect(!proxy.contains("policy.verdict("), "a verdict outside ProxyPolicy")
+        let handed = calls(of: "ProxyPolicy.egressVerdict(", in: proxy) + calls(of: "ProxyPolicy.deniedOnceTracked(", in: proxy)
+        #expect(handed.count == 2)
+        for call in handed { #expect(call.contains("identity: binaryIdentity"), "\(call)") }
     }
 }
