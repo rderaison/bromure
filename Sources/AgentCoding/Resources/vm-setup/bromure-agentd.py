@@ -1872,14 +1872,37 @@ _BRIDGES = {}
 _BRIDGES_LOCK = threading.Lock()
 
 
+RELAY_CHUNK = 64 * 1024
+
+
+def _relay(src, dst, on_first=None, moved=None):
+    """Copy bytes from src to dst until src ends; the bytes moved (also kept
+    in `moved[0]` as they go, for a caller that's told of an error).
+
+    Into one buffer, reused: `recv` makes a new 64 KB object for every read,
+    and with a thread per direction of every open connection that churn is
+    spread over glibc's per-thread arenas, which keep what's freed (see
+    `limit_malloc_arenas`). `on_first` sees the first chunk (a copy)."""
+    buf = bytearray(RELAY_CHUNK)
+    view = memoryview(buf)
+    total = 0
+    while True:
+        n = src.recv_into(buf)
+        if not n:
+            return total
+        if on_first is not None:
+            on_first(bytes(view[:n]))
+            on_first = None
+        dst.sendall(view[:n])
+        total += n
+        if moved is not None:
+            moved[0] = total
+
+
 def _bridge_pump(src, dst, conn=None, to_client=False):
     """Copy bytes from src to dst until either side closes."""
     try:
-        while True:
-            chunk = src.recv(64 * 1024)
-            if not chunk:
-                break
-            dst.sendall(chunk)
+        _relay(src, dst)
     except (OSError, ConnectionError):
         pass
     finally:
@@ -2450,26 +2473,20 @@ def _loopback_connect(port):
 
 
 def _loopback_pipe(src, dst, label=None):
-    total = 0
-    first = True
+    moved = [0]
+
+    def first_line(chunk):
+        head = chunk.split(b"\r\n", 1)[0][:160].decode("latin1", "replace")
+        _loopback_log("%s first line: %r" % (label, head))
+
     try:
-        while True:
-            chunk = src.recv(65536)
-            if not chunk:
-                break
-            if first and label:
-                head = chunk.split(b"\r\n", 1)[0][:160].decode("latin1",
-                                                               "replace")
-                _loopback_log("%s first line: %r" % (label, head))
-                first = False
-            total += len(chunk)
-            dst.sendall(chunk)
+        _relay(src, dst, on_first=first_line if label else None, moved=moved)
     except OSError as exc:
         if label:
-            _loopback_log("%s pipe error after %dB: %s" % (label, total, exc))
+            _loopback_log("%s pipe error after %dB: %s" % (label, moved[0], exc))
     finally:
         if label:
-            _loopback_log("%s done, %dB" % (label, total))
+            _loopback_log("%s done, %dB" % (label, moved[0]))
         try:
             dst.shutdown(socket.SHUT_WR)
         except OSError:
@@ -5834,10 +5851,70 @@ def malloc_trim():
         return False
 
 
+# A codereview guest's agentd at 318 MB: 52 threads, no connection open, and
+# 308 MB anonymous, 165 MB of it in four 64 MB-aligned regions holding 28-47 MB
+# each: glibc's per-thread arenas. Each long-lived service thread (roster,
+# ports, docker, vmstat, every bridge's pumps...) gets one, keeps what its
+# transient allocations freed, and fragments it past what the minute's trim can
+# return. Two arenas are plenty for a daemon that mostly waits.
+#
+# And a fixed mmap threshold: glibc raises it each time a large block is freed
+# (up to 32 MB), after which large allocations (a subprocess's output, a big
+# read) come from the arenas, and fragment them, instead of their own mapping,
+# which goes back to the kernel the moment it's freed. From <malloc.h>.
+M_ARENA_MAX = -8
+M_MMAP_THRESHOLD = -3
+MALLOC_ARENAS = 2
+MALLOC_MMAP_THRESHOLD = 128 * 1024
+
+
+def limit_malloc_arenas(n=MALLOC_ARENAS, mmap_threshold=MALLOC_MMAP_THRESHOLD):
+    """Cap glibc's malloc arenas at `n`, and fix its mmap threshold. First
+    thing in main(), before any thread allocates. True if both took; False
+    also where it's not glibc."""
+    try:
+        if not _LIBC:
+            import ctypes
+            _LIBC.append(ctypes.CDLL(None, use_errno=True))
+        import ctypes
+        arenas = _LIBC[0].mallopt(ctypes.c_int(M_ARENA_MAX), ctypes.c_int(n)) == 1
+        mapped = _LIBC[0].mallopt(ctypes.c_int(M_MMAP_THRESHOLD), ctypes.c_int(mmap_threshold)) == 1
+        return arenas and mapped
+    except Exception:
+        return False
+
+
+# How often agentd says what it holds (its log): resident memory, threads,
+# open bridges. One line, so a report of it growing says where.
+MEMORY_REPORT_INTERVAL = 600
+
+
+def memory_report():
+    rss = hwm = "?"
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = line.split()[1]
+                elif line.startswith("VmHWM:"):
+                    hwm = line.split()[1]
+    except OSError:
+        pass
+    with _BRIDGES_LOCK:
+        bridges = len(_BRIDGES)
+    return "rss %s kB (peak %s kB), %d threads, %d bridges" % (
+        rss, hwm, threading.active_count(), bridges)
+
+
 def malloc_trim_service():
+    since_report = 0
     while _RUNNING.is_set():
         time.sleep(MALLOC_TRIM_INTERVAL)
         malloc_trim()
+        since_report += MALLOC_TRIM_INTERVAL
+        if since_report >= MEMORY_REPORT_INTERVAL:
+            since_report = 0
+            log("agentd", "memory: " + memory_report())
 
 
 def vmstat_loop_service():
@@ -8276,13 +8353,16 @@ def _run_once(name, fn):
 
 
 def main():
+    # 0. Before any thread allocates (see limit_malloc_arenas).
+    arenas_capped = limit_malloc_arenas()
     # 1. Parse env / basic setup.
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     compute_self_hash()
-    log("agentd", "starting (pid %d, python %s, self %s)"
+    log("agentd", "starting (pid %d, python %s, self %s, malloc arenas %s)"
         % (os.getpid(), sys.version.split()[0],
-           (SELF_HASH[:8] if SELF_HASH else "?")))
+           (SELF_HASH[:8] if SELF_HASH else "?"),
+           (MALLOC_ARENAS if arenas_capped else "uncapped")))
 
     # Truncate the vm-bridge log on each run (the original bridge did this).
     try:
