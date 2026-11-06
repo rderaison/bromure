@@ -26,9 +26,15 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
         // SandboxEngine's policy parser, as the app builds it.
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
+        // The prompt-injection detectors' tokenizers, as the app builds them
+        // (the same 1.2.x range as the root Package.swift).
+        .package(url: "https://github.com/huggingface/swift-transformers", "1.2.0" ..< "1.3.0"),
     ],
     targets: [
         .target(name: "CACLinuxShims"),
+        // onnxruntime's C API, loaded at run time (dlopen), over its vendored
+        // headers (Sources/COrtShim/ort/README.md): nothing links against it.
+        .target(name: "COrtShim", exclude: ["ort/LICENSE", "ort/README.md"], linkerSettings: [.linkedLibrary("dl")]),
         // macOS's SandboxEngine module: its portable files (symlinks into
         // Sources/SandboxEngine) and the Linux stand-ins under Linux/.
         .target(
@@ -43,7 +49,9 @@ let package = Package(
             name: "ACLinux",
             dependencies: [
                 "CACLinuxShims",
+                "COrtShim",
                 "SandboxEngine",
+                .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

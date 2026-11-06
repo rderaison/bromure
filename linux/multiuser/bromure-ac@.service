@@ -12,6 +12,13 @@ NotifyAccess=main
 User=%i
 SupplementaryGroups=kvm
 ExecStart=/usr/local/lib/bromure-ac/bin/bromure-ac daemon
+# The distro's onnxruntime (libonnxruntime1.23) loads its own copy of the
+# onnx library's op schemas next to libonnx's: each model load prints ~600
+# "Schema error: ... already registered" lines to stderr (not through
+# onnxruntime's logger, whose level doesn't reach them). Dropped here, by
+# their exact shape; anything else on stderr is kept. (journald applies
+# this to system services only: the single-user user unit still logs them.)
+LogFilterPatterns=~^Schema error: Trying to register schema with name .* but it is already registered from file 
 ExecStopPost=/usr/local/lib/bromure-ac/bin/bromure-ac stop-post
 KillMode=process
 TimeoutStopSec=20
