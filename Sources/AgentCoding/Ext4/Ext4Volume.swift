@@ -84,8 +84,13 @@ struct Ext4Superblock {
         hasCsumSeed ? checksumSeedRaw : Crc32c.hash(0xFFFF_FFFF, uuid)
     }
     var groupCount: Int {
-        Int((blocksCount - UInt64(firstDataBlock) + UInt64(blocksPerGroup) - 1) / UInt64(blocksPerGroup))
+        let span = blocksCount - UInt64(firstDataBlock), per = UInt64(blocksPerGroup)
+        return Int(span / per + (span % per == 0 ? 0 : 1))
     }
+    /// Far past any real filesystem (a 1 PiB one with 128 MiB groups has
+    /// 8 Mi): what a superblock may claim before it's refused. The GDT read
+    /// and the per-group table are sized by it.
+    static let maxGroups: UInt64 = 1 << 24
     var isClean: Bool { state & 0x1 != 0 }
 
     init?(_ b: [UInt8]) {
@@ -93,6 +98,10 @@ struct Ext4Superblock {
         inodesCount = le32(b, 0)
         let blkLo = UInt64(le32(b, 4))
         let logBS = le32(b, 24)
+        // Every field is the image's word: ext4 blocks are 1–64 KiB, and a
+        // superblock that says otherwise is refused here rather than
+        // trapping (a shift, a division by zero) further on.
+        guard logBS <= 6, le32(b, 32) > 0, le32(b, 40) > 0 else { return nil }
         blockSize = 1024 << logBS
         blocksPerGroup = le32(b, 32)
         inodesPerGroup = le32(b, 40)
@@ -104,6 +113,7 @@ struct Ext4Superblock {
         featureIncompat = le32(b, 96)
         featureRoCompat = le32(b, 100)
         let dsz = Int(le16(b, 254))
+        guard dsz <= 1024 else { return nil }   // EXT4_MAX_DESC_SIZE
         state = le16(b, 58)
         uuid = Array(b[104..<120])            // s_uuid @0x68, 16 bytes
         checksumSeedRaw = le32(b, 0x270)      // s_checksum_seed
@@ -112,6 +122,8 @@ struct Ext4Superblock {
         // 64-bit block count
         let blkHi = (featureIncompat & Ext4Superblock.INCOMPAT_64BIT != 0) ? UInt64(le32(b, 0x150)) : 0
         blocksCount = blkLo | (blkHi << 32)
+        guard blocksCount > UInt64(firstDataBlock),
+              (blocksCount - UInt64(firstDataBlock)) / UInt64(blocksPerGroup) < Self.maxGroups else { return nil }
         descSize = (featureIncompat & Ext4Superblock.INCOMPAT_64BIT != 0)
             ? (dsz < 32 ? 32 : dsz) : 32
         // volume name @ 120, 16 bytes, NUL-padded
@@ -175,7 +187,17 @@ final class Ext4Device {
 
     deinit { close(fd) }
 
+    /// The image's length, read once: every read is clamped to it.
+    private lazy var length: UInt64 = imageSize()
+
+    /// Up to `count` bytes at `offset`, never past the image's end. Offsets
+    /// and counts come from the image itself (block numbers, sizes), so a
+    /// read is clamped to what the file holds rather than allocating what a
+    /// corrupt field asks for, or trapping on an offset past off_t.
     func read(at offset: UInt64, count: Int) throws -> [UInt8] {
+        let (start, overflow) = base.addingReportingOverflow(offset)
+        guard !overflow, start < length, count > 0 else { return [] }
+        let count = Int(min(UInt64(count), length - start))
         var buf = [UInt8](repeating: 0, count: count)
         var got = 0
         try buf.withUnsafeMutableBytes { raw in
@@ -196,6 +218,10 @@ final class Ext4Device {
 
     func write(at offset: UInt64, _ bytes: [UInt8]) throws {
         guard writable else { throw Ext4Error.io("device opened read-only") }
+        let (start, overflow) = base.addingReportingOverflow(offset)
+        guard !overflow, start <= UInt64(Int64.max) - UInt64(bytes.count) else {
+            throw Ext4Error.io("write past the image (offset \(offset))")
+        }
         var put = 0
         try bytes.withUnsafeBytes { raw in
             let p = raw.baseAddress!
@@ -311,6 +337,8 @@ final class Ext4Volume {
         let count = sb.groupCount
         let bytes = try readBlocks(startBlock: gdtBlock,
                                    count: (count * sb.descSize + blockSize - 1) / blockSize)
+        // Short when the table runs past the image's end (reads are clamped).
+        guard bytes.count >= count * sb.descSize else { throw Ext4Error.io("group descriptors run past the image") }
         groupInodeTable.reserveCapacity(count)
         for g in 0..<count {
             let o = g * sb.descSize
@@ -335,11 +363,17 @@ final class Ext4Volume {
     }
 
     func readBlock(_ block: UInt64) throws -> [UInt8] {
-        try fsRead(at: block * UInt64(blockSize), count: blockSize)
+        let (at, overflow) = block.multipliedReportingOverflow(by: UInt64(blockSize))
+        guard block < sb.blocksCount, !overflow else { throw Ext4Error.io("block \(block) is past the filesystem") }
+        return try fsRead(at: at, count: blockSize)
     }
 
     private func readBlocks(startBlock: UInt64, count: Int) throws -> [UInt8] {
-        try fsRead(at: startBlock * UInt64(blockSize), count: count * blockSize)
+        let (bytes, overflow) = count.multipliedReportingOverflow(by: blockSize)
+        let (at, overflow2) = startBlock.multipliedReportingOverflow(by: UInt64(blockSize))
+        guard startBlock < sb.blocksCount, UInt64(max(count, 0)) <= sb.blocksCount - startBlock,
+              !overflow, !overflow2 else { throw Ext4Error.io("blocks \(startBlock)+\(count) are past the filesystem") }
+        return try fsRead(at: at, count: bytes)
     }
 
     // MARK: inodes
@@ -370,27 +404,68 @@ final class Ext4Volume {
     // MARK: file contents
 
     /// The full byte contents of a regular file or directory inode.
-    func readData(_ inode: Ext4Inode) throws -> [UInt8] {
+    /// The filesystem's size in bytes. blocksCount is the image's word, so
+    /// the product saturates rather than trapping.
+    var byteSize: UInt64 {
+        let (p, overflow) = sb.blocksCount.multipliedReportingOverflow(by: UInt64(blockSize))
+        return overflow ? .max : p
+    }
+
+    /// An inode's data: its first `limit` bytes, or all of it when no limit
+    /// is given. i_size is the image's word, and a guest makes a terabyte
+    /// sparse file with one `truncate`, so a read never allocates more than
+    /// `limit`. Without one, a file larger than the filesystem itself is
+    /// refused rather than read.
+    func readData(_ inode: Ext4Inode, limit: Int? = nil) throws -> [UInt8] {
         if inode.isInline {
             // Inline data: first 60 bytes live in i_block; the tail (if any) is
             // in a system.data xattr, which we don't parse — cap to what we have.
-            let want = Int(min(inode.size, 60))
+            let want = Int(min(inode.size, 60, UInt64(max(limit ?? 60, 0))))
             return Array(inode.iBlock.prefix(want))
         }
+        let size: UInt64
+        if let limit {
+            size = min(inode.size, UInt64(max(limit, 0)))
+        } else {
+            guard inode.size <= byteSize, inode.size <= UInt64(Int.max) else { throw Ext4Error.badInode(inode.ino) }
+            size = inode.size
+        }
+        var out = [UInt8](); out.reserveCapacity(Int(size))
+        try forEachBlock(inode, size: size) { out.append(contentsOf: $0) }
+        return out
+    }
+
+    /// A whole file written to `handle` a block at a time, never held in
+    /// memory (the browser's Extract). Refused, like `readData` without a
+    /// limit, when it claims to be larger than the filesystem. Returns the
+    /// bytes written.
+    func writeData(_ inode: Ext4Inode, to handle: FileHandle) throws -> UInt64 {
+        if inode.isInline {
+            let bytes = try readData(inode)
+            try handle.write(contentsOf: bytes)
+            return UInt64(bytes.count)
+        }
+        guard inode.size <= byteSize, inode.size <= UInt64(Int.max) else { throw Ext4Error.badInode(inode.ino) }
+        try forEachBlock(inode, size: inode.size) { try handle.write(contentsOf: $0) }
+        return inode.size
+    }
+
+    /// The first `size` bytes of a block-mapped inode, block by block (holes
+    /// as zeros), the last one trimmed.
+    private func forEachBlock(_ inode: Ext4Inode, size: UInt64, _ body: ([UInt8]) throws -> Void) throws {
         let bs = blockSize
-        let total = Int(inode.size)
+        let total = Int(size)
         let numBlocks = (total + bs - 1) / bs
-        var out = [UInt8](); out.reserveCapacity(total)
         let map = try blockMap(inode, upTo: numBlocks)
         for lbn in 0..<numBlocks {
+            let want = min(bs, total - lbn * bs)
             if let phys = map[lbn], phys != 0 {
-                out.append(contentsOf: try readBlock(phys))
+                let block = try readBlock(phys)
+                try body(want == bs ? block : Array(block.prefix(want)))
             } else {
-                out.append(contentsOf: repeatElement(0, count: bs))   // sparse hole
+                try body([UInt8](repeating: 0, count: want))   // sparse hole
             }
         }
-        if out.count > total { out.removeLast(out.count - total) }
-        return out
     }
 
     /// logical-block -> physical-block map for the first `upTo` blocks.
@@ -405,12 +480,22 @@ final class Ext4Volume {
     }
 
     /// Recursively walk an extent tree node (header + entries).
-    private func walkExtents(_ node: [UInt8], into map: inout [Int: UInt64], limit: Int) throws {
+    /// ext4's extent trees are at most 5 levels below the inode.
+    static let maxExtentDepth = 5
+
+    private func walkExtents(_ node: [UInt8], into map: inout [Int: UInt64], limit: Int,
+                             expectedDepth: Int? = nil) throws {
         guard node.count >= 12, le16(node, 0) == 0xF30A else {
             throw Ext4Error.unsupported("bad extent header")
         }
         let entries = Int(le16(node, 2))
         let depth = Int(le16(node, 6))
+        // Each level is one shallower than its parent, so an index that
+        // points back up the tree (or at itself) ends here, not in a stack
+        // overflow on the host.
+        guard depth <= Self.maxExtentDepth, expectedDepth.map({ depth == $0 }) ?? true else {
+            throw Ext4Error.unsupported("bad extent tree depth")
+        }
         for i in 0..<entries {
             let e = 12 + i * 12
             guard e + 12 <= node.count else { break }
@@ -431,7 +516,7 @@ final class Ext4Volume {
                 let leafHi = UInt64(le16(node, e + 8))
                 let child = (leafHi << 32) | leafLo
                 let childBytes = try readBlock(child)
-                try walkExtents(childBytes, into: &map, limit: limit)
+                try walkExtents(childBytes, into: &map, limit: limit, expectedDepth: depth - 1)
             }
         }
     }
@@ -478,14 +563,37 @@ final class Ext4Volume {
 
     /// List a directory inode's entries (linear parse; works for htree dirs too,
     /// whose leaf blocks are ordinary dir blocks). "." and ".." are omitted.
+    /// The most a directory's data may be read as: far past any real one (a
+    /// million entries are some tens of MB). i_size is the image's word, so
+    /// a corrupt one can't have the host allocate gigabytes.
+    static let maxDirectoryBytes: UInt64 = 64 << 20
+
     func listDir(_ ino: UInt32) throws -> [Ext4DirEntry] {
         let node = try inode(ino)
         guard node.isDir else { throw Ext4Error.notADirectory("inode \(ino)") }
         if node.isInline {
             return try inlineDirEntries(node)
         }
+        // Bounded by the filesystem's own size too: no real directory is larger.
+        guard node.size <= min(Self.maxDirectoryBytes, byteSize) else {
+            throw Ext4Error.badInode(ino)
+        }
         let data = try readData(node)
         return parseDirBlock(data, includeDots: false)
+    }
+
+    /// A directory's own "." and ".." inode numbers, nil when missing. They
+    /// are always the first two entries of its logical block 0, which is
+    /// all that's read (never i_size's worth). An inline directory has no
+    /// "." entry (it is itself) and keeps ".." in the first four bytes of
+    /// its i_block area.
+    func dotEntries(_ ino: UInt32) throws -> (dot: UInt32?, dotdot: UInt32?) {
+        let node = try inode(ino)
+        guard node.isDir else { throw Ext4Error.notADirectory("inode \(ino)") }
+        if node.isInline { return (ino, le32(Array(node.iBlock), 0)) }
+        guard let phys = try blockMap(node, upTo: 1)[0], phys != 0, phys < sb.blocksCount else { return (nil, nil) }
+        let all = parseDirBlock(try readBlock(phys), includeDots: true)
+        return (all.first { $0.name == "." }?.ino, all.first { $0.name == ".." }?.ino)
     }
 
     private func parseDirBlock(_ data: [UInt8], includeDots: Bool) -> [Ext4DirEntry] {
@@ -564,7 +672,7 @@ final class Ext4Volume {
         if node.size < 60 && !node.usesExtents {
             return String(decoding: node.iBlock.prefix(Int(node.size)), as: UTF8.self)
         }
-        return String(decoding: try readData(node), as: UTF8.self)
+        return String(decoding: try readData(node, limit: Int(PATH_MAX)), as: UTF8.self)
     }
 }
 

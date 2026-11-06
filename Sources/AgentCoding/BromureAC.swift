@@ -14263,7 +14263,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let mtime = UInt32(r[0x10]) | (UInt32(r[0x11]) << 8)
                     | (UInt32(r[0x12]) << 16) | (UInt32(r[0x13]) << 24)
                 if newest == nil || mtime > newest!.mtime,
-                   let data = try? vol.readData(ino) {
+                   let data = try? vol.readData(ino, limit: 25_000_000) {
                     newest = (mtime, data)
                 }
             }

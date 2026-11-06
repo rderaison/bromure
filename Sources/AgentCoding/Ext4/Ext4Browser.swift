@@ -104,7 +104,7 @@ final class Ext4BrowserModel: ObservableObject {
                 return
             }
             let cap = 1 << 20                                    // preview up to 1 MiB
-            let bytes = Array(try volume.readData(node).prefix(cap))
+            let bytes = try volume.readData(node, limit: cap)
             let isText = Self.looksLikeText(bytes)
             let text = isText ? String(decoding: bytes, as: UTF8.self) : Self.hexDump(bytes)
             preview = Preview(title: row.name, text: text, isBinary: !isText,
@@ -121,9 +121,13 @@ final class Ext4BrowserModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let node = try volume.inode(row.id)
-            let bytes = try volume.readData(node)
-            try Data(bytes).write(to: url)
-            banner = "Extracted \(row.name) (\(bytes.count) bytes)"
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw Ext4Error.io("cannot create \(url.path)")
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            let written = try volume.writeData(node, to: handle)
+            banner = "Extracted \(row.name) (\(written) bytes)"
         } catch { banner = "Extract failed: \(error)" }
     }
 
