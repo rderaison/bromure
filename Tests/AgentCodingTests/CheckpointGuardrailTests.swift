@@ -161,19 +161,65 @@ struct CheckpointGuardrailTests {
         #expect(keep == [now, dayBefore])
     }
 
+    /// The finding: a delete under way (the launch clearing a backlog) made
+    /// the session start's checkpoints return nil, and the session start
+    /// doesn't come again, so that boot had no rollback point.
+    @Test("a session start's checkpoints wait for a delete under way, then are taken")
+    func sessionStartWaits() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "waits", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        try Data("home".utf8).write(to: store.homeImageURL(for: p))
+        let gate = DispatchSemaphore(value: 0)
+        ProfileStore.purgeQueue.async { gate.wait() }
+        #expect(ProfileStore.purgeCheckpointsInBackground([root.appendingPathComponent("none.img")], of: p.id, name: p.name, why: "test"))
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var done = false
+            func set() { lock.lock(); done = true; lock.unlock() }
+            var value: Bool { lock.lock(); defer { lock.unlock() }; return done } }
+        let finished = Flag()
+        store.takeSessionStartCheckpoints(for: p) { finished.set() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!finished.value && store.listCheckpoints(for: p).isEmpty)   // held while the delete runs
+        gate.signal()
+        for _ in 0..<250 where !finished.value { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(finished.value)
+        #expect(store.listCheckpoints(for: p).count == 1)
+        #expect(store.listHomeCheckpoints(for: p).count == 1)
+    }
+
+    @Test("with no delete under way, a session start's checkpoints are taken at once")
+    func sessionStartNow() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "now", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        try Data("home".utf8).write(to: store.homeImageURL(for: p))
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var done = false
+            func set() { lock.lock(); done = true; lock.unlock() }
+            var value: Bool { lock.lock(); defer { lock.unlock() }; return done } }
+        let finished = Flag()
+        store.takeSessionStartCheckpoints(for: p) { finished.set() }
+        for _ in 0..<250 where !finished.value { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(store.listCheckpoints(for: p).count == 1 && store.listHomeCheckpoints(for: p).count == 1)
+    }
+
     @Test("launch settles the backlog; a session start takes its checkpoints as automatic")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
         #expect(ac.contains("store.settleCheckpointBacklog(profiles)"))
-        #expect(ac.contains("store.snapshotDisk(for: profile, at: now, automatic: true)"))
-        #expect(ac.contains("store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
+        #expect(ac.contains("self.store.takeSessionStartCheckpoints(for: profile)"))
         let store = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
         // No checkpoint is shrunk by the reaper any more: every delete is a
         // plain unlink on the purge queue.
         #expect(!store.contains("reaper.retire(") && !store.contains("reaper.sweep("))
-        let start = try #require(ac.range(of: "store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
-        #expect(ac[start.upperBound...].prefix(500).contains("store.pruneCheckpoints(for: profile, now: now)"))
+        let take = try #require(store.range(of: "func takeSessionStartCheckpoints("))
+        let body = store[take.upperBound...].prefix(1800)
+        let disk = try #require(body.range(of: "snapshotDisk(for: profile, at: now, automatic: true)"))
+        let home = try #require(body.range(of: "snapshotHomeImage(for: profile, at: now, automatic: true)"))
+        let prune = try #require(body.range(of: "pruneCheckpoints(for: profile, now: now)"))
+        #expect(disk.lowerBound < home.lowerBound && home.lowerBound < prune.lowerBound)
         #expect(store.contains("precondition(!Thread.isMainThread"))
     }
 }

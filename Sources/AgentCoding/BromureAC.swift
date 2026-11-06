@@ -16194,22 +16194,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         AppLog.stamp("'\(profile.name)': BROMURE_NO_REAPER=1 — no session-start checkpoint")
                         return
                     }
-                    let store = self.store
-                    Task.detached {
-                        let now = Date()
-                        do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }
-                        catch {
-                            FileHandle.standardError.write(Data(
-                                "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
-                        }
-                        do { _ = try store.snapshotHomeImage(for: profile, at: now, automatic: true) }
-                        catch {
-                            FileHandle.standardError.write(Data(
-                                "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
-                        }
-                        // Then what's beyond the ladder, both images at once.
-                        store.pruneCheckpoints(for: profile, now: now)
-                    }
+                    // Off the main actor; after any checkpoint delete under way.
+                    self.store.takeSessionStartCheckpoints(for: profile)
                 }
             }
         }
