@@ -323,8 +323,10 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// What this connection may do (a Bromure Agent Host's key: attach only).
     private let grant: RemoteGrant?
     /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
-    /// connect is async), flushed once it is.
+    /// connect is async), flushed once it is. Capped: a channel that sends
+    /// without ever asking for exec or a shell is closed past it.
     private var pendingInbound: [UInt8] = []
+    static let maxPendingInbound = 1 << 20
     private var term = "xterm-256color"
     private var cols: UInt16 = 80
     private var rows: UInt16 = 24
@@ -544,14 +546,25 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
         // Hand off to the io queue so the write path (buffer + writable-drain)
         // never runs on — or blocks — the SSH event loop.
-        ioQueue.async { [weak self] in self?.deliverInbound(bytes) }
+        let channel = context.channel
+        ioQueue.async { [weak self] in self?.deliverInbound(bytes, channel: channel) }
     }
 
     // MARK: SSH → master write path (non-blocking, backpressure-aware; ioQueue only)
 
-    private func deliverInbound(_ bytes: [UInt8]) {
-        // The forward/control fd opens asynchronously; buffer bytes that beat it.
-        if master < 0 { pendingInbound.append(contentsOf: bytes); return }
+    private func deliverInbound(_ bytes: [UInt8], channel: Channel) {
+        // The forward/control fd opens asynchronously; buffer bytes that beat it
+        // (up to maxPendingInbound: more is a channel that never asked for one).
+        if master < 0 {
+            guard pendingInbound.count + bytes.count <= Self.maxPendingInbound else {
+                FatClientLog.log("srv: \(pendingInbound.count + bytes.count) bytes before exec or shell: closing the channel")
+                pendingInbound = []
+                channel.close(promise: nil)
+                return
+            }
+            pendingInbound.append(contentsOf: bytes)
+            return
+        }
         outBuffer.append(contentsOf: bytes)
         drainOut()
     }
