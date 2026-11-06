@@ -12,6 +12,13 @@ enum UtunPacket {
     static let PSH: UInt8 = 0x08
     static let ACK: UInt8 = 0x10
 
+    /// A TCP flow's endpoints, as the guest sent its segments (the key a
+    /// userspace TCP stack keeps its flows under).
+    struct FlowKey: Hashable {
+        let srcIP: UInt32, srcPort: UInt16, dstIP: UInt32, dstPort: UInt16
+        init(_ s: UtunPacket.TCPSegment) { srcIP = s.srcIP; srcPort = s.srcPort; dstIP = s.dstIP; dstPort = s.dstPort }
+    }
+
     struct TCPSegment {
         var srcIP: UInt32           // host order
         var dstIP: UInt32           // host order

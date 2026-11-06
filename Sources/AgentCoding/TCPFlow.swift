@@ -11,14 +11,14 @@ import Darwin
 /// State is guarded by `cond` (an NSCondition doubling as the lock); the reader
 /// thread blocks on it for send-window room and is woken by inbound ACKs.
 final class TCPFlow {
-    private let key: UtunForwarder.FlowKey
+    private let key: UtunPacket.FlowKey
     /// Opens the upstream byte stream for this flow and returns its fd, or nil to
     /// RST. The target is captured by the closure — this keeps TCPFlow transport-
     /// agnostic (an SSH forward channel for the utun tunnel, a socketpair end for
     /// the switch MiTM forwarder).
     private let dial: () -> Int32?
     private let send: (UtunPacket.TCPSegment) -> Void
-    private let onClosed: (UtunForwarder.FlowKey) -> Void
+    private let onClosed: (UtunPacket.FlowKey) -> Void
 
     private let cond = NSCondition()
     private enum State { case connecting, synReceived, established, closing, closed }
@@ -36,11 +36,11 @@ final class TCPFlow {
     private let mss: Int
     private static let ourWindow: UInt16 = 65535
 
-    init(key: UtunForwarder.FlowKey, clientISN: UInt32,
+    init(key: UtunPacket.FlowKey, clientISN: UInt32,
          mss: Int = 1460,
          dial: @escaping () -> Int32?,
          send: @escaping (UtunPacket.TCPSegment) -> Void,
-         onClosed: @escaping (UtunForwarder.FlowKey) -> Void) {
+         onClosed: @escaping (UtunPacket.FlowKey) -> Void) {
         self.key = key
         self.mss = mss
         self.dial = dial
@@ -58,9 +58,9 @@ final class TCPFlow {
         let dial = self.dial
         Thread.detachNewThread { [weak self] in
             let fd = dial() ?? -1
-            guard let self else { if fd >= 0 { Darwin.close(fd) }; return }
+            guard let self else { if fd >= 0 { fdClose(fd) }; return }
             self.cond.lock()
-            guard self.state == .connecting else { self.cond.unlock(); if fd >= 0 { Darwin.close(fd) }; return }
+            guard self.state == .connecting else { self.cond.unlock(); if fd >= 0 { fdClose(fd) }; return }
             if fd < 0 {
                 self.sendRSTLocked(); self.closeLocked(); self.cond.unlock(); return
             }
@@ -112,7 +112,7 @@ final class TCPFlow {
         if seg.flags & UtunPacket.FIN != 0, seg.seq &+ UInt32(seg.payload.count) == rcvNxt {
             rcvNxt = rcvNxt &+ 1
             emitLocked(flags: UtunPacket.ACK, payload: [][...])
-            if rfd >= 0 { shutdown(rfd, SHUT_WR) }   // half-close toward the remote
+            if rfd >= 0 { fdShutdownWrite(rfd) }   // half-close toward the remote
             clientFin = true
             closeIfFullyClosedLocked()
         }
@@ -126,7 +126,7 @@ final class TCPFlow {
         Thread.detachNewThread { [weak self] in
             var buf = [UInt8](repeating: 0, count: mss)
             while true {
-                let n = Darwin.read(fd, &buf, buf.count)
+                let n = buf.withUnsafeMutableBytes { fdRead(fd, $0.baseAddress!, $0.count) }
                 if n > 0 {
                     guard let self, self.sendData(Array(buf[0..<n])) else { break }
                 } else if n < 0 && errno == EINTR {
@@ -212,7 +212,7 @@ final class TCPFlow {
         bytes.withUnsafeBytes { raw in
             let base = raw.baseAddress!
             while off < bytes.count {
-                let n = Darwin.write(fd, base + off, bytes.count - off)
+                let n = fdWrite(fd, base + off, bytes.count - off)
                 if n > 0 { off += n }
                 else if n < 0 && (errno == EINTR) { continue }
                 else { break }

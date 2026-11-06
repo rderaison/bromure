@@ -182,10 +182,7 @@ final class UtunForwarder {
 
     // MARK: Helpers
 
-    struct FlowKey: Hashable {
-        let srcIP: UInt32, srcPort: UInt16, dstIP: UInt32, dstPort: UInt16
-        init(_ s: UtunPacket.TCPSegment) { srcIP = s.srcIP; srcPort = s.srcPort; dstIP = s.dstIP; dstPort = s.dstPort }
-    }
+    typealias FlowKey = UtunPacket.FlowKey
 
     static func parseCIDR(_ cidr: String) -> (net: UInt32, mask: UInt32)? {
         let parts = cidr.split(separator: "/")

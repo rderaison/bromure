@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 // Small platform differences behind one function each, so the code that
 // needs them reads the same on Apple platforms and on Linux.
@@ -50,6 +55,45 @@ func statModificationTime(_ st: stat) -> timespec {
     st.st_mtimespec
 #else
     st.st_mtim
+#endif
+}
+
+/// read(2), write(2), close(2) and a write-side shutdown(2), for a type whose
+/// own `read`/`write`/`close` members shadow the C ones (Darwin.close in
+/// Darwin, Glibc.close in Glibc).
+func fdRead(_ fd: Int32, _ buf: UnsafeMutableRawPointer, _ count: Int) -> Int {
+#if canImport(Darwin)
+    Darwin.read(fd, buf, count)
+#else
+    Glibc.read(fd, buf, count)
+#endif
+}
+
+func fdWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int {
+#if canImport(Darwin)
+    Darwin.write(fd, buf, count)
+#else
+    Glibc.write(fd, buf, count)
+#endif
+}
+
+@discardableResult
+func fdClose(_ fd: Int32) -> Int32 {
+#if canImport(Darwin)
+    Darwin.close(fd)
+#else
+    Glibc.close(fd)
+#endif
+}
+
+/// Half-close: no more writes on `fd` (SHUT_WR is an Int32 in Darwin, an Int
+/// in Glibc).
+@discardableResult
+func fdShutdownWrite(_ fd: Int32) -> Int32 {
+#if canImport(Darwin)
+    shutdown(fd, SHUT_WR)
+#else
+    shutdown(fd, Int32(SHUT_WR))
 #endif
 }
 
