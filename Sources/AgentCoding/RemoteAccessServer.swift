@@ -381,6 +381,12 @@ final class RemoteAccessServer {
     /// and ONLY when the managed set actually changed — so a periodic account
     /// sync never needlessly restarts the sshd (which would drop live sessions).
     func setManagedKeys(marker: String, lines: [String]) {
+        // A file that exists but can't be read would list no manual keys, and
+        // the rewrite below would drop them all: leave it alone instead.
+        if fm.fileExists(atPath: paths.authKeys.path),
+           (try? String(contentsOf: paths.authKeys, encoding: .utf8)) == nil {
+            return
+        }
         let current = listAuthorizedKeys()
         let managedNow = Set(current.filter { $0.comment.hasPrefix(marker) }.map(\.line))
         let manual = current.filter { !$0.comment.hasPrefix(marker) }
@@ -389,7 +395,10 @@ final class RemoteAccessServer {
         var seen = Set(manual.map { Self.keyBlob($0.line) })
         var desired: [String] = []
         for line in lines {
-            guard (try? NIOSSHPublicKey(openSSHPublicKey: line)) != nil,
+            // One key per line: a control or line-break character (in a
+            // device's comment, say) would write a second, untagged key.
+            guard !Self.hasLineBreakOrControl(line),
+                  (try? NIOSSHPublicKey(openSSHPublicKey: line)) != nil,
                   seen.insert(Self.keyBlob(line)).inserted else { continue }
             desired.append(line)
         }
@@ -417,6 +426,10 @@ final class RemoteAccessServer {
     /// is sufficient: new connections see the update; live ones (already past
     /// auth) are undisturbed. Structural config changes (port, auth methods) still
     /// go through `start()` from `remoteAccessApply`.
+    static func hasLineBreakOrControl(_ line: String) -> Bool {
+        line.unicodeScalars.contains { CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0) }
+    }
+
     private func reloadIfRunning() {
         guard running, let cfg = current else { return }
         authFactory?.updateAuthorizedKeys(cfg.pubkeyAuth ? loadAuthorizedNIOKeys() : [],

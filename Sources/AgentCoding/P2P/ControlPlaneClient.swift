@@ -309,8 +309,14 @@ struct ControlPlaneClient {
         /// attach their machine (RemoteGrant). nil from an older control plane.
         let capability: String?
         /// The authorized_keys comment a server tags this key with.
+        /// The id goes in as letters, digits, `.`, `_` and `-` only, so a
+        /// comment can't carry a space, a line break or a second key.
         var authorizedKeysComment: String {
-            capability == "agent-host" ? "bromure-account:machine:\(id)" : "bromure-account:\(id)"
+            let safeID = String(id.unicodeScalars.map { s in
+                s.isASCII && (CharacterSet.alphanumerics.contains(s) || "._-".unicodeScalars.contains(s))
+                    ? Character(s) : "_"
+            })
+            return capability == "agent-host" ? "bromure-account:machine:\(safeID)" : "bromure-account:\(safeID)"
         }
     }
     /// The SSH public keys of the caller's OWN devices — a server installs these
