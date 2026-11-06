@@ -18,6 +18,7 @@ struct RemoteAccessSettingsView: View {
     @State private var fingerprint = ""
     @State private var connect = ""
     @State private var keys: [[String: Any]] = []
+    @State private var keysProblem = ""
     @State private var newKey = ""
     @State private var errorText: String?
 
@@ -162,6 +163,11 @@ struct RemoteAccessSettingsView: View {
     private var keysSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Authorized public keys").font(.headline)
+            if !keysProblem.isEmpty {
+                Label(keysProblem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
             if keys.isEmpty {
                 Text("No keys enrolled.").font(.callout).foregroundColor(.secondary)
             } else {
@@ -290,5 +296,6 @@ struct RemoteAccessSettingsView: View {
         fingerprint = s["fingerprint"] as? String ?? fingerprint
         connect = s["connect"] as? String ?? connect
         keys = s["authorizedKeys"] as? [[String: Any]] ?? keys
+        keysProblem = s["authorizedKeysProblem"] as? String ?? keysProblem
     }
 }

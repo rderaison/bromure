@@ -4688,6 +4688,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "user": user,
             "connect": "ssh -p \(cfg.port) \(user)@\(host)",
             "authorizedKeys": keys,
+            "authorizedKeysProblem": server.authorizedKeysProblem ?? "",
         ]
     }
 

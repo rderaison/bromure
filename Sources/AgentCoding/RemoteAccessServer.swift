@@ -103,17 +103,34 @@ final class RemoteAccessServer {
         case startFailed(String)
         case badKey(String)
         case noAuthMethods
+        case unreadableKeys(String)
         var errorDescription: String? {
             switch self {
             case .keygenFailed(let m): return "Couldn't generate host key: \(m)"
             case .startFailed(let m):  return "Couldn't start the SSH server: \(m)"
             case .badKey(let m):       return "Not a valid public key: \(m)"
             case .noAuthMethods:       return "At least one of password / public-key auth must be enabled."
+            case .unreadableKeys(let p): return "\(p) can't be read (it isn't UTF-8 text): fix or remove it first."
             }
         }
     }
 
     var isRunning: Bool { running }
+
+    /// Why the account's device keys couldn't be synced: authorized_keys
+    /// exists but can't be read. Public-key sign-in is off meanwhile (the
+    /// live listener holds no key it can't read). nil once a sync went in.
+    private(set) var authorizedKeysProblem: String?
+
+    /// The keys the running listener lets in right now (tests).
+    var liveAuthorizedKeys: Set<NIOSSHPublicKey> { authFactory?.currentAuthorizedKeys ?? [] }
+
+    /// authorized_keys is there but isn't text this can read: rewriting it
+    /// from what was read (nothing) would drop every key in it.
+    private var authKeysUnreadable: Bool {
+        fm.fileExists(atPath: paths.authKeys.path)
+            && (try? String(contentsOf: paths.authKeys, encoding: .utf8)) == nil
+    }
 
     // MARK: Lifecycle
 
@@ -124,6 +141,7 @@ final class RemoteAccessServer {
 
         try ensureLayout()
         let hostKey = try loadOrCreateHostKey()
+        noteKeysReadability()   // what it loads below, said or cleared
         let authorized = config.pubkeyAuth ? loadAuthorizedNIOKeys() : []
         let machineOnly = config.pubkeyAuth ? loadMachineOnlyKeys() : [:]
         let exe = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
@@ -350,6 +368,7 @@ final class RemoteAccessServer {
         guard (try? NIOSSHPublicKey(openSSHPublicKey: key)) != nil else {
             throw RemoteError.badKey("couldn't parse it (supported: ed25519, ecdsa)")
         }
+        guard !authKeysUnreadable else { throw RemoteError.unreadableKeys(paths.authKeys.path) }
         try ensureLayout()
         var lines = (try? String(contentsOf: paths.authKeys, encoding: .utf8))?
             .split(whereSeparator: \.isNewline).map(String.init) ?? []
@@ -362,6 +381,7 @@ final class RemoteAccessServer {
     }
 
     func removeAuthorizedKey(_ selector: String) throws {
+        guard !authKeysUnreadable else { throw RemoteError.unreadableKeys(paths.authKeys.path) }
         var keys = listAuthorizedKeys()
         let sel = selector.trimmingCharacters(in: .whitespaces)
         if let idx = Int(sel), idx >= 1, idx <= keys.count {
@@ -382,9 +402,15 @@ final class RemoteAccessServer {
     /// sync never needlessly restarts the sshd (which would drop live sessions).
     func setManagedKeys(marker: String, lines: [String]) {
         // A file that exists but can't be read would list no manual keys, and
-        // the rewrite below would drop them all: leave it alone instead.
-        if fm.fileExists(atPath: paths.authKeys.path),
-           (try? String(contentsOf: paths.authKeys, encoding: .utf8)) == nil {
+        // the rewrite below would drop them all: leave it alone instead. But
+        // the live listener mustn't keep the keys it read before: a device
+        // taken off the account would still get in. It reloads the file as
+        // what it can read of it, nothing, until it's fixed.
+        // Readable again after it wasn't: the listener holds no key, so it
+        // takes the file back even if the account's keys are as they were.
+        let wasUnreadable = authorizedKeysProblem != nil
+        if noteKeysReadability() {
+            reloadIfRunning()
             return
         }
         let current = listAuthorizedKeys()
@@ -402,13 +428,28 @@ final class RemoteAccessServer {
                   seen.insert(Self.keyBlob(line)).inserted else { continue }
             desired.append(line)
         }
-        guard managedNow != Set(desired) else { return }   // unchanged → no restart
+        guard managedNow != Set(desired) else {   // unchanged → no restart
+            if wasUnreadable { reloadIfRunning() }
+            return
+        }
         try? ensureLayout()
         let out = manual.map(\.line) + desired
         try? (out.joined(separator: "\n") + (out.isEmpty ? "" : "\n"))
             .write(to: paths.authKeys, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.authKeys.path)
         reloadIfRunning()
+    }
+
+    /// Whether authorized_keys can't be read, said in `authorizedKeysProblem`
+    /// (and the log, once), or cleared when it can.
+    @discardableResult
+    private func noteKeysReadability() -> Bool {
+        guard authKeysUnreadable else { authorizedKeysProblem = nil; return false }
+        let why = "\(paths.authKeys.path) can't be read (it isn't UTF-8 text): "
+            + "the account's device keys can't be synced, and public-key sign-in is off until it's fixed"
+        if authorizedKeysProblem != why { NSLog("[remote-access] %@", why) }
+        authorizedKeysProblem = why
+        return true
     }
 
     /// The "type blob" identity of an authorized_keys line (ignoring the comment).
