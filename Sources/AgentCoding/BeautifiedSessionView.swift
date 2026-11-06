@@ -1335,6 +1335,9 @@ final class BeautifiedSessionModel: ObservableObject {
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            // Sent with files: the agent takes their paths in as attachments,
+            // so its turn never carries the text Bromure typed.
+            if Self.attachmentTurnArrived(q.text, since: turns.dropFirst(q.baseline)) { return true }
             // One Bromure typed in that came out a little changed (a
             // composer completion rewrote its end, the agent re-flowed it):
             // the turn it became still resolves the row.
@@ -1406,6 +1409,26 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         guard f == ChatQueueStore.notDeliveredText || f == notTakenText else { return false }
         return since.contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
+    }
+
+    /// Whether a message sent with files (their guest paths after its words,
+    /// `send`) has become a turn. The agent takes the paths in as attachments
+    /// (Claude writes an image as "[Image #1]", or not at all in the text), so
+    /// the turn is compared without them: it carries the words, or, for a
+    /// message that was only files, it's any turn since.
+    nonisolated static func attachmentTurnArrived(_ typed: String, since turns: ArraySlice<String>) -> Bool {
+        guard typed.contains(GuestDrop.baseDir) else { return false }
+        let want = withoutAttachments(typed)
+        if want.isEmpty { return !turns.isEmpty }
+        return turns.contains { withoutAttachments($0).contains(want) }
+    }
+
+    /// The words of a message, without attachment paths or placeholders.
+    nonisolated static func withoutAttachments(_ s: String) -> String {
+        let noImages = s.replacingOccurrences(of: #"\[Image #\d+\]"#, with: " ", options: .regularExpression)
+        return noImages.split(whereSeparator: \.isWhitespace)
+            .filter { !$0.hasPrefix(GuestDrop.baseDir) && !$0.hasPrefix("~/.bromure/drops/") }
+            .joined(separator: " ")
     }
 
     /// Whitespace runs folded, ends trimmed.
@@ -3389,6 +3412,8 @@ private struct TailFollowProbe: NSViewRepresentable {
 /// Codex-desktop-style composer. Mounted into the pane's container by
 /// `SessionPane.updateNativeTerminalMount()` when the view mode is `.beautified`.
 struct BeautifiedSessionView: View {
+    /// How long the "While you were away" panel shows before it goes.
+    static let whileAwayShownNanos: UInt64 = 3_000_000_000
     @ObservedObject var model: BeautifiedSessionModel
     /// Which parts to draw. A room's grid shows transcripts only and one
     /// composer below, addressed to the Switchboard or the focused cell.
@@ -3424,6 +3449,8 @@ struct BeautifiedSessionView: View {
     /// What's new on arriving (the panel), and where it begins (the divider,
     /// which stays after the panel is put away).
     @State private var whileAway: UnseenSummary?
+    /// The pointer is over the "While you were away" panel: it stays.
+    @State private var hoveringAway = false
     @State private var newSince: Date?
     @State private var arrival = ChatArrivalTracker()
     /// Held, not observed: only `ScrubLabelView` observes it. As a @StateObject
@@ -4296,6 +4323,17 @@ struct BeautifiedSessionView: View {
                             .padding(.horizontal, 20)
                             .padding(.top, 10)
                             .transition(.opacity.combined(with: .move(edge: .top)))
+                            .onHover { hoveringAway = $0 }
+                            // Seen at a glance, then out of the way: it goes
+                            // after a few seconds, not while the pointer is on it.
+                            .task(id: summary) {
+                                try? await Task.sleep(nanoseconds: Self.whileAwayShownNanos)
+                                while hoveringAway, !Task.isCancelled {
+                                    try? await Task.sleep(nanoseconds: 250_000_000)
+                                }
+                                guard !Task.isCancelled, whileAway == summary else { return }
+                                whileAway = nil
+                            }
                     }
                     ScrubLabelView(state: scrub).padding(.top, whileAway == nil ? 10 : 0)
                   }
