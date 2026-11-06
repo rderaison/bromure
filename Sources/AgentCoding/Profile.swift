@@ -4359,8 +4359,8 @@ public final class ProfileStore {
         return keep
     }
 
-    /// CoW-clone the current disk into `checkpoints/<ts>.img` and prune to
-    /// the tiered ladder. clonefile is instant + near-zero space (shares
+    /// CoW-clone the current disk into `checkpoints/<ts>.img` (pruning to the
+    /// ladder is `pruneCheckpoints`, run after). clonefile is instant + near-zero space (shares
     /// blocks with the live disk until they diverge), so this is cheap to do
     /// every boot. Cloning a live disk yields a crash-consistent image (ext4
     /// journal replays on restore) — acceptable for a rollback point, and
@@ -4454,11 +4454,15 @@ public final class ProfileStore {
 
     /// Rename each kept-looking checkpoint (`N.img`) to `N.img.deleting`, so no
     /// list or revert offers it while it waits its turn. What can't be renamed
-    /// (gone already) is dropped.
+    /// (gone already) is dropped. One whose `.deleting` name is taken (a
+    /// leftover, itself in the list to delete) stays put and is unlinked as it
+    /// is: renaming over the leftover would unlink it here, maybe on main.
     static func takeOutOfList(_ files: [URL]) -> [URL] {
         files.compactMap { url -> URL? in
             guard url.pathExtension != CheckpointReaper.retiredExtension else { return url }
             let to = url.appendingPathExtension(CheckpointReaper.retiredExtension)
+            var st = stat()
+            if lstat(to.path, &st) == 0 { return url }
             return rename(url.path, to.path) == 0 ? to : nil
         }
     }

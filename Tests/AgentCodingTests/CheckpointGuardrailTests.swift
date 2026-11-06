@@ -140,6 +140,17 @@ struct CheckpointGuardrailTests {
         #expect(!store.pruneCheckpoints(for: p, now: now))   // nothing beyond
     }
 
+    @Test("a checkpoint whose .deleting name is taken isn't renamed over it")
+    func renameCollision() throws {
+        let dir = try tempRoot(); defer { try? FileManager.default.removeItem(at: dir) }
+        let cp = dir.appendingPathComponent("1700000000.img"), left = dir.appendingPathComponent("1700000000.img.deleting")
+        let other = dir.appendingPathComponent("1700000100.img")
+        for u in [cp, left, other] { try Data(u.lastPathComponent.utf8).write(to: u) }
+        let out = ProfileStore.takeOutOfList([cp, left, other])
+        #expect(out == [cp, left, other.appendingPathExtension("deleting")])
+        #expect(try String(contentsOf: left, encoding: .utf8) == "1700000000.img.deleting")   // not replaced
+    }
+
     @Test("the days are calendar days: the day before yesterday's morning stays")
     func calendarDays() {
         let cal = Calendar.current
