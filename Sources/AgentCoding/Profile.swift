@@ -4558,7 +4558,9 @@ public final class ProfileStore {
             write("off")
             return 0
         }
-        guard (try? String(contentsOf: mark, encoding: .utf8)) != Self.ladderGeneration else { return 0 }
+        guard (try? String(contentsOf: mark, encoding: .utf8)) != Self.ladderGeneration else {
+            return sweepRetiredCheckpoints(profiles, done: done)
+        }
         let jobs = profiles.map { ($0, checkpointBacklog(for: $0, now: now)) }.filter { !$0.1.isEmpty }
         guard !jobs.isEmpty else {
             try? fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
@@ -4583,6 +4585,33 @@ public final class ProfileStore {
             }
             if ok { started += 1 } else {
                 left.withLock { $0.count -= 1; $0.clean = false }   // another delete runs: next launch
+            }
+        }
+        if started == 0 { DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
+        return started
+    }
+
+    /// Every launch, once the ladder is settled: the checkpoints a delete had
+    /// renamed out of the list (`.deleting`) but not unlinked when the app quit
+    /// or crashed. Hidden from every list, they would hold their space until
+    /// that workspace's next session start pruned it, which may never come.
+    /// One that fails to unlink is logged and tried again at the next launch.
+    /// Returns how many workspaces it started on.
+    @discardableResult
+    func sweepRetiredCheckpoints(_ profiles: [Profile], done: @escaping @MainActor () -> Void = {}) -> Int {
+        let jobs = profiles.map { p -> (Profile, [URL]) in
+            let dirs = [checkpointsDirectory(for: p), homeCheckpointsDirectory(for: p)]
+            return (p, Self.checkpointFiles(in: dirs).filter { $0.pathExtension == CheckpointReaper.retiredExtension })
+        }.filter { !$0.1.isEmpty }
+        let left = OSAllocatedUnfairLock(initialState: jobs.count)
+        var started = 0
+        for (p, files) in jobs {
+            let ok = Self.purgeCheckpointsInBackground(files, of: p.id, name: p.name,
+                                                       why: "left half deleted by a quit") { _, _ in
+                if left.withLock({ $0 -= 1; return $0 == 0 }) { done() }
+            }
+            if ok { started += 1 } else if left.withLock({ $0 -= 1; return $0 == 0 }), started > 0 {
+                DispatchQueue.main.async { MainActor.assumeIsolated { done() } }   // the others already ended
             }
         }
         if started == 0 { DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
