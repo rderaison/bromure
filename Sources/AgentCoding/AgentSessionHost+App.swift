@@ -6,6 +6,14 @@ import Foundation
 extension ACAppDelegate: AgentSessionHost {
     func tabsModel(for id: Profile.ID) -> TabsModel? { pane(for: id)?.model }
 
+    func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? {
+        guard let vm = runningSessions[id] else { return nil }
+        return GuestMemoryReport(
+            unresponsive: vm.guestUnresponsive, at: vm.vmStatsAt,
+            snapshot: GuestMemorySnapshot(availableKB: vm.vmMemTotalKB - vm.vmMemUsedKB, totalKB: vm.vmMemTotalKB,
+                                          pressureSome: vm.vmMemPressureSome, pressureFull: vm.vmMemPressureFull))
+    }
+
     func chatIsWorking(profileID: Profile.ID, window: Int) -> Bool? {
         pane(for: profileID)?.chatIsWorking(window: window)
     }

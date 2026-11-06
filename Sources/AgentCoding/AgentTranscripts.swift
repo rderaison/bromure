@@ -301,7 +301,7 @@ enum ClaudeTranscriptParser {
         var next = 0
         while next < lines.count {
             let batchEnd = min(next + 256, lines.count)
-            autoreleasepool {
+            threadAutoreleasepool {
             for line in lines[next..<batchEnd] {
                 guard let obj = try? JSONSerialization.jsonObject(
                     with: Data(line.utf8)) as? [String: Any] else { continue }

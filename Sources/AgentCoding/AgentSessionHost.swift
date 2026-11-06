@@ -41,4 +41,22 @@ protocol AgentSessionHost: AnyObject {
     func codingTaskOwnsLiveTab(profileID: Profile.ID, branch: String) -> Bool
     /// A session that was shown got succeeded by a new run: follow it.
     func followSucceededSession(old: UUID, new: UUID)
+    /// What the workspace's guest last said of its memory, and whether it
+    /// has gone silent: the session engine won't start one more agent that
+    /// doesn't fit (MemoryAdmission). nil when nothing is known.
+    func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport?
+}
+
+/// A workspace's memory as its host last heard it (AgentSessionHost).
+struct GuestMemoryReport {
+    /// The guest stopped answering (a frozen VM).
+    var unresponsive: Bool
+    /// When the guest last reported (`vmstat.txt`); nil: not yet.
+    var at: Date?
+    var snapshot: GuestMemorySnapshot
+}
+
+extension AgentSessionHost {
+    /// A host that doesn't track its guests' memory lets every start through.
+    func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? { nil }
 }

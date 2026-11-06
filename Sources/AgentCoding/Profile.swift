@@ -1,5 +1,12 @@
 import Foundation
+#if canImport(os)
 import os
+/// The checkpoint locks: OSAllocatedUnfairLock where Apple's `os` is there,
+/// LockedState (PlatformCompat) elsewhere.
+private typealias CheckpointLock<State> = OSAllocatedUnfairLock<State>
+#else
+private typealias CheckpointLock<State> = LockedState<State>
+#endif
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -4502,7 +4509,7 @@ public final class ProfileStore {
     /// Workspaces whose checkpoints are being deleted: no revert reads one
     /// meanwhile (`revertImage` refuses), and no second delete starts. Shared by
     /// "Delete All Checkpoints" and the delete a home resize starts.
-    private static let purging = OSAllocatedUnfairLock(initialState: Set<UUID>())
+    private static let purging = CheckpointLock(initialState: Set<UUID>())
     static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0.contains(id) } }
 
     /// One delete at a time, app-wide: the backlog a launch clears for every
@@ -4574,7 +4581,7 @@ public final class ProfileStore {
         }
         // The mark is written once every delete ran clean, so a quit midway
         // picks up the rest at the next launch.
-        let left = OSAllocatedUnfairLock(initialState: (count: jobs.count, clean: true))
+        let left = CheckpointLock(initialState: (count: jobs.count, clean: true))
         var started = 0
         for (p, files) in jobs {
             let ok = Self.purgeCheckpointsInBackground(Self.takeOutOfList(files), of: p.id, name: p.name,
