@@ -52,7 +52,8 @@ final class SessionStores {
     }
 
     /// The /state keys macOS adds on a server with the sessions-first home.
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentSessions h=8888028888b19ce0 @7dd92fdf
+    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentSessions h=98721b804428bec6 @b41d9876
     func stateEntries() -> [String: JSONValue] {
         [
             "agentSessions": .array(sessions.sessions.compactMap(JSONValue.encoding)),

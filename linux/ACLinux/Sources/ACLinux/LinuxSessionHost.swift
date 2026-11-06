@@ -82,7 +82,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// workspaces', and a connected machine's roster). An entry keeps its
     /// object while its roster does.
     // partial: a workspace runs or it doesn't (no booting or suspended: both read as asleep); no compromised, squelch or notes; no window
-    // @port ACAppDelegate.refreshSidebar() h=1bc5abc68c91e571 @d2db8346
+    // @port ACAppDelegate.refreshSidebar() h=4d4669ab07510cd1 @b41d9876
     func refreshSidebar(workspaces: [SessionListModel.VMEntry], profiles: [Profile], machines: [AttachedMachine]? = nil) {
         let running = Self.running.withLockedValue { $0 }
         let machines = machines ?? (LinuxMachines.shared?.attached.values).map(Array.init) ?? []
@@ -103,6 +103,34 @@ final class LinuxSessionHost: AgentSessionHost {
         }
         let entries = wanted.map { e in old[e.id].flatMap { $0.model === e.model ? $0 : nil } ?? e }
         if listModel.entries.map(ObjectIdentifier.init) != entries.map(ObjectIdentifier.init) { listModel.entries = entries }
+    }
+
+    /// What the workspace's guest last said of its memory (`vmstat.txt` in its
+    /// outbox, as GuestOutbox reads it for /state), when it said it (the
+    /// file's date); nil while it isn't running here.
+    // partial: no "guest unresponsive" (the daemon doesn't track a frozen guest yet)
+    // @port-skip linux-only: macOS reads the VM's RunningSession fields (AgentSessionHost+App.swift)
+    func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? {
+        guard Self.running.withLockedValue({ $0.contains(id) }) else { return nil }
+        let path = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/vmstat.txt"
+        guard let raw = GuestOutbox.read(path),
+              let at = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date else { return nil }
+        var used = 0, total = 0, some = 0.0, full = 0.0
+        for line in raw.split(whereSeparator: \.isNewline) {
+            let p = line.split(separator: " ")
+            guard p.count == 2 else { continue }
+            switch p[0] {
+            case "mem_used_kb": used = Int(p[1]) ?? 0
+            case "mem_total_kb": total = Int(p[1]) ?? 0
+            case "mem_psi_some": some = Double(p[1]) ?? 0
+            case "mem_psi_full": full = Double(p[1]) ?? 0
+            default: break
+            }
+        }
+        guard total > 0 else { return nil }
+        return GuestMemoryReport(unresponsive: false, at: at,
+                                 snapshot: GuestMemorySnapshot(availableKB: total - used, totalKB: total,
+                                                               pressureSome: some, pressureFull: full))
     }
 
     /// What the guest's hooks last said per workspace and window (macOS:

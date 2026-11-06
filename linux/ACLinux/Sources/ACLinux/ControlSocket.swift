@@ -461,8 +461,8 @@ public struct ControlClient: Sendable {
     /// A streaming request: returns the connected fd once a 200 header has
     /// been read (byte by byte, so no stream byte is consumed); any other
     /// status throws the reply's `error`. The header read is bounded at 12 s.
-    // partial: no link-stats-scaled handshake timeout (fixed 12 s), Unix socket only
-    // @port ControlClient.openStream(_: String, _: String, body: [String:Any]) h=8e529cadf8cdad71 @53294cad
+    // partial: no link-stats-scaled handshake timeout (fixed 12 s), Unix socket only, no extra request headers
+    // @port ControlClient.openStream(_: String, _: String, body: [String:Any], headers: [String:String]) h=ade14be1b219a4b9 @1b984d09
     public func openStream(_ method: String, _ path: String, body: JSONValue) throws -> Int32 {
         let fd = try Self.connect(to: socketPath)
         let payload = try JSONEncoder().encode(body)

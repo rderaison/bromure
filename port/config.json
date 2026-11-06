@@ -87,6 +87,7 @@
     "Sources/AgentCoding/LLMEventExtractor.swift",
     "Sources/AgentCoding/LiveModelRefresh.swift",
     "Sources/AgentCoding/MachineLinks.swift",
+    "Sources/AgentCoding/MemoryAdmission.swift",
     "Sources/AgentCoding/MessagingConnectorEngine.swift",
     "Sources/AgentCoding/Mitm/AWSCredentialServer.swift",
     "Sources/AgentCoding/Mitm/AWSHosts.swift",

@@ -65,3 +65,14 @@ enum SessionDisk {
     static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
 }
 
+
+/// The app's durable log (macOS: AppLog, a copy of the GUI process's stderr
+/// in ~/Library/Logs). The daemon's stderr is the journal already: a stamp
+/// is a line there.
+// @port-skip linux-only: stand-in for AppLog (Darwin/MachO-bound)
+enum AppLog {
+    // @port-skip linux-only: see AppLog
+    static func stamp(_ text: String, alsoToTerminal: Bool = false) {
+        FileHandle.standardError.write(Data("=== \(text)\n".utf8))
+    }
+}

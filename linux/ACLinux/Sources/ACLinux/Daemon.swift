@@ -370,9 +370,9 @@ public actor Daemon {
     /// least every 15 s (a client resubscribes after 45 s of silence). Ends
     /// when a write fails; the client half-closing (the SSH bridge forwards
     /// its EOF) doesn't end it.
-    // partial: no gzip frames (flag 1)
+    // partial: no gzip frames (flag 1), and no delta frames (flag 2): a client that asks for them gets whole ones, which it reads as before
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
-    // @port ACAutomationServer.handleStateSubscribe(fd: Int32) h=7745b9b5fc280681 @7dd92fdf
+    // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
     func stateSubscribe() -> ControlResponse {
         let me = WeakDaemon(self)
         return .streaming { client in
@@ -1399,8 +1399,8 @@ public actor Daemon {
     /// Grows an existing home image to `target` (never shrinks; it stays
     /// sparse; agentd runs resize2fs after mounting). Returns what it did,
     /// for the log: a grow that doesn't happen says why.
-    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice
-    // @port SessionDisk.growHomeImageIfNeeded() h=594c22d9dd98aa97 @25ad3a88
+    // partial: no free-space check (EphemeralDisk.checkDiskSpace), no ProfileStore change notice, and no home checkpoints to purge after a grow
+    // @port SessionDisk.growHomeImageIfNeeded() h=2e3adcbd5eaa9db6 @b41d9876
     static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?) throws -> String {
         let gib = { (b: UInt64) in "\(b >> 30) GiB" }
         var st = stat()

@@ -124,7 +124,9 @@ extension Daemon {
 extension SessionStores {
     // MARK: The coding board
 
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTasks h=72b011428431c370 @9936e30c
+    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
+
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTasks h=14bbb26eb97daa18 @b41d9876
     func taskList() -> [String: Any] {
         ["tasks": codingTasks.tasks.compactMap(Self.dict)]
     }
@@ -255,7 +257,8 @@ extension SessionStores {
 
     /// Automations, their runs and next fires, with the repository watches
     /// and their findings riding along for the fat client.
-    // @port ACAppDelegate.automationScheduledList() h=1a1571e3ceb17220 @9936e30c
+    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
+    // @port ACAppDelegate.automationScheduledList() h=7100e2d62c0f78c0 @b41d9876
     func automationList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         return [
