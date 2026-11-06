@@ -112,9 +112,7 @@ extension Daemon {
 
 /// Rooms on the daemon (macOS: ACAppDelegate's room* members): the room
 /// store and the sessions in them, this server's and attached machines'.
-/// No Switchboard.
 extension LinuxSessionHost {
-    // partial: no Switchboard for a room on Linux yet
     // @port ACAppDelegate.roomCommand(_: UUID?, _: String, _: [String:Any]) h=980cca82c30fb700 @b10aa434
     func roomCommand(_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any] {
         func uuid(_ k: String) -> UUID? { (body[k] as? String).flatMap(UUID.init(uuidString:)) }
@@ -155,8 +153,11 @@ extension LinuxSessionHost {
         case (let rid?, "unarchive"):
             roomUnarchive(rid)
             return ["ok": true]
-        case (_?, "switchboard"):
-            return ["error": "This server can't run a room's Switchboard yet."]
+        case (let rid?, "switchboard"):
+            guard let room = rooms.room(rid),
+                  let sid = SessionStores.shared?.switchboardEngine?.ensureSwitchboard(room: room, remotely: true)
+            else { return ["error": "no workspace to run the Switchboard in"] }
+            return ["ok": true, "id": sid.uuidString]
         default:
             return ["error": "unknown room action"]
         }

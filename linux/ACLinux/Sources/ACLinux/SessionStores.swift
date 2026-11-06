@@ -29,6 +29,7 @@ final class SessionStores {
     var automationEngine: ScheduledAutomationEngine?
     var delegationEngine: DelegationEngine?
     var taskDispatcher: TaskDispatcher?
+    var switchboardEngine: SwitchboardEngine?
     /// The watch engine and its host (DaemonWatches.swift).
     var watchEngine: RepoWatchEngine?
     var watchHost: LinuxRepoWatchHost?

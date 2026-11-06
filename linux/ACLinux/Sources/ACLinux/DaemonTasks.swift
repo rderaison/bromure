@@ -331,10 +331,10 @@ extension Daemon {
     /// automations' TaskMCPVsockBridge per VM): the coding board on 5831,
     /// the workspace's own automations and its findings on 5833, the
     /// clusters and registries it may use on 5834, delegations between
-    /// agents on 5835. `stored`: a restarted
+    /// agents on 5835, the Switchboard's tools on 5836 (its own MCP: only
+    /// the Switchboard session may use them). `stored`: a restarted
     /// daemon's listeners, by fd-store prefix. One that can't listen is
     /// left out (its tools then fail in the guest), logged.
-    // partial: no Switchboard (5836) MCP on Linux yet
     // @port-skip linux-only: the per-VM MCP listeners (macOS: in ACAppDelegate's VM start, on the VZ socket device)
     func serveMCP(_ rec: VMRecord, udsPath: String, stored: [String: Int32]) async -> [MCPLineListener] {
         let pid = UUID(uuidString: rec.id) ?? UUID()
@@ -358,10 +358,12 @@ extension Daemon {
             let delegation = DelegationMCPServer(profileID: pid,
                                                  sessions: { SessionStores.shared?.sessions },
                                                  engine: { SessionStores.shared?.delegationEngine })
+            let switchboard = SwitchboardMCPServer(profileID: pid, engine: { SessionStores.shared?.switchboardEngine })
             for (prefix, port, server) in [("tbmcp-", GuestPorts.taskBoardMCPVsockPort, board as any MCPLineHandler),
                                            ("amcp-", GuestPorts.automationMCPVsockPort, automations as any MCPLineHandler),
                                            ("kmcp-", GuestPorts.kubeMCPVsockPort, infra as any MCPLineHandler),
-                                           ("dmcp-", GuestPorts.delegationMCPVsockPort, delegation as any MCPLineHandler)] {
+                                           ("dmcp-", GuestPorts.delegationMCPVsockPort, delegation as any MCPLineHandler),
+                                           ("sbmcp-", GuestPorts.switchboardMCPVsockPort, switchboard as any MCPLineHandler)] {
                 do {
                     out.append(try MCPLineListener(udsPath: udsPath, port: port, server: server,
                                                    fdStoreName: prefix + short, stored: stored[prefix]))

@@ -24,6 +24,10 @@ final class LinuxSessionHost: AgentSessionHost {
     private(set) var tabs: [UUID: TabsModel] = [:]
     /// The proxy sign-ins in flight, one per workspace (ProxySignInHost).
     var proxySignIns: [UUID: ProxySignIn] = [:]
+    /// The session list as macOS's window keeps it, without the window
+    /// (refreshSidebar): what the Switchboard and the dispatcher read a
+    /// session's state from.
+    let listModel = SessionListModel()
 
     // @port-skip linux-only: daemon wiring
     init(daemon: Daemon, stateDir: String) {
@@ -60,7 +64,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// list timer does (UnifiedSessionWindow.startSessionReconcile).
     // @port ACAppDelegate.sessionEntries(for: SessionListModel) h=f7d00b98aad3ae2a @9936e30c
     func reconcileSessions() {
-        let profiles = Dictionary(ProfileStore().loadAll().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let all = ProfileStore().loadAll()
+        let profiles = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let entries: [SessionListModel.VMEntry] = Self.running.withLockedValue { $0 }.sorted { $0.uuidString < $1.uuidString }
             .compactMap { id in
                 guard let p = profiles[id], let model = tabsModel(for: id), !model.tabs.isEmpty else { return nil }
@@ -69,6 +74,35 @@ final class LinuxSessionHost: AgentSessionHost {
         SessionStores.shared?.sessions.reconcile(entries: entries)
         SessionStores.shared?.engine?.probeLiveness(entries: entries)
         scanLiveSessions()
+        refreshSidebar(workspaces: entries, profiles: all)
+    }
+
+    /// The list model's rows (every workspace and its run state, and the
+    /// attached machines, a row always) and its tab entries (the running
+    /// workspaces', and a connected machine's roster). An entry keeps its
+    /// object while its roster does.
+    // partial: a workspace runs or it doesn't (no booting or suspended: both read as asleep); no compromised, squelch or notes; no window
+    // @port ACAppDelegate.refreshSidebar() h=1bc5abc68c91e571 @d2db8346
+    func refreshSidebar(workspaces: [SessionListModel.VMEntry], profiles: [Profile], machines: [AttachedMachine]? = nil) {
+        let running = Self.running.withLockedValue { $0 }
+        let machines = machines ?? (LinuxMachines.shared?.attached.values).map(Array.init) ?? []
+        let sorted = machines.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let rows = profiles.map { p in
+            SessionListModel.ProfileRow(id: p.id, name: p.name, accentHex: p.color.hexInUI,
+                                        state: running.contains(p.id) ? .running : .off, compromised: false)
+        } + sorted.map { m in
+            SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
+                                        state: m.connected ? .running : .off, compromised: false)
+        }
+        if listModel.profileRows != rows { listModel.profileRows = rows }
+        let ids = Set(sorted.map(\.id))
+        if listModel.machineIDs != ids { listModel.machineIDs = ids }
+        let old = Dictionary(listModel.entries.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let wanted = workspaces + sorted.filter(\.connected).map {
+            SessionListModel.VMEntry(id: $0.id, name: $0.name, accentHex: $0.accentHex, model: $0.tabsModel)
+        }
+        let entries = wanted.map { e in old[e.id].flatMap { $0.model === e.model ? $0 : nil } ?? e }
+        if listModel.entries.map(ObjectIdentifier.init) != entries.map(ObjectIdentifier.init) { listModel.entries = entries }
     }
 
     /// What the guest's hooks last said per workspace and window (macOS:

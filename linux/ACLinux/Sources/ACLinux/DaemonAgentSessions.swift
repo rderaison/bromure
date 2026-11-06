@@ -53,6 +53,18 @@ extension Daemon {
                                          rootDirectory: URL(fileURLWithPath: state, isDirectory: true)
                                             .appendingPathComponent("kube", isDirectory: true))
             stores.kubeEngine = kube
+            // The Switchboard (macOS: the app delegate's lazy switchboardEngine);
+            // the user's phone and Slack (the messaging connector) talk to it.
+            if let engine = stores.engine {
+                let sb = SwitchboardEngine(sessions: stores.sessions, sessionEngine: engine, delegate: host)
+                sb.profiles = { ProfileStore().loadAll() }
+                sb.listModel = { LinuxSessionHost.shared?.listModel }
+                sb.sendToPhone = { text, kind in await SessionStores.shared?.kubeEngine?.sendToUser(text, via: kind) ?? false }
+                sb.phoneLinked = { !(SessionStores.shared?.kube.connector?.channels.isEmpty ?? true) }
+                sb.roomName = { id in SessionStores.shared?.rooms.room(id)?.name }
+                stores.switchboardEngine = sb
+                kube.onConnectorMessage = { kind, text in SessionStores.shared?.switchboardEngine?.phoneMessage(kind, text) }
+            }
             // Machines of a cluster, registry or connector that's gone.
             let owned = stores.kube.clusters.map(\.id) + stores.kube.registries.map(\.id)
                 + stores.kube.connectors.map(\.id)
@@ -81,11 +93,14 @@ extension Daemon {
                 }
             }
             // The rosters and the sessions bound to them, kept current (macOS:
-            // its session list's refresh), with or without a client watching.
+            // its session list's refresh), with or without a client watching;
+            // then the Switchboard's events from them (its 2 s Timer is on
+            // RunLoop.main too).
             Task { @MainActor in
                 while true {
                     try? await Task.sleep(for: .seconds(2))
                     LinuxSessionHost.shared?.reconcileSessions()
+                    SessionStores.shared?.switchboardEngine?.tick()
                 }
             }
             // The guests' hook reports, read as they come (macOS polls 40 ms).
@@ -99,8 +114,20 @@ extension Daemon {
         }
     }
 
+    /// `GET /agent-sessions/<id>/pending`: what the session waits on (the
+    /// Switchboard's pending_question, for a client).
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionPending h=aec4eb30e141e85f @d2db8346
+    func agentSessionPending(_ id: UUID) async -> ControlResponse {
+        let v: JSONValue? = await Task { @MainActor in
+            guard let sb = SessionStores.shared?.switchboardEngine, let s = SessionStores.shared?.sessions.session(id) else { return nil }
+            return JSONValue(foundation: await sb.pending(s))
+        }.value
+        guard let v else { return .error(404, "Unknown session") }
+        return ControlResponse(200, v)
+    }
+
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
-    // partial: no switchboard or read yet
+    // partial: no read yet
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
@@ -125,46 +152,33 @@ extension Daemon {
                 return SessionStartCoalescer.shared.run(SessionStartCoalescer.key(req)) {
                     ["ok": true, "id": engine.start(req, remotely: true).uuidString]
                 }
-            case (let sid?, "send"):
-                // {text}: typed into the live prompt when it's free (long text
-                // lands in the session's inbox with a pointer), or a resume
-                // with it, as SwitchboardEngine.send does on macOS.
-                guard let s = store.session(sid) else { return ["error": "unknown session"] }
-                guard let text = (doc["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
-                else { return ["error": "text required"] }
-                guard let host = LinuxSessionHost.shared else { return ["error": "no session host"] }
-                Task { @MainActor in
-                    var line = text
-                    if text.contains("\n") || text.count > 400 {
-                        let dir = "/home/ubuntu/.bromure/inbox/switchboard-\(Int(Date().timeIntervalSince1970))"
-                        let b64 = Data(text.utf8).base64EncodedString()
-                        _ = try? await host.guestExec(profileID: s.profileID,
-                                                      command: "mkdir -p \(dir) && echo \(b64) | base64 -d > \(dir)/message.md", timeout: 20)
-                        line = "A message from the user (relayed by the Switchboard) is in \(dir)/message.md — read it and act on it."
-                    }
-                    if let w = s.windowIndex, !s.hasEnded, s.agentAlive != false {
-                        _ = await CodingTaskEngine.typeWhenFreeResult(exec: { cmd in
-                            try await host.guestExec(profileID: s.profileID, command: cmd, timeout: 20)
-                        }, target: AgentSessionEngine.paneTarget(s) ?? .index(w), text: line)
-                    } else {
-                        engine.resume(sid, message: line, remotely: true)
-                    }
+            case (nil, "switchboard"):
+                // The Switchboard, started (or woken) for a client that
+                // clicked its row: {profile?} picks the workspace.
+                let preferred = (doc["profile"] as? String).flatMap { key in
+                    ProfileStore().loadAll().first { $0.id.uuidString == key || $0.name.lowercased() == key.lowercased() }?.id
                 }
+                guard let sb = stores.switchboardEngine,
+                      let cid = sb.ensureSwitchboard(preferred: preferred, remotely: true)
+                else { return ["error": "no workspace to run the Switchboard in"] }
+                return ["ok": true, "id": cid.uuidString]
+            case (let sid?, "send"):
+                // {text}: typed into the live prompt (long text lands in
+                // the session's inbox with a pointer), or a resume with it.
+                guard let s = store.session(sid) else { return ["error": "unknown session"] }
+                guard let text = doc["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+                guard let sb = stores.switchboardEngine else { return ["error": "no session host"] }
+                Task { try? await sb.send(s, text) }
                 return ["ok": true]
             case (let sid?, "keys"):
-                // {keys: [...]}: named keys only, into the session's own window
-                // (SwitchboardEngine.press).
+                // {keys: [...]}: named keys only (SwitchboardEngine.allowedKeys).
                 guard let s = store.session(sid) else { return ["error": "unknown session"] }
                 let keys = (doc["keys"] as? [String]) ?? []
-                guard !keys.isEmpty, keys.count <= 12, keys.allSatisfy(SwitchboardKeys.allowed.contains) else {
-                    return ["error": "keys must be 1–12 of " + SwitchboardKeys.allowed.sorted().joined(separator: " ")]
+                guard !keys.isEmpty, keys.allSatisfy(SwitchboardEngine.allowedKeys.contains), keys.count <= 12 else {
+                    return ["error": "keys must be 1–12 of " + SwitchboardEngine.allowedKeys.sorted().joined(separator: " ")]
                 }
-                guard let w = s.windowIndex, !s.hasEnded else { return ["error": "That session has no live tab to type into."] }
-                guard let host = LinuxSessionHost.shared else { return ["error": "no session host"] }
-                let target = AgentSessionEngine.paneTarget(s) ?? .index(w)
-                let cmd = PaneTypeGuard.prelude(target) + "if _bg; then "
-                    + keys.map { "tmux send-keys -t \"$_bt\" \($0)" }.joined(separator: " && sleep 0.15 && ") + "; fi"
-                Task { @MainActor in _ = try? await host.guestExec(profileID: s.profileID, command: cmd, timeout: 15) }
+                guard let sb = stores.switchboardEngine else { return ["error": "no session host"] }
+                Task { try? await sb.press(s, keys) }
                 return ["ok": true]
             case (nil, "worktree-open"):
                 // A fat client's Branches window: {profile, entry fields, tool?}.

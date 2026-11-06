@@ -213,13 +213,17 @@ extension LinuxSessionHost: TaskDispatchHost {
     var allSessionRecords: [AgentSession] {
         agentSessionStore.sessions + (LinuxMachines.shared?.attached.values.flatMap(\.sessionStore.sessions) ?? [])
     }
-    /// No window: every live session is free unless its agent is mid-turn.
-    // @port-skip linux-only: no session list window on a server
-    var sessionListModel: SessionListModel? { nil }
+    /// The session list's model, kept without a window (refreshSidebar).
+    // @port ACAppDelegate.var sessionListModel h=b55aac90da9b04da @1e72cfdb
+    var sessionListModel: SessionListModel? { listModel }
     // @port ACAppDelegate.attachedMachineName(_: Profile.ID) h=2b2c216aa08778df @fa0f94e5
     func attachedMachineName(_ id: Profile.ID) -> String? { LinuxMachines.shared?.attached[id]?.name }
-    /// No Switchboard on Linux yet: a room's task has nowhere to go.
-    // partial: no Switchboard on Linux yet
-    // @port-skip linux-only: no Switchboard on Linux yet
-    func ensureSwitchboard(room: AgentRoom?) -> UUID? { nil }
+    // @port ACAppDelegate.ensureSwitchboard(room: AgentRoom?) h=68b9817700f6a730 @1e72cfdb
+    func ensureSwitchboard(room: AgentRoom?) -> UUID? { SessionStores.shared?.switchboardEngine?.ensureSwitchboard(room: room) }
+}
+
+/// The Switchboard's host (macOS: the app delegate).
+extension LinuxSessionHost: SwitchboardHost {
+    // @port-skip linux-only: LinuxMachines answers it (DaemonMachines)
+    func machine(forSession id: UUID) -> AttachedMachine? { LinuxMachines.shared?.machine(forSession: id) }
 }

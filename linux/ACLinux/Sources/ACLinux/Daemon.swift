@@ -185,7 +185,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-", "ssh-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-", "llm-", "aws-", "ssh-"].contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -298,10 +298,16 @@ public actor Daemon {
         case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
             return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
         case ("POST", "/agent-sessions/start"): return await agentSessionCommand(nil, "start", req.body)
+        case ("POST", "/agent-sessions/switchboard"): return await agentSessionCommand(nil, "switchboard", req.body)
         case ("POST", "/agent-sessions/folders"): return await workspaceRoute(req.method, req.path, req.body)!
         case ("POST", "/agent-sessions/git-state"): return await agentSessionGitState(req.body)
         case ("POST", "/agent-sessions/worktree-open"): return await agentSessionCommand(nil, "worktree-open", req.body)
         case ("POST", "/agent-sessions/worktree-discard"): return await agentSessionCommand(nil, "worktree-discard", req.body)
+        case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/pending"):
+            // What a session is waiting on: {question?, options?, screen}.
+            guard let id = UUID(uuidString: String(p.dropFirst("/agent-sessions/".count).dropLast("/pending".count))
+                .removingPercentEncoding ?? "") else { return .error(400, "Bad session id") }
+            return await agentSessionPending(id)
         case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"):
             guard let id = UUID(uuidString: String(p.dropFirst("/agent-sessions/".count).dropLast("/transcript".count))
                 .removingPercentEncoding ?? "") else { return .error(400, "Bad session id") }
@@ -1203,7 +1209,7 @@ public actor Daemon {
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
                 startTraceSession(rec)
                 var storedMCP: [String: Int32] = [:]
-                for name in ["tbmcp-", "amcp-", "kmcp-", "dmcp-"] {
+                for name in ["tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-"] {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
                 }
                 if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP) }
@@ -1501,7 +1507,7 @@ public actor Daemon {
         l.aws?.stop()
         l.ssh?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "llm-", "aws-", "ssh-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
+        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-", "llm-", "aws-", "ssh-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
         FDStore.remove(l.storedNet)
         FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
         FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))

@@ -98,7 +98,6 @@ extension SessionStores {
     /// `/watches…` and `/findings…`: the fat client's write path for the
     /// hub (macOS: the app delegate's, same paths and bodies). Returns the
     /// response body; "error" set = failure.
-    // partial: "switchboard" refused (no Switchboard on a Linux server yet)
     // @port ACAppDelegate.watchesCommand(method: String, path: String, body: [String:Any]) h=43b69ba1786f52f5 @32c80445
     func watchesCommand(method: String, path: String, body: [String: Any]) async -> [String: Any] {
         guard let engine = watchEngine, let watchHost else { return ["error": "no watch engine"] }
@@ -161,7 +160,10 @@ extension SessionStores {
                       let status = RepoFinding.Status(rawValue: raw) else { return ["error": "status?"] }
                 findings.setStatus(id, status, note: body["note"] as? String)
             case ("POST", "switchboard"):
-                return ["error": "no Switchboard could be started"]
+                let room = (body["room"] as? String).flatMap(UUID.init(uuidString:))
+                guard routeFindingToSwitchboard(id, room: room, confirmed: true) else {
+                    return ["error": "no Switchboard could be started"]
+                }
             case ("POST", "session"):
                 guard let sid = (body["session"] as? String).flatMap(UUID.init(uuidString:)) else {
                     return ["error": "unknown session"]
@@ -189,6 +191,39 @@ extension SessionStores {
     /// session (RepoWatchEngine.fix(_:by:)). Returns why it didn't get
     /// there (nil = queued). A flagged finding goes only once the user
     /// `confirmed` it.
+    /// "Ask the Switchboard": the global Switchboard (room nil) or a room's
+    /// proposes who fixes the finding. A flagged finding goes only once the
+    /// user `confirmed` it.
+    // partial: nothing to show (no window)
+    // @port ACAppDelegate.routeFindingToSwitchboard(_: UUID, room: UUID?, show: Bool, confirmed: Bool) h=af93d97118cb37c2 @977cc122
+    @discardableResult
+    func routeFindingToSwitchboard(_ findingID: UUID, room roomID: UUID?, confirmed: Bool) -> Bool {
+        guard let f = findings.finding(findingID), f.handOverRefusal(confirmed: confirmed) == nil,
+              let sb = switchboardEngine else { return false }
+        let room = roomID.flatMap { rooms.room($0) }
+        let brief = RepoWatchPrompts.fixTask(f)
+        let store = findings
+        let generation = UUID()
+        guard sb.routeFinding(
+            id: f.id, severity: f.severity.rawValue, repo: f.repo,
+            brief: "## \(brief.title)\n\nFinding id: \(f.id.uuidString)\n\n\(brief.details)",
+            preferredWorkspace: f.profileID, room: room,
+            delivered: { store.handOverDelivered(findingID, generation: generation) },
+            failed: { why in
+                // The note said "Sent to the Switchboard": say it didn't get
+                // there — unless a later hand-over or the user moved it since.
+                store.handOverFailed(findingID, generation: generation, note: String(
+                    format: NSLocalizedString("Couldn't hand it to the Switchboard: %@",
+                                              comment: "finding status note"), why))
+            }) != nil else { return false }
+        findings.markHandedOver(findingID, note: room.map {
+            String(format: NSLocalizedString("Sent to the “%@” room's Switchboard to find who fixes it",
+                                             comment: "finding status note"), $0.name)
+        } ?? NSLocalizedString("Sent to the Switchboard to find who fixes it", comment: "finding status note"),
+            generation: generation)
+        return true
+    }
+
     // @port ACAppDelegate.routeFindingToSession(_: UUID, session: UUID, confirmed: Bool) h=c9393fdcd37420d9 @32c80445
     func routeFindingToSession(_ findingID: UUID, session sessionID: UUID, confirmed: Bool) -> String? {
         guard let f = findings.finding(findingID),
