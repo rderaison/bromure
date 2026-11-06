@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 // MARK: - Switchboard MCP (vsock 5836)
@@ -412,4 +411,3 @@ final class SwitchboardMCPServer: MCPLineHandler {
         return s
     }
 }
-#endif

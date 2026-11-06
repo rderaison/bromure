@@ -1,7 +1,6 @@
-#if os(macOS)
 import Foundation
 
-// MARK: - Switchboard (macOS)
+// MARK: - Switchboard
 //
 // One agent session that keeps track of all the others: what's running,
 // what's stuck, what needs the user; it relays their answers and starts,
@@ -39,9 +38,17 @@ struct SwitchboardEvent {
     var roomID: UUID? = nil
 }
 
+/// What the Switchboard needs from its host: the sessions and their
+/// panes, the guests, and the attached machines. The macOS app delegate is
+/// one (TaskDispatchHost+App.swift).
+@MainActor
+protocol SwitchboardHost: TaskDispatchHost, CodingTaskHost {
+    func machine(forSession id: UUID) -> AttachedMachine?
+}
+
 @MainActor
 final class SwitchboardEngine {
-    weak var delegate: ACAppDelegate?
+    weak var delegate: (any SwitchboardHost)?
     let sessions: AgentSessionStore
     let sessionEngine: AgentSessionEngine
     var profiles: () -> [Profile] = { [] }
@@ -126,7 +133,7 @@ final class SwitchboardEngine {
     /// Answers must quote a message the user typed within this window.
     static let provenanceWindow: TimeInterval = 30 * 60
 
-    init(sessions: AgentSessionStore, sessionEngine: AgentSessionEngine, delegate: ACAppDelegate?) {
+    init(sessions: AgentSessionStore, sessionEngine: AgentSessionEngine, delegate: (any SwitchboardHost)?) {
         self.sessions = sessions
         self.sessionEngine = sessionEngine
         self.delegate = delegate
@@ -249,7 +256,9 @@ final class SwitchboardEngine {
 
     // MARK: Events
 
-    private func tick() {
+    /// Every 2 s (the init's timer; a host whose main run loop doesn't run
+    /// calls it itself).
+    func tick() {
         guard let model = listModel() else { return }
         var seen: Set<UUID> = []
         // This host's sessions and its attached machines' (a room can hold both).
@@ -410,7 +419,7 @@ final class SwitchboardEngine {
         let pending = events.filter { $0.seq > (consumed[c.id] ?? 0) && $0.notable && concerns($0, c) }
         guard let newest = pending.last, newest.seq > (noticed[c.id] ?? 0) else { return }
         if let last = lastNotice[c.id], Date().timeIntervalSince(last) < Self.noticeSpacing { return }
-        let status = delegate.pane(for: c.profileID)?.model.tabs.first { $0.index == w }?.agentStatus
+        let status = delegate.tabsModel(for: c.profileID)?.tabs.first { $0.index == w }?.agentStatus
         guard status == nil || status == .done else { return }
         let head = pending.count == 1 ? pending[0].text
             : "\(pending.count) events, latest: \(newest.text)"
@@ -639,7 +648,7 @@ final class SwitchboardEngine {
     }
 
     func workspaceName(_ id: UUID) -> String {
-        profiles().first { $0.id == id }?.name ?? delegate?.attachedMachines[id]?.name ?? ""
+        profiles().first { $0.id == id }?.name ?? delegate?.attachedMachineName(id) ?? ""
     }
 
     func markTouched(_ id: UUID) { touched.insert(id) }
@@ -838,4 +847,3 @@ final class SwitchboardEngine {
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
     }
 }
-#endif
