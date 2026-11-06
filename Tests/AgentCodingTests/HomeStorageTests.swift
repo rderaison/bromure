@@ -153,32 +153,20 @@ struct HomeStorageTests {
         return Calendar.current.date(from: c)!
     }
 
-    @Test("Retention keeps last boots, dailies for a week, weeklies for a month")
+    @Test("Retention keeps the last session and the newest of each of the last two days")
     func retentionLadder() {
         let now = date(2026, 7, 10, 18)
-        // Three boots today, two yesterday, one 3 days ago, one 10 days ago
-        // (inside the 4-week weekly window), one 60 days ago (outside all).
-        let boots = [date(2026, 7, 10, 17), date(2026, 7, 10, 12), date(2026, 7, 10, 9)]
+        let today = [date(2026, 7, 10, 17), date(2026, 7, 10, 12)]
         let yesterday = [date(2026, 7, 9, 16), date(2026, 7, 9, 8)]
+        let twoDays = [date(2026, 7, 8, 20)]
         let threeDays = [date(2026, 7, 7)]
         let tenDays = [date(2026, 6, 30)]
-        let ancient = [date(2026, 5, 11)]
-        let all = boots + yesterday + threeDays + tenDays + ancient
+        let all = today + yesterday + twoDays + threeDays + tenDays
         let keep = ProfileStore.checkpointRetention(all, now: now)
-
-        // Newest 3 unconditionally.
-        for b in boots { #expect(keep.contains(b)) }
-        // Daily tier: the newest of each day inside 7 days.
-        #expect(keep.contains(yesterday[0]))
-        #expect(!keep.contains(yesterday[1]))    // older same-day sibling pruned
-        #expect(keep.contains(threeDays[0]))
-        // Weekly tier: the newest of that week inside 4 weeks.
-        #expect(keep.contains(tenDays[0]))
-        // Outside every tier.
-        #expect(!keep.contains(ancient[0]))
+        #expect(keep == [today[0], yesterday[0], twoDays[0]])
     }
 
-    @Test("Retention never keeps more than boots+days+weeks entries")
+    @Test("Retention never keeps more than 3")
     func retentionBound() {
         let now = date(2026, 7, 10, 23)
         // Four boots a day for 60 days.
@@ -190,8 +178,7 @@ struct HomeStorageTests {
                                                  second: 0, of: day)!)
             }
         }
-        let keep = ProfileStore.checkpointRetention(all, now: now)
-        #expect(keep.count <= 3 + 7 + 4 + 1)   // +1: today's daily may overlap-count
+        #expect(ProfileStore.checkpointRetention(all, now: now).count <= 3)
     }
 
     @Test("Home checkpoints snapshot, list, and revert the ext4 image")

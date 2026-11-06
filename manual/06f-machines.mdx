@@ -205,7 +205,9 @@ The **⋯** button on a machine row adapts to the machine's state:
 
 ### Rewinding the home
 
-Each time a machine boots successfully, Bromure keeps a copy-on-write checkpoint of its home image. The ladder keeps the last few boots, then one a day for a week, then one a week for a month. Checkpoints cost nothing to create, but they take real disk space as the home diverges from them.
+The first time a machine boots successfully each day, Bromure keeps a copy-on-write checkpoint of its home image. It keeps at most three: the latest, and the newest of each of the last two days. A home larger than 64 GB gets no automatic checkpoint. Checkpoints cost nothing to create, but they take real disk space as the home diverges from them, and deleting a checkpoint of a large home can keep the disk busy.
+
+To delete every checkpoint of a machine, hold ⌥ and click the machine in the toolbar, then choose **Delete All Checkpoints…**. Making a machine's home larger also deletes its home checkpoints.
 
 **Rewind home…** opens a sheet listing those rollback points.
 

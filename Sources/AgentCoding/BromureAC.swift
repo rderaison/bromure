@@ -3951,6 +3951,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         default: break
         }
         profiles = store.loadAll()
+        // Checkpoints beyond the ladder (it went from 14 an image to 3, or
+        // BROMURE_NO_REAPER=1 kept them all): unlinked off the main thread.
+        store.settleCheckpointBacklog(profiles)
         // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
         // a crash) and whose process is gone.
         sweepStoppedEphemeral(atLaunch: true)
@@ -16194,12 +16197,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     let store = self.store
                     Task.detached {
                         let now = Date()
-                        do { _ = try store.snapshotDisk(for: profile, at: now) }
+                        do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }
                         catch {
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
                         }
-                        do { _ = try store.snapshotHomeImage(for: profile, at: now) }
+                        do { _ = try store.snapshotHomeImage(for: profile, at: now, automatic: true) }
                         catch {
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))

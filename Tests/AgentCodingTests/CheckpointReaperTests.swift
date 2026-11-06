@@ -83,6 +83,8 @@ struct CheckpointReaperTests {
         #expect(!listed.isEmpty && listed.count <= 3)
         #expect(listed.allSatisfy { $0.url.pathExtension == "img" })
         #expect(exists(disk))
+        // Five beyond the ladder at once: unlinked by the purge, not shrunk.
+        for _ in 0..<200 where ProfileStore.isPurgingCheckpoints(profile.id) { Thread.sleep(forTimeInterval: 0.02) }
         CheckpointReaper.shared.drain()
         let files = try FileManager.default.contentsOfDirectory(atPath: store.checkpointsDirectory(for: profile).path)
         #expect(!files.contains { $0.hasSuffix(".deleting") })
@@ -95,8 +97,8 @@ struct CheckpointReaperTests {
         let source = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
         #expect(source.contains(#"DispatchQueue(label: "io.bromure.checkpoint-reaper", qos: .background)"#))
         #expect(!source.contains("io.bromure.checkpoint-reaper\", qos: .background, attributes"))
-        let prune = try #require(source.range(of: "private func prune(in dir: URL, now: Date) {"))
-        #expect(source[prune.upperBound...].prefix(400).contains("reaper.retire(cp.url)"))
-        #expect(!source[prune.upperBound...].prefix(400).contains("removeItem"))
+        let prune = try #require(source.range(of: "private func prune(in dir: URL, of profile: Profile, now: Date) {"))
+        #expect(source[prune.upperBound...].prefix(1400).contains("for cp in drop { reaper.retire(cp.url) }"))
+        #expect(!source[prune.upperBound...].prefix(1400).contains("removeItem"))
     }
 }

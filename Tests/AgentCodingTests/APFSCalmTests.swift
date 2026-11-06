@@ -212,7 +212,7 @@ struct APFSCalmTests {
     func noSessionStartCheckpoint() throws {
         let src = try source("Sources/AgentCoding/BromureAC.swift")
         let guardAt = try #require(src.range(of: "guard CheckpointReaper.shared.enabled else {"))
-        let snap = try #require(src.range(of: "do { _ = try store.snapshotDisk(for: profile, at: now) }"))
+        let snap = try #require(src.range(of: "do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }"))
         #expect(guardAt.lowerBound < snap.lowerBound)
         #expect(src[guardAt.upperBound..<snap.lowerBound].contains("return"))
         #expect(src[guardAt.upperBound..<snap.lowerBound].count < 400)

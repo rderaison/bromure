@@ -77,7 +77,8 @@ struct CheckpointPurgeTests {
         let removeAt = try #require(rb.range(of: "try fm.removeItem(at: image)"))
         #expect(guardAt.lowerBound < removeAt.lowerBound)
         let bg = try #require(store.range(of: "static func purgeCheckpointsInBackground("))
-        #expect(store[bg.upperBound...].prefix(900).contains("DispatchQueue.global(qos: .utility).async"))
+        #expect(store[bg.upperBound...].prefix(900).contains("purgeQueue.async {"))
+        #expect(store.contains(#"DispatchQueue(label: "io.bromure.checkpoint-purge", qos: .utility)"#))
         // No alert goes up as a second sheet: that throws.
         let purge = try #require(ac.range(of: "func deleteAllCheckpoints("))
         let purgeBody = ac[purge.upperBound...].prefix { _ in true }
