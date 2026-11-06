@@ -1617,6 +1617,7 @@ private func printRemoteStatus(_ s: [String: Any]) {
     }
     let keys = s["authorizedKeys"] as? [[String: Any]] ?? []
     print("  Keys:     \(keys.count) authorized")
+    if let problem = s["authorizedKeysProblem"] as? String, !problem.isEmpty { print("  Warning:  \(problem)") }
     for (i, k) in keys.enumerated() {
         let c = (k["comment"] as? String ?? "")
         print("    [\(i + 1)] \(k["fingerprint"] as? String ?? "?") \(c)")
