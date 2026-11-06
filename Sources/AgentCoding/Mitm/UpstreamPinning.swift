@@ -11,13 +11,14 @@ import SandboxEngine
 enum UpstreamPinning {
     typealias IPAddress = OpenShellPolicy.IPAddress
 
-    /// Addresses the upstream leg may use: `.success(nil)` = not pinned (no
-    /// OpenShell policy, or a Bromure-managed provider endpoint). Without a
-    /// policy the destination is still checked (`defaultCheck`).
+    /// Addresses the upstream leg may use: `.success(nil)` = not pinned (a
+    /// Bromure-managed provider endpoint, or the local-model sentinel).
+    /// Without a policy they are the answers `defaultCheck` passed, possibly
+    /// none (a name that didn't resolve).
     static func pin(policy: OpenShellPolicy?, host: String, port: Int,
                     identity: OpenShellPolicy.BinaryIdentity?, enforceBinaries: Bool)
         -> Result<[IPAddress]?, OpenShellPolicy.DestinationDenial> {
-        guard let policy else { return defaultCheck(host: host, port: port).map { nil } }
+        guard let policy else { return checkedAddresses(host: host, port: port) }
         let p = UInt16(truncatingIfNeeded: port)
         if policy.networkPolicies.contains(where: { $0.endpoints.contains { $0.managed && $0.matches(host: host.lowercased(), port: p) } }) {
             return .success(nil)
@@ -34,21 +35,38 @@ enum UpstreamPinning {
     /// the automation API), link-local (169.254/16, fe80::/10) or the
     /// unspecified address — OpenShell's always-blocked set, IPv6 forms that
     /// carry such an IPv4 address included. Every answer for the name is
-    /// checked; LAN addresses stay reachable. The upstream is still dialed by
-    /// name (the routing that follows, local models, may send it elsewhere),
-    /// so a name that doesn't resolve is left to fail at the dial, and names
-    /// the proxy answers itself (`bromure.llm`, hooks) keep working.
+    /// checked; LAN addresses stay reachable. A name that doesn't resolve is
+    /// left to fail at the dial, so names the proxy answers itself (hooks)
+    /// keep working; `bromure.llm` is the proxy's own routing.
     static func defaultCheck(host: String, port: Int,
                              resolver: (String, Int) -> [IPAddress] = { resolve($0, port: $1) })
         -> Result<Void, OpenShellPolicy.DestinationDenial> {
+        checkedAddresses(host: host, port: port, resolver: resolver).map { _ in () }
+    }
+
+    /// `defaultCheck`, keeping the answers it passed: the upstream dials
+    /// exactly these and never looks the name up again, so a short-lived DNS
+    /// answer can't swap a public address for loopback between the check and
+    /// the connection. `nil` for `bromure.llm`, which the proxy routes itself.
+    static func checkedAddresses(host: String, port: Int,
+                                 resolver: (String, Int) -> [IPAddress] = { resolve($0, port: $1) })
+        -> Result<[IPAddress]?, OpenShellPolicy.DestinationDenial> {
         var lookup = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         if lookup.hasSuffix(".") { lookup.removeLast() }
-        if lookup.lowercased() == InferenceService.localMitmHost { return .success(()) }
+        if lookup.lowercased() == InferenceService.localMitmHost { return .success(nil) }
         let resolved = IPAddress(lookup).map { [$0] } ?? resolver(lookup, port)
         if let ip = resolved.first(where: isAlwaysBlocked) {
             return .failure(.init(reason: "\(host) resolves to always-blocked address \(ip), connection rejected"))
         }
-        return .success(())
+        return .success(resolved)
+    }
+
+    /// What a dial to a destination nothing checked yet may use — a
+    /// redirect, a Depi re-route, a leg the policy left unpinned: resolved,
+    /// checked and pinned in one step. nil = refused.
+    static func checkedForDial(host: String, port: Int) -> [IPAddress]? {
+        if case .success(let addrs?) = checkedAddresses(host: host, port: port) { return addrs }
+        return nil
     }
 
     /// OpenShell's always-blocked set, judging an IPv6 form that carries an
@@ -172,20 +190,26 @@ enum UpstreamPinning {
 /// OpenShell's destination checks. It answers `CONNECT host:port` (HTTPS) and
 /// absolute-form requests (plain HTTP, rewritten to origin-form — what the
 /// client sent, and what many servers insist on) for that host:port only;
-/// anything else gets a 403.
+/// anything else gets a 403. With `others` (no OpenShell policy), another
+/// destination the session reaches — a redirect, a re-route — is dialed at
+/// the addresses `others` resolved and checked, and so is the own host when
+/// it had none.
 final class PinnedUpstreamDialer: @unchecked Sendable {
     let port: Int
     private let listenFD: Int32
     private let host: String
     private let upstreamPort: Int
     private let addresses: [OpenShellPolicy.IPAddress]
+    private let others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)?
     private let lock = NSLock()
     private var closed = false
 
-    init(host: String, port upstreamPort: Int, addresses: [OpenShellPolicy.IPAddress]) throws {
+    init(host: String, port upstreamPort: Int, addresses: [OpenShellPolicy.IPAddress],
+         others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)? = nil) throws {
         self.host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         self.upstreamPort = upstreamPort
         self.addresses = addresses
+        self.others = others
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else { throw MitmError.upstreamFailed("pinned dialer: socket") }
         var sa = sockaddr_in()
@@ -253,12 +277,19 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
             guard authority.lowercased().hasPrefix("http://") else { refuse(client); return }
             authority = String(authority.dropFirst(7).prefix(while: { $0 != "/" && $0 != "?" }))
         }
-        guard let a = OpenShellHTTP.Authority.parse(authority),
-              a.host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) == host.trimmingCharacters(in: CharacterSet(charactersIn: ".")),
-              Int(a.port ?? (isConnect ? 443 : 80)) == upstreamPort else {
+        guard let a = OpenShellHTTP.Authority.parse(authority) else { refuse(client); return }
+        let p = Int(a.port ?? (isConnect ? 443 : 80))
+        let own = a.host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) == host.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            && p == upstreamPort
+        let dial: [OpenShellPolicy.IPAddress]
+        if own, !addresses.isEmpty || others == nil {
+            dial = addresses
+        } else if let checked = others?(a.host, p) {
+            dial = checked
+        } else {
             refuse(client); return
         }
-        guard let upstream = try? UpstreamPinning.connect(addresses, port: upstreamPort) else {
+        guard let upstream = try? UpstreamPinning.connect(dial, port: p) else {
             _ = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".withCString { write(client, $0, strlen($0)) }
             close(client); return
         }

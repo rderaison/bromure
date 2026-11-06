@@ -28,12 +28,19 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// The scheme the guest's request travels in ("http" on a cleartext
     /// flow), for the firewall events the OCSF export maps.
     private var flowScheme = "https"
-    /// Under an OpenShell policy: the upstream addresses that passed its
-    /// destination checks (resolved host-side). Every upstream leg of this
-    /// connection dials only these. nil = not pinned.
+    /// The upstream addresses that passed the destination checks (resolved
+    /// host-side: OpenShell's, or `UpstreamPinning.defaultCheck` without a
+    /// policy). Every upstream leg of this connection dials only these.
+    /// nil = not pinned.
     private var pinnedUpstream: [OpenShellPolicy.IPAddress]?
     private var destinationChecked = false
     private var pinnedPort: Int?
+    /// No OpenShell policy: a destination other than the pinned one (a
+    /// redirect, a Depi re-route) is resolved, checked and pinned at its dial
+    /// rather than refused.
+    private var checkOtherDestinations: Bool {
+        guardrailsProvider()?.egressPolicy?.openShell == nil
+    }
     let certCache: CertCache
     let swapper: TokenSwapper
     let awsResigner: AWSResigner
@@ -324,10 +331,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
             if verdict == .splice {
                 let own = dup(fd)
                 if own >= 0 {
-                    if let pinned = pinnedUpstream {
-                        MitmPassthrough.splice(appFD: own, addresses: pinned, destPort: port)
+                    if let addrs = upstreamAddresses(host: host, port: port) {
+                        MitmPassthrough.splice(appFD: own, addresses: addrs, destPort: port)
                     } else {
-                        MitmPassthrough.splice(appFD: own, host: host, destPort: port)
+                        close(own)
                     }
                 }
                 return
@@ -615,11 +622,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return out
     }
 
-    /// OpenShell destination check for this connection's upstream (once per
+    /// Destination check for this connection's upstream (once per
     /// connection): resolve host-side, validate every address, remember the
-    /// survivors for the upstream legs. No OpenShell policy → nothing pinned,
-    /// but the Mac's own loopback / link-local is still refused
-    /// (`UpstreamPinning.defaultCheck`).
+    /// survivors for the upstream legs. Without an OpenShell policy the check
+    /// is `UpstreamPinning.defaultCheck` (the Mac's own loopback / link-local
+    /// is refused) and its answers are pinned the same way.
     private func checkDestination(host: String, port: Int) -> Result<Void, OpenShellPolicy.DestinationDenial> {
         if destinationChecked { return .success(()) }
         destinationChecked = true
@@ -2862,8 +2869,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let clientIdentity = identityEntry?.identity
         let pinnedCA = clusterCAs.ca(for: host, port: port, profileID: profileID)
 
-        let upstreamFD = try pinnedUpstream.map { try UpstreamPinning.connect($0, port: port) }
-            ?? connectTCP(host: host, port: port)
+        guard let upstreamAddrs = upstreamAddresses(host: host, port: port) else {
+            throw MitmError.upstreamFailed("\(host):\(port): destination refused")
+        }
+        let upstreamFD = try UpstreamPinning.connect(upstreamAddrs, port: port)
         // The handshake reads block: an upstream that never answers the
         // upgrade (seen with Codex's reconnect loop) held its thread for
         // good. Bounded here; the relay below polls and ignores it.
@@ -3875,14 +3884,33 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // `timeoutIntervalForResource` (unchanged) remains the hard backstop,
         // and a closed guest is still detected promptly on the next write.
         cfg.timeoutIntervalForRequest = 3600
-        // OpenShell: the TCP leg goes through a loopback dialer bound to the
-        // validated addresses; TLS (SNI, certificate) still runs end to end.
-        if let pinned = pinnedUpstream, !pinned.isEmpty,
-           let dialer = try? PinnedUpstreamDialer(host: host, port: pinnedPort ?? 443, addresses: pinned) {
-            cfg.connectionProxyDictionary = dialer.proxyDictionary
-            delegate.dialer = dialer
+        // The TCP leg goes through a loopback dialer bound to the validated
+        // addresses; TLS (SNI, certificate) still runs end to end. Without an
+        // OpenShell policy every other destination the session reaches is
+        // checked and pinned there too: nothing dials by name.
+        var others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)?
+        if checkOtherDestinations {
+            others = { h, p in UpstreamPinning.checkedForDial(host: h, port: p) }
+        }
+        if others != nil || pinnedUpstream?.isEmpty == false {
+            if let dialer = try? PinnedUpstreamDialer(host: host, port: pinnedPort ?? port,
+                                                      addresses: pinnedUpstream ?? [], others: others) {
+                cfg.connectionProxyDictionary = dialer.proxyDictionary
+                delegate.dialer = dialer
+            } else {
+                cfg.protocolClasses = [RefusedUpstreamProtocol.self]   // never fall back to a dial by name
+            }
         }
         return URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+    }
+
+    /// The addresses a raw upstream leg (WebSocket, `tls: skip` splice) to
+    /// `host:port` dials: the pinned ones, else — no OpenShell policy, or an
+    /// endpoint it left unpinned — resolved and checked now. nil = refused.
+    private func upstreamAddresses(host: String, port: Int) -> [OpenShellPolicy.IPAddress]? {
+        if let pinned = pinnedUpstream, !pinned.isEmpty, pinnedPort == port { return pinned }
+        if let pinned = pinnedUpstream, !checkOtherDestinations { return pinned }
+        return UpstreamPinning.checkedForDial(host: host, port: port)
     }
 
     /// The standard reason phrase for a status (RFC 9110), for response heads
@@ -4714,81 +4742,6 @@ private func readUntilDoubleCRLF(via tls: MitmClientStream, maxBytes: Int) throw
         if buffer.range(of: Data("\r\n\r\n".utf8)) != nil { return buffer }
     }
     return buffer
-}
-
-/// Open a synchronous TCP socket to `host:port` using `getaddrinfo`
-/// on a background queue so we don't block the cooperative pool.
-/// Returns the connected FD (caller owns the close). Tries each
-/// resolved address until one connects; throws `upstreamFailed` if
-/// none succeed.
-private func connectTCP(host: String, port: Int) throws -> Int32 {
-    var hints = addrinfo(
-        ai_flags: 0,
-        ai_family: AF_UNSPEC,
-        ai_socktype: SOCK_STREAM,
-        ai_protocol: IPPROTO_TCP,
-        ai_addrlen: 0,
-        ai_canonname: nil,
-        ai_addr: nil,
-        ai_next: nil
-    )
-    var res: UnsafeMutablePointer<addrinfo>? = nil
-    let rc = getaddrinfo(host, String(port), &hints, &res)
-    if rc != 0 || res == nil {
-        let msg = String(cString: gai_strerror(rc))
-        throw MitmError.upstreamFailed("getaddrinfo(\(host)): \(msg)")
-    }
-    defer { freeaddrinfo(res) }
-
-    // Happy-Eyeballs-lite: start a NON-BLOCKING connect to every resolved
-    // address at once and take the first that completes. A sequential BLOCKING
-    // connect() with no timeout hung the WebSocket-upgrade path forever when a
-    // host (chatgpt.com/Cloudflare) returned an IPv6 (AAAA) address this machine
-    // can't route — connect() to the dead v6 never returns. URLSession's HTTP
-    // path never hit it because URLSession already races the address families.
-    var fds: [Int32] = []
-    var savedFlags: [Int32: Int32] = [:]
-    var cursor = res
-    while let info = cursor {
-        cursor = info.pointee.ai_next
-        let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
-        if fd < 0 { continue }
-        let flags = fcntl(fd, F_GETFL, 0)
-        savedFlags[fd] = flags
-        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-        if connect(fd, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 {
-            _ = fcntl(fd, F_SETFL, flags)   // restore blocking; the rest of the path expects it
-            fds.forEach { close($0) }
-            return fd
-        }
-        if errno == EINPROGRESS { fds.append(fd) } else { close(fd) }
-    }
-    guard !fds.isEmpty else {
-        throw MitmError.upstreamFailed("connect(\(host):\(port)): no reachable address")
-    }
-
-    let start = Date()
-    while Date().timeIntervalSince(start) < 10 {
-        var pfds = fds.map { pollfd(fd: $0, events: Int16(POLLOUT), revents: 0) }
-        let pr = poll(&pfds, UInt32(pfds.count), 1000)
-        if pr < 0 { if errno == EINTR { continue }; break }
-        for p in pfds where (p.revents & Int16(POLLOUT | POLLERR | POLLHUP | POLLNVAL)) != 0 {
-            var soErr: Int32 = 0
-            var len = socklen_t(MemoryLayout<Int32>.size)
-            getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &soErr, &len)
-            if soErr == 0 {
-                _ = fcntl(p.fd, F_SETFL, savedFlags[p.fd] ?? 0)   // restore blocking
-                fds.removeAll { $0 == p.fd }
-                fds.forEach { close($0) }   // drop the losers
-                return p.fd
-            }
-            close(p.fd)
-            fds.removeAll { $0 == p.fd }
-        }
-        if fds.isEmpty { break }
-    }
-    fds.forEach { close($0) }
-    throw MitmError.upstreamFailed("connect(\(host):\(port)): timed out / all addresses failed")
 }
 
 private func writeAll(fd: Int32, bytes: [UInt8]) throws {
@@ -5627,6 +5580,17 @@ private final class StreamingRelayDelegate: NSObject, URLSessionDataDelegate, @u
 }
 
 // MARK: - Client-cert challenge handler
+
+/// The session for a pinned upstream whose loopback dialer couldn't be set
+/// up: every request fails rather than reaching the name unpinned.
+private final class RefusedUpstreamProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+    }
+    override func stopLoading() {}
+}
 
 /// URLSessionDelegate that satisfies an upstream's mTLS challenge by
 /// looking up the matching SecIdentity from the per-profile registry,
