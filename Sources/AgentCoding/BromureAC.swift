@@ -16104,6 +16104,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                    let session = self.runningSessions[pid], !session.didCheckpoint,
                    let profile = self.profiles.first(where: { $0.id == pid }) {
                     session.didCheckpoint = true
+                    // BROMURE_NO_REAPER=1: no clone, and so no delete later.
+                    guard CheckpointReaper.shared.enabled else {
+                        AppLog.stamp("'\(profile.name)': BROMURE_NO_REAPER=1 — no session-start checkpoint")
+                        return
+                    }
                     let store = self.store
                     Task.detached {
                         let now = Date()
