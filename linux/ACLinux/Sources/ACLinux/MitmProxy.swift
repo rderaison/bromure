@@ -211,7 +211,7 @@ final class MitmProxy: @unchecked Sendable {
     /// off the event loop. A parsed conversation gets the prompt-injection
     /// log scan when the workspace's policy is on with "log but continue"
     /// (ask and block run before the request is forwarded: not on Linux yet).
-    // partial: the log scan's rules pass only (RulesFileScanner); the ModernBERT passes (PromptInjectionClassifier: tool output, CLAUDE.md) need onnxruntime, which the Linux build hasn't
+    // partial: log mode only (ask and block, which run before the request is forwarded, aren't on Linux yet)
 
     // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=22ed0216edbd064f @cb7cdd6a
     func emitTrace(_ t: RequestReader.Trace, response: Data, wireBytes: Int, truncated: Bool) {
@@ -227,15 +227,34 @@ final class MitmProxy: @unchecked Sendable {
     }
 
     /// The "log but continue" scan of a conversation (macOS:
-    /// HTTPMitmConnection.logPromptInjection): the instruction files it
-    /// carries through the rules scanner, never delaying the traffic.
-    // partial: the rules pass only (the source-injection and semantic passes are PromptInjectionClassifier's: onnxruntime)
+    /// HTTPMitmConnection.logPromptInjection), detached, never delaying the
+    /// traffic: the newest tool output through the source classifier
+    /// (PromptGuard), and the instruction files it carries through the rules
+    /// scanner and the CLAUDE.md classifier (ModernBERT). Without onnxruntime
+    /// or the models the classifiers are absent (logged once): the rules pass
+    /// still runs.
     // @port HTTPMitmConnection.static logPromptInjection(in: Conversation, policy: PromptInjectionPolicy, host: String, profileID: UUID) h=362b005a39f1838a @141c77e1
     func logPromptInjection(in conv: Conversation, host: String, profileID: UUID) {
-        guard let pi = promptInjectionPolicy(for: profileID), pi.isActive, pi.onDetection == .log,
-              pi.detectRulesInjection else { return }
-        let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
-        RulesFileScanner.shared.scanAndLog(systemPrompt: conv.systemPrompt, extraSpans: extra, host: host, profileID: profileID)
+        guard let pi = promptInjectionPolicy(for: profileID), pi.isActive, pi.onDetection == .log else { return }
+        let pid = profileID
+        if pi.detectSourceInjection {
+            let untrusted = PromptInjectionRedactions.scannable(ToolResultSpans.newest(in: conv))
+            if !untrusted.isEmpty {
+                Task.detached(priority: .utility) {
+                    await PromptInjectionClassifier.shared.scanAndLog(spans: untrusted, host: host, profileID: pid)
+                }
+            }
+        }
+        if pi.detectRulesInjection {
+            let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
+            RulesFileScanner.shared.scanAndLog(systemPrompt: conv.systemPrompt, extraSpans: extra, host: host, profileID: pid)
+            let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt, extraSpans: extra)
+            if !ruleSpans.isEmpty {
+                Task.detached(priority: .utility) {
+                    await PromptInjectionClassifier.claudeMd.scanAndLog(spans: ruleSpans, host: host, profileID: pid)
+                }
+            }
+        }
     }
 
     /// Serves one VM's `<udsPath>_8443` (or `stored`, a restarted daemon's

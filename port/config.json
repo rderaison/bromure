@@ -136,6 +136,7 @@
     "Sources/AgentCoding/Mitm/SupplyChainLog.swift",
     "Sources/AgentCoding/Mitm/SupplyChainPolicy.swift",
     "Sources/AgentCoding/Mitm/TokenSwap.swift",
+    "Sources/AgentCoding/Mitm/ToolResultSpans.swift",
     "Sources/AgentCoding/Mitm/TraceEmitter.swift",
     "Sources/AgentCoding/Mitm/TraceRecord.swift",
     "Sources/AgentCoding/Mitm/TraceStore.swift",
