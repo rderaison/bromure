@@ -16,13 +16,21 @@ import SwiftUI
 final class QuickTaskPanel {
     private weak var delegate: ACAppDelegate?
     private var panel: NSPanel?
-    /// Where the task goes, decided when the panel opens.
+    /// Where the task goes, decided when the panel opens: the board of the
+    /// window in front; summoned from another app, every machine's (this
+    /// Mac's and each connected host's), the task going to the one its
+    /// assignee is on.
     private var target: Target?
+    private var targets: [Target] = []
 
     /// The board a quick task lands on: this Mac's, or — when a fat-client
     /// window is in front — the host it mirrors (its workspaces, its
     /// sessions' nicknames, its board).
-    private struct Target {
+    struct Target {
+        /// "local", or the host's id.
+        var key = "local"
+        /// The machine's name, as the list shows it.
+        var machine = ""
         let profiles: [Profile]
         /// The agents a workspace can run, for the full editor's picker.
         var toolSpecs: (Profile) -> [Profile.ToolSpec] = { $0.allToolSpecs }
@@ -45,7 +53,8 @@ final class QuickTaskPanel {
         @MainActor
         static func local(_ d: ACAppDelegate) -> Target {
             let current = d.unifiedWindow?.listModel.selectedSessionID.flatMap { d.agentSessionStore.session($0) }
-            return Target(profiles: d.profiles, toolSpecs: { d.readyToolSpecs(for: $0) },
+            return Target(machine: NSLocalizedString("This Mac", comment: "quick task: the machine a session runs on"),
+                          profiles: d.profiles, toolSpecs: { d.readyToolSpecs(for: $0) },
                           choices: d.taskDispatcher.choices(), current: current,
                           label: { d.delegationEngine.label($0) },
                           save: { d.codingTaskStore.upsert($0) },
@@ -68,7 +77,9 @@ final class QuickTaskPanel {
                 }
             let rooms = c.roomStore.rooms.filter { $0.archivedAt == nil }
                 .map { TaskAssigneeChoices.Room(id: $0.id, name: $0.name) }
-            return Target(profiles: c.profiles, toolSpecs: { c.readyToolSpecs(for: $0) },
+            return Target(key: c.host.id.uuidString,
+                          machine: c.host.name.isEmpty ? c.host.address : c.host.name,
+                          profiles: c.profiles, toolSpecs: { c.readyToolSpecs(for: $0) },
                           choices: TaskAssigneeChoices(sessions: Array(sessions), rooms: rooms),
                           current: w.selectedSessionID.flatMap { c.sessionStore.session($0) },
                           label: label,
@@ -80,6 +91,33 @@ final class QuickTaskPanel {
                           plan: { [weak w] id in w?.planQuickTask(id) })
         }
     }
+    /// Every machine's sessions and rooms in one list, each saying which
+    /// machine it's on. Taken in turns, each machine's most recent first, so
+    /// the first rows aren't all this Mac's.
+    static func merged(_ targets: [Target]) -> TaskAssigneeChoices {
+        guard targets.count > 1 else { return targets.first?.choices ?? TaskAssigneeChoices() }
+        var all = TaskAssigneeChoices()
+        let lists = targets.map { t in t.choices.sessions.map { var s = $0; s.machine = t.machine; return s } }
+        for i in 0..<(lists.map(\.count).max() ?? 0) {
+            for l in lists where i < l.count { all.sessions.append(l[i]) }
+        }
+        for t in targets {
+            all.rooms += t.choices.rooms.map { var r = $0; r.machine = t.machine; return r }
+        }
+        return all
+    }
+
+    /// The machine whose board a task assigned this way goes to: the one its
+    /// session or room is on, else `main`'s.
+    static func owner(of assignment: TaskAssignment?, in targets: [Target], else main: Target) -> Target {
+        guard let a = assignment else { return main }
+        switch a.kind {
+        case .session: return targets.first { t in t.choices.sessions.contains { $0.id == a.id } } ?? main
+        case .room: return targets.first { t in t.choices.rooms.contains { $0.id == a.id } } ?? main
+        default: return main
+        }
+    }
+
     /// The app that was in front when the panel was summoned from outside
     /// Bromure — it gets focus back when the panel closes.
     private var previousApp: NSRunningApplication?
@@ -106,13 +144,23 @@ final class QuickTaskPanel {
         guard let delegate else { return }
         let front = NSWorkspace.shared.frontmostApplication
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
-        // A fat-client window in front: the task is for the host it mirrors.
-        let target: Target = (previousApp == nil ? NSApp.keyWindow as? RemoteHostWindow : nil)
-            .map(Target.remote) ?? Target.local(delegate)
+        let target: Target
+        if previousApp != nil {
+            // From another app: every machine. A task with no session or
+            // room picked goes to this Mac's board, or the first host's when
+            // this Mac has no workspace (all the work is on a host).
+            let local = Target.local(delegate)
+            targets = [local] + delegate.connectedRemoteHostWindows().map(Target.remote)
+            target = local.profiles.isEmpty ? (targets.first { !$0.profiles.isEmpty } ?? local) : local
+        } else {
+            // A fat-client window in front: the task is for the host it mirrors.
+            target = (NSApp.keyWindow as? RemoteHostWindow).map(Target.remote) ?? Target.local(delegate)
+            targets = [target]
+        }
         self.target = target
         // Context: the session in front of the user, if any.
         let current = target.current
-        let choices = target.choices
+        let choices = Self.merged(targets)
         let profiles = target.profiles
         guard let workspace = current?.profileID ?? profiles.first?.id else { return }
         let here = current.map {
@@ -195,10 +243,15 @@ final class QuickTaskPanel {
 
     /// A task from the full editor.
     private func add(_ task: CodingTask, plan: Bool) {
-        guard let target else { return }
+        guard let main = target else { return }
+        let target = Self.owner(of: task.assignment, in: targets, else: main)
         var t = task
         t.stage = .backlog
-        t.profileID = target.workspace(for: t.assignment, else: t.profileID)
+        // The editor offered the first board's workspaces: on another
+        // machine, the assignee's (or that machine's first).
+        let own = target.profile(t.profileID) != nil ? t.profileID : (target.profiles.first?.id ?? t.profileID)
+        t.profileID = target.workspace(for: t.assignment, else: own)
+        if target.key != main.key, let p = target.profile(t.profileID) { t.tool = p.tool }
         target.save(t)
         if plan {
             target.plan(t.id)
@@ -210,11 +263,17 @@ final class QuickTaskPanel {
 
     private func add(title: String, details: String, assignment: TaskAssignment?,
                      profileID: UUID, folder: String, tool: Profile.Tool?) {
-        guard let target else { return }
-        let profileID = target.workspace(for: assignment, else: profileID)
+        guard let main = target else { return }
+        let target = Self.owner(of: assignment, in: targets, else: main)
+        let elsewhere = target.key != main.key
+        // On another machine: its workspace (the assignee's, else its
+        // first), its folder and agent, not the ones of the session in front.
+        let fallback = elsewhere ? (target.profiles.first?.id ?? profileID) : profileID
+        let profileID = target.workspace(for: assignment, else: fallback)
         let profile = target.profile(profileID)
         let task = CodingTask(title: title, details: details, profileID: profileID,
-                              repoPath: folder, tool: tool ?? profile?.tool ?? .claude,
+                              repoPath: elsewhere ? "~" : folder,
+                              tool: elsewhere ? (profile?.tool ?? .claude) : (tool ?? profile?.tool ?? .claude),
                               stage: .backlog)
         target.save(task)
         if let assignment {
@@ -350,23 +409,33 @@ struct QuickTaskView: View {
                 && (r.name.lowercased().hasPrefix(m.query) || "switchboard".hasPrefix(m.query)) {
                 out.append(Suggestion(id: "room-" + r.id.uuidString,
                                       assignment: TaskAssignment(kind: .room, id: r.id, label: "#" + r.name),
-                                      detail: String(format: NSLocalizedString("%@'s Switchboard picks a member", comment: "quick task"),
+                                      detail: Self.onMachine(r.machine) + String(format: NSLocalizedString("%@'s Switchboard picks a member", comment: "quick task"),
                                                      "#" + r.name)))
             }
             for s in choices.sessions where m.query.isEmpty
-                || s.label.lowercased().contains(m.query) || s.workspace.lowercased().contains(m.query) {
+                || s.label.lowercased().contains(m.query) || s.workspace.lowercased().contains(m.query)
+                || (s.machine?.lowercased().contains(m.query) ?? false) {
                 out.append(Suggestion(id: s.id.uuidString,
                                       assignment: TaskAssignment(kind: .session, id: s.id, label: s.label),
-                                      detail: s.workspace + (s.busy ? " · " + NSLocalizedString("busy — takes it after its current work", comment: "quick task") : "")))
+                                      detail: Self.onMachine(s.machine) + s.workspace + (s.busy ? " · " + NSLocalizedString("busy — takes it after its current work", comment: "quick task") : "")))
             }
         } else {
-            for r in choices.rooms where m.query.isEmpty || r.name.lowercased().contains(m.query) {
+            for r in choices.rooms where m.query.isEmpty || r.name.lowercased().contains(m.query)
+                || (r.machine?.lowercased().contains(m.query) ?? false) {
                 out.append(Suggestion(id: r.id.uuidString,
                                       assignment: TaskAssignment(kind: .room, id: r.id, label: "#" + r.name),
-                                      detail: NSLocalizedString("the room's Switchboard picks a member", comment: "quick task")))
+                                      detail: Self.onMachine(r.machine) + NSLocalizedString("the room's Switchboard picks a member", comment: "quick task")))
             }
         }
-        return Array(out.prefix(6))
+        // Several machines: a few more rows, as each lists its own.
+        let machines = Set(choices.sessions.compactMap(\.machine) + choices.rooms.compactMap(\.machine)).count
+        return Array(out.prefix(machines > 1 ? 10 : 6))
+    }
+
+    /// "Mac mini · " before a row's detail, when the list spans machines.
+    static func onMachine(_ machine: String?) -> String {
+        guard let machine, !machine.isEmpty else { return "" }
+        return machine + " · "
     }
 
     private func pick(_ s: Suggestion) {
