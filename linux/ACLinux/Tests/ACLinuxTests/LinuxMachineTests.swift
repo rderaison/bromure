@@ -123,6 +123,20 @@ struct LinuxMachineTests {
         await d.shutdown()
     }
 
+    /// A start's reply names a session: the machine's own only while its
+    /// check says so (machines-e2e: a reply naming another's session gets a
+    /// 502). With no check registered (not attached yet, or gone), nothing
+    /// says so: it's foreign. (Asked off the main actor, as the hub does:
+    /// with a check, it hops to the main queue.)
+    @Test func aMachineWithNoCheckHasNoSessionOfItsOwn() {
+        let hub = MachineLinkHub.shared
+        let m = UUID()
+        #expect(hub.isForeign(UUID(), machine: m), "never registered: foreign")
+        hub.setForeignCheck(m) { [] }
+        hub.setForeignCheck(m, nil)
+        #expect(hub.isForeign(UUID(), machine: m), "gone: foreign again")
+    }
+
     /// /state's machine lines: one asking to join, then blocked.
     @Test func theStateListsPendingAndBlockedMachines() throws {
         let hub = MachineLinkHub.shared

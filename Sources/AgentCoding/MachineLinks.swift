@@ -530,10 +530,12 @@ final class MachineLinkHub: @unchecked Sendable {
     }
 
     /// Whether `sid` belongs to someone other than machine `id` (asked on
-    /// the main actor, where the session stores are).
+    /// the main actor, where the session stores are). With no check for the
+    /// machine (not attached yet, or gone) nothing says it's its own, so it
+    /// is foreign.
     func isForeign(_ sid: UUID, machine id: UUID) -> Bool {
         cond.lock(); let check = foreignChecks[id]; cond.unlock()
-        guard let check else { return false }
+        guard let check else { return true }
         if Thread.isMainThread { return MainActor.assumeIsolated { check().contains(sid) } }
         return DispatchQueue.main.sync { MainActor.assumeIsolated { check().contains(sid) } }
     }
