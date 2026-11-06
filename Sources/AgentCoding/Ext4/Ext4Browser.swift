@@ -135,10 +135,13 @@ final class Ext4BrowserModel: ObservableObject {
         let fm = FileManager.default
         let tmp = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).bromure-\(UUID().uuidString.prefix(8))", isDirectory: false)
-        guard fm.createFile(atPath: tmp.path, contents: nil) else { throw Ext4Error.io("cannot create \(tmp.path)") }
+        // A new name only (never an existing file or a link planted there),
+        // and the owner's alone while the guest's bytes go in.
+        let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw Ext4Error.io("cannot create \(tmp.path): \(String(cString: strerror(errno)))") }
         var placed = false
         defer { if !placed { try? fm.removeItem(at: tmp) } }
-        let handle = try FileHandle(forWritingTo: tmp)
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         let written: UInt64
         do {
             written = try volume.writeData(node, to: handle)
@@ -148,8 +151,9 @@ final class Ext4BrowserModel: ObservableObject {
             throw error
         }
         if fm.fileExists(atPath: url.path) {
-            _ = try fm.replaceItemAt(url, withItemAt: tmp)
+            _ = try fm.replaceItemAt(url, withItemAt: tmp)   // keeps the replaced file's permissions
         } else {
+            try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmp.path)
             try fm.moveItem(at: tmp, to: url)
         }
         placed = true

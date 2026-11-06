@@ -430,6 +430,8 @@ struct Ext4FsckTests {
             let fresh = dir.appendingPathComponent("hello.txt")
             _ = try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: fresh)
             #expect(try Data(contentsOf: fresh) == Data(Self.helloContent))
+            let mode = try FileManager.default.attributesOfItem(atPath: fresh.path)[.posixPermissions] as? Int
+            #expect(mode == 0o644)
         }
         #expect(try Data(contentsOf: dst) == Data(Self.helloContent))
         #expect(try names() == ["hello.txt", "notes.txt"])
