@@ -1558,6 +1558,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func remoteController(forHost id: UUID) -> RemoteHostController? {
         remoteHostWindows[id]?.controller
     }
+    /// The connected remote-host mirrors, by host name.
+    @MainActor func connectedRemoteHostWindows() -> [RemoteHostWindow] {
+        remoteHostWindows.values.filter { $0.controller.connected }
+            .sorted { $0.controller.host.name.localizedStandardCompare($1.controller.host.name) == .orderedAscending }
+    }
     /// The "Connect to Remote Bromure" window (auth flow), if open.
     var remoteConnectWindow: NSWindow?
 

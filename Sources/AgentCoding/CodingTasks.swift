@@ -695,10 +695,14 @@ struct TaskAssigneeChoices: Equatable, Sendable {
         /// Its workspace: a task queued for it is that workspace's (the
         /// card's chip, review, merge), whatever the editor defaulted to.
         var profileID: UUID? = nil
+        /// The machine it runs on, when the list spans several (the quick
+        /// task panel summoned from another app: this Mac and every host).
+        var machine: String? = nil
     }
     struct Room: Identifiable, Equatable, Sendable, Hashable {
         let id: UUID
         let name: String
+        var machine: String? = nil
     }
     var sessions: [Session] = []
     var rooms: [Room] = []
