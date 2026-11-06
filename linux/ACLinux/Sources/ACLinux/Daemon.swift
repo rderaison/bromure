@@ -237,6 +237,20 @@ public actor Daemon {
             mitm = nil
             FileHandle.standardError.write(Data("bromure-ac daemon: no intercepting proxy: \(error)\n".utf8))
         }
+        // Transparent host-side interception (macOS: launch's
+        // setInterceptor(SwitchMitmForwarder, ports: [80, 443])): a session
+        // VM's TCP to :80 and :443 goes through the MiTM whatever its proxy
+        // env says, so guardrails, egress verbs and the credential swap can't
+        // be skipped by unsetting HTTP(S)_PROXY. A workspace can opt out
+        // (Profile.disableTransparentProxy); BROMURE_NO_TRANSPARENT forces it
+        // off (debugging).
+        if ProcessInfo.processInfo.environment["BROMURE_NO_TRANSPARENT"] == nil, let mitm {
+            let egress = sw.egress
+            let interceptor = SwitchInterceptor(proxy: mitm, guestMTU: passt.mtu) { portID, ip in
+                egress.inject(MAC(raw: UInt64(truncatingIfNeeded: portID)), ip)
+            }
+            egress.setInterception(.init(interceptor: interceptor, ports: [80, 443]))
+        }
     }
 
     /// Debug builds, VM e2e only: every upstream connection goes to a test

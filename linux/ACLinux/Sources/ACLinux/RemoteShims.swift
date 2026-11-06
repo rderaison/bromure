@@ -76,3 +76,17 @@ enum AppLog {
         FileHandle.standardError.write(Data("=== \(text)\n".utf8))
     }
 }
+
+/// FDGuard's pass-through behaviour (macOS: FDGuard.swift, its audit armed
+/// only by env, on Darwin's guarded-fd syscall and os.Logger): adopt and
+/// disown are no-ops, close is close(2).
+// @port-skip linux-only: stand-in for FDGuard (Darwin guarded fds, os.Logger)
+enum FDGuard {
+    // @port-skip linux-only: stand-in for FDGuard
+    static func adopt(_ fd: Int32, _ owner: String) {}
+    // @port-skip linux-only: stand-in for FDGuard
+    static func disown(_ fd: Int32, _ owner: String) {}
+    // @port-skip linux-only: stand-in for FDGuard
+    @discardableResult
+    static func close(_ fd: Int32, _ owner: String) -> Int32 { fdClose(fd) }
+}

@@ -1,0 +1,221 @@
+import Foundation
+import Glibc
+import NIOCore
+import NIOPosix
+import NIOSSL
+import SandboxEngine
+
+/// The transparent entry of the Linux proxy (macOS: MitmEngine's
+/// acceptTransparentFlow): a guest flow the switch diverted, with no CONNECT,
+/// its destination recovered from the TLS SNI or the HTTP Host header, and the
+/// same policy chain as the cooperative path.
+extension MitmProxy {
+    /// Accept a transparently-intercepted TCP flow (from SwitchInterceptor).
+    /// `appFD` is the guest side of a socketpair carrying the raw stream.
+    /// Passthrough hosts (the built-in pinners plus the operator's list) and
+    /// non-TLS / unparseable flows are spliced raw (fail open); everything
+    /// else is MiTM'd through the workspace's policy chain. Takes ownership
+    /// of `appFD`.
+    // partial: no binary identity (no attestor on Linux)
+    // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=85d1555a8e0b2840 @8e2543eb
+    func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int = 0) {
+        // Off the event loops: the peeks block on the socket.
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            // A frame the guest addressed to loopback / link-local reaches
+            // the switch only if it was forged; never dial the host's own.
+            // A multi-user server's own addresses are refused too, as the
+            // switch refuses them on the native path (blockedDestination),
+            // which a diverted flow never takes.
+            if let ip = OpenShellPolicy.IPAddress(destIP),
+               let reason = Self.destinationDenial(host: destIP, resolved: [ip], hostAddresses: blocksHostAddresses) {
+                SupplyChainLog.shared.record(
+                    "[firewall] ✗ deny tcp \(destIP):\(destPort) — \(reason) (\(profileID.uuidString.prefix(8)))")
+                close(appFD); return
+            }
+            let identity: OpenShellPolicy.BinaryIdentity? = nil
+            let guardrails = guardrailsConfig(for: profileID)
+
+            // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
+            // destination, apply the egress policy, then MiTM as cleartext (or
+            // splice on passthrough / non-HTTP).
+            let destAddr = EgressPolicy.parseIPv4Address(destIP)
+            // An OpenShell L7 endpoint on another port: the switch diverted it
+            // here, and cleartext HTTP on it gets the same treatment as :80.
+            var plainHTTP = destPort == 80
+            var tlsPeek: TLSClientHello.Result?
+            if !plainHTTP,
+               guardrails?.egressPolicy?.inspectedPorts.contains(UInt16(truncatingIfNeeded: destPort)) == true {
+                let d = TLSClientHello.peek(fd: appFD)
+                if case .notTLS = d { plainHTTP = true } else { tlsPeek = d }
+            }
+            if plainHTTP {
+                let peeked = Self.peekHTTPHost(fd: appFD)
+                let host = peeked ?? destIP
+                let strict80 = guardrails?.strictCredentials ?? false
+                var shouldSplice = !strict80 && PassthroughList.current().matches(host)
+                // `policy.local` on its reserved address: the advisor, answered
+                // by the proxy (no egress decision, never forwarded).
+                let advisor = destIP == EgressPolicy.advisorAddressString && host == OpenShellAdvisor.host
+                if !advisor, let policy = guardrails?.egressPolicy {
+                    // pf rules keep their name-only check here; OpenShell also
+                    // needs the address (allowed_ips, private-range guard).
+                    let os = policy.openShell != nil
+                    switch policy.verdict(ip: os ? destAddr : nil,
+                                          hostnames: os ? (peeked.map { [$0] } ?? []) : [host], proto: .tcp,
+                                          port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
+                    case .deny:
+                        Self.reportTransparentDeny(policy: policy, profileID: profileID, label: host,
+                                                   hostnames: [host], destIP: destIP, destPort: destPort, layer: "l4")
+                        close(appFD); return
+                    case .mitm:   shouldSplice = false
+                    case .splice: shouldSplice = true
+                    case .allow:  break
+                    }
+                }
+                if shouldSplice {
+                    spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
+                } else {
+                    serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: false)
+                }
+                return
+            }
+
+            let decision = tlsPeek ?? TLSClientHello.peek(fd: appFD)
+            // Strict credential mode inspects every flow: no passthrough list.
+            let strict = guardrails?.strictCredentials ?? false
+            let passthrough = strict ? PassthroughList.none : PassthroughList.current()
+            let host: String
+            var shouldSplice: Bool
+            switch decision {
+            case .sni(let s):
+                host = s
+                shouldSplice = passthrough.matches(s)          // pinned / operator-listed
+            case .noSNI:
+                host = destIP                                  // MiTM with an IP-literal leaf
+                shouldSplice = false
+            case .notTLS, .needMoreData:
+                host = destIP
+                shouldSplice = true                            // fail open — not our protocol
+            }
+
+            // Egress firewall by SNI hostname (the authoritative check for
+            // TLS, and the fallback for names the switch couldn't map at L4).
+            // An OpenShell policy also decides SNI-less and non-TLS flows (by
+            // destination address) instead of letting them fail open.
+            let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            if let policy = guardrails?.egressPolicy, sniHost != nil || policy.openShell != nil {
+                switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,
+                                      hostnames: sniHost.map { [$0] } ?? [], proto: .tcp,
+                                      port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
+                case .deny:
+                    Self.reportTransparentDeny(policy: policy, profileID: profileID, label: sniHost ?? destIP,
+                                               hostnames: sniHost.map { [$0] } ?? [], destIP: destIP,
+                                               destPort: destPort, layer: "sni")
+                    close(appFD); return
+                case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
+                case .splice: shouldSplice = true               // OpenShell `tls: skip`
+                case .allow:  break
+                }
+            }
+
+            if shouldSplice {
+                // Strict credential mode can't vouch for an uninspected
+                // non-TLS stream on an HTTP(S) port; only an explicit
+                // OpenShell `tls: skip` endpoint is relayed raw.
+                if strict, sniHost == nil {
+                    SupplyChainLog.shared.record(
+                        "[firewall] ✗ deny uninspectable tcp \(destIP):\(destPort) — strict credentials (\(profileID.uuidString.prefix(8)))")
+                    close(appFD); return
+                }
+                spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
+                return
+            }
+            serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: true)
+        }
+    }
+
+    /// The Timeline row for a transparent flow the egress policy refused
+    /// (macOS: acceptTransparentFlow's two deny reports, `l4` for HTTP and
+    /// `sni` for TLS), once a minute per destination.
+    // @port-skip linux-only: acceptTransparentFlow's deny report, factored once
+    static func reportTransparentDeny(policy: EgressPolicy, profileID: UUID, label: String, hostnames: [String],
+                                      destIP: String, destPort: Int, layer: String) {
+        guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
+                                                      port: destPort, denied: true, exe: nil) else { return }
+        SupplyChainLog.shared.record(
+            "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
+            eventData: ["action": .string("deny"), "proto": .string("tcp"),
+                        "host": .string(label), "port": .int(destPort), "layer": .string(layer),
+                        "dst_ip": .string(destIP), "exe": .of(nil as String?),
+                        "rule": .of(policy.firstMatch(ip: nil, hostnames: hostnames, proto: .tcp,
+                                                      port: UInt16(truncatingIfNeeded: destPort))?.text),
+                        "by_policy": .bool(true)])
+    }
+
+    /// The flow MiTM'd: the unread stream (the peeks only looked) through the
+    /// TLS leaf for `host` when `tls`, then the request pipeline, registered
+    /// with the firewall's registry (macOS: runTransparentTLS /
+    /// runTransparentHTTP, route "transparent").
+    // @port-skip linux-only: makeConnection + runTransparentTLS / runTransparentHTTP on NIO
+    func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool) {
+        let bootstrap = ClientBootstrap(group: group).channelInitializer { [self] ch in
+            do {
+                let ops = ch.pipeline.syncOperations
+                if tls { try ops.addHandler(NIOSSLServerHandler(context: try serverContext(host: host))) }
+                try ops.addHandler(RequestReader(proxy: self, profileID: profileID, host: host, port: port, tls: tls))
+                return ch.eventLoop.makeSucceededVoidFuture()
+            } catch {
+                return ch.eventLoop.makeFailedFuture(error)
+            }
+        }
+        do {
+            let ch = try bootstrap.withConnectedSocket(appFD).wait()
+            if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent") {
+                ch.close(promise: nil)
+            }
+        } catch {
+            close(appFD)
+        }
+    }
+
+    /// Splice `appFD` to a fresh TCP connection to `destIP:destPort` — the
+    /// exact address the guest chose, never re-resolved, so a pinned host
+    /// reaches its real endpoint (macOS: MitmPassthrough.splice). Closes both
+    /// when either side ends.
+    // @port-skip linux-only: MitmPassthrough.splice(appFD:destIP:destPort:) on NIO
+    func spliceRaw(appFD: Int32, destIP: String, destPort: Int) {
+        guard let ip = OpenShellPolicy.IPAddress(destIP),
+              let ch = try? ClientBootstrap(group: group).withConnectedSocket(appFD).wait() else {
+            close(appFD); return
+        }
+        splice(ch, to: [ip], port: destPort, pending: ByteBuffer())
+    }
+
+    /// The HTTP request's host, peeked (not consumed): an absolute-form
+    /// target's, else the Host header's, lowercased; nil when the stream
+    /// doesn't look like HTTP.
+    // @port MitmEngine.static peekHTTPHost(fd: Int32) h=347205d2f6f9c707 @8e2543eb
+    static func peekHTTPHost(fd: Int32) -> String? {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = buf.withUnsafeMutableBytes { recv(fd, $0.baseAddress, 4096, Int32(MSG_PEEK)) }
+        guard n > 0, let text = String(bytes: buf.prefix(n), encoding: .isoLatin1),
+              let firstLineEnd = text.range(of: "\r\n") else { return nil }
+        let parts = text[..<firstLineEnd.lowerBound].split(separator: " ")
+        guard parts.count >= 3, parts[2].hasPrefix("HTTP/") else { return nil }   // looks like HTTP?
+        // absolute-form target: METHOD http://host[:port]/path HTTP/1.1
+        let target = String(parts[1])
+        if let schemeSep = target.range(of: "://") {
+            let hostPart = target[schemeSep.upperBound...].prefix { $0 != "/" }
+            let host = hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart)
+            if !host.isEmpty { return host.lowercased() }
+        }
+        // origin-form: pull the Host header.
+        for line in text.split(separator: "\r\n") where line.lowercased().hasPrefix("host:") {
+            let v = line.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
+            let host = v.split(separator: ":").first.map(String.init) ?? v
+            if !host.isEmpty { return host.lowercased() }
+        }
+        return nil
+    }
+}
