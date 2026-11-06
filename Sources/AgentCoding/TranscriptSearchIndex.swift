@@ -185,7 +185,8 @@ final class TranscriptSearchIndex {
                     self.loaded = true
                 }
                 self.refreshing = false
-                if !found.isEmpty { self.onUpdate?(Array(found.keys)) }
+                let updated = Set(found.keys).subtracting(back)
+                if !updated.isEmpty { self.onUpdate?(Array(updated)) }
             }
         }
     }
