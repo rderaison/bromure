@@ -3500,64 +3500,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                              ompProvider: ompProvider)
     }
 
-    /// Whether a workspace's guardrails actually restrict something — for the
-    /// Security Timeline's Overview. `GuardrailsPolicy.isActive` also counts
-    /// the (default-on) `X-bromure-insecure` escape hatch, which relaxes rather
-    /// than restricts, so it isn't used here: a write policy / egress rule the
-    /// proxy enforces, or any credential set to "ask before use".
-    static func guardrailsRestrict(_ p: Profile) -> Bool {
-        if makeGuardrailsConfig(for: p).isActive { return true }
-        return p.apiKeyRequiresApproval
-            || p.additionalTools.contains { $0.requireApproval }
-            || p.gitHTTPSCredentials.contains { $0.requireApproval }
-            || p.manualTokens.contains { $0.requireApproval }
-            || p.dockerRegistries.contains { $0.requireApproval }
-            || p.httpDatabases.contains { $0.requireApproval }
-            || p.kubeconfigs.contains { $0.requireApproval }
-            || p.importedSSHKeys.contains { $0.requireApproval }
-            || p.awsCredentials.requireApproval
-            || p.digitalOceanTokenRequiresApproval
-            || p.linearTokenRequiresApproval
-            || p.twilioCredential.requireApproval
-            || p.sshKeyRequiresApproval
-    }
+    /// Whether a workspace's guardrails actually restrict something
+    /// (`GuardrailsConfig.restricts`).
+    static func guardrailsRestrict(_ p: Profile) -> Bool { GuardrailsConfig.restricts(p) }
 
-    static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig {
-        let kubeHosts = Set(profile.kubeconfigs.compactMap {
-            URL(string: $0.serverURL)?.host?.lowercased()
-        })
-        // Docker registry hosts the profile has creds for. "docker.io" is a
-        // user-facing alias for the real Hub endpoints, so expand it.
-        var dockerHosts = Set<String>()
-        for reg in profile.dockerRegistries {
-            let h = reg.host.lowercased()
-            if h == "docker.io" || h == "index.docker.io" || h == "registry-1.docker.io" {
-                dockerHosts.formUnion(["docker.io", "index.docker.io",
-                                       "registry-1.docker.io", "auth.docker.io"])
-            } else {
-                dockerHosts.insert(h)
-            }
-        }
-        // HTTPS-database guardrails: each configured endpoint contributes its
-        // engine + (user-specified) host + per-endpoint mode.
-        let databases = profile.httpDatabases.compactMap { db -> GuardrailsConfig.DBGuardrail? in
-            let host = db.host.lowercased().trimmingCharacters(in: .whitespaces)
-            guard !host.isEmpty, db.guardrail != .off else { return nil }
-            return GuardrailsConfig.DBGuardrail(engine: db.engine, host: host, mode: db.guardrail)
-        }
-        let g = profile.guardrails
-        var config = GuardrailsConfig(kubernetes: g.kubernetes, kubeHosts: kubeHosts,
-                                      aws: g.aws,
-                                      digitalOcean: g.digitalOcean,
-                                      docker: g.docker, dockerHosts: dockerHosts,
-                                      github: g.github, gitlab: g.gitlab, bitbucket: g.bitbucket,
-                                      databases: databases,
-                                      egressPolicy: profile.resolvedEgressPolicy,
-                                      allowInsecureBypass: g.allowInsecureBypass)
-        config.exfiltrationAlertsDisabled = profile.disableExfiltrationAlerts
-        config.strictCredentials = profile.effectiveStrictCredentials
-        return config
-    }
+    /// The proxy's guardrails for a workspace (`GuardrailsConfig.make`).
+    static func makeGuardrailsConfig(for profile: Profile) -> GuardrailsConfig { GuardrailsConfig.make(for: profile) }
 
     /// The port of a guest page's loopback OAuth redirect -- the one the
     /// host's forwarder must own before the page may open (see
