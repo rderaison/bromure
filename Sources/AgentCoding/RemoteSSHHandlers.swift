@@ -12,7 +12,42 @@ import SandboxEngine
 import Darwin
 #endif
 
-enum RemoteSSHError: Error { case invalidChannelType }
+enum RemoteSSHError: Error { case invalidChannelType, tooManyChannels }
+
+/// What one SSH connection's session channels may hold together: how many
+/// are open, and the bytes they keep before an exec or shell opens their fd
+/// (each has its own cap too, SSHPTYSessionHandler.maxPendingInbound). A
+/// client that opens channels and sends without ever asking for one can't
+/// grow them past these. The channel cap is generous: a fat client opens
+/// one per forwarded TCP connection (a browser through its SOCKS proxy).
+final class RemoteConnectionBudget: @unchecked Sendable {
+    static let maxChannels = 256
+    static let maxPendingBytes = 4 << 20
+    private let lock = NSLock()
+    private var channels = 0
+    private var pending = 0
+
+    /// A new session channel, if there's room for it.
+    func openChannel() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard channels < Self.maxChannels else { return false }
+        channels += 1
+        return true
+    }
+    func closeChannel() { lock.lock(); channels = max(0, channels - 1); lock.unlock() }
+
+    /// `n` more bytes held before an exec, if the connection has room for them.
+    func reserve(_ n: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard pending + n <= Self.maxPendingBytes else { return false }
+        pending += n
+        return true
+    }
+    func release(_ n: Int) { lock.lock(); pending = max(0, pending - n); lock.unlock() }
+
+    var openChannels: Int { lock.lock(); defer { lock.unlock() }; return channels }
+    var pendingBytes: Int { lock.lock(); defer { lock.unlock() }; return pending }
+}
 
 /// Close the connection on any pipeline error.
 final class RemoteErrorHandler: ChannelInboundHandler {
@@ -326,6 +361,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// connect is async), flushed once it is. Capped: a channel that sends
     /// without ever asking for exec or a shell is closed past it.
     private var pendingInbound: [UInt8] = []
+    /// The connection's share of what its channels hold (RemoteConnectionBudget).
+    private let budget: RemoteConnectionBudget?
     static let maxPendingInbound = 1 << 20
     private var term = "xterm-256color"
     private var cols: UInt16 = 80
@@ -444,7 +481,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
          udpForwardResolver: RemoteAccessServer.UDPForwardResolver? = nil,
          browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil,
          delegationMCPResolver: RemoteAccessServer.StreamResolver? = nil,
-         grant: RemoteGrant? = nil) {
+         grant: RemoteGrant? = nil,
+         budget: RemoteConnectionBudget? = nil) {
+        self.budget = budget
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
@@ -556,8 +595,10 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         // The forward/control fd opens asynchronously; buffer bytes that beat it
         // (up to maxPendingInbound: more is a channel that never asked for one).
         if master < 0 {
-            guard pendingInbound.count + bytes.count <= Self.maxPendingInbound else {
+            guard pendingInbound.count + bytes.count <= Self.maxPendingInbound,
+                  budget?.reserve(bytes.count) ?? true else {
                 FatClientLog.log("srv: \(pendingInbound.count + bytes.count) bytes before exec or shell: closing the channel")
+                budget?.release(pendingInbound.count)
                 pendingInbound = []
                 channel.close(promise: nil)
                 return
@@ -575,6 +616,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         defer { forwardEOFIfDrained() }
         guard master >= 0, !pendingInbound.isEmpty else { return }
         outBuffer.insert(contentsOf: pendingInbound, at: 0)   // pre-fd bytes come first
+        budget?.release(pendingInbound.count)
         pendingInbound = []
         drainOut()
     }
@@ -947,6 +989,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func teardown(pid: pid_t, master: Int32) {
         guard !terminated else { return }
         terminated = true
+        budget?.release(pendingInbound.count)
+        pendingInbound = []
         cancelReadSource()
         writeSource?.cancel()
         writeSource = nil
