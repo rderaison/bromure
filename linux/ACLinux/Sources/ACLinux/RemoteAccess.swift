@@ -70,6 +70,7 @@ extension Daemon {
         Self.linkControlSocket(config)
         Self.linkRemoteDirectory(state: config.stateDir + "/remote", runtime: config.runtimeDir + "/remote")
         EnrollmentCodes.file.withLockedValue { $0 = config.stateDir + "/remote/enroll-codes" }
+        BromureLinuxPaths.stateDir.withLockedValue { $0 = config.stateDir }
         let g = sw.dhcp.server.map(UInt32.init)
         let gw = g[0] << 24 | g[1] << 16 | g[2] << 8 | g[3]
         VMNetSwitch.shared.subnet = VmnetSubnet(gateway: gw, mask: 0xFFFF_FF00, poolEnd: gw & 0xFFFF_FF00 | 254)
@@ -85,6 +86,9 @@ extension Daemon {
                 Task { completion(await resolverBox.daemon?.browserMCPFD(vm: vm) ?? -1) }
             }
         }
+        // Signed in to bromure.io: the account's devices' keys, whether this
+        // daemon serves SSH itself or the multi-user gateway reads them.
+        if P2PIdentity.current() != nil { await MainActor.run { LinuxAccountKeys.shared.start() } }
         let s = RemoteSettings.load(remoteSettingsPath)
         LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
         guard s.enabled else { return }

@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -424,6 +424,93 @@ enum ControlClientIO {
 /// iOS apps) connect to.
 // partial: no Preferences pane; status, enable/disable, keys, and Linux's one-time enrollment code
 // @port-skip linux-only: macOS has the same verbs under `bromure-ac remote` driving UserDefaults
+struct Account: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "This server's bromure.io account: your other devices' SSH keys, kept in authorized_keys.",
+        subcommands: [Status.self, SignIn.self, SignOut.self, Sync.self],
+        defaultSubcommand: Status.self)
+
+    // @port-skip linux-only: CLI plumbing
+    static func show(_ j: JSONValue) {
+        guard j["signedIn"] == .bool(true) else {
+            print("Not signed in. `bromure-ac account sign-in` with a code from bromure.io.")
+            return
+        }
+        print("signed in: \(j["org"]?.stringValue ?? "bromure.io")   device: \(j["deviceId"]?.stringValue ?? "?")   api: \(j["apiBase"]?.stringValue ?? "?")")
+        if let s = j["lastSync"] {
+            let n = { (k: String) in s[k].flatMap { if case .number(let v) = $0 { return Int(v) } else { return nil } } ?? 0 }
+            if let e = s["error"]?.stringValue {
+                print("last sync: \(s["at"]?.stringValue ?? "?") failed: \(e) (keeping \(n("keys")) keys)")
+            } else {
+                print("last sync: \(s["at"]?.stringValue ?? "?"): \(n("keys")) keys (\(n("machineKeys")) for attached machines only)")
+            }
+        }
+    }
+
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show whether this server is signed in, and the last key sync.")
+        @Flag(help: "JSON output.") var json = false
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("GET", "/account")
+            try check(r, "status")
+            if json { print(r.json) } else { Account.show(r.json) }
+        }
+    }
+
+    struct SignIn: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "sign-in",
+            abstract: "Sign this server in with the enrollment code bromure.io shows (a bromure://enroll link works too).",
+            discussion: "The code is read from the terminal without echo (or from stdin), so it stays out of your shell history.")
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let tty = isatty(STDIN_FILENO) == 1
+            if tty { FileHandle.standardError.write(Data("Enrollment code from bromure.io: ".utf8)) }
+            guard let link = Account.readSecretLine(echo: !tty), !link.isEmpty else { throw ValidationError("No code given.") }
+            if tty { FileHandle.standardError.write(Data("\n".utf8)) }
+            let r = try client().request("POST", "/account/sign-in", body: ["link": .string(link)])
+            try check(r, "sign-in")
+            print("Signed in\(r.json["org"]?.stringValue.map { " to \($0)" } ?? ""). Your devices' keys sync now and every 3 minutes.")
+        }
+    }
+
+    struct SignOut: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "sign-out", abstract: "Forget this server's account here (the keys it brought in stay).")
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("POST", "/account/sign-out")
+            try check(r, "sign-out")
+            print("Signed out. The keys it brought in stay; remove one with `remote rm-key`.")
+        }
+    }
+
+    struct Sync: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Pull your devices' keys now.")
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("POST", "/account/sync")
+            try check(r, "sync")
+            Account.show(r.json)
+        }
+    }
+
+    /// One line from stdin; on a terminal, without echo.
+    // @port-skip linux-only: CLI plumbing
+    static func readSecretLine(echo: Bool) -> String? {
+        var orig = termios()
+        let quiet = !echo && tcgetattr(STDIN_FILENO, &orig) == 0
+        if quiet {
+            var raw = orig
+            raw.c_lflag &= ~tcflag_t(ECHO)
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw)
+        }
+        defer { if quiet { tcsetattr(STDIN_FILENO, TCSANOW, &orig) } }
+        return readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespaces)
+    }
+}
+
 struct Remote: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Remote access for the Bromure apps (an SSH server, port 2222 by default).",
