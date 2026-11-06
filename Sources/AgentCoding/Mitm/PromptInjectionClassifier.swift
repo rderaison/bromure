@@ -298,9 +298,11 @@ actor PromptInjectionClassifier {
 
     private enum LoadError: LocalizedError {
         case missingAsset(String)
+        case checksum([String])
         var errorDescription: String? {
             switch self {
             case .missingAsset(let n): return "\(n) not found"
+            case .checksum(let n): return "\(n.joined(separator: ", ")) didn't match the pinned hash (removed; fetch the model again)"
             }
         }
     }
@@ -316,6 +318,15 @@ actor PromptInjectionClassifier {
         guard fm.fileExists(atPath: dir.appendingPathComponent("tokenizer.json").path) else {
             throw LoadError.missingAsset("tokenizer.json")
         }
+        // Every pinned file must hash to its pin (PromptInjectionModelPins)
+        // before anything reads it: checked here, on the load's own thread.
+        // One that doesn't is deleted, so the model reads as not installed
+        // and is fetched again; it's never loaded.
+        let dirName = modelDirName
+        let mismatched = try await ClassifierQueue.load(logLabel) {
+            PromptInjectionModelPins.removeMismatched(dirName: dirName, in: dir)
+        }
+        guard mismatched.isEmpty else { throw LoadError.checksum(mismatched) }
 
         // Tokenizer straight from the model's own HF assets — handles
         // whatever family it is (DeBERTa/SentencePiece for PromptGuard,

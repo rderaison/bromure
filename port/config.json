@@ -114,6 +114,7 @@
     "Sources/AgentCoding/Mitm/OnePasswordRefresher.swift",
     "Sources/AgentCoding/Mitm/PIIPolicy.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionCloudEvent.swift",
+    "Sources/AgentCoding/Mitm/PromptInjectionModelPins.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionPolicy.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionRedactions.swift",
     "Sources/AgentCoding/Mitm/RemoteConsent.swift",

@@ -1,5 +1,4 @@
 import AppKit
-import CryptoKit
 import Foundation
 
 /// Locates + downloads the local detector models for prompt-injection /
@@ -84,7 +83,7 @@ public enum PromptInjectionModels {
     }
 
     private static func expectedSHA256(_ kind: Kind, _ file: String) -> String? {
-        kind == .piiRampart ? rampartFiles[file]?.sha256 : nil
+        kind == .piiRampart ? rampartFiles[file]?.sha256 : PromptInjectionModelPins.expected(dir: kind.dirName, file: file)
     }
 
     public static var modelsRoot: URL {
@@ -101,9 +100,16 @@ public enum PromptInjectionModels {
         let dir = directory(for: kind)
         let fm = FileManager.default
         return kind.files.allSatisfy { f in
-            guard let sz = (try? fm.attributesOfItem(atPath: dir.appendingPathComponent(f.name).path)[.size]) as? Int
+            let url = dir.appendingPathComponent(f.name)
+            guard let sz = (try? fm.attributesOfItem(atPath: url.path)[.size]) as? Int
             else { return false }
-            return sz >= f.minBytes
+            guard sz >= f.minBytes else { return false }
+            // A pinned file known not to match isn't installed. Not yet
+            // hashed as it is now: installed, unverified; the classifier
+            // checks it as it loads it, off the main thread, and deletes it
+            // (so it's fetched again) if it doesn't match. Never hashed here.
+            guard let want = expectedSHA256(kind, f.name) else { return true }
+            return PromptInjectionModelPins.cachedVerdict(url, sha256: want) != false
         }
     }
 
@@ -157,13 +163,14 @@ public enum PromptInjectionModels {
             let sz = ((try? FileManager.default.attributesOfItem(atPath: tmp.path)[.size]) as? Int) ?? 0
             guard sz >= f.minBytes else { throw Err.truncated(f.name, sz, f.minBytes) }
             if let want = expectedSHA256(kind, f.name) {
-                let got = SHA256.hash(data: try Data(contentsOf: tmp)).map { String(format: "%02x", $0) }.joined()
-                guard got == want else { throw Err.checksum(f.name) }
+                // Read in chunks: a model is up to 600 MB.
+                guard try PromptInjectionModelPins.hex(of: tmp) == want else { throw Err.checksum(f.name) }
             }
             if FileManager.default.fileExists(atPath: dest.path) {
                 try FileManager.default.removeItem(at: dest)
             }
             try FileManager.default.moveItem(at: tmp, to: dest)
+            if let want = expectedSHA256(kind, f.name) { PromptInjectionModelPins.noteVerified(dest, sha256: want) }
             completedBytes += Int64(sz)
             progress(min(0.999, Double(completedBytes) / total))
         }
