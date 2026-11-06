@@ -358,6 +358,56 @@ struct Ext4FsckTests {
         }
     }
 
+    /// The finding: listDir refused any directory over 64 MiB as a corrupt
+    /// inode, though one with many entries grows past that. The browser
+    /// couldn't open it, and fsck called it damage, so the error flag that
+    /// strands the guest's boot was never cleared.
+    @Test("a directory past 64 MiB is listed and verified, read a block at a time")
+    func bigDirectory() throws {
+        var img = Self.buildImage()
+        let bs = Self.blockSize
+        let fsBlocks = 73_728                               // 72 MiB of 1K blocks: 9 groups
+        let sb = 1024
+        putLE32(&img, sb + 0, 9 * 16)                       // s_inodes_count: 16 a group
+        putLE32(&img, sb + 4, UInt32(fsBlocks))             // s_blocks_count_lo
+        // The root: 65 MiB, its block 0 as before, and logical block 20000
+        // (past the first map window) through the double-indirect pointer.
+        let root = Self.inodeOffset(2)
+        let dirBlocks = (65 << 20) / bs + 1
+        putLE32(&img, root + 4, UInt32(dirBlocks * bs))
+        let dind = 13, ind = 14, late = 15
+        putLE32(&img, root + 40 + 13 * 4, UInt32(dind))     // i_block[13]
+        putLE32(&img, dind * bs + 77 * 4, UInt32(ind))      // 12 + 256 + 77·256 + 20 = 20000
+        putLE32(&img, ind * bs + 20 * 4, UInt32(late))
+        // There: "late.txt", an empty file at inode 13.
+        let o = Self.inodeOffset(13)
+        putLE16(&img, o, 0x81A4)
+        putLE16(&img, o + 26, 1)
+        putLE32(&img, late * bs, 13)
+        putLE16(&img, late * bs + 4, UInt16(bs))
+        img[late * bs + 6] = 8
+        img[late * bs + 7] = 1
+        for (i, c) in Array("late.txt".utf8).enumerated() { img[late * bs + 8 + i] = c }
+        // The error flag up: only a check that finds nothing wrong clears it.
+        putLE16(&img, sb + 58, le16(img, sb + 58) | 0x0002)
+
+        let path = NSTemporaryDirectory() + "ext4fsck-\(UUID().uuidString).img"
+        try Data(img).write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let h = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try h.truncate(atOffset: UInt64(fsBlocks * bs))     // sparse: costs nothing on disk
+        try h.close()
+
+        let vol = try Ext4Volume(path: path)
+        let node = try vol.inode(2)
+        #expect(node.size > 64 << 20)
+        #expect(try vol.listDir(2).map(\.name) == ["hello.txt", "late.txt"])
+        let repair = try Ext4Fsck.check(imagePath: path, autoFix: true)
+        #expect(repair.output.contains("verified 3 reachable inode(s)"), "\(repair.output)")
+        #expect(repair.output.contains("error flag cleared"), "\(repair.output)")
+        #expect(!(try Ext4Volume(path: path)).sb.hasErrors)
+    }
+
     @Test("a root claiming a huge size is refused, not read")
     func rootWithHugeSize() throws {
         // i_size is the image's word: ~4 GiB on a one-block root. "." and
