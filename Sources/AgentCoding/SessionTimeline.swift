@@ -9,8 +9,8 @@ import Observation
 // the time between tool calls is the model's own (thinking, writing). The
 // flamegraph (per session) and the room timeline (per room) draw from this.
 
-struct SessionTimeline: Equatable {
-    enum Kind: String, CaseIterable {
+struct SessionTimeline: Equatable, Codable {
+    enum Kind: String, CaseIterable, Codable {
         case model, shell, edit, read, web, agent, mcp, other
 
         var label: String {
@@ -38,7 +38,7 @@ struct SessionTimeline: Equatable {
         }
     }
 
-    struct Segment: Equatable, Identifiable {
+    struct Segment: Equatable, Identifiable, Codable {
         let id: Int
         var kind: Kind
         /// The tool's name ("model" for the model's own time).
@@ -52,7 +52,7 @@ struct SessionTimeline: Equatable {
         var duration: TimeInterval { end.timeIntervalSince(start) }
     }
 
-    struct Turn: Equatable, Identifiable {
+    struct Turn: Equatable, Identifiable, Codable {
         let id: Int
         /// The user's message, one line.
         var prompt: String

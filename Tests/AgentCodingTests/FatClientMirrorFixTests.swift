@@ -26,7 +26,7 @@ struct FatClientMirrorFixTests {
     }
 
     @Test("a self-mirror's report wins over older local input, loses to newer")
-    func selfMirrorArbitration() {
+    nonisolated func selfMirrorArbitration() async {
         let p = ConsolePresence()
         p.noteLocal()
         Thread.sleep(forTimeInterval: 0.005)   // distinct instants under a loaded runner
@@ -103,9 +103,12 @@ struct FatClientMirrorFixTests {
     @Test("the pane's poll doesn't orphan a slow listing (spinner forever over a fat client)")
     func pollDoesNotOrphanSlowRefresh() async {
         let m = FileExplorerModel()
-        let calls = Counter()
+        let calls = Counter(), inFlight = Counter(), mostAtOnce = Counter()
         m.execProvider = { _, _, _ in
             calls.n += 1
+            inFlight.n += 1
+            mostAtOnce.n = max(mostAtOnce.n, inFlight.n)
+            defer { inFlight.n -= 1 }
             try await Task.sleep(nanoseconds: 300_000_000)   // slower than the poll
             return ""
         }
@@ -117,10 +120,13 @@ struct FatClientMirrorFixTests {
             try? await Task.sleep(nanoseconds: 100_000_000)
             Task { await m.pollRefresh() }
         }
+        for _ in 0..<500 where m.loading { try? await Task.sleep(nanoseconds: 10_000_000) }
         #expect(!m.loading)
         #expect(m.loadError == nil)
-        // The first listing landed and later polls only ran once it had.
-        #expect(calls.n <= 4)
+        // The first listing landed and later polls only ran once it had. How
+        // many fit depends on the machine's load; that they never overlap doesn't.
+        #expect(mostAtOnce.n == 1)
+        #expect(calls.n < 10)   // the first, plus at most one for each poll
     }
 
     // MARK: Stage split (local window and mirror share it)
@@ -155,7 +161,7 @@ struct FatClientMirrorFixTests {
 
     @Test("the guest shim forwards a CDP tool to the host when told cdp-via-host",
           .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
-    func shimForwardsCDPViaHost() throws {
+    nonisolated func shimForwardsCDPViaHost() async throws {
         let script = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/AgentCoding/Resources/vm-setup")
         let proc = Process()

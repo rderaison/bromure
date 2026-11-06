@@ -113,7 +113,7 @@ struct TaskQAFixesTests {
 
     // MARK: Litter (L11) and empty branches (L10)
 
-    private func sh(_ c: String, in dir: URL) -> String {
+    nonisolated private func sh(_ c: String, in dir: URL) -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-c", c]
@@ -129,7 +129,7 @@ struct TaskQAFixesTests {
 
     @Test("untracked build/cache litter isn't a change; an empty branch is seen as empty",
           .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/git")))
-    func litterAndEmptyBranch() throws {
+    nonisolated func litterAndEmptyBranch() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("litter-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }

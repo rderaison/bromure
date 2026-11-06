@@ -209,6 +209,7 @@ final class SessionPane {
             })
         let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []   // pinned to the pane: never size the window
         // Topmost — above the terminal surface AND the suspended tint.
         containerView.addSubview(host, positioned: .above, relativeTo: suspendedTintView)
         NSLayoutConstraint.activate([
@@ -334,13 +335,28 @@ final class SessionPane {
     var sessionOnStage = false {
         didSet {
             guard sessionOnStage != oldValue else { return }
+            if !sessionOnStage { sessionTerminalWindow = nil }
             // Before anything mounts (no roster yet, the chat's first layout),
             // the stage shows the chat's own background — a dark terminal-
             // coloured frame flashed for a second when a session was picked.
-            if sessionOnStage && !beautifierLocked { applyContainerBackground(chat: true) }
+            if sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil {
+                applyContainerBackground(chat: true)
+            }
             updateNativeTerminalMount()
         }
     }
+    /// The session on stage shows its terminal rather than its chat (the
+    /// Linux pill): the tmux window it runs in. Set before the session is
+    /// mounted, so the chat is never built just to be replaced.
+    var sessionTerminalWindow: Int? {
+        didSet { sessionTerminalGone = false }
+    }
+    /// That window closed under the session. The pane mounts nothing until the
+    /// stage has been planned again: anything mounted here would be another
+    /// session's, and takes the keyboard, behind the page that replaces it.
+    private(set) var sessionTerminalGone = false
+    /// The session's terminal on stage lost its window: plan the stage again.
+    var onSessionTerminalGone: (() -> Void)?
 
     /// The container's backing: the chat's window background while the chat
     /// is (or is about to be) on show, the terminal's colour otherwise (a
@@ -562,6 +578,7 @@ final class SessionPane {
     /// toggle safe to flip live. Falls back to the framebuffer silently if
     /// libghostty is unavailable.
     func updateNativeTerminalMount() {
+        guard !sessionTerminalGone else { return }
         guard model.tabs.indices.contains(model.activeIndex) else { return }
         // Beautified mode only applies to a tab that's actually running a coding
         // agent — a plain shell (or any non-agent) tab has no transcript to
@@ -571,8 +588,10 @@ final class SessionPane {
         let activeTab = model.tabs[model.activeIndex]
         let activeIsAgent = BromureIcons.agentKind(forLabel: activeTab.shownLabel) != nil
             || agentWindows.contains(activeTab.index)
-        if sessionOnStage && !beautifierLocked { mountBeautified(); return }
-        if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        if sessionTerminalWindow == nil {
+            if sessionOnStage && !beautifierLocked { mountBeautified(); return }
+            if viewMode == .beautified && activeIsAgent { mountBeautified(); return }
+        }
         unmountBeautified()
         // Restore the profile's window translucency for the terminal.
         containerView.layer?.opacity = Float(min(1.0, max(0.3, profile.windowOpacity)))
@@ -797,23 +816,7 @@ final class SessionPane {
     /// never this tab's (two Kimi tabs in one folder).
     func chatTranscriptPin(window: Int) -> TranscriptPin {
         let s = acDelegate?.sessionRecord(profileID: profile.id, windowIndex: window)
-        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
-            return TranscriptPin(kimiSession: id)
-        }
-        // Grok / Codex: the session's own conversation, never the folder's
-        // newest (an archived session's, a second session's live one).
-        if let s, s.tool == .grok || s.tool == .codex || s.tool == .omp {
-            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
-            if pin != TranscriptPin() { return pin }
-            // Not pinned yet: never another session's conversation.
-            pin.foreignConversations = acDelegate?.agentSessionStore
-                .conversationsClaimed(tool: s.tool, profileID: profile.id, besides: s.id) ?? []
-            return pin
-        }
-        var pin = TranscriptPin()
-        pin.kimiExclude = acDelegate?.agentSessionStore
-            .kimiSessionsClaimed(profileID: profile.id, besides: s?.id) ?? []
-        return pin
+        return acDelegate?.agentSessionStore.chatTranscriptPin(for: s, profileID: profile.id) ?? TranscriptPin()
     }
 
     /// Mount (or keep) the beautified transcript view, unmounting the terminal
@@ -837,7 +840,7 @@ final class SessionPane {
         mountedTerminalView = nil
         containerView.layer?.opacity = 1   // opaque chat surface, never dimmed
         applyContainerBackground(chat: true)
-        let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self))
+        let m = makeBeautifiedModel(windowIndex: windowIndex, provider: LocalTranscriptProvider(pane: self, window: windowIndex))
         beautifiedModel = m
         beautifiedTabIndex = windowIndex
         beautifiedSessionID = sessionID
@@ -897,7 +900,8 @@ final class SessionPane {
         // honors the profile's window translucency.
         let opacity = viewMode == .beautified ? 1.0 : min(1.0, max(0.3, newProfile.windowOpacity))
         containerView.layer?.opacity = Float(opacity)
-        applyContainerBackground(chat: viewMode == .beautified || (sessionOnStage && !beautifierLocked))
+        applyContainerBackground(chat: viewMode == .beautified
+                                 || (sessionOnStage && !beautifierLocked && sessionTerminalWindow == nil))
         terminalController?.applyProfile(newProfile)   // live appearance update
         updateNativeTerminalMount()
         host?.paneDidUpdateProfile(self)
@@ -1016,7 +1020,18 @@ final class SessionPane {
             if model.tabs[i].display != t.display { model.tabs[i].display = t.display }
             if model.tabs[i].repoRoot != t.repoRoot { model.tabs[i].repoRoot = t.repoRoot }
         }
-        if let activePos = tabs.firstIndex(where: { $0.active }) {
+        // A session on stage is pinned to its own window, as on the fat client
+        // (`refreshStageIfNeeded`). The guest's active tab is a poll behind and
+        // shared with whoever else drives the machine: following it mounted
+        // another session's chat under this one's header — on a quick A→B→A,
+        // whose stale "A" confirmed the switch and whose next snapshot said B —
+        // or, with its terminal showing, another session's shell, to be typed
+        // into. A terminal whose window has gone follows nothing either.
+        let heldGone = sessionTerminalWindow.map { held in !tabs.contains { $0.index == held } } ?? false
+        if let held = sessionTerminalWindow ?? (sessionOnStage ? beautifiedTabIndex : nil),
+           let pos = tabs.firstIndex(where: { $0.index == held }) {
+            if model.activeIndex != pos { model.activeIndex = pos }
+        } else if !heldGone, let activePos = tabs.firstIndex(where: { $0.active }) {
             if let pending = pendingActiveIndex {
                 if tabs[activePos].index == pending.index
                     || Date().timeIntervalSince(pending.at) > 3 {
@@ -1036,7 +1051,15 @@ final class SessionPane {
         // Windows tmux no longer reports are gone for good — drop their
         // surfaces; then make sure the active tab has a live surface.
         terminalController?.retire(windowsNotIn: Set(tabs.map(\.index)))
-        updateNativeTerminalMount()
+        if heldGone {
+            sessionTerminalWindow = nil
+            sessionTerminalGone = true
+            mountedTerminalView?.removeFromSuperview()
+            mountedTerminalView = nil
+            onSessionTerminalGone?()
+        } else {
+            updateNativeTerminalMount()
+        }
         if !created.isEmpty, let onNewTerminals {
             let fresh = Set(created.map(\.index))
             onNewTerminals(model.tabs.filter { fresh.contains($0.index) })

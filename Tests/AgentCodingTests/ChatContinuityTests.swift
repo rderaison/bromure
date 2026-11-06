@@ -61,7 +61,9 @@ struct ChatContinuityTests {
     func keepsLastPrompts() async {
         let model = BeautifiedSessionModel(provider: Provider())
         model.start()
-        let until = Date().addingTimeInterval(8)
+        // Takes milliseconds alone. The deadline is only so a backfill that
+        // stops short fails instead of hanging, so it has to outlast a full run's load.
+        let until = Date().addingTimeInterval(60)
         while BeautifiedSessionModel.userPrompts(in: model.items) < BeautifiedSessionModel.continuityPrompts,
               Date() < until {
             try? await Task.sleep(nanoseconds: 50_000_000)

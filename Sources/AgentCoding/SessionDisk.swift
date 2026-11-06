@@ -215,6 +215,14 @@ public final class SessionDisk {
         defer { try? handle.close() }
         try handle.truncate(atOffset: target)
         ProfileStore.homeImageChanged(profile.id)
+        // The checkpoints of the smaller home go (the save that set the size
+        // started that; this catches a grow from the app-wide default, or one
+        // the save's delete hadn't finished). Off the main thread.
+        let stale = ProfileStore.checkpointFiles(in: [store.homeCheckpointsDirectory(for: profile)])
+        if !stale.isEmpty {
+            ProfileStore.purgeCheckpointsInBackground(stale, of: profile.id, name: profile.name,
+                                                      why: "home grown to \(gib(target))")
+        }
         let now = ((try? fm.attributesOfItem(atPath: homeImageURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
         return "home image grown \(gib(size)) → \(gib(now)) (target \(gib(target)))"
     }
@@ -225,7 +233,7 @@ public final class SessionDisk {
     /// per-profile MAC + machine identifier files, so no sidecar JSON
     /// is needed.
     public var savedStateURL: URL {
-        store.profileDirectory(for: profile).appendingPathComponent("vm.state")
+        store.profileDirectory(for: profile).appendingPathComponent("vm.state", isDirectory: false)
     }
     public var hasSavedState: Bool {
         fm.fileExists(atPath: savedStateURL.path)
@@ -287,9 +295,11 @@ public final class SessionDisk {
     /// per-profile dir holds a compromised flag — saves the picker
     /// from having to construct a SessionDisk just to read one bit.
     public static func isCompromised(profile: Profile, store: ProfileStore) -> Bool {
-        let url = store.profileDirectory(for: profile)
-            .appendingPathComponent("compromised.flag")
-        return FileManager.default.fileExists(atPath: url.path)
+        FileManager.default.fileExists(atPath: compromiseMarkURL(profile: profile, store: store).path)
+    }
+
+    public static func compromiseMarkURL(profile: Profile, store: ProfileStore) -> URL {
+        store.profileDirectory(for: profile).appendingPathComponent("compromised.flag", isDirectory: false)
     }
 
     /// Wipe everything that could carry contamination from a

@@ -54,3 +54,22 @@ struct ChatWarmStartTests {
         again.stop()
     }
 }
+
+extension ChatWarmStartTests {
+    @Test("a chat already parsed is on show at once when it's opened again, before any await")
+    func parsedHistoryShowsInTheSameFrame() async {
+        let key = "test-\(UUID().uuidString)"
+        let first = BeautifiedSessionModel(provider: Provider(key: key, delay: 0))
+        first.start()
+        await waitFor(5) { !first.items.isEmpty }
+        let shown = first.items
+        first.stop()
+
+        let again = BeautifiedSessionModel(provider: Provider(key: key, delay: 3_000_000_000))
+        again.start()
+        #expect(again.items == shown, "synchronously, with the first frame")
+        #expect(!again.loading)
+        #expect(again.catchingUp, "and it says the latest is on its way")
+        again.stop()
+    }
+}

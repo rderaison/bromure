@@ -531,6 +531,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // whole window (the window is isMovableByWindowBackground).
         let sidebarHost = NonMovableHostingView(rootView: sidebar)
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
+        // Default sizing, unlike the fat client's sidebar: without it the
+        // window collapsed to its header (118 pt) and couldn't be resized, even
+        // past a contentMinSize. The cost: every frame of a working dot's pulse
+        // re-measures the sidebar for the window's minimum size.
         self.sidebarHost = sidebarHost
 
         // Empty stage — shows the selected off/suspended profile's Start card.
@@ -549,6 +553,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         paneSlot.clipsToBounds = true
         paneSlot.translatesAutoresizingMaskIntoConstraints = false
         emptyStateHost.translatesAutoresizingMaskIntoConstraints = false
+        // Pinned to the stage on all sides, hidden or not: never size the window.
+        emptyStateHost.sizingOptions = []
         stage.addSubview(paneSlot)
         stage.addSubview(emptyStateHost)
         // Tasks-first: the header strip above a live session's pane. Height 0
@@ -921,6 +927,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showVMDashboard(id) },
+            onDeleteCheckpoints: { [weak self] id in self?.acDelegate?.deleteAllCheckpoints(id, from: self) },
             sessionForTab: { [weak self] id, window in
                 self?.acDelegate?.sessionRecord(profileID: id, windowIndex: window)?.id
             })
@@ -1352,6 +1359,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
                 self.gridStore.autoAdd(profileID: profileID, windowIndex: tab.index, label: tab.shownLabel)
             }
         }
+        pane.onSessionTerminalGone = { [weak self] in self?.sessionStageDidChange() }
         listModel.entries.append(SessionListModel.VMEntry(
             id: pane.profile.id,
             name: pane.profile.name,
@@ -1429,6 +1437,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if let sid = selectedSessionID, acDelegate?.sessionRecord(sid)?.profileID != id {
             clearSessionStage()
         }
+        // No session on stage: this is the machine itself. A pane left "on
+        // stage" by a move to another machine's session is a terminal again
+        // (and, its session's window gone since, would otherwise stay blank).
+        if selectedSessionID == nil { pane.sessionOnStage = false }
         selectedID = id
         listModel.selectedID = id
         mountSelected(pane)
@@ -2233,8 +2245,12 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let machine = delegate.attachedMachines[s.profileID]
         // The tab itself is the surface while the agent runs; an ended
         // session's shell is reachable as a terminal from the Machines list.
-        let liveChat = livePosition != nil && (pane(s.profileID) != nil || machine?.connected == true)
-            && bucket != .ended
+        let tabReachable = livePosition != nil && (pane(s.profileID) != nil || machine?.connected == true)
+        let liveChat = tabReachable && bucket != .ended
+        let liveTerminal = SessionTerminalPreference.showsTerminal(
+            prefers: SessionTerminalPreference.enabled, tabLive: tabReachable && s.windowIndex != nil,
+            launching: s.isLaunching) && !DemoMode.isLive(s.id)
+        listModel.sessionTerminalShown = liveTerminal
         // B73: a live session in a workspace that runs with no pane here
         // (booted detached — at startup, by an automation or a CLI start —
         // or its window was closed with the VM kept up). Its roster still
@@ -2259,8 +2275,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         let key: String
         if DemoMode.isLive(s.id) {
             key = "demo:\(s.id.uuidString)"
-        } else if liveChat, let livePosition {
-            key = "live:\(s.profileID.uuidString):\(livePosition)"
+        } else if liveChat || liveTerminal, let livePosition {
+            key = SessionTerminalPreference.liveKey(terminal: liveTerminal, profileID: s.profileID, tab: livePosition)
         } else if s.isLaunching {
             key = "launch"
         } else {
@@ -2272,7 +2288,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         }
         // Same plan — unless the live chat's pane fell out of the slot (see
         // `selectTab`): then it's planned again, not left blank.
-        guard key != sessionPresentationKey || (liveChat && machine == nil && !isMounted(s.profileID)) else { return }
+        guard key != sessionPresentationKey
+                || ((liveChat || liveTerminal) && machine == nil && !isMounted(s.profileID)) else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
         // The browser pane follows the session: its own state when live,
@@ -2282,6 +2299,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         demoChat = nil
         machineChat?.stop()
         machineChat = nil
+        if liveTerminal, let machine, let w = s.windowIndex {
+            showMachineTerminal(machine, window: w)
+            return
+        }
         if liveChat, let machine, let w = s.windowIndex {
             let m = makeMachineChatModel(machine, window: w, session: s)
             machineChat = m
@@ -2297,8 +2318,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             return
         }
 
-        if liveChat, let livePosition, let pane = pane(s.profileID) {
+        if liveChat || liveTerminal, let livePosition, let pane = pane(s.profileID) {
             hideSessionOverlay()
+            pane.sessionTerminalWindow = liveTerminal ? s.windowIndex : nil
             // Before the tab switch mounts the view: the session's window is
             // an agent window whatever its title says yet, and a session
             // started with a message echoes it (with the thinking cue) the
@@ -2524,10 +2546,10 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         showMachineTerminal(machine, window: w)
     }
 
-    /// A session on stage is a chat. Pane-local — never rewrites the
-    /// app-wide beautified default.
+    /// A session on stage is a chat, or its terminal if that's what the user
+    /// asked for. Pane-local — never rewrites the app-wide beautified default.
     private func applySessionViewMode(_ pane: SessionPane) {
-        let mode: SessionViewMode = .beautified
+        let mode: SessionViewMode = pane.sessionTerminalWindow == nil ? .beautified : .terminal
         // The session's tab hosts an agent even before its title says so.
         if let active = pane.model.activeTab { pane.agentWindows.insert(active.index) }
         pane.sessionOnStage = true
@@ -2538,12 +2560,23 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         makeFirstResponder(pane.preferredFirstResponder)
     }
 
-    /// Toolbar / ⌥⌘U: from a session, the Linux machine behind it — its
-    /// terminal tab in the Machines list, with the machine's own toolbar.
-    /// From that terminal, the same chord brings the session back.
+    /// Toolbar / ⌥⌘U: flip the session on stage between its chat and its
+    /// terminal, in place. The choice holds: the next session opens the same
+    /// way. With no tab to show, the machine's dashboard, and nothing to
+    /// remember. From a machine's tab that hosts a session, that session.
     @objc func toggleLinux(_ sender: Any? = nil) {
         if let id = selectedSessionID {
-            showLinux(for: id)
+            if listModel.sessionTerminalShown {
+                SessionTerminalPreference.enabled = false
+                selectSession(id)
+            } else if let s = acDelegate?.sessionRecord(id), !s.isLaunching, s.windowIndex != nil,
+                      SessionHome.liveTabPosition(for: s, in: listModel) != nil,
+                      pane(s.profileID) != nil || acDelegate?.attachedMachines[s.profileID]?.connected == true {
+                SessionTerminalPreference.enabled = true
+                selectSession(id)
+            } else {
+                showLinux(for: id)
+            }
         } else if let id = sessionOnSelectedTab {
             selectSession(id)
         }
@@ -2641,6 +2674,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// took the stage. The remembered session survives for the next launch.
     func clearSessionStage() {
         clearRoom()
+        listModel.sessionTerminalShown = false
         guard selectedSessionID != nil || listModel.newSessionSelected || !sessionSlot.isHidden else { return }
         // Its machine, shown later from the Machines list or the grid, is a
         // terminal again.
@@ -3741,6 +3775,9 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         // machine was picked: a pane removed and re-added while a room had
         // the stage (re-attached quietly, never mounted) kept `selectedID`,
         // and its sessions came back to a blank stage with no composer.
+        // The tab first: mounting the pane builds the chat of its active tab,
+        // which would be the session it showed last, not this one.
+        if let p = pane(id), p.model.tabs.indices.contains(index) { p.model.activeIndex = index }
         if selectedID != id || !isMounted(id) { select(profileID: id) }
         guard let pane = pane(id) else { return }
         pane.switchTo(index: index)
@@ -5801,6 +5838,8 @@ struct UnifiedToolbarBar: View {
     var onToggleLinux: () -> Void = {}
     /// The machine's dashboard (the machine menu's "Machine Details").
     var onDetails: ((Profile.ID) -> Void)? = nil
+    /// ⌥ on the machine menu: delete every checkpoint of the machine. nil on a fat client.
+    var onDeleteCheckpoints: ((Profile.ID) -> Void)? = nil
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -5859,7 +5898,8 @@ struct UnifiedToolbarBar: View {
                                 onSettings: { onSettings(row.id) },
                                 onReboot: {}, onTrace: {}, onDetach: {},
                                 onDetails: onDetails.map { f in { f(row.id) } },
-                                running: false)
+                                running: false,
+                                onDeleteCheckpoints: onDeleteCheckpoints.map { f in { f(row.id) } })
                 }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: false) {}
@@ -5890,7 +5930,7 @@ struct UnifiedToolbarBar: View {
                     }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
-                    LinuxPill(back: false, action: onToggleLinux)
+                    LinuxPill(back: false, chat: model.sessionTerminalShown, action: onToggleLinux)
                 } else if terminalHostsSession {
                     LinuxPill(back: true, action: onToggleLinux)
                 }
@@ -5902,7 +5942,8 @@ struct UnifiedToolbarBar: View {
                             onTrace: { onTrace(entry.id) },
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
-                            ip: entry.model.ipAddress)
+                            ip: entry.model.ipAddress,
+                            onDeleteCheckpoints: onDeleteCheckpoints.map { f in { f(entry.id) } })
                 PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
@@ -5931,6 +5972,8 @@ struct MachineMenu: View {
     var ip: String? = nil
     /// Off or suspended: only what works without it (settings, details).
     var running = true
+    /// Shown only when the menu is opened with ⌥ held: rare, and it can stall the Mac.
+    var onDeleteCheckpoints: (() -> Void)? = nil
     @State private var hovering = false
 
     @State private var anchor = MenuAnchor()
@@ -5988,6 +6031,11 @@ struct MachineMenu: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(ip, forType: .string)
             }
+        }
+        // Read when the menu opens: ⌥-click shows it, a plain click doesn't.
+        if let onDeleteCheckpoints, NSEvent.modifierFlags.contains(.option) {
+            menu.addItem(.separator())
+            add(NSLocalizedString("Delete All Checkpoints…", comment: "machine menu"), "trash", onDeleteCheckpoints)
         }
         guard running else {
             popUpMenu(menu)
@@ -6048,19 +6096,22 @@ final class ClosureMenuItem: NSMenuItem {
     @objc private func fire() { run() }
 }
 
-/// Toolbar pill: from a session, the Linux machine behind it (its terminal
-/// tab in the Machines list); from that terminal (`back`), the session again.
+/// Toolbar pill: flips the session on stage to its terminal, and (`chat`)
+/// back to its chat; from a machine's tab that hosts a session (`back`), that
+/// session.
 struct LinuxPill: View {
     let back: Bool
+    var chat = false
     let action: () -> Void
     @State private var hovering = false
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: back ? "text.bubble" : "terminal")
+                Image(systemName: back || chat ? "text.bubble" : "terminal")
                     .font(.system(size: 12))
                 Text(back ? NSLocalizedString("Session", comment: "toolbar")
-                          : NSLocalizedString("Linux", comment: "toolbar"))
+                     : chat ? NSLocalizedString("Chat", comment: "toolbar")
+                     : NSLocalizedString("Linux", comment: "toolbar"))
                     .font(.system(size: 12, weight: .medium))
             }
             .foregroundStyle(.secondary)
@@ -6073,7 +6124,8 @@ struct LinuxPill: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(back ? NSLocalizedString("Back to the session this terminal hosts (⌥⌘U)", comment: "toolbar")
-                   : NSLocalizedString("The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)", comment: "toolbar"))
+                   : chat ? NSLocalizedString("Show this session as a chat (⌥⌘U)", comment: "toolbar")
+                   : NSLocalizedString("Show this session's Linux terminal (⌥⌘U)", comment: "toolbar"))
     }
 }
 

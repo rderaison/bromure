@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -3569,6 +3570,105 @@ public final class MACBindings: @unchecked Sendable {
     }
 }
 
+
+/// Deletes old checkpoints one at a time, at background priority, in small steps.
+///
+/// No longer used for checkpoints the ladder drops: those are unlinked whole
+/// (`ProfileStore.pruneCheckpoints`), as deleting a clone of a large home
+/// stalled APFS shrunk or not. Its `enabled` (BROMURE_NO_REAPER) still says
+/// whether any are deleted or taken automatically.
+///
+/// Cloning an image is instant, but deleting a clone isn't: APFS has to walk its
+/// extents, which took 7-18 s for a 6 GB allocation on an idle Mac. A panic on a
+/// Mac running 8 VMs caught this happening with the APFS transaction flusher, the
+/// VMs' disk threads and logd all stuck on one lock until the watchdog rebooted the
+/// machine. Nothing showed the delete held that lock, but it's work we can pace.
+///
+/// A retired image is renamed first, so it's out of the list at once and a crash
+/// can't leave a shortened file passing for a checkpoint. It then shrinks by
+/// `step` at a time, a short transaction each (the longest call fell from about
+/// 7 s to about 110 ms). Truncating a clone leaves the image it shares blocks with
+/// alone, as APFS copies on write.
+public final class CheckpointReaper: @unchecked Sendable {
+    public static let shared = CheckpointReaper()
+    static let retiredExtension = "deleting"
+
+    private let queue = DispatchQueue(label: "io.bromure.checkpoint-reaper", qos: .background)
+    private let lock = NSLock()
+    private var queued = Set<String>()
+    private let step: off_t
+    private let stepPause: useconds_t
+    private let filePause: useconds_t
+    /// False under BROMURE_NO_REAPER=1: nothing is deleted, and the automatic
+    /// checkpoints a session start takes aren't taken (`ProfileStore.prune`,
+    /// `ACAppDelegate`), so no APFS clone is made or deleted that a
+    /// user didn't ask for. Checkpoints already retired stay on disk as
+    /// `.deleting` until a run without it.
+    public let enabled: Bool
+
+    static func enabled(in env: [String: String]) -> Bool { env["BROMURE_NO_REAPER"] != "1" }
+
+    /// Paced so a backlog (every checkpoint a long-running server should have
+    /// let go of) drains in the background: at 50 ms a step it held two thirds
+    /// of a core while it lasted.
+    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000,
+         enabled: Bool = CheckpointReaper.enabled(in: ProcessInfo.processInfo.environment)) {
+        self.enabled = enabled
+        self.step = step
+        self.stepPause = stepPause
+        self.filePause = filePause
+    }
+
+    /// Take a checkpoint out of the list now, and delete it when its turn comes.
+    public func retire(_ url: URL) {
+        let retired = url.appendingPathExtension(Self.retiredExtension)
+        guard rename(url.path, retired.path) == 0 else { return }
+        enqueue(retired)
+    }
+
+    /// Queue whatever is already retired in `dir`.
+    public func sweep(_ dir: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for url in names where url.pathExtension == Self.retiredExtension { enqueue(url) }
+    }
+
+    /// Wait for everything queued so far.
+    func drain() { queue.sync {} }
+
+    private func enqueue(_ url: URL) {
+        lock.lock()
+        let isNew = queued.insert(url.path).inserted
+        lock.unlock()
+        guard isNew else { return }
+        queue.async { [self] in
+            remove(url)
+            lock.lock()
+            queued.remove(url.path)
+            lock.unlock()
+            usleep(filePause)
+        }
+    }
+
+    private func remove(_ url: URL) {
+        // O_NOFOLLOW and a single link: shrinking must only ever touch this one
+        // file. Anything else just gets unlinked.
+        let fd = open(url.path, O_WRONLY | O_NOFOLLOW)
+        if fd >= 0 {
+            var st = stat()
+            if fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_nlink == 1 {
+                var size = st.st_size
+                while size > 0 {
+                    size = max(0, size - step)
+                    guard ftruncate(fd, size) == 0 else { break }
+                    usleep(stepPause)
+                }
+            }
+            close(fd)
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
 /// Reads / writes profiles under ~/Library/Application Support/BromureAC/profiles/<id>/.
 /// Each profile dir holds:
 ///   profile.json   — the Profile struct
@@ -3577,12 +3677,14 @@ public final class MACBindings: @unchecked Sendable {
 public final class ProfileStore {
     private let rootDir: URL
     private let fm = FileManager.default
+    private let reaper: CheckpointReaper
 
     /// Where `ProfileStore()` keeps profiles when no root is given: unset,
     /// Application Support (below); the Linux daemon sets its state dir.
     nonisolated(unsafe) public static var defaultRootDir: URL?
 
-    public init(rootDir: URL? = nil) {
+    public init(rootDir: URL? = nil, reaper: CheckpointReaper = .shared) {
+        self.reaper = reaper
         if let rootDir {
             self.rootDir = rootDir
         } else if let root = Self.defaultRootDir {
@@ -3791,7 +3893,9 @@ public final class ProfileStore {
     }
 
     public func diskURL(for profile: Profile) -> URL {
-        profileDirectory(for: profile).appendingPathComponent("disk.img")
+        // `isDirectory:`: without it, building the path stats the file, and the
+        // main thread asks for this path constantly.
+        profileDirectory(for: profile).appendingPathComponent("disk.img", isDirectory: false)
     }
 
     /// The host-side dir mounted as /home/ubuntu in the guest (legacy
@@ -3807,7 +3911,7 @@ public final class ProfileStore {
     /// allocated size ~0); the guest agent formats it on first boot and
     /// fstrim/discard punches freed blocks back out of the host file.
     public func homeImageURL(for profile: Profile) -> URL {
-        profileDirectory(for: profile).appendingPathComponent("home.img")
+        profileDirectory(for: profile).appendingPathComponent("home.img", isDirectory: false)
     }
 
     /// Tiny host dir attached as the `bromure-home` virtiofs tag for
@@ -3927,6 +4031,7 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
+        purgeHomeCheckpointsIfGrowing(profile)
         return profile
     }
 
@@ -4230,23 +4335,27 @@ public final class ProfileStore {
     /// The newest `boots` stay unconditionally (the last few sessions), then
     /// the newest checkpoint of each calendar day for `days` days, then the
     /// newest of each calendar week for `weeks` weeks; everything older is
-    /// pruned. Worst case boots+days+weeks images — in practice the tiers
-    /// overlap and it's fewer, and clonefile copies only cost the blocks
-    /// that have since diverged.
+    /// pruned.
+    ///
+    /// By default: the last session, and the newest of each calendar day back
+    /// to the day before yesterday, so at most 3 an image (automatic ones are one a day). It kept
+    /// up to 14: a 128 GB home, grown over time, with that many clones sharing
+    /// its blocks stalled APFS whenever one was deleted, until the Mac's
+    /// watchdog rebooted it. Each clone makes every delete of the others cost more.
     public static func checkpointRetention(_ dates: [Date], now: Date,
-                                           boots: Int = 3, days: Int = 7,
-                                           weeks: Int = 4,
+                                           boots: Int = 1, days: Int = 2,
+                                           weeks: Int = 0,
                                            calendar: Calendar = .current) -> Set<Date> {
         let sorted = dates.sorted(by: >)
         var keep = Set(sorted.prefix(max(0, boots)))
-        if let dayCut = calendar.date(byAdding: .day, value: -days, to: now) {
+        if let dayCut = calendar.date(byAdding: .day, value: -days, to: calendar.startOfDay(for: now)) {
             var seen = Set<DateComponents>()
             for d in sorted where d >= dayCut {
                 let day = calendar.dateComponents([.year, .month, .day], from: d)
                 if seen.insert(day).inserted { keep.insert(d) }
             }
         }
-        if let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: now) {
+        if weeks > 0, let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: now) {
             var seen = Set<DateComponents>()
             for d in sorted where d >= weekCut {
                 let week = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: d)
@@ -4256,36 +4365,59 @@ public final class ProfileStore {
         return keep
     }
 
-    /// CoW-clone the current disk into `checkpoints/<ts>.img` and prune to
-    /// the tiered ladder. clonefile is instant + near-zero space (shares
+    /// CoW-clone the current disk into `checkpoints/<ts>.img` (pruning to the
+    /// ladder is `pruneCheckpoints`, run after). clonefile is instant + near-zero space (shares
     /// blocks with the live disk until they diverge), so this is cheap to do
     /// every boot. Cloning a live disk yields a crash-consistent image (ext4
     /// journal replays on restore) — acceptable for a rollback point, and
     /// the source just booted.
+    ///
+    /// `automatic` (the one a session start takes): none if one was already
+    /// taken that calendar day. Never while the workspace's checkpoints are
+    /// being deleted: a clone would add to what that delete has to untangle.
     @discardableResult
-    public func snapshotDisk(for profile: Profile, at date: Date) throws -> DiskCheckpoint? {
-        try snapshotImage(diskURL(for: profile),
-                          into: checkpointsDirectory(for: profile), at: date)
+    public func snapshotDisk(for profile: Profile, at date: Date, automatic: Bool = false) throws -> DiskCheckpoint? {
+        try snapshotImage(diskURL(for: profile), of: profile,
+                          into: checkpointsDirectory(for: profile), at: date, automatic: automatic)
     }
+
+    /// Automatic home checkpoints stop above this: clones of a home that size
+    /// are what stalled APFS (see `checkpointRetention`).
+    public static let automaticHomeCheckpointCap: Int64 = 64 << 30
 
     /// Same rollback ladder for the ext4 home image — the "my agent trashed
     /// my code an hour ago" recovery path. No-op for legacy virtiofs homes
     /// (no home.img to clone).
+    /// `automatic`: as for the disk, and none for a home over
+    /// `automaticHomeCheckpointCap`.
     @discardableResult
-    public func snapshotHomeImage(for profile: Profile, at date: Date) throws -> DiskCheckpoint? {
-        try snapshotImage(homeImageURL(for: profile),
-                          into: homeCheckpointsDirectory(for: profile), at: date)
+    public func snapshotHomeImage(for profile: Profile, at date: Date, automatic: Bool = false) throws -> DiskCheckpoint? {
+        let image = homeImageURL(for: profile)
+        let dir = homeCheckpointsDirectory(for: profile)
+        if automatic, let size = (try? fm.attributesOfItem(atPath: image.path))?[.size] as? Int64,
+           size > Self.automaticHomeCheckpointCap {
+            AppLog.stamp("'\(profile.name)': home is \(size >> 30) GB, over \(Self.automaticHomeCheckpointCap >> 30) GB: no automatic checkpoint")
+            return nil   // the ones it has still age out (`pruneCheckpoints`)
+        }
+        return try snapshotImage(image, of: profile, into: dir, at: date, automatic: automatic)
     }
 
-    private func snapshotImage(_ image: URL, into dir: URL,
-                               at date: Date) throws -> DiskCheckpoint? {
+    private func snapshotImage(_ image: URL, of profile: Profile, into dir: URL,
+                               at date: Date, automatic: Bool) throws -> DiskCheckpoint? {
         guard fm.fileExists(atPath: image.path) else { return nil }
+        guard !Self.isPurgingCheckpoints(profile.id) else {
+            AppLog.stamp("'\(profile.name)': its checkpoints are being deleted: no new one of \(image.lastPathComponent)")
+            return nil
+        }
+        if automatic, let newest = list(in: dir).first,
+           Calendar.current.isDate(newest.createdAt, inSameDayAs: date) {
+            return nil   // one a day
+        }
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let ts = Int(date.timeIntervalSince1970)
         let dst = dir.appendingPathComponent("\(ts).img")
         guard !fm.fileExists(atPath: dst.path) else { return nil }   // one per second
         try Self.cloneItem(at: image, to: dst)
-        prune(in: dir, now: date)
         return list(in: dir).first { $0.id == String(ts) }
     }
 
@@ -4311,12 +4443,193 @@ public final class ProfileStore {
         }.sorted { $0.createdAt > $1.createdAt }
     }
 
-    private func prune(in dir: URL, now: Date) {
-        let all = list(in: dir)
-        let keep = Self.checkpointRetention(all.map(\.createdAt), now: now)
-        for cp in all where !keep.contains(cp.createdAt) {
-            try? fm.removeItem(at: cp.url)
+    /// Delete what a workspace holds beyond the ladder, disk and home, in one
+    /// go: each renamed out of the list now, then unlinked whole, one after
+    /// another, off the main thread (`purgeCheckpointsInBackground`), the way
+    /// `rm` cleared the stalled server. Not shrunk step by step by the reaper.
+    /// Separate from taking a checkpoint: a delete under way refuses new ones,
+    /// and the disk's must not stop the home's. True if a delete started.
+    @discardableResult
+    public func pruneCheckpoints(for profile: Profile, now: Date) -> Bool {
+        guard reaper.enabled else { return false }   // BROMURE_NO_REAPER=1: keep everything
+        guard !Self.isPurgingCheckpoints(profile.id) else { return false }   // that delete has them
+        let files = Self.takeOutOfList(checkpointBacklog(for: profile, now: now))
+        guard !files.isEmpty else { return false }
+        return Self.purgeCheckpointsInBackground(files, of: profile.id, name: profile.name, why: "beyond the checkpoint ladder")
+    }
+
+    /// Rename each kept-looking checkpoint (`N.img`) to `N.img.deleting`, so no
+    /// list or revert offers it while it waits its turn. What can't be renamed
+    /// (gone already) is dropped. One whose `.deleting` name is taken (a
+    /// leftover, itself in the list to delete) stays put and is unlinked as it
+    /// is: renaming over the leftover would unlink it here, maybe on main.
+    static func takeOutOfList(_ files: [URL]) -> [URL] {
+        files.compactMap { url -> URL? in
+            guard url.pathExtension != CheckpointReaper.retiredExtension else { return url }
+            let to = url.appendingPathExtension(CheckpointReaper.retiredExtension)
+            var st = stat()
+            if lstat(to.path, &st) == 0 { return url }
+            return rename(url.path, to.path) == 0 ? to : nil
         }
+    }
+
+    /// Every checkpoint file a workspace holds, disk and home, kept or already
+    /// retired (`.deleting`): what "Delete All Checkpoints" removes. Regular files
+    /// only, named as checkpoints are, directly in the two checkpoint folders:
+    /// nothing else in the workspace (disk.img, home.img) can be listed.
+    public func allCheckpointFiles(for profile: Profile) -> [URL] {
+        Self.checkpointFiles(in: [checkpointsDirectory(for: profile), homeCheckpointsDirectory(for: profile)])
+    }
+
+    static func checkpointFiles(in dirs: [URL]) -> [URL] {
+        dirs.flatMap { dir -> [URL] in
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            return names.compactMap { name -> URL? in
+                var stem = name
+                if stem.hasSuffix("." + CheckpointReaper.retiredExtension) {
+                    stem = String(stem.dropLast(CheckpointReaper.retiredExtension.count + 1))
+                }
+                let ts = stem.dropLast(4)
+                guard stem.hasSuffix(".img"), !ts.isEmpty, ts.allSatisfy(\.isASCII), ts.allSatisfy(\.isNumber) else { return nil }
+                let url = dir.appendingPathComponent(name, isDirectory: false)
+                var st = stat()
+                guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
+                return url
+            }
+        }.sorted { $0.path < $1.path }
+    }
+
+    /// Workspaces whose checkpoints are being deleted: no revert reads one
+    /// meanwhile (`revertImage` refuses), and no second delete starts. Shared by
+    /// "Delete All Checkpoints" and the delete a home resize starts.
+    private static let purging = OSAllocatedUnfairLock(initialState: Set<UUID>())
+    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0.contains(id) } }
+
+    /// One delete at a time, app-wide: the backlog a launch clears for every
+    /// workspace goes through it file by file, not all at once.
+    static let purgeQueue = DispatchQueue(label: "io.bromure.checkpoint-purge", qos: .utility)
+
+    /// Delete `files` (a workspace's checkpoints) off the main thread, one unlink
+    /// each, logging each one's time. False if a delete for `id` already runs.
+    /// `done` runs on the main thread.
+    @discardableResult
+    static func purgeCheckpointsInBackground(_ files: [URL], of id: UUID, name: String, why: String,
+                                             done: @escaping @MainActor ((deleted: Int, failed: [URL]), TimeInterval) -> Void = { _, _ in })
+        -> Bool {
+        guard purging.withLock({ $0.insert(id).inserted }) else { return false }
+        AppLog.stamp("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
+        purgeQueue.async {
+            let t0 = Date()
+            let result = unlinkOneByOne(files) { i, url, took in
+                AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
+            }
+            let total = Date().timeIntervalSince(t0)
+            purging.withLock { _ = $0.remove(id) }
+            AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(result, total) } }
+        }
+        return true
+    }
+
+    /// What this store's checkpoints were last pruned to: `ladderGeneration`,
+    /// or "off" while BROMURE_NO_REAPER=1 kept them all.
+    var checkpointLadderMark: URL { rootDir.appendingPathComponent(".checkpoint-ladder", isDirectory: false) }
+    static let ladderGeneration = "3-per-image"
+
+    /// The checkpoints a workspace holds beyond the ladder, and any left
+    /// retired (`.deleting`).
+    func checkpointBacklog(for profile: Profile, now: Date) -> [URL] {
+        let dirs = [checkpointsDirectory(for: profile), homeCheckpointsDirectory(for: profile)]
+        let extra = dirs.flatMap { dir -> [URL] in
+            let all = list(in: dir)
+            let keep = Self.checkpointRetention(all.map(\.createdAt), now: now)
+            return all.filter { !keep.contains($0.createdAt) }.map(\.url)
+        }
+        let retired = Self.checkpointFiles(in: dirs).filter { $0.pathExtension == CheckpointReaper.retiredExtension }
+        return (extra + retired).sorted { $0.path < $1.path }
+    }
+
+    /// At launch. A run under BROMURE_NO_REAPER=1 leaves every checkpoint, and
+    /// a smaller ladder leaves the ones the old one kept: unlink that backlog
+    /// whole now, one file at a time (what cleared the stalled server), before
+    /// the machines boot, rather than at their next session starts. Once
+    /// done, it isn't looked for again. Returns how many workspaces it started on.
+    @discardableResult
+    func settleCheckpointBacklog(_ profiles: [Profile], now: Date = Date(),
+                                 done: @escaping @MainActor () -> Void = {}) -> Int {
+        let mark = checkpointLadderMark
+        func write(_ s: String) { try? Data(s.utf8).write(to: mark, options: .atomic) }
+        guard reaper.enabled else {
+            try? fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
+            write("off")
+            return 0
+        }
+        guard (try? String(contentsOf: mark, encoding: .utf8)) != Self.ladderGeneration else { return 0 }
+        let jobs = profiles.map { ($0, checkpointBacklog(for: $0, now: now)) }.filter { !$0.1.isEmpty }
+        guard !jobs.isEmpty else {
+            try? fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
+            write(Self.ladderGeneration)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done() } }
+            return 0
+        }
+        // The mark is written once every delete ran clean, so a quit midway
+        // picks up the rest at the next launch.
+        let left = OSAllocatedUnfairLock(initialState: (count: jobs.count, clean: true))
+        var started = 0
+        for (p, files) in jobs {
+            let ok = Self.purgeCheckpointsInBackground(Self.takeOutOfList(files), of: p.id, name: p.name,
+                                                       why: "beyond the checkpoint ladder") { result, _ in
+                let last = left.withLock { s -> Bool in
+                    s.count -= 1
+                    if !result.failed.isEmpty { s.clean = false }
+                    return s.count == 0 && s.clean
+                }
+                if last { write(Self.ladderGeneration) }
+                if left.withLock({ $0.count == 0 }) { done() }
+            }
+            if ok { started += 1 } else {
+                left.withLock { $0.count -= 1; $0.clean = false }   // another delete runs: next launch
+            }
+        }
+        if started == 0 { DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
+        return started
+    }
+
+    /// A save that grows the home past its image: its checkpoints go first.
+    /// One from before a grow is the old, smaller home -- rewinding to it undoes
+    /// the resize -- and on a server whose 128 GB home had grown over time, its
+    /// full set of checkpoints is what stalled APFS. The grow itself waits for
+    /// the next cold boot.
+    func purgeHomeCheckpointsIfGrowing(_ profile: Profile) {
+        guard let gb = profile.homeImageGB else { return }
+        let target = UInt64(min(1024, max(8, gb))) << 30
+        guard let size = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber,
+              size.uint64Value < target else { return }
+        let files = Self.checkpointFiles(in: [homeCheckpointsDirectory(for: profile)])
+        guard !files.isEmpty else { return }
+        Self.purgeCheckpointsInBackground(files, of: profile.id, name: profile.name,
+                                          why: "home growing to \(gb) GB")
+    }
+
+    /// Unlink each file at once, one after another: the opposite of the reaper's
+    /// paced truncation. On a Mac whose checkpoints stalled APFS while the reaper
+    /// shrank them, a plain `rm` of each, one at a time, is what cleared them.
+    /// Blocking (minutes, on a large long-used image): never on the main thread.
+    /// `unlink` doesn't follow a symlink; `checkpointFiles` lists none anyway.
+    @discardableResult
+    static func unlinkOneByOne(_ urls: [URL], progress: (Int, URL, TimeInterval) -> Void = { _, _, _ in })
+        -> (deleted: Int, failed: [URL]) {
+        precondition(!Thread.isMainThread, "deleting checkpoints blocks: run it off the main thread")
+        var deleted = 0
+        var failed: [URL] = []
+        for (i, url) in urls.enumerated() {
+            let t0 = Date()
+            let rc = unlink(url.path)
+            let err = errno
+            if rc == 0 || err == ENOENT { deleted += 1 } else { failed.append(url) }   // ENOENT: the reaper got it
+            progress(i, url, Date().timeIntervalSince(t0))
+        }
+        return (deleted, failed)
     }
 
     /// Restore a checkpoint over the live disk. The VM MUST be stopped first (the
@@ -4352,6 +4665,12 @@ public final class ProfileStore {
 
     private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
                              over image: URL, profile: Profile) throws {
+        // Checked last, right before the live image goes: a modal before this
+        // may have run the run loop, and a delete started from it.
+        guard !Self.isPurgingCheckpoints(profile.id) else {
+            throw NSError(domain: "BromureAC.checkpoint", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Its checkpoints are being deleted."])
+        }
         let src = dir.appendingPathComponent("\(checkpointID).img")
         guard fm.fileExists(atPath: src.path) else {
             throw NSError(domain: "BromureAC.checkpoint", code: 1,

@@ -566,9 +566,9 @@ struct Profiles: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "workspaces",
         abstract: "Manage workspaces — list (live + off), boot, exec, and lifecycle. Also available as `vm`.",
-        // NOTE: disk + home checkpoints run silently (one of each per boot,
-        // pruned to a tiered ladder: last 3 boots, daily for a week, weekly
-        // for a month), but VMCheckpoints/VMRevert are intentionally NOT
+        // NOTE: disk + home checkpoints run silently (one of each on the
+        // first boot of a day, at most 3 kept: the last, and one a day for
+        // two days), but VMCheckpoints/VMRevert are intentionally NOT
         // registered yet — the list/revert surface stays unexposed until we
         // decide to ship it (the GUI ships "Restore home…" in the workspace
         // editor). The structs + control routes remain so re-exposing is a

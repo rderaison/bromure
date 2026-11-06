@@ -245,6 +245,13 @@ struct BromureAC: ParsableCommand {
                         Spacer(minLength: 0)
                     }
                     .padding(22) })
+            case "chat-indicators":
+                // The real chat over a fixture: a conversation over two days,
+                // with this Mac having last read it before its final turn.
+                (view, size) = ChatIndicatorsPreview.view()
+            case "switchboard":
+                // The real chat over a fixture Switchboard: several sessions at once.
+                (view, size) = SwitchboardThreadsPreview.view()
             case "machine-signin":
                 size = NSSize(width: 640, height: 640)
                 view = AnyView(ZStack { Color(nsColor: .windowBackgroundColor)
@@ -499,6 +506,9 @@ struct BromureAC: ParsableCommand {
             window.makeKeyAndOrderFront(nil)
             let end = Date().addingTimeInterval(1.5)
             while Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+            if which == "chat-indicators", let frac = ProcessInfo.processInfo.environment["BROMURE_SHOT_SCROLL"].flatMap(Double.init) {
+                ChatIndicatorsPreview.scrollBack(host, fraction: frac, window: window)
+            }
             let bounds = host.bounds
             // BROMURE_SHOT_WINDOW=1: capture the window as the window server
             // drew it. cacheDisplay leaves a split view's detail blank (the
@@ -1460,6 +1470,12 @@ final class RunningSession {
     var vmLoad: Double = 0
     var vmDiskUsedKB: Int = 0
     var vmDiskTotalKB: Int = 0
+    /// `/proc/pressure/memory` avg10, and when the guest last reported at all.
+    var vmMemPressureSome: Double = 0
+    var vmMemPressureFull: Double = 0
+    var vmStatsAt: Date?
+    /// The guest has stopped proving it can run a process (`GuestLiveness`).
+    var guestUnresponsive = false
 
     /// The profile the VM was BOOTED with — unlike `profile`, never moved by
     /// a live edit. A setting changed and then changed back to this value
@@ -2050,13 +2066,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the dashboard can render an off/suspended workspace's config.
     func profile(for id: Profile.ID) -> Profile? { profiles.first { $0.id == id } }
 
+    /// From `FileFacts`: never waits on the disk (0 until first read).
     func vmDashboardData(for id: Profile.ID) -> (diskAllocated: Int64, diskCapacity: Int64, startedAt: Date?) {
         var alloc: Int64 = 0, cap: Int64 = 0
         if let profile = profiles.first(where: { $0.id == id }),
-           let rv = try? store.diskURL(for: profile)
-               .resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileSizeKey]) {
-            alloc = Int64(rv.totalFileAllocatedSize ?? 0)
-            cap = Int64(rv.fileSize ?? 0)
+           let f = FileFacts.shared.facts(store.diskURL(for: profile)), f.exists {
+            alloc = f.allocated
+            cap = f.size
         }
         return (alloc, cap, runningSessions[id]?.startedAt)
     }
@@ -2069,7 +2085,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func refreshSidebar() {
         guard let w = unifiedWindow else { return }
         let machines = attachedMachines.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        w.listModel.profileRows = profiles.map { p in
+        // Assigned only when different: the model is @Observable, so even an
+        // equal assignment re-renders and re-measures the whole sidebar (and
+        // an attached machine calls this on every change it reports).
+        let rows = profiles.map { p in
             SessionListModel.ProfileRow(
                 id: p.id,
                 name: p.name,
@@ -2083,6 +2102,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
         }
+        if w.listModel.profileRows != rows { w.listModel.profileRows = rows }
         // Attached machines: a row always, a tab entry while connected (its
         // roster, like a VM's). Kept out of every local reconcile/probe.
         let former = w.listModel.machineIDs
@@ -2160,7 +2180,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Coarse run state for a profile, for the source-list badge: a live VM is
     /// running/booting; otherwise a saved snapshot on disk means suspended,
     /// else it's off.
-    private func runState(for profile: Profile) -> SessionListModel.RunState {
+    /// `cached`: read the saved state from `FileFacts` (the state snapshot,
+    /// which must never wait on the disk) instead of the disk itself.
+    private func runState(for profile: Profile, cached: Bool = false) -> SessionListModel.RunState {
         if DemoMode.isRunning(profile.id) { return .running }   // manual screenshots
         if bootsInFlight.contains(profile.id) { return .booting }
         if let session = runningSessions[profile.id] {
@@ -2172,6 +2194,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         let disk = SessionDisk(profile: profile, store: store,
                                baseDiskURL: imageManager.baseDiskURL)
+        if cached { return FileFacts.shared.facts(disk.savedStateURL)?.exists == true ? .suspended : .off }
         return disk.hasSavedState ? .suspended : .off
     }
 
@@ -2980,6 +3003,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a sign-in's port (the next one couldn't bind it, and the browser's
         // redirect would be reset or relayed into a VM shutting down).
         if let dev = runningSessions[id]?.sandbox.socketDevice { stopLoopbackForwarders(of: dev) }
+        GuestLivenessStore.shared.clear(id)
         runningSessions.removeValue(forKey: id)
         releaseLeaseIfIdle(id)
         updateStatusMenu()
@@ -3862,6 +3886,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
@@ -3885,6 +3910,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         default: break
         }
         profiles = store.loadAll()
+        // Checkpoints beyond the ladder (it went from 14 an image to 3, or
+        // BROMURE_NO_REAPER=1 kept them all): unlinked off the main thread.
+        store.settleCheckpointBacklog(profiles)
         // `vm run --rm` workspaces a previous run left (quit mid-relaunch,
         // a crash) and whose process is gone.
         sweepStoppedEphemeral(atLaunch: true)
@@ -5803,7 +5831,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onListTasks = { [weak self] in
             MainActor.assumeIsolated {
-                ["tasks": self?.codingTaskStore.tasks.compactMap(Self.codableToDict) ?? []]
+                guard let self else { return ["tasks": []] }
+                return ["tasks": self.encodedRows(self.codingTaskStore.tasks, "tasks")]
             }
         }
         // Sessions-first home for a fat client: the records as stored (the
@@ -5813,16 +5842,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             MainActor.assumeIsolated {
                 // What Squelch saved in each conversation rides along: a
                 // client has no ledger of the host's.
-                self?.agentSessionStore.sessions.compactMap { s -> [String: Any]? in
+                guard let self else { return [] }
+                return self.encodedRows(self.agentSessionStore.sessions.map { s -> AgentSession in
                     var s = s
                     if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
-                    return Self.codableToDict(s)
-                } ?? []
+                    return s
+                }, "agentSessions")
             }
         }
         server.onListDelegations = { [weak self] in
             MainActor.assumeIsolated {
-                self?.delegationStore.delegations.compactMap(Self.codableToDict) ?? []
+                guard let self else { return [] }
+                return self.encodedRows(self.delegationStore.delegations, "delegations")
             }
         }
         // Security Timeline rows carry the workspace's name.
@@ -5831,7 +5862,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onListAgentRooms = { [weak self] in
             MainActor.assumeIsolated {
-                self?.agentRoomStore.rooms.compactMap(Self.codableToDict) ?? []
+                guard let self else { return [] }
+                return self.encodedRows(self.agentRoomStore.rooms, "agentRooms")
             }
         }
         server.onListInstructionPresets = { [weak self] in
@@ -6982,8 +7014,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return d
             }
             let diskURL = store.diskURL(for: s.profile)
-            let diskAllocated = (try? diskURL.resourceValues(
-                forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
+            let diskAllocated = FileFacts.shared.facts(diskURL)?.allocated ?? 0
             return [
                 "id": s.profileID.uuidString,
                 "shortId": Self.shortID(s.profileID),
@@ -7011,6 +7042,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "diskUsedKB": pane(for: s.profileID)?.model.vmDiskUsedKB ?? s.vmDiskUsedKB,
                 "diskTotalKB": pane(for: s.profileID)?.model.vmDiskTotalKB ?? s.vmDiskTotalKB,
                 "hasStats": (pane(for: s.profileID)?.model.vmMemTotalKB ?? s.vmMemTotalKB) > 0,
+                "guestUnresponsive": s.guestUnresponsive,
                 "networkMode": s.profile.networkMode.rawValue,
                 "macAddress": MACBindings.shared.macAddress(for: s.profileID),
                 "diskPath": diskURL.path,
@@ -7053,14 +7085,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// source list 1:1.
     /// home.img's size, or NSNull when there is none (the row says so, rather
     /// than leaving the key out like a server too old to report it).
-    nonisolated static func homeImageBytes(_ url: URL) -> Any {
-        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? NSNull()
+    /// From `FileFacts`: never waits on the disk. NSNull while not known yet,
+    /// as for an image that doesn't exist.
+    static func homeImageBytes(_ url: URL) -> Any {
+        guard let f = FileFacts.shared.facts(url), f.exists else { return NSNull() }
+        return Int(f.size)
     }
 
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
-            switch runState(for: p) {
+            switch runState(for: p, cached: true) {
             case .running:   state = "running"
             case .booting:   state = "booting"
             case .suspended: state = "suspended"
@@ -7077,7 +7112,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "tool": p.tool.rawValue,
                 "authMode": p.authMode.rawValue,
                 "state": state,
-                "compromised": SessionDisk.isCompromised(profile: p, store: store),
+                "compromised": FileFacts.shared.facts(SessionDisk.compromiseMarkURL(profile: p, store: store))?.exists ?? false,
                 "memoryGB": p.memoryGB,
                 "cpuCount": UbuntuSandboxVM.runtimeCPUs,
                 "diskAllocatedBytes": dash.diskAllocated,
@@ -7142,21 +7177,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor func automationScheduledList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         return [
-            "automations": scheduledAutomationStore.automations.compactMap(Self.codableToDict),
-            "runs": scheduledAutomationStore.runs.compactMap(Self.codableToDict),
+            "automations": encodedRows(scheduledAutomationStore.automations, "automations"),
+            "runs": encodedRows(scheduledAutomationStore.runs, "automationRuns"),
             "nextFires": scheduledAutomationStore.allNextFires()
                 .mapValues { iso.string(from: $0) },
             // The clock the schedules run on: a client in another zone
             // names it, and shows its own equivalent.
             "timeZone": TimeZone.current.identifier,
             // Repository watches + findings ride along for the fat client.
-            "watches": findingStore.watches.compactMap(Self.codableToDict),
-            "findings": findingStore.findings.compactMap(Self.codableToDict),
+            "watches": encodedRows(findingStore.watches, "watches"),
+            "findings": encodedRows(findingStore.findings, "findings"),
         ]
     }
+    /// `encodedRows`' memo, per list.
+    private let encodedRowMemo = EncodedRowMemo()
 
-    /// Encode a Codable value to a JSON object dict (ISO8601 dates) for the
-    /// `[String: Any]` HTTP responses.
+    /// `codableToDict` of each item, reusing what an unchanged one encoded to
+    /// last time (see `EncodedRowMemo`).
+    func encodedRows<T: Encodable & Equatable & Identifiable>(_ items: [T], _ key: String) -> [[String: Any]] {
+        encodedRowMemo.rows(items, key, encode: Self.codableToDict)
+    }
+
     static func codableToDict<T: Encodable>(_ value: T) -> [String: Any]? {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
@@ -7302,6 +7343,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The image is replaced wholesale, so the VM must not have it open.
         if diskInUse(profile.id) {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
+        }
+        if ProfileStore.isPurgingCheckpoints(profile.id) {
+            return ["error": "Its checkpoints are being deleted."]
         }
         do {
             if target == "home" {
@@ -10953,6 +10997,76 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.runModal()
     }
 
+    /// ⌥ on the machine menu: "Delete All Checkpoints…". Every checkpoint of
+    /// the workspace, disk and home, kept or already retired, is unlinked
+    /// whole, one after another, off the main thread: what cleared a server
+    /// whose paced deletes kept stalling APFS. Each unlink can itself stall the
+    /// disk for a while on a large, long-used image, so the alert says so.
+    @MainActor
+    func deleteAllCheckpoints(_ id: Profile.ID, from window: NSWindow?) {
+        guard let p = profile(for: id), !ProfileStore.isPurgingCheckpoints(id) else { return }
+        let files = store.allCheckpointFiles(for: p)
+        let alert = NSAlert()
+        guard !files.isEmpty else {
+            alert.messageText = String(format: NSLocalizedString("“%@” has no checkpoints.", comment: "delete checkpoints"), p.name)
+            alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            present(alert, on: window) { _ in }
+            return
+        }
+        alert.alertStyle = .warning
+        alert.messageText = String(format: NSLocalizedString("Delete all %d checkpoints of “%@”?", comment: "delete checkpoints"),
+                                   files.count, p.name)
+        alert.informativeText = NSLocalizedString(
+            "You won't be able to rewind its disk or home to an earlier point. The workspace itself isn't touched.\n\nEach checkpoint is deleted at once, not in small steps. On a large image used for a long time, one delete can keep the Mac's disk busy for a while: the app and the other machines may stall until it's done. Best with the machines shut down.",
+            comment: "delete checkpoints")
+        alert.addButton(withTitle: NSLocalizedString("Delete All", comment: "delete checkpoints"))
+        alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+        alert.buttons.first?.hasDestructiveAction = true
+        let go: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard r == .alertFirstButtonReturn else { return }
+            self?.purgeCheckpoints(p, files, window: window)
+        }
+        present(alert, on: window, go)
+    }
+
+    /// As a sheet when the window has none up (Rewind home, another alert),
+    /// else app-modal: a second sheet on one window throws.
+    @MainActor
+    private func present(_ alert: NSAlert, on window: NSWindow?,
+                         _ done: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
+    }
+
+    @MainActor
+    private func purgeCheckpoints(_ p: Profile, _ files: [URL], window: NSWindow?) {
+        let name = p.name
+        let started = ProfileStore.purgeCheckpointsInBackground(files, of: p.id, name: name, why: "Delete All Checkpoints") { [weak self] result, _ in
+            guard let self else { return }
+            let done = NSAlert()
+            done.messageText = result.failed.isEmpty
+                ? String(format: NSLocalizedString("Deleted %d checkpoints of “%@”.", comment: "delete checkpoints"), result.deleted, name)
+                : String(format: NSLocalizedString("Deleted %d checkpoints of “%@”; %d couldn't be deleted.", comment: "delete checkpoints"),
+                         result.deleted, name, result.failed.count)
+            if !result.failed.isEmpty {
+                done.informativeText = result.failed.map(\.path).joined(separator: "\n")
+            }
+            done.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            self.present(done, on: window) { _ in }
+        }
+        // A delete already under way (a home resize's): say so, don't vanish.
+        if !started {
+            let busy = NSAlert()
+            busy.messageText = String(format: NSLocalizedString("“%@” is already deleting checkpoints.", comment: "delete checkpoints"), name)
+            busy.informativeText = NSLocalizedString("Try again once it's done (the log says when).", comment: "delete checkpoints")
+            busy.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            present(busy, on: window) { _ in }
+        }
+    }
+
     /// A workspace's home rollback points, newest first — the sidebar's
     /// Rewind sheet.
     func homeCheckpoints(for id: Profile.ID) -> [HomeCheckpoint] {
@@ -10974,6 +11088,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard !diskInUse(p.id) else {
             return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
         }
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else {
+            return NSLocalizedString("Its checkpoints are being deleted.", comment: "rewind home")
+        }
         do {
             _ = try store.snapshotHomeImage(for: p, at: Date())
             try store.revertHomeImage(for: p, to: checkpointID)
@@ -10992,6 +11109,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .ext4 else { return }
         guard !diskInUse(p.id) else { return }   // row is disabled while running
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else { return }
         let checkpoints = store.listHomeCheckpoints(for: p)
         guard !checkpoints.isEmpty else {
             let alert = NSAlert()
@@ -11031,6 +11149,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let choice = checkpoints[popup.indexOfSelectedItem]
         // The modal ran the run loop: a boot may have started meanwhile.
         guard !diskInUse(p.id) else { showRunningRefusal(profile: p, what: "home folder"); return }
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else { return }   // the modal ran the run loop too
 
         do {
             // Safety net first: the pre-restore home becomes a checkpoint.
@@ -13858,7 +13977,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let mtime = UInt32(r[0x10]) | (UInt32(r[0x11]) << 8)
                     | (UInt32(r[0x12]) << 16) | (UInt32(r[0x13]) << 24)
                 if newest == nil || mtime > newest!.mtime,
-                   let data = try? vol.readData(ino) {
+                   let data = try? vol.readData(ino, limit: 25_000_000) {
                     newest = (mtime, data)
                 }
             }
@@ -15784,19 +15903,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                    let session = self.runningSessions[pid], !session.didCheckpoint,
                    let profile = self.profiles.first(where: { $0.id == pid }) {
                     session.didCheckpoint = true
+                    // BROMURE_NO_REAPER=1: no clone, and so no delete later.
+                    guard CheckpointReaper.shared.enabled else {
+                        AppLog.stamp("'\(profile.name)': BROMURE_NO_REAPER=1 — no session-start checkpoint")
+                        return
+                    }
                     let store = self.store
                     Task.detached {
                         let now = Date()
-                        do { _ = try store.snapshotDisk(for: profile, at: now) }
+                        do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }
                         catch {
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
                         }
-                        do { _ = try store.snapshotHomeImage(for: profile, at: now) }
+                        do { _ = try store.snapshotHomeImage(for: profile, at: now, automatic: true) }
                         catch {
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
                         }
+                        // Then what's beyond the ladder, both images at once.
+                        store.pruneCheckpoints(for: profile, now: now)
                     }
                 }
             }
@@ -15830,9 +15956,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerStats(stats)
             }
         }
+        sandbox.onVMMemoryPressure = { [weak self] some, full in
+            Task { @MainActor in
+                guard let s = self?.runningSessions[pid] else { return }
+                s.vmMemPressureSome = some; s.vmMemPressureFull = full
+            }
+        }
+        sandbox.onGuestResponsive = { [weak self] responsive in
+            Task { @MainActor in
+                self?.runningSessions[pid]?.guestUnresponsive = !responsive
+                GuestLivenessStore.shared.mark(pid, unresponsive: !responsive) { [weak self] in
+                    self?.restartProfile(pid, force: true)
+                }
+            }
+        }
         sandbox.onVMStats = { [weak self] cpu, used, total, load, diskUsed, diskTotal in
             Task { @MainActor in
                 guard let self else { return }
+                self.runningSessions[pid]?.vmStatsAt = Date()
                 // Mirror into the session so /vms reports vitals even detached
                 // (a fat client reads these; there may be no local pane).
                 if let s = self.runningSessions[pid] {

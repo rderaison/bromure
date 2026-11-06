@@ -453,6 +453,9 @@ final class SessionListModel {
     /// (desktop-app look) instead of the raw terminal. Per-pane state mirrored
     /// here so the toolbar toggle can tint; updated on selection + flip.
     var beautifiedActive = false
+    /// The session on stage is showing its terminal, not its chat (see
+    /// `SessionTerminalPreference`): the toolbar pill offers the chat back.
+    var sessionTerminalShown = false
 
     // MARK: Sessions-first
 
@@ -620,4 +623,31 @@ enum FleetAction: Sendable {
     case block
     /// Forget a blocked machine's answer: it asks again when it next dials.
     case unblock
+}
+
+/// Sessions-first: whether a session opens as its chat or its terminal. The
+/// toolbar's Linux pill flips it, and it holds for every session from then on.
+/// Separate from `ui.beautifiedTranscript`, the default for a machine's own
+/// tabs: that one reads false for anyone who never set it, and a session is
+/// a chat until the user asks otherwise.
+enum SessionTerminalPreference {
+    static let key = "ui.sessionTerminalView"
+
+    static var enabled: Bool {
+        get { UserDefaults.standard.bool(forKey: key) }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
+    }
+
+    /// The stage shows the terminal only when it's preferred and there is one
+    /// to show. A launch keeps its page, however its tab is doing. An agent
+    /// that exited still has its tab, which is what the user asked to see.
+    static func showsTerminal(prefers: Bool, tabLive: Bool, launching: Bool) -> Bool {
+        prefers && tabLive && !launching
+    }
+
+    /// What a live session's stage is planned from. The surface is part of it:
+    /// with the same key, a flip re-plans nothing and the pill does nothing.
+    static func liveKey(terminal: Bool, profileID: UUID, tab: Int) -> String {
+        "\(terminal ? "terminal" : "live"):\(profileID.uuidString):\(tab)"
+    }
 }

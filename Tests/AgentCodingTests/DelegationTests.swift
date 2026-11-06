@@ -37,6 +37,7 @@ struct DelegationTests {
         let store = DelegationStore(fileURL: tmp.appendingPathComponent("delegations-\(UUID().uuidString).json"))
         let sessionEngine = AgentSessionEngine(store: sessions, delegate: nil)
         let engine = DelegationEngine(store: store, sessions: sessions, sessionEngine: sessionEngine, delegate: nil)
+        engine.stopTicking()   // these tests say when a tick happens
         // A stand-in for the classifier: one phrase trips it.
         engine.scan = { text in text.contains("IGNORE ALL PREVIOUS INSTRUCTIONS") ? "IGNORE ALL PREVIOUS INSTRUCTIONS" : nil }
         engine.audit = { _, _ in }

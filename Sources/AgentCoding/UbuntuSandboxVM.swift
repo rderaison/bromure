@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SandboxEngine
 @preconcurrency import Virtualization
 
@@ -150,6 +151,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// allocation overstates real usage. 0/0 from an older guest agent.
     public var onVMStats: ((_ cpu: Double, _ memUsedKB: Int, _ memTotalKB: Int, _ load: Double,
                             _ diskUsedKB: Int, _ diskTotalKB: Int) -> Void)?
+    /// `/proc/pressure/memory` avg10, reported just before each `onVMStats`.
+    /// 0/0 from an older guest agent.
+    public var onVMMemoryPressure: ((_ some: Double, _ full: Double) -> Void)?
+    /// Whether the guest still proves it can run a process (`GuestLiveness`).
+    /// Told `true` whenever polling starts, as a new boot owes nothing yet.
+    public var onGuestResponsive: ((Bool) -> Void)?
 
     /// Called ~every 2s WHILE a dashboard is open with the local image list
     /// (from `docker images`).
@@ -278,6 +285,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
 
     private var outboxPollTask: Task<Void, Never>?
+    private var guestLiveness = GuestLiveness()
+    private var guestSilent = false
 
     /// CPU count for the runtime VM. RAM is per-profile (Profile.memoryGB).
     public static let runtimeCPUs: Int = 4
@@ -362,9 +371,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         platform.machineIdentifier = Self.persistentMachineIdentifier(for: sessionDisk)
         config.platform = platform
 
-        let diskAttachment = try VZDiskImageStorageDeviceAttachment(
-            url: bootDiskURL, readOnly: false
-        )
+        let diskAttachment = try Self.diskAttachment(bootDiskURL)
         config.storageDevices = [
             VZVirtioBlockDeviceConfiguration(attachment: diskAttachment),
         ]
@@ -385,13 +392,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 ? "saved state present — home image kept at its size until a cold boot"
                 : try session.growHomeImageIfNeeded()
             AppLog.stamp("'\(session.profile.name)': \(homeNote)")
-            let homeAttachment = try VZDiskImageStorageDeviceAttachment(
-                url: session.homeImageURL, readOnly: false)
+            let homeAttachment = try Self.diskAttachment(session.homeImageURL)
             config.storageDevices.append(
                 VZVirtioBlockDeviceConfiguration(attachment: homeAttachment))
         }
         for url in extraDiskURLs {
-            let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: false)
+            let attachment = try Self.diskAttachment(url)
             config.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: attachment))
         }
 
@@ -627,6 +633,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         self.vm = virtualMachine
     }
 
+    /// A writable disk whose guest flushes are an fsync, not VZ's default full
+    /// sync. A full sync is an F_FULLFSYNC: it makes APFS commit the whole
+    /// container and the drive empty its cache. Several Linux guests booting at
+    /// once send a stream of them (journal commits, fstrim), into a container a
+    /// panic caught already stalled. fsync still hands the data to the drive;
+    /// what it gives up is only an Mac losing power before the drive's cache is
+    /// written out, where a guest's ext4 journal replays on its next boot.
+    static func diskAttachment(_ url: URL) throws -> VZDiskImageStorageDeviceAttachment {
+        try VZDiskImageStorageDeviceAttachment(url: url, readOnly: false,
+                                               cachingMode: .automatic, synchronizationMode: .fsync)
+    }
+
     public func start() async throws {
         guard let vm = vm else { throw UbuntuImageError.installerStoppedEarly }
         state = .starting
@@ -638,8 +656,21 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
                 try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
             }
+            // The last boot's heartbeat isn't this one's.
+            try? FileManager.default.removeItem(at: outbox.appendingPathComponent("liveness.txt"))
         }
-        try await vm.start()
+        // One of a few starts at a time, app-wide (VMStartGate): held until
+        // the guest is up, so boots don't all hit the disk together.
+        let gate = VMStartGate.shared
+        await gate.acquire()
+        let began = Date()
+        do { try await vm.start() } catch { gate.release(); throw error }
+        if let outbox = sessionDisk?.outboxDirectory {
+            gate.release(whenSettled: { VMStartGate.guestReportedAddress(outbox: outbox, since: began) },
+                         cap: VMStartGate.bootSettleCap)
+        } else {
+            gate.release(whenSettled: { false }, cap: VMStartGate.bootSettleCap)
+        }
         state = .running
         startOutboxPolling()
     }
@@ -684,14 +715,19 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             FileHandle.standardError.write(Data(
                 "[ac] saved state of '\(session.profile.name)' was taken with a different configuration: \(drift)\n".utf8))
         }
-        try await vm.restoreMachineStateFrom(url: stateURL)
+        // Reading the saved RAM back is the heaviest disk work a start does:
+        // one of a few at a time, app-wide (VMStartGate).
+        let gate = VMStartGate.shared
+        await gate.acquire()
+        do { try await vm.restoreMachineStateFrom(url: stateURL) } catch { gate.release(); throw error }
         // The snapshot is consumed — its contents are the VM's RAM now.
         // Delete it BEFORE resuming: from the first resumed instruction the
         // guest mutates the ext4 home image, so if the app crashed with the
         // file still on disk, the next launch would restore stale RAM (dirty
         // journal, page cache) against a newer disk and corrupt the fs.
         session.clearSavedState()
-        try await vm.resume()
+        do { try await vm.resume() } catch { gate.release(); throw error }
+        gate.release(whenSettled: { false }, cap: VMStartGate.restoreSettle)
         didRestore = true
         state = .running
         startOutboxPolling()
@@ -1002,7 +1038,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// label, container, cwd, worktree, parent_branch, root_repo, display,
     /// repoRoot. Older guests send only the first 4 — trailing fields default
     /// to nil, so a stale image degrades to plain tabs instead of misparsing.
-    static func parseRoster(_ raw: String) -> [GuestTab] {
+    nonisolated static func parseRoster(_ raw: String) -> [GuestTab] {
         var tabs: [GuestTab] = []
         for line in raw.split(whereSeparator: \.isNewline) {
             let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
@@ -1029,336 +1065,412 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     private func startOutboxPolling() {
         guard let outbox = sessionDisk?.outboxDirectory else { return }
         outboxPollTask?.cancel()
+        guestLiveness = GuestLiveness()
+        guestSilent = false
+        onGuestResponsive?(true)
+        // The file work runs on the scanner's own queue: read on the main
+        // thread, a stalled disk (a panic caught one, two minutes long) froze
+        // the app with it. Only what a tick found comes back here.
+        let scanner = OutboxScanner(outbox: outbox)
         outboxPollTask = Task { @MainActor [weak self] in
-            let fm = FileManager.default
-            // Roster mtime seen last, so the fast tick can re-parse tabs.txt
-            // only when it actually changed (a new/closed tab shows up in
-            // ~one fast tick instead of waiting for the ~480ms heavy scan).
-            var lastTabsMTime: Date?
-            // One task, two cadences. The reboot-intent marker is drained
-            // every tick (~40ms); everything else in the outbox (ip / url
-            // relay / titles / roster) is latency-tolerant and stays on the
-            // ~480ms cadence via the tick gate below.
-            var ticks = 0
-            // agent-tool-<win>.jsonl: bytes already read, per file.
-            var toolLogs: [String: ToolLog] = [:]
             while !Task.isCancelled {
-                // FAST PATH — reboot-intent: the guest is going down for a
-                // reboot (systemd reboot.target), not a user-closed session.
-                // Drained on the fast tick so the host flags the reboot BEFORE
-                // the slow-path roster scan publishes the empty tabs.txt that
-                // would otherwise trigger the close-action shutdown.
-                let rebootMarker = outbox.appendingPathComponent("reboot-intent")
-                if fm.fileExists(atPath: rebootMarker.path) {
-                    try? fm.removeItem(at: rebootMarker)
-                    self?.onGuestReboot?()
-                }
-
-                // FAST PATH — roster. Tab open/close/switch is felt directly
-                // (the pill appears / the grid cell mounts), so read tabs.txt
-                // on the fast tick, but only re-parse when its mtime changed —
-                // the guest publishes it immediately after any tab command, so
-                // this picks the change up in ~one 40ms tick instead of up to
-                // the ~480ms heavy cadence.
-                let tabsFile = outbox.appendingPathComponent("tabs.txt")
-                if let mtime = try? fm.attributesOfItem(atPath: tabsFile.path)[.modificationDate] as? Date,
-                   mtime != lastTabsMTime {
-                    lastTabsMTime = mtime
-                    if let raw = Self.boundedText(tabsFile) { self?.onTabList?(Self.parseRoster(raw)) }
-                }
-
-                // Throttle the heavier scan to ~every 12th tick (~480ms) so
-                // titles / url relay keep their original cadence.
-                ticks &+= 1
-                if ticks % 12 != 0 {
-                    try? await Task.sleep(nanoseconds: 40_000_000)
-                    continue
-                }
-
-                // Read the always-present ip.txt without consuming it —
-                // the guest rewrites it every 5s.
-                let ipFile = outbox.appendingPathComponent("ip.txt")
-                if let raw = Self.boundedText(ipFile, max: 4096) {
-                    let ip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !ip.isEmpty, ip != self?.lastReportedIP {
-                        self?.lastReportedIP = ip
-                        self?.onIPUpdate?(ip)
-                    }
-                }
-                // Bound how much guest-driven URL relay work happens
-                // per poll tick. A compromised guest could otherwise
-                // flood the outbox with url-*.txt files and use the
-                // host's default browser as a spam cannon. The cap
-                // resets every poll iteration, so legitimate OAuth
-                // URLs are only delayed (~ticks-to-drain), never
-                // dropped.
-                let maxURLsPerTick = 8
-                // Real OAuth URLs are well under 4 KB. Anything larger
-                // is either junk or an attempt to flood the host's
-                // memory + URL parser with a huge body.
-                let maxURLFileSize = 8 * 1024
-                var urlsProcessedThisTick = 0
-                var oneShotsThisTick = 0
-                if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
-                    // agent-tool-<win>.jsonl — append-only, one line per tool
-                    // call, written by the agents' PreToolUse hooks before the
-                    // tool runs (NETWORK_LINEAGE.md). Read new complete lines;
-                    // truncate once fully consumed and large, so it can't grow
-                    // without bound (the hook appends with O_APPEND).
-                    for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
-                        && entry.pathExtension == "jsonl" {
-                        let key = entry.lastPathComponent
-                        let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
-                        // Bounded: a window per tick from the saved offset,
-                        // never the whole file (the guest can make it huge).
-                        var log = toolLogs[key] ?? ToolLog()
-                        for line in log.read(entry) { self?.onAgentToolCall?(line, window) }
-                        toolLogs[key] = log
-                    }
-                    for entry in entries where entry.pathExtension == "txt" {
-                        let name = entry.lastPathComponent
-                        // url-*.txt — guest's bromure-open relayed a URL.
-                        if name.hasPrefix("url-") {
-                            // Hit the per-tick cap: leave the file on
-                            // disk so the next tick can pick it up
-                            // (rather than dropping a legitimate URL
-                            // that lost a race with a flood).
-                            if urlsProcessedThisTick >= maxURLsPerTick {
-                                continue
-                            }
-                            urlsProcessedThisTick += 1
-                            let size = (try? entry.resourceValues(
-                                forKeys: [.fileSizeKey]).fileSize) ?? 0
-                            let raw: String
-                            if size > 0, size <= maxURLFileSize,
-                               let body = Self.boundedText(entry, max: maxURLFileSize) {
-                                raw = body.trimmingCharacters(in: .whitespacesAndNewlines)
-                            } else {
-                                // Empty / oversize / unreadable —
-                                // consume + drop so it can't recur.
-                                raw = ""
-                            }
-                            try? fm.removeItem(at: entry)
-                            // mailto: is intentionally NOT here.
-                            // Historically Mail.app / Outlook /
-                            // Thunderbird have leaked local file paths
-                            // via mailto:?attach= parameters
-                            // (CVE-2020-9922 and friends). CLIs that
-                            // call xdg-open / $BROWSER for login are
-                            // always http(s); we don't lose anything
-                            // real by dropping it.
-                            guard let url = URL(string: raw),
-                                  let scheme = url.scheme?.lowercased(),
-                                  ["http", "https"].contains(scheme) else {
-                                continue
-                            }
-                            self?.onURLOpen?(url)
-                            continue
-                        }
-                        // tabs.txt is read on the fast tick above (mtime-gated),
-                        // not here — skip it in the heavy scan.
-                        if name == "tabs.txt" { continue }
-                        // home-migrate.txt — live progress of the home-storage
-                        // upgrade copy ("<phase> <copied> <total>"), rewritten
-                        // by the guest agent ~2×/s. Read, never consumed.
-                        if name == "home-migrate.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            let p = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
-                            if p.count >= 3, let done = Int64(p[1]), let total = Int64(p[2]) {
-                                self?.onHomeMigrationProgress?(String(p[0]), done, total)
-                            }
-                            continue
-                        }
-                        // home-migrated.txt — one-shot completion marker: the
-                        // copy is verified and the image is mounted over
-                        // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
-                        if name == "home-migrated.txt" {
-                            try? fm.removeItem(at: entry)
-                            self?.onHomeMigrated?()
-                            continue
-                        }
-                        // docker.txt — `docker ps -a --format '{{json .}}'`, one
-                        // JSON object per line (running + stopped). Rewritten
-                        // atomically every ~2s; empty when there's no docker.
-                        if name == "docker.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var containers: [DockerContainer] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                guard let data = line.data(using: .utf8),
-                                      let ps = try? JSONDecoder().decode(DockerPSJSON.self, from: data)
-                                else { continue }
-                                containers.append(DockerContainer(
-                                    id: ps.ID, name: ps.Names, image: ps.Image,
-                                    status: ps.Status, state: ps.State.lowercased(),
-                                    ports: ps.Ports ?? "", runningFor: ps.RunningFor ?? "",
-                                    mounts: ps.Mounts ?? ""))
-                            }
-                            self?.onDockerList?(containers)
-                            continue
-                        }
-                        // docker-stats.txt — `docker stats --no-stream` NDJSON;
-                        // dashboard-only (gated by the .docker-watch marker).
-                        if name == "docker-stats.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var stats: [(id: String, cpu: String, mem: String)] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                guard let data = line.data(using: .utf8),
-                                      let s = try? JSONDecoder().decode(DockerStatsJSON.self, from: data)
-                                else { continue }
-                                stats.append((id: s.ID, cpu: s.CPUPerc ?? "", mem: s.MemUsage ?? ""))
-                            }
-                            self?.onDockerStats?(stats)
-                            continue
-                        }
-                        // vmstat.txt — VM vitals (key value per line) for the
-                        // workspace dashboard: cpu / mem_used_kb / mem_total_kb /
-                        // load / disk_used_kb / disk_total_kb (guest root FS, df).
-                        if name == "vmstat.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var cpu = 0.0, used = 0, total = 0, load = 0.0
-                            var diskUsed = 0, diskTotal = 0
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                let p = line.split(separator: " ")
-                                guard p.count == 2 else { continue }
-                                let v = String(p[1])
-                                switch p[0] {
-                                case "cpu":           cpu = Double(v) ?? 0
-                                case "mem_used_kb":   used = Int(v) ?? 0
-                                case "mem_total_kb":  total = Int(v) ?? 0
-                                case "load":          load = Double(v) ?? 0
-                                case "disk_used_kb":  diskUsed = Int(v) ?? 0
-                                case "disk_total_kb": diskTotal = Int(v) ?? 0
-                                default: break
-                                }
-                            }
-                            self?.onVMStats?(cpu, used, total, load, diskUsed, diskTotal)
-                            continue
-                        }
-                        // ports.txt — raw `ss -tulnH` lines from the guest's
-                        // ports loop (~3s cadence). Parse → dashboard/API; only
-                        // fire when the content actually changed.
-                        if name == "ports.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            if raw != self?.lastPortsRaw {
-                                self?.lastPortsRaw = raw
-                                self?.onPortsList?(Self.parseListeningPorts(raw))
-                            }
-                            continue
-                        }
-                        // docker-images.txt — `docker images` NDJSON; dashboard-only.
-                        if name == "docker-images.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var images: [DockerImage] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                guard let data = line.data(using: .utf8),
-                                      let im = try? JSONDecoder().decode(DockerImageJSON.self, from: data)
-                                else { continue }
-                                images.append(DockerImage(
-                                    id: im.ID, repository: im.Repository, tag: im.Tag,
-                                    size: im.Size ?? "", created: im.CreatedSince ?? ""))
-                            }
-                            self?.onDockerImages?(images)
-                            continue
-                        }
-                        // docker-volumes.txt — `docker volume inspect` NDJSON
-                        // (+ merged Size); dashboard-only.
-                        if name == "docker-volumes.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var volumes: [DockerVolume] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                guard let data = line.data(using: .utf8),
-                                      let vol = try? JSONDecoder().decode(DockerVolumeJSON.self, from: data)
-                                else { continue }
-                                volumes.append(DockerVolume(
-                                    name: vol.Name, driver: vol.Driver ?? "",
-                                    mountpoint: vol.Mountpoint ?? "",
-                                    createdAt: vol.CreatedAt ?? "", size: vol.Size ?? ""))
-                            }
-                            self?.onDockerVolumes?(volumes)
-                            continue
-                        }
-                        // docker-binfmt.txt — space-separated qemu arch suffixes
-                        // currently emulated; may be empty (probed, none).
-                        if name == "docker-binfmt.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            let arches = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
-                                .map(String.init)
-                            self?.onDockerBinfmt?(arches)
-                            continue
-                        }
-                        // docker-arch.txt — "id<TAB>arch" per running container.
-                        if name == "docker-arch.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            var out: [(id: String, arch: String)] = []
-                            for line in raw.split(whereSeparator: \.isNewline) {
-                                let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
-                                guard cols.count >= 2 else { continue }
-                                out.append((id: String(cols[0]).trimmingCharacters(in: .whitespaces),
-                                            arch: String(cols[1]).trimmingCharacters(in: .whitespaces)))
-                            }
-                            self?.onDockerArch?(out)
-                            continue
-                        }
-                        // docker-run-status.txt — "state\timage\tdone\ttotal" while
-                        // a detached run pulls/starts; empty when idle.
-                        if name == "docker-run-status.txt" {
-                            let raw = Self.boundedText(entry) ?? ""
-                            let cols = raw.split(separator: "\t", omittingEmptySubsequences: false)
-                            if cols.count >= 4, !cols[0].isEmpty {
-                                self?.onDockerRunStatus?((
-                                    state: String(cols[0]), image: String(cols[1]),
-                                    done: Int(cols[2]) ?? 0, total: Int(cols[3]) ?? 0))
-                            } else {
-                                self?.onDockerRunStatus?((state: "", image: "", done: 0, total: 0))
-                            }
-                            continue
-                        }
-                        // docker-error.txt — one-shot: a failed docker action's
-                        // stderr. Read, delete, surface. (Deleting makes it fire
-                        // once rather than every 40ms poll.)
-                        if Self.isOneShot(name, stem: "docker-error") {
-                            if oneShotsThisTick >= Self.maxOneShotsPerTick { continue }
-                            oneShotsThisTick += 1
-                            let raw = Self.boundedText(entry)?
-                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                            try? fm.removeItem(at: entry)
-                            if !raw.isEmpty { self?.onDockerError?(raw) }
-                            continue
-                        }
-                        // worktree-error-*.txt — one-shot, same pattern: a failed
-                        // git worktree create/merge/remove, or a refused
-                        // automation run, surfaced to the host. One file per
-                        // report: refusals of runs started together each land.
-                        if Self.isOneShot(name, stem: "worktree-error") {
-                            if oneShotsThisTick >= Self.maxOneShotsPerTick { continue }
-                            oneShotsThisTick += 1
-                            let raw = Self.boundedText(entry)?
-                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                            try? fm.removeItem(at: entry)
-                            if !raw.isEmpty { self?.onWorktreeError?(raw) }
-                            continue
-                        }
-                        // agent-status-<windowIndex>.txt — one-shot: a Claude
-                        // hook reporting working/done/needsInput for that tab's
-                        // status dot. Per-window filename so two tabs signalling
-                        // at once don't clobber each other.
-                        if name.hasPrefix("agent-status-"), name.hasSuffix(".txt") {
-                            let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
-                            let raw = Self.boundedText(entry)?
-                                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                            try? fm.removeItem(at: entry)
-                            if let idx = Int(idxStr), !raw.isEmpty { self?.onAgentStatus?(idx, raw) }
-                            continue
-                        }
-                        // shortcut-<key>.txt is handled by the fast path at the
-                        // top of the loop; it never reaches this scan.
-                        //
-                        // cmd-*.txt — host-written, consumed by the in-VM
-                        // tab agent. Leave alone.
-                    }
-                }
+                let events = await scanner.tick()
+                // A finished tick is applied even if cancelled meanwhile, as
+                // the tick run here used to be: it may have consumed a file.
+                guard let self else { return }
+                for apply in events { apply(self) }
                 try? await Task.sleep(nanoseconds: 40_000_000)
             }
+        }
+    }
+
+    /// The outbox poll's file work, a tick at a time on a queue of its own;
+    /// what it finds comes back as work for the main actor. Its state is
+    /// touched only on `queue`, one tick at a time.
+    final class OutboxScanner: @unchecked Sendable {
+        typealias Event = @MainActor (UbuntuSandboxVM) -> Void
+        private typealias VM = UbuntuSandboxVM
+        private let outbox: URL
+        private let queue: DispatchQueue
+
+        /// One queue per outbox, shared by every scanner of it: a relaunch's
+        /// new scanner (same outbox) waits behind a tick the old one still has
+        /// in flight on a stalled disk, rather than racing it for the
+        /// one-shot files.
+        private static let queues = OSAllocatedUnfairLock(initialState: [String: DispatchQueue]())
+        static func queue(for outbox: URL) -> DispatchQueue {
+            let key = outbox.standardizedFileURL.path
+            return queues.withLock { q in
+                if let existing = q[key] { return existing }
+                let made = DispatchQueue(label: "io.bromure.outbox-poll", qos: .userInitiated)
+                q[key] = made
+                return made
+            }
+        }
+        // Roster mtime seen last, so the fast tick can re-parse tabs.txt
+        // only when it actually changed (a new/closed tab shows up in
+        // ~one fast tick instead of waiting for the ~480ms heavy scan).
+        private var lastTabsMTime: Date?
+        // One task, two cadences. The reboot-intent marker is drained
+        // every tick (~40ms); everything else in the outbox (ip / url
+        // relay / titles / roster) is latency-tolerant and stays on the
+        // ~480ms cadence via the tick gate below.
+        private var ticks = 0
+        // agent-tool-<win>.jsonl: bytes already read, per file.
+        private var toolLogs: [String: ToolLog] = [:]
+
+        init(outbox: URL) { self.outbox = outbox; queue = Self.queue(for: outbox) }
+
+        func tick() async -> [Event] {
+            await withCheckedContinuation { cont in
+                queue.async { cont.resume(returning: self.scan()) }
+            }
+        }
+
+        private func scan() -> [Event] {
+            var events: [Event] = []
+            let fm = FileManager.default
+            let outbox = self.outbox
+            // FAST PATH — reboot-intent: the guest is going down for a
+            // reboot (systemd reboot.target), not a user-closed session.
+            // Drained on the fast tick so the host flags the reboot BEFORE
+            // the slow-path roster scan publishes the empty tabs.txt that
+            // would otherwise trigger the close-action shutdown.
+            let rebootMarker = outbox.appendingPathComponent("reboot-intent")
+            if fm.fileExists(atPath: rebootMarker.path) {
+                try? fm.removeItem(at: rebootMarker)
+                events.append { $0.onGuestReboot?() }
+            }
+
+            // FAST PATH — roster. Tab open/close/switch is felt directly
+            // (the pill appears / the grid cell mounts), so read tabs.txt
+            // on the fast tick, but only re-parse when its mtime changed —
+            // the guest publishes it immediately after any tab command, so
+            // this picks the change up in ~one 40ms tick instead of up to
+            // the ~480ms heavy cadence.
+            let tabsFile = outbox.appendingPathComponent("tabs.txt")
+            if let mtime = try? fm.attributesOfItem(atPath: tabsFile.path)[.modificationDate] as? Date,
+               mtime != lastTabsMTime {
+                lastTabsMTime = mtime
+                if let raw = VM.boundedText(tabsFile) {
+                    let roster = VM.parseRoster(raw)
+                    events.append { $0.onTabList?(roster) }
+                }
+            }
+
+            // Throttle the heavier scan to ~every 12th tick (~480ms) so
+            // titles / url relay keep their original cadence.
+            ticks &+= 1
+            if ticks % 12 != 0 {
+                return events
+            }
+
+            // Read the always-present ip.txt without consuming it —
+            // the guest rewrites it every 5s.
+            let ipFile = outbox.appendingPathComponent("ip.txt")
+            if let raw = VM.boundedText(ipFile, max: 4096) {
+                let ip = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !ip.isEmpty {
+                    events.append { vm in
+                        guard ip != vm.lastReportedIP else { return }
+                        vm.lastReportedIP = ip
+                        vm.onIPUpdate?(ip)
+                    }
+                }
+            }
+            // Read first, so a tick the host itself delayed judges the
+            // guest on what it has written since.
+            let beat = VM.boundedText(outbox.appendingPathComponent("liveness.txt"), max: 256)
+            events.append { vm in
+                let silent = vm.guestLiveness.observe(
+                    beat,
+                    running: vm.vm?.state == .running,
+                    now: ProcessInfo.processInfo.systemUptime)
+                if silent != vm.guestSilent {
+                    vm.guestSilent = silent
+                    vm.onGuestResponsive?(!silent)
+                }
+            }
+            // Bound how much guest-driven URL relay work happens
+            // per poll tick. A compromised guest could otherwise
+            // flood the outbox with url-*.txt files and use the
+            // host's default browser as a spam cannon. The cap
+            // resets every poll iteration, so legitimate OAuth
+            // URLs are only delayed (~ticks-to-drain), never
+            // dropped.
+            let maxURLsPerTick = 8
+            // Real OAuth URLs are well under 4 KB. Anything larger
+            // is either junk or an attempt to flood the host's
+            // memory + URL parser with a huge body.
+            let maxURLFileSize = 8 * 1024
+            var urlsProcessedThisTick = 0
+            var oneShotsThisTick = 0
+            if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+                // agent-tool-<win>.jsonl — append-only, one line per tool
+                // call, written by the agents' PreToolUse hooks before the
+                // tool runs (NETWORK_LINEAGE.md). Read new complete lines;
+                // truncate once fully consumed and large, so it can't grow
+                // without bound (the hook appends with O_APPEND).
+                for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
+                    && entry.pathExtension == "jsonl" {
+                    let key = entry.lastPathComponent
+                    let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    // Bounded: a window per tick from the saved offset,
+                    // never the whole file (the guest can make it huge).
+                    var log = toolLogs[key] ?? ToolLog()
+                    for line in log.read(entry) { events.append { $0.onAgentToolCall?(line, window) } }
+                    toolLogs[key] = log
+                }
+                for entry in entries where entry.pathExtension == "txt" {
+                    let name = entry.lastPathComponent
+                    // url-*.txt — guest's bromure-open relayed a URL.
+                    if name.hasPrefix("url-") {
+                        // Hit the per-tick cap: leave the file on
+                        // disk so the next tick can pick it up
+                        // (rather than dropping a legitimate URL
+                        // that lost a race with a flood).
+                        if urlsProcessedThisTick >= maxURLsPerTick {
+                            continue
+                        }
+                        urlsProcessedThisTick += 1
+                        let size = (try? entry.resourceValues(
+                            forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        let raw: String
+                        if size > 0, size <= maxURLFileSize,
+                           let body = VM.boundedText(entry, max: maxURLFileSize) {
+                            raw = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                        } else {
+                            // Empty / oversize / unreadable —
+                            // consume + drop so it can't recur.
+                            raw = ""
+                        }
+                        try? fm.removeItem(at: entry)
+                        // mailto: is intentionally NOT here.
+                        // Historically Mail.app / Outlook /
+                        // Thunderbird have leaked local file paths
+                        // via mailto:?attach= parameters
+                        // (CVE-2020-9922 and friends). CLIs that
+                        // call xdg-open / $BROWSER for login are
+                        // always http(s); we don't lose anything
+                        // real by dropping it.
+                        guard let url = URL(string: raw),
+                              let scheme = url.scheme?.lowercased(),
+                              ["http", "https"].contains(scheme) else {
+                            continue
+                        }
+                        events.append { $0.onURLOpen?(url) }
+                        continue
+                    }
+                    // tabs.txt is read on the fast tick above (mtime-gated),
+                    // not here — skip it in the heavy scan.
+                    if name == "tabs.txt" { continue }
+                    // home-migrate.txt — live progress of the home-storage
+                    // upgrade copy ("<phase> <copied> <total>"), rewritten
+                    // by the guest agent ~2×/s. Read, never consumed.
+                    if name == "home-migrate.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        let p = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
+                        if p.count >= 3, let done = Int64(p[1]), let total = Int64(p[2]) {
+                            events.append { $0.onHomeMigrationProgress?(String(p[0]), done, total) }
+                        }
+                        continue
+                    }
+                    // home-migrated.txt — one-shot completion marker: the
+                    // copy is verified and the image is mounted over
+                    // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
+                    if name == "home-migrated.txt" {
+                        try? fm.removeItem(at: entry)
+                        events.append { $0.onHomeMigrated?() }
+                        continue
+                    }
+                    // docker.txt — `docker ps -a --format '{{json .}}'`, one
+                    // JSON object per line (running + stopped). Rewritten
+                    // atomically every ~2s; empty when there's no docker.
+                    if name == "docker.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var containers: [DockerContainer] = []
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            guard let data = line.data(using: .utf8),
+                                  let ps = try? JSONDecoder().decode(DockerPSJSON.self, from: data)
+                            else { continue }
+                            containers.append(DockerContainer(
+                                id: ps.ID, name: ps.Names, image: ps.Image,
+                                status: ps.Status, state: ps.State.lowercased(),
+                                ports: ps.Ports ?? "", runningFor: ps.RunningFor ?? "",
+                                mounts: ps.Mounts ?? ""))
+                        }
+                        events.append { $0.onDockerList?(containers) }
+                        continue
+                    }
+                    // docker-stats.txt — `docker stats --no-stream` NDJSON;
+                    // dashboard-only (gated by the .docker-watch marker).
+                    if name == "docker-stats.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var stats: [(id: String, cpu: String, mem: String)] = []
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            guard let data = line.data(using: .utf8),
+                                  let s = try? JSONDecoder().decode(DockerStatsJSON.self, from: data)
+                            else { continue }
+                            stats.append((id: s.ID, cpu: s.CPUPerc ?? "", mem: s.MemUsage ?? ""))
+                        }
+                        events.append { $0.onDockerStats?(stats) }
+                        continue
+                    }
+                    // vmstat.txt — VM vitals (key value per line) for the
+                    // workspace dashboard: cpu / mem_used_kb / mem_total_kb /
+                    // load / disk_used_kb / disk_total_kb (guest root FS, df).
+                    if name == "vmstat.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var cpu = 0.0, used = 0, total = 0, load = 0.0
+                        var diskUsed = 0, diskTotal = 0
+                        var psiSome = 0.0, psiFull = 0.0
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            let p = line.split(separator: " ")
+                            guard p.count == 2 else { continue }
+                            let v = String(p[1])
+                            switch p[0] {
+                            case "cpu":           cpu = Double(v) ?? 0
+                            case "mem_used_kb":   used = Int(v) ?? 0
+                            case "mem_total_kb":  total = Int(v) ?? 0
+                            case "load":          load = Double(v) ?? 0
+                            case "disk_used_kb":  diskUsed = Int(v) ?? 0
+                            case "disk_total_kb": diskTotal = Int(v) ?? 0
+                            case "mem_psi_some":  psiSome = Double(v) ?? 0
+                            case "mem_psi_full":  psiFull = Double(v) ?? 0
+                            default: break
+                            }
+                        }
+                        events.append { $0.onVMMemoryPressure?(psiSome, psiFull) }
+                        events.append { $0.onVMStats?(cpu, used, total, load, diskUsed, diskTotal) }
+                        continue
+                    }
+                    // ports.txt — raw `ss -tulnH` lines from the guest's
+                    // ports loop (~3s cadence). Parse → dashboard/API; only
+                    // fire when the content actually changed.
+                    if name == "ports.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        let ports = VM.parseListeningPorts(raw)
+                        events.append { vm in
+                            guard raw != vm.lastPortsRaw else { return }
+                            vm.lastPortsRaw = raw
+                            vm.onPortsList?(ports)
+                        }
+                        continue
+                    }
+                    // docker-images.txt — `docker images` NDJSON; dashboard-only.
+                    if name == "docker-images.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var images: [DockerImage] = []
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            guard let data = line.data(using: .utf8),
+                                  let im = try? JSONDecoder().decode(DockerImageJSON.self, from: data)
+                            else { continue }
+                            images.append(DockerImage(
+                                id: im.ID, repository: im.Repository, tag: im.Tag,
+                                size: im.Size ?? "", created: im.CreatedSince ?? ""))
+                        }
+                        events.append { $0.onDockerImages?(images) }
+                        continue
+                    }
+                    // docker-volumes.txt — `docker volume inspect` NDJSON
+                    // (+ merged Size); dashboard-only.
+                    if name == "docker-volumes.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var volumes: [DockerVolume] = []
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            guard let data = line.data(using: .utf8),
+                                  let vol = try? JSONDecoder().decode(DockerVolumeJSON.self, from: data)
+                            else { continue }
+                            volumes.append(DockerVolume(
+                                name: vol.Name, driver: vol.Driver ?? "",
+                                mountpoint: vol.Mountpoint ?? "",
+                                createdAt: vol.CreatedAt ?? "", size: vol.Size ?? ""))
+                        }
+                        events.append { $0.onDockerVolumes?(volumes) }
+                        continue
+                    }
+                    // docker-binfmt.txt — space-separated qemu arch suffixes
+                    // currently emulated; may be empty (probed, none).
+                    if name == "docker-binfmt.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        let arches = raw.split(whereSeparator: { $0 == " " || $0.isNewline })
+                            .map(String.init)
+                        events.append { $0.onDockerBinfmt?(arches) }
+                        continue
+                    }
+                    // docker-arch.txt — "id<TAB>arch" per running container.
+                    if name == "docker-arch.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        var out: [(id: String, arch: String)] = []
+                        for line in raw.split(whereSeparator: \.isNewline) {
+                            let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
+                            guard cols.count >= 2 else { continue }
+                            out.append((id: String(cols[0]).trimmingCharacters(in: .whitespaces),
+                                        arch: String(cols[1]).trimmingCharacters(in: .whitespaces)))
+                        }
+                        events.append { $0.onDockerArch?(out) }
+                        continue
+                    }
+                    // docker-run-status.txt — "state\timage\tdone\ttotal" while
+                    // a detached run pulls/starts; empty when idle.
+                    if name == "docker-run-status.txt" {
+                        let raw = VM.boundedText(entry) ?? ""
+                        let cols = raw.split(separator: "\t", omittingEmptySubsequences: false)
+                        if cols.count >= 4, !cols[0].isEmpty {
+                            let status = (
+                                state: String(cols[0]), image: String(cols[1]),
+                                done: Int(cols[2]) ?? 0, total: Int(cols[3]) ?? 0)
+                            events.append { $0.onDockerRunStatus?(status) }
+                        } else {
+                            events.append { $0.onDockerRunStatus?((state: "", image: "", done: 0, total: 0)) }
+                        }
+                        continue
+                    }
+                    // docker-error.txt — one-shot: a failed docker action's
+                    // stderr. Read, delete, surface. (Deleting makes it fire
+                    // once rather than every 40ms poll.)
+                    if VM.isOneShot(name, stem: "docker-error") {
+                        if oneShotsThisTick >= VM.maxOneShotsPerTick { continue }
+                        oneShotsThisTick += 1
+                        let raw = VM.boundedText(entry)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        try? fm.removeItem(at: entry)
+                        if !raw.isEmpty { events.append { $0.onDockerError?(raw) } }
+                        continue
+                    }
+                    // worktree-error-*.txt — one-shot, same pattern: a failed
+                    // git worktree create/merge/remove, or a refused
+                    // automation run, surfaced to the host. One file per
+                    // report: refusals of runs started together each land.
+                    if VM.isOneShot(name, stem: "worktree-error") {
+                        if oneShotsThisTick >= VM.maxOneShotsPerTick { continue }
+                        oneShotsThisTick += 1
+                        let raw = VM.boundedText(entry)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        try? fm.removeItem(at: entry)
+                        if !raw.isEmpty { events.append { $0.onWorktreeError?(raw) } }
+                        continue
+                    }
+                    // agent-status-<windowIndex>.txt — one-shot: a Claude
+                    // hook reporting working/done/needsInput for that tab's
+                    // status dot. Per-window filename so two tabs signalling
+                    // at once don't clobber each other.
+                    if name.hasPrefix("agent-status-"), name.hasSuffix(".txt") {
+                        let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
+                        let raw = VM.boundedText(entry)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        try? fm.removeItem(at: entry)
+                        if let idx = Int(idxStr), !raw.isEmpty { events.append { $0.onAgentStatus?(idx, raw) } }
+                        continue
+                    }
+                    // shortcut-<key>.txt is handled by the fast path at the
+                    // top of the loop; it never reaches this scan.
+                    //
+                    // cmd-*.txt — host-written, consumed by the in-VM
+                    // tab agent. Leave alone.
+                }
+            }
+            return events
         }
     }
 

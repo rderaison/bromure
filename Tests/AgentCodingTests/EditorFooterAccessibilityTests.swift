@@ -18,7 +18,7 @@ struct EditorFooterAccessibilityTests {
     }
 
     @Test("Save and Cancel are buttons with a plain description, and pressable")
-    func footerButtonsAreNamed() throws {
+    func footerButtonsAreNamed() async throws {
         let app = NSApplication.shared
         app.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
         app.accessibilitySetValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXManualAccessibility"))
@@ -83,11 +83,16 @@ struct EditorFooterAccessibilityTests {
         osa.standardError = Pipe()
         if (try? osa.run()) != nil {
             let deadline = Date().addingTimeInterval(40)
-            while osa.isRunning, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            if osa.isRunning { osa.terminate() }
+            // Awaited, not a nested run loop: that holds the main queue, and every
+            // main-actor test in the run, for as long as this takes.
+            while osa.isRunning, Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            // No answer (System Events waits on a permission this machine hasn't
+            // given): nothing learned. Its status can't be read until it has gone.
+            let answered = !osa.isRunning
+            if !answered { osa.terminate(); osa.waitUntilExit() }
             let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if osa.terminationStatus == 0, !out.isEmpty, !out.hasPrefix("NONE") {
+            if answered, osa.terminationStatus == 0, !out.isEmpty, !out.hasPrefix("NONE") {
                 #expect(out == "Cancel,Save")
             }
         }

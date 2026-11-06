@@ -10,22 +10,24 @@ struct QuickTaskReturnTests {
         override var canBecomeKey: Bool { true }
     }
 
-    private func spin(_ s: TimeInterval) {
-        RunLoop.main.run(until: Date().addingTimeInterval(s))
+    /// Lets the panel settle. Awaited: a nested run loop would hold the main
+    /// queue, and every main-actor test in the run, for as long as it spins.
+    private func spin(_ s: TimeInterval) async {
+        try? await Task.sleep(nanoseconds: UInt64(s * 1_000_000_000))
     }
 
-    private func key(_ p: NSWindow, _ ch: String, code: UInt16, mods: NSEvent.ModifierFlags = []) {
+    private func key(_ p: NSWindow, _ ch: String, code: UInt16, mods: NSEvent.ModifierFlags = []) async {
         for t in [NSEvent.EventType.keyDown, .keyUp] {
             let e = NSEvent.keyEvent(with: t, location: .zero, modifierFlags: mods, timestamp: 0,
                                      windowNumber: p.windowNumber, context: nil, characters: ch,
                                      charactersIgnoringModifiers: ch, isARepeat: false, keyCode: code)!
             NSApp.sendEvent(e)
         }
-        spin(0.1)
+        await spin(0.1)
     }
 
     @Test("typed title + ↩ reaches onAdd")
-    func returnAdds() {
+    func returnAdds() async {
         _ = NSApplication.shared
         var added: [(String, Bool)] = []
         let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
@@ -36,9 +38,9 @@ struct QuickTaskReturnTests {
         p.contentView = NSHostingView(rootView: view.padding(.top, 16)
             .frame(width: 800, height: 700, alignment: .top))
         p.makeKeyAndOrderFront(nil)
-        spin(0.5)
-        for c in "fix it" { key(p, String(c), code: 0) }
-        key(p, "\r", code: 36)
+        await spin(0.5)
+        for c in "fix it" { await key(p, String(c), code: 0) }
+        await key(p, "\r", code: 36)
         #expect(added.map(\.0) == ["fix it"])
         p.orderOut(nil)
     }
@@ -46,7 +48,7 @@ struct QuickTaskReturnTests {
     /// Board report: one ⇥ opens Details, and ↩ there did nothing — the
     /// only way on was ⇥⇥ into the full editor.
     @Test("↩ in Details adds the task; ⌘↩ adds and keeps going; ⌥↩ is a new line")
-    func returnInDetailsAdds() {
+    func returnInDetailsAdds() async {
         _ = NSApplication.shared
         var added: [(String, String, Bool)] = []
         let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
@@ -57,19 +59,19 @@ struct QuickTaskReturnTests {
         p.contentView = NSHostingView(rootView: view.padding(.top, 16)
             .frame(width: 800, height: 700, alignment: .top))
         p.makeKeyAndOrderFront(nil)
-        spin(0.5)
-        for c in "one" { key(p, String(c), code: 0) }
-        key(p, "\t", code: 48)
-        spin(0.3)
-        for c in "a" { key(p, String(c), code: 0) }
-        key(p, "\r", code: 36, mods: .option)
-        for c in "b" { key(p, String(c), code: 0) }
-        key(p, "\r", code: 36, mods: .command)
+        await spin(0.5)
+        for c in "one" { await key(p, String(c), code: 0) }
+        await key(p, "\t", code: 48)
+        await spin(0.3)
+        for c in "a" { await key(p, String(c), code: 0) }
+        await key(p, "\r", code: 36, mods: .option)
+        for c in "b" { await key(p, String(c), code: 0) }
+        await key(p, "\r", code: 36, mods: .command)
         // Kept open, title focused again: a second one, details and ↩.
-        for c in "two" { key(p, String(c), code: 0) }
-        key(p, "\t", code: 48)
-        spin(0.3)
-        for c in "c" { key(p, String(c), code: 0) }
+        for c in "two" { await key(p, String(c), code: 0) }
+        await key(p, "\t", code: 48)
+        await spin(0.3)
+        for c in "c" { await key(p, String(c), code: 0) }
         // An input method still composing: its ↩ is the IME's, not an add.
         let editor = p.firstResponder as? NSTextView
         editor?.setMarkedText("か", selectedRange: NSRange(location: 1, length: 0),
@@ -77,7 +79,7 @@ struct QuickTaskReturnTests {
         #expect(QuickTaskView.composing(in: p))
         editor?.unmarkText()
         #expect(!QuickTaskView.composing(in: p))
-        key(p, "\r", code: 36)
+        await key(p, "\r", code: 36)
         #expect(added.map(\.0) == ["one", "two"])
         #expect(added.map(\.1) == ["a\nb", "cか"])
         #expect(added.map(\.2) == [true, false])
@@ -87,7 +89,7 @@ struct QuickTaskReturnTests {
     /// Review: with the title's @ list still open, ↩ in Details filed the
     /// task with "@" left in its title instead of picking.
     @Test("↩ in Details with the @ list open picks the assignee first")
-    func returnInDetailsPicksSuggestion() {
+    func returnInDetailsPicksSuggestion() async {
         _ = NSApplication.shared
         var added: [(String, TaskAssignment?)] = []
         let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
@@ -98,10 +100,10 @@ struct QuickTaskReturnTests {
         p.contentView = NSHostingView(rootView: view.padding(.top, 16)
             .frame(width: 800, height: 700, alignment: .top))
         p.makeKeyAndOrderFront(nil)
-        spin(0.5)
-        for c in "one" { key(p, String(c), code: 0) }
-        key(p, "\t", code: 48)
-        spin(0.3)
+        await spin(0.5)
+        for c in "one" { await key(p, String(c), code: 0) }
+        await key(p, "\t", code: 48)
+        await spin(0.3)
         func fields(_ v: NSView) -> [NSTextField] {
             (v as? NSTextField).map { [$0] } ?? v.subviews.flatMap(fields)
         }
@@ -111,13 +113,13 @@ struct QuickTaskReturnTests {
         // Back to the title for an @ (the list opens), then a click into
         // Details. (Focusing the title selects it: type it whole.)
         p.makeFirstResponder(all[0])
-        spin(0.2)
-        for c in "one @" { key(p, String(c), code: 0) }
+        await spin(0.2)
+        for c in "one @" { await key(p, String(c), code: 0) }
         p.makeFirstResponder(all[1])
-        spin(0.2)
-        key(p, "\r", code: 36)
+        await spin(0.2)
+        await key(p, "\r", code: 36)
         #expect(added.isEmpty)
-        key(p, "\r", code: 36)
+        await key(p, "\r", code: 36)
         #expect(added.map(\.0) == ["one"])
         #expect(added.first?.1 == .newAgent)
         p.orderOut(nil)
@@ -127,7 +129,7 @@ struct QuickTaskReturnTests {
     /// while the @ list was open — and ⌘↩ in the title still did: neither
     /// picked the highlighted row, the "@" left in the title.
     @Test("⌘↩ in the title with the @ list open picks first, like ↩")
-    func commandReturnInTitlePicksSuggestion() {
+    func commandReturnInTitlePicksSuggestion() async {
         _ = NSApplication.shared
         var added: [(String, TaskAssignment?, Bool)] = []
         let view = QuickTaskView(choices: TaskAssigneeChoices(sessions: [], rooms: []), here: nil,
@@ -138,11 +140,11 @@ struct QuickTaskReturnTests {
         p.contentView = NSHostingView(rootView: view.padding(.top, 16)
             .frame(width: 800, height: 700, alignment: .top))
         p.makeKeyAndOrderFront(nil)
-        spin(0.5)
-        for c in "one @" { key(p, String(c), code: 0) }
-        key(p, "\r", code: 36, mods: .command)
+        await spin(0.5)
+        for c in "one @" { await key(p, String(c), code: 0) }
+        await key(p, "\r", code: 36, mods: .command)
         #expect(added.isEmpty)
-        key(p, "\r", code: 36, mods: .command)
+        await key(p, "\r", code: 36, mods: .command)
         #expect(added.map(\.0) == ["one"])
         #expect(added.first?.1 == .newAgent)
         #expect(added.first?.2 == true)

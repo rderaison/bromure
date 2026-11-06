@@ -190,7 +190,7 @@ struct TaskLandingTests {
     }
 
     @Test("the fast-path probe against a real repository", .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/git")))
-    func checkCommandLive() throws {
+    nonisolated func checkCommandLive() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("land-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -257,7 +257,7 @@ struct TaskLandingTests {
     }
 
     @Test("pushing the target after a local merge, against a real remote", .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/git")))
-    func pushLive() throws {
+    nonisolated func pushLive() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("push-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1106,7 +1106,7 @@ struct TaskLandingTests {
 
     @Test("agentd refuses a merge into a branch that isn't checked out (no wrong-branch fallback)",
           .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
-    func agentdElsewhereGuard() throws {
+    nonisolated func agentdElsewhereGuard() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentd-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }

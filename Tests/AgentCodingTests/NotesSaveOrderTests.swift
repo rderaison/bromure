@@ -21,7 +21,8 @@ struct NotesSaveOrderTests {
             try? await Task.sleep(nanoseconds: 200_000_000)
             log.events.append("end 1"); return 1
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        // Asked for only once the first is under way, however late that is.
+        while !log.events.contains("start 1") { try? await Task.sleep(nanoseconds: 1_000_000) }
         async let second = q.run("ws") {
             log.events.append("start 2"); log.events.append("end 2"); return 2
         }
@@ -35,14 +36,24 @@ struct NotesSaveOrderTests {
     func otherKey() async {
         let q = InOrder<String, Int>()
         let log = Log()
+        // "a" is waiting before "b" is asked for, and can't finish until "b"
+        // has run, so nothing here depends on how long anything took: a main
+        // thread held by a neighbouring test can't reorder them. Counted
+        // polls, not a deadline, for the same reason; they only run out if
+        // "b" really waits for "a".
         async let slow = q.run("a") {
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            log.events.append("a waits")
+            var polls = 0
+            while !log.events.contains("b"), polls < 500 {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                polls += 1
+            }
             log.events.append("a"); return 1
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        while !log.events.contains("a waits") { try? await Task.sleep(nanoseconds: 1_000_000) }
         async let fast = q.run("b") { log.events.append("b"); return 2 }
         _ = await (slow, fast)
-        #expect(log.events == ["b", "a"])
+        #expect(log.events == ["a waits", "b", "a"])
     }
 
     @Test("the fat client's dashboard saves notes through the queue")

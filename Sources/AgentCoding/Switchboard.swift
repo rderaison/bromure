@@ -597,10 +597,13 @@ final class SwitchboardEngine {
 
     /// What the Switchboard and the user call a session: its @nickname when it
     /// has one, else a slug of its title (made unique).
-    func handles() -> [UUID: String] {
+    func handles() -> [UUID: String] { Self.handles(of: allSessions) }
+
+    /// As `handles()`, from any list of sessions (a fat client's mirror).
+    nonisolated static func handles(of sessions: [AgentSession]) -> [UUID: String] {
         var out: [UUID: String] = [:]
         var taken: Set<String> = []
-        let list = allSessions.filter { !$0.isSwitchboard && !$0.isDeleted }
+        let list = sessions.filter { !$0.isSwitchboard && !$0.isDeleted }
             .sorted { $0.createdAt < $1.createdAt }
         for s in list {
             if let n = s.nickname, !n.isEmpty { out[s.id] = n; taken.insert(n.lowercased()) }

@@ -332,6 +332,238 @@ struct Ext4FsckTests {
         }
     }
 
+    @Test("a cleared root inode is not passed as clean")
+    func clearedRootInode() throws {
+        // What `debugfs -w -R "clri <2>"` does: inode 2's record zeroed. The
+        // walk would see one inode with nothing under it; the root check
+        // reports it, so a cluster machine goes on to the real e2fsck.
+        var img = Self.buildImage()
+        let o = Self.inodeOffset(2)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("root inode is not a directory"), "\(r.output)")
+        }
+    }
+
+    @Test("a root whose \"..\" points elsewhere is not passed as clean")
+    func rootDotDotElsewhere() throws {
+        var img = Self.buildImage()
+        putLE32(&img, Self.rootDirBlock * Self.blockSize + 12, 12)   // ".." → inode 12
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("don't both point at inode 2"), "\(r.output)")
+        }
+    }
+
+    @Test("a root claiming a huge size is refused, not read")
+    func rootWithHugeSize() throws {
+        // i_size is the image's word: ~4 GiB on a one-block root. "." and
+        // ".." come from block 0 alone, the listing is refused past the
+        // bound, and the check ends at once as unfixable.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(2) + 4, 0xFFFF_F000)
+        try withImage(img) { path in
+            let t0 = Date()
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("corrupt inode 2"), "\(r.output)")
+            #expect(!r.output.contains("don't both point"), "the dots still read from block 0: \(r.output)")
+            #expect(Date().timeIntervalSince(t0) < 5)
+        }
+    }
+
+    @Test("a file claiming an enormous size is read only up to its limit")
+    func hugeFileSize() throws {
+        // A guest makes this with one `truncate -s 1T`: i_size is the image's
+        // word. The transcript reader and the browser's preview read a prefix;
+        // a whole read (or Extract) of more than the filesystem is refused.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
+        putLE32(&img, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)    // i_size_high
+        try withImage(img) { path in
+            let vol = try Ext4Volume(path: path)
+            let node = try vol.inode(12)
+            #expect(node.size == .max)
+            let head = try vol.readData(node, limit: 1 << 20)
+            #expect(head.count == 1 << 20)
+            #expect(Array(head.prefix(Self.helloContent.count)) == Self.helloContent)
+            #expect(throws: Ext4Error.self) { try vol.readData(node) }
+            let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+            FileManager.default.createFile(atPath: out, contents: nil)
+            defer { try? FileManager.default.removeItem(atPath: out) }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+            defer { try? handle.close() }
+            #expect(throws: Ext4Error.self) { try vol.writeData(node, to: handle) }
+        }
+    }
+
+    @Test("the check survives a file claiming an enormous size")
+    func fsckHugeFileSize() throws {
+        // The boot remedy and the cluster disk repair run this on their own.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
+        putLE32(&img, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)
+        try withImage(img) { path in
+            _ = try Ext4Fsck.check(imagePath: path, autoFix: false)
+        }
+    }
+
+    @Test("a superblock with impossible geometry is refused, not trusted")
+    func impossibleSuperblock() throws {
+        // Each would trap on open: a shift past the word, a division by zero,
+        // a group count (and GDT read) sized by a 64-bit block count.
+        let cases: [(String, (inout [UInt8]) -> Void)] = [
+            ("s_log_block_size 40", { putLE32(&$0, 1024 + 24, 40) }),
+            ("s_inodes_per_group 0", { putLE32(&$0, 1024 + 40, 0) }),
+            ("s_blocks_per_group 0", { putLE32(&$0, 1024 + 32, 0) }),
+            ("s_blocks_count below s_first_data_block", { putLE32(&$0, 1024 + 4, 0) }),
+            ("s_desc_size past EXT4_MAX_DESC_SIZE", {
+                putLE32(&$0, 1024 + 96, Ext4Superblock.INCOMPAT_FILETYPE | Ext4Superblock.INCOMPAT_64BIT)
+                putLE16(&$0, 1024 + 254, 4096)
+            }),
+            ("a 64-bit block count of 2^64-1", {
+                putLE32(&$0, 1024 + 96, Ext4Superblock.INCOMPAT_FILETYPE | Ext4Superblock.INCOMPAT_64BIT)
+                putLE32(&$0, 1024 + 4, 0xFFFF_FFFF)
+                putLE32(&$0, 1024 + 0x150, 0xFFFF_FFFF)
+            }),
+        ]
+        for (name, corrupt) in cases {
+            var img = Self.buildImage()
+            corrupt(&img)
+            try withImage(img) { path in
+                #expect(throws: Ext4Error.self, "\(name)") { _ = try Ext4Volume(path: path) }
+            }
+        }
+    }
+
+    @Test("a group descriptor table past the image's end is refused, not indexed")
+    func gdtPastImageEnd() throws {
+        // The superblock claims many groups (a big filesystem); the image file
+        // holds a few KiB, so the descriptor table read comes back short.
+        var img = Self.buildImage()
+        putLE32(&img, 1024 + 4, 40_000_000)                 // s_blocks_count
+        putLE32(&img, 1024 + 32, 8)                         // s_blocks_per_group → 5M groups
+        try withImage(img) { path in
+            #expect(throws: Ext4Error.self) { _ = try Ext4Volume(path: path) }
+        }
+    }
+
+    @Test("Extract writes the file a block at a time, byte for byte")
+    func extractStreams() throws {
+        try withImage(Self.buildImage()) { path in
+            let vol = try Ext4Volume(path: path)
+            let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+            FileManager.default.createFile(atPath: out, contents: nil)
+            defer { try? FileManager.default.removeItem(atPath: out) }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+            #expect(try vol.writeData(try vol.inode(12), to: handle) == UInt64(Self.helloContent.count))
+            try handle.close()
+            #expect(try Data(contentsOf: URL(fileURLWithPath: out)) == Data(Self.helloContent))
+        }
+    }
+
+    @Test("an extent index that points back at itself is refused, not followed")
+    func extentCycle() throws {
+        // hello.txt becomes an extent-mapped file whose depth-1 index names
+        // block 13, and block 13 is another depth-1 node naming itself.
+        var img = Self.buildImage()
+        let o = Self.inodeOffset(12)
+        putLE32(&img, o + 32, Ext4Inode.EXTENTS_FL)               // i_flags
+        func extentIndex(_ at: Int, child: UInt32) {
+            putLE16(&img, at, 0xF30A)                              // magic
+            putLE16(&img, at + 2, 1)                               // entries
+            putLE16(&img, at + 4, 4)                               // max
+            putLE16(&img, at + 6, 1)                               // depth
+            putLE32(&img, at + 12, 0)                              // ei_block
+            putLE32(&img, at + 16, child)                          // ei_leaf_lo
+        }
+        extentIndex(o + 40, child: 13)
+        extentIndex(13 * Self.blockSize, child: 13)
+        try withImage(img) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(throws: Ext4Error.self) { try vol.readData(try vol.inode(12), limit: 4096) }
+        }
+    }
+
+    @Test("a directory entry naming a cleared inode is not passed as clean")
+    func entryNamingAClearedInode() throws {
+        // hello.txt's record zeroed, as `debugfs clri` does; the root still
+        // names it. The error flag (forcing the guest's boot check) stays.
+        var img = Self.buildImage()
+        putLE16(&img, 1024 + 58, le16(img, 1024 + 58) | 0x0002)
+        let o = Self.inodeOffset(12)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("inode 12: referenced by a directory entry but unused"), "\(r.output)")
+            #expect((try Ext4Volume(path: path)).sb.hasErrors)
+        }
+    }
+
+    @Test("a directory entry naming a deleted inode is not passed as clean")
+    func entryNamingADeletedInode() throws {
+        var img = Self.buildImage()
+        putLE16(&img, Self.inodeOffset(12) + 26, 0)            // links_count 0
+        putLE32(&img, Self.inodeOffset(12) + 20, 1781652178)   // i_dtime set
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
+    @Test("a directory entry naming an inode with no links is not passed as clean, dtime or not")
+    func entryNamingAnUnlinkedInode() throws {
+        var img = Self.buildImage()
+        putLE16(&img, Self.inodeOffset(12) + 26, 0)            // links_count 0, i_dtime still 0
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
+    @Test("orphans, devices and fast symlinks are in use")
+    func inUseWithoutBlocks() throws {
+        // A character device and a fast symlink (target inline, no blocks)
+        // reached from the root; an orphan-list inode (no links, its dtime
+        // the next orphan) that no entry names. None of them is "unused".
+        var img = Self.buildImage()
+        var o = Self.inodeOffset(12)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        putLE16(&img, o, 0x21A4)                                // crw-r--r--
+        putLE16(&img, o + 26, 1)
+        putLE32(&img, o + 40, 0x0103)                           // device number in i_block
+        o = Self.inodeOffset(13)
+        putLE16(&img, o, 0xA1FF)                                // lrwxrwxrwx
+        putLE32(&img, o + 4, 4)
+        putLE16(&img, o + 26, 1)
+        for (i, c) in Array("/etc".utf8).enumerated() { img[o + 40 + i] = c }
+        // The root's third entry becomes "dev" (12) + a fourth, "lnk" (13).
+        var d = Self.rootDirBlock * Self.blockSize + 24
+        func dirent(_ ino: UInt32, _ name: String, _ type: UInt8, _ recLen: UInt16) {
+            putLE32(&img, d, ino); putLE16(&img, d + 4, recLen)
+            img[d + 6] = UInt8(name.utf8.count); img[d + 7] = type
+            for (i, c) in Array(name.utf8).enumerated() { img[d + 8 + i] = c }
+            d += Int(recLen)
+        }
+        dirent(12, "dev", 3, 12)
+        dirent(13, "lnk", 7, UInt16(Self.blockSize - 36))
+        o = Self.inodeOffset(14)                                // the orphan
+        putLE16(&img, o, 0x81A4)
+        putLE32(&img, o + 20, 0)                                // end of the orphan list
+        putLE32(&img, 1024 + 0xE8, 14)                          // s_last_orphan
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.clean, "\(r.output)")
+            #expect(!r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
     @Test("real image (env-gated): native fsck parses, replays, and verifies")
     func realImage() throws {
         // Point BROMURE_EXT4_TEST_IMAGE at a *clone* of a real home/disk image

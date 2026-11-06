@@ -106,7 +106,9 @@ struct BootBudgetTests {
         r.release()   // idempotent
         // Never checked again (a caller stuck in a call): it still ends.
         let stuck = BootBudget(seconds: 0.2, reason: "test")
-        try await Task.sleep(nanoseconds: 600_000_000)
+        // On a global queue, so a loaded machine runs it late: the point is
+        // that it ends with nobody asking, not to the millisecond.
+        for _ in 0..<600 where stuck.holdsAwake { try await Task.sleep(nanoseconds: 50_000_000) }
         #expect(!stuck.holdsAwake)
     }
 

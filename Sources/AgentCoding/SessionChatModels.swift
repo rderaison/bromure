@@ -292,6 +292,14 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// until it lands as a turn. Optional so an older saved queue decodes.
     var delivered: Bool? = nil
     var isDelivered: Bool { delivered == true }
+    /// Typed straight into the agent's own queue when it was sent. Apart from
+    /// `delivered`: this one can still be recalled from the agent's queue, and
+    /// is never typed again if it seems lost.
+    var handedOver: Bool?
+    /// The agent has it: only its own turn is left to come. Nothing should say
+    /// it's still waiting to be sent. Never while held: taken back (omp's Esc)
+    /// or found lost, it's waiting on Bromure again, whatever happened before.
+    var agentHasIt: Bool { !held && (isDelivered || handedOver == true) }
     /// Times Bromure typed it in without the agent ever taking it (typed as
     /// a dialog closed, into a screen still redrawing): put back on hold
     /// once, then shown as not delivered — never silently dropped.

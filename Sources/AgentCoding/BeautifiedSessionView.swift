@@ -141,6 +141,9 @@ extension BeautifiedTranscriptProvider {
         guard let idx = activeTabIndex() else { return .none }
         guard let meta = await execGuest(AgentSessionLocator.floorProbeCommand(window: idx), timeout: 8)
         else { return .failed }
+        // Switched away while that was on the wire: don't fetch a megabyte or
+        // two of conversation for a chat nobody's looking at.
+        if Task.isCancelled { return .none }
         guard let probe = AgentSessionLocator.parseFloorProbe(meta) else { return .none }
         let cwd = probe.cwd
         let since = probe.since
@@ -293,18 +296,36 @@ final class BeautifiedSessionModel: ObservableObject {
     /// `TranscriptRow.userCollapses`). Kept here so a remount of the chat
     /// (a layout switch, a zoom) doesn't fold them again.
     @Published var expandedMessages: Set<Int> = []
-    /// What's typed in the composer. Kept in its own observable
-    /// (`composer`), NOT published by the model: every model change
-    /// re-renders the whole chat, transcript included, and a keystroke — or
-    /// a 200 KB paste — must only re-render the composer (`ComposerObserver`).
+    /// What's typed in the composer. Kept in its own observable (`composer`),
+    /// NOT published by the model: every model change re-renders the whole
+    /// chat, transcript included. Setting this replaces what the field shows
+    /// (a send clearing it, a command completed, a draft brought back).
     var composerText: String {
         get { composer.text }
         set {
-            composer.text = newValue
+            composer.replace(newValue)
             if let draftKey { ComposerDrafts[draftKey].text = newValue }
         }
     }
     let composer = ComposerTextStore()
+
+    /// The field reports what was typed: it already shows it, so nothing needs
+    /// redrawing unless what's derived from the text changed (`ComposerTextStore`).
+    func composerTyped(_ text: String) {
+        let previous = composer.text
+        composer.typed(text)
+        if let draftKey { ComposerDrafts[draftKey].text = text }
+        // A file dropped on the field arrives as its path. A key typed can't be
+        // one, and telling needs a round trip to the pasteboard daemon per key.
+        guard ComposerText.mayBeDrop(from: previous, to: text) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.composer.text == text else { return }
+            let (rest, files) = DroppedFile.absorbHostPaths(in: text)
+            guard !files.isEmpty else { return }
+            self.drop(files)
+            self.composerText = rest
+        }
+    }
     /// Where this chat's unsent draft is kept (`ComposerDrafts`): the machine
     /// and tab it's for. Setting it brings the draft back.
     var draftKey: String? {
@@ -676,6 +697,7 @@ final class BeautifiedSessionModel: ObservableObject {
     private static let maxBuffers = 3
     private var currentPath: String?
     private var pqLine = Data()
+    private var firstScanRunning = false
     /// The history changed since the last parse.
     private var parseDirty = false
     private var lastParseAt = Date.distantPast
@@ -968,10 +990,13 @@ final class BeautifiedSessionModel: ObservableObject {
             guard !q.held else { return false }
             // A TUI may merge several queued messages into one turn.
             if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            // Sent with files: the agent takes their paths in as attachments,
+            // so its turn never carries the text Bromure typed.
+            if Self.attachmentTurnArrived(q.text, since: turns.dropFirst(q.baseline)) { return true }
             // One Bromure typed in that came out a little changed (a
             // composer completion rewrote its end, the agent re-flowed it):
             // the turn it became still resolves the row.
-            if q.isDelivered, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
+            if q.agentHasIt, turns.dropFirst(q.baseline).contains(where: { Self.typedBecame(q.text, turn: $0) }) {
                 return true
             }
             // Or take it in as something other than a user turn (Claude's
@@ -1039,6 +1064,26 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         guard f == ChatQueueStore.notDeliveredText || f == notTakenText else { return false }
         return since.contains { $0.contains(q.text) || typedBecame(q.text, turn: $0) }
+    }
+
+    /// Whether a message sent with files (their guest paths after its words,
+    /// `send`) has become a turn. The agent takes the paths in as attachments
+    /// (Claude writes an image as "[Image #1]", or not at all in the text), so
+    /// the turn is compared without them: it carries the words, or, for a
+    /// message that was only files, it's any turn since.
+    nonisolated static func attachmentTurnArrived(_ typed: String, since turns: ArraySlice<String>) -> Bool {
+        guard typed.contains(GuestDrop.baseDir) else { return false }
+        let want = withoutAttachments(typed)
+        if want.isEmpty { return !turns.isEmpty }
+        return turns.contains { withoutAttachments($0).contains(want) }
+    }
+
+    /// The words of a message, without attachment paths or placeholders.
+    nonisolated static func withoutAttachments(_ s: String) -> String {
+        let noImages = s.replacingOccurrences(of: #"\[Image #\d+\]"#, with: " ", options: .regularExpression)
+        return noImages.split(whereSeparator: \.isWhitespace)
+            .filter { !$0.hasPrefix(GuestDrop.baseDir) && !$0.hasPrefix("~/.bromure/drops/") }
+            .joined(separator: " ")
     }
 
     /// Whitespace runs folded, ends trimmed.
@@ -1257,8 +1302,19 @@ final class BeautifiedSessionModel: ObservableObject {
             buffers[hit.path] = hit.buffer
             bufferOrder = [hit.path]
             currentPath = hit.path
-            parseDirty = true
-            restored = true
+            if hit.parsed.isEmpty {
+                parseDirty = true
+                restored = true
+            } else {
+                // Already parsed: on show in this very frame, not after a parse
+                // that takes hundreds of milliseconds on a long conversation.
+                // With the pending question those items were parsed with, or a
+                // question answered since would never be parsed away.
+                pqLine = hit.pq
+                applyParsed(hit.parsed)
+                rebuild()
+                loading = false
+            }
         }
         // The history on hand shows at once — over a tunnel the first poll
         // (terminal scan, then the fetch) is seconds away — with a quiet
@@ -1282,6 +1338,7 @@ final class BeautifiedSessionModel: ObservableObject {
             if let seedID { await self?.showCopy(seedID) }
             while !Task.isCancelled {
                 await self?.poll()
+                if Task.isCancelled { break }
                 if self?.catchingUp == true { self?.catchingUp = false }
                 let busy = self?.working ?? false
                 let background = self?.background ?? false
@@ -1293,6 +1350,8 @@ final class BeautifiedSessionModel: ObservableObject {
     /// The downloaded history, parsed and shown before any network round trip.
     private func showCached() async {
         let parsed = await parseCurrent()
+        // Stopped meanwhile: the poll that replaced this one parses it again.
+        guard !Task.isCancelled else { parseDirty = true; return }
         guard !parsed.isEmpty else { return }
         applyParsed(parsed)
         rebuild()
@@ -1308,7 +1367,7 @@ final class BeautifiedSessionModel: ObservableObject {
         let parsed = await Task.detached(priority: .userInitiated) {
             GuestSharePaths.rewrite(AgentTranscript.parse(data, agent: agent), names: names)
         }.value
-        guard !parsed.isEmpty, parsedItems.isEmpty else { return }
+        guard !Task.isCancelled, !parsed.isEmpty, parsedItems.isEmpty else { return }
         applyParsed(parsed)
         rebuild()
         if loading { loading = false }
@@ -1339,17 +1398,18 @@ final class BeautifiedSessionModel: ObservableObject {
         detachQueue()
         flushSink(force: true)
         if let key = provider.historyCacheKey, let path = currentPath, let buf = buffers[path] {
-            Self.remember(key, path: path, buffer: buf)
+            // Parsed only if it's what the buffer holds: a parse can be pending.
+            Self.remember(key, path: path, buffer: buf, parsed: parseDirty ? [] : parsedItems, pq: pqLine)
         }
     }
 
     /// Downloaded history kept across chat models, by `historyCacheKey`,
     /// most recent last, within `historyCacheLimit` bytes.
-    private static var historyCache: [String: (path: String, buffer: TranscriptBuffer)] = [:]
+    private static var historyCache: [String: (path: String, buffer: TranscriptBuffer, parsed: [TranscriptItem], pq: Data)] = [:]
     private static var historyCacheOrder: [String] = []
     private static let historyCacheLimit = 96_000_000
-    private static func remember(_ key: String, path: String, buffer: TranscriptBuffer) {
-        historyCache[key] = (path, buffer)
+    private static func remember(_ key: String, path: String, buffer: TranscriptBuffer, parsed: [TranscriptItem], pq: Data) {
+        historyCache[key] = (path, buffer, parsed, pq)
         historyCacheOrder.removeAll { $0 == key }
         historyCacheOrder.append(key)
         var total = historyCache.values.reduce(0) { $0 + $1.buffer.data.count }
@@ -1357,6 +1417,39 @@ final class BeautifiedSessionModel: ObservableObject {
             let old = historyCacheOrder.removeFirst()
             total -= historyCache.removeValue(forKey: old)?.buffer.data.count ?? 0
         }
+    }
+
+    /// Fetch and parse a conversation into `historyCache` with no chat open, so
+    /// opening it shows it at once. Only reads: no scan, no queue, no sink.
+    /// False when the machine couldn't be asked or there's nothing to read.
+    @discardableResult
+    static func preloadHistory(provider: BeautifiedTranscriptProvider, agent: String?, profileID: UUID?) async -> Bool {
+        guard let key = provider.historyCacheKey else { return false }
+        let held = historyCache[key]
+        let known = held.map { ($0.path, $0.buffer.end) }
+        guard case .fetched(let f) = await provider.readTranscript(known: known, mode: .tail, agent: agent) else {
+            return false
+        }
+        // A chat that opened meanwhile has moved on from what this read extends.
+        guard historyCache[key]?.buffer.end == held?.buffer.end else { return false }
+        var buf: TranscriptBuffer
+        if let held, held.path == f.path, f.start == held.buffer.end {
+            guard !f.chunk.isEmpty else { return true }   // nothing new: what's held stands
+            buf = held.buffer
+            buf.data.append(f.chunk)
+            buf.end = f.end
+        } else {
+            buf = TranscriptBuffer(data: f.chunk, base: f.start, end: f.end)
+        }
+        if buf.data.count > buf.budget { trimHead(&buf) }
+        let input = buf.data
+        let names = provider.guestPathNames
+        let items = await Task.detached(priority: .utility) {
+            GuestSharePaths.rewrite(AgentTranscript.parse(input), names: names)
+        }.value
+        guard historyCache[key]?.buffer.end == held?.buffer.end else { return false }
+        remember(key, path: f.path, buffer: buf, parsed: BromureBlockLog.shared.annotate(items, profileID: profileID), pq: Data())
+        return true
     }
 
     /// Set `working`, tracking when a working spell begins (for the elapsed
@@ -1385,7 +1478,28 @@ final class BeautifiedSessionModel: ObservableObject {
         // an auth error) can be on screen before any transcript store exists, so
         // it must not sit behind the transcript fetch's early return. (Kept
         // warm off stage: skipped — nobody sees its cards until it's back.)
-        if !background { await scanTerminal() } else { screenSaysBusy = false; await scanDialogOffStage() }
+        if background {
+            screenSaysBusy = false
+            await scanDialogOffStage()
+        } else if parsedItems.isEmpty {
+            // Nothing on show: over a tunnel the scan is a whole round trip the
+            // conversation shouldn't wait behind. Side by side, not skipped: a
+            // card still appears when the scan answers, as it did. One at a time,
+            // for a chat that stays empty over a link slower than the scan interval.
+            if !firstScanRunning {
+                firstScanRunning = true
+                Task { [weak self] in
+                    await self?.scanTerminal()
+                    self?.firstScanRunning = false
+                }
+            }
+        } else {
+            await scanTerminal()
+        }
+        // Stopped mid-poll (the user switched away): an exec under way isn't
+        // interrupted by the cancel, so nothing after an await may assume
+        // this chat is still the one on show. No read, no sink, no parse.
+        if Task.isCancelled { return }
         // The session's own agent wins over the tab label's guess (an omp
         // under bun reads "bash", and fell back to the workspace's main
         // agent: "Message Kimi Code…" over an omp chat).
@@ -1398,6 +1512,7 @@ final class BeautifiedSessionModel: ObservableObject {
         // every 0.4–1.2 s — five chats in a room re-laid out their text
         // continuously for nothing.
         let read = await provider.readTranscript(known: known, mode: .tail, agent: agentKind)
+        if Task.isCancelled { return }
         let issue = loadTracker.record(read, at: Date(), showing: !parsedItems.isEmpty, working: isWorking)
         if issue != loadIssue { loadIssue = issue }
         guard case .fetched(let fetch) = read else {
@@ -1419,6 +1534,8 @@ final class BeautifiedSessionModel: ObservableObject {
         // of seconds — polls in between still bank the file's growth.
         if parseDirty, !(lastParseDuration > 0.25 && Date().timeIntervalSince(lastParseAt) < 2) {
             let parsed = await parseCurrent()
+            // Back on stage meanwhile (a warm chat): the new poll parses it.
+            guard !Task.isCancelled else { parseDirty = true; return }
             // Don't blank a populated transcript on a transient empty read (see
             // `emptyParseStreak`) — that's the "beautified view goes all white" bug.
             // Keep the last good items until either real content returns or the
@@ -1451,7 +1568,7 @@ final class BeautifiedSessionModel: ObservableObject {
     /// `continuityPrompts` of the user's, or `continuityBytes`.
     private func backfillContinuity() async {
         for _ in 0..<8 {
-            guard canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
+            guard !Task.isCancelled, canLoadEarlier, !loadingEarlier, let path = currentPath, let held = buffers[path],
                   held.data.count < Self.continuityBytes,
                   Self.userPrompts(in: parsedItems) < Self.continuityPrompts
             else { return }
@@ -2156,6 +2273,17 @@ final class BeautifiedSessionModel: ObservableObject {
                 let key = self.queueKey
                 self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
+                if native, outcome == .typed {
+                    self.queueStore.update(key) { l in
+                        guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
+                        l[i].handedOver = true
+                    }
+                    self.sending = false
+                    // The turn may already be there: an agent that had just
+                    // finished takes it at once. Look now, not at the next poll.
+                    await self.poll()
+                    return
+                }
                 if outcome != .typed {
                     // Never typed (a dialog came up, or typing failed):
                     // Bromure holds it, saying why when it can't retry.
@@ -2622,22 +2750,28 @@ final class BeautifiedSessionModel: ObservableObject {
 }
 
 /// Local provider: runs the transcript + type commands in the workspace VM over
-/// vsock (`guestExec`), resolving the active tab's guest cwd (the transcript
-/// store is keyed off it) and caching it per tmux window.
+/// vsock (`guestExec`), resolving its window's guest cwd (the transcript
+/// store is keyed off it).
 @MainActor
 final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
     let accent: Color
     private weak var pane: SessionPane?
+    /// The tmux window this chat is FOR, never the pane's active tab: a poll
+    /// under way when the user switched sessions read the NEW tab's
+    /// transcript into the old chat, whose sink saved it as the old
+    /// session's copy — shown as that session's opening frame next time.
+    private let window: Int
 
-    init(pane: SessionPane) {
+    init(pane: SessionPane, window: Int) {
         self.pane = pane
+        self.window = window
         self.accent = Color(hex: pane.profile.color.hexInUI)
     }
 
+    /// The window while the roster still lists it (gone = nothing to read,
+    /// and nothing to type into — not somebody else's tab).
     func activeTabIndex() -> Int? {
-        guard let pane, pane.model.tabs.indices.contains(pane.model.activeIndex)
-        else { return nil }
-        return pane.model.tabs[pane.model.activeIndex].index
+        pane?.model.tabs.contains { $0.index == window } == true ? window : nil
     }
 
     func execGuest(_ command: String, timeout: Int) async -> String? {
@@ -2650,7 +2784,9 @@ final class LocalTranscriptProvider: BeautifiedTranscriptProvider {
         return try? await delegate.guestFileOp(profileID: pane.profile.id, op: op, timeout: 30)
     }
 
-    func isWorking() -> Bool { pane?.model.activeTab?.agentStatus == .working }
+    func isWorking() -> Bool {
+        pane?.model.tabs.first { $0.index == window }?.agentStatus == .working
+    }
 
     func isWorking(window: Int) -> Bool? { pane?.chatIsWorking(window: window) }
 
@@ -2741,6 +2877,11 @@ private struct DelegationPanelHost: View {
 /// tail moves — short of the view (stuck mid-chat) or past it (blank) —
 /// for seconds in a grid of busy cells. So it's the user's own wheel or
 /// drag over this scroll view that decides (`probe` marks where it is).
+/// `__shot-ui chat-indicators`: see `TailFollow.assumeUserScrolling`.
+enum ChatScrollDebug {
+    static func assumeUserScrolling() { TailFollow.assumeUserScrolling = true }
+}
+
 private final class TailFollow {
     /// Follow the tail through layout drift.
     var sticky = true
@@ -2750,7 +2891,10 @@ private final class TailFollow {
     var lastMarker: CGFloat?
     /// The user is scrolling this transcript: a wheel or drag over it
     /// just now (a wheel notch scrolls on for a few frames after it).
+    /// `__shot-ui chat-indicators`: scrolling from code counts as the user's.
+    static var assumeUserScrolling = false
     var userScrolling: Bool {
+        if Self.assumeUserScrolling { return true }
         guard let v = probe.view, let e = Self.lastEvent, e.window === v.window,
               Date().timeIntervalSince(e.at) < 0.4 else { return false }
         return v.bounds.contains(v.convert(e.location, from: nil))
@@ -2871,6 +3015,8 @@ final class LayoutShiftGuard {
 /// width step and expanded messages reuses them instead of cutting every
 /// reply again (the body runs on every model change).
 final class TranscriptRowsMemo {
+    /// Above which rows a day or a long pause is marked, for `cached`.
+    private(set) var markers: [Int: TranscriptTimeMarker] = [:]
     private var items: [TranscriptItem] = []
     private var chunkLimit = -1
     private var expanded: Set<Int> = []
@@ -2882,7 +3028,24 @@ final class TranscriptRowsMemo {
         self.chunkLimit = chunkLimit
         self.expanded = expanded
         cached = TranscriptRow.layout(items, chunkLimit: chunkLimit, expanded: expanded)
+        markers = TranscriptTimeline.markers(cached.rows)
         return cached
+    }
+}
+
+/// Reports where a timed row sits (`RowTimesKey`); nothing for an untimed one.
+private struct RowTimeProbe: ViewModifier {
+    let date: Date?
+    let space: String
+    func body(content: Content) -> some View {
+        if let date {
+            content.background(GeometryReader { g in
+                Color.clear.preference(key: RowTimesKey.self,
+                                       value: [.init(date: date, minY: g.frame(in: .named(space)).minY)])
+            })
+        } else {
+            content
+        }
     }
 }
 
@@ -2904,6 +3067,8 @@ private struct TailFollowProbe: NSViewRepresentable {
 /// Codex-desktop-style composer. Mounted into the pane's container by
 /// `SessionPane.updateNativeTerminalMount()` when the view mode is `.beautified`.
 struct BeautifiedSessionView: View {
+    /// How long the "While you were away" panel shows before it goes.
+    static let whileAwayShownNanos: UInt64 = 3_000_000_000
     @ObservedObject var model: BeautifiedSessionModel
     /// Which parts to draw. A room's grid shows transcripts only and one
     /// composer below, addressed to the Switchboard or the focused cell.
@@ -2936,6 +3101,23 @@ struct BeautifiedSessionView: View {
     @State private var resizeFrozen: CGSize?
     /// The chat's rows, kept between renders (a reference: never re-renders).
     @State private var rowsMemo = TranscriptRowsMemo()
+    /// What's new on arriving (the panel), and where it begins (the divider,
+    /// which stays after the panel is put away).
+    @State private var whileAway: UnseenSummary?
+    /// The pointer is over the "While you were away" panel: it stays.
+    @State private var hoveringAway = false
+    @State private var newSince: Date?
+    @State private var arrival = ChatArrivalTracker()
+    /// Held, not observed: only `ScrubLabelView` observes it. As a @StateObject
+    /// here, each change of the label would re-run this whole view, and every
+    /// row's position report with it.
+    @State private var scrub = ScrubLabelState()
+    @State private var threadMemo = SwitchboardThreadMemo()
+    @State private var threading: SwitchboardThreadingInputs?
+    /// The Switchboard's chain on show alone (nil: the whole conversation).
+    @State private var threadFilter: String?
+    /// The filter was cleared to show a search hit: stay there, not at the end.
+    @State private var keepPlaceOnFilterChange = false
 
     /// The newest items the chat lays out: at most `limit` of them, and
     /// newer-to-older until about `chars` of text (`renderWeight`) — the
@@ -2995,16 +3177,14 @@ struct BeautifiedSessionView: View {
     /// What's typed after a leading "/" — the palette shows for it until a
     /// space (the command is chosen) or a newline.
     private var paletteQuery: String? {
-        let t = model.composerText
-        guard t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") else { return nil }
-        return String(t.dropFirst())
+        model.composer.shape.palette
     }
     /// "@…" being typed as the last word: the sessions with a nickname
     /// that match, for the composer to complete ("Ask @seclio to…"). Never
     /// inside a slash command; gone once the word is closed with a space.
     private var mentionQuery: String? {
         guard model.peerMentions != nil else { return nil }
-        return PeerMentionCompletion.query(in: model.composerText)
+        return model.composer.shape.mention
     }
     /// Every session but this one: by its nickname, or by the name it
     /// would get (tagged so), matched on the name or the title. Named
@@ -3158,8 +3338,34 @@ struct BeautifiedSessionView: View {
         }
     }
 
+    /// The Switchboard's conversation told apart by session; nil for any other chat.
+    /// Reads no store: a store read in a body re-runs the whole transcript on every
+    /// change to it, and over a fat client that's every snapshot (see `refreshThreading`).
+    private var threaded: ThreadedConversation? {
+        guard let threading else { return nil }
+        return threadMemo.conversation(model.items, aliases: threading.aliases)
+    }
+
+    /// What threading takes from the session store, looked at once a moment off
+    /// the render path, and written only when it has changed.
+    private func refreshThreading() {
+        guard let me = model.currentSession?(), me.isSwitchboard, let store = model.sessionStore else {
+            if threading != nil { threading = nil }
+            return
+        }
+        let next = SwitchboardThreadingInputs(sessions: store.sessions)
+        if next != threading { threading = next }
+    }
+
     @ViewBuilder
     private var transcriptParts: some View {
+            if let conversation = threaded, !conversation.threads.isEmpty {
+                SwitchboardThreadBar(
+                    conversation: conversation, filter: $threadFilter,
+                    waiting: threading?.waiting ?? [],
+                    onOpen: model.openSession)
+                    .onAppear { if let picked = SwitchboardThreadsPreview.picked { threadFilter = picked } }
+            }
             transcript
                 // A window drag: the full transcript holds its size (no
                 // re-layout) and hides; a small preview of its tail — kept
@@ -3174,6 +3380,9 @@ struct BeautifiedSessionView: View {
                         .equatable()
                         .opacity(liveResizing ? 1 : 0)
                         .allowsHitTesting(false)
+                }
+                .overlay(alignment: .top) {
+                    GuestUnresponsiveBanner(profileID: model.currentSession?()?.profileID)
                 }
                 // Shown from what was on hand; the latest round is on its way.
                 // In the top-right corner, clear of where a line begins (centred
@@ -3213,7 +3422,7 @@ struct BeautifiedSessionView: View {
                     }
                     // The resize preview, kept ready (at most 2 s behind).
                     while !Task.isCancelled {
-                        let tail = Self.resizeTail(model.items, limit: model.renderLimit)
+                        let tail = Self.resizeTail(threaded?.items(in: threadFilter) ?? model.items, limit: model.renderLimit)
                         if tail != previewItems { previewItems = tail }
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
@@ -3275,7 +3484,7 @@ struct BeautifiedSessionView: View {
                     ? NSLocalizedString("Message the agent… (or drop files)", comment: "beautified composer")
                     : String(format: NSLocalizedString("Message %@… (or drop files)", comment: "beautified composer"),
                              model.agentDisplayName)),
-                text: $model.composerText,
+                text: Binding(get: { model.composer.text }, set: { model.composerTyped($0) }),
                 autofocus: true,
                 busy: model.sending,
                 accent: model.accent,
@@ -3284,14 +3493,6 @@ struct BeautifiedSessionView: View {
                 onStop: { model.interrupt() },
                 onKey: { handlePaletteKey($0) },
                 onSend: { model.send() })
-            // A drop that lands ON the field pastes the file's host path
-            // (the field takes the drag first): turn it into a chip.
-            .onChange(of: model.composerText) { _, text in
-                let (rest, files) = DroppedFile.absorbHostPaths(in: text)
-                guard !files.isEmpty else { return }
-                model.drop(files)
-                model.composerText = rest
-            }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
     }
@@ -3396,11 +3597,13 @@ struct BeautifiedSessionView: View {
                         // While the window is being resized, only the last
                         // couple of screens re-flow live; the rest comes back
                         // when the drag ends.
+                        let conversation = threaded
+                        let source = conversation?.items(in: threadFilter) ?? model.items
                         let visible = !settled
-                            ? Self.resizeTail(model.items, limit: model.renderLimit)
-                            : Self.renderWindow(model.items, limit: model.renderLimit, chars: model.renderChars,
+                            ? Self.resizeTail(source, limit: model.renderLimit)
+                            : Self.renderWindow(source, limit: model.renderLimit, chars: model.renderChars,
                                                 expanded: model.expandedMessages)
-                        let hidden = model.items.count - visible.count
+                        let hidden = source.count - visible.count
                         if hidden > 0 || model.canLoadEarlier {
                             HStack {
                                 Spacer()
@@ -3436,7 +3639,7 @@ struct BeautifiedSessionView: View {
                                         }
                                     } else if hidden > 0 {
                                         let n = max(1, Self.renderWindow(
-                                            model.items,
+                                            source,
                                             limit: model.renderLimit + BeautifiedSessionModel.renderStep,
                                             chars: model.renderChars + BeautifiedSessionModel.renderCharStep,
                                             expanded: model.expandedMessages).count
@@ -3485,10 +3688,35 @@ struct BeautifiedSessionView: View {
                         })?.id
                         // A reply cut into rows: Copy on ANY of its rows
                         // takes the whole reply (`layout.replies`).
+                        let markers = rowsMemo.markers
+                        let newRow = newSince.flatMap { UnseenSummary.firstRow(rows, since: $0) }
+                        // Filtered to one chain, every row is about it: no headers.
+                        let threadHeaders = conversation?.effective(threadFilter) == nil ? (conversation?.headers(rows) ?? [:]) : [:]
                         ForEach(rows) { row in
+                            if let marker = markers[row.id] {
+                                TranscriptTimeMarkerRow(marker: marker)
+                            }
+                            if row.id == newRow, let newSince {
+                                TranscriptNewDivider(since: newSince).id(Self.newDividerID)
+                            }
+                            if let conversation, let keys = threadHeaders[row.id] {
+                                SwitchboardThreadHeader(threads: keys.compactMap(conversation.thread),
+                                                        onPick: { threadFilter = $0 })
+                            }
                             switch row {
                             case .item(let item):
-                                itemRow(item, lastUserID: lastUserID, layout: layout)
+                                if let conversation, case .userText(let t) = item.kind,
+                                   let notice = DelegationNotice.stripSwitchboard(t) {
+                                    SwitchboardNoticeLine(
+                                        text: notice,
+                                        thread: conversation.threadsOf[item.id]?.first.flatMap(conversation.thread),
+                                        time: item.timestamp, onPick: { threadFilter = $0 })
+                                        .id(item.id)
+                                        .modifier(RowTimeProbe(date: item.timestamp, space: Self.scrollSpace))
+                                } else {
+                                    itemRow(item, lastUserID: lastUserID, layout: layout)
+                                        .modifier(RowTimeProbe(date: Self.scrubDate(item), space: Self.scrollSpace))
+                                }
                             case .activity(let run):
                                 ActivityGroupView(items: run, live: row.id == liveRun)
                                     .id(row.id)
@@ -3618,6 +3846,10 @@ struct BeautifiedSessionView: View {
                     if r != viewportHeight { viewportHeight = r; tailFollow.resetBudget() }
                     model.debugGeometry["viewport"] = r
                 }
+                .onPreferenceChange(RowTimesKey.self) { rows in
+                    // Not a state of this view: the label redraws, the chat doesn't.
+                    scrub.rowsMoved(rows, following: tailFollow.sticky)
+                }
                 .onPreferenceChange(TailOffsetKey.self) { marker in
                     // Runs inside the layout pass that moved the marker:
                     // record, decide, and leave every scroll to `snap`
@@ -3662,6 +3894,33 @@ struct BeautifiedSessionView: View {
                         snapToTail(proxy)
                     }
                 }
+                .onAppear { refreshThreading() }   // no unthreaded first frame
+                .task {
+                    while !Task.isCancelled {
+                        refreshThreading()
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    }
+                }
+                .task(id: parts == .all) {
+                    // What's new, once a moment: see `ChatArrivalTracker`.
+                    guard parts == .all else { return }
+                    while !Task.isCancelled {
+                        if let id = model.currentSession?()?.id {
+                            let window = tailFollow.probe.view?.window
+                            let found = arrival.tick(
+                                id: id, items: model.items, ready: settled && !model.catchingUp && !model.loading,
+                                active: NSApp.isActive && window?.isKeyWindow == true,
+                                atEnd: pinnedToBottom, store: .shared)
+                            if let found {
+                                newSince = found.since
+                                whileAway = found
+                            }
+                        }
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                }
+                // Said something yourself: you're here, and the panel has done its job.
+                .onChange(of: model.localRevision) { _, _ in whileAway = nil }
                 .task {
                     // Watchdog: following the tail, yet the tail isn't on
                     // screen (unloaded, or the offset drifted past it) and
@@ -3680,6 +3939,9 @@ struct BeautifiedSessionView: View {
                     }
                 }
                 .onChange(of: model.commandOutput) { _, _ in scrollToTail(proxy) }
+                .onChange(of: threadFilter) { _, _ in
+                    if keepPlaceOnFilterChange { keepPlaceOnFilterChange = false } else { scrollToTail(proxy) }
+                }
                 // `revision` is read off the publisher (it fires before the
                 // rows re-lay out), so "was it at the tail" is judged on the
                 // content BEFORE the append — a big answer landing would
@@ -3707,21 +3969,35 @@ struct BeautifiedSessionView: View {
                 }
                 .onChange(of: model.items.count) { _, _ in applyFind(proxy) }
                 // Scrolled up while it keeps going: one click back down.
+                .overlay(alignment: .top) {
+                  VStack(spacing: 8) {
+                    if let summary = whileAway {
+                        WhileAwayPanel(summary: summary,
+                                       onJump: { jumpToNew(summary, proxy) },
+                                       onDismiss: { whileAway = nil })
+                            .padding(.horizontal, 20)
+                            .padding(.top, 10)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .onHover { hoveringAway = $0 }
+                            // Seen at a glance, then out of the way: it goes
+                            // after a few seconds, not while the pointer is on it.
+                            .task(id: summary) {
+                                try? await Task.sleep(nanoseconds: Self.whileAwayShownNanos)
+                                while hoveringAway, !Task.isCancelled {
+                                    try? await Task.sleep(nanoseconds: 250_000_000)
+                                }
+                                guard !Task.isCancelled, whileAway == summary else { return }
+                                whileAway = nil
+                            }
+                    }
+                    ScrubLabelView(state: scrub).padding(.top, whileAway == nil ? 10 : 0)
+                  }
+                  .animation(.easeOut(duration: 0.15), value: whileAway == nil)
+                }
                 .overlay(alignment: .bottom) {
                   ZStack {
                     if !pinnedToBottom {
-                        Button {
-                            scrollToTail(proxy)
-                        } label: {
-                            Label(NSLocalizedString("Jump to latest", comment: "beautified"), systemImage: "arrow.down")
-                                .font(.system(size: 12, weight: .semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(.regularMaterial, in: Capsule())
-                                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
-                                .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
-                        }
-                        .buttonStyle(.plain)
+                        JumpToLatestButton { scrollToTail(proxy) }
                         .padding(.bottom, 12)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
@@ -3753,14 +4029,58 @@ struct BeautifiedSessionView: View {
         guard let q = pendingFind, !q.isEmpty,
               let i = model.items.firstIndex(where: { Self.says($0, q) }) else { return }
         pendingFind = nil
-        let needed = model.items.count - i
-        if needed > model.renderLimit { model.renderLimit = needed }
-        let weight = Self.renderWeight(model.items.suffix(needed))
-        if weight > model.renderChars { model.renderChars = weight }
         let id = model.items[i].id
+        showAllThreads()
+        widenWindow(toInclude: id)
         tailFollow.sticky = false
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
+        }
+    }
+
+    /// Back to the whole conversation for a scroll to somewhere in it, staying
+    /// put rather than going to the end as picking a thread does.
+    private func showAllThreads() {
+        guard threadFilter != nil else { return }
+        keepPlaceOnFilterChange = true
+        threadFilter = nil
+    }
+
+    /// Lay out far enough back to reach `id`, counted in what's drawn: the
+    /// Switchboard's replies are cut into more items than the transcript has.
+    private func widenWindow(toInclude id: Int) {
+        let drawn = threaded?.items ?? model.items
+        guard let i = drawn.firstIndex(where: { $0.id == id }) else { return }
+        let needed = drawn.count - i
+        if needed > model.renderLimit { model.renderLimit = needed }
+        let weight = Self.renderWeight(drawn.suffix(needed))
+        if weight > model.renderChars { model.renderChars = weight }
+    }
+
+    /// To where the new part begins: as `applyFind`, the rows have to be in the
+    /// window first, and the tail no longer followed.
+    private func jumpToNew(_ summary: UnseenSummary, _ proxy: ScrollViewProxy) {
+        whileAway = nil
+        // New, but with no row of its own (a question up as a card): that's at the end.
+        // What's new may be outside the Switchboard thread on show.
+        showAllThreads()
+        guard let first = summary.firstItemIndex, model.items.indices.contains(first) else {
+            scrollToTail(proxy)
+            return
+        }
+        widenWindow(toInclude: model.items[first].id)
+        tailFollow.sticky = false
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(Self.newDividerID, anchor: .top) }
+        }
+    }
+    private static let newDividerID = "beautified-new-divider"
+
+    /// The rows the floating label tells time by: your messages and the agent's.
+    static func scrubDate(_ item: TranscriptItem) -> Date? {
+        switch item.kind {
+        case .userText, .assistantText: return item.timestamp
+        default: return nil
         }
     }
 
@@ -3846,6 +4166,7 @@ struct BeautifiedSessionView: View {
                           onEdit: item.id == lastUserID ? { model.composerText = whole } : nil) {
                 VStack(alignment: .leading, spacing: 4) {
                     TranscriptItemView(item: item,
+                                       continuesMessage: long.map { $0.itemID != item.id } ?? false,
                                        attachments: paths.compactMap { model.imagesByPath[$0] },
                                        hiddenPaths: paths)
                     if let long, long.controls {
@@ -3905,8 +4226,48 @@ struct BeautifiedSessionView: View {
 
 /// The composer's text (`BeautifiedSessionModel.composer`), observed by the
 /// composer alone.
+///
+/// A keystroke publishes nothing. The text view has already drawn the letter;
+/// an update here would run SwiftUI's graph over the composer and, through its
+/// layout, the chat around it, at a cost that grew with the transcript. Only
+/// what the chat shows differently because of the text is published.
 final class ComposerTextStore: ObservableObject {
-    @Published var text = ""
+    /// What the chat's views take from the text.
+    struct Shape: Equatable {
+        /// Nothing to send (the send button).
+        var blank = true
+        /// "/…" being typed: the command palette's query.
+        var palette: String?
+        /// "@…" being typed as the last word: the session list's query.
+        var mention: String?
+
+        init() {}
+        init(_ t: String) {
+            blank = t.allSatisfy(\.isWhitespace)
+            if t.hasPrefix("/"), !t.contains(" "), !t.contains("\n") { palette = String(t.dropFirst()) }
+            mention = PeerMentionCompletion.query(in: t)
+        }
+    }
+
+    private(set) var text = ""
+    @Published private(set) var shape = Shape()
+    /// Bumped when the text is replaced from outside, so the field picks it up.
+    @Published private(set) var replacements = 0
+
+    /// From the field, which is showing it already.
+    func typed(_ s: String) {
+        text = s
+        let new = Shape(s)
+        if new != shape { shape = new }
+    }
+
+    /// From anywhere else.
+    func replace(_ s: String) {
+        text = s
+        let new = Shape(s)
+        if new != shape { shape = new }
+        replacements &+= 1
+    }
 }
 
 /// Re-renders `content` when the composer's text changes — and only it: the
@@ -5238,7 +5599,7 @@ struct QueuedMessagesStrip: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: q.failure != nil ? "exclamationmark.triangle"
                           : q.waitingOnDialog ? "hand.raised"
-                          : q.isDelivered ? "checkmark.circle"
+                          : q.agentHasIt ? "checkmark.circle"
                           : q.held ? "clock" : "text.line.last.and.arrowtriangle.forward")
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(q.failure != nil ? Color.red : accent)
@@ -5269,7 +5630,7 @@ struct QueuedMessagesStrip: View {
                                 .buttonStyle(.link)
                                 .font(.system(size: 11))
                             }
-                        } else if q.isDelivered {
+                        } else if q.agentHasIt {
                             Text(agent.isEmpty
                                  ? NSLocalizedString("Delivered — queued by the agent", comment: "queued message typed in, not yet a turn in the transcript")
                                  : String(format: NSLocalizedString("Delivered — queued by %@", comment: "queued message typed in, not yet a turn in the transcript"), agent))

@@ -272,8 +272,13 @@ struct TranscriptQuestion: Equatable {
 /// writes under ~/.claude/projects/…). Unknown line types and malformed
 /// lines are skipped, not fatal — the format is Claude Code's to evolve.
 enum ClaudeTranscriptParser {
-    static func parse(_ data: Data) -> [TranscriptItem] {
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
+    static func parse(_ data: Data) -> [TranscriptItem] { parseNotingClear(data).items }
+
+    /// The items, and whether a `/clear` emptied the conversation on the way
+    /// (what was before it isn't shown).
+    static func parseNotingClear(_ data: Data) -> (items: [TranscriptItem], cleared: Bool) {
+        var cleared = false
+        guard let text = String(data: data, encoding: .utf8) else { return ([], false) }
         var items: [TranscriptItem] = []
         /// tool_use id → tool name, so results can name their tool.
         var toolNames: [String: String] = [:]
@@ -289,122 +294,133 @@ enum ClaudeTranscriptParser {
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
 
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let obj = try? JSONSerialization.jsonObject(
-                with: Data(line.utf8)) as? [String: Any] else { continue }
-            let type = obj["type"] as? String ?? ""
-            // A PreToolUse hook dump of a PENDING AskUserQuestion (appended
-            // to the tail by the plan-transcript fetch): the question is on
-            // screen in the session but not yet in the transcript proper.
-            if type.isEmpty, obj["tool_name"] as? String == "AskUserQuestion",
-               let input = obj["tool_input"] as? [String: Any] {
-                // Defer: whether this is genuinely pending depends on the
-                // rest of the transcript (see the flush below).
-                let qs = TranscriptQuestion.parse(input)
-                if !qs.isEmpty { pendingDumps.append(qs) }
-                continue
-            }
-            guard type == "user" || type == "assistant",
-                  let message = obj["message"] as? [String: Any] else { continue }
-            // Meta lines (command echoes, hook chatter) aren't conversation.
-            if obj["isMeta"] as? Bool == true { continue }
-            let stamp = (obj["timestamp"] as? String).flatMap {
-                iso.date(from: $0) ?? isoPlain.date(from: $0)
-            }
-
-            func add(_ kind: TranscriptItem.Kind) {
-                items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
-            }
-
-            // `/compact`'s summary is written as a user message ("This
-            // session is being continued from a previous conversation…"):
-            // not something the user said — one folded row, the summary
-            // behind its disclosure.
-            if type == "user", obj["isCompactSummary"] as? Bool == true {
-                add(compactSummaryItem(resultText(message["content"])))
-                continue
-            }
-
-            // A refused API call ("Please run /login · API Error: 401 …"),
-            // written as a synthetic assistant turn but tagged with its enum
-            // and status — the tags are the signal, the text only the detail.
-            if type == "assistant", obj["isApiErrorMessage"] as? Bool == true {
-                let text = resultText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
-                add(.agentError(.claude(error: obj["error"] as? String,
-                                        status: obj["apiErrorStatus"] as? Int, message: text)))
-                continue
-            }
-
-            // content is either a bare string or an array of typed blocks.
-            if let s = message["content"] as? String {
-                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                if type == "user", isLocalRecord(trimmed) {
-                    // `/clear` empties the conversation on screen; older
-                    // Claude Codes kept writing to the same file after it.
-                    if isClearCommand(trimmed) { items.removeAll() }
+        // In batches, each in its own autorelease pool: every line's JSON is a
+        // tree of autoreleased Foundation objects, and a 944 MB transcript
+        // held all of them at once (4.1 GB) until the parse returned.
+        let lines = text.split(whereSeparator: \.isNewline)
+        var next = 0
+        while next < lines.count {
+            let batchEnd = min(next + 256, lines.count)
+            autoreleasepool {
+            for line in lines[next..<batchEnd] {
+                guard let obj = try? JSONSerialization.jsonObject(
+                    with: Data(line.utf8)) as? [String: Any] else { continue }
+                let type = obj["type"] as? String ?? ""
+                // A PreToolUse hook dump of a PENDING AskUserQuestion (appended
+                // to the tail by the plan-transcript fetch): the question is on
+                // screen in the session but not yet in the transcript proper.
+                if type.isEmpty, obj["tool_name"] as? String == "AskUserQuestion",
+                   let input = obj["tool_input"] as? [String: Any] {
+                    // Defer: whether this is genuinely pending depends on the
+                    // rest of the transcript (see the flush below).
+                    let qs = TranscriptQuestion.parse(input)
+                    if !qs.isEmpty { pendingDumps.append(qs) }
                     continue
                 }
-                if !trimmed.isEmpty {
-                    add(type == "user" ? .userText(unwrapPasted(trimmed)) : .assistantText(trimmed))
+                guard type == "user" || type == "assistant",
+                      let message = obj["message"] as? [String: Any] else { continue }
+                // Meta lines (command echoes, hook chatter) aren't conversation.
+                if obj["isMeta"] as? Bool == true { continue }
+                let stamp = (obj["timestamp"] as? String).flatMap {
+                    iso.date(from: $0) ?? isoPlain.date(from: $0)
                 }
-                continue
-            }
-            guard let blocks = message["content"] as? [[String: Any]] else { continue }
-            for block in blocks {
-                switch block["type"] as? String {
-                case "text":
-                    let s = (block["text"] as? String ?? "")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !s.isEmpty else { continue }
-                    if type == "user", isLocalRecord(s) {
-                        if isClearCommand(s) { items.removeAll() }
+
+                func add(_ kind: TranscriptItem.Kind) {
+                    items.append(TranscriptItem(id: items.count, kind: kind, timestamp: stamp))
+                }
+
+                // `/compact`'s summary is written as a user message ("This
+                // session is being continued from a previous conversation…"):
+                // not something the user said — one folded row, the summary
+                // behind its disclosure.
+                if type == "user", obj["isCompactSummary"] as? Bool == true {
+                    add(compactSummaryItem(resultText(message["content"])))
+                    continue
+                }
+
+                // A refused API call ("Please run /login · API Error: 401 …"),
+                // written as a synthetic assistant turn but tagged with its enum
+                // and status — the tags are the signal, the text only the detail.
+                if type == "assistant", obj["isApiErrorMessage"] as? Bool == true {
+                    let text = resultText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    add(.agentError(.claude(error: obj["error"] as? String,
+                                            status: obj["apiErrorStatus"] as? Int, message: text)))
+                    continue
+                }
+
+                // content is either a bare string or an array of typed blocks.
+                if let s = message["content"] as? String {
+                    let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if type == "user", isLocalRecord(trimmed) {
+                        // `/clear` empties the conversation on screen; older
+                        // Claude Codes kept writing to the same file after it.
+                        if isClearCommand(trimmed) { items.removeAll(); cleared = true }
                         continue
                     }
-                    add(type == "user" ? .userText(unwrapPasted(s)) : .assistantText(s))
-                case "thinking":
-                    let s = (block["thinking"] as? String ?? "")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !s.isEmpty { add(.thinking(s)) }
-                case "tool_use":
-                    let name = block["name"] as? String ?? "tool"
-                    if let id = block["id"] as? String { toolNames[id] = name }
-                    let input = block["input"] as? [String: Any] ?? [:]
-                    let questions = name == "AskUserQuestion"
-                        ? TranscriptQuestion.parse(input) : []
-                    if !questions.isEmpty {
-                        lastAskedQuestions = questions.map(\.question)
-                        let first = items.count
-                        questions.forEach { add(.question($0)) }
-                        if let id = block["id"] as? String {
-                            questionItems[id] = Array(first..<items.count)
-                        }
-                    } else {
-                        add(.toolUse(name: name,
-                                     summary: toolSummary(name: name, input: input),
-                                     detail: prettyJSON(input)))
+                    if !trimmed.isEmpty {
+                        add(type == "user" ? .userText(unwrapPasted(trimmed)) : .assistantText(trimmed))
                     }
-                case "tool_result":
-                    let useID = block["tool_use_id"] as? String
-                    if let useID, let idxs = questionItems.removeValue(forKey: useID) {
-                        // The question's answer (Claude records the picks
-                        // by question text) or its dismissal.
-                        let declined = block["is_error"] as? Bool ?? false
-                        let answers = (obj["toolUseResult"] as? [String: Any])?["answers"]
-                            as? [String: String] ?? [:]
-                        for i in idxs where items.indices.contains(i) {
-                            guard case .question(var q) = items[i].kind else { continue }
-                            if declined { q.declined = true } else { q.answer = answers[q.question] ?? "" }
-                            items[i].kind = .question(q)
-                        }
-                    }
-                    let tool = useID.flatMap { toolNames[$0] } ?? "tool"
-                    add(.toolResult(tool: tool,
-                                    content: resultText(block["content"]),
-                                    isError: block["is_error"] as? Bool ?? false))
-                default:
                     continue
                 }
+                guard let blocks = message["content"] as? [[String: Any]] else { continue }
+                for block in blocks {
+                    switch block["type"] as? String {
+                    case "text":
+                        let s = (block["text"] as? String ?? "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !s.isEmpty else { continue }
+                        if type == "user", isLocalRecord(s) {
+                            if isClearCommand(s) { items.removeAll(); cleared = true }
+                            continue
+                        }
+                        add(type == "user" ? .userText(unwrapPasted(s)) : .assistantText(s))
+                    case "thinking":
+                        let s = (block["thinking"] as? String ?? "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !s.isEmpty { add(.thinking(s)) }
+                    case "tool_use":
+                        let name = block["name"] as? String ?? "tool"
+                        if let id = block["id"] as? String { toolNames[id] = name }
+                        let input = block["input"] as? [String: Any] ?? [:]
+                        let questions = name == "AskUserQuestion"
+                            ? TranscriptQuestion.parse(input) : []
+                        if !questions.isEmpty {
+                            lastAskedQuestions = questions.map(\.question)
+                            let first = items.count
+                            questions.forEach { add(.question($0)) }
+                            if let id = block["id"] as? String {
+                                questionItems[id] = Array(first..<items.count)
+                            }
+                        } else {
+                            add(.toolUse(name: name,
+                                         summary: toolSummary(name: name, input: input),
+                                         detail: prettyJSON(input)))
+                        }
+                    case "tool_result":
+                        let useID = block["tool_use_id"] as? String
+                        if let useID, let idxs = questionItems.removeValue(forKey: useID) {
+                            // The question's answer (Claude records the picks
+                            // by question text) or its dismissal.
+                            let declined = block["is_error"] as? Bool ?? false
+                            let answers = (obj["toolUseResult"] as? [String: Any])?["answers"]
+                                as? [String: String] ?? [:]
+                            for i in idxs where items.indices.contains(i) {
+                                guard case .question(var q) = items[i].kind else { continue }
+                                if declined { q.declined = true } else { q.answer = answers[q.question] ?? "" }
+                                items[i].kind = .question(q)
+                            }
+                        }
+                        let tool = useID.flatMap { toolNames[$0] } ?? "tool"
+                        add(.toolResult(tool: tool,
+                                        content: resultText(block["content"]),
+                                        isError: block["is_error"] as? Bool ?? false))
+                    default:
+                        continue
+                    }
+                }
             }
+            }
+            next = batchEnd
         }
         // Flush pending-question dumps: only a dump whose questions are
         // NOT the transcript's last (already answered or declined)
@@ -419,7 +435,7 @@ enum ClaudeTranscriptParser {
                                             kind: .question($0), timestamp: nil))
             }
         }
-        return items
+        return (items, cleared)
     }
 
     /// Claude Code records what happened in the terminal as user turns
@@ -633,6 +649,12 @@ enum GuestSharePaths {
 /// keep rendering after the caller lost track of which tool wrote them.
 enum AgentTranscript {
     static func parse(_ data: Data, agent: String? = nil) -> [TranscriptItem] {
+        parseNotingClear(data, agent: agent).items
+    }
+
+    /// The items, and whether the conversation started over in them (Claude's
+    /// `/clear`): what came before isn't part of it.
+    static func parseNotingClear(_ data: Data, agent: String? = nil) -> (items: [TranscriptItem], cleared: Bool) {
         let kind: String
         if let agent, ["claude", "codex", "grok", "kimi", "omp"].contains(agent) {
             kind = agent
@@ -640,14 +662,15 @@ enum AgentTranscript {
             kind = sniff(data)
         }
         let items: [TranscriptItem]
+        var cleared = false
         switch kind {
         case "codex": items = CodexTranscriptParser.parse(data)
         case "grok": items = GrokTranscriptParser.parse(data)
         case "kimi": items = KimiTranscriptParser.parse(data)
         case "omp": items = OmpTranscriptParser.parse(data)
-        default: items = ClaudeTranscriptParser.parse(data)
+        default: (items, cleared) = ClaudeTranscriptParser.parseNotingClear(data)
         }
-        return stableIDs(items)
+        return (stableIDs(items), cleared)
     }
 
     /// Re-key items so an item keeps its id when the bytes in front of it
@@ -678,9 +701,24 @@ enum AgentTranscript {
     /// a long time, so undecidable files are overwhelmingly Claude's).
     /// A tail-cut read may start mid-line — unparseable lines are skipped,
     /// exactly as the parsers themselves do.
+    /// How many of a transcript's first lines `sniff` reads: with fewer, a
+    /// longer copy of the same file can read as another format.
+    static let sniffLines = 200
+
+    /// Whether `sniff` saw all it reads in `data`, so a longer copy of the same
+    /// file will read as the same format.
+    static func sniffIsSettled(_ data: Data) -> Bool {
+        var lines = 0
+        for b in data where b == 0x0A {
+            lines += 1
+            if lines >= sniffLines { return true }
+        }
+        return false
+    }
+
     static func sniff(_ data: Data) -> String {
         guard let text = String(data: data, encoding: .utf8) else { return "claude" }
-        for line in text.split(whereSeparator: \.isNewline).prefix(200) {
+        for line in text.split(whereSeparator: \.isNewline).prefix(sniffLines) {
             guard let obj = try? JSONSerialization.jsonObject(
                 with: Data(line.utf8)) as? [String: Any] else { continue }
             // Grok: persisted ACP notifications — {"method":"session/update",

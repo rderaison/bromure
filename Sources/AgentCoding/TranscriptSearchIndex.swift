@@ -14,7 +14,7 @@ import Observation
 final class TranscriptSearchIndex {
     static let shared = TranscriptSearchIndex()
 
-    struct Entry: Sendable {
+    struct Entry: Sendable, Codable, Equatable {
         /// The conversation's words, one message per paragraph.
         var text: String
         /// The agent's last reply, one line.
@@ -38,15 +38,45 @@ final class TranscriptSearchIndex {
         /// `session_meta` id): a copy that took another session's
         /// conversation in is never counted as this one's.
         var conversationID: String? = nil
+        /// The conversation started over in these bytes (Claude's `/clear`):
+        /// nothing of what came before belongs to it (`joined`).
+        var startsOver = false
     }
 
-    struct Turn: Sendable, Equatable {
+    /// This entry, for the bytes up to a turn's start, then `later`'s, for the
+    /// bytes from there: the entry of both (see `turnStart`).
+    nonisolated static func joined(_ a: Entry, _ b: Entry) -> Entry {
+        var e = b
+        // Read off the bytes, whatever the conversation did: the latest one
+        // wins, or the first.
+        e.tokens = b.tokens.total == 0 ? a.tokens : b.tokens
+        e.model = b.model ?? a.model
+        e.agentTitle = b.agentTitle ?? a.agentTitle
+        e.conversationID = a.conversationID ?? b.conversationID
+        e.startsOver = a.startsOver || b.startsOver
+        // What the conversation said: none of `a` if it started over in `b`.
+        guard !b.startsOver else { return e }
+        e.text = a.text.isEmpty ? b.text : b.text.isEmpty ? a.text : a.text + "\n\n" + b.text
+        if b.lastReply.isEmpty { e.lastReply = a.lastReply }
+        e.turns = a.turns + b.turns
+        let shift = (a.timeline.turns.map { max($0.id, $0.segments.map(\.id).max() ?? 0) }.max() ?? 0)
+        e.timeline = SessionTimeline(turns: a.timeline.turns + b.timeline.turns.map { t in
+            SessionTimeline.Turn(id: t.id + shift, prompt: t.prompt, start: t.start, end: t.end,
+                                 segments: t.segments.map { var g = $0; g = SessionTimeline.Segment(
+                                    id: g.id + shift, kind: g.kind, name: g.name, detail: g.detail,
+                                    start: g.start, end: g.end, lane: g.lane); return g })
+        })
+        e.firstPrompt = a.firstPrompt ?? b.firstPrompt
+        return e
+    }
+
+    struct Turn: Sendable, Equatable, Codable {
         var start: Date
         var end: Date
         var duration: TimeInterval { end.timeIntervalSince(start) }
     }
 
-    struct TokenUsage: Sendable, Equatable {
+    struct TokenUsage: Sendable, Equatable, Codable {
         var input = 0
         var cached = 0
         var output = 0
@@ -54,13 +84,18 @@ final class TranscriptSearchIndex {
     }
 
     private(set) var entries: [UUID: Entry] = [:]
+    /// What each transcript was read to: where to carry on from.
+    @ObservationIgnored private var records: [UUID: Record] = [:]
+    @ObservationIgnored private var loaded = false
     @ObservationIgnored private var refreshing = false
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private let dir: URL
+    @ObservationIgnored private let storeDir: URL
 
     private init() {
-        dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/transcripts", isDirectory: true)
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        dir = support.appendingPathComponent("BromureAC/transcripts", isDirectory: true)
+        storeDir = support.appendingPathComponent("BromureAC/transcript-index", isDirectory: true)
     }
 
     /// Start keeping up (idempotent).
@@ -72,33 +107,265 @@ final class TranscriptSearchIndex {
         }
     }
 
-    /// Re-read the transcripts whose copies changed since the last pass.
+    /// Read what the transcripts gained since the last pass: only the turn
+    /// each was last in, and for one not seen before (or rewritten), all of it.
+    /// The first pass after a launch starts from what the last run saved.
     func refresh() {
         guard !refreshing else { return }
         refreshing = true
-        let known = entries.mapValues(\.modified)
-        let dir = self.dir
+        let known = records
+        let firstPass = !loaded
+        let dir = self.dir, storeDir = self.storeDir
         Task.detached(priority: .utility) {
             let fm = FileManager.default
+            var known = known
+            if firstPass { known = Self.loadRecords(from: storeDir) }
             let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            var updates: [UUID: Entry] = [:]
+            var updates: [UUID: Record] = [:]
             var present: Set<UUID> = []
             for url in files where url.pathExtension == "jsonl" {
                 guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
                 present.insert(id)
-                let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                if let k = known[id], k >= date { continue }
-                guard let data = try? Data(contentsOf: url) else { continue }
-                updates[id] = Self.entry(data, modified: date)
+                let rv = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let date = rv?.contentModificationDate ?? Date()
+                let size = UInt64(rv?.fileSize ?? 0)
+                if let k = known[id], k.modified == date, k.size == size {
+                    if firstPass { updates[id] = k }   // as saved: nothing to read
+                    continue
+                }
+                if let r = Self.read(url, modified: date, known: known[id]) {
+                    updates[id] = r
+                    Self.save(r, id: id, in: storeDir)
+                }
+            }
+            if firstPass {
+                // Records of transcripts that are gone.
+                for (id, _) in known where !present.contains(id) {
+                    try? fm.removeItem(at: storeDir.appendingPathComponent("\(id.uuidString).json"))
+                }
             }
             let found = updates, seen = present
             await MainActor.run {
-                for (id, e) in found { self.entries[id] = e }
-                for id in self.entries.keys where !seen.contains(id) { self.entries[id] = nil }
+                for (id, r) in found { self.records[id] = r; self.entries[id] = r.entry }
+                for id in self.entries.keys where !seen.contains(id) { self.entries[id] = nil; self.records[id] = nil }
+                if firstPass {
+                    for id in self.records.keys where !seen.contains(id) { self.records[id] = nil }
+                    self.loaded = true
+                }
                 self.refreshing = false
                 if !found.isEmpty { self.onUpdate?(Array(found.keys)) }
             }
         }
+    }
+
+    /// What the index keeps of a transcript between passes and launches.
+    struct Record: Codable, Sendable, Equatable {
+        static let currentVersion = 1
+        var version = Record.currentVersion
+        var size: UInt64
+        var modified: Date
+        var entry: Entry
+        var resume: Resume?
+    }
+
+    /// Where the transcript's last turn starts, and the entry of everything
+    /// before it (`turnStart`, `joined`). The copies are rewritten whole
+    /// (`SessionTranscriptCache`), appended to or with older records put in
+    /// front, so a rewrite of what came before shifts it: `head`, `before` and
+    /// the `probes` spread over it then differ, and it's all read again. An
+    /// edit that kept every byte's place wouldn't be seen; the copies never
+    /// make one.
+    struct Resume: Codable, Sendable, Equatable {
+        var offset: UInt64
+        var prefix: Entry
+        var head: Data
+        var before: Data
+        var probes: [Data]
+        var agent: String
+        /// The format was read off all the lines `sniff` reads: a longer copy
+        /// of the file reads as the same one. Not settled, the file is read
+        /// anew, as it is small.
+        var agentSettled: Bool
+    }
+
+    nonisolated static let fingerprint = 64
+    nonisolated static let probeCount = 16
+
+    /// `probeCount` small reads spread evenly over the first `end` bytes.
+    nonisolated static func probes(upTo end: UInt64, using read: (UInt64, Int) -> Data?) -> [Data] {
+        guard end > UInt64(fingerprint) else { return [] }
+        let span = end - UInt64(fingerprint)
+        return (0..<probeCount).map { i in read(span * UInt64(i) / UInt64(probeCount), 16) ?? Data() }
+    }
+
+    /// A transcript's record: carried on from `known` when the file still
+    /// starts and runs up to its resume point the same, else read anew.
+    nonisolated static func read(_ url: URL, modified: Date, known: Record?,
+                                 cap: Int = indexCap, head: Int = indexHead) -> Record? {
+        autoreleasepool {
+            guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? h.close() }
+            guard let size = try? h.seekToEnd() else { return nil }
+            func bytes(at offset: UInt64, _ count: Int) -> Data? {
+                guard (try? h.seek(toOffset: offset)) != nil else { return nil }
+                return (try? h.read(upToCount: count)) ?? Data()
+            }
+            let fileHead = bytes(at: 0, fingerprint) ?? Data()
+            // Carry on: only what's after the last turn's start.
+            if let k = known, k.version == Record.currentVersion, let r = k.resume, r.agentSettled,
+               size >= r.offset, size - r.offset <= UInt64(cap), fileHead == r.head,
+               r.offset < UInt64(r.before.count) || bytes(at: r.offset - UInt64(r.before.count), r.before.count) == r.before,
+               probes(upTo: r.offset, using: bytes) == r.probes,
+               let rest = bytes(at: r.offset, Int(size - r.offset)) {
+                return record(prefix: r.prefix, offset: r.offset, bytes: rest, agent: r.agent, settled: true,
+                              size: size, modified: modified, head: fileHead, handle: h)
+            }
+            // Anew: all of it, or past the cap its start and its end.
+            guard size > UInt64(cap) else {
+                guard let data = bytes(at: 0, Int(size)) else { return nil }
+                return record(prefix: nil, offset: 0, bytes: data, agent: AgentTranscript.sniff(data),
+                              settled: AgentTranscript.sniffIsSettled(data),
+                              size: size, modified: modified, head: fileHead, handle: h)
+            }
+            guard var start = bytes(at: 0, head) else { return nil }
+            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
+            let tailAt = size - UInt64(cap - head)
+            guard var end = bytes(at: tailAt, Int(size - tailAt)) else { return nil }
+            var endAt = tailAt
+            if let nl = end.firstIndex(of: 0x0A) {
+                endAt += UInt64(nl - end.startIndex + 1)
+                end = Data(end[(nl + 1)...])
+            } else {
+                endAt = size
+                end = Data()
+            }
+            // The format comes from the start: the end of a file can look like
+            // another agent's lines.
+            let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
+            return record(prefix: entry(start, modified: modified, agent: agent), offset: endAt, bytes: end,
+                          agent: agent, settled: AgentTranscript.sniffIsSettled(start.isEmpty ? end : start),
+                          size: size, modified: modified, head: fileHead, handle: h)
+        }
+    }
+
+    /// The record of `prefix` (the entry of what's before `offset`, nil for
+    /// nothing) followed by `bytes`, resuming next time at the last turn
+    /// start found in them.
+    nonisolated private static func record(prefix: Entry?, offset: UInt64, bytes: Data, agent: String,
+                                           settled: Bool, size: UInt64, modified: Date, head: Data,
+                                           handle: FileHandle) -> Record {
+        var front = prefix
+        var resumeAt = offset
+        var rest = bytes
+        if let t = turnStart(in: bytes, agent: agent), t > 0 {
+            let before = entry(Data(bytes[bytes.startIndex ..< bytes.startIndex + t]), modified: modified, agent: agent)
+            front = front.map { joined($0, before) } ?? before
+            resumeAt = offset + UInt64(t)
+            rest = Data(bytes[(bytes.startIndex + t)...])
+        }
+        let last = entry(rest, modified: modified, agent: agent)
+        var whole = front.map { joined($0, last) } ?? last
+        whole.modified = modified
+        let fp = Int(min(UInt64(fingerprint), resumeAt))
+        var before = Data()
+        if fp > 0, (try? handle.seek(toOffset: resumeAt - UInt64(fp))) != nil {
+            before = (try? handle.read(upToCount: fp)) ?? Data()
+        }
+        let empty = Entry(text: "", lastReply: "", tokens: TokenUsage(), modified: modified)
+        let marks = probes(upTo: resumeAt) { at, count in
+            guard (try? handle.seek(toOffset: at)) != nil else { return nil }
+            return (try? handle.read(upToCount: count)) ?? Data()
+        }
+        return Record(size: size, modified: modified, entry: whole,
+                      resume: Resume(offset: resumeAt, prefix: front ?? empty, head: head,
+                                     before: before, probes: marks, agent: agent, agentSettled: settled))
+    }
+
+    nonisolated static func save(_ r: Record, id: UUID, in dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(r) else { return }
+        try? data.write(to: dir.appendingPathComponent("\(id.uuidString).json"), options: .atomic)
+    }
+
+    nonisolated static func loadRecords(from dir: URL) -> [UUID: Record] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        var out: [UUID: Record] = [:]
+        for url in files where url.pathExtension == "json" {
+            autoreleasepool {
+                guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
+                      let data = try? Data(contentsOf: url),
+                      let r = try? JSONDecoder().decode(Record.self, from: data),
+                      r.version == Record.currentVersion else { return }
+                out[id] = r
+            }
+        }
+        return out
+    }
+
+    /// One transcript's entry, leaving nothing behind but the entry. Parsing
+    /// autoreleases Foundation objects by the million, and a detached task's
+    /// loop never drains them by itself: after a launch, with every transcript
+    /// to read, they piled up to several times the transcripts' own size before
+    /// the pass ended and they all went at once.
+    nonisolated static func entry(of url: URL, modified: Date,
+                                  cap: Int = indexCap, head: Int = indexHead) -> Entry? {
+        autoreleasepool {
+            guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? h.close() }
+            guard let size = try? h.seekToEnd(), (try? h.seek(toOffset: 0)) != nil else { return nil }
+            guard size > UInt64(cap) else {
+                guard let data = try? h.readToEnd() else { return nil }
+                return entry(data, modified: modified)
+            }
+            // Its start, for what only the start says, and its end.
+            guard var start = try? h.read(upToCount: head) else { return nil }
+            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
+            guard (try? h.seek(toOffset: size - UInt64(cap - head))) != nil,
+                  var end = try? h.readToEnd() else { return nil }
+            end = end.firstIndex(of: 0x0A).map { Data(end[($0 + 1)...]) } ?? Data()
+            // The format comes from the start: the end of a file can look like
+            // another agent's lines.
+            let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
+            let first = entry(start, modified: modified, agent: agent)
+            var e = entry(end, modified: modified, agent: agent)
+            e.text = first.text + "\n\n" + e.text
+            e.firstPrompt = first.firstPrompt ?? e.firstPrompt
+            e.conversationID = first.conversationID ?? e.conversationID
+            e.agentTitle = e.agentTitle ?? first.agentTitle
+            e.model = e.model ?? first.model
+            return e
+        }
+    }
+
+    /// Past this, a transcript is read for its first `indexHead` bytes and the
+    /// rest of the cap from its end. Search, the timeline and the time worked
+    /// then cover those parts only. A 944 MB transcript peaked at 2.2 GB while
+    /// parsed, and kept 22 MB of text.
+    nonisolated static let indexCap = 100 * 1_048_576
+    nonisolated static let indexHead = 1_048_576
+
+    /// Where the last turn starts: the byte offset of the last line that opens
+    /// one (a prompt), or nil. Everything a turn carries (open tool calls, a
+    /// question waiting on the user) ends at a prompt, so the entry of what's
+    /// before it and the entry of the rest, joined with `followed(by:)`, are the
+    /// entry of the whole: what's before never has to be read again.
+    nonisolated private static let userWord = Data("user".utf8)
+
+    nonisolated static func turnStart(in data: Data, agent: String) -> Int? {
+        var end = data.endIndex
+        while end > data.startIndex {
+            let start = data[..<end].lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
+            let line = data[start..<end]
+            // Every agent's prompt line names the user; most lines don't, and
+            // parsing each one is what this costs.
+            if line.count > 2, line.count < 4_000_000, line.range(of: Self.userWord) != nil,
+               let first = AgentTranscript.parse(Data(line), agent: agent).first,
+               case .userText = first.kind {
+                return start - data.startIndex
+            }
+            end = start > data.startIndex ? start - 1 : data.startIndex
+        }
+        return nil
     }
 
     /// Called with the sessions whose entries were just re-read.
@@ -107,12 +374,13 @@ final class TranscriptSearchIndex {
     /// Claude's own title for the conversation, the latest one it logged:
     /// a `/rename` (custom-title) wins over the generated ai-title.
     nonisolated static func agentTitle(in data: Data) -> String? {
-        let raw = String(decoding: data, as: UTF8.self)
+        // In the bytes: the title is one line, and a string of the whole file
+        // to find it cost more than parsing the transcript did.
         func last(_ type: String, _ key: String) -> String? {
-            guard let r = raw.range(of: "\"type\":\"\(type)\"", options: .backwards) else { return nil }
-            let start = raw[..<r.lowerBound].lastIndex(of: "\n").map { raw.index(after: $0) } ?? raw.startIndex
-            let end = raw[r.upperBound...].firstIndex(of: "\n") ?? raw.endIndex
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(raw[start..<end].utf8)) as? [String: Any],
+            guard let r = data.range(of: Data("\"type\":\"\(type)\"".utf8), options: .backwards) else { return nil }
+            let start = data[..<r.lowerBound].lastIndex(of: 0x0A).map { $0 + 1 } ?? data.startIndex
+            let end = data[r.upperBound...].firstIndex(of: 0x0A) ?? data.endIndex
+            guard let obj = try? JSONSerialization.jsonObject(with: data[start..<end]) as? [String: Any],
                   let t = (obj[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty
             else { return nil }
             return String(t.prefix(60))
@@ -128,8 +396,8 @@ final class TranscriptSearchIndex {
             && !DelegationNotice.isHostAside(s) && DelegationNotice.strip(s) == nil
     }
 
-    nonisolated static func entry(_ data: Data, modified: Date) -> Entry {
-        let items = AgentTranscript.parse(data)
+    nonisolated static func entry(_ data: Data, modified: Date, agent: String? = nil) -> Entry {
+        let (items, cleared) = AgentTranscript.parseNotingClear(data, agent: agent)
         var firstPrompt: String?
         var parts: [String] = []
         var last = ""
@@ -151,12 +419,14 @@ final class TranscriptSearchIndex {
         if let o = open, o.end > o.start { turns.append(o) }
         let oneLine = last.split(whereSeparator: \.isNewline).map(String.init)
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
-        return Entry(text: parts.joined(separator: "\n\n"),
+        var e = Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: codexModel(data) ?? model(in: data),
                      turns: turns, timeline: SessionTimeline.build(items),
                      agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified,
                      conversationID: conversationID(in: data))
+        e.startsOver = cleared
+        return e
     }
 
     /// Codex's conversation id, from the copy's `session_meta` record (the

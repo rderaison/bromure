@@ -207,10 +207,12 @@ struct ControlClient {
     /// Open a streaming connection: send the request, consume the response
     /// header, and hand back the raw fd for bidirectional streaming. The caller
     /// owns the fd and must close it. Throws on non-200.
-    func openStream(_ method: String, _ path: String, body: [String: Any]) throws -> Int32 {
+    func openStream(_ method: String, _ path: String, body: [String: Any],
+                    headers: [String: String] = [:]) throws -> Int32 {
         guard let fd = dial() else { throw ClientError.agentNotRunning }
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         var head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\n"
+        for (k, v) in headers.sorted(by: { $0.key < $1.key }) { head += "\(k): \(v)\r\n" }
         head += "Content-Type: application/json\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
         var out = Data(head.utf8); out.append(bodyData)
         Self.writeAll(fd, out)

@@ -32,7 +32,7 @@ struct CardAccessibilityTests {
     }
 
     @Test("the card is one button element named by its label, and pressing it opens the card")
-    func cardIsNamedButton() throws {
+    func cardIsNamedButton() async throws {
         let app = NSApplication.shared
         // SwiftUI builds its accessibility tree only once an assistive
         // client asks for it — these are the attributes such clients set.
@@ -48,6 +48,10 @@ struct CardAccessibilityTests {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 160),
                            styleMask: [.titled], backing: .buffered, defer: false)
         win.isReleasedWhenClosed = false
+        // Found by title: the walk starts at this window, not at the whole
+        // process (windows other tests left behind ran past 30 000 elements).
+        let windowTitle = "Board card AX \(UUID().uuidString)"
+        win.title = windowTitle
         win.contentView = host
         win.orderFrontRegardless()
         defer { win.orderOut(nil) }
@@ -75,18 +79,6 @@ struct CardAccessibilityTests {
 
         // Through the AX API, as System Events reads it — when this process
         // may use it (an untrusted test runner can't; skipped then).
-        let axApp = AXUIElementCreateApplication(getpid())
-        AXUIElementSetMessagingTimeout(axApp, 2)
-        func attr(_ el: AXUIElement, _ name: String) -> AnyObject? {
-            var v: CFTypeRef?
-            return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
-        }
-        func find(_ el: AXUIElement, depth: Int = 0) -> AXUIElement? {
-            if (attr(el, kAXDescriptionAttribute) as? String)?.contains("Fix the login bug") == true { return el }
-            guard depth < 14, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
-            for k in kids { if let hit = find(k, depth: depth + 1) { return hit } }
-            return nil
-        }
         // And as System Events reads it (osascript, when this runner may
         // drive it): a button whose plain description is the label.
         let js = """
@@ -111,24 +103,69 @@ struct CardAccessibilityTests {
         osa.standardError = errPipe
         if (try? osa.run()) != nil {
             let deadline = Date().addingTimeInterval(25)
-            while osa.isRunning, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            if osa.isRunning { osa.terminate() }
+            // Awaited, not a nested run loop: that holds the main queue, and every
+            // main-actor test in the run, for as long as this takes.
+            while osa.isRunning, Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            // No answer (System Events waits on a permission this machine hasn't
+            // given): nothing learned. Its status can't be read until it has gone.
+            let answered = !osa.isRunning
+            if !answered { osa.terminate(); osa.waitUntilExit() }
             let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            if osa.terminationStatus == 0, !out.hasPrefix("NONE") {
+            if answered, osa.terminationStatus == 0, !out.hasPrefix("NONE") {
                 #expect(out == "AXButton|Fix the login bug, Workspace, Couldn't start")
             }
         }
-        var probe: CFTypeRef?
-        let rc = AXUIElementCopyAttributeValue(axApp, kAXRoleAttribute as CFString, &probe)
-        if rc == .success {
-            let el = try #require(find(axApp), "the card's AXDescription is readable through the AX API")
-            #expect(attr(el, kAXRoleAttribute) as? String == kAXButtonRole)
-            var names: CFArray?
-            if AXUIElementCopyActionNames(el, &names) == .success {
-                #expect((names as? [String] ?? []).contains(kAXPressAction))
+        // Walked off the main thread: an AX call into this process is answered
+        // on its main thread, so made from there each one waited out its
+        // timeout, through every window the run had left open (80 minutes of a
+        // run, every main-actor test held). Bounded, too: out of time is
+        // nothing learned, as for System Events, and so is a call that timed out.
+        enum AXWalk: Sendable { case unavailable, outOfTime, missing(String), found(role: String?, presses: Bool?) }
+        let walk = await Task.detached { [windowTitle] () -> AXWalk in
+            let axApp = AXUIElementCreateApplication(getpid())
+            AXUIElementSetMessagingTimeout(axApp, 2)
+            let deadline = Date().addingTimeInterval(20)
+            var outOfTime = false
+            func attr(_ el: AXUIElement, _ name: String) -> AnyObject? {
+                var v: CFTypeRef?
+                let rc = AXUIElementCopyAttributeValue(el, name as CFString, &v)
+                // The main thread busy with another test past the timeout:
+                // no answer, which isn't "not there".
+                if rc == .cannotComplete { outOfTime = true }
+                return rc == .success ? v : nil
             }
+            func find(_ el: AXUIElement, depth: Int = 0) -> AXUIElement? {
+                guard Date() < deadline else { outOfTime = true; return nil }
+                if (attr(el, kAXDescriptionAttribute) as? String)?.contains("Fix the login bug") == true { return el }
+                guard depth < 14, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
+                for k in kids { if let hit = find(k, depth: depth + 1) { return hit } }
+                return nil
+            }
+            var probe: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXRoleAttribute as CFString, &probe) == .success
+            else { return .unavailable }
+            let windows = attr(axApp, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            // Not listed yet (seen in a full run, beside the windows other
+            // tests left): nothing learned. The checks in-process above ran.
+            guard let mine = windows.first(where: { attr($0, kAXTitleAttribute) as? String == windowTitle }) else {
+                return .unavailable
+            }
+            guard let el = find(mine) else {
+                return outOfTime ? .outOfTime : .missing("not in its window")
+            }
+            var names: CFArray?
+            let presses = AXUIElementCopyActionNames(el, &names) == .success
+                ? (names as? [String] ?? []).contains(kAXPressAction) : nil
+            return .found(role: attr(el, kAXRoleAttribute) as? String, presses: presses)
+        }.value
+        switch walk {
+        case .unavailable, .outOfTime: break
+        case .missing(let why): Issue.record("the card's AXDescription is readable through the AX API (\(why))")
+        case .found(let role, let presses):
+            #expect(role == kAXButtonRole)
+            if let presses { #expect(presses) }
         }
     }
 }

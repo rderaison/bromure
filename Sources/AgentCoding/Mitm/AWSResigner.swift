@@ -25,9 +25,11 @@ import Foundation
 /// `X-Amz-Security-Token` headers (we regenerate).
 ///
 /// **Out of scope (MVP)**:
-///   - `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` chunked S3 uploads — chunk-
-///     by-chunk signing chain isn't reproducible without the original
-///     secret. Detected and surfaced to the guest as a 501 with a clear
+///   - Signed aws-chunked S3 uploads (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`
+///     and the other signed `STREAMING-*` modes) — the chunk-by-chunk
+///     signing chain isn't reproducible without the original secret.
+///     `STREAMING-UNSIGNED-PAYLOAD-TRAILER` signs only the seed and is
+///     re-signed. Detected and surfaced to the guest as a 501 with a clear
 ///     message; the guest's SDK should fall back to single-shot uploads.
 ///   - SigV4A (asymmetric) — used by some cross-region S3 ops; rare.
 ///   - Query-string-signed requests (presigned URLs). The SDK doesn't
@@ -91,11 +93,15 @@ public final class AWSResigner: @unchecked Sendable {
                                 body: "bromure: could not parse AWS Authorization\n"))
         }
 
-        // STREAMING-AWS4-HMAC-SHA256-PAYLOAD: chunk-by-chunk signing
-        // can't be reproduced without the original secret (each chunk's
-        // signature chains off the previous). Bail with a clear error.
+        // aws-chunked uploads: STREAMING-UNSIGNED-PAYLOAD-TRAILER (the
+        // SDKs' default for S3 uploads with a checksum) signs only the
+        // seed, so it re-signs like UNSIGNED-PAYLOAD, the body untouched.
+        // Every other STREAMING-* mode signs each chunk (and trailer) off
+        // the previous signature, which can't be reproduced without the
+        // original secret. Bail with a clear error.
         let originalContentSHA = parsed.headerValue("X-Amz-Content-SHA256") ?? ""
-        if originalContentSHA == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+        if originalContentSHA.hasPrefix("STREAMING-"),
+           originalContentSHA != Self.unsignedTrailer {
             return .failed(reason: "streaming chunked uploads not supported",
                            response: Self.errorResponse(
                                 status: 501,
@@ -167,12 +173,11 @@ public final class AWSResigner: @unchecked Sendable {
         let now = Date()
         let amzDate = SigV4Signer.isoBasic(now)
         let dateOnly = String(amzDate.prefix(8))
-        // Honor the SDK's intent on UNSIGNED-PAYLOAD; otherwise compute
-        // the body hash ourselves.
-        let unsignedPayload = (originalContentSHA == "UNSIGNED-PAYLOAD")
-        let payloadHash = unsignedPayload
-            ? "UNSIGNED-PAYLOAD"
-            : SigV4Signer.hexSHA256(parsed.body)
+        // Honor the SDK's intent on UNSIGNED-PAYLOAD and on an unsigned
+        // aws-chunked upload; otherwise compute the body hash ourselves.
+        let literalPayload: String? = originalContentSHA == "UNSIGNED-PAYLOAD"
+            || originalContentSHA == Self.unsignedTrailer ? originalContentSHA : nil
+        let payloadHash = literalPayload ?? SigV4Signer.hexSHA256(parsed.body)
 
         // Append the headers we generate. Order doesn't matter for
         // canonicalization (signer sorts) but does for wire consistency.
@@ -197,7 +202,7 @@ public final class AWSResigner: @unchecked Sendable {
                                      region: scope.region,
                                      service: scope.service),
             date: now,
-            unsignedPayload: unsignedPayload)
+            payloadHash: literalPayload)
 
         // Reassemble. We sign over Host so the signature matches what
         // URLSession will put on the wire (URLSession derives Host from
@@ -236,6 +241,9 @@ public final class AWSResigner: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// The unsigned aws-chunked mode: only the seed request is signed.
+    static let unsignedTrailer = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 
     /// Extract `(date, region, service)` from a SigV4 Authorization
     /// header. Format:

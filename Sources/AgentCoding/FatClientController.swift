@@ -112,6 +112,10 @@ final class RemoteHostController {
     /// Per-workspace tab models (live, shared into `VMEntry` by reference so the
     /// sidebar tab rows and the grid update together).
     private var tabsModels: [Profile.ID: TabsModel] = [:]
+#if os(macOS)
+    /// The server's VMs whose guest it reports as gone silent.
+    private var unresponsiveIDs = Set<Profile.ID>()
+#endif
     /// Called after a running workspace's tab roster is applied, with the tmux
     /// window indices that exist right now. The mirror window retires cached
     /// surfaces for dead windows — a killed window's grouped view session
@@ -582,7 +586,7 @@ final class RemoteHostController {
     /// `applyWorkspaces` until the server confirms them gone, so an in-flight
     /// stale poll can't flash the chip back. Cleared per-window once a snapshot
     /// no longer lists it (or a reboot legitimately rebuilds it).
-    private var pendingTabDrops: [Profile.ID: Set<Int>] = [:]
+    private var pendingTabDrops: [Profile.ID: [Int: Date]] = [:]
 
     /// The 0.75 s poll timer, held in a non-isolated box so it can be
     /// invalidated when the controller deallocates — a `@MainActor` class can't
@@ -716,9 +720,28 @@ final class RemoteHostController {
 #endif
     }
 
+#if os(macOS)
+    /// What the store says about this server's VMs follows what the server
+    /// reports, for as long as this controller is the one listening.
+    func noteUnresponsive(_ now: Set<Profile.ID>) {
+        for id in unresponsiveIDs.subtracting(now) { GuestLivenessStore.shared.clear(id) }
+        for id in now.subtracting(unresponsiveIDs) {
+            GuestLivenessStore.shared.mark(id, unresponsive: true) { [weak self] in
+                guard let self else { return }
+                let name = self.profile(for: id)?.name ?? "workspace"
+                if ACAppDelegate.confirmReboot(name, force: true) { self.hardRebootWorkspace(id) }
+            }
+        }
+        unresponsiveIDs = now
+    }
+#endif
+
     func stop() {
         Self.liveHosts[host.id] = nil
 #if os(macOS)
+        // Nobody will report these again, and a reopened window is a new
+        // controller that doesn't know it has them to clear.
+        noteUnresponsive([])
         delegationRelay?.stop()
         delegationRelay = nil
 #endif
@@ -1154,6 +1177,9 @@ final class RemoteHostController {
         // Running entries: one VMEntry per running VM, carrying a live TabsModel.
         var entries: [SessionListModel.VMEntry] = []
         var liveIDs = Set<Profile.ID>()
+#if os(macOS)
+        var unresponsiveNow = Set<Profile.ID>()
+#endif
         var rebootedIDs = Set<Profile.ID>()   // a new boot since last poll → the VM rebooted
         let offset = Self.wallClockOffset()
         let step = Self.clockStep(last: lastWallClockOffset, now: offset)
@@ -1179,6 +1205,9 @@ final class RemoteHostController {
             model.vmLoad = vm["load"] as? Double ?? 0
             model.vmDiskUsedKB = vm["diskUsedKB"] as? Int ?? 0
             model.vmDiskTotalKB = vm["diskTotalKB"] as? Int ?? 0
+#if os(macOS)
+            if vm["guestUnresponsive"] as? Bool == true { unresponsiveNow.insert(id) }
+#endif
             let stamp = vm["bootedAt"] as? Double
             var stampMoved = false
             if let stamp {
@@ -1247,14 +1276,9 @@ final class RemoteHostController {
             // once it's confirmed absent (or a reboot legitimately rebuilt it).
             if let pending = pendingTabDrops[id], !pending.isEmpty {
                 let present = Set(tabDicts.compactMap { $0["index"] as? Int })
-                let confirmed = pending.subtracting(present)   // server no longer lists it
-                if !confirmed.isEmpty {
-                    let remaining = pending.subtracting(confirmed)
-                    pendingTabDrops[id] = remaining.isEmpty ? nil : remaining
-                }
-                if let stillPending = pendingTabDrops[id] {
-                    tabDicts = tabDicts.filter { !stillPending.contains($0["index"] as? Int ?? -1) }
-                }
+                let stillPending = TabDrops.stillPending(pending, listed: present)
+                pendingTabDrops[id] = stillPending.isEmpty ? nil : stillPending
+                tabDicts = tabDicts.filter { stillPending[$0["index"] as? Int ?? -1] == nil }
             }
             applyRemoteTabs(model, tabDicts)
             // The server sends its guests' own rosters — live whenever there
@@ -1269,6 +1293,9 @@ final class RemoteHostController {
                 accentHex: model.accentHex, model: model))
         }
         tabsModels = tabsModels.filter { liveIDs.contains($0.key) }
+#if os(macOS)
+        noteUnresponsive(unresponsiveNow)
+#endif
         // Keep bootTimes across a brief running-absence (a reboot drops the VM
         // from /state for a few polls), so the uptime-reset comparison still
         // fires when it returns — only forget it when the workspace itself is
@@ -1491,13 +1518,9 @@ final class RemoteHostController {
         kubeStore.mirror(clusters: decoded.clusters, status: decoded.status, registries: decoded.registries)
     }
 
+    private let taskDecoder = SnapshotDecodeMemo<CodingTask>()
     private func applyTasks(_ payload: [String: Any]) {
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let tasks = ((payload["tasks"] as? [[String: Any]]) ?? []).compactMap { dict -> CodingTask? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(CodingTask.self, from: data)
-        }
-        taskStore.mirror(tasks: tasks)
+        taskStore.mirror(tasks: taskDecoder.decode((payload["tasks"] as? [[String: Any]]) ?? []))
     }
 
     // MARK: Sessions (the sessions-first home, mirrored)
@@ -1533,15 +1556,11 @@ final class RemoteHostController {
     }
 #endif
 
+    private let sessionDecoder = SnapshotDecodeMemo<AgentSession>()
     private func applySessions(_ list: [[String: Any]]?) {
         guard let list else { supportsSessions = false; return }
         supportsSessions = true
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let sessions = list.compactMap { dict -> AgentSession? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(AgentSession.self, from: data)
-        }
-        var mirrored = sessions
+        var mirrored = sessionDecoder.decode(list)
         // A rename just sent: keep showing it until the server says so too
         // (a few seconds at most) instead of the old title for a round trip.
         for (id, pending) in pendingTitles {
@@ -1650,13 +1669,10 @@ final class RemoteHostController {
 
     /// Only when present: an older server sends none, and the mirror keeps
     /// what it has rather than reading that as "none".
+    private let delegationDecoder = SnapshotDecodeMemo<Delegation>()
     private func applyDelegations(_ list: [[String: Any]]?) {
         guard let list else { return }
-        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
-        let items = list.compactMap { dict -> Delegation? in
-            guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
-            return try? dec.decode(Delegation.self, from: data)
-        }
+        let items = delegationDecoder.decode(list)
         let before = delegationStore.delegations
         delegationStore.applyMirror(items)
         if before != delegationStore.delegations { onDelegationsMirrored?(self) }
@@ -1989,7 +2005,7 @@ final class RemoteHostController {
     /// `applyWorkspaces`) until the server confirms it gone, so an in-flight
     /// stale poll can't flash the chip back. Kicks an immediate poll to confirm.
     func dropTabLocally(_ id: Profile.ID, index: Int) {
-        pendingTabDrops[id, default: []].insert(index)
+        pendingTabDrops[id, default: [:]][index] = Date()
         if let m = tabsModels[id], let pos = m.tabs.firstIndex(where: { $0.index == index }) {
             m.tabs.remove(at: pos)
             if m.activeIndex >= m.tabs.count { m.activeIndex = max(0, m.tabs.count - 1) }
@@ -3113,17 +3129,7 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     /// own journal, never the folder's newest (two Kimi tabs in one folder).
     func transcriptPin(window w: Int) -> TranscriptPin {
         let s = controller.sessionStore.session(profileID: workspaceID, windowIndex: w)
-        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
-            return TranscriptPin(kimiSession: id)
-        }
-        // Grok / Codex: the session's own conversation (see SessionPane).
-        if let s, s.tool == .grok || s.tool == .codex {
-            let pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
-            if pin != TranscriptPin() { return pin }
-        }
-        var pin = TranscriptPin()
-        pin.kimiExclude = controller.sessionStore.kimiSessionsClaimed(profileID: workspaceID, besides: s?.id)
-        return pin
+        return controller.sessionStore.chatTranscriptPin(for: s, profileID: workspaceID)
     }
 }
 
@@ -3220,7 +3226,7 @@ struct RemoteToolbarBar: View {
                     }
                 }
                 if model.sessionsFirst, model.selectedSessionID != nil {
-                    LinuxPill(back: false, action: onToggleLinux)
+                    LinuxPill(back: false, chat: model.sessionTerminalShown, action: onToggleLinux)
                 } else if terminalHostsSession {
                     LinuxPill(back: true, action: onToggleLinux)
                 }
@@ -3493,7 +3499,8 @@ final class RemoteHostWindow: NSWindow {
     /// The (session, batch of changes) the Files pane last popped up for —
     /// see `revealChangedFiles`.
     private var revealedChangesKey: String?
-    /// While a session is on stage: chat; a machine's tab: the terminal —
+    /// While a session is on stage: chat, or its terminal if the user chose
+    /// that (`SessionTerminalPreference`); a machine's tab: the terminal —
     /// never the app-wide default.
     private var sessionViewMode: SessionViewMode?
     private static let sessionHeaderHeightValue: CGFloat = 66
@@ -3640,6 +3647,7 @@ final class RemoteHostWindow: NSWindow {
         showGrid()
         controller.watching = { [weak self] in self?.sessionsOnScreen ?? [] }
         controller.onSnapshotApplied = { [weak self] in
+            self?.preloadNextChat()
             guard let self else { return }
             self.syncSessionsHome()
             self.refreshDashboardProfile()
@@ -5921,10 +5929,14 @@ final class RemoteHostWindow: NSWindow {
         default: running = false
         }
         let liveChat = live != nil && running && bucket != .ended
+        let liveTerminal = SessionTerminalPreference.showsTerminal(
+            prefers: SessionTerminalPreference.enabled, tabLive: live != nil && running && s.windowIndex != nil,
+            launching: s.isLaunching)
+        model.sessionTerminalShown = liveTerminal
         revealChangedFiles(for: s, live: live != nil && running)
         let key: String
-        if liveChat, let w = s.windowIndex {
-            key = "live:\(s.profileID.uuidString):\(w)"
+        if liveChat || liveTerminal, let w = s.windowIndex {
+            key = SessionTerminalPreference.liveKey(terminal: liveTerminal, profileID: s.profileID, tab: w)
         } else if s.isLaunching {
             key = "launch"
         } else {
@@ -5937,7 +5949,7 @@ final class RemoteHostWindow: NSWindow {
         guard key != sessionPresentationKey else { return }
         sessionPresentationKey = key
         setSessionHeader(visible: true)
-        if liveChat, let w = s.windowIndex {
+        if liveChat || liveTerminal, let w = s.windowIndex {
             sessionOverlayHost?.removeFromSuperview()
             sessionOverlayHost = nil
             let k = "\(s.profileID.uuidString):\(w)"
@@ -5948,7 +5960,7 @@ final class RemoteHostWindow: NSWindow {
                 seededSessions.insert(s.id)
                 sessionSeeds[k] = msg
             }
-            sessionViewMode = .beautified
+            sessionViewMode = liveTerminal ? .terminal : .beautified
             model.selectedID = s.profileID
             controller.selectTab(s.profileID, index: w)
             showWorkspace(s.profileID, window: w)
@@ -6029,6 +6041,7 @@ final class RemoteHostWindow: NSWindow {
     private func clearSessionStage() {
         clearRoom()
         let model = controller.listModel
+        model.sessionTerminalShown = false
         guard selectedSessionID != nil || model.newSessionSelected || sessionOverlayHost != nil else { return }
         selectedSessionID = nil
         model.selectedSessionID = nil
@@ -6251,16 +6264,32 @@ final class RemoteHostWindow: NSWindow {
         }
     }
 
-    /// Linux mode: the terminal for every tab, the machine's controls back,
-    /// the Machines list unfolded.
-    /// Toolbar / ⌥⌘U, as in the local window: from a session, the Linux
-    /// machine behind it — its terminal tab in the Machines list. From that
-    /// terminal, the session again.
+    /// Toolbar / ⌥⌘U, as in the local window: flip the session on stage
+    /// between its chat and its terminal, in place, and keep that choice. With
+    /// no tab to show, the machine's dashboard. From a machine's tab that
+    /// hosts a session, that session.
     func toggleLinux() {
         if let id = selectedSessionID {
-            showLinux(for: id)
+            let model = controller.listModel
+            if model.sessionTerminalShown {
+                SessionTerminalPreference.enabled = false
+                selectSession(id)
+            } else if let s = controller.sessionStore.session(id), !s.isLaunching, s.windowIndex != nil,
+                      SessionHome.liveTabPosition(for: s, in: model) != nil, isRunning(s.profileID) {
+                SessionTerminalPreference.enabled = true
+                selectSession(id)
+            } else {
+                showLinux(for: id)
+            }
         } else if let id = sessionOnShownTab {
             selectSession(id)
+        }
+    }
+
+    private func isRunning(_ id: Profile.ID) -> Bool {
+        switch controller.runState(for: id) {
+        case .running, .booting: return true
+        default: return false
         }
     }
 
@@ -7848,7 +7877,15 @@ final class RemoteHostWindow: NSWindow {
         if shownWorkspace == id, let idx = shownWindowIndex, !liveWindows.contains(idx) {
             mountedTermView = nil          // retire already tore the view down
             shownWindowIndex = nil
-            showWorkspace(id)
+            // A session's terminal: its own next surface, not the machine's
+            // active tab — another session's shell, typeable, under this
+            // session's header.
+            if let sid = selectedSessionID, let s = controller.sessionStore.session(sid) {
+                sessionPresentationKey = nil
+                presentSession(s)
+            } else {
+                showWorkspace(id)
+            }
         }
         // Same fallback for a pop-out window the retire left empty.
         if let win = popOutWindows[id], let content = win.contentView,
@@ -8181,6 +8218,36 @@ final class RemoteHostWindow: NSWindow {
         return m
     }
 
+    // MARK: Preloading conversations
+
+    private var preloading = false
+    private var preloaded: [UUID: ChatPreload.Done] = [:]
+
+    /// A snapshot came in: fetch the next conversation that's worth having ready,
+    /// one at a time. Quiet on a slow link, where it would compete with what the
+    /// user is doing.
+    private func preloadNextChat() {
+        guard !preloading, controller.connected, !controller.linkSlow else { return }
+        let warm = Set(warmChats.values.compactMap { $0.currentSession?()?.id })
+        let running = Set(controller.listModel.profileRows.filter { $0.state == .running }.map(\.id))
+        let list = controller.sessionStore.sessions.filter { running.contains($0.profileID) }
+        guard let s = ChatPreload.next(list, done: preloaded, skipping: warm.union(selectedSessionID.map { [$0] } ?? []),
+                                       activity: SessionHome.lastActivity(_:)),
+              let w = s.windowIndex else { return }
+        preloading = true
+        let provider = RemoteTranscriptProvider(controller: controller, workspaceID: s.profileID, windowIndex: w,
+                                                sessionID: s.id, accent: .accentColor)
+        let activity = SessionHome.lastActivity(s)
+        Task { [weak self] in
+            await BeautifiedSessionModel.preloadHistory(provider: provider, agent: s.tool.rawValue, profileID: s.profileID)
+            guard let self else { return }
+            // Tried is done, whatever came of it: a machine that can't be read
+            // isn't asked again until the session does something.
+            self.preloaded[s.id] = ChatPreload.Done(activity: activity, at: Date())
+            self.preloading = false
+        }
+    }
+
     /// Chats recently on stage, kept streaming in the background (see
     /// `BeautifiedSessionModel.setBackground`), most recent last.
     private var warmChats: [String: BeautifiedSessionModel] = [:]
@@ -8399,7 +8466,9 @@ final class StateStream: @unchecked Sendable {
         // iOS) instead of the short-request control path.
         let client = RemoteTransport.client(for: host, interactive: true)
         let fd: Int32
-        do { fd = try client.openStream("GET", "/state/subscribe", body: [:]) }
+        // Sections that changed, merged here; a server that doesn't know the
+        // header sends the whole state, which reads the same.
+        do { fd = try client.openStream("GET", "/state/subscribe", body: [:], headers: ["X-Bromure-State-Delta": "1"]) }
         catch { return false }
         lock.lock(); currentFD = fd; lock.unlock()
         // The server re-pushes at least every 15 s even when nothing changed,
@@ -8418,6 +8487,8 @@ final class StateStream: @unchecked Sendable {
 
         var buf = [UInt8](); buf.reserveCapacity(1 << 17)
         var rbuf = [UInt8](repeating: 0, count: 1 << 16)
+        // The state as of the last frame: deltas apply to it, in order.
+        var state: [String: Any]?
         while !isStopped {
             let n = rbuf.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress!, $0.count) }
             if n <= 0 { break }
@@ -8428,20 +8499,28 @@ final class StateStream: @unchecked Sendable {
             // terminal refresh pushes a frame) pinned tens of GB over hours.
             var bogus = false
             autoreleasepool {
-                while buf.count >= 4 {
-                    let len = (Int(buf[0]) << 24) | (Int(buf[1]) << 16) | (Int(buf[2]) << 8) | Int(buf[3])
-                    if len < 1 || len > 32 * 1024 * 1024 { bogus = true; return }   // bogus frame → drop + reconnect
-                    if buf.count < 4 + len { break }
-                    let flag = buf[4]
-                    var data = Data(buf[5 ..< 4 + len])
-                    buf.removeFirst(4 + len)
-                    if flag == 1, let inflated = try? (data as NSData).decompressed(using: .zlib) {
+                // A whole frame replaces what came before it, so only the last
+                // whole one and the deltas after it are read; each delta merges
+                // into the state, in order.
+                let frames = SnapshotFrames.takeAll(from: &buf)
+                bogus = frames.bogus
+                var changed = false
+                for frame in SnapshotFrames.fromLastWhole(frames.frames) {
+                    var data = frame.payload
+                    if frame.compressed, let inflated = try? (data as NSData).decompressed(using: .zlib) {
                         data = inflated as Data
                     }
-                    if let snap = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                        deliverSnapshot(snap)
+                    guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+                    if frame.delta {
+                        // A delta with nothing to apply to: the stream is out of step.
+                        guard let base = state else { bogus = true; break }
+                        state = SnapshotFrames.merge(base, delta: obj)
+                    } else {
+                        state = obj
                     }
+                    changed = true
                 }
+                if changed, let state { deliverSnapshot(state) }
             }
             if bogus { return true }
         }
@@ -8449,9 +8528,23 @@ final class StateStream: @unchecked Sendable {
         return true
     }
 
+    /// Newest wins: a main thread behind on snapshots catches up to the latest
+    /// instead of applying every state it missed, which kept it behind for good.
+    private var pendingSnapshot: [String: Any]?
     private func deliverSnapshot(_ snap: [String: Any]) {
+        lock.lock()
+        let scheduled = pendingSnapshot != nil
+        pendingSnapshot = snap
+        lock.unlock()
+        guard !scheduled else { return }
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.controller?.applyPushedSnapshot(snap) }
+            guard let self else { return }
+            self.lock.lock()
+            let latest = self.pendingSnapshot
+            self.pendingSnapshot = nil
+            self.lock.unlock()
+            guard let latest else { return }
+            MainActor.assumeIsolated { self.controller?.applyPushedSnapshot(latest) }
         }
     }
     private func deliverActive(_ active: Bool) {
@@ -8660,4 +8753,127 @@ final class InOrder<Key: Hashable, Value> {
     }
 
     var idle: Bool { tails.isEmpty }
+}
+
+
+/// The push stream's framing: a 4-byte length, a compression flag, the payload.
+enum SnapshotFrames {
+    struct Frame: Equatable {
+        var compressed: Bool
+        var payload: Data
+        /// Only the sections that changed (`merge`), not the whole state.
+        var delta = false
+    }
+
+    /// Takes every complete frame off `buf`, in order.
+    static func takeAll(from buf: inout [UInt8]) -> (frames: [Frame], bogus: Bool) {
+        var frames: [Frame] = []
+        var at = 0
+        var bogus = false
+        while buf.count - at >= 4 {
+            let len = (Int(buf[at]) << 24) | (Int(buf[at + 1]) << 16) | (Int(buf[at + 2]) << 8) | Int(buf[at + 3])
+            if len < 1 || len > 32 * 1024 * 1024 { bogus = true; break }
+            if buf.count - at < 4 + len { break }
+            let flag = buf[at + 4]
+            frames.append(Frame(compressed: flag & 1 != 0, payload: Data(buf[(at + 5) ..< (at + 4 + len)]),
+                                delta: flag & 2 != 0))
+            at += 4 + len
+        }
+        if at > 0 { buf.removeFirst(at) }
+        return (frames, bogus)
+    }
+
+    /// What has to be read of `frames`: the last whole one and the deltas
+    /// after it, or every delta when there's no whole one among them.
+    static func fromLastWhole(_ frames: [Frame]) -> ArraySlice<Frame> {
+        guard let i = frames.lastIndex(where: { !$0.delta }) else { return frames[...] }
+        return frames[i...]
+    }
+
+    /// `state` with a delta's sections set and removed.
+    static func merge(_ state: [String: Any], delta: [String: Any]) -> [String: Any] {
+        var out = state
+        for (k, v) in delta["set"] as? [String: Any] ?? [:] { out[k] = v }
+        for k in delta["unset"] as? [String] ?? [] { out[k] = nil }
+        return out
+    }
+
+    /// Takes every complete frame off `buf` and returns the last. `bogus`: a
+    /// length no frame could have, so the stream can't be trusted any further.
+    static func takeLatest(from buf: inout [UInt8]) -> (latest: Frame?, bogus: Bool) {
+        let all = takeAll(from: &buf)
+        return (all.frames.last, all.bogus)
+    }
+}
+
+/// Decoding the same records out of every snapshot is most of what applying one
+/// costs on the main thread: a record whose raw form hasn't changed since the
+/// last snapshot keeps its decoded value. What's applied is exactly what a fresh
+/// decode would give.
+final class SnapshotDecodeMemo<T: Decodable> {
+    private var known: [String: (raw: NSDictionary, value: T)] = [:]
+    private let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+
+    func decode(_ list: [[String: Any]]) -> [T] {
+        var next: [String: (raw: NSDictionary, value: T)] = [:]
+        next.reserveCapacity(list.count)
+        let out = list.compactMap { dict -> T? in
+            let raw = dict as NSDictionary
+            let id = dict["id"] as? String
+            if let id, let hit = known[id], hit.raw.isEqual(raw) {
+                next[id] = hit
+                return hit.value
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let value = try? decoder.decode(T.self, from: data) else { return nil }
+            if let id { next[id] = (raw, value) }
+            return value
+        }
+        known = next
+        return out
+    }
+}
+
+
+/// Which conversation to have ready next, before the user asks for it.
+enum ChatPreload {
+    struct Done: Equatable { var activity: Date; var at: Date }
+    /// The sessions a user is likely to switch to: the most recently active.
+    static let candidates = 8
+    /// However busy a session is, it's fetched at most this often: a working
+    /// agent would otherwise be read back to back, for a chat nobody has open.
+    static let minimumInterval: TimeInterval = 20
+
+    @MainActor
+    static func next(_ sessions: [AgentSession], done: [UUID: Done], skipping: Set<UUID>,
+                     activity: (AgentSession) -> Date, now: Date = Date()) -> AgentSession? {
+        let live = sessions.filter { $0.windowIndex != nil && !$0.hasEnded && !$0.isDeleted && !$0.isArchived }
+            .sorted { activity($0) > activity($1) }
+            .prefix(candidates)
+        return live.first { s in
+            guard !skipping.contains(s.id) else { return false }
+            guard let d = done[s.id] else { return true }
+            return activity(s) > d.activity && now.timeIntervalSince(d.at) >= minimumInterval
+        }
+    }
+}
+
+
+/// Tabs closed here that the server hasn't confirmed gone yet.
+enum TabDrops {
+    /// How long a closed tab's index stays hidden while the server still lists it.
+    /// Long enough for a stale snapshot to pass. It can't be until the server
+    /// confirms: tmux reuses the lowest free index, so a new tab can take the
+    /// number before any snapshot without it is applied (only the newest of a
+    /// batch is), and it would stay hidden for as long as it exists.
+    static let patience: TimeInterval = 8
+
+    /// What of `pending` to keep hiding, given the indices the server lists.
+    static func stillPending(_ pending: [Int: Date], listed: Set<Int>, now: Date = Date()) -> [Int: Date] {
+        pending.filter { index, at in listed.contains(index) && now.timeIntervalSince(at) < patience }
+    }
 }

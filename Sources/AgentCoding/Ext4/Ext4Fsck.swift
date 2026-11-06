@@ -200,6 +200,12 @@ enum Ext4Fsck {
             issues += verifyGroupDescriptors(vol, log: &log)
         }
 
+        // The root itself. A cleared or clobbered inode 2 walks as one inode
+        // with nothing under it and would pass as clean (the engine would
+        // then reboot a cluster machine into the same failed fsck instead of
+        // going on to the real e2fsck).
+        issues += verifyRoot(vol, log: &log)
+
         // Reachability walk from the root: inode checksums + extent trees +
         // directory structure. The cap only exists so a pathological image
         // can't spin forever — it is sized off the filesystem's own inode
@@ -214,6 +220,17 @@ enum Ext4Fsck {
             if !visited.insert(ino).inserted { continue }
             do {
                 let node = try vol.inode(ino)
+                // Reached through a directory entry, so it must be in use: a
+                // zeroed (cleared) record, or one with no links left (deleted,
+                // whatever its dtime), is the "deleted/unused inode" e2fsck
+                // refuses to preen. Its checksum can still verify, so this
+                // comes first. (Orphan-list inodes, links 0 by design, aren't
+                // reached: no entry names them.)
+                if node.mode == 0 || node.links == 0 {
+                    bad += 1
+                    if bad <= 10 { log.append("inode \(ino): referenced by a directory entry but unused (deleted or cleared)") }
+                    continue
+                }
                 if try !vol.verifyInodeChecksum(ino) {
                     bad += 1
                     if bad <= 10 { log.append("inode \(ino): checksum mismatch") }
@@ -225,7 +242,8 @@ enum Ext4Fsck {
                 // huge tree can't blow up memory — walkExtents materializes one
                 // dict entry per block, not per extent.
                 if !node.isInline && (node.isDir || node.isRegular) {
-                    let want = (Int(node.size) + vol.blockSize - 1) / vol.blockSize
+                    let head = min(node.size, UInt64(12 * vol.blockSize))   // i_size is the image's word
+                    let want = (Int(head) + vol.blockSize - 1) / vol.blockSize
                     for (_, phys) in try vol.blockMap(node, upTo: min(max(want, 1), 12))
                     where phys != 0 && phys >= vol.sb.blocksCount {
                         bad += 1
@@ -253,6 +271,33 @@ enum Ext4Fsck {
         log.append("verified \(visited.count) reachable inode(s)"
                    + (bad > 0 ? ", \(bad) bad" : ""))
         return (issues + bad, complete)
+    }
+
+    /// Inode 2 must be a directory with its own data (blocks, or inline),
+    /// whose "." and ".." are both inode 2. Returns the problem count (0/1).
+    private static func verifyRoot(_ vol: Ext4Volume, log: inout [String]) -> Int {
+        let root = Ext4Volume.rootInode
+        do {
+            let node = try vol.inode(root)
+            guard node.isDir else {
+                log.append("root inode is not a directory (mode \(String(node.mode, radix: 8)))")
+                return 1
+            }
+            if !node.isInline, try vol.blockMap(node, upTo: 1).isEmpty {
+                log.append("root directory has no data blocks")
+                return 1
+            }
+            let dots = try vol.dotEntries(root)
+            guard dots.dot == root, dots.dotdot == root else {
+                log.append("root directory's \".\" and \"..\" don't both point at inode \(root) "
+                           + "(\(dots.dot.map(String.init) ?? "none"), \(dots.dotdot.map(String.init) ?? "none"))")
+                return 1
+            }
+            return 0
+        } catch {
+            log.append("root inode: \(error)")
+            return 1
+        }
     }
 
     /// metadata_csum group-descriptor checksums: crc32c(seed → group# (le32) →

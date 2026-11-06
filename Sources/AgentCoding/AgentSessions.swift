@@ -290,8 +290,8 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var launchingSince: Date?
     var launchBaselineIndex: Int?
     var endedAt: Date?
-    /// When a roster pass last found the session's tab — every pass while
-    /// the tab is there, idle or not: liveness, never activity.
+    /// When a roster pass last found the session's tab — every 30 s while
+    /// the tab is there (`seenStride`), idle or not: liveness, never activity.
     var lastSeenAt: Date?
     /// When the agent last finished a turn or stopped to ask (`noteReply`):
     /// what the card's "3m" and the stage's "Idle · 3 min" count from.
@@ -982,6 +982,25 @@ final class AgentSessionStore {
         conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
     }
 
+    /// Which conversation a chat for `s` may read — one rule for the app's own
+    /// chat and the fat client's: the session's own, never the folder's newest
+    /// (an archived session's, a second session's live one).
+    func chatTranscriptPin(for s: AgentSession?, profileID: UUID) -> TranscriptPin {
+        if let s, s.tool == .kimi, let id = s.agentTranscriptID, AgentSessionLocator.isKimiSessionID(id) {
+            return TranscriptPin(kimiSession: id)
+        }
+        if let s, s.tool == .grok || s.tool == .codex || s.tool == .omp {
+            var pin = TranscriptPin.conversation(tool: s.tool.rawValue, id: s.agentTranscriptID)
+            if pin != TranscriptPin() { return pin }
+            // Not pinned yet: never another session's conversation.
+            pin.foreignConversations = conversationsClaimed(tool: s.tool, profileID: profileID, besides: s.id)
+            return pin
+        }
+        var pin = TranscriptPin()
+        pin.kimiExclude = kimiSessionsClaimed(profileID: profileID, besides: s?.id)
+        return pin
+    }
+
     /// The uuid-named conversations sessions of `tool` on `profileID` other
     /// than `besides` own, lowercased.
     func conversationsClaimed(tool: Profile.Tool, profileID: UUID, besides: UUID?) -> [String] {
@@ -1314,8 +1333,11 @@ final class AgentSessionStore {
             if now.timeIntervalSince(first) < Self.deadGrace, sessions[i].agentAlive != false { return }
         }
         let changed = sessions[i].agentAlive != alive
-        sessions[i].agentAlive = alive
-        if alive { sessions[i].agentSeenAt = now }
+        // Written only when it moves: any write to `sessions` re-renders the sidebar.
+        if changed { sessions[i].agentAlive = alive }
+        if alive, Self.restamp(sessions[i].agentSeenAt, now, since: Self.started(sessions[i])) {
+            sessions[i].agentSeenAt = now
+        }
         if changed { save() }
     }
 
@@ -1324,6 +1346,26 @@ final class AgentSessionStore {
     /// the session is "ended" (a roster still loading shows nothing at all).
     static let deadGrace: TimeInterval = 6
     static let missingGrace: TimeInterval = 8
+
+    /// How stale `lastSeenAt` / `agentSeenAt` get before a pass restamps
+    /// them. Every pass used to (the state feed alone runs one up to 2.5
+    /// times a second), so the store always changed: each pass re-rendered
+    /// and re-measured the whole sidebar and rewrote sessions.json, most of a
+    /// busy server's main thread. Both read in seconds-to-minutes.
+    nonisolated static let seenStride: TimeInterval = 30
+
+    /// Whether a seen-stamp is due: never set, `seenStride` old, or from
+    /// before `since` (a restart or resume: "has the agent run since?"
+    /// must answer yes on the first pass that sees it).
+    nonisolated static func restamp(_ stamp: Date?, _ now: Date, since: Date = .distantPast) -> Bool {
+        guard let stamp else { return true }
+        return stamp < since || now.timeIntervalSince(stamp) >= seenStride
+    }
+
+    /// The session's last (re)start, as `agentExited` counts it.
+    nonisolated static func started(_ s: AgentSession) -> Date {
+        max(s.createdAt, s.resumedAt ?? .distantPast)
+    }
     private var deadSince: [UUID: Date] = [:]
     private var missingSince: [UUID: Date] = [:]
 
@@ -1416,9 +1458,10 @@ final class AgentSessionStore {
                     if indices.contains(w) {
                         missingSince[s.id] = nil
                         if s.endedAt != nil { s.endedAt = nil }
-                        s.lastSeenAt = now
+                        if Self.restamp(s.lastSeenAt, now) { s.lastSeenAt = now }
                         if let tab = tabs.first(where: { $0.index == w }) {
-                            if Self.agentRunning(s, in: tab) { s.agentSeenAt = now }
+                            if Self.agentRunning(s, in: tab),
+                               Self.restamp(s.agentSeenAt, now, since: Self.started(s)) { s.agentSeenAt = now }
                             // Not while its agent is known gone: a title in
                             // the tab then is a new run's (`checkAgentProcess`
                             // hands that tab to a session of its own).
@@ -2040,6 +2083,11 @@ enum SessionHome {
         if s.hasEnded { return !(s.lastError ?? "").isEmpty && !s.isArchived ? .needsYou : .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
+        #if os(macOS)
+        // Its guest has gone silent: nothing it last said about this agent can
+        // still be trusted, "working" least of all.
+        guard !GuestLivenessStore.shared.isUnresponsive(s.profileID) else { return .asleep }
+        #endif
         // Up, but tmux hasn't reported yet (a boot, a resume): still asleep
         // as far as the session can tell — not "Ended" for a few seconds.
         guard rosterLive(for: s.profileID, in: model) else { return .asleep }

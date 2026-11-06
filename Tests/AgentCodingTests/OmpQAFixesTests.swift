@@ -80,7 +80,7 @@ struct OmpQAFixesTests {
 
     /// Runs `confirmedEnter` against a stub tmux whose screen changes on
     /// Enter unless it swallows the first `swallow` of them.
-    private func runConfirm(swallow: Int) throws -> (out: String, keys: Int) {
+    nonisolated private func runConfirm(swallow: Int) throws -> (out: String, keys: Int) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("omp-confirm-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -117,7 +117,7 @@ struct OmpQAFixesTests {
     }
 
     @Test("An Enter the agent swallows is pressed once more; twice swallowed is not delivered")
-    func confirmedEnterRetries() throws {
+    nonisolated func confirmedEnterRetries() async throws {
         let ok = try runConfirm(swallow: 0)
         #expect(ok.out.contains(PaneTypeGuard.typedMarker) && ok.keys == 1)
         let retried = try runConfirm(swallow: 1)

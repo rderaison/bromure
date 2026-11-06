@@ -75,6 +75,10 @@ enum SwitchboardBrief {
       no tables, no headings.
     - Refer to sessions by their handle from `list_sessions` (an @nickname
       or a short slug), never by id.
+    - The user reads your conversation one session at a time. When you cover
+      several, give each its own "•" line or paragraph, naming only that
+      session's handle. Don't mix two sessions in one line unless the point
+      is how they relate.
     - When a session is blocked, quote its question word for word, list the
       options numbered, and say how to answer ("tell me: api 2").
     - Report what the transcripts and screens show, not what you assume.

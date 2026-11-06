@@ -255,6 +255,13 @@ final class DelegationEngine {
 
     deinit { ticker?.cancel() }
 
+    /// For a test driving `tick()` itself: the 4 s ticker, firing between two of
+    /// its steps on a loaded machine, is a tick the test didn't ask for.
+    func stopTicking() {
+        ticker?.cancel()
+        ticker = nil
+    }
+
     // MARK: Reach
 
     /// May agents in workspace `from` reach sessions in workspace `to`?

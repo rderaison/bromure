@@ -69,6 +69,9 @@ extension SessionDisk {
            tokenPlan?.claudeOAuthStandIn == nil {
             exported.insert("ANTHROPIC_API_KEY")
         }
+        // A key with no stand-in (its base URL names no host the proxy can
+        // swap on, e.g. "10.0.0.5:8000/v1" with no scheme) never goes in as
+        // itself: the VM gets "none", as for a keyless server.
         for extra in profile.ompExtraProviders where !exported.contains(extra.envVar) {
             let value = extra.apiKey.isEmpty
                 ? "none"

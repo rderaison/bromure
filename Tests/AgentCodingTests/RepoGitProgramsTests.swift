@@ -26,8 +26,18 @@ struct RepoGitProgramsTests {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// The probe's command comes from the main actor, but runs off it: these
+    /// tests spend their time in git, and a main thread held for that stalls
+    /// every main-actor test in the run.
+    private func changesProbe(_ root: String) async -> String {
+        let command = await MainActor.run {
+            AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])
+        }
+        return sh(command)
+    }
+
     @Test("the review, the session list and the changes probe run no fsmonitor, diff program or filter")
-    @MainActor func noRepoPrograms() throws {
+    nonisolated func noRepoPrograms() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgp-\(UUID().uuidString)").path
         defer { try? FileManager.default.removeItem(atPath: home) }
         let root = home + "/.bromure/worktrees/repo/x"   // where the session list looks
@@ -46,7 +56,7 @@ struct RepoGitProgramsTests {
         let review = sh(TaskReviewData.sessionCommand(dir: root, base: .uncommitted))
         #expect(review.contains("===STATUS===") && review.contains("+b"))
         _ = sh(TaskReviewSummary.command(root: root, worktreeDir: root, branch: "main", target: "main"))
-        _ = sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())]))
+        _ = await changesProbe(root)
         let roster = sh(WorktreeEntry.guestCommand, home: home)
         #expect(roster.contains(root))
         #expect(!FileManager.default.fileExists(atPath: marker))
@@ -219,7 +229,7 @@ struct RepoGitProgramsTests {
     /// session list said "no changes yet", Discard said nothing would be
     /// lost, and removing the worktree deleted that work.
     @Test("an edited submodule reads as a change, and its own programs still don't run")
-    @MainActor func dirtySubmoduleCounts() throws {
+    nonisolated func dirtySubmoduleCounts() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgs-\(UUID().uuidString)").path
         defer { try? FileManager.default.removeItem(atPath: home) }
         let root = home + "/.bromure/worktrees/repo/x"
@@ -238,7 +248,8 @@ struct RepoGitProgramsTests {
                + "git config filter.evil.clean \(pwn)")
         #expect(count() == "1")
         #expect(sh(TaskLitter.status("'\(root)'")).contains(" M sub"))
-        #expect(sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])).contains("k\t1"))
+        let probed = await changesProbe(root)
+        #expect(probed.contains("k\t1"))
         #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
                                                    squash: false)).contains("dirty"))
         #expect(!FileManager.default.fileExists(atPath: marker))
@@ -248,7 +259,7 @@ struct RepoGitProgramsTests {
     /// truncated index, as a crash mid-write leaves it) printed nothing, so
     /// the checkout read as clean and empty — and Mark done removed it.
     @Test("a submodule whose status fails reads as a change")
-    @MainActor func failedSubmoduleStatusCounts() throws {
+    nonisolated func failedSubmoduleStatusCounts() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgf-\(UUID().uuidString)").path
         defer { try? FileManager.default.removeItem(atPath: home) }
         let root = home + "/.bromure/worktrees/repo/x"
@@ -262,7 +273,8 @@ struct RepoGitProgramsTests {
                + "head -c 20 \"$i\" > \"$i.t\"; mv \"$i.t\" \"$i\"")
         #expect(sh("cd \(root)/sub && git status --porcelain >/dev/null 2>&1 || echo failed").contains("failed"))
         #expect(sh(TaskLitter.status("'\(root)'")).contains(" M sub"))
-        #expect(sh(AgentSessionEngine.changesProbeCommand([(key: "k", path: root, since: Date())])).contains("k\t1"))
+        let probed = await changesProbe(root)
+        #expect(probed.contains("k\t1"))
         #expect(sh(BranchMergeCommands.mergeScript(root: root, branch: "wt/none", into: "main", sourceDir: root,
                                                    squash: false)).contains("dirty"))
     }
@@ -271,7 +283,7 @@ struct RepoGitProgramsTests {
     /// holding `"`, `\\`, a tab or a newline, and the quoted text was looked
     /// for on disk — an edit in such a submodule read as no change at all.
     @Test("an edited submodule whose path git quotes still reads as a change")
-    @MainActor func quotedSubmodulePath() throws {
+    nonisolated func quotedSubmodulePath() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("rgq-\(UUID().uuidString)").path
         defer { try? FileManager.default.removeItem(atPath: home) }
         let root = home + "/.bromure/worktrees/repo/x"
