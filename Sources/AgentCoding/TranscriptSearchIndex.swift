@@ -227,22 +227,14 @@ final class TranscriptSearchIndex {
                               settled: AgentTranscript.sniffIsSettled(data),
                               size: size, modified: modified, head: fileHead, handle: h)
             }
-            guard var start = bytes(at: 0, head) else { return nil }
-            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
-            let tailAt = size - UInt64(cap - head)
-            guard var end = bytes(at: tailAt, Int(size - tailAt)) else { return nil }
-            var endAt = tailAt
-            if let nl = end.firstIndex(of: 0x0A) {
-                endAt += UInt64(nl - end.startIndex + 1)
-                end = Data(end[(nl + 1)...])
-            } else {
-                endAt = size
-                end = Data()
-            }
+            guard let s = samples(size: size, cap: cap, head: head, read: bytes) else { return nil }
+            let start = s.start, end = s.end
             // The format comes from the start: the end of a file can look like
             // another agent's lines.
             let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
-            return record(prefix: entry(start, modified: modified, agent: agent), offset: endAt, bytes: end,
+            let front = start.isEmpty && end.isEmpty
+                ? salvagedEntry(s.rawHead, modified: modified) : entry(start, modified: modified, agent: agent)
+            return record(prefix: front, offset: s.endAt, bytes: end,
                           agent: agent, settled: AgentTranscript.sniffIsSettled(start.isEmpty ? end : start),
                           size: size, modified: modified, head: fileHead, handle: h)
         }
@@ -318,11 +310,12 @@ final class TranscriptSearchIndex {
                 return entry(data, modified: modified)
             }
             // Its start, for what only the start says, and its end.
-            guard var start = try? h.read(upToCount: head) else { return nil }
-            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
-            guard (try? h.seek(toOffset: size - UInt64(cap - head))) != nil,
-                  var end = try? h.readToEnd() else { return nil }
-            end = end.firstIndex(of: 0x0A).map { Data(end[($0 + 1)...]) } ?? Data()
+            guard let s = samples(size: size, cap: cap, head: head, read: { at, count in
+                guard (try? h.seek(toOffset: at)) != nil else { return nil }
+                return (try? h.read(upToCount: count)) ?? Data()
+            }) else { return nil }
+            let start = s.start, end = s.end
+            if start.isEmpty && end.isEmpty { return salvagedEntry(s.rawHead, modified: modified) }
             // The format comes from the start: the end of a file can look like
             // another agent's lines.
             let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
@@ -335,6 +328,73 @@ final class TranscriptSearchIndex {
             e.model = e.model ?? first.model
             return e
         }
+    }
+
+    /// A file past the cap, sampled: `start` its first `head` bytes cut back to
+    /// the last whole line, `end` the rest of the cap from its end after the
+    /// first line break (`endAt` where that is). A first record longer than
+    /// `head` is read whole when it fits in half the cap (the end then gets
+    /// what's left, so the two stay within the cap): it left the start empty,
+    /// and a file of one long record (a pasted prompt, a tool's output) had
+    /// nothing indexed at all. `rawHead`: the first `head` bytes, for
+    /// `salvagedEntry` when neither sample holds a whole line.
+    nonisolated static func samples(size: UInt64, cap: Int, head: Int,
+                                    read: (UInt64, Int) -> Data?) -> (start: Data, end: Data, endAt: UInt64, rawHead: Data)? {
+        guard let raw = read(0, head) else { return nil }
+        var start = Data(), took = head
+        if let nl = raw.lastIndex(of: 0x0A) {
+            start = Data(raw[...nl])
+        } else if cap / 2 > head, let longer = read(0, cap / 2), let nl = longer.firstIndex(of: 0x0A) {
+            start = Data(longer[...nl])
+            took = start.count
+        }
+        let tailAt = size - UInt64(cap - took)
+        guard var end = read(tailAt, Int(size - tailAt)) else { return nil }
+        var endAt = tailAt
+        if let nl = end.firstIndex(of: 0x0A) {
+            endAt += UInt64(nl - end.startIndex + 1)
+            end = Data(end[(nl + 1)...])
+        } else {
+            endAt = size
+            end = Data()
+        }
+        return (start, end, endAt, raw)
+    }
+
+    /// What one record too long to parse says, from its first bytes: the words
+    /// of its `text` and `content` strings, in order (the last one cut where
+    /// the bytes end), as a user's prompt or the agent's reply.
+    nonisolated static func salvagedEntry(_ data: Data, modified: Date) -> Entry {
+        let s = String(decoding: data, as: UTF8.self)
+        var found: [(String.Index, String)] = []
+        for key in ["\"text\":\"", "\"content\":\""] {
+            var from = s.startIndex
+            while let r = s.range(of: key, range: from..<s.endIndex) {
+                var i = r.upperBound, raw = "", escaped = false, closed = false
+                while i < s.endIndex {
+                    let c = s[i]
+                    if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { closed = true; break }
+                    raw.append(c)
+                    i = s.index(after: i)
+                }
+                // Cut mid-escape (a lone "\" or a short "\u12"): drop it.
+                var value: String?
+                for drop in 0...6 where value == nil && raw.count >= drop {
+                    value = try? JSONSerialization.jsonObject(with: Data(("\"" + raw.dropLast(drop) + "\"").utf8),
+                                                              options: .fragmentsAllowed) as? String
+                }
+                if let v = value?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty { found.append((r.lowerBound, v)) }
+                from = closed ? s.index(after: i) : s.endIndex
+            }
+        }
+        let texts = found.sorted { $0.0 < $1.0 }.map(\.1)
+        let text = texts.joined(separator: "\n\n")
+        let lead = s.prefix(4096)
+        let isUser = lead.contains("\"type\":\"user\"") || lead.contains("\"role\":\"user\"")
+        let first = texts.first ?? ""
+        let line = first.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return Entry(text: text, lastReply: isUser ? "" : String(line.prefix(160)), tokens: TokenUsage(),
+                     firstPrompt: isUser && isOwnWords(first) ? first : nil, modified: modified)
     }
 
     /// Past this, a transcript is read for its first `indexHead` bytes and the
