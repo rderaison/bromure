@@ -927,6 +927,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showVMDashboard(id) },
+            onDeleteCheckpoints: { [weak self] id in self?.acDelegate?.deleteAllCheckpoints(id, from: self) },
             sessionForTab: { [weak self] id, window in
                 self?.acDelegate?.sessionRecord(profileID: id, windowIndex: window)?.id
             })
@@ -5837,6 +5838,8 @@ struct UnifiedToolbarBar: View {
     var onToggleLinux: () -> Void = {}
     /// The machine's dashboard (the machine menu's "Machine Details").
     var onDetails: ((Profile.ID) -> Void)? = nil
+    /// ⌥ on the machine menu: delete every checkpoint of the machine. nil on a fat client.
+    var onDeleteCheckpoints: ((Profile.ID) -> Void)? = nil
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -5895,7 +5898,8 @@ struct UnifiedToolbarBar: View {
                                 onSettings: { onSettings(row.id) },
                                 onReboot: {}, onTrace: {}, onDetach: {},
                                 onDetails: onDetails.map { f in { f(row.id) } },
-                                running: false)
+                                running: false,
+                                onDeleteCheckpoints: onDeleteCheckpoints.map { f in { f(row.id) } })
                 }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: false) {}
@@ -5938,7 +5942,8 @@ struct UnifiedToolbarBar: View {
                             onTrace: { onTrace(entry.id) },
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
-                            ip: entry.model.ipAddress)
+                            ip: entry.model.ipAddress,
+                            onDeleteCheckpoints: onDeleteCheckpoints.map { f in { f(entry.id) } })
                 PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
@@ -5967,6 +5972,8 @@ struct MachineMenu: View {
     var ip: String? = nil
     /// Off or suspended: only what works without it (settings, details).
     var running = true
+    /// Shown only when the menu is opened with ⌥ held: rare, and it can stall the Mac.
+    var onDeleteCheckpoints: (() -> Void)? = nil
     @State private var hovering = false
 
     @State private var anchor = MenuAnchor()
@@ -6024,6 +6031,11 @@ struct MachineMenu: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(ip, forType: .string)
             }
+        }
+        // Read when the menu opens: ⌥-click shows it, a plain click doesn't.
+        if let onDeleteCheckpoints, NSEvent.modifierFlags.contains(.option) {
+            menu.addItem(.separator())
+            add(NSLocalizedString("Delete All Checkpoints…", comment: "machine menu"), "trash", onDeleteCheckpoints)
         }
         guard running else {
             popUpMenu(menu)

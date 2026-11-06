@@ -4413,6 +4413,50 @@ public final class ProfileStore {
         reaper.sweep(dir)   // what a quit left half deleted
     }
 
+    /// Every checkpoint file a workspace holds, disk and home, kept or already
+    /// retired (`.deleting`): what "Delete All Checkpoints" removes. Regular files
+    /// only, named as checkpoints are, directly in the two checkpoint folders:
+    /// nothing else in the workspace (disk.img, home.img) can be listed.
+    public func allCheckpointFiles(for profile: Profile) -> [URL] {
+        Self.checkpointFiles(in: [checkpointsDirectory(for: profile), homeCheckpointsDirectory(for: profile)])
+    }
+
+    static func checkpointFiles(in dirs: [URL]) -> [URL] {
+        dirs.flatMap { dir -> [URL] in
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            return names.compactMap { name -> URL? in
+                var stem = name
+                if stem.hasSuffix("." + CheckpointReaper.retiredExtension) {
+                    stem = String(stem.dropLast(CheckpointReaper.retiredExtension.count + 1))
+                }
+                guard stem.hasSuffix(".img"), Int(stem.dropLast(4)) != nil else { return nil }
+                let url = dir.appendingPathComponent(name, isDirectory: false)
+                var st = stat()
+                guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
+                return url
+            }
+        }.sorted { $0.path < $1.path }
+    }
+
+    /// Unlink each file at once, one after another: the opposite of the reaper's
+    /// paced truncation. On a Mac whose checkpoints stalled APFS while the reaper
+    /// shrank them, a plain `rm` of each, one at a time, is what cleared them.
+    /// Blocking (minutes, on a large long-used image): never on the main thread.
+    /// `unlink` doesn't follow a symlink; `checkpointFiles` lists none anyway.
+    @discardableResult
+    static func unlinkOneByOne(_ urls: [URL], progress: (Int, URL, TimeInterval) -> Void = { _, _, _ in })
+        -> (deleted: Int, failed: [URL]) {
+        precondition(!Thread.isMainThread, "deleting checkpoints blocks: run it off the main thread")
+        var deleted = 0
+        var failed: [URL] = []
+        for (i, url) in urls.enumerated() {
+            let t0 = Date()
+            if unlink(url.path) == 0 || errno == ENOENT { deleted += 1 } else { failed.append(url) }
+            progress(i, url, Date().timeIntervalSince(t0))
+        }
+        return (deleted, failed)
+    }
+
     /// Restore a checkpoint over the live disk. The VM MUST be stopped first (the
     /// caller enforces this) — replacing an open disk image would corrupt it.
     /// Clears saved RAM state so the kernel's block-device view matches the disk.
