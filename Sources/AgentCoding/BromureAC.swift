@@ -16207,6 +16207,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             FileHandle.standardError.write(Data(
                                 "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
                         }
+                        // Then what's beyond the ladder, both images at once.
+                        store.pruneCheckpoints(for: profile, now: now)
                     }
                 }
             }

@@ -39,7 +39,7 @@ struct CheckpointGuardrailTests {
     }
 
     @Test("a home over 64 GB gets no automatic checkpoint, its old ones still age out")
-    func bigHome() throws {
+    func bigHome() async throws {
         let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let store = ProfileStore(rootDir: root)
         let p = Profile(name: "big", tool: .claude, authMode: .token)
@@ -53,7 +53,8 @@ struct CheckpointGuardrailTests {
         #expect(try store.snapshotHomeImage(for: p, at: old) != nil)   // asked for: taken
         #expect(try store.snapshotHomeImage(for: p, at: old.addingTimeInterval(86_400)) != nil)
         #expect(try store.snapshotHomeImage(for: p, at: Date(), automatic: true) == nil)
-        CheckpointReaper.shared.drain()
+        #expect(store.pruneCheckpoints(for: p, now: Date()))
+        try await waitForPurge(p.id)
         // The newest stays (the last session's); the older one aged out.
         #expect(store.listHomeCheckpoints(for: p).map(\.createdAt) == [Date(timeIntervalSince1970: floor(old.timeIntervalSince1970 + 86_400))])
     }
@@ -83,7 +84,7 @@ struct CheckpointGuardrailTests {
         #expect(g.lowerBound < clone.lowerBound)
     }
 
-    @Test("a backlog beyond the ladder is renamed out of the list and unlinked whole")
+    @Test("a backlog beyond the ladder is unlinked whole at launch, once")
     func backlogUnlinked() async throws {
         let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
         let off = CheckpointReaper(step: 4096, stepPause: 0, filePause: 0, enabled: false)
@@ -110,6 +111,41 @@ struct CheckpointGuardrailTests {
         #expect(store.settleCheckpointBacklog([p], now: now) == 0)   // done once
     }
 
+    @Test("the one a new day ages out is renamed, then unlinked, with the home's")
+    func dailyPrune() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "day", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        let img = store.homeImageURL(for: p)
+        try Data("home".utf8).write(to: img)
+        let now = Date()
+        for d in 0...3 {
+            let at = now.addingTimeInterval(-Double(d) * 86_400)
+            _ = try store.snapshotDisk(for: p, at: at, automatic: true)
+            _ = try store.snapshotHomeImage(for: p, at: at, automatic: true)
+        }
+        #expect(store.listCheckpoints(for: p).count == 4 && store.listHomeCheckpoints(for: p).count == 4)
+        #expect(store.pruneCheckpoints(for: p, now: now))
+        #expect(store.listCheckpoints(for: p).count == 3 && store.listHomeCheckpoints(for: p).count == 3)   // at once
+        try await waitForPurge(p.id)
+        #expect(files(store.checkpointsDirectory(for: p)).filter { $0.hasSuffix(".img") }.count == 3)
+        #expect(!files(store.checkpointsDirectory(for: p)).contains { $0.hasSuffix(".deleting") })
+        #expect(!files(store.homeCheckpointsDirectory(for: p)).contains { $0.hasSuffix(".deleting") })
+        #expect(FileManager.default.fileExists(atPath: img.path) && FileManager.default.fileExists(atPath: store.diskURL(for: p).path))
+        #expect(!store.pruneCheckpoints(for: p, now: now))   // nothing beyond
+    }
+
+    @Test("the days are calendar days: the day before yesterday's morning stays")
+    func calendarDays() {
+        let cal = Calendar.current
+        let now = cal.date(bySettingHour: 20, minute: 0, second: 0, of: Date())!
+        let dayBefore = cal.date(byAdding: .day, value: -2, to: cal.date(bySettingHour: 7, minute: 0, second: 0, of: now)!)!
+        let older = cal.date(byAdding: .day, value: -3, to: now)!
+        let keep = ProfileStore.checkpointRetention([now, dayBefore, older], now: now)
+        #expect(keep == [now, dayBefore])
+    }
+
     @Test("launch settles the backlog; a session start takes its checkpoints as automatic")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -118,12 +154,11 @@ struct CheckpointGuardrailTests {
         #expect(ac.contains("store.snapshotDisk(for: profile, at: now, automatic: true)"))
         #expect(ac.contains("store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
         let store = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
-        let prune = try #require(store.range(of: "private func prune(in dir: URL, of profile: Profile, now: Date) {"))
-        let body = store[prune.upperBound...].prefix(1400)
-        let bulk = try #require(body.range(of: "if drop.count > 1 {"))
-        let purge = try #require(body.range(of: "Self.purgeCheckpointsInBackground(retired"))
-        let reap = try #require(body.range(of: "reaper.retire(cp.url)"))
-        #expect(bulk.lowerBound < purge.lowerBound && purge.lowerBound < reap.lowerBound)
+        // No checkpoint is shrunk by the reaper any more: every delete is a
+        // plain unlink on the purge queue.
+        #expect(!store.contains("reaper.retire(") && !store.contains("reaper.sweep("))
+        let start = try #require(ac.range(of: "store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
+        #expect(ac[start.upperBound...].prefix(500).contains("store.pruneCheckpoints(for: profile, now: now)"))
         #expect(store.contains("precondition(!Thread.isMainThread"))
     }
 }

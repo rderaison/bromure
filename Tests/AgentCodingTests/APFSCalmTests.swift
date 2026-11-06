@@ -203,6 +203,7 @@ struct APFSCalmTests {
             _ = try store.snapshotDisk(for: profile, at: now.addingTimeInterval(-Double(weeks) * 7 * 86_400))
         }
         _ = try store.snapshotDisk(for: profile, at: now)
+        #expect(!store.pruneCheckpoints(for: profile, now: now))
         off.drain()
         #expect(store.listCheckpoints(for: profile).count == 6)
         #expect(FileManager.default.fileExists(atPath: leftover.path))

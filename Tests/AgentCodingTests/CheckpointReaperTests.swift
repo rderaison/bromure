@@ -79,6 +79,8 @@ struct CheckpointReaperTests {
             _ = try store.snapshotDisk(for: profile, at: now.addingTimeInterval(-Double(weeks) * 7 * 86_400))
         }
         _ = try store.snapshotDisk(for: profile, at: now)
+        #expect(store.listCheckpoints(for: profile).count == 6)   // a snapshot doesn't prune
+        #expect(store.pruneCheckpoints(for: profile, now: now))
         let listed = store.listCheckpoints(for: profile)
         #expect(!listed.isEmpty && listed.count <= 3)
         #expect(listed.allSatisfy { $0.url.pathExtension == "img" })
@@ -97,8 +99,9 @@ struct CheckpointReaperTests {
         let source = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
         #expect(source.contains(#"DispatchQueue(label: "io.bromure.checkpoint-reaper", qos: .background)"#))
         #expect(!source.contains("io.bromure.checkpoint-reaper\", qos: .background, attributes"))
-        let prune = try #require(source.range(of: "private func prune(in dir: URL, of profile: Profile, now: Date) {"))
-        #expect(source[prune.upperBound...].prefix(1400).contains("for cp in drop { reaper.retire(cp.url) }"))
-        #expect(!source[prune.upperBound...].prefix(1400).contains("removeItem"))
+        let prune = try #require(source.range(of: "public func pruneCheckpoints(for profile: Profile, now: Date) -> Bool {"))
+        let body = source[prune.upperBound...].prefix(900)
+        #expect(body.contains("Self.purgeCheckpointsInBackground(files"))
+        #expect(!body.contains("reaper.retire") && !body.contains("removeItem") && !body.contains("sweep"))
     }
 }
