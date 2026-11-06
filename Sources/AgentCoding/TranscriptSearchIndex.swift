@@ -31,6 +31,10 @@ final class TranscriptSearchIndex {
         /// The agent's own name for the conversation: Claude's `/rename`
         /// (custom-title), else the title it generated (ai-title).
         var agentTitle: String? = nil
+        /// `agentTitle` is the user's `/rename`, not one the agent generated:
+        /// it wins over a generated one from any other part of the file.
+        /// Optional, so a record saved before it decodes (as generated).
+        var agentTitleIsCustom: Bool? = nil
         /// The user's first real request (no notices, no host asides).
         var firstPrompt: String? = nil
         var modified: Date
@@ -51,7 +55,7 @@ final class TranscriptSearchIndex {
         // wins, or the first.
         e.tokens = b.tokens.total == 0 ? a.tokens : b.tokens
         e.model = b.model ?? a.model
-        e.agentTitle = b.agentTitle ?? a.agentTitle
+        (e.agentTitle, e.agentTitleIsCustom) = mergedTitle(a, b)
         e.conversationID = a.conversationID ?? b.conversationID
         e.startsOver = a.startsOver || b.startsOver
         // What the conversation said: none of `a` if it started over in `b`.
@@ -324,7 +328,7 @@ final class TranscriptSearchIndex {
             e.text = first.text + "\n\n" + e.text
             e.firstPrompt = first.firstPrompt ?? e.firstPrompt
             e.conversationID = first.conversationID ?? e.conversationID
-            e.agentTitle = e.agentTitle ?? first.agentTitle
+            (e.agentTitle, e.agentTitleIsCustom) = mergedTitle(first, e)
             e.model = e.model ?? first.model
             return e
         }
@@ -433,7 +437,21 @@ final class TranscriptSearchIndex {
 
     /// Claude's own title for the conversation, the latest one it logged:
     /// a `/rename` (custom-title) wins over the generated ai-title.
-    nonisolated static func agentTitle(in data: Data) -> String? {
+    /// The title of `earlier` then `later` parts of one file, as `agentTitle`
+    /// picks it in one: the last rename, else the last generated title. A part
+    /// was read on its own, so a generated title in the later one mustn't hide
+    /// a rename in the earlier.
+    nonisolated static func mergedTitle(_ earlier: Entry, _ later: Entry) -> (String?, Bool?) {
+        if later.agentTitleIsCustom == true { return (later.agentTitle, true) }
+        if earlier.agentTitleIsCustom == true { return (earlier.agentTitle, true) }
+        if let t = later.agentTitle { return (t, later.agentTitleIsCustom) }
+        return (earlier.agentTitle, earlier.agentTitleIsCustom)
+    }
+
+    nonisolated static func agentTitle(in data: Data) -> String? { agentTitleRecord(in: data)?.title }
+
+    /// The title and whether it's a rename (`custom-title`) or generated.
+    nonisolated static func agentTitleRecord(in data: Data) -> (title: String, custom: Bool)? {
         // In the bytes: the title is one line, and a string of the whole file
         // to find it cost more than parsing the transcript did.
         func last(_ type: String, _ key: String) -> String? {
@@ -445,7 +463,8 @@ final class TranscriptSearchIndex {
             else { return nil }
             return String(t.prefix(60))
         }
-        return last("custom-title", "customTitle") ?? last("ai-title", "aiTitle")
+        if let t = last("custom-title", "customTitle") { return (t, true) }
+        return last("ai-title", "aiTitle").map { ($0, false) }
     }
 
     /// A user message that is the user's own words — not a notice typed in
@@ -479,11 +498,13 @@ final class TranscriptSearchIndex {
         if let o = open, o.end > o.start { turns.append(o) }
         let oneLine = last.split(whereSeparator: \.isNewline).map(String.init)
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+        let title = agentTitleRecord(in: data)
         var e = Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: codexModel(data) ?? model(in: data),
                      turns: turns, timeline: SessionTimeline.build(items),
-                     agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified,
+                     agentTitle: title?.title, agentTitleIsCustom: title?.custom,
+                     firstPrompt: firstPrompt, modified: modified,
                      conversationID: conversationID(in: data))
         e.startsOver = cleared
         return e
