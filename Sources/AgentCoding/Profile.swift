@@ -3593,11 +3593,21 @@ public final class CheckpointReaper: @unchecked Sendable {
     private let step: off_t
     private let stepPause: useconds_t
     private let filePause: useconds_t
+    /// False under BROMURE_NO_REAPER=1: nothing is deleted, and the automatic
+    /// checkpoints a session start takes aren't taken (`ProfileStore.prune`,
+    /// `ACAppDelegate`), so no APFS clone is made or deleted that a
+    /// user didn't ask for. Checkpoints already retired stay on disk as
+    /// `.deleting` until a run without it.
+    public let enabled: Bool
+
+    static func enabled(in env: [String: String]) -> Bool { env["BROMURE_NO_REAPER"] != "1" }
 
     /// Paced so a backlog (every checkpoint a long-running server should have
     /// let go of) drains in the background: at 50 ms a step it held two thirds
     /// of a core while it lasted.
-    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000) {
+    init(step: off_t = 512 * 1024 * 1024, stepPause: useconds_t = 250_000, filePause: useconds_t = 2_000_000,
+         enabled: Bool = CheckpointReaper.enabled(in: ProcessInfo.processInfo.environment)) {
+        self.enabled = enabled
         self.step = step
         self.stepPause = stepPause
         self.filePause = filePause
@@ -3661,9 +3671,10 @@ public final class CheckpointReaper: @unchecked Sendable {
 public final class ProfileStore {
     private let rootDir: URL
     private let fm = FileManager.default
-    private let reaper = CheckpointReaper.shared
+    private let reaper: CheckpointReaper
 
-    public init(rootDir: URL? = nil) {
+    public init(rootDir: URL? = nil, reaper: CheckpointReaper = .shared) {
+        self.reaper = reaper
         if let rootDir {
             self.rootDir = rootDir
         } else {
@@ -4393,6 +4404,7 @@ public final class ProfileStore {
     }
 
     private func prune(in dir: URL, now: Date) {
+        guard reaper.enabled else { return }   // BROMURE_NO_REAPER=1: keep everything
         let all = list(in: dir)
         let keep = Self.checkpointRetention(all.map(\.createdAt), now: now)
         for cp in all where !keep.contains(cp.createdAt) {
