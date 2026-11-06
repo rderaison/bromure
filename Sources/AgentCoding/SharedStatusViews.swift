@@ -1,4 +1,12 @@
 import SwiftUI
+import QuartzCore
+#if os(macOS)
+import AppKit
+private typealias OrbBaseView = NSView
+#else
+import UIKit
+private typealias OrbBaseView = UIView
+#endif
 
 // MARK: - Shared status views
 //
@@ -89,15 +97,103 @@ struct UnreadMark: View {
             if reduceMotion {
                 orb(0)
             } else {
-                // A slow turn (one every 6 s), redrawn at 20 fps at most: a
-                // handful of these in a sidebar costs next to nothing, and the
-                // timeline stops with the view (no lingering animation).
-                TimelineView(.animation(minimumInterval: 1.0 / 20)) { t in
-                    orb(t.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) * 60)
-                }
+                // The turn runs in Core Animation: a TimelineView redrew it 20
+                // times a second, and every redraw re-measured the sidebar it
+                // sits in (784 measure passes in 2 s for 20 rows, none now).
+                orb(0)
+                    .hidden()
+                    .overlay(TurningOrb(size: size, colors: Self.colors.map(CrossColor.cg)))
             }
         }
         .accessibilityLabel(NSLocalizedString("Unread", comment: "session list: the agent replied and the user hasn't looked"))
         .help(NSLocalizedString("Unread", comment: "session list: the agent replied and the user hasn't looked"))
     }
 }
+
+
+enum CrossColor {
+    static func cg(_ c: Color) -> CGColor {
+        #if os(macOS)
+        NSColor(c).cgColor
+        #else
+        UIColor(c).cgColor
+        #endif
+    }
+}
+
+/// `UnreadMark`'s orb, turned by Core Animation: one turn every 6 s in the
+/// render server, with no SwiftUI update at all while it turns.
+private final class TurningOrbLayerView: OrbBaseView {
+    private let turn = CAGradientLayer()
+    private let shine = CAGradientLayer()
+    private let size: CGFloat
+    private let colors: [CGColor]
+
+    init(size: CGFloat, colors: [CGColor]) {
+        self.size = size
+        self.colors = colors
+        super.init(frame: CGRect(x: 0, y: 0, width: size, height: size))
+        #if os(macOS)
+        wantsLayer = true
+        guard let base = layer else { return }
+        #else
+        let base = layer
+        #endif
+        turn.type = .conic
+        turn.colors = colors
+        turn.startPoint = CGPoint(x: 0.5, y: 0.5)
+        turn.endPoint = CGPoint(x: 0.5, y: 0)
+        turn.cornerRadius = size / 2
+        turn.masksToBounds = true
+        shine.type = .radial
+        shine.colors = [CGColor(gray: 1, alpha: 0.55), CGColor(gray: 1, alpha: 0)]
+        shine.startPoint = CGPoint(x: 0.32, y: 0.30)
+        shine.endPoint = CGPoint(x: 0.32 + 0.55, y: 0.30 + 0.55)
+        shine.cornerRadius = size / 2
+        shine.masksToBounds = true
+        base.shadowColor = colors.first
+        base.shadowOpacity = 0.55
+        base.shadowRadius = size * 0.45
+        base.shadowOffset = .zero
+        base.addSublayer(turn)
+        base.addSublayer(shine)
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 6
+        spin.repeatCount = .infinity
+        spin.isRemovedOnCompletion = false
+        turn.add(spin, forKey: "turn")
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    #if os(macOS)
+    override func layout() { super.layout(); place() }
+    #else
+    override func layoutSubviews() { super.layoutSubviews(); place() }
+    #endif
+
+    private func place() {
+        let r = CGRect(x: 0, y: 0, width: size, height: size)
+        turn.bounds = r
+        turn.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        shine.frame = CGRect(x: bounds.midX - size / 2, y: bounds.midY - size / 2, width: size, height: size)
+    }
+}
+
+#if os(macOS)
+private struct TurningOrb: NSViewRepresentable {
+    let size: CGFloat
+    let colors: [CGColor]
+    func makeNSView(context: Context) -> TurningOrbLayerView { TurningOrbLayerView(size: size, colors: colors) }
+    func updateNSView(_ v: TurningOrbLayerView, context: Context) {}
+}
+#else
+private struct TurningOrb: UIViewRepresentable {
+    let size: CGFloat
+    let colors: [CGColor]
+    func makeUIView(context: Context) -> TurningOrbLayerView { TurningOrbLayerView(size: size, colors: colors) }
+    func updateUIView(_ v: TurningOrbLayerView, context: Context) {}
+}
+#endif
