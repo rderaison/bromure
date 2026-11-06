@@ -220,6 +220,17 @@ enum Ext4Fsck {
             if !visited.insert(ino).inserted { continue }
             do {
                 let node = try vol.inode(ino)
+                // Reached through a directory entry, so it must be in use: a
+                // zeroed (cleared) record, or one with no links left (deleted,
+                // whatever its dtime), is the "deleted/unused inode" e2fsck
+                // refuses to preen. Its checksum can still verify, so this
+                // comes first. (Orphan-list inodes, links 0 by design, aren't
+                // reached: no entry names them.)
+                if node.mode == 0 || node.links == 0 {
+                    bad += 1
+                    if bad <= 10 { log.append("inode \(ino): referenced by a directory entry but unused (deleted or cleared)") }
+                    continue
+                }
                 if try !vol.verifyInodeChecksum(ino) {
                     bad += 1
                     if bad <= 10 { log.append("inode \(ino): checksum mismatch") }

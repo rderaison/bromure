@@ -488,6 +488,82 @@ struct Ext4FsckTests {
         }
     }
 
+    @Test("a directory entry naming a cleared inode is not passed as clean")
+    func entryNamingAClearedInode() throws {
+        // hello.txt's record zeroed, as `debugfs clri` does; the root still
+        // names it. The error flag (forcing the guest's boot check) stays.
+        var img = Self.buildImage()
+        putLE16(&img, 1024 + 58, le16(img, 1024 + 58) | 0x0002)
+        let o = Self.inodeOffset(12)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: true)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("inode 12: referenced by a directory entry but unused"), "\(r.output)")
+            #expect((try Ext4Volume(path: path)).sb.hasErrors)
+        }
+    }
+
+    @Test("a directory entry naming a deleted inode is not passed as clean")
+    func entryNamingADeletedInode() throws {
+        var img = Self.buildImage()
+        putLE16(&img, Self.inodeOffset(12) + 26, 0)            // links_count 0
+        putLE32(&img, Self.inodeOffset(12) + 20, 1781652178)   // i_dtime set
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
+    @Test("a directory entry naming an inode with no links is not passed as clean, dtime or not")
+    func entryNamingAnUnlinkedInode() throws {
+        var img = Self.buildImage()
+        putLE16(&img, Self.inodeOffset(12) + 26, 0)            // links_count 0, i_dtime still 0
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.status == 4, "\(r.output)")
+            #expect(r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
+    @Test("orphans, devices and fast symlinks are in use")
+    func inUseWithoutBlocks() throws {
+        // A character device and a fast symlink (target inline, no blocks)
+        // reached from the root; an orphan-list inode (no links, its dtime
+        // the next orphan) that no entry names. None of them is "unused".
+        var img = Self.buildImage()
+        var o = Self.inodeOffset(12)
+        img.replaceSubrange(o ..< o + 128, with: [UInt8](repeating: 0, count: 128))
+        putLE16(&img, o, 0x21A4)                                // crw-r--r--
+        putLE16(&img, o + 26, 1)
+        putLE32(&img, o + 40, 0x0103)                           // device number in i_block
+        o = Self.inodeOffset(13)
+        putLE16(&img, o, 0xA1FF)                                // lrwxrwxrwx
+        putLE32(&img, o + 4, 4)
+        putLE16(&img, o + 26, 1)
+        for (i, c) in Array("/etc".utf8).enumerated() { img[o + 40 + i] = c }
+        // The root's third entry becomes "dev" (12) + a fourth, "lnk" (13).
+        var d = Self.rootDirBlock * Self.blockSize + 24
+        func dirent(_ ino: UInt32, _ name: String, _ type: UInt8, _ recLen: UInt16) {
+            putLE32(&img, d, ino); putLE16(&img, d + 4, recLen)
+            img[d + 6] = UInt8(name.utf8.count); img[d + 7] = type
+            for (i, c) in Array(name.utf8).enumerated() { img[d + 8 + i] = c }
+            d += Int(recLen)
+        }
+        dirent(12, "dev", 3, 12)
+        dirent(13, "lnk", 7, UInt16(Self.blockSize - 36))
+        o = Self.inodeOffset(14)                                // the orphan
+        putLE16(&img, o, 0x81A4)
+        putLE32(&img, o + 20, 0)                                // end of the orphan list
+        putLE32(&img, 1024 + 0xE8, 14)                          // s_last_orphan
+        try withImage(img) { path in
+            let r = try Ext4Fsck.check(imagePath: path, autoFix: false)
+            #expect(r.clean, "\(r.output)")
+            #expect(!r.output.contains("unused"), "\(r.output)")
+        }
+    }
+
     @Test("real image (env-gated): native fsck parses, replays, and verifies")
     func realImage() throws {
         // Point BROMURE_EXT4_TEST_IMAGE at a *clone* of a real home/disk image
