@@ -2204,7 +2204,7 @@ final class BeautifiedSessionModel: ObservableObject {
         return tail.contains { raw in
             let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
             return l.hasSuffix("[stop]") || l == "[stop]" || l.contains("esc to interrupt")
-                || l.contains("ctrl+c to interrupt")
+                || l.contains("ctrl+c to interrupt") || l.contains("ctrl-c to interrupt")
         }
     }
 

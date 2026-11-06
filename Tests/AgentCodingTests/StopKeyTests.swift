@@ -38,7 +38,8 @@ struct StopKeyTests {
         // omp's queue comes back on Esc only.
         #expect(body.contains(#"if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind)"#))
         let sb = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Switchboard.swift"), encoding: .utf8)
-        #expect(sb.contains(#"BeautifiedSessionModel.interruptKey(screen: "", agent: c.tool.rawValue)"#))
+        #expect(sb.contains("let key = BeautifiedSessionModel.interruptKey(screen: screen, agent: tool)"))
+        #expect(M.screenShowsBusy("Thinking… (ctrl-c to interrupt)"))
         #expect(!sb.contains(#"send-keys -t bromure:\(w) Escape"#))
     }
 }
