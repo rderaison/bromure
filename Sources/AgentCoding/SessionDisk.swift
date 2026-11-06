@@ -215,9 +215,14 @@ public final class SessionDisk {
         defer { try? handle.close() }
         try handle.truncate(atOffset: target)
         ProfileStore.homeImageChanged(profile.id)
-        // The checkpoints of the smaller home go (the save that set the size
-        // started that; this catches a grow from the app-wide default, or one
-        // the save's delete hadn't finished). Off the main thread.
+        // The checkpoints of the smaller home go, once it has grown: one from
+        // before is the old home (rewinding to it undoes the resize), and on a
+        // server whose 128 GB home had grown over time, its full set is what
+        // stalled APFS. Not when the size is saved: the grow waits for a cold
+        // boot (a saved state defers it, the size can be set back), and until
+        // it happens they're the only rollback points. The delete is marked
+        // before this returns, so no revert reads one meanwhile. Off the main
+        // thread.
         let stale = ProfileStore.checkpointFiles(in: [store.homeCheckpointsDirectory(for: profile)])
         if !stale.isEmpty {
             ProfileStore.purgeCheckpointsInBackground(stale, of: profile.id, name: profile.name,
