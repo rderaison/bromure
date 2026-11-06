@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SandboxEngine
 @preconcurrency import Virtualization
 
@@ -1090,7 +1091,22 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         typealias Event = @MainActor (UbuntuSandboxVM) -> Void
         private typealias VM = UbuntuSandboxVM
         private let outbox: URL
-        private let queue = DispatchQueue(label: "io.bromure.outbox-poll", qos: .userInitiated)
+        private let queue: DispatchQueue
+
+        /// One queue per outbox, shared by every scanner of it: a relaunch's
+        /// new scanner (same outbox) waits behind a tick the old one still has
+        /// in flight on a stalled disk, rather than racing it for the
+        /// one-shot files.
+        private static let queues = OSAllocatedUnfairLock(initialState: [String: DispatchQueue]())
+        static func queue(for outbox: URL) -> DispatchQueue {
+            let key = outbox.standardizedFileURL.path
+            return queues.withLock { q in
+                if let existing = q[key] { return existing }
+                let made = DispatchQueue(label: "io.bromure.outbox-poll", qos: .userInitiated)
+                q[key] = made
+                return made
+            }
+        }
         // Roster mtime seen last, so the fast tick can re-parse tabs.txt
         // only when it actually changed (a new/closed tab shows up in
         // ~one fast tick instead of waiting for the ~480ms heavy scan).
@@ -1103,7 +1119,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // agent-tool-<win>.jsonl: bytes already read, per file.
         private var toolLogs: [String: ToolLog] = [:]
 
-        init(outbox: URL) { self.outbox = outbox }
+        init(outbox: URL) { self.outbox = outbox; queue = Self.queue(for: outbox) }
 
         func tick() async -> [Event] {
             await withCheckedContinuation { cont in

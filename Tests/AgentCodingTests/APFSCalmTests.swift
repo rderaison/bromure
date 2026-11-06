@@ -164,6 +164,15 @@ struct APFSCalmTests {
         #expect(left == ["ip.txt", "tabs.txt", "ports.txt"])
     }
 
+    @Test("two scanners of one outbox share a queue, so a relaunch's waits behind the old tick")
+    func scannersShareAQueue() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let other = try tempDir(); defer { try? FileManager.default.removeItem(at: other) }
+        let q = UbuntuSandboxVM.OutboxScanner.queue(for: dir)
+        #expect(q === UbuntuSandboxVM.OutboxScanner.queue(for: dir.appendingPathComponent(".").standardizedFileURL))
+        #expect(q !== UbuntuSandboxVM.OutboxScanner.queue(for: other))
+    }
+
     // MARK: BROMURE_NO_REAPER
 
     @Test("BROMURE_NO_REAPER=1, and only that, turns the reaper off")
