@@ -1330,11 +1330,19 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         queueStore.update(queueKey) { queued in
           var lost: Set<UUID> = []
+          // Messages that were only files, each matched to a turn of its own.
+          let filesIn = Self.fileOnlyArrivals(queued, turns: turns)
+          // The turns each text has resolved a row with: the same words sent
+          // twice need two turns carrying them, not one.
+          var textTurns: [String: Set<Int>] = [:]
           queued.removeAll { q in
             if Self.arrivedAnyway(q, turns: turns) { return true }
             guard !q.held else { return false }
+            if filesIn.contains(q.id) { return true }
             // A TUI may merge several queued messages into one turn.
-            if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
+            if let i = Self.textTurn(q, turns: turns, taken: textTurns[q.text] ?? []) {
+                textTurns[q.text, default: []].insert(i); return true
+            }
             // Sent with files: the agent takes their paths in as attachments,
             // so its turn never carries the text Bromure typed.
             if Self.attachmentTurnArrived(q.text, since: turns.dropFirst(q.baseline)) { return true }
@@ -1414,13 +1422,58 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Whether a message sent with files (their guest paths after its words,
     /// `send`) has become a turn. The agent takes the paths in as attachments
     /// (Claude writes an image as "[Image #1]", or not at all in the text), so
-    /// the turn is compared without them: it carries the words, or, for a
-    /// message that was only files, it's any turn since.
+    /// the turn is compared without them: it carries the words. A message
+    /// that was only files has no words to find: `fileOnlyArrivals`.
     nonisolated static func attachmentTurnArrived(_ typed: String, since turns: ArraySlice<String>) -> Bool {
         guard typed.contains(GuestDrop.baseDir) else { return false }
         let want = withoutAttachments(typed)
-        if want.isEmpty { return !turns.isEmpty }
+        guard !want.isEmpty else { return false }
         return turns.contains { withoutAttachments($0).contains(want) }
+    }
+
+    /// The first turn since `q` was queued that carries its words and hasn't
+    /// resolved an earlier row with the same words (`taken`).
+    nonisolated static func textTurn(_ q: QueuedMessage, turns: [String], taken: Set<Int>) -> Int? {
+        turns.indices.first { $0 >= q.baseline && !taken.contains($0) && turns[$0].contains(q.text) }
+    }
+
+    /// A message of files only, no words.
+    nonisolated static func isFileOnly(_ typed: String) -> Bool {
+        typed.contains(GuestDrop.baseDir) && withoutAttachments(typed).isEmpty
+    }
+
+    /// Which of `rows` (in queue order) that were only files have become a turn.
+    /// Any turn since one was queued used to count: several sent while the
+    /// agent was busy share a baseline, so the first one's turn cleared them
+    /// all, and an unrelated one (typed in the terminal) did too. Now a row
+    /// is resolved by a turn that names one of its files (the agent kept the
+    /// path: several sent together may come out as one turn), or else by a
+    /// turn of attachments only ("[Image #1]", or no words at all) that no
+    /// other row has taken, the earliest first. A turn with words is never
+    /// one of these.
+    nonisolated static func fileOnlyArrivals(_ rows: [QueuedMessage], turns: [String]) -> Set<UUID> {
+        let candidates = rows.filter { !$0.held && isFileOnly($0.text) }
+        guard !candidates.isEmpty else { return [] }
+        func paths(_ s: String) -> [Substring] {
+            s.split(whereSeparator: \.isWhitespace).filter { $0.hasPrefix(GuestDrop.baseDir) }
+        }
+        var arrived: Set<UUID> = []
+        var taken: Set<Int> = []
+        // Named first (whole paths: a.png isn't a.png.bak): those turns are theirs.
+        let named = turns.map { Set(paths($0)) }
+        for q in candidates {
+            let mine = paths(q.text)
+            for i in turns.indices where i >= q.baseline && mine.contains(where: { named[i].contains($0) }) {
+                arrived.insert(q.id); taken.insert(i)
+            }
+        }
+        // Then one attachment-only turn each, in order.
+        for q in candidates where !arrived.contains(q.id) {
+            if let i = turns.indices.first(where: { $0 >= q.baseline && !taken.contains($0) && withoutAttachments(turns[$0]).isEmpty }) {
+                arrived.insert(q.id); taken.insert(i)
+            }
+        }
+        return arrived
     }
 
     /// The words of a message, without attachment paths or placeholders.
