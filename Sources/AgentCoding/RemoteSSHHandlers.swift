@@ -91,9 +91,20 @@ enum SystemPassword {
 /// Unset (macOS, a single-user Linux daemon): this process's own account, as
 /// ever. A routed connection only reaches its account's control socket and
 /// its guests (forwards); no shell, menu or machine link runs in the server.
+/// How a key may log in to an account: with all of it, or (a Bromure Agent
+/// Host's, tagged `bromure-account:machine:<device>`) only to attach that
+/// machine.
+enum RemoteKeyAccess: Equatable, Sendable {
+    case full
+    case machineOnly(device: String)
+}
+
 protocol RemoteAccountRouter: AnyObject, Sendable {
-    /// The keys `user` may log in with; nil when there is no such account.
-    func authorizedKeys(user: String) -> Set<NIOSSHPublicKey>?
+    /// How `key` may log in to `user`'s account, from one look at the
+    /// account's keys (so whether it may and how far can't disagree); nil
+    /// when it may not: no such account, not one of its keys, or its keys
+    /// couldn't be read. The login then fails.
+    func keyAccess(user: String, key: NIOSSHPublicKey) -> RemoteKeyAccess?
     /// Whether `password` (an enrollment code) opens `user`'s account; false
     /// for an unknown user, taking about as long.
     func verifyPassword(user: String, password: String) -> Bool
@@ -246,8 +257,12 @@ extension RemoteAuthDelegate {
             guard allowPubkey else { responsePromise.succeed(.failure); return }
             let key = pk.publicKey
             DispatchQueue.global(qos: .userInitiated).async {
-                let ok = router.authorizedKeys(user: user)?.contains(key) ?? false
-                if ok { grant.account = user }
+                let access = router.keyAccess(user: user, key: key)
+                let ok = access != nil
+                if let access {
+                    grant.account = user
+                    if case .machineOnly(let device) = access { grant.machineOnly = device }
+                }
                 FatClientLog.log("srv-auth: routed publickey user=\(user) → \(ok ? "SUCCESS" : "FAILURE")")
                 responsePromise.succeed(ok ? .success : .failure)
             }
@@ -800,6 +815,21 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// here (the server's own user isn't the account's).
     private func routedExec(context: ChannelHandlerContext, _ e: SSHChannelRequestEvent.ExecRequest,
                             account: String, router: RemoteAccountRouter) {
+        // A Bromure Agent Host's key attaches its machine to the account, and
+        // that's all; the owner comes from this connection's grant.
+        let owner = grant?.machineOnly.map { "device:" + $0 }
+        let socket = router.controlSocketPath(user: account)
+        if let link = FatClient.parseMachineLink(e.command) {
+            startMachineLink(context: context, wantReply: e.wantReply, request: "/machines/link",
+                             id: link.id, name: link.name, owner: owner, socketPath: socket)
+            return
+        }
+        if let id = FatClient.parseMachineDetach(e.command) {
+            startMachineLink(context: context, wantReply: e.wantReply, request: "/machines/detach",
+                             id: id, name: nil, owner: owner, socketPath: socket)
+            return
+        }
+        guard owner == nil else { refuse(context, e.wantReply, e.command); return }
         if e.command == FatClient.controlVerb {
             startControlBridge(context: context, wantReply: e.wantReply, socketPath: router.controlSocketPath(user: account))
             return
@@ -835,13 +865,15 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// written by us — the owner in it comes from this connection's grant,
     /// never from the client — then a plain byte pipe (the link's verbs).
     private func startMachineLink(context: ChannelHandlerContext, wantReply: Bool,
-                                  request: String, id: UUID, name: String?, owner: String?) {
+                                  request: String, id: UUID, name: String?, owner: String?,
+                                  socketPath: String? = nil) {
         var body: [String: Any] = ["id": id.uuidString]
         if let name { body["name"] = name }
         if let owner { body["owner"] = owner }
         let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
         let head = "POST \(request) HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\n\r\n"
-        startControlBridge(context: context, wantReply: wantReply, preamble: Data(head.utf8) + payload)
+        startControlBridge(context: context, wantReply: wantReply, preamble: Data(head.utf8) + payload,
+                           socketPath: socketPath)
     }
 
     /// Bridge the SSH channel to the app's owner-only control socket: no PTY, no

@@ -17,7 +17,10 @@ public final class GatewayRouter: RemoteAccountRouter {
     /// Every password check takes at least this long, an unknown account's
     /// included: the timing tells nothing about which names exist.
     static let passwordFloor: Duration = .milliseconds(150)
-    private let keyCache = NIOLockedValueBox<[String: (keys: Set<NIOSSHPublicKey>, at: ContinuousClock.Instant)]>([:])
+    /// Per account: its keys, and which of them are machine-only (an agent
+    /// host's, by device), as its daemon last listed them.
+    private let keyCache = NIOLockedValueBox<[String: (keys: Set<NIOSSHPublicKey>, machine: [NIOSSHPublicKey: String],
+                                                       at: ContinuousClock.Instant)]>([:])
 
     // @port-skip linux-only: multi-user gateway
     public init(socketDir: String) { self.socketDir = socketDir }
@@ -33,15 +36,42 @@ public final class GatewayRouter: RemoteAccountRouter {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
+    /// Whether `key` opens `user`'s account, and a machine-only key's device
+    /// (`bromure-account:machine:<device>`, as RemoteAccessServer
+    /// .loadMachineOnlyKeys reads them on a single-user server), from one
+    /// snapshot of its keys: a refetch that fails refuses the key.
+    // @port-skip linux-only: multi-user gateway (macOS: RemoteAccessServer.loadMachineOnlyKeys)
+    func keyAccess(user: String, key: NIOSSHPublicKey) -> RemoteKeyAccess? {
+        guard let k = accountKeys(user: user), k.keys.contains(key) else { return nil }
+        return k.machine[key].map { .machineOnly(device: $0) } ?? .full
+    }
+
     // @port-skip linux-only: multi-user gateway
-    func authorizedKeys(user: String) -> Set<NIOSSHPublicKey>? {
+    private func accountKeys(user: String) -> (keys: Set<NIOSSHPublicKey>, machine: [NIOSSHPublicKey: String])? {
         guard let sock = socket(for: user) else { return nil }
-        if let c = keyCache.withLockedValue({ $0[user] }), ContinuousClock.now - c.at < .seconds(3) { return c.keys }
+        if let c = keyCache.withLockedValue({ $0[user] }), ContinuousClock.now - c.at < .seconds(3) { return (c.keys, c.machine) }
         guard let r = try? FirecrackerAPI.exchange(sock, "GET", "/remote/authorized-keys", nil, timeoutMs: 5000), r.ok,
               case .array(let lines)? = r.body?["keys"] else { return nil }
-        let keys = Set(lines.compactMap { $0.stringValue.flatMap { try? NIOSSHPublicKey(openSSHPublicKey: Self.keyField($0)) } })
-        keyCache.withLockedValue { $0[user] = (keys, .now) }
-        return keys
+        var keys = Set<NIOSSHPublicKey>(), machine: [NIOSSHPublicKey: String] = [:]
+        for case .string(let line) in lines {
+            guard let pk = try? NIOSSHPublicKey(openSSHPublicKey: Self.keyField(line)) else { continue }
+            keys.insert(pk)
+            if let device = Self.machineDevice(line) { machine[pk] = device }
+        }
+        keyCache.withLockedValue { $0[user] = (keys, machine, .now) }
+        return (keys, machine)
+    }
+
+    /// The device of an agent host's key line: its comment is
+    /// `bromure-account:machine:<device>`. nil for any other line.
+    // @port-skip linux-only: multi-user gateway
+    static func machineDevice(_ line: String) -> String? {
+        let f = line.split(separator: " ")
+        guard let i = f.firstIndex(where: { $0.hasPrefix("ssh-") || $0.hasPrefix("ecdsa-") }), f.count > i + 2 else { return nil }
+        let comment = f[(i + 2)...].joined(separator: " ")
+        guard comment.hasPrefix(RemoteAccessServer.machineKeyMarker) else { return nil }
+        let device = String(comment.dropFirst(RemoteAccessServer.machineKeyMarker.count))
+        return device.isEmpty ? nil : device
     }
 
     /// `type base64` of an authorized_keys line (no options, no comment).
