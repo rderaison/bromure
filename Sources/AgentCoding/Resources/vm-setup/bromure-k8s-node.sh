@@ -242,7 +242,7 @@ do_repoint() {
     local server_ip="$1"
     local envf=/etc/systemd/system/k3s-agent.service.env
     [ -f "$envf" ] || { log "repoint: not an agent"; return 0; }
-    if grep -q "K3S_URL=https://$server_ip:6443" "$envf"; then
+    if sudo grep -q "K3S_URL=https://$server_ip:6443" "$envf"; then
         log "repoint: already at $server_ip"; return 0
     fi
     sudo sed -i "s#^K3S_URL=.*#K3S_URL=https://$server_ip:6443#" "$envf"

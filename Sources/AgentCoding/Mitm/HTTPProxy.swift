@@ -3,6 +3,22 @@ import Compression
 @preconcurrency import Virtualization
 import SandboxEngine
 
+/// A static provider the proxies read on their connections' threads while
+/// `MitmEngine.register` replaces it (at every session's start, on the main
+/// thread): under a lock. Unlocked, a read in the middle of a replace could
+/// take the closure being released, and free it a second time.
+final class LockedProvider<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value?
+
+    init() {}
+
+    var current: Value? {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}
+
 /// One MITM connection's lifetime: read CONNECT, send 200, terminate
 /// TLS with a forged leaf cert, read the wrapped HTTP request, swap
 /// tokens, fire to upstream, stream response back.
@@ -77,10 +93,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// scanning + log/ask/block action). Set once by `MitmEngine`; nil →
     /// detection off. Static to avoid threading a closure through every
     /// listener/delegate layer.
-    nonisolated(unsafe) static var promptInjectionPolicyProvider: (@Sendable (UUID) -> PromptInjectionPolicy?)?
+    static var promptInjectionPolicyProvider: (@Sendable (UUID) -> PromptInjectionPolicy?)? {
+        get { promptInjectionPolicyProviderSlot.current }
+        set { promptInjectionPolicyProviderSlot.current = newValue }
+    }
+    private static let promptInjectionPolicyProviderSlot = LockedProvider<@Sendable (UUID) -> PromptInjectionPolicy?>()
     /// Per-profile PII protection (swap personal data for stand-ins on the
     /// way to the model, restore it on the way back). Same static rationale.
-    nonisolated(unsafe) static var piiPolicyProvider: (@Sendable (UUID) -> PIIPolicy?)?
+    static var piiPolicyProvider: (@Sendable (UUID) -> PIIPolicy?)? {
+        get { piiPolicyProviderSlot.current }
+        set { piiPolicyProviderSlot.current = newValue }
+    }
+    private static let piiPolicyProviderSlot = LockedProvider<@Sendable (UUID) -> PIIPolicy?>()
     /// Per-profile Squelch (command-output noise cut from AI requests).
     /// Reads the workspaces' settings as last saved (`SquelchSettings`).
     nonisolated(unsafe) static var squelchPolicyProvider: (@Sendable (UUID) -> SquelchPolicy?)? = {
@@ -89,30 +113,66 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// Reads whether Fusion is currently engaged for a profile's session.
     /// Set once by `MitmEngine.register`; nil → treat as disengaged.
     /// Static, same rationale as `promptInjectionPolicyProvider`.
-    nonisolated(unsafe) static var fusionEngagedProvider: (@Sendable (UUID) -> Bool)?
+    static var fusionEngagedProvider: (@Sendable (UUID) -> Bool)? {
+        get { fusionEngagedProviderSlot.current }
+        set { fusionEngagedProviderSlot.current = newValue }
+    }
+    private static let fusionEngagedProviderSlot = LockedProvider<@Sendable (UUID) -> Bool>()
     /// Per-profile Fusion config (legs + judge + auth modes). nil → not
     /// configured. Set by `MitmEngine.register`; same static-provider rationale.
-    nonisolated(unsafe) static var fusionConfigProvider: (@Sendable (UUID) -> Fusion.Config?)?
+    static var fusionConfigProvider: (@Sendable (UUID) -> Fusion.Config?)? {
+        get { fusionConfigProviderSlot.current }
+        set { fusionConfigProviderSlot.current = newValue }
+    }
+    private static let fusionConfigProviderSlot = LockedProvider<@Sendable (UUID) -> Fusion.Config?>()
     /// Per-profile LLM routing context (Cloud/Local/Hybrid + hybrid policy
     /// engine). nil → cloud pass-through. Set by `MitmEngine.register`;
     /// same static-provider rationale as the Fusion providers above.
-    nonisolated(unsafe) static var routingProvider: (@Sendable (UUID) -> LLMRoutingContext?)?
+    static var routingProvider: (@Sendable (UUID) -> LLMRoutingContext?)? {
+        get { routingProviderSlot.current }
+        set { routingProviderSlot.current = newValue }
+    }
+    private static let routingProviderSlot = LockedProvider<@Sendable (UUID) -> LLMRoutingContext?>()
     /// Reaches the host-owned Claude subscription store + refresher. nil →
     /// subscription auth off. Set once by `MitmEngine.register`; static, same
     /// rationale as the providers above.
     /// The engine's `CredentialMinter`: rewrites the responses of calls
     /// that issue a credential (`CredentialMint`). Set by MitmEngine.
-    nonisolated(unsafe) static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)?
-    nonisolated(unsafe) static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)?
+    static var credentialMinterProvider: (@Sendable () -> CredentialMinter?)? {
+        get { credentialMinterProviderSlot.current }
+        set { credentialMinterProviderSlot.current = newValue }
+    }
+    private static let credentialMinterProviderSlot = LockedProvider<@Sendable () -> CredentialMinter?>()
+    static var claudeSubscriptionProvider: (@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?)? {
+        get { claudeSubscriptionProviderSlot.current }
+        set { claudeSubscriptionProviderSlot.current = newValue }
+    }
+    private static let claudeSubscriptionProviderSlot = LockedProvider<@Sendable () -> (ClaudeSubscriptionStore, ClaudeSubscriptionRefresher)?>()
     /// A sign-in the host is capturing for this workspace (SignInCapture.swift):
     /// the token exchange is answered by the host, not the provider.
-    nonisolated(unsafe) static var signInCaptureProvider: (@Sendable (UUID) -> SignInCapture?)?
+    static var signInCaptureProvider: (@Sendable (UUID) -> SignInCapture?)? {
+        get { signInCaptureProviderSlot.current }
+        set { signInCaptureProviderSlot.current = newValue }
+    }
+    private static let signInCaptureProviderSlot = LockedProvider<@Sendable (UUID) -> SignInCapture?>()
     /// Codex / ChatGPT counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)?
+    static var codexSubscriptionProvider: (@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?)? {
+        get { codexSubscriptionProviderSlot.current }
+        set { codexSubscriptionProviderSlot.current = newValue }
+    }
+    private static let codexSubscriptionProviderSlot = LockedProvider<@Sendable () -> (CodexSubscriptionStore, CodexSubscriptionRefresher)?>()
     /// Grok (xAI) counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)?
+    static var grokSubscriptionProvider: (@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?)? {
+        get { grokSubscriptionProviderSlot.current }
+        set { grokSubscriptionProviderSlot.current = newValue }
+    }
+    private static let grokSubscriptionProviderSlot = LockedProvider<@Sendable () -> (GrokSubscriptionStore, GrokSubscriptionRefresher)?>()
     /// Kimi (Moonshot) counterpart of `claudeSubscriptionProvider`.
-    nonisolated(unsafe) static var kimiSubscriptionProvider: (@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?)?
+    static var kimiSubscriptionProvider: (@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?)? {
+        get { kimiSubscriptionProviderSlot.current }
+        set { kimiSubscriptionProviderSlot.current = newValue }
+    }
+    private static let kimiSubscriptionProviderSlot = LockedProvider<@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?>()
     /// Process-wide consent broker for the "ask me what to do" action.
     static let promptInjectionBroker = PromptInjectionConsentBroker()
 
