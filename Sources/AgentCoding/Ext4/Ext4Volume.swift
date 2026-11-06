@@ -22,6 +22,9 @@ enum Ext4Error: Error, CustomStringConvertible {
     case badInode(UInt32)
     case notADirectory(String)
     case notFound(String)
+    /// Past what this reader takes on (`Ext4Volume.maxDirectoryBytes`,
+    /// `maxDirectoryEntries`): not known to be corrupt, just not checked.
+    case tooLarge(UInt32)
 
     var description: String {
         switch self {
@@ -32,6 +35,7 @@ enum Ext4Error: Error, CustomStringConvertible {
         case .badInode(let n): return "corrupt inode \(n)"
         case .notADirectory(let p): return "not a directory: \(p)"
         case .notFound(let p): return "no such file: \(p)"
+        case .tooLarge(let n): return "directory inode \(n) is too large to read here"
         }
     }
 }
@@ -512,7 +516,14 @@ final class Ext4Volume {
                 let lo = max(logical, from), hi = min(logical + len, limit)
                 if lo < hi { for b in lo..<hi { map[b] = phys + UInt64(b - logical) } }
             } else {
-                // internal: ext4_extent_idx -> child node block
+                // internal: ext4_extent_idx -> child node block. It covers
+                // its first logical block up to the next index's: one wholly
+                // outside the window isn't read (each window would re-read
+                // the whole tree).
+                let first = Int(le32(node, e))
+                if first >= limit { break }
+                if i + 1 < entries, 12 + (i + 1) * 12 + 12 <= node.count,
+                   Int(le32(node, 12 + (i + 1) * 12)) <= from { continue }
                 let leafLo = UInt64(le32(node, e + 4))
                 let leafHi = UInt64(le16(node, e + 8))
                 let child = (leafHi << 32) | leafLo
@@ -569,18 +580,25 @@ final class Ext4Volume {
     /// Read a block at a time, its block map a window at a time
     /// (`dirWindowBlocks`), holes skipped: what's held is the entries, never
     /// i_size's worth of bytes. A directory with many entries grows past any
-    /// fixed cap (one of 64 MiB took a real directory for a corrupt inode,
-    /// and fsck then refused to clear the error flag); i_size is the image's
-    /// word, so only one larger than the filesystem itself is refused.
+    /// small cap (one of 64 MiB took a real directory for a corrupt inode,
+    /// and fsck then refused to clear the error flag). One larger than the
+    /// filesystem is corrupt. Past ext4's own limit without `large_dir`
+    /// (2 GiB), or past `maxDirectoryEntries`, it's `tooLarge`: not read (i_size
+    /// and the entries are the image's word; a hostile one mustn't have the
+    /// host read and hold the whole image), and not called corrupt either.
     static let dirWindowBlocks = 16_384
+    static let maxDirectoryBytes: UInt64 = 2 << 30
+    static let maxDirectoryEntries = 4_000_000
 
-    func listDir(_ ino: UInt32) throws -> [Ext4DirEntry] {
+    func listDir(_ ino: UInt32, maxBytes: UInt64 = maxDirectoryBytes,
+                 maxEntries: Int = maxDirectoryEntries) throws -> [Ext4DirEntry] {
         let node = try inode(ino)
         guard node.isDir else { throw Ext4Error.notADirectory("inode \(ino)") }
         if node.isInline {
             return try inlineDirEntries(node)
         }
         guard node.size <= byteSize, node.size <= UInt64(Int.max) else { throw Ext4Error.badInode(ino) }
+        guard node.size <= maxBytes else { throw Ext4Error.tooLarge(ino) }
         let bs = blockSize, total = Int(node.size)
         let numBlocks = (total + bs - 1) / bs
         var out = [Ext4DirEntry]()
@@ -593,6 +611,7 @@ final class Ext4Volume {
                 let block = try readBlock(phys)
                 let want = min(bs, total - lbn * bs)
                 out += parseDirBlock(want == bs ? block : Array(block.prefix(want)), includeDots: false)
+                guard out.count <= maxEntries else { throw Ext4Error.tooLarge(ino) }
             }
             from = to
         }

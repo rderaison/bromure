@@ -214,6 +214,7 @@ enum Ext4Fsck {
         // is reported and reported as incomplete.
         var visited = Set<UInt32>()
         var bad = 0
+        var tooLarge = 0
         let cap = Int(vol.sb.inodesCount) + 1
         var stack: [UInt32] = [Ext4Volume.rootInode]
         while let ino = stack.popLast(), visited.count < cap {
@@ -259,13 +260,17 @@ enum Ext4Fsck {
                         stack.append(e.ino)
                     }
                 }
+            } catch Ext4Error.tooLarge(let n) {
+                // Not read, so not checked: no damage found, and no clean bill.
+                tooLarge += 1
+                if tooLarge <= 10 { log.append("directory inode \(n) is too large to check here — walk was NOT exhaustive") }
             } catch {
                 bad += 1
                 if bad <= 10 { log.append("inode \(ino): \(error)") }
             }
         }
-        let complete = visited.count < cap
-        if !complete {
+        let complete = visited.count < cap && tooLarge == 0
+        if visited.count >= cap {
             log.append("verification capped at \(cap) inodes — walk was NOT exhaustive")
         }
         log.append("verified \(visited.count) reachable inode(s)"

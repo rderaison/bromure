@@ -406,6 +406,21 @@ struct Ext4FsckTests {
         #expect(repair.output.contains("verified 3 reachable inode(s)"), "\(repair.output)")
         #expect(repair.output.contains("error flag cleared"), "\(repair.output)")
         #expect(!(try Ext4Volume(path: path)).sb.hasErrors)
+
+        // Past what it reads (2 GiB, or 4 million entries): too large, not
+        // corrupt, and fsck neither calls it damage nor clears the flag.
+        #expect(throws: Ext4Error.self) { try vol.listDir(2, maxBytes: 32 << 20) }
+        do { _ = try vol.listDir(2, maxEntries: 1); Issue.record("read past the entry cap") }
+        catch Ext4Error.tooLarge(let n) { #expect(n == 2) }
+        do { _ = try vol.listDir(2, maxBytes: 32 << 20) }
+        catch Ext4Error.tooLarge(let n) { #expect(n == 2) }
+        #expect(Ext4Volume.maxDirectoryBytes == 2 << 30 && Ext4Volume.maxDirectoryEntries == 4_000_000)
+        let fsck = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Ext4/Ext4Fsck.swift"), encoding: .utf8)
+        let caught = try #require(fsck.range(of: "} catch Ext4Error.tooLarge(let n) {"))
+        #expect(!fsck[caught.upperBound...].prefix(260).contains("bad += 1"))
+        #expect(fsck.contains("let complete = visited.count < cap && tooLarge == 0"))
     }
 
     @Test("a root claiming a huge size is refused, not read")
