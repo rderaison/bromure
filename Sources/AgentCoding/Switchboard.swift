@@ -473,8 +473,10 @@ final class SwitchboardEngine {
             paused = true
             BACDebug.log("switchboard", "paused from \(Self.phoneLabel(kind))")
             if let c = switchboard, let w = c.windowIndex, c.agentAlive == true, let delegate {
+                // The key its agent stops on (Grok: Ctrl-C), as the chat's Stop.
+                let key = BeautifiedSessionModel.interruptKey(screen: "", agent: c.tool.rawValue)
                 Task { _ = try? await delegate.guestExec(profileID: c.profileID,
-                                                         command: "tmux send-keys -t bromure:\(w) Escape", timeout: 10) }
+                                                         command: "tmux send-keys -t bromure:\(w) \(key)", timeout: 10) }
             }
             Task { _ = await sendToPhone?("Paused — I won't act on any session. Send RESUME to continue.", kind) }
             return

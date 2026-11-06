@@ -2395,9 +2395,14 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
-    /// Interrupt the running agent — send Esc to its pane, the interrupt key
-    /// every supported TUI honours ("esc to interrupt"). Optimistically drops the
-    /// cue for instant feedback; the next poll reconciles from real status.
+    /// Interrupt the running agent with the key it takes for that: the one its
+    /// own busy line names ("esc to interrupt", "ctrl+c to interrupt", Grok's
+    /// "[stop]" is Ctrl-C), else its kind's. Still at it a moment later (Claude
+    /// running a command can need a second Esc), the same key once more, only
+    /// while that busy line is up: a second Ctrl-C to an idle agent quits it,
+    /// and a second Esc opens Claude's rewind. It used to be Esc for every
+    /// agent, once, which Grok ignores. Optimistically drops the cue for
+    /// instant feedback; the next poll reconciles from real status.
     func interrupt() {
         gate.interrupt()
         // Force the cue off now; the next poll feeds the real `isWorking()` to
@@ -2406,13 +2411,42 @@ final class BeautifiedSessionModel: ObservableObject {
         // omp hands its whole queue back to the input box on Esc — not sent,
         // and our rows for it then aged out of the strip unseen. Ours are
         // taken back and held here, typed in (and confirmed) once it's idle.
-        let restored = AgentQueueSupport.escapeRestoresQueue(agentKind)
-            ? queued.filter { !$0.held && !$0.isDelivered && !$0.sending } : []
+        let kind = agentKind
+        let restoring = queued.filter { !$0.held && !$0.isDelivered && !$0.sending }
         Task { [weak self] in
-            await self?.provider.pressKeys(["Escape"])
-            if !restored.isEmpty { await self?.reclaimAfterEscape(restored) }
-            await self?.rescanSoon()
+            guard let self else { return }
+            let key = Self.interruptKey(screen: await self.paneTail(), agent: kind)
+            await self.provider.pressKeys([key])
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if Self.screenShowsBusy(await self.paneTail()) {
+                BACDebug.log("beautified", "stop: still busy after \(key), once more")
+                await self.provider.pressKeys([key])
+            }
+            if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind), !restoring.isEmpty {
+                await self.reclaimAfterEscape(restoring)
+            }
+            await self.rescanSoon()
         }
+    }
+
+    /// The tmux key that interrupts this agent: what its busy line says, else
+    /// what its kind takes (Grok: Ctrl-C; the others: Esc).
+    nonisolated static func interruptKey(screen: String, agent: String?) -> String {
+        for raw in screen.split(whereSeparator: \.isNewline).suffix(14).reversed() {
+            let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            if l.contains("ctrl+c to interrupt") || l.contains("ctrl-c to interrupt") { return "C-c" }
+            if l.contains("esc to interrupt") { return "Escape" }
+            if l.hasSuffix("[stop]") || l == "[stop]" { return "C-c" }   // Grok's busy line
+        }
+        return agent == "grok" ? "C-c" : "Escape"
+    }
+
+    /// The last lines of the agent's pane, as on screen ("" if unreadable).
+    private func paneTail() async -> String {
+        guard let w = provider.activeTabIndex() else { return "" }
+        let probe = PaneTypeGuard.resolve(provider.paneTarget(window: w))
+            + "[ -n \"$_bt\" ] && tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30"
+        return await provider.execGuest(probe, timeout: 4) ?? ""
     }
 
     /// After Esc: when the agent put our queued messages back into its input
