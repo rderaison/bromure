@@ -444,7 +444,7 @@ struct Ext4FsckTests {
     func hugeFileSize() throws {
         // A guest makes this with one `truncate -s 1T`: i_size is the image's
         // word. The transcript reader and the browser's preview read a prefix;
-        // a whole read (or Extract) of more than the filesystem is refused.
+        // a whole read is too large, an Extract of more than 8 EiB refused.
         var img = Self.buildImage()
         putLE32(&img, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
         putLE32(&img, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)    // i_size_high
@@ -463,6 +463,39 @@ struct Ext4FsckTests {
             defer { try? handle.close() }
             #expect(throws: Ext4Error.self) { try vol.writeData(node, to: handle) }
         }
+    }
+
+    /// The finding: a whole-file read or Extract refused any file whose
+    /// logical size passed the filesystem's as a corrupt inode, though a
+    /// sparse file can (an 8 MiB volume holds a 16 MiB file with holes).
+    @Test("a sparse file larger than the filesystem reads whole, and extracts sparse")
+    func sparseFilePastTheFilesystem() throws {
+        var img = Self.buildImage()                              // a 64 KiB filesystem
+        let size = 16 << 20
+        putLE32(&img, Self.inodeOffset(12) + 4, UInt32(size))    // hello.txt: 16 MiB, one block kept
+        try withImage(img) { path in
+            let vol = try Ext4Volume(path: path)
+            let node = try vol.inode(12)
+            #expect(node.size > vol.byteSize)
+            let whole = try vol.readData(node)
+            #expect(whole.count == size)
+            #expect(Array(whole.prefix(Self.helloContent.count)) == Self.helloContent)
+            #expect(whole[Self.blockSize...].allSatisfy { $0 == 0 })
+
+            let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+            FileManager.default.createFile(atPath: out, contents: nil)
+            defer { try? FileManager.default.removeItem(atPath: out) }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+            #expect(try vol.writeData(node, to: handle) == UInt64(size))
+            try handle.close()
+            let copy = try Data(contentsOf: URL(fileURLWithPath: out))
+            #expect(copy.count == size && Array(copy) == whole)
+            // Its holes stayed holes: far less on disk than its size.
+            let allocated = try URL(fileURLWithPath: out).resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? size
+            #expect(allocated < size / 4, "allocated \(allocated)")
+        }
+        // A whole read past what's held in memory is too large, not corrupt.
+        #expect(Ext4Volume.maxBufferedBytes == 512 << 20)
     }
 
     @Test("the check survives a file claiming an enormous size")

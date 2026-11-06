@@ -415,11 +415,17 @@ final class Ext4Volume {
         return overflow ? .max : p
     }
 
+    /// The most a whole-file read holds in memory (`readData` with no limit):
+    /// a resource bound, not a validity one. A sparse file's logical size can
+    /// pass the filesystem's own (an 8 MiB volume holds a 16 MiB file with
+    /// holes), so that's no sign of corruption; past this it's `tooLarge`.
+    /// `writeData` streams, and has no such bound.
+    static let maxBufferedBytes: UInt64 = 512 << 20
+
     /// An inode's data: its first `limit` bytes, or all of it when no limit
     /// is given. i_size is the image's word, and a guest makes a terabyte
     /// sparse file with one `truncate`, so a read never allocates more than
-    /// `limit`. Without one, a file larger than the filesystem itself is
-    /// refused rather than read.
+    /// `limit`, or without one `maxBufferedBytes`.
     func readData(_ inode: Ext4Inode, limit: Int? = nil) throws -> [UInt8] {
         if inode.isInline {
             // Inline data: first 60 bytes live in i_block; the tail (if any) is
@@ -431,7 +437,7 @@ final class Ext4Volume {
         if let limit {
             size = min(inode.size, UInt64(max(limit, 0)))
         } else {
-            guard inode.size <= byteSize, inode.size <= UInt64(Int.max) else { throw Ext4Error.badInode(inode.ino) }
+            guard inode.size <= Self.maxBufferedBytes else { throw Ext4Error.tooLarge(inode.ino) }
             size = inode.size
         }
         var out = [UInt8](); out.reserveCapacity(Int(size))
@@ -439,18 +445,36 @@ final class Ext4Volume {
         return out
     }
 
-    /// A whole file written to `handle` a block at a time, never held in
-    /// memory (the browser's Extract). Refused, like `readData` without a
-    /// limit, when it claims to be larger than the filesystem. Returns the
-    /// bytes written.
+    /// A whole file written to `handle` (the browser's Extract): only the
+    /// blocks it has, each at its offset, its block map a window at a time
+    /// (`dirWindowBlocks`); its holes are left as holes, and the size set at
+    /// the end. Never held in memory, and a sparse file stays sparse, whatever
+    /// its logical size (which can pass the filesystem's). Returns its size.
     func writeData(_ inode: Ext4Inode, to handle: FileHandle) throws -> UInt64 {
         if inode.isInline {
             let bytes = try readData(inode)
             try handle.write(contentsOf: bytes)
             return UInt64(bytes.count)
         }
-        guard inode.size <= byteSize, inode.size <= UInt64(Int.max) else { throw Ext4Error.badInode(inode.ino) }
-        try forEachBlock(inode, size: inode.size) { try handle.write(contentsOf: $0) }
+        // ext4 caps a file at 16 TiB; past Int.max the offsets can't be.
+        guard inode.size <= UInt64(Int.max) else { throw Ext4Error.badInode(inode.ino) }
+        let base = try handle.offset()
+        let bs = blockSize, total = Int(inode.size)
+        let numBlocks = (total + bs - 1) / bs
+        var from = 0
+        while from < numBlocks {
+            let to = min(numBlocks, from + Self.dirWindowBlocks)
+            let map = try blockMap(inode, from: from, upTo: to)
+            for lbn in map.keys.sorted() {
+                guard let phys = map[lbn], phys != 0 else { continue }   // a hole stays one
+                let block = try readBlock(phys)
+                let want = min(bs, total - lbn * bs)
+                try handle.seek(toOffset: base + UInt64(lbn * bs))
+                try handle.write(contentsOf: want == bs ? block : Array(block.prefix(want)))
+            }
+            from = to
+        }
+        try handle.truncate(atOffset: base + inode.size)
         return inode.size
     }
 
