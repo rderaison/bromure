@@ -92,10 +92,35 @@ final class TranscriptSearchIndex {
     @ObservationIgnored private let dir: URL
     @ObservationIgnored private let storeDir: URL
 
-    private init() {
+    /// Sessions removed since a pass last saw their transcript gone: a pass
+    /// already under way when one was removed read it, and mustn't put it back.
+    @ObservationIgnored private var forgotten: Set<UUID> = []
+
+    private convenience init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dir = support.appendingPathComponent("BromureAC/transcripts", isDirectory: true)
-        storeDir = support.appendingPathComponent("BromureAC/transcript-index", isDirectory: true)
+        self.init(dir: support.appendingPathComponent("BromureAC/transcripts", isDirectory: true),
+                  storeDir: support.appendingPathComponent("BromureAC/transcript-index", isDirectory: true))
+    }
+
+    init(dir: URL, storeDir: URL) {
+        self.dir = dir
+        self.storeDir = storeDir
+    }
+
+    nonisolated static func recordURL(_ id: UUID, in storeDir: URL) -> URL {
+        storeDir.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
+    /// A session was removed: what the index kept of its conversation (your
+    /// messages and the agent's replies, saved to disk for the next launch)
+    /// goes now, not at that launch.
+    func forget(_ id: UUID) {
+        forgotten.insert(id)
+        entries[id] = nil
+        records[id] = nil
+        liveModels[id] = nil
+        let url = Self.recordURL(id, in: storeDir)
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
     }
 
     /// Start keeping up (idempotent).
@@ -138,15 +163,22 @@ final class TranscriptSearchIndex {
                     Self.save(r, id: id, in: storeDir)
                 }
             }
-            if firstPass {
-                // Records of transcripts that are gone.
-                for (id, _) in known where !present.contains(id) {
-                    try? fm.removeItem(at: storeDir.appendingPathComponent("\(id.uuidString).json"))
-                }
+            // Records of transcripts that are gone, on every pass: what a
+            // session said stays on disk no longer than its transcript.
+            for (id, _) in known where !present.contains(id) {
+                try? fm.removeItem(at: Self.recordURL(id, in: storeDir))
             }
             let found = updates, seen = present
             await MainActor.run {
-                for (id, r) in found { self.records[id] = r; self.entries[id] = r.entry }
+                // Removed while this pass read it: not back in, and its record
+                // (saved just now) goes again.
+                let back = Set(found.keys).intersection(self.forgotten)
+                for id in back {
+                    let url = Self.recordURL(id, in: storeDir)
+                    DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
+                }
+                self.forgotten.formIntersection(seen)   // its transcript gone from disk: done
+                for (id, r) in found where !back.contains(id) { self.records[id] = r; self.entries[id] = r.entry }
                 for id in self.entries.keys where !seen.contains(id) { self.entries[id] = nil; self.records[id] = nil }
                 if firstPass {
                     for id in self.records.keys where !seen.contains(id) { self.records[id] = nil }
@@ -284,7 +316,7 @@ final class TranscriptSearchIndex {
     nonisolated static func save(_ r: Record, id: UUID, in dir: URL) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(r) else { return }
-        try? data.write(to: dir.appendingPathComponent("\(id.uuidString).json"), options: .atomic)
+        try? data.write(to: recordURL(id, in: dir), options: .atomic)
     }
 
     nonisolated static func loadRecords(from dir: URL) -> [UUID: Record] {
