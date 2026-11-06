@@ -83,6 +83,10 @@ final class LinuxAccountKeys {
         interval * Double.random(in: 0.9...1.1)
     }
 
+    /// Whether the periodic pull is running (tests).
+    // @port-skip linux-only: test hook
+    var isTicking: Bool { ticker != nil }
+
     // @port ACAppDelegate.stopAccountKeySync() h=5fc6970b829fd009 @d2db8346
     func stop() {
         ticker?.cancel()
@@ -178,7 +182,11 @@ extension Daemon {
                 : .error(409, "This server's account is its managed enrollment; it can't sign out here")
         }
         DeviceIdentityStore.erase()
-        await MainActor.run { LinuxAccountKeys.shared.signedOut() }
+        await MainActor.run {
+            // A managed (enterprise) enrollment is the identity now, as on
+            // macOS (P2PIdentity falls back to it): the pulls go on under it.
+            if P2PIdentity.current() != nil { LinuxAccountKeys.shared.start() } else { LinuxAccountKeys.shared.signedOut() }
+        }
         return ControlResponse(200, ["ok": .bool(true)])
     }
 
