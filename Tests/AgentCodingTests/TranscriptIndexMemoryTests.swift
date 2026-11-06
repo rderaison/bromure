@@ -111,12 +111,49 @@ struct TranscriptIndexCapTests {
         #expect(capped.turns == whole.turns && capped.agentTitle == whole.agentTitle && capped.tokens == whole.tokens)
     }
 
-    @Test("a start with no complete line, or one long line, is read without crashing")
+    /// The finding: a file of one record past the cap (a pasted prompt, a
+    /// tool's output) had no whole line in either sample, and was indexed
+    /// with nothing in it: not searchable, no prompt, no reply.
+    @Test("one record past the cap is still indexed: its words, as prompt or reply")
     func degenerate() throws {
-        let long = try file([reply(String(repeating: "x", count: 20_000))]); defer { try? FileManager.default.removeItem(at: long) }
-        #expect(TranscriptSearchIndex.entry(of: long, modified: Date(), cap: 4_000, head: 300) != nil)
+        typealias I = TranscriptSearchIndex
+        let d0 = Date(timeIntervalSince1970: 0)
+        let words = "needle-in-the-reply " + String(repeating: "x", count: 20_000)
+        let long = try file([reply(words)]); defer { try? FileManager.default.removeItem(at: long) }
+        let e = try #require(I.entry(of: long, modified: d0, cap: 4_000, head: 300))
+        #expect(e.text.hasPrefix("needle-in-the-reply") && e.lastReply.hasPrefix("needle-in-the-reply"))
+        let r = try #require(I.read(long, modified: d0, known: nil, cap: 4_000, head: 300))
+        #expect(r.entry.text.hasPrefix("needle-in-the-reply"))
+        // A pasted prompt: the user's words, and its first prompt.
+        let prompt = try file([user("please review " + String(repeating: "y", count: 20_000))])
+        defer { try? FileManager.default.removeItem(at: prompt) }
+        let p = try #require(I.entry(of: prompt, modified: d0, cap: 4_000, head: 300))
+        #expect(p.firstPrompt?.hasPrefix("please review") == true && p.lastReply.isEmpty)
         let tiny = try file([user("a"), reply("b")]); defer { try? FileManager.default.removeItem(at: tiny) }
-        #expect(TranscriptSearchIndex.entry(of: tiny, modified: Date(), cap: 40, head: 10)?.lastReply != nil)
+        #expect(I.entry(of: tiny, modified: d0, cap: 40, head: 10)?.lastReply != nil)
+    }
+
+    @Test("a first record longer than the head, but under half the cap, is read whole")
+    func longFirstRecord() throws {
+        typealias I = TranscriptSearchIndex
+        let d0 = Date(timeIntervalSince1970: 0)
+        let first = user("the opening ask " + String(repeating: "z", count: 1_500))
+        let rest = (0..<120).flatMap { [user("ask \($0) " + String(repeating: "p", count: 60)), reply("answer \($0)")] }
+        let url = try file([first] + rest); defer { try? FileManager.default.removeItem(at: url) }
+        let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as! Int
+        let cap = 8_000
+        #expect(size > cap)
+        for e in [try #require(I.entry(of: url, modified: d0, cap: cap, head: 300)),
+                  try #require(I.read(url, modified: d0, known: nil, cap: cap, head: 300)).entry] {
+            #expect(e.firstPrompt?.hasPrefix("the opening ask") == true)
+            #expect(e.lastReply == "answer 119")
+        }
+        // The two samples stay within the cap.
+        let data = try Data(contentsOf: url)
+        let s = try #require(I.samples(size: UInt64(size), cap: cap, head: 300) { at, count in
+            data.subdata(in: Int(at)..<min(data.count, Int(at) + count))
+        })
+        #expect(s.start.count + (size - Int(s.endAt)) <= cap)
     }
 
     @Test("the cap is 100 MB, with the first megabyte kept")
