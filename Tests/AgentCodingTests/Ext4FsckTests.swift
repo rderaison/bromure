@@ -498,6 +498,51 @@ struct Ext4FsckTests {
         #expect(Ext4Volume.maxBufferedBytes == 512 << 20)
     }
 
+    @Test("Extract of a huge sparse file walks its map, not its size; a hostile map stops at the filesystem's blocks")
+    func extractHostile() throws {
+        func extract(_ img: [UInt8]) throws -> (UInt64?, TimeInterval, UInt64) {
+            var result: (UInt64?, TimeInterval, UInt64) = (nil, 0, 0)
+            try withImage(img) { path in
+                let vol = try Ext4Volume(path: path)
+                let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+                FileManager.default.createFile(atPath: out, contents: nil)
+                defer { try? FileManager.default.removeItem(atPath: out) }
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+                let t0 = Date()
+                let n = try? vol.writeData(try vol.inode(12), to: handle)
+                try handle.close()
+                let size = (try FileManager.default.attributesOfItem(atPath: out)[.size] as? NSNumber)?.uint64Value ?? 0
+                result = (n, Date().timeIntervalSince(t0), size)
+            }
+            return result
+        }
+        // 1 TiB, one block kept: in no time, and the copy is sparse.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(12) + 4, 0)
+        putLE32(&img, Self.inodeOffset(12) + 108, 256)            // i_size_high: 256 << 32 = 1 TiB
+        let (n, took, size) = try extract(img)
+        #expect(n == 1 << 40 && size == 1 << 40)
+        #expect(took < 2, "took \(took) s")
+        // Past 2^32 blocks (4 TiB at 1K): no ext4 file is that large.
+        putLE32(&img, Self.inodeOffset(12) + 108, 1025)
+        #expect(try extract(img).0 == nil)
+        // A double-indirect table whose every pointer is the same table, and
+        // that table's every pointer the same block: 65,536 blocks of a
+        // 64-block filesystem. Refused at the budget.
+        var loop = Self.buildImage()
+        let o = Self.inodeOffset(12)
+        putLE32(&loop, o + 4, 0)
+        putLE32(&loop, o + 108, 1)                                // 4 GiB
+        putLE32(&loop, o + 40 + 13 * 4, 13)                       // i_block[13] → table 13
+        for i in 0..<Self.blockSize / 4 {
+            putLE32(&loop, 13 * Self.blockSize + i * 4, 14)       // every entry → table 14
+            putLE32(&loop, 14 * Self.blockSize + i * 4, UInt32(Self.helloBlock))
+        }
+        let (m, tookLoop, _) = try extract(loop)
+        #expect(m == nil)
+        #expect(tookLoop < 2)
+    }
+
     @Test("the check survives a file claiming an enormous size")
     func fsckHugeFileSize() throws {
         // The boot remedy and the cluster disk repair run this on their own.
