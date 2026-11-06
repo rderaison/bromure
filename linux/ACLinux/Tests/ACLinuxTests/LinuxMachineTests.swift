@@ -102,6 +102,36 @@ struct LinuxMachineTests {
         await srv.close()
     }
 
+    /// The other way: a body that doesn't read. The connection stops
+    /// reading from the client (ControlInbound's gate), so the client's
+    /// sends wait, rather than everything piling up in the daemon.
+    @Test func aBodyThatDoesntReadHoldsTheClientBack() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let release = Flag()
+        let (srv, path) = try await Self.server(dir) { _ in
+            .descriptor(head: "") { fd in
+                // Never reads; lets go once the test is done.
+                let until = Date().addingTimeInterval(30)
+                while !release.isSet && Date() < until { usleep(20_000) }
+                close(fd)
+            }
+        }
+        let fd = try #require(Self.dial(path)); defer { close(fd) }
+        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        Self.say(fd, "POST /up HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        let chunk = [UInt8](repeating: 66, count: 65536)
+        var sent = 0
+        for _ in 0..<1024 {                  // 64 MiB at most
+            let n = chunk.withUnsafeBytes { Glibc.send(fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+            if n <= 0 { break }
+            sent += n
+        }
+        release.set()
+        #expect(sent < 24 << 20, "held back at \(sent) bytes, not the whole 64 MiB")
+        await srv.close()
+    }
+
     static func request(_ method: String, _ path: String, _ body: [String: Any] = [:]) -> ControlRequest {
         ControlRequest(method: method, path: path, body: JSONValue(foundation: body) ?? .object([:]))
     }

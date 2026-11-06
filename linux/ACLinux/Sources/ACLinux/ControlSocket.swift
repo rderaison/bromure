@@ -138,11 +138,70 @@ public final class ControlServer: Sendable {
 /// bytes as they arrive, and writes back to it.
 // @port-skip linux-only: NIO stream handoff (macOS hands the raw fd to the handler)
 public struct ControlStream: Sendable {
-    /// Ends when the client closes (or the connection fails).
-    public let inbound: AsyncStream<ByteBuffer>
+    /// Ends when the client closes (or the connection fails). Read it: the
+    /// connection stops reading from the client while it's behind.
+    public let inbound: ControlInbound
     let channel: Channel
     // @port-skip linux-only: NIO stream handoff
     public func write(_ b: ByteBuffer) async throws { try await channel.writeAndFlush(b) }
+}
+
+/// A stream's inbound, with backpressure: while `InboundGate.high` bytes
+/// wait for the reader, the connection stops reading from the client (its
+/// sends then wait in the socket), and it reads again once they're down to
+/// `InboundGate.low`.
+// @port-skip linux-only: NIO stream handoff
+public struct ControlInbound: AsyncSequence, Sendable {
+    public typealias Element = ByteBuffer
+    let base: AsyncStream<ByteBuffer>
+    let gate: InboundGate
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        var it: AsyncStream<ByteBuffer>.AsyncIterator
+        let gate: InboundGate
+        // @port-skip linux-only: NIO stream handoff
+        public mutating func next() async -> ByteBuffer? {
+            let b = await it.next()
+            if let b { gate.taken(b.readableBytes) }
+            return b
+        }
+    }
+    // @port-skip linux-only: NIO stream handoff
+    public func makeAsyncIterator() -> AsyncIterator { AsyncIterator(it: base.makeAsyncIterator(), gate: gate) }
+}
+
+/// The bytes a stream's reader has yet to take, and whether the connection
+/// stopped reading for them. Only touched on the channel's event loop, so a
+/// pause and a resume can't land out of order.
+// @port-skip linux-only: NIO stream handoff
+final class InboundGate: @unchecked Sendable {
+    static let high = 256 << 10, low = 64 << 10
+    let channel: Channel
+    private var queued = 0
+    private(set) var paused = false
+    // @port-skip linux-only: NIO stream handoff
+    init(channel: Channel) { self.channel = channel }
+
+    /// The connection handed `n` bytes to the stream (on the event loop).
+    // @port-skip linux-only: NIO stream handoff
+    func added(_ n: Int) {
+        channel.eventLoop.preconditionInEventLoop()
+        queued += n
+        guard !paused, queued >= Self.high else { return }
+        paused = true
+        channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
+    }
+
+    /// The reader took `n` bytes (any thread).
+    // @port-skip linux-only: NIO stream handoff
+    func taken(_ n: Int) {
+        channel.eventLoop.execute { [self] in
+            queued -= n
+            guard paused, queued <= Self.low else { return }
+            paused = false
+            channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+            channel.read()
+        }
+    }
 }
 
 /// Reads one request (headers to `\r\n\r\n`, then Content-Length bytes, both
@@ -159,6 +218,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     private var started = false
     /// Set once a streaming reply has taken the connection over.
     private var streamIn: AsyncStream<ByteBuffer>.Continuation?
+    private var gate: InboundGate?
     /// nil until SO_PEERCRED has answered: nothing is served before that.
     private var authorized: Bool?
     /// The client sent EOF: an incomplete request can't complete any more.
@@ -193,7 +253,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     // @port-skip linux-only: NIO request framing
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
-        if let streamIn { streamIn.yield(b); return }
+        if let streamIn { gate?.added(b.readableBytes); streamIn.yield(b); return }
         buf.writeBuffer(&b)
         process(context)
     }
@@ -270,9 +330,11 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     private func startStream(_ context: ChannelHandlerContext, leftover consumed: Int, head: String?,
                              _ body: @escaping @Sendable (ControlStream) async -> Void) {
         let (inbound, cont) = AsyncStream<ByteBuffer>.makeStream()
+        let gate = InboundGate(channel: context.channel)
         streamIn = cont
+        self.gate = gate
         buf.moveReaderIndex(forwardBy: consumed)
-        if buf.readableBytes > 0 { cont.yield(buf.slice()) }
+        if buf.readableBytes > 0 { gate.added(buf.readableBytes); cont.yield(buf.slice()) }
         buf = ByteBuffer()
         if !context.channel.isActive { cont.finish() }
         let head = head ?? "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
@@ -281,7 +343,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
         }
         let channel = context.channel
         Task {
-            await body(ControlStream(inbound: inbound, channel: channel))
+            await body(ControlStream(inbound: ControlInbound(base: inbound, gate: gate), channel: channel))
             try? await channel.close()
         }
     }
