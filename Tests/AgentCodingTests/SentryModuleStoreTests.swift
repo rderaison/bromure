@@ -330,7 +330,21 @@ struct SentryModuleStoreTests {
         #expect(await fresh.ensure(kernel: "6.8.0-139-generic", hash: Self.hash)?.contains("no module catalog") == true)
     }
 
-    @Test("The publisher re-signs kept statements a bucket write stripped, and refuses when nothing vouches for them")
+    /// The publisher is a node script, run in a node container (Jenkinsfile.sentry).
+    /// A Mac without node has nothing to run it with.
+    private static let hasNode: Bool = {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["node", "--version"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }()
+
+    @Test("The publisher re-signs kept statements a bucket write stripped, and refuses when nothing vouches for them",
+          .enabled(if: hasNode, "needs node"))
     func publisherResignsStrippedModules() throws {
         let tools = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("tools/make-sentry-catalog.mjs")

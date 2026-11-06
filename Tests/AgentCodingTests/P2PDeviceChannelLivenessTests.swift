@@ -79,9 +79,14 @@ struct P2PDeviceChannelLivenessTests {
         let port = await server.start()
         #expect(port > 0)
         let ch = try channel(port: port)
+        // Latched, not sampled: this socket reads connected for only ~1 s
+        // (its first ping is due at 0.4 s, given up on at 1.0 s), and a poll
+        // on a loaded machine can sleep through all of it.
+        let opened = OSAllocatedUnfairLock(initialState: false)
+        ch.onStateChange = { if $0 { opened.withLock { $0 = true } } }
         ch.connect()
         defer { ch.close(); server.stop() }
-        #expect(await waitFor(5) { ch.connected })
+        #expect(await waitFor(10) { opened.withLock { $0 } })
         // First ping at 0.4 s, its deadline at 1.0 s, a reconnect ~0.5 s later.
         #expect(await waitFor(6) { server.count >= 2 })
     }

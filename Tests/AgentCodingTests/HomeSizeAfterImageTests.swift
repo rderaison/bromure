@@ -79,7 +79,9 @@ struct HomeSizeAfterImageTests {
         let register = try #require(ac.range(of: "func registerSession("))
         #expect(ac[register.upperBound...].prefix(1800).contains("post(name: .bromureWorkspaceStorageChanged, object: profile.id)"))
         let unregister = try #require(ac.range(of: "func unregisterSession("))
-        #expect(ac[unregister.upperBound...].prefix(500).contains("post(name: .bromureWorkspaceStorageChanged, object: id)"))
+        let afterUnregister = ac[unregister.upperBound...]
+        let unregisterBody = afterUnregister[..<(afterUnregister.range(of: "\n    }\n")?.lowerBound ?? afterUnregister.endIndex)]
+        #expect(unregisterBody.contains("post(name: .bromureWorkspaceStorageChanged, object: id)"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }"))
         #expect(fc.contains("post(name: .bromureWorkspaceStorageChanged, object: id)"))

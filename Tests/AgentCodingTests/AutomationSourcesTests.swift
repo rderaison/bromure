@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 @testable import bromure_ac
 
@@ -74,15 +75,22 @@ struct AutomationSourcesTests {
     /// and applied to the workspace now on screen.
     @Test("a lookup whose view moved on never returns the late reply")
     func cancelledLookup() async throws {
+        // The host answers only once the view task is cancelled — the read
+        // itself doesn't stop (not a cancellable sleep). In that order for
+        // sure: a sleep on each side raced on a loaded machine.
+        let asked = DispatchSemaphore(value: 0), cancelled = DispatchSemaphore(value: 0)
+        let first = OSAllocatedUnfairLock(initialState: true)
         let sources = AutomationSources { _ in
-            // The host answering after the view task was cancelled — the read
-            // itself doesn't stop (not a cancellable sleep).
-            Thread.sleep(forTimeInterval: 0.3)
+            if first.withLock({ f in defer { f = false }; return f }) {
+                asked.signal()
+                _ = cancelled.wait(timeout: .now() + 10)
+            }
             return ["items": ["old/repo"]]
         }
         let lookup = Task { try await sources.repos(UUID()) }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        while asked.wait(timeout: .now()) == .timedOut { try? await Task.sleep(nanoseconds: 10_000_000) }
         lookup.cancel()
+        cancelled.signal()
         let result = await lookup.result
         #expect(throws: CancellationError.self) { _ = try result.get() }
         // Not cancelled: the reply as ever.
