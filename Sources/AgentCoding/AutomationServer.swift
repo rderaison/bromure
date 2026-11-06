@@ -606,8 +606,11 @@ final class ACAutomationServer {
 
         // Console-presence: a fat client stamps every /state poll with its
         // user's idle time; the browser-MCP bridge routes agent browser
-        // streams to whichever console was used last.
-        if let r = headerBlock.lowercased().range(of: "x-bromure-console-idle-ms:") {
+        // streams to whichever console was used last. Only on the owner-only
+        // socket (the one `/state` answers on): from the loopback TCP listener
+        // any process could claim a fat client, and consent prompts would go
+        // to it instead of the local panel.
+        if isTrustedLocal, let r = headerBlock.lowercased().range(of: "x-bromure-console-idle-ms:") {
             let ms = Int(headerBlock.lowercased()[r.upperBound...]
                 .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? Int.max / 2
             ConsolePresence.shared.noteRemote(idleMs: ms)
@@ -639,18 +642,16 @@ final class ACAutomationServer {
         // waiting for its verb) reads as long as its stream lives.
         Self.setReceiveTimeout(fd, 0)
         // A client that merges sections gets only those that changed; an
-        // older one (no header) the whole state each time, as before.
-        if method == "GET", path == "/state/subscribe",
-           headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil {
-            handleStateSubscribe(fd: fd, delta: true)
-            return
-        }
-        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
+        // older one (no header) the whole state each time, as before. Only a
+        // flag here: the route's owner-only guard decides who gets a feed.
+        let stateDelta = headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil
+        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta)
     }
 
     // MARK: - Routing
 
-    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool) {
+    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool,
+                       stateDelta: Bool = false) {
         // Local shadow so every `sendResponse` in this switch honors the client's
         // gzip capability without threading a flag through ~50 call sites. The
         // real 4-arg method is reached via `self.sendResponse`.
@@ -849,7 +850,7 @@ final class ACAutomationServer {
         // to a slow heartbeat; older clients keep polling /state.
         case ("GET", "/state/subscribe"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
-            handleStateSubscribe(fd: fd)
+            handleStateSubscribe(fd: fd, delta: stateDelta)
 
         case ("GET", "/squelch"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
