@@ -161,6 +161,36 @@ struct CheckpointGuardrailTests {
         #expect(keep == [now, dayBefore])
     }
 
+    /// The finding: the cut-off kept the time of day, so at 18:00 on July 10
+    /// the 09:00 checkpoint of July 8 was dropped, July 8's only one.
+    @Test("at 18:00 on July 10, July 8's 09:00 checkpoint stays; July 7's goes")
+    func dayCutIsMidnight() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        func at(_ d: Int, _ h: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 7, day: d, hour: h))! }
+        let now = at(10, 18)
+        let dates = [at(10, 8), at(9, 23), at(8, 9), at(8, 0), at(7, 23)]
+        let keep = ProfileStore.checkpointRetention(dates, now: now, calendar: cal)
+        #expect(keep == [at(10, 8), at(9, 23), at(8, 9)])
+        // Midnight itself is that day's.
+        #expect(ProfileStore.checkpointRetention([at(10, 8), at(8, 0)], now: now, calendar: cal) == [at(10, 8), at(8, 0)])
+    }
+
+    @Test("the weekly tier counts whole weeks too")
+    func weekCutIsWeekStart() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        cal.firstWeekday = 2   // Monday
+        func at(_ d: Int, _ h: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 7, day: d, hour: h))! }
+        // Friday July 10, 18:00. One week back starts Monday June 29.
+        let now = at(10, 18)
+        let june29 = cal.date(from: DateComponents(year: 2026, month: 6, day: 29, hour: 9))!
+        let june28 = cal.date(from: DateComponents(year: 2026, month: 6, day: 28, hour: 23))!
+        let keep = ProfileStore.checkpointRetention([now, june29, june28], now: now,
+                                                    boots: 1, days: 0, weeks: 1, calendar: cal)
+        #expect(keep == [now, june29])
+    }
+
     @Test("launch settles the backlog; a session start takes its checkpoints as automatic")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
