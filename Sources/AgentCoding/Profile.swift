@@ -4437,6 +4437,34 @@ public final class ProfileStore {
         }.sorted { $0.createdAt > $1.createdAt }
     }
 
+    /// A session start's checkpoints: the disk's, the home's, then what's beyond
+    /// the ladder. A delete of the workspace's checkpoints (the launch clearing
+    /// a backlog, Delete All) refuses new ones while it runs, so they wait for
+    /// it to end rather than being skipped: the session start doesn't come
+    /// again, and the boot would have no rollback point. Off the main thread.
+    func takeSessionStartCheckpoints(for profile: Profile, done: (@Sendable () -> Void)? = nil) {
+        Self.afterCheckpointPurge(profile.id) { [self] in
+            // Another delete started meanwhile: wait for that one too.
+            if Self.isPurgingCheckpoints(profile.id) {
+                AppLog.stamp("'\(profile.name)': session-start checkpoints wait for a checkpoint delete to end")
+                takeSessionStartCheckpoints(for: profile, done: done)
+                return
+            }
+            let now = Date()
+            do { _ = try snapshotDisk(for: profile, at: now, automatic: true) }
+            catch {
+                FileHandle.standardError.write(Data("[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
+            }
+            do { _ = try snapshotHomeImage(for: profile, at: now, automatic: true) }
+            catch {
+                FileHandle.standardError.write(Data("[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
+            }
+            // Then what's beyond the ladder, both images at once.
+            pruneCheckpoints(for: profile, now: now)
+            done?()
+        }
+    }
+
     /// Delete what a workspace holds beyond the ladder, disk and home, in one
     /// go: each renamed out of the list now, then unlinked whole, one after
     /// another, off the main thread (`purgeCheckpointsInBackground`), the way
@@ -4496,8 +4524,20 @@ public final class ProfileStore {
     /// Workspaces whose checkpoints are being deleted: no revert reads one
     /// meanwhile (`revertImage` refuses), and no second delete starts. Shared by
     /// "Delete All Checkpoints" and the delete a home resize starts.
-    private static let purging = OSAllocatedUnfairLock(initialState: Set<UUID>())
-    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0.contains(id) } }
+    /// Each with what waits for it to end (`afterCheckpointPurge`).
+    private static let purging = OSAllocatedUnfairLock(initialState: [UUID: [@Sendable () -> Void]]())
+    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0[id] != nil } }
+
+    /// Run `work` on a background queue once no delete of `id`'s checkpoints
+    /// runs: now if none does, else when it ends.
+    static func afterCheckpointPurge(_ id: UUID, _ work: @escaping @Sendable () -> Void) {
+        let now = purging.withLock { s -> Bool in
+            guard s[id] != nil else { return true }
+            s[id]!.append(work)
+            return false
+        }
+        if now { DispatchQueue.global(qos: .utility).async(execute: work) }
+    }
 
     /// One delete at a time, app-wide: the backlog a launch clears for every
     /// workspace goes through it file by file, not all at once.
@@ -4510,7 +4550,11 @@ public final class ProfileStore {
     static func purgeCheckpointsInBackground(_ files: [URL], of id: UUID, name: String, why: String,
                                              done: @escaping @MainActor ((deleted: Int, failed: [URL]), TimeInterval) -> Void = { _, _ in })
         -> Bool {
-        guard purging.withLock({ $0.insert(id).inserted }) else { return false }
+        guard purging.withLock({ s -> Bool in
+            guard s[id] == nil else { return false }
+            s[id] = []
+            return true
+        }) else { return false }
         AppLog.stamp("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
         purgeQueue.async {
             let t0 = Date()
@@ -4518,7 +4562,8 @@ public final class ProfileStore {
                 AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
             }
             let total = Date().timeIntervalSince(t0)
-            purging.withLock { _ = $0.remove(id) }
+            let waiting = purging.withLock { $0.removeValue(forKey: id) ?? [] }
+            for work in waiting { DispatchQueue.global(qos: .utility).async(execute: work) }
             AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
             DispatchQueue.main.async { MainActor.assumeIsolated { done(result, total) } }
         }
