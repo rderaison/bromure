@@ -1,5 +1,4 @@
 import Foundation
-import OnnxRuntimeBindings
 import Tokenizers
 
 /// Local, on-device prompt-injection classifier for AI traffic.
@@ -47,7 +46,7 @@ actor PromptInjectionClassifier {
     let modelDirName: String
     let logLabel: String
     /// Load and inference on a queue of their own (`ClassifierQueue`).
-    private let queue: DispatchSerialQueue
+    private let queue: ClassifierQueue.Executor
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     init(modelDirName: String, logLabel: String) {
         self.modelDirName = modelDirName
@@ -91,8 +90,7 @@ actor PromptInjectionClassifier {
     // MARK: - Loaded state
 
     private struct Loaded {
-        let env: ORTEnv
-        let session: ORTSession
+        let session: any InjectionSession
         let inputNames: Set<String>
         let tokenizer: Tokenizer
         let maxLength: Int
@@ -343,38 +341,15 @@ actor PromptInjectionClassifier {
             cfg = parsed
         }
 
-        // ONNX session on the CPU execution provider by default. The CoreML
-        // EP balloons resident memory ~5x (a 288 MB model → ~5 GB; both
-        // detectors → ~9 GB): it partitions a transformer into ~160 subgraphs
-        // and keeps the ORT graph AND the compiled CoreML copies in RAM.
-        // Detection is off the hot path and verdict-cached (each unique span
-        // is scored once per session), so the ANE speed isn't worth that
-        // footprint sitting next to the VM. CPU holds both models in ~2 GB at
-        // identical accuracy. Opt back into CoreML with
-        // BROMURE_INJECTION_COREML=1; BROMURE_NO_COREML still forces CPU.
-        // Building the session blocks for a while: off this actor's queue,
-        // so `readiness()` answers meanwhile.
-        let (env, session, inputNames) = try await ClassifierQueue.load(logLabel) {
-            () throws -> (ORTEnv, ORTSession, Set<String>) in
-            let env = try ORTEnv(loggingLevel: .warning)
-            let opts = try ORTSessionOptions()
-            try opts.setGraphOptimizationLevel(.all)
-            let useCoreML = ORTIsCoreMLExecutionProviderAvailable()
-                && ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
-                && ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil
-            if useCoreML {
-                let coreml = ORTCoreMLExecutionProviderOptions()
-                coreml.enableOnSubgraphs = true
-                try opts.appendCoreMLExecutionProvider(with: coreml)
-            }
-            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
-            return (env, session, Set(try session.inputNames()))
-        }
+        // The ONNX session (InjectionRuntime: each platform's onnxruntime).
+        // Building it blocks for a while: off this actor's queue, so
+        // `readiness()` answers meanwhile.
+        let path = modelURL.path
+        let session = try await ClassifierQueue.load(logLabel) { try InjectionRuntime.session(modelPath: path) }
 
         return Loaded(
-            env: env,
             session: session,
-            inputNames: inputNames,
+            inputNames: session.inputNames,
             tokenizer: tokenizer,
             maxLength: cfg.maxLength ?? 512,
             injectionLabelIndex: cfg.injectionLabelIndex ?? 1,
@@ -455,13 +430,7 @@ actor PromptInjectionClassifier {
 
         // Sentences (and lines), then windows of up to ~2 sentences / 360 chars.
         let body = String(text.prefix(maxFineScanChars))
-        var sentences: [String] = []
-        body.enumerateSubstrings(in: body.startIndex..<body.endIndex, options: [.bySentences, .substringNotRequired]) { _, r, _, _ in
-            for line in body[r].split(whereSeparator: \.isNewline) {
-                let t = line.trimmingCharacters(in: .whitespaces)
-                if !t.isEmpty { sentences.append(t) }
-            }
-        }
+        let sentences = Self.sentences(in: body)
         var windows: [(text: String, cues: Int, order: Int)] = []
         for (i, s) in sentences.enumerated() {
             let cues = injectionCues(s)
@@ -565,43 +534,28 @@ actor PromptInjectionClassifier {
             mask += [Int64](repeating: 0, count: pad)
         }
         let len = ids64.count
-        let shape: [NSNumber] = [1, len as NSNumber]
         let zeros = [Int64](repeating: 0, count: len)
 
         do {
-            func tensor(_ arr: [Int64]) throws -> ORTValue {
-                let data = NSMutableData(bytes: arr, length: arr.count * MemoryLayout<Int64>.size)
-                return try ORTValue(tensorData: data, elementType: .int64, shape: shape)
-            }
             // Build only the inputs this exported model declares —
             // DistilBERT drops token_type_ids, some exports rename ids.
-            var inputs: [String: ORTValue] = [:]
+            var inputs: [String: [Int64]] = [:]
             for name in loaded.inputNames {
                 switch name.lowercased() {
                 case "input_ids", "input.1", "ids":
-                    inputs[name] = try tensor(ids64)
+                    inputs[name] = ids64
                 case "attention_mask", "mask":
-                    inputs[name] = try tensor(mask)
+                    inputs[name] = mask
                 case "token_type_ids", "segment_ids":
-                    inputs[name] = try tensor(zeros)
+                    inputs[name] = zeros
                 default:
                     break
                 }
             }
             guard !inputs.isEmpty else { return nil }
 
-            let outputs = try loaded.session.run(
-                withInputs: inputs,
-                outputNames: Set(try loaded.session.outputNames()),
-                runOptions: nil)
-            guard let logitsValue = outputs.values.first else { return nil }
-            let data = try logitsValue.tensorData() as Data
-            let count = data.count / MemoryLayout<Float>.size
-            guard count > 0 else { return nil }
-            var logits = [Float](repeating: 0, count: count)
-            _ = logits.withUnsafeMutableBytes { dst in
-                data.copyBytes(to: dst)
-            }
+            let logits = try loaded.session.run(inputs, shape: [1, len])
+            guard !logits.isEmpty else { return nil }
             return Self.injectionProbability(
                 logits: logits, injectionIndex: loaded.injectionLabelIndex)
         } catch {

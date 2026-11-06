@@ -143,7 +143,7 @@ struct DetectorLoadingTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let c = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Mitm/PromptInjectionClassifier.swift"), encoding: .utf8)
         #expect(c.contains("try await ClassifierQueue.offPool { try await AutoTokenizer.from(modelFolder: dir) }"))
-        #expect(c.contains("let (env, session, inputNames) = try await ClassifierQueue.load(logLabel) {"))
+        #expect(c.contains("let session = try await ClassifierQueue.load(logLabel) { try InjectionRuntime.session(modelPath: path) }"))
         let p = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Mitm/PIIDetector.swift"), encoding: .utf8)
         #expect(p.contains("let l = try await ClassifierQueue.load(\"pii\") { try Self.load(dir) }"))
     }
