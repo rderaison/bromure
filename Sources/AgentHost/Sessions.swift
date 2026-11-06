@@ -18,7 +18,7 @@ struct HostSession: Codable, Equatable {
     var lastSeenAt: Date?
     /// When the agent last finished a turn or asked (the window's hook
     /// stamp): what a client's session card counts from. `lastSeenAt` moves
-    /// on every roster pass while the window is there.
+    /// while the window is there, every 30 s (`restamp`).
     var activeAt: Date?
     var agentSeenAt: Date?
     var agentAlive: Bool?

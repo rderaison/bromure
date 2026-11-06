@@ -251,8 +251,8 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var launchingSince: Date?
     var launchBaselineIndex: Int?
     var endedAt: Date?
-    /// When a roster pass last found the session's tab — every pass while
-    /// the tab is there, idle or not: liveness, never activity.
+    /// When a roster pass last found the session's tab — every 30 s while
+    /// the tab is there (`seenStride`), idle or not: liveness, never activity.
     var lastSeenAt: Date?
     /// When the agent last finished a turn or stopped to ask (`noteReply`):
     /// what the card's "3m" and the stage's "Idle · 3 min" count from.
