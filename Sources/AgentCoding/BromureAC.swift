@@ -11082,7 +11082,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     private func purgeCheckpoints(_ p: Profile, _ files: [URL], window: NSWindow?) {
         let name = p.name
-        ProfileStore.purgeCheckpointsInBackground(files, of: p.id, name: name, why: "Delete All Checkpoints") { [weak self] result, _ in
+        let started = ProfileStore.purgeCheckpointsInBackground(files, of: p.id, name: name, why: "Delete All Checkpoints") { [weak self] result, _ in
             guard let self else { return }
             let done = NSAlert()
             done.messageText = result.failed.isEmpty
@@ -11094,6 +11094,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             done.addButton(withTitle: NSLocalizedString("OK", comment: ""))
             self.present(done, on: window) { _ in }
+        }
+        // A delete already under way (a home resize's): say so, don't vanish.
+        if !started {
+            let busy = NSAlert()
+            busy.messageText = String(format: NSLocalizedString("“%@” is already deleting checkpoints.", comment: "delete checkpoints"), name)
+            busy.informativeText = NSLocalizedString("Try again once it's done (the log says when).", comment: "delete checkpoints")
+            busy.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            present(busy, on: window) { _ in }
         }
     }
 
