@@ -4327,9 +4327,11 @@ public final class ProfileStore {
 
     /// The tiered "go back in time" ladder: which of `dates` to KEEP.
     /// The newest `boots` stay unconditionally (the last few sessions), then
-    /// the newest checkpoint of each calendar day for `days` days, then the
-    /// newest of each calendar week for `weeks` weeks; everything older is
-    /// pruned.
+    /// the newest checkpoint of each of today and the `days` calendar days
+    /// before it, then the newest of each of this and the `weeks` calendar
+    /// weeks before it; everything older is pruned. The cut-offs are midnight
+    /// and the week's start: a day's checkpoint isn't dropped because it was
+    /// taken earlier in that day than it is now.
     ///
     /// By default: the last session, and the newest of each calendar day back
     /// to the day before yesterday, so at most 3 an image (automatic ones are one a day). It kept
@@ -4349,7 +4351,10 @@ public final class ProfileStore {
                 if seen.insert(day).inserted { keep.insert(d) }
             }
         }
-        if weeks > 0, let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: now) {
+        // Whole weeks, as the days are whole days: from the start of the week
+        // `weeks` back, not this moment's weekday and time `weeks` back.
+        if weeks > 0, let thisWeek = calendar.dateInterval(of: .weekOfYear, for: now)?.start,
+           let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: thisWeek) {
             var seen = Set<DateComponents>()
             for d in sorted where d >= weekCut {
                 let week = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: d)
