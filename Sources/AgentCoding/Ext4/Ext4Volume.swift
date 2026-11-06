@@ -446,9 +446,8 @@ final class Ext4Volume {
     }
 
     /// A whole file written to `handle` (the browser's Extract): only the
-    /// blocks it has, each at its offset, its block map a window at a time
-    /// (`dirWindowBlocks`); its holes are left as holes, and the size set at
-    /// the end. Never held in memory, and a sparse file stays sparse, whatever
+    /// blocks its map has, each at its offset; its holes are left as holes,
+    /// and the size set at the end. Never held in memory, and a sparse file stays sparse, whatever
     /// its logical size (which can pass the filesystem's). Returns its size.
     func writeData(_ inode: Ext4Inode, to handle: FileHandle) throws -> UInt64 {
         if inode.isInline {
