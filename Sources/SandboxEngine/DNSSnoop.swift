@@ -90,7 +90,7 @@ enum DNSSnoop {
 /// Thread-safe IPv4 → hostnames cache with per-entry TTL. Its own lock so the
 /// snoop path (uplink→VM frames) and the verdict path (VM→uplink frames) — on
 /// different threads — don't contend the switch's forwarding lock.
-final class DNSSnoopCache: @unchecked Sendable {
+public final class DNSSnoopCache: @unchecked Sendable {
     /// `queriedAt`: the last time this name was the QUESTION of an answer
     /// (the guest asked for it). An answer also refreshes its CNAME targets'
     /// `seen`, but not their `queriedAt` — so a CDN name the guest once
@@ -105,9 +105,11 @@ final class DNSSnoopCache: @unchecked Sendable {
     private let minTTL: TimeInterval = 60
     private let maxTTL: TimeInterval = 3600
 
+    public init() {}
+
     /// `query`: the name was the one the guest asked for (not a CNAME target).
     /// A name once seen as a query stays one.
-    func record(ip: UInt32, name: String, ttl: UInt32, query: Bool = true, now: Date = Date()) {
+    public func record(ip: UInt32, name: String, ttl: UInt32, query: Bool = true, now: Date = Date()) {
         let life = min(max(TimeInterval(ttl), minTTL), maxTTL)
         let expiry = now.addingTimeInterval(life)
         lock.lock(); defer { lock.unlock() }
@@ -127,7 +129,7 @@ final class DNSSnoopCache: @unchecked Sendable {
     /// guest queried (most recent first — on a shared CDN address that's the
     /// site just looked up), then CNAME targets. Callers present `first` as
     /// "the host"; rules still match against all of them.
-    func names(for ip: UInt32, now: Date = Date()) -> [String] {
+    public func names(for ip: UInt32, now: Date = Date()) -> [String] {
         lock.lock(); defer { lock.unlock() }
         guard let e = map[ip], e.expiry > now else { return [] }
         return e.names.sorted { a, b in
