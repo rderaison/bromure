@@ -94,8 +94,13 @@ struct StateDeltaTests {
         let fc = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
         #expect(fc.contains(#"openStream("GET", "/state/subscribe", body: [:], headers: ["X-Bromure-State-Delta": "1"])"#))
         let srv = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/AutomationServer.swift"), encoding: .utf8)
-        #expect(srv.contains(#"headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil"#))
-        #expect(srv.contains("handleStateSubscribe(fd: fd, delta: true)"))
+        #expect(srv.contains(#"let stateDelta = headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil"#))
+        // Negotiated inside the owner-only route, never dispatched before it.
+        #expect(srv.contains("""
+                    guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+                    handleStateSubscribe(fd: fd, delta: stateDelta)
+        """))
+        #expect(srv.components(separatedBy: "handleStateSubscribe(fd: fd").count - 1 == 1)
         #expect(srv.contains("if delta, let frames = feedDeltas(after: seen) {"))
     }
 }
@@ -184,5 +189,78 @@ struct StateFeedLiveTests {
         #expect(!w.isEmpty && w.allSatisfy { !$0.delta })
         let last = Self.decode(try #require(w.last))
         #expect(((last["vms"] as? [[String: Any]])?.first?["cpu"] as? Double) == 77)
+    }
+}
+
+/// The loopback TCP listener is reachable by any local process: the state feed,
+/// delta or not, is only for the owner-only Unix socket. A delta request was
+/// dispatched before the route's guard and got the whole state, then deltas
+/// (CWE-862).
+@Suite("The state feed refuses the TCP listener, delta or not")
+struct StateFeedTCPGuardTests {
+    private static func request(port: UInt16, _ path: String, headers: String) throws -> String {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET); addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        guard ok == 0 else { throw POSIXError(.ECONNREFUSED) }
+        let req = "GET \(path) HTTP/1.1\r\nHost: localhost\r\n\(headers)Content-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = req.withCString { write(fd, $0, strlen($0)) }
+        var tv = timeval(tv_sec: 0, tv_usec: 200_000)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var raw = [UInt8](), chunk = [UInt8](repeating: 0, count: 1 << 16)
+        let end = Date().addingTimeInterval(5)
+        while Date() < end {
+            let n = chunk.withUnsafeMutableBufferPointer { read(fd, $0.baseAddress!, $0.count) }
+            if n > 0 { raw += chunk[0..<n] } else if n == 0 { break }
+            if raw.count > 12, String(decoding: raw, as: UTF8.self).contains("\r\n\r\n") { break }
+        }
+        return String(decoding: raw, as: UTF8.self)
+    }
+
+    @Test("GET /state/subscribe over TCP is 403, with or without X-Bromure-State-Delta")
+    func refused() async throws {
+        var lastError: Error?
+        for _ in 0..<5 {
+            let port = UInt16.random(in: 40_000...60_000)
+            let server = ACAutomationServer(port: port)
+            server.onListVMs = { [["id": "vm-secret", "cpu": 1.0]] }
+            server.start()
+            defer { server.stop() }
+            try await Task.sleep(for: .milliseconds(200))
+            do {
+                let delta = try Self.request(port: port, "/state/subscribe", headers: "X-Bromure-State-Delta: 1\r\n")
+                let whole = try Self.request(port: port, "/state/subscribe", headers: "")
+                let lower = try Self.request(port: port, "/state/subscribe", headers: "x-bromure-state-delta: 1\r\n")
+                for r in [delta, whole, lower] {
+                    #expect(r.hasPrefix("HTTP/1.1 403"), "\(r.prefix(80))")
+                    #expect(!r.contains("vm-secret"))
+                }
+                return
+            } catch { lastError = error }   // port taken: try another
+        }
+        throw try #require(lastError)
+    }
+
+    @Test("a TCP request stamped as a fat client's poll doesn't count as one")
+    func noFatClientClaim() async throws {
+        let port = UInt16.random(in: 40_000...60_000)
+        let server = ACAutomationServer(port: port)
+        server.start()
+        defer { server.stop() }
+        try await Task.sleep(for: .milliseconds(200))
+        // Another suite records a contact of its own now and then: one clean
+        // pass is enough, and the bug fails every one.
+        var claimed = true
+        for _ in 0..<3 where claimed {
+            PendingPromptBroker.resetFatClientContact()
+            let r = try Self.request(port: port, "/state", headers: "X-Bromure-Console-Idle-Ms: 0\r\n")
+            #expect(r.hasPrefix("HTTP/1.1 403"))
+            claimed = PendingPromptBroker.hasLiveListener()
+        }
+        PendingPromptBroker.resetFatClientContact()
+        #expect(!claimed)
     }
 }
