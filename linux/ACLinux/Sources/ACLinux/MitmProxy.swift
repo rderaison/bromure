@@ -23,7 +23,7 @@ import X509
 /// Each request is traced as macOS traces it (TraceEmitter, at the
 /// workspace's trace level). Guardrails, PII, supply-chain and the egress
 /// firewall are macOS's alone for now.
-// partial: no guardrails, PII, supply-chain, prompt-injection or egress policy on Linux yet
+// partial: no PII, supply-chain or strict-credentials policy on Linux yet; prompt injection logs only
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -43,6 +43,13 @@ final class MitmProxy: @unchecked Sendable {
     /// Each workspace's prompt-injection policy (macOS: MitmEngine's
     /// promptInjectionPolicies), read when a traced conversation is parsed.
     private let promptInjectionPolicies = NIOLockedValueBox<[UUID: PromptInjectionPolicy]>([:])
+    /// Each workspace's guardrails and egress policy (macOS: MitmEngine's
+    /// guardrailsConfigs), read per connection and per request
+    /// (MitmEgress.swift).
+    let guardrailsConfigs = NIOLockedValueBox<[UUID: GuardrailsConfig]>([:])
+    /// `.promptOnWrite` guardrails' consent (macOS: MitmEngine.guardrailsBroker):
+    /// asked of the connected client (ConsentPrompt).
+    let guardrailsBroker = GuardrailsConsentBroker()
     /// The workspaces' SSH agent (macOS: MitmEngine.sshAgent): their keys
     /// stay on the host; guests sign through vsock 8444.
     let sshAgent: SSHAgentServer
@@ -322,7 +329,7 @@ final class MitmProxy: @unchecked Sendable {
     /// the client certificate presented.
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
-                         on loop: EventLoop) -> EventLoopFuture<Channel> {
+                         pinned: [IPAddress]? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed = Self.route(host: host, port: port, tls: requestedTLS)
         if routed.local {
             guard let to = try? SocketAddress(ipAddress: routed.host, port: routed.port) else {
@@ -334,7 +341,13 @@ final class MitmProxy: @unchecked Sendable {
             ?? upstreamContext
         // Only to the addresses that passed the check, in order: the name is
         // never looked up again (a rebinding answer can't slip in between).
-        return checkDestination(host: host, port: port, on: loop).flatMap { [self] resolved in
+        // One destination check per connection, the workspace's (its OpenShell
+        // route's address authorization too): a CONNECT's, made before the
+        // tunnel was confirmed, or made here (plain HTTP, transparent).
+        // Either way the dial uses exactly the addresses it passed.
+        let checked = pinned.map { loop.makeSucceededFuture($0) }
+            ?? checkDestination(host: host, port: port, profileID: profileID, on: loop)
+        return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
                 return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop)
             }
@@ -459,7 +472,12 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
     let proxy: MitmProxy
     let profileID: UUID
     private var buf = ByteBuffer()
-    private enum Phase { case preamble, request, checking, hello(host: String, port: Int), handedOff }
+    private enum Phase {
+        case preamble, request, checking, handedOff
+        /// The tunnel is confirmed; the destination's checked addresses are
+        /// the only ones the upstream may dial.
+        case hello(host: String, port: Int, addresses: [MitmProxy.IPAddress])
+    }
     private var phase = Phase.preamble
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -502,10 +520,21 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 if parts[0] == "CONNECT" {
                     let (host, port) = Self.split(String(parts[1]), defaultPort: 443)
                     buf.moveReaderIndex(forwardBy: end.upperBound - buf.readerIndex)
+                    // Connection-layer egress verdict for the cooperative-proxy
+                    // path (macOS: HTTPMitmConnection.run): a deny is the
+                    // CONNECT's 403.
+                    let policy = proxy.guardrailsConfig(for: profileID)?.egressPolicy
+                    let verdict = ProxyPolicy.egressVerdict(policy: policy, profileID: profileID,
+                                                            host: host, port: port, identity: nil)
+                    if verdict == .deny {
+                        return answer(context, ProxyPolicy.connectDenied(policy: policy, profileID: profileID,
+                                                                         host: host, port: port))
+                    }
                     // The destination is checked before the tunnel is
                     // confirmed (a refusal is the CONNECT's 403).
                     phase = .checking
-                    proxy.checkDestination(host: host, port: port, on: context.eventLoop).whenComplete { [self] r in
+                    proxy.checkDestination(host: host, port: port, profileID: profileID,
+                                           on: context.eventLoop).whenComplete { [self] r in
                         switch r {
                         case .failure(let e as ProxyDestinationDenied):
                             phase = .handedOff
@@ -517,10 +546,27 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                                 FileHandle.standardError.write(Data("[mitm] CONNECT \(host):\(port) not checked: \(e)\n".utf8))
                             }
                             reject(context, 502, "Bad Gateway")
-                        case .success:
-                            phase = .hello(host: host, port: port)
+                        case .success(let addresses):
+                            ProxyPolicy.reportAllowed(policy: proxy.guardrailsConfig(for: profileID)?.egressPolicy,
+                                                      profileID: profileID, host: host, port: port)
+                            guard proxy.trackForFirewall(context.channel, profileID: profileID,
+                                                         host: host, port: port, route: "proxy") else {
+                                phase = .handedOff
+                                context.close(promise: nil)
+                                return
+                            }
                             context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
                                 string: "HTTP/1.1 200 Connection Established\r\n\r\n")), promise: nil)
+                            // An OpenShell `tls: skip` endpoint is relayed raw, never terminated.
+                            if verdict == .splice {
+                                phase = .handedOff
+                                let rest = buf
+                                buf.clear()
+                                proxy.splice(context.channel, to: addresses, port: port, pending: rest)
+                                context.pipeline.removeHandler(self, promise: nil)
+                                return
+                            }
+                            phase = .hello(host: host, port: port, addresses: addresses)
                             step(context)
                         }
                     }
@@ -529,19 +575,37 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 // A plain-HTTP request through the proxy: absolute form.
                 guard let url = URL(string: String(parts[1])), url.scheme?.lowercased() == "http",
                       let host = url.host else { return reject(context, 405, "Method Not Allowed") }
+                let port = url.port ?? 80
+                let policy = proxy.guardrailsConfig(for: profileID)?.egressPolicy
+                if host.lowercased() != OpenShellAdvisor.host,
+                   ProxyPolicy.egressVerdict(policy: policy, profileID: profileID, host: host, port: port,
+                                             identity: nil) == .deny {
+                    return answer(context, ProxyPolicy.connectDenied(policy: policy, profileID: profileID,
+                                                                     host: host, port: port))
+                }
+                ProxyPolicy.reportAllowed(policy: policy, profileID: profileID, host: host, port: port)
+                guard proxy.trackForFirewall(context.channel, profileID: profileID,
+                                             host: host, port: port, route: "proxy") else {
+                    phase = .handedOff
+                    context.close(promise: nil)
+                    return
+                }
                 handOff(context, RequestReader(proxy: proxy, profileID: profileID, host: host,
-                                               port: url.port ?? 80, tls: false), tlsHost: nil)
+                                               port: port, tls: false), tlsHost: nil)
                 return
-            case .hello(let host, let port):
+            case .hello(let host, let port, let addresses):
                 switch ClientHelloInfo.parse(buf) {
                 case .needMore: return
                 case .notTLS: return reject(context, 400, "Bad Request")
-                case .hello(let hello):
-                    // The leaf names what the client will verify (its SNI); the
-                    // upstream is that name too, at the CONNECT port.
-                    let name = hello.serverName ?? host
-                    handOff(context, RequestReader(proxy: proxy, profileID: profileID, host: name,
-                                                   port: port, tls: true), tlsHost: name)
+                case .hello:
+                    // The tunnel is the CONNECT host's (macOS: driveTLS for
+                    // the CONNECT target): every check above was made for it,
+                    // so it is what the leaf names and the upstream dials —
+                    // only the addresses checked for it. The ClientHello's SNI
+                    // routes nothing: a client that names another host fails
+                    // its own certificate check against this leaf.
+                    handOff(context, RequestReader(proxy: proxy, profileID: profileID, host: host,
+                                                   port: port, tls: true, pinned: addresses), tlsHost: host)
                     return
                 }
             case .checking, .handedOff:
@@ -570,6 +634,13 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
         buf.clear()
         if rest.readableBytes > 0 { context.fireChannelRead(NIOAny(rest)) }
         context.pipeline.removeHandler(self, promise: nil)
+    }
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    private func answer(_ context: ChannelHandlerContext, _ response: String) {
+        phase = .handedOff
+        context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(string: response)))
+            .whenComplete { _ in context.close(promise: nil) }
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -604,6 +675,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     let host: String
     let port: Int
     let tls: Bool
+    /// The addresses this connection's destination check passed (a
+    /// CONNECT's): the upstream dials only these, never re-resolving.
+    let pinned: [MitmProxy.IPAddress]?
     private var buf = ByteBuffer()
     private var started = false
     /// After the request went upstream: the guest's further bytes (a
@@ -612,12 +686,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     private var pending: [ByteBuffer] = []
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
-    init(proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool) {
+    init(proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
+         pinned: [MitmProxy.IPAddress]? = nil) {
         self.proxy = proxy
         self.profileID = profileID
         self.host = host
         self.port = port
         self.tls = tls
+        self.pinned = pinned
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -688,6 +764,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
                         trace: inout Trace?) async -> Plan {
         var req = origin(raw)
+        if let answer = await policyAnswer(&req, proxy: proxy, profileID: profileID, host: host, port: port, tls: tls) {
+            return .answer(answer)
+        }
         let head = SubscriptionAuthRewrite.rawHeaderSection(of: req) ?? ""
         let line = head.prefix { $0 != "\r" && $0 != "\n" }.split(separator: " ")
         let method = line.first.map(String.init) ?? ""
@@ -793,7 +872,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
         case .forward(let req, let injected, let capture, let upgrade, let mint):
-            proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, on: channel.eventLoop).whenComplete { r in
+            proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, pinned: pinned,
+                                  on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
                     let reply = (e as? ProxyDestinationDenied).map {

@@ -103,13 +103,14 @@ extension LinuxSessionHost: ProfileEditHost {
     }
 
     /// A save's live part (no sidebar or launch agent on a server): the
-    /// prompt-injection policy, as macOS applies it to a running workspace.
-    // partial: the prompt-injection policy only (macOS: the egress, supply-chain, PII and credential restage too)
+    /// guardrails, egress and prompt-injection policies, as macOS applies
+    /// them to a running workspace.
+    // partial: no supply-chain, PII or credential restage (macOS does those too)
     // @port-skip linux-only: no app surfaces to refresh on a server
     func profilesDidChange(saved: Profile?, editing: Profile?) {
         // A running workspace's only: a stopped one's comes with its launch
         // (and a stop clears it).
         guard let saved, LinuxSessionHost.running.withLockedValue({ $0.contains(saved.id) }) else { return }
-        daemon?.mitm?.setPromptInjectionPolicy(saved.promptInjection, for: saved.id)
+        daemon?.mitm?.applyWorkspacePolicies(saved)
     }
 }

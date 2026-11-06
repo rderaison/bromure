@@ -509,7 +509,7 @@ public actor Daemon {
         _ = await kubeconfig(for: profile, plan: sessionTokenPlan(for: profile))
         pushAWSCredentials(for: profile, meta: meta)
         mitm.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: profileStore), for: profile.id)
-        mitm.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
+        mitm.applyWorkspacePolicies(profile)
     }
 
     /// Why a VM may not launch with `plan`: a workspace's needs one (no proxy
@@ -915,7 +915,7 @@ public actor Daemon {
         mitm?.sshAgent.clearKeys(for: pid)
         mitm?.awsCreds.clearCredentials(for: pid)
         AWSSSORefusals.set(false, for: pid)
-        mitm?.clearPromptInjectionPolicy(for: pid)
+        mitm?.clearWorkspacePolicies(pid)
         if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
         InferenceRepairProxy.shared.setExternalEngine(pid, nil)
     }
@@ -1001,7 +1001,7 @@ public actor Daemon {
                 // The workspace's SSH key, signing for the guest through the
                 // host's agent (macOS: launch's sshAgent.setKeys).
                 mitm?.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: store), for: profile.id)
-                mitm?.setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
+                mitm?.applyWorkspacePolicies(profile)
             }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
@@ -1084,7 +1084,7 @@ public actor Daemon {
         if rec.registration != true, rec.kube == nil, let pid = UUID(uuidString: id), let mitm {
             await MainActor.run {
                 if let now = ProfileStore().loadAll().first(where: { $0.id == pid }) {
-                    mitm.setPromptInjectionPolicy(now.promptInjection, for: pid)
+                    mitm.applyWorkspacePolicies(now)
                 }
             }
         }

@@ -34,14 +34,36 @@ extension MitmProxy {
     /// addresses to dial, or ProxyDestinationDenied, or
     /// ProxyDestinationUnresolved (no answer: never dialed by name). The
     /// sentinel is the one name not looked up (MitmProxy.route remaps it).
-    // partial: no OpenShell policy on Linux yet, so only the always-blocked addresses (and the host's own, multi-user)
+    /// Under the workspace's OpenShell policy every answer is also validated
+    /// against its route's address authorization (macOS: UpstreamPinning.pin),
+    /// so a private or rebinding answer can't redirect a request the policy
+    /// allowed by name. A refusal is a Security Timeline event, as on macOS.
     // @port HTTPMitmConnection.checkDestination(host: String, port: Int) h=dd146338138184b2 @32a528c5
-    func checkDestination(host: String, port: Int, on loop: EventLoop) -> EventLoopFuture<[IPAddress]> {
-        Self.checkDestination(host: host, port: port, hostAddresses: blocksHostAddresses, on: loop)
+    func checkDestination(host: String, port: Int, profileID: UUID? = nil,
+                          identity: OpenShellPolicy.BinaryIdentity? = nil,
+                          on loop: EventLoop) -> EventLoopFuture<[IPAddress]> {
+        let egress = profileID.flatMap { guardrailsConfig(for: $0)?.egressPolicy }
+        let future = Self.checkDestination(host: host, port: port, hostAddresses: blocksHostAddresses,
+                                           openShell: egress?.openShell, identity: identity,
+                                           enforceBinaries: egress?.enforceBinaries ?? false, on: loop)
+        guard let profileID else { return future }
+        return future.flatMapErrorThrowing { e in
+            if let d = e as? ProxyDestinationDenied {
+                SupplyChainLog.shared.record(
+                    "[firewall] ✗ deny tcp \(host):\(port) — \(d.reason) (\(profileID.uuidString.prefix(8)))")
+                BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                    "action": .string("deny"), "layer": .string("l4"), "proto": .string("tcp"),
+                    "host": .string(host), "port": .int(port), "reason": .string(d.reason),
+                ])
+            }
+            throw e
+        }
     }
 
     // @port-skip linux-only: the static half of checkDestination (tests stub the resolver and the host's addresses)
     static func checkDestination(host: String, port: Int, hostAddresses: Bool,
+                                 openShell: OpenShellPolicy? = nil,
+                                 identity: OpenShellPolicy.BinaryIdentity? = nil, enforceBinaries: Bool = false,
                                  resolver: @escaping @Sendable (String, Int) -> [IPAddress] = { resolve($0, port: $1) },
                                  hostOwn: @escaping @Sendable (IPAddress) -> Bool = { isHostOwn($0) },
                                  on loop: EventLoop) -> EventLoopFuture<[IPAddress]> {
@@ -53,7 +75,9 @@ extension MitmProxy {
                 FileHandle.standardError.write(Data("[mitm] ✗ deny tcp \(host):\(port) — no address\n".utf8))
                 promise.fail(ProxyDestinationUnresolved(host: host, port: port))
             } else if let reason = Self.destinationDenial(host: host, resolved: resolved, hostAddresses: hostAddresses,
-                                                          hostOwn: hostOwn) {
+                                                          hostOwn: hostOwn)
+                        ?? Self.openShellDenial(openShell, host: host, port: port, resolved: resolved,
+                                                identity: identity, enforceBinaries: enforceBinaries) {
                 FileHandle.standardError.write(Data("[mitm] ✗ deny tcp \(host):\(port) — \(reason)\n".utf8))
                 promise.fail(ProxyDestinationDenied(host: host, port: port, reason: reason))
             } else {
@@ -61,6 +85,25 @@ extension MitmProxy {
             }
         }
         return promise.futureResult
+    }
+
+    /// Why OpenShell's address authorization refuses `resolved` for
+    /// `host:port`; nil: allowed, or no policy. A Bromure-managed provider
+    /// endpoint isn't pinned (UpstreamPinning.pin), but still gets the
+    /// always-blocked check every destination gets here.
+    // @port-skip linux-only: UpstreamPinning.pin's policy half, on the answers checkDestination resolved
+    static func openShellDenial(_ policy: OpenShellPolicy?, host: String, port: Int, resolved: [IPAddress],
+                                identity: OpenShellPolicy.BinaryIdentity?, enforceBinaries: Bool) -> String? {
+        guard let policy else { return nil }
+        let p = UInt16(truncatingIfNeeded: port)
+        if policy.networkPolicies.contains(where: { $0.endpoints.contains { $0.managed && $0.matches(host: host.lowercased(), port: p) } }) {
+            return nil
+        }
+        switch policy.destinationPlan(host: host, port: p, identity: identity, enforceBinaries: enforceBinaries)
+            .flatMap({ OpenShellPolicy.validateDestination($0, host: host, port: p, resolved: resolved) }) {
+        case .success: return nil
+        case .failure(let d): return d.reason
+        }
     }
 
     /// Why `resolved` (the answers for `host`) may not be dialed; nil: it may.
@@ -139,13 +182,8 @@ extension MitmProxy {
 
     /// The CONNECT's (or request's) 403 for a refused destination, as macOS
     /// answers one.
-    // @port HTTPMitmConnection.destinationDeniedResponse(host: String, port: Int, reason: String) h=870f78d6e53d2fc5 @32a528c5
+    // @port HTTPMitmConnection.destinationDeniedResponse(host: String, port: Int, reason: String) h=7a8983d9fb65d598 @d721d562
     static func destinationDeniedResponse(host: String, port: Int, reason: String) -> Data {
-        func json(_ s: String) -> String {
-            let array = String(decoding: (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8), as: UTF8.self)
-            return String(array.dropFirst().dropLast())
-        }
-        let body = "{\"error\":\"destination_denied\",\"detail\":\(json(reason)),\"host\":\(json(host)),\"port\":\(port)}"
-        return Data("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)".utf8)
+        Data(ProxyPolicy.destinationDenied(host: host, port: port, reason: reason).utf8)
     }
 }
