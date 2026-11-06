@@ -215,6 +215,14 @@ public final class SessionDisk {
         defer { try? handle.close() }
         try handle.truncate(atOffset: target)
         ProfileStore.homeImageChanged(profile.id)
+        // The checkpoints of the smaller home go (the save that set the size
+        // started that; this catches a grow from the app-wide default, or one
+        // the save's delete hadn't finished). Off the main thread.
+        let stale = ProfileStore.checkpointFiles(in: [store.homeCheckpointsDirectory(for: profile)])
+        if !stale.isEmpty {
+            ProfileStore.purgeCheckpointsInBackground(stale, of: profile.id, name: profile.name,
+                                                      why: "home grown to \(gib(target))")
+        }
         let now = ((try? fm.attributesOfItem(atPath: homeImageURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
         return "home image grown \(gib(size)) → \(gib(now)) (target \(gib(target)))"
     }

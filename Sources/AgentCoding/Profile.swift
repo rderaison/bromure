@@ -1,4 +1,5 @@
 import Foundation
+import os
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -4019,6 +4020,7 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
+        purgeHomeCheckpointsIfGrowing(profile)
         return profile
     }
 
@@ -4429,13 +4431,58 @@ public final class ProfileStore {
                 if stem.hasSuffix("." + CheckpointReaper.retiredExtension) {
                     stem = String(stem.dropLast(CheckpointReaper.retiredExtension.count + 1))
                 }
-                guard stem.hasSuffix(".img"), Int(stem.dropLast(4)) != nil else { return nil }
+                let ts = stem.dropLast(4)
+                guard stem.hasSuffix(".img"), !ts.isEmpty, ts.allSatisfy(\.isASCII), ts.allSatisfy(\.isNumber) else { return nil }
                 let url = dir.appendingPathComponent(name, isDirectory: false)
                 var st = stat()
                 guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
                 return url
             }
         }.sorted { $0.path < $1.path }
+    }
+
+    /// Workspaces whose checkpoints are being deleted: no revert reads one
+    /// meanwhile (`revertImage` refuses), and no second delete starts. Shared by
+    /// "Delete All Checkpoints" and the delete a home resize starts.
+    private static let purging = OSAllocatedUnfairLock(initialState: Set<UUID>())
+    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0.contains(id) } }
+
+    /// Delete `files` (a workspace's checkpoints) off the main thread, one unlink
+    /// each, logging each one's time. False if a delete for `id` already runs.
+    /// `done` runs on the main thread.
+    @discardableResult
+    static func purgeCheckpointsInBackground(_ files: [URL], of id: UUID, name: String, why: String,
+                                             done: @escaping @MainActor ((deleted: Int, failed: [URL]), TimeInterval) -> Void = { _, _ in })
+        -> Bool {
+        guard purging.withLock({ $0.insert(id).inserted }) else { return false }
+        AppLog.stamp("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
+        DispatchQueue.global(qos: .utility).async {
+            let t0 = Date()
+            let result = unlinkOneByOne(files) { i, url, took in
+                AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
+            }
+            let total = Date().timeIntervalSince(t0)
+            purging.withLock { _ = $0.remove(id) }
+            AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(result, total) } }
+        }
+        return true
+    }
+
+    /// A save that grows the home past its image: its checkpoints go first.
+    /// One from before a grow is the old, smaller home -- rewinding to it undoes
+    /// the resize -- and on a server whose 128 GB home had grown over time, its
+    /// full set of checkpoints is what stalled APFS. The grow itself waits for
+    /// the next cold boot.
+    func purgeHomeCheckpointsIfGrowing(_ profile: Profile) {
+        guard let gb = profile.homeImageGB else { return }
+        let target = UInt64(min(1024, max(8, gb))) << 30
+        guard let size = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber,
+              size.uint64Value < target else { return }
+        let files = Self.checkpointFiles(in: [homeCheckpointsDirectory(for: profile)])
+        guard !files.isEmpty else { return }
+        Self.purgeCheckpointsInBackground(files, of: profile.id, name: profile.name,
+                                          why: "home growing to \(gb) GB")
     }
 
     /// Unlink each file at once, one after another: the opposite of the reaper's
@@ -4451,7 +4498,9 @@ public final class ProfileStore {
         var failed: [URL] = []
         for (i, url) in urls.enumerated() {
             let t0 = Date()
-            if unlink(url.path) == 0 || errno == ENOENT { deleted += 1 } else { failed.append(url) }
+            let rc = unlink(url.path)
+            let err = errno
+            if rc == 0 || err == ENOENT { deleted += 1 } else { failed.append(url) }   // ENOENT: the reaper got it
             progress(i, url, Date().timeIntervalSince(t0))
         }
         return (deleted, failed)
@@ -4490,6 +4539,12 @@ public final class ProfileStore {
 
     private func revertImage(fromCheckpoint checkpointID: String, in dir: URL,
                              over image: URL, profile: Profile) throws {
+        // Checked last, right before the live image goes: a modal before this
+        // may have run the run loop, and a delete started from it.
+        guard !Self.isPurgingCheckpoints(profile.id) else {
+            throw NSError(domain: "BromureAC.checkpoint", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Its checkpoints are being deleted."])
+        }
         let src = dir.appendingPathComponent("\(checkpointID).img")
         guard fm.fileExists(atPath: src.path) else {
             throw NSError(domain: "BromureAC.checkpoint", code: 1,

@@ -7382,7 +7382,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if diskInUse(profile.id) {
             return ["error": "Stop the workspace first (`vm kill \(profile.name)`), then revert."]
         }
-        if checkpointPurges.contains(profile.id) {
+        if ProfileStore.isPurgingCheckpoints(profile.id) {
             return ["error": "Its checkpoints are being deleted."]
         }
         do {
@@ -11035,10 +11035,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         alert.runModal()
     }
 
-    /// Workspaces whose checkpoints are being deleted (`deleteAllCheckpoints`):
-    /// no rewind reads one meanwhile, and no second delete starts.
-    private var checkpointPurges = Set<Profile.ID>()
-
     /// ⌥ on the machine menu: "Delete All Checkpoints…". Every checkpoint of
     /// the workspace, disk and home, kept or already retired, is unlinked
     /// whole, one after another, off the main thread: what cleared a server
@@ -11046,13 +11042,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// disk for a while on a large, long-used image, so the alert says so.
     @MainActor
     func deleteAllCheckpoints(_ id: Profile.ID, from window: NSWindow?) {
-        guard let p = profile(for: id), !checkpointPurges.contains(id) else { return }
+        guard let p = profile(for: id), !ProfileStore.isPurgingCheckpoints(id) else { return }
         let files = store.allCheckpointFiles(for: p)
         let alert = NSAlert()
         guard !files.isEmpty else {
             alert.messageText = String(format: NSLocalizedString("“%@” has no checkpoints.", comment: "delete checkpoints"), p.name)
             alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+            present(alert, on: window) { _ in }
             return
         }
         alert.alertStyle = .warning
@@ -11068,35 +11064,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard r == .alertFirstButtonReturn else { return }
             self?.purgeCheckpoints(p, files, window: window)
         }
-        if let window { alert.beginSheetModal(for: window, completionHandler: go) } else { go(alert.runModal()) }
+        present(alert, on: window, go)
+    }
+
+    /// As a sheet when the window has none up (Rewind home, another alert),
+    /// else app-modal: a second sheet on one window throws.
+    @MainActor
+    private func present(_ alert: NSAlert, on window: NSWindow?,
+                         _ done: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
     }
 
     @MainActor
     private func purgeCheckpoints(_ p: Profile, _ files: [URL], window: NSWindow?) {
-        guard checkpointPurges.insert(p.id).inserted else { return }
         let name = p.name
-        AppLog.stamp("'\(name)': deleting \(files.count) checkpoints, one unlink each")
-        let t0 = Date()
-        Task.detached(priority: .utility) { [weak self] in
-            let result = ProfileStore.unlinkOneByOne(files) { i, url, took in
-                AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
+        ProfileStore.purgeCheckpointsInBackground(files, of: p.id, name: name, why: "Delete All Checkpoints") { [weak self] result, _ in
+            guard let self else { return }
+            let done = NSAlert()
+            done.messageText = result.failed.isEmpty
+                ? String(format: NSLocalizedString("Deleted %d checkpoints of “%@”.", comment: "delete checkpoints"), result.deleted, name)
+                : String(format: NSLocalizedString("Deleted %d checkpoints of “%@”; %d couldn't be deleted.", comment: "delete checkpoints"),
+                         result.deleted, name, result.failed.count)
+            if !result.failed.isEmpty {
+                done.informativeText = result.failed.map(\.path).joined(separator: "\n")
             }
-            let total = Date().timeIntervalSince(t0)
-            await MainActor.run {
-                guard let self else { return }
-                self.checkpointPurges.remove(p.id)
-                AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
-                let done = NSAlert()
-                done.messageText = result.failed.isEmpty
-                    ? String(format: NSLocalizedString("Deleted %d checkpoints of “%@”.", comment: "delete checkpoints"), result.deleted, name)
-                    : String(format: NSLocalizedString("Deleted %d checkpoints of “%@”; %d couldn't be deleted.", comment: "delete checkpoints"),
-                             result.deleted, name, result.failed.count)
-                if !result.failed.isEmpty {
-                    done.informativeText = result.failed.map(\.path).joined(separator: "\n")
-                }
-                done.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-                if let window, window.attachedSheet == nil { done.beginSheetModal(for: window) } else { done.runModal() }
-            }
+            done.addButton(withTitle: NSLocalizedString("OK", comment: ""))
+            self.present(done, on: window) { _ in }
         }
     }
 
@@ -11121,7 +11118,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard !diskInUse(p.id) else {
             return NSLocalizedString("Shut the machine down first — its home can't be swapped while it's in use.", comment: "rewind home")
         }
-        guard !checkpointPurges.contains(p.id) else {
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else {
             return NSLocalizedString("Its checkpoints are being deleted.", comment: "rewind home")
         }
         do {
@@ -11142,7 +11139,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let p = profiles.first(where: { $0.id == profile.id }) ?? profile
         guard p.homeModel == .ext4 else { return }
         guard !diskInUse(p.id) else { return }   // row is disabled while running
-        guard !checkpointPurges.contains(p.id) else { return }
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else { return }
         let checkpoints = store.listHomeCheckpoints(for: p)
         guard !checkpoints.isEmpty else {
             let alert = NSAlert()
@@ -11182,6 +11179,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let choice = checkpoints[popup.indexOfSelectedItem]
         // The modal ran the run loop: a boot may have started meanwhile.
         guard !diskInUse(p.id) else { showRunningRefusal(profile: p, what: "home folder"); return }
+        guard !ProfileStore.isPurgingCheckpoints(p.id) else { return }   // the modal ran the run loop too
 
         do {
             // Safety net first: the pre-restore home becomes a checkpoint.

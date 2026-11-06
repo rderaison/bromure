@@ -29,7 +29,7 @@ struct CheckpointPurgeTests {
         for n in ["1700000000.img", "1700000100.img.deleting"] { touch(cps.appendingPathComponent(n)) }
         touch(home.appendingPathComponent("1700000200.img"))
         // Not checkpoints: other names, a folder, a link to the live image.
-        for n in ["disk.img", "notes.txt", "1700000300.img.tmp", "abc.img"] { touch(cps.appendingPathComponent(n)) }
+        for n in ["disk.img", "notes.txt", "1700000300.img.tmp", "abc.img", "-1.img", ".img"] { touch(cps.appendingPathComponent(n)) }
         try FileManager.default.createDirectory(at: cps.appendingPathComponent("1700000400.img"), withIntermediateDirectories: false)
         let live = ws.appendingPathComponent("live-\(UUID().uuidString).img")
         touch(live)
@@ -64,12 +64,71 @@ struct CheckpointPurgeTests {
         #expect(w.contains("self?.acDelegate?.deleteAllCheckpoints(id, from: self)"))
         let ac = try source("Sources/AgentCoding/BromureAC.swift")
         let start = try #require(ac.range(of: "private func purgeCheckpoints("))
-        let body = ac[start.upperBound...].prefix(1200)
-        #expect(body.contains("Task.detached(priority: .utility)"))
-        #expect(body.contains("ProfileStore.unlinkOneByOne(files)"))
+        #expect(ac[start.upperBound...].prefix(400).contains("ProfileStore.purgeCheckpointsInBackground(files"))
         #expect(ac.contains("the app and the other machines may stall"))
-        // Every revert path refuses while a purge runs.
-        #expect(ac.components(separatedBy: "checkpointPurges.contains(p.id)").count - 1 >= 2)
-        #expect(ac.contains("if checkpointPurges.contains(profile.id) {"))
+        // Every revert path refuses while a delete runs, the store's own last.
+        #expect(ac.components(separatedBy: "ProfileStore.isPurgingCheckpoints(p.id)").count - 1 >= 3)
+        #expect(ac.contains("if ProfileStore.isPurgingCheckpoints(profile.id) {"))
+        #expect(ac.contains("guard !ProfileStore.isPurgingCheckpoints(p.id) else { return }   // the modal ran the run loop too"))
+        let store = try source("Sources/AgentCoding/Profile.swift")
+        let revert = try #require(store.range(of: "private func revertImage("))
+        let rb = store[revert.upperBound...].prefix(900)
+        let guardAt = try #require(rb.range(of: "guard !Self.isPurgingCheckpoints(profile.id)"))
+        let removeAt = try #require(rb.range(of: "try fm.removeItem(at: image)"))
+        #expect(guardAt.lowerBound < removeAt.lowerBound)
+        let bg = try #require(store.range(of: "static func purgeCheckpointsInBackground("))
+        #expect(store[bg.upperBound...].prefix(900).contains("DispatchQueue.global(qos: .utility).async"))
+        // No alert goes up as a second sheet: that throws.
+        let purge = try #require(ac.range(of: "func deleteAllCheckpoints("))
+        let purgeBody = ac[purge.upperBound...].prefix { _ in true }
+        let end = try #require(purgeBody.range(of: "private func present("))
+        #expect(!purgeBody[..<end.lowerBound].contains("beginSheetModal("))
+        #expect(ac.contains("if let window, window.attachedSheet == nil {\n            alert.beginSheetModal(for: window, completionHandler: done)"))
+    }
+
+    // MARK: A home resize
+
+    private func waitForPurge(_ id: UUID) async throws {
+        for _ in 0..<200 where ProfileStore.isPurgingCheckpoints(id) { try await Task.sleep(nanoseconds: 20_000_000) }
+        try await Task.sleep(nanoseconds: 50_000_000)   // `done` hops to main
+    }
+
+    @Test("a save that grows the home past its image deletes the home's checkpoints; one that doesn't keeps them")
+    @MainActor func resizeDeletes() async throws {
+        let (store, root) = HomeSizeAfterImageTests.tempStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var p = Profile(name: "grow", tool: .claude, authMode: .token)
+        p.homeModel = .ext4
+        p.homeImageGB = 16
+        try store.save(p)
+        try HomeSizeAfterImageTests.makeImage(store, p, gb: 16)
+        let home = store.homeCheckpointsDirectory(for: p)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let cps = ["1700000000.img", "1700000100.img.deleting"].map { home.appendingPathComponent($0) }
+        cps.forEach(touch)
+        let disk = store.checkpointsDirectory(for: p).appendingPathComponent("1700000200.img")
+        touch(disk)
+
+        try store.save(p)                       // same size: nothing goes
+        try await waitForPurge(p.id)
+        #expect(cps.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+
+        p.homeImageGB = 32
+        try store.save(p)                       // grows past the 16 GB image
+        try await waitForPurge(p.id)
+        #expect(cps.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(FileManager.default.fileExists(atPath: disk.path))   // the system disk's stay
+        #expect(FileManager.default.fileExists(atPath: store.homeImageURL(for: p).path))
+    }
+
+    @Test("the grow at boot deletes what's left of the smaller home's checkpoints")
+    func growBackstop() throws {
+        let d = try source("Sources/AgentCoding/SessionDisk.swift")
+        let g = try #require(d.range(of: "public func growHomeImageIfNeeded()"))
+        let body = d[g.upperBound...].prefix(2200)
+        let grow = try #require(body.range(of: "try handle.truncate(atOffset: target)"))
+        let purge = try #require(body.range(of: "ProfileStore.purgeCheckpointsInBackground(stale"))
+        #expect(grow.lowerBound < purge.lowerBound)
+        #expect(body.contains("store.homeCheckpointsDirectory(for: profile)"))
     }
 }
