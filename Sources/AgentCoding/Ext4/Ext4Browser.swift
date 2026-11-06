@@ -121,14 +121,43 @@ final class Ext4BrowserModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let node = try volume.inode(row.id)
-            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
-                throw Ext4Error.io("cannot create \(url.path)")
-            }
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            let written = try volume.writeData(node, to: handle)
+            let written = try Self.extract(node, from: volume, to: url)
             banner = "Extracted \(row.name) (\(written) bytes)"
         } catch { banner = "Extract failed: \(error)" }
+    }
+
+    /// The file written beside `url` first, then put in its place: an
+    /// extraction that fails (a corrupt inode, a read error, a full disk)
+    /// leaves whatever was at `url` as it was. It used to open `url` for
+    /// writing first: the file the user picked to replace was emptied, and
+    /// then the guest's was never written.
+    static func extract(_ node: Ext4Inode, from volume: Ext4Volume, to url: URL) throws -> UInt64 {
+        let fm = FileManager.default
+        let tmp = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).bromure-\(UUID().uuidString.prefix(8))", isDirectory: false)
+        // A new name only (never an existing file or a link planted there),
+        // and the owner's alone while the guest's bytes go in.
+        let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw Ext4Error.io("cannot create \(tmp.path): \(String(cString: strerror(errno)))") }
+        var placed = false
+        defer { if !placed { try? fm.removeItem(at: tmp) } }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        let written: UInt64
+        do {
+            written = try volume.writeData(node, to: handle)
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+        if fm.fileExists(atPath: url.path) {
+            _ = try fm.replaceItemAt(url, withItemAt: tmp)   // keeps the replaced file's permissions
+        } else {
+            try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tmp.path)
+            try fm.moveItem(at: tmp, to: url)
+        }
+        placed = true
+        return written
     }
 
     // MARK: editing

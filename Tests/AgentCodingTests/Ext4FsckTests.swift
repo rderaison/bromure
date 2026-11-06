@@ -400,6 +400,48 @@ struct Ext4FsckTests {
         }
     }
 
+    /// The finding (CWE-404): Extract opened the chosen destination for
+    /// writing before reading the guest's file, so one that failed to read
+    /// left the user's existing file emptied.
+    @Test("a failed Extract leaves the file it would have replaced as it was")
+    func extractKeepsDestination() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("extract-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dst = dir.appendingPathComponent("notes.txt")
+        try Data("precious".utf8).write(to: dst)
+        func names() throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() }
+
+        // A guest file that can't be read: it claims every byte there is.
+        var bad = Self.buildImage()
+        putLE32(&bad, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
+        putLE32(&bad, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)
+        try withImage(bad) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(throws: Ext4Error.self) { try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) }
+        }
+        #expect(try String(contentsOf: dst, encoding: .utf8) == "precious")
+        #expect(try names() == ["notes.txt"], "a temporary file was left behind")
+
+        // One that reads: it replaces the file, and lands where there's none.
+        try withImage(Self.buildImage()) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) == UInt64(Self.helloContent.count))
+            let fresh = dir.appendingPathComponent("hello.txt")
+            _ = try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: fresh)
+            #expect(try Data(contentsOf: fresh) == Data(Self.helloContent))
+            let mode = try FileManager.default.attributesOfItem(atPath: fresh.path)[.posixPermissions] as? Int
+            #expect(mode == 0o644)
+        }
+        #expect(try Data(contentsOf: dst) == Data(Self.helloContent))
+        #expect(try names() == ["hello.txt", "notes.txt"])
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Ext4/Ext4Browser.swift"), encoding: .utf8)
+        #expect(src.contains("let written = try Self.extract(node, from: volume, to: url)"))
+        #expect(!src.contains("FileManager.default.createFile(atPath: url.path"))
+    }
+
     @Test("the check survives a file claiming an enormous size")
     func fsckHugeFileSize() throws {
         // The boot remedy and the cluster disk repair run this on their own.
