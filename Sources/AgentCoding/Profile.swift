@@ -3571,6 +3571,14 @@ public final class MACBindings: @unchecked Sendable {
 }
 
 
+/// The checkpoint code's log line: the app's log on the Mac. The iOS app
+/// builds this file without it (and has no checkpoints to log).
+func checkpointLog(_ line: @autoclosure () -> String) {
+    #if os(macOS)
+    AppLog.stamp(line())
+    #endif
+}
+
 /// Deletes old checkpoints one at a time, at background priority, in small steps.
 ///
 /// No longer used for checkpoints the ladder drops: those are unlinked whole
@@ -4394,7 +4402,7 @@ public final class ProfileStore {
         let dir = homeCheckpointsDirectory(for: profile)
         if automatic, let size = (try? fm.attributesOfItem(atPath: image.path))?[.size] as? Int64,
            size > Self.automaticHomeCheckpointCap {
-            AppLog.stamp("'\(profile.name)': home is \(size >> 30) GB, over \(Self.automaticHomeCheckpointCap >> 30) GB: no automatic checkpoint")
+            checkpointLog("'\(profile.name)': home is \(size >> 30) GB, over \(Self.automaticHomeCheckpointCap >> 30) GB: no automatic checkpoint")
             return nil   // the ones it has still age out (`pruneCheckpoints`)
         }
         return try snapshotImage(image, of: profile, into: dir, at: date, automatic: automatic)
@@ -4404,7 +4412,7 @@ public final class ProfileStore {
                                at date: Date, automatic: Bool) throws -> DiskCheckpoint? {
         guard fm.fileExists(atPath: image.path) else { return nil }
         guard !Self.isPurgingCheckpoints(profile.id) else {
-            AppLog.stamp("'\(profile.name)': its checkpoints are being deleted: no new one of \(image.lastPathComponent)")
+            checkpointLog("'\(profile.name)': its checkpoints are being deleted: no new one of \(image.lastPathComponent)")
             return nil
         }
         if automatic, let newest = list(in: dir).first,
@@ -4450,7 +4458,7 @@ public final class ProfileStore {
         Self.afterCheckpointPurge(profile.id) { [self] in
             // Another delete started meanwhile: wait for that one too.
             if Self.isPurgingCheckpoints(profile.id) {
-                AppLog.stamp("'\(profile.name)': session-start checkpoints wait for a checkpoint delete to end")
+                checkpointLog("'\(profile.name)': session-start checkpoints wait for a checkpoint delete to end")
                 takeSessionStartCheckpoints(for: profile, done: done)
                 return
             }
@@ -4559,16 +4567,16 @@ public final class ProfileStore {
             s[id] = []
             return true
         }) else { return false }
-        AppLog.stamp("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
+        checkpointLog("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
         purgeQueue.async {
             let t0 = Date()
             let result = unlinkOneByOne(files) { i, url, took in
-                AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
+                checkpointLog("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
             }
             let total = Date().timeIntervalSince(t0)
             let waiting = purging.withLock { $0.removeValue(forKey: id) ?? [] }
             for work in waiting { DispatchQueue.global(qos: .utility).async(execute: work) }
-            AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
+            checkpointLog("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
             DispatchQueue.main.async { MainActor.assumeIsolated { done(result, total) } }
         }
         return true
