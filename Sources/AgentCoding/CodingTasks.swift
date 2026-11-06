@@ -1233,18 +1233,21 @@ enum AgentSessionLocator {
     /// real omp session. The transcript is the newest `*.jsonl` directly
     /// inside the dir; the logical and readlink-resolved paths are both tried
     /// (a worktree cwd may be a symlink).
+    /// POSIX sh setting `$v` to omp's session-dir name for the path in `$src`
+    /// (the scoped rules above). Inlined, not a shell function: fragments
+    /// concatenate with other agents' probes.
+    nonisolated static func ompDirName(_ src: String, into v: String) -> String {
+        "if [ \"$\(src)\" = \"$HOME\" ]; then \(v)=-; "
+        + "elif [ \"${\(src)#$HOME/}\" != \"$\(src)\" ]; then "
+        + "\(v)=\"-$(printf %s \"${\(src)#$HOME/}\" | tr /: -)\"; "
+        + "elif [ \"$\(src)\" = /tmp ]; then \(v)=-tmp; "
+        + "elif [ \"${\(src)#/tmp/}\" != \"$\(src)\" ]; then "
+        + "\(v)=\"-tmp-$(printf %s \"${\(src)#/tmp/}\" | tr /: -)\"; "
+        + "else \(v)=\"--$(printf %s \"${\(src)#/}\" | tr /: -)--\"; fi; "
+    }
+
     nonisolated static func ompFragment(since: Int, into varName: String) -> String {
-        // POSIX-sh encoder, inlined twice (fragments concatenate with other
-        // agents' probes, so no function definitions / reused temp names).
-        func enc(_ src: String, into v: String) -> String {
-            "if [ \"$\(src)\" = \"$HOME\" ]; then \(v)=-; "
-            + "elif [ \"${\(src)#$HOME/}\" != \"$\(src)\" ]; then "
-            + "\(v)=\"-$(printf %s \"${\(src)#$HOME/}\" | tr /: -)\"; "
-            + "elif [ \"$\(src)\" = /tmp ]; then \(v)=-tmp; "
-            + "elif [ \"${\(src)#/tmp/}\" != \"$\(src)\" ]; then "
-            + "\(v)=\"-tmp-$(printf %s \"${\(src)#/tmp/}\" | tr /: -)\"; "
-            + "else \(v)=\"--$(printf %s \"${\(src)#/}\" | tr /: -)--\"; fi; "
-        }
+        func enc(_ src: String, into v: String) -> String { ompDirName(src, into: v) }
         // omp doesn't always keep the tab's folder as its own cwd (it has been
         // seen running in /tmp while its tab sat in the home), so when the
         // folder-keyed store is empty fall back to the newest omp session
@@ -4051,19 +4054,26 @@ final class CodingTaskEngine {
                 + "2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
                 + emit
         case .omp:
-            // omp names each session dir after the run's cwd with '/' → '-'
-            // (e.g. /home/ubuntu/wt-foo → -home-ubuntu-wt-foo); the transcript
-            // is the newest `*.jsonl` inside. Prefer the marker cwd's dir (exact
-            // + readlink-resolved), else newest session overall.
-            return markerCwd
-                + "base=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; d=\"\"; "
+            // omp names each session dir after the run's cwd with its scoped
+            // rules (`ompDirName`: ~/proj → -proj, not -home-ubuntu-proj); the
+            // transcript is the newest `*.jsonl` directly inside. The marker
+            // cwd's dir (as is, and readlink-resolved) while the tab exists,
+            // else the dir named after the slug (a worktree's basename is the
+            // slug, "-N" when deduped; "--" closes the outside-home form).
+            // Never the newest session anywhere: another one in the workspace
+            // isn't this run's, and its writes held a finished run's completion.
+            let names: String = AgentSessionLocator.ompDirName("cwd", into: "s1")
+                + AgentSessionLocator.ompDirName("rc", into: "s2")
+            let byCwd: String = "base=\"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions\"; d=\"\"; f=\"\"; "
                 + "if [ -n \"$cwd\" ]; then "
-                + "s1=$(printf %s \"$cwd\" | tr / -); "
-                + "s2=$(printf %s \"$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\")\" | tr / -); "
+                + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+                + names
                 + "d=$(ls -td \"$base/$s1\" \"$base/$s2\" 2>/dev/null | head -1); fi; "
-                + "f=$(find \"${d:-$base}\" -name '*.jsonl' 2>/dev/null "
+            let bySlug: String = "[ -z \"$d\" ] && d=$(ls -td \"$base\"/*-\(slug) \"$base\"/*-\(slug)-[0-9]* "
+                + "\"$base\"/*-\(slug)-- \"$base\"/*-\(slug)-[0-9]*-- 2>/dev/null | head -1); "
+            let newest: String = "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 1 -name '*.jsonl' 2>/dev/null "
                 + "| xargs -r ls -t 2>/dev/null | head -1); "
-                + emit
+            return markerCwd + byCwd + bySlug + newest + emit
         }
     }
 

@@ -67,6 +67,50 @@ struct DeclaredDoneQuietTests {
         #expect((0...30).contains(age))
     }
 
+    /// Finding: "omp completion now waits on unrelated sessions because its
+    /// probe uses the wrong directory encoding". omp stores ~/proj as
+    /// `-proj` (scoped to the home), the probe looked for `-home-ubuntu-proj`,
+    /// missed, and watched the newest omp session anywhere: another session
+    /// writing on held a finished run's completion up to its 30-minute cap.
+    @Test("the omp probe reads the run's own session dir (omp's scoped name), never another session's")
+    func ompAge() throws {
+        let home = try Self.tempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = home.appendingPathComponent(".omp/agent/sessions")
+        let mine = store.appendingPathComponent("-wt-watch-pr-12")        // ~/wt/watch-pr-12
+        let other = store.appendingPathComponent("-proj")                  // ~/proj, still writing
+        for d in [mine, other] { try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+        try "{}\n".write(to: mine.appendingPathComponent("s1.jsonl"), atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)],
+                                              ofItemAtPath: mine.appendingPathComponent("s1.jsonl").path)
+        try "{}\n".write(to: other.appendingPathComponent("s2.jsonl"), atomically: true, encoding: .utf8)
+        let cmd = try #require(CodingTaskEngine.transcriptAgeCommand(slug: "watch-pr-12", agent: .omp))
+        let age = try #require(Int(try Self.run(cmd, home: home)))
+        #expect((590...700).contains(age), "read another session's age: \(age)")
+        // A run whose session can't be found prints nothing (the grace holds),
+        // not the age of whatever omp session wrote last.
+        let none = try #require(CodingTaskEngine.transcriptAgeCommand(slug: "fix-leak-0720", agent: .omp))
+        #expect(try Self.run(none, home: home).isEmpty)
+        // The transcript view finds the same file, and nothing for a stranger.
+        let view = try #require(CodingTaskEngine.taskTranscriptCommand(branch: "wt/watch-pr-12", agent: .omp))
+        #expect(try Self.run(view, home: home) == "{}")
+        let stranger = try #require(CodingTaskEngine.taskTranscriptCommand(branch: "wt/fix-leak-0720", agent: .omp))
+        #expect(try Self.run(stranger, home: home).isEmpty)
+    }
+
+    @Test("omp's scoped dir names: under the home, /tmp, elsewhere")
+    func ompDirNames() throws {
+        let home = try Self.tempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        func name(_ path: String) throws -> String {
+            try Self.run("src=\"\(path)\"; " + AgentSessionLocator.ompDirName("src", into: "v") + "printf %s \"$v\"", home: home)
+        }
+        #expect(try name(home.path) == "-")
+        #expect(try name(home.path + "/proj/a") == "-proj-a")
+        #expect(try name("/tmp/x") == "-tmp-x")
+        #expect(try name("/mnt/share/x") == "--mnt-share-x--")
+    }
+
     @Test("Claude and Kimi keep the whole-tree probe; a bad slug gets none")
     func otherAgents() throws {
         for agent: Profile.Tool? in [nil, .claude, .kimi] {
