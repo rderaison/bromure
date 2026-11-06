@@ -164,14 +164,12 @@ struct SecretsVaultTests {
         (systemd ? [:] : ["BROMURE_VAULT_KEY_SOURCE": "file"]).merging(extra) { _, b in b }
     }
 
+    /// A vault of its own (SecretsVault.withInstance): no other suite's
+    /// vault calls see it, and it never touches the process's.
     func withVault(systemd: Bool = false, _ extra: [String: String] = [:], _ body: (String) throws -> Void) rethrows {
         let dir = "/tmp/acl-vault-\(UUID().uuidString.prefix(8))"
-        SecretsVault.configure(directory: dir, environment: env(systemd: systemd, extra))
-        defer {
-            SecretsVault.configure(directory: SecretsVault.defaultDirectory())
-            try? FileManager.default.removeItem(atPath: dir)
-        }
-        try body(dir)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try SecretsVault.withInstance(directory: dir, environment: env(systemd: systemd, extra)) { try body(dir) }
     }
 
     @Test("round trip, plain and item-bound; the forced fallback is reported; key file 0600")
@@ -322,6 +320,104 @@ extension SecretsVaultTests {
         try "#!/bin/sh\necho '\(stderr)' >&2\nexit 1\n".write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
         return path
+    }
+
+    /// A systemd-creds stand-in that seals and unseals for real (a marked
+    /// base64 file). With `race-key` beside it, its `encrypt` first seals
+    /// that key into master-key.cred, as another process of this user
+    /// starting fresh at the same moment would, then writes its own output.
+    static func racingCreds(in dir: String) throws -> (binary: String, raceKey: String) {
+        let fdir = dir + "-racecreds"
+        try FileManager.default.createDirectory(atPath: fdir, withIntermediateDirectories: true)
+        let path = fdir + "/systemd-creds"
+        try """
+        #!/usr/bin/env python3
+        import base64, os, sys
+        a = sys.argv[1:]
+        here = os.path.dirname(os.path.abspath(__file__))
+        def sealed(key): return base64.b64encode(b"FAKECRED" + key + b"\\0" * 64).decode()
+        if a[0] == "encrypt":
+            out = a[-1]; key = sys.stdin.buffer.read()
+            race = os.path.join(here, "race-key")
+            if os.path.exists(race):
+                with open(os.path.join(os.path.dirname(out), "master-key.cred"), "w") as f:
+                    f.write(sealed(open(race, "rb").read()))
+            with open(out, "w") as f: f.write(sealed(key))
+        elif a[0] == "decrypt":
+            raw = base64.b64decode(open(a[-2]).read())
+            if not raw.startswith(b"FAKECRED"):
+                sys.stderr.write("Failed to read encrypted credential data: Invalid argument\\n"); sys.exit(1)
+            sys.stdout.buffer.write(raw[8:40])
+        """.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return (path, fdir + "/race-key")
+    }
+
+    /// The race that rewrote a credential in a full test run: another
+    /// process seals the master key while this one is sealing its own. Its
+    /// credential is kept and its key used; this one's never replaces it.
+    @Test func aCredentialSealedMeanwhileIsUsedNotReplaced() throws {
+        try withVault(systemd: true) { dir in
+            let (fake, raceKey) = try Self.racingCreds(in: dir)
+            defer { try? FileManager.default.removeItem(atPath: dir + "-racecreds") }
+            let theirs = Data((0..<32).map { UInt8($0 &* 7 &+ 3) })
+            try theirs.write(to: URL(fileURLWithPath: raceKey))
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["BROMURE_SYSTEMD_CREDS": fake]))
+            let blob = try SecretsVault.encrypt(Data("hello".utf8))
+            let cred = try String(contentsOfFile: dir + "/master-key.cred", encoding: .utf8)
+            #expect(Data(base64Encoded: cred).map { Data($0.dropFirst(8).prefix(32)) } == theirs,
+                    "the credential the other process sealed is still there")
+            #expect(SecretsVault.masterKeySource == .systemdCreds)
+            // And its key is the vault's: a fresh read (a restart) opens the blob.
+            try FileManager.default.removeItem(atPath: raceKey)
+            SecretsVault.configure(directory: dir, environment: env(systemd: true, ["BROMURE_SYSTEMD_CREDS": fake]))
+            #expect(try SecretsVault.decrypt(blob) == Data("hello".utf8))
+            let left = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.contains(".tmp-") }
+            #expect(left.isEmpty, "no temporary file left behind")
+        }
+    }
+
+    @Test func aKeyFileIsNeverReplaced() throws {
+        try withVault { dir in
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let target = dir + "/k", tmp = dir + "/k.tmp"
+            try Data("first".utf8).write(to: URL(fileURLWithPath: target))
+            try Data("second".utf8).write(to: URL(fileURLWithPath: tmp))
+            #expect(throws: VaultError.exists(target)) { try SecretsVault.placeNew(tmp, at: target) }
+            #expect(FileManager.default.contents(atPath: target) == Data("first".utf8))
+            // A file key that isn't one (wrong size) is kept aside, not overwritten.
+            let keyFile = dir + "/secrets-master.key"
+            try Data("not a key".utf8).write(to: URL(fileURLWithPath: keyFile))
+            let k = try SecretsVault.fileFallbackKey(directory: dir)
+            #expect(k.count == 32)
+            let aside = try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasPrefix("secrets-master.key.unreadable-") }
+            #expect(aside.count == 1)
+            #expect(FileManager.default.contents(atPath: dir + "/" + aside[0]) == Data("not a key".utf8))
+        }
+    }
+
+    /// A test's vault is its own: the process's vault (which other suites'
+    /// daemons use meanwhile) never sees it, and once the process's vault
+    /// holds a key, configure won't move it.
+    @Test func aTestsVaultNeverTouchesTheProcesss() throws {
+        let processDir = SecretsVault.directory
+        try withVault { dir in
+            #expect(SecretsVault.directory == dir)
+            final class Seen: @unchecked Sendable { var directory = "" }
+            let seen = Seen(), done = DispatchSemaphore(value: 0)
+            let t = Thread { seen.directory = SecretsVault.directory; done.signal() }
+            t.start()
+            try #require(done.wait(timeout: .now() + 10) == .success, "the other thread never ran")
+            #expect(seen.directory == processDir, "another thread still sees the process's vault")
+        }
+        #expect(SecretsVault.directory == processDir)
+        // A vault in production use (not a test's own): a loaded key pins it.
+        let pinned = SecretsVault.Instance(directory: "/tmp/acl-vault-pinned", environment: ["BROMURE_VAULT_KEY_SOURCE": "file"])
+        #expect(pinned.configure(directory: "/tmp/acl-vault-a", environment: nil, restartable: false), "before any key: moves")
+        pinned.state.withLockedValue { $0.key = SecureKey(Data(repeating: 1, count: 32)) }
+        #expect(!pinned.configure(directory: "/tmp/acl-vault-b", environment: nil, restartable: false), "with a key: refused")
+        #expect(pinned.state.withLockedValue { $0.directory } == "/tmp/acl-vault-a")
+        #expect(pinned.configure(directory: "/tmp/acl-vault-c", environment: nil, restartable: true), "a test's own: a restart")
     }
 
     @Test("an unseal that fails to run (no credential service, timeout, EMFILE…) throws and leaves the credential alone",

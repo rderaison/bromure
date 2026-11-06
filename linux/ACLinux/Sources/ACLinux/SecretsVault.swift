@@ -47,8 +47,51 @@ public enum SecretsVault {
         var environment: [String: String]?
     }
 
-    static let state = NIOLockedValueBox(State(directory: SecretsVault.defaultDirectory(), key: nil, source: nil,
-                                               environment: nil))
+    /// One vault: its directory, environment and (once loaded) key.
+    // @port-skip linux-only: vault configuration
+    final class Instance: Sendable {
+        let state: NIOLockedValueBox<State>
+        // @port-skip linux-only: vault configuration
+        init(directory: String, environment: [String: String]?) {
+            state = NIOLockedValueBox(State(directory: directory, key: nil, source: nil, environment: environment))
+        }
+
+        /// SecretsVault.configure on this vault. `restartable`: a test's own
+        /// vault, where it drops the key (a restart); otherwise refused once
+        /// a key is loaded.
+        // @port-skip linux-only: vault configuration
+        func configure(directory: String, environment: [String: String]?, restartable: Bool) -> Bool {
+            state.withLockedValue { s in
+                guard restartable || s.key == nil else {
+                    FileHandle.standardError.write(Data("[secrets] the vault is in use: it stays at \(s.directory)\n".utf8))
+                    return false
+                }
+                s.directory = directory
+                s.key = nil
+                s.source = nil
+                s.environment = environment
+                return true
+            }
+        }
+    }
+
+    /// The process's vault.
+    static let shared = Instance(directory: SecretsVault.defaultDirectory(), environment: nil)
+    /// A test's own vault (withInstance): bound to its task, so a test never
+    /// changes the vault another suite's code is using meanwhile.
+    @TaskLocal static var bound: Instance?
+    // @port-skip linux-only: vault configuration
+    static var current: Instance { bound ?? shared }
+    // @port-skip linux-only: vault configuration
+    static var state: NIOLockedValueBox<State> { current.state }
+
+    /// Runs `body` with a vault of its own at `directory` (tests): every vault
+    /// call in it, on this task, uses that one; the process's is untouched.
+    // @port-skip linux-only: vault configuration
+    public static func withInstance<T>(directory: String, environment: [String: String]? = nil,
+                                       _ body: () throws -> T) rethrows -> T {
+        try $bound.withValue(Instance(directory: directory, environment: environment)) { try body() }
+    }
 
     /// `$XDG_DATA_HOME/bromure-ac/secrets` (default `~/.local/share/…`), or
     /// `/var/lib/bromure-ac/secrets` for a system service (euid 0).
@@ -60,16 +103,15 @@ public enum SecretsVault {
         return data + "/bromure-ac/secrets"
     }
 
-    /// Points the vault at `directory` and drops the cached key (tests, and a
-    /// daemon with a custom data dir).
+    /// Points the vault at `directory` (a daemon with a custom data dir),
+    /// before it's used: once a key is loaded the process's vault stays where
+    /// it is (moving it under code that holds its key would split the secrets
+    /// between two keys). In a test's own vault (`withInstance`) it's a
+    /// restart: the key is dropped and read again. False when refused.
     // @port-skip linux-only: vault configuration
-    public static func configure(directory: String, environment: [String: String]? = nil) {
-        state.withLockedValue { s in
-            s.directory = directory
-            s.key = nil
-            s.source = nil
-            s.environment = environment
-        }
+    @discardableResult
+    public static func configure(directory: String, environment: [String: String]? = nil) -> Bool {
+        current.configure(directory: directory, environment: environment, restartable: bound != nil)
     }
 
     // @port-skip linux-only: vault configuration
@@ -134,6 +176,11 @@ public enum SecretsVault {
                     let adopted = FileManager.default.contents(atPath: keyFile).flatMap { $0.count == 32 ? $0 : nil }
                     var bytes = adopted ?? SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
                     defer { wipe(&bytes) }
+                    // A credential that appears meanwhile (another process of
+                    // this user starting fresh) is the vault's key from then on:
+                    // it's used, never replaced, and never falls back to a file
+                    // key (that would split the secrets between two keys).
+                    var appeared = false
                     do {
                         try creds.seal(bytes, at: cred)
                         // Only drop the plaintext once the sealed copy reads back.
@@ -148,9 +195,19 @@ public enum SecretsVault {
                                 "[secrets] moved the file-backed master key into systemd-creds\n".utf8))
                         }
                         return install(&s, bytes, .systemdCreds)
+                    } catch VaultError.exists {
+                        appeared = true
                     } catch {
                         FileHandle.standardError.write(Data(
                             "[secrets] systemd-creds seal failed: \(error) — falling back to file key\n".utf8))
+                    }
+                    if appeared {
+                        guard case .key(var theirs) = creds.unseal(cred) else {
+                            throw VaultError.credentials("decrypt", "master-key.cred appeared meanwhile but can't be opened")
+                        }
+                        defer { wipe(&theirs) }
+                        FileHandle.standardError.write(Data("[secrets] another process sealed the master key first: using it\n".utf8))
+                        return install(&s, theirs, .systemdCreds)
                     }
                 }
             }
@@ -198,15 +255,41 @@ public enum SecretsVault {
     // @port SecretsVault.static fileFallbackKey() h=47d6fbebb8289f55 @08d935d2
     static func fileFallbackKey(directory: String) throws -> Data {
         let path = directory + "/secrets-master.key"
-        if let data = FileManager.default.contents(atPath: path), data.count == 32 { return data }
+        if let data = FileManager.default.contents(atPath: path) {
+            if data.count == 32 { return data }
+            // Not a key: kept aside, never overwritten (its blobs read as unreadable).
+            try FileManager.default.moveItem(atPath: path, toPath: path + ".unreadable-\(Int(Date().timeIntervalSince1970))")
+        }
         let fresh = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        guard FileManager.default.createFile(atPath: path, contents: fresh,
+        let tmp = path + ".tmp-\(getpid())-\(UUID().uuidString.prefix(8))"
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        guard FileManager.default.createFile(atPath: tmp, contents: fresh,
                                              attributes: [.posixPermissions: NSNumber(value: 0o600)]) else {
-            throw VaultError.io("write \(path)")
+            throw VaultError.io("write \(tmp)")
+        }
+        do {
+            try placeNew(tmp, at: path)
+        } catch VaultError.exists {
+            // Another process made it meanwhile: theirs is the key.
+            guard let theirs = FileManager.default.contents(atPath: path), theirs.count == 32 else {
+                throw VaultError.io("\(path) appeared but isn't a key")
+            }
+            return theirs
         }
         return fresh
+    }
+
+    /// Puts the file `tmp` at `path` only if nothing is there: link(2) fails
+    /// on an existing name, where rename(2) would replace it. The vault's
+    /// key files are only ever created this way; an existing one is only
+    /// ever moved aside (rotate), never replaced.
+    // @port-skip linux-only: the vault's no-replace invariant
+    static func placeNew(_ tmp: String, at path: String) throws {
+        if link(tmp, path) == 0 { return }
+        if errno == EEXIST { throw VaultError.exists(path) }
+        throw VaultError.io("link \(path): \(String(cString: strerror(errno)))")
     }
 
     /// Encrypt arbitrary bytes with the master key.
@@ -312,10 +395,13 @@ public enum SecretsVault {
             }
         }
 
-        /// Seals `key` into `path` (0600, atomically). Key bytes go over a pipe.
+        /// Seals `key` into `path` (0600), never over an existing file: it's
+        /// sealed beside it and linked into place, so a credential another
+        /// process put there meanwhile is never replaced (VaultError.exists).
+        /// Key bytes go over a pipe.
         // @port SecretsVault.static storeInKeychain(_: SymmetricKey) h=07a0ca756e929bb0 @08d935d2
         func seal(_ key: Data, at path: String) throws {
-            let tmp = path + ".tmp-\(getpid())"
+            let tmp = path + ".tmp-\(getpid())-\(UUID().uuidString.prefix(8))"
             defer { try? FileManager.default.removeItem(atPath: tmp) }
             do {
                 _ = try ChildProcess.capture(binary, ["encrypt"] + scope + ["--name=\(credentialName)", "-", tmp], input: key)
@@ -323,7 +409,7 @@ public enum SecretsVault {
                 throw VaultError.credentials("encrypt", err)
             }
             try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: tmp)
-            guard rename(tmp, path) == 0 else { throw VaultError.io("rename \(tmp)") }
+            try SecretsVault.placeNew(tmp, at: path)
         }
 
         /// A systemd credential file is base64 of a binary header + payload; a
@@ -421,6 +507,9 @@ public enum VaultError: Error, CustomStringConvertible, Equatable {
     /// tampered byte, or a blob moved to another item. Re-enter the secret.
     case unreadable
     case io(String)
+    /// A key file that was to be created exists already (another process
+    /// made it meanwhile): it's never replaced.
+    case exists(String)
 
     // @port VaultError.var description h=0e6f9aca2e366991 @08d935d2
     public var description: String {
@@ -429,6 +518,7 @@ public enum VaultError: Error, CustomStringConvertible, Equatable {
         case .sealFailed: return "AES-GCM seal returned no combined output"
         case .unreadable: return "secret unreadable with the current master key; re-enter it"
         case .io(let what): return "vault I/O failed: \(what)"
+        case .exists(let path): return "\(path) exists already"
         }
     }
 }
