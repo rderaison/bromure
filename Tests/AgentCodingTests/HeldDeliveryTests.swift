@@ -273,6 +273,8 @@ struct HandedOverTests {
         let log = row("log.txt"), notes = row("notes.txt")
         #expect(M.fileOnlyArrivals([a, log], turns: before + ["\(dir)/log.txt"]) == [log.id])
         #expect(M.fileOnlyArrivals([log, notes], turns: before + ["\(dir)/log.txt \(dir)/notes.txt"]) == [log.id, notes.id])
+        // A whole path, not a longer one that starts like it.
+        #expect(M.fileOnlyArrivals([log], turns: before + ["\(dir)/log.txt.bak hi"]).isEmpty)
         // A held one is matched elsewhere (it's typed in by Bromure).
         var held = row("held.png"); held.held = true
         #expect(M.fileOnlyArrivals([held], turns: before + ["[Image #1]"]).isEmpty)

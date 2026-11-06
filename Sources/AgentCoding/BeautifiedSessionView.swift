@@ -1459,10 +1459,11 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         var arrived: Set<UUID> = []
         var taken: Set<Int> = []
-        // Named first: those turns are theirs.
+        // Named first (whole paths: a.png isn't a.png.bak): those turns are theirs.
+        let named = turns.map { Set(paths($0)) }
         for q in candidates {
             let mine = paths(q.text)
-            for i in turns.indices where i >= q.baseline && mine.contains(where: { turns[i].contains($0) }) {
+            for i in turns.indices where i >= q.baseline && mine.contains(where: { named[i].contains($0) }) {
                 arrived.insert(q.id); taken.insert(i)
             }
         }
