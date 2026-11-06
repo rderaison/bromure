@@ -107,6 +107,10 @@ struct CheckpointGuardrailTests {
         #expect(store.settleCheckpointBacklog([p], now: now) == 1)
         try await waitForPurge(p.id)
         #expect(files(dir).count == 2 && files(dir).allSatisfy { $0.hasSuffix(".img") })
+        // The mark is written once `done` reaches the main thread.
+        for _ in 0..<250 where (try? String(contentsOf: store.checkpointLadderMark, encoding: .utf8)) != ProfileStore.ladderGeneration {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         #expect(try String(contentsOf: store.checkpointLadderMark, encoding: .utf8) == ProfileStore.ladderGeneration)
         #expect(store.settleCheckpointBacklog([p], now: now) == 0)   // done once
     }
