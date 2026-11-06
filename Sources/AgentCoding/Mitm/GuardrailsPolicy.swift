@@ -679,7 +679,8 @@ public struct GuardrailsConfig: Sendable {
     /// We can't reconstruct the operation description here from
     /// (host, method, path) alone for ClickHouse — the SQL has
     /// already been extracted by the caller for `dbQuery`.
-#if os(macOS)
+    /// Not on iOS: the remote app doesn't carry the consent broker.
+#if !os(iOS)
     public func denyAsync(host: String, method: String, path: String,
                           amzTarget: String?, formAction: String?,
                           dbQuery: String? = nil,
