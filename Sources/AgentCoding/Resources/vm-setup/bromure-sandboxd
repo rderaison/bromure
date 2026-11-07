@@ -2834,10 +2834,15 @@ def build_plan(spec, policy, status, group_gid, sandbox_cgroup=None):
     # the agent user sudo, and silently breaking it would be worse than not
     # applying the filters. So the process/seccomp layer requires the strict
     # sandbox; Landlock, which touches no credentials, does not.
+    #
+    # Requested is enough: agentd's root script starts this supervisor BEFORE
+    # it marks the revocation done, so at boot `strict_applied` is still false.
+    # Gating on it as well left a strict workspace whose policy has no
+    # `process` section with Landlock only -- no no_new_privs, no filters, no
+    # child self-protection -- until something restarted the supervisor.
     strict_applied = os.path.exists(STRICT_DONE)
     strict_requested = bool(spec.get("strict_sandbox"))
-    apply_seccomp = (policy.process.present or strict_applied) and \
-                    (strict_applied or strict_requested)
+    apply_seccomp = strict_applied or strict_requested
     if apply_seccomp:
         ensure_seccomp_logging(status)
     if policy.process.present and not (strict_applied or strict_requested):
