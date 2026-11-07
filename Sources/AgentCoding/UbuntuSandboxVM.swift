@@ -666,7 +666,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // (never consumed) names a window of the previous boot — read now it
         // flashed "Working" on whatever tab took that index.
         if let outbox = sessionDisk?.outboxDirectory,
-           let names = try? FileManager.default.contentsOfDirectory(atPath: outbox.path) {
+           let names = Self.listing(outbox, max: Self.maxOutboxEntriesPerTick) {
             for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
                 try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
             }
@@ -864,6 +864,35 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
     /// One-shot reports surfaced per poll; the rest wait for the next tick.
     nonisolated static let maxOneShotsPerTick = 32
+
+    /// Outbox entries read per heavy tick, and of its URL relay folder: the
+    /// guest (and in the relay, a sandboxed agent) can fill either with
+    /// files, and listing them whole each tick made the host's work and
+    /// memory grow with the backlog (CWE-400).
+    nonisolated static let maxOutboxEntriesPerTick = 2048
+    nonisolated static let maxRelayEntriesPerTick = 256
+    /// More URL files than this in one tick's listing is a flood: past the
+    /// per-tick cap they're removed unopened, so the backlog drains with
+    /// bounded work instead of delaying a real sign-in URL forever. Fewer
+    /// wait for the next tick, as before.
+    nonisolated static let urlBacklogHighWater = 64
+
+    /// At most `max` names of `dir` (no "." or ".."), read with readdir so
+    /// the rest of a huge directory is never materialized; nil when it can't
+    /// be opened. In no particular order.
+    nonisolated static func listing(_ dir: URL, max: Int) -> [String]? {
+        guard let d = opendir(dir.path) else { return nil }
+        defer { closedir(d) }
+        var names: [String] = []
+        while names.count < max, let ent = readdir(d) {
+            let name = withUnsafePointer(to: ent.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
+            if name == "." || name == ".." { continue }
+            names.append(name)
+        }
+        return names
+    }
 
     nonisolated static func boundedText(_ url: URL, max: Int = maxOutboxTextFile) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -1242,7 +1271,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             let maxURLFileSize = 8 * 1024
             var urlsProcessedThisTick = 0
             var oneShotsThisTick = 0
-            if var entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+            if var entries = VM.listing(outbox, max: VM.maxOutboxEntriesPerTick)?.map({ outbox.appendingPathComponent($0) }) {
                 // The URL relay's own folder (what a sandboxed agent can
                 // write): its url-*.txt only, never anything else named
                 // like the outbox's own signals.
@@ -1250,8 +1279,20 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // to a folder of the Mac's (attributesOfItem doesn't follow one).
                 let relay = outbox.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
                 if (try? fm.attributesOfItem(atPath: relay.path))?[.type] as? FileAttributeType == .typeDirectory {
-                    entries += ((try? fm.contentsOfDirectory(at: relay, includingPropertiesForKeys: nil)) ?? [])
-                        .filter { $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt" }
+                    entries += (VM.listing(relay, max: VM.maxRelayEntriesPerTick) ?? [])
+                        .filter { $0.hasPrefix("url-") && $0.hasSuffix(".txt") }
+                        .map { relay.appendingPathComponent($0) }
+                }
+                let urlBacklog = entries.filter {
+                    $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt"
+                }.count
+                let shedding = urlBacklog > VM.urlBacklogHighWater
+                var shed = 0
+                defer {
+                    if shed > 0 {
+                        FileHandle.standardError.write(Data(
+                            "[ac] outbox: \(shed) URL request(s) dropped — the guest is flooding the relay\n".utf8))
+                    }
                 }
                 // agent-tool-<win>.jsonl — append-only, one line per tool
                 // call, written by the agents' PreToolUse hooks before the
@@ -1276,7 +1317,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // disk so the next tick can pick it up
                         // (rather than dropping a legitimate URL
                         // that lost a race with a flood).
+                        // A flood (more than the high-water mark listed):
+                        // the excess goes unopened, so it drains.
                         if urlsProcessedThisTick >= maxURLsPerTick {
+                            if shedding {
+                                guard consume(entry) else { return [] }
+                                shed += 1
+                            }
                             continue
                         }
                         urlsProcessedThisTick += 1
