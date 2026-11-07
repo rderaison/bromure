@@ -88,7 +88,7 @@ struct FatClientSecurityCountsTests {
         #expect(server.contains(#"case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"):"#))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains(#""GET", "/security-timeline?hours=\(range)""#))
-        #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key)"))
+        #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)"))
         // A reply lands when it covers the range asked for last and is newer
         // than the one applied last.
         #expect(fc.contains("guard let self, Self.acceptsHistory(generation: generation, hours: range,"))
@@ -220,6 +220,81 @@ struct FatClientSecurityCountsTests {
         #expect(try src("Sources/AgentCoding/AutomationServer.swift")
             .contains(#""securityTimelineOldest": Self.jsonNumberOrNull(self.onSecurityTimelineOldest?() ?? nil),"#))
         #expect(try src("Sources/AgentCoding/FatClientController.swift")
-            .contains(#"oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)))"#))
+            .contains(#"oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)),"#))
+    }
+
+    /// Finding: "Security timeline cutoff hides retained rows after a
+    /// backward clock change". The host keeps rows in the order they came,
+    /// and the client cut fetched history at the host's first row's TIME: a
+    /// clock set back gives later rows earlier times, so rows the host still
+    /// held (and counted) vanished on the client. Rows are numbered now, and
+    /// the client prunes by number.
+    @Test("rows the host still holds stay after its clock went back: pruned by order, not time")
+    func clockSetBack() throws {
+        // The host: three rows added one after the other, each stamped
+        // earlier than the last (the clock went back between them).
+        let host = SecurityTimeline(directory: nil)
+        for minutesAgo in [80.0, 90, 100] { host.append(ev(minutesAgo)) }
+        #expect(host.events.map(\.seq) == [0, 1, 2])
+        #expect(host.oldestRetainedSeq == 0)
+        let rows = host.historyRows(hours: 0)
+        #expect(rows.map { $0["sq"] as? Int } == [0, 1, 2])
+
+        // The finding's case: all three fetched, a mirror of the last one.
+        let client = SecurityTimeline(directory: nil)
+        client.applyHistory(rows, host: "h", epoch: host.epoch)
+        client.applyMirror(Array(rows.suffix(1)), host: "h", oldestRetained: host.oldestRetained,
+                           oldestSeq: host.oldestRetainedSeq, epoch: host.epoch)
+        #expect(client.remote["h"]?.count == 3)
+        // It used to be the 80 one alone -- still so from an older host,
+        // which numbers nothing and sends only the time.
+        let unnumbered = rows.map { r in r.filter { $0.key != "sq" } }
+        let legacy = SecurityTimeline(directory: nil)
+        legacy.applyHistory(unnumbered, host: "h")
+        legacy.applyMirror(Array(unnumbered.suffix(1)), host: "h", oldestRetained: host.oldestRetained)
+        #expect(legacy.remote["h"]?.count == 1)
+
+        // The host pruned its first row: it goes, whatever the times.
+        client.applyMirror(Array(rows.suffix(1)), host: "h", oldestSeq: 1, epoch: host.epoch)
+        #expect(client.remote["h"]?.compactMap(\.seq) == [1, 2])
+    }
+
+    @Test("a repeat folded in is renumbered last; a host restart's numbers prune nothing until a refetch")
+    func numberingAndEpochs() {
+        let host = SecurityTimeline(directory: nil)
+        host.append(ev(10, ck: "k")); host.append(ev(9)); host.append(ev(8, ck: "k"))
+        #expect(host.events.count == 2)
+        #expect(host.events.map(\.seq) == [1, 2])          // the repeat moved to the end, numbered last
+        // The cap prunes by order: the first held row is the oldest number.
+        for i in 0..<5000 { host.append(ev(Double(i % 7))) }
+        #expect(host.events.count == 5000)
+        #expect(host.oldestRetainedSeq == host.events.compactMap(\.seq).min())
+
+        // History from the host's previous run: its numbers say nothing now.
+        let client = SecurityTimeline(directory: nil)
+        let rows = host.historyRows(hours: 0)
+        client.applyHistory(rows, host: "h", epoch: "an earlier run")
+        #expect(client.historyIsStale(host: "h", epoch: host.epoch))
+        client.applyMirror(Array(rows.suffix(10)), host: "h", oldestSeq: 1_000_000, epoch: host.epoch)
+        #expect(client.remote["h"]?.count == 5000)          // none dropped
+        client.applyHistory(rows, host: "h", epoch: host.epoch)
+        #expect(!client.historyIsStale(host: "h", epoch: host.epoch))
+        #expect(!client.historyIsStale(host: "h", epoch: nil))   // an older host: nothing to compare
+    }
+
+    @Test("the host sends its first row's number and run; the client prunes and refetches by them")
+    func wiredRetention() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        let server = try src("Sources/AgentCoding/AutomationServer.swift")
+        #expect(server.contains(#""securityTimelineOldestSeq": "#))
+        #expect(server.contains(#""securityTimelineEpoch": "#))
+        #expect(server.contains(#"if let epoch { body["epoch"] = epoch }"#))
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains(#"oldestSeq: snapshot["securityTimelineOldestSeq"] as? Int, epoch: epoch)"#))
+        #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)"))
+        #expect(fc.contains("SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch)"))
+        #expect(try src("Sources/AgentCoding/BromureAC.swift")
+            .contains("(SecurityTimeline.shared.oldestRetainedSeq, SecurityTimeline.shared.epoch)"))
     }
 }

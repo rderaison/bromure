@@ -310,6 +310,9 @@ final class ACAutomationServer {
     var onSecurityTimeline: (() -> [[String: Any]])?
     /// The oldest timeline row this host still holds (epoch seconds), nil with none.
     var onSecurityTimelineOldest: (() -> Double?)?
+    /// The first row the timeline holds, by its number, and the run those
+    /// numbers belong to: what a fat client prunes its fetched rows by.
+    var onSecurityTimelineRetention: (() -> (oldestSeq: Int?, epoch: String))?
     /// A JSON value for an optional number: the number, or null (never a
     /// boxed Optional, which JSONSerialization refuses).
     nonisolated static func jsonNumberOrNull(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
@@ -888,8 +891,12 @@ final class ACAutomationServer {
                     if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
                 }
             }
-            let rows = DispatchQueue.main.sync { self.onSecurityHistory?(hours) ?? [] }
-            sendResponse(fd: fd, status: 200, body: ["rows": rows])
+            let (rows, epoch) = DispatchQueue.main.sync {
+                (self.onSecurityHistory?(hours) ?? [], self.onSecurityTimelineRetention?().epoch)
+            }
+            var body: [String: Any] = ["rows": rows]
+            if let epoch { body["epoch"] = epoch }   // which run the rows' numbers are from
+            sendResponse(fd: fd, status: 200, body: body)
 
         // Fat-client local-model management: download/cancel/discard/remove a
         // model ON THE SERVER (that's where the engine + downloads live). The
@@ -2616,6 +2623,10 @@ final class ACAutomationServer {
                 // The oldest row this host still holds: a fat client drops
                 // fetched history older than that (the host pruned it).
                 "securityTimelineOldest": Self.jsonNumberOrNull(self.onSecurityTimelineOldest?() ?? nil),
+                // The same, in the host's own order (a clock set back makes
+                // times go backwards): its first row's number, and whose.
+                "securityTimelineOldestSeq": (self.onSecurityTimelineRetention?().oldestSeq).map { $0 as Any } ?? NSNull(),
+                "securityTimelineEpoch": (self.onSecurityTimelineRetention?().epoch).map { $0 as Any } ?? NSNull(),
                 "localModels": self.onLocalModels?() ?? [:],
                 "kubeClusters": self.onListKubeClusters?() ?? ["clusters": [], "status": [:]],
             ]
