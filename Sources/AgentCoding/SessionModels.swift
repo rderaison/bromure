@@ -432,6 +432,14 @@ final class SessionListModel {
     var filePaneOpen = false
     /// True while the Sandbox drawer (blocked connections, proposals) is open.
     var policyDrawerOpen = false
+    /// Workspaces known to run without an OpenShell sandbox: no shield, no
+    /// drawer. Unknown (a fat client's older host) isn't in it.
+    var unsandboxedProfileIDs: Set<Profile.ID> = []
+    /// The Sandbox drawer can show this workspace.
+    func hasSandboxDrawer(_ id: Profile.ID?) -> Bool {
+        guard let id else { return false }
+        return !unsandboxedProfileIDs.contains(id)
+    }
     /// When each workspace's drawer was last looked at: the toolbar badge
     /// counts blocks since.
     var policyDrawerSeen: [UUID: Date] = [:]

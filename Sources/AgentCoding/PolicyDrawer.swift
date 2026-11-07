@@ -83,7 +83,9 @@ struct PolicyDrawer: View {
         .onAppear { reloadProposals(); markSeen() }
         .onChange(of: list.stageProfileID) { _, _ in
             dismissed = []; allowed = []; needsRestart = []; errors = [:]; reloadProposals(); markSeen()
+            closeIfUnsandboxed()
         }
+        .onChange(of: list.unsandboxedProfileIDs) { _, _ in closeIfUnsandboxed() }
         .onReceive(NotificationCenter.default.publisher(for: OpenShellAdvisor.changedNotification)) { _ in
             reloadProposals()
         }
@@ -98,6 +100,12 @@ struct PolicyDrawer: View {
             now = $0; markSeen()
             if list.policyDrawerOpen { reloadProposals() }   // a host's: fetched again
         }
+    }
+
+    /// The stage's workspace has no sandbox (switched to, or its policy
+    /// removed): its shield is gone, so is the drawer.
+    private func closeIfUnsandboxed() {
+        if list.policyDrawerOpen, list.stageProfileID != nil, !list.hasSandboxDrawer(list.stageProfileID) { onClose() }
     }
 
     // MARK: Header, tabs, footer
@@ -723,6 +731,10 @@ struct PolicyDrawerButton: View {
     let action: () -> Void
 
     var body: some View {
+        if list.hasSandboxDrawer(profileID) { button }
+    }
+
+    @ViewBuilder private var button: some View {
         let _ = SecurityTimeline.shared.allEvents.count
         let n = list.policyDrawerOpen ? 0 : PolicyDrawer.unseenCount(profileID: profileID, list: list, machine: machine)
         HeaderIcon(system: "shield.lefthalf.filled",

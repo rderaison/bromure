@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import bromure_ac
@@ -136,5 +137,54 @@ struct FatClientPolicyDrawerTests {
         let block = "version: 1\nfilesystem_policy:\n  read_write:\n    - /tmp\n"
         let out = try OpenShellPolicy.addingFilesystemPath("/home/u/a,b", readWrite: true, to: block)
         #expect(try #require(try OpenShellPolicy.parse(out).filesystem).readWrite.contains("/home/u/a,b"))
+    }
+
+    /// User report: in a fat client, clicking the shield showed nothing. The
+    /// window's mount, run on every stage refresh, removed every subview of
+    /// the stage but the one it mounted, the drawer included; the window
+    /// kept toggling a view no longer in it.
+    @Test("a stage mount keeps the drawer on the stage, and on top")
+    @MainActor func mountKeepsDrawer() throws {
+        let stage = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let old = NSView(), drawer = NSView(), next = NSView(), cue = NSView()
+        for v in [old, next] { v.translatesAutoresizingMaskIntoConstraints = false }
+        stage.addSubview(old)
+        stage.addSubview(drawer, positioned: .above, relativeTo: nil)
+        RemoteHostWindow.mount(next, on: stage, keeping: drawer)
+        #expect(stage.subviews == [next, drawer])
+        #expect(old.superview == nil)
+        // The boot cue rides over the terminal, under the drawer.
+        RemoteHostWindow.addBelow(drawer, cue, on: stage)
+        #expect(stage.subviews.last === drawer)
+        // No drawer yet: as before.
+        let bare = NSView()
+        RemoteHostWindow.mount(old, on: bare, keeping: nil)
+        #expect(bare.subviews == [old])
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("for v in stage.subviews where v !== policyDrawerHost { v.isHidden = !contentShown }"))
+        #expect(!fc.contains("stage.addSubview(host)   // last subview = topmost"))
+    }
+    /// User report: the shield showed on workspaces with no sandbox, where
+    /// the drawer has nothing to say. Hidden there, here and in a fat client
+    /// (the host says which run sandboxed; an older host, unknown, keeps it).
+    @Test("no shield, and no drawer, for a workspace without a sandbox")
+    @MainActor func shieldOnlyWhenSandboxed() throws {
+        let list = SessionListModel()
+        let plain = UUID(), boxed = UUID()
+        list.unsandboxedProfileIDs = [plain]
+        #expect(!list.hasSandboxDrawer(plain))
+        #expect(list.hasSandboxDrawer(boxed))
+        #expect(!list.hasSandboxDrawer(nil))
+        let ac = try src("Sources/AgentCoding/BromureAC.swift")
+        #expect(ac.contains("\"sandboxed\": p.usesOpenShellPolicy,"))
+        #expect(ac.contains("profiles.filter { !$0.usesOpenShellPolicy }"))
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("if (w[\"sandboxed\"] as? Bool) == false { unsandboxed.insert(id) }"))
+        #expect(fc.contains("guard list.policyDrawerOpen || list.hasSandboxDrawer(list.stageProfileID) else { return }"))
+        let win = try src("Sources/AgentCoding/UnifiedSessionWindow.swift")
+        #expect(win.contains("guard listModel.policyDrawerOpen || listModel.hasSandboxDrawer(listModel.stageProfileID) else { return }"))
+        let drawer = try src("Sources/AgentCoding/PolicyDrawer.swift")
+        #expect(drawer.contains("if list.hasSandboxDrawer(profileID) { button }"))
+        #expect(drawer.contains(".onChange(of: list.unsandboxedProfileIDs) { _, _ in closeIfUnsandboxed() }"))
     }
 }

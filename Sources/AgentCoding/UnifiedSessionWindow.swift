@@ -1011,7 +1011,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// ⌃⌘N / the toolbar's shield button.
     @objc func togglePolicyDrawer(_ sender: Any?) {
+        // No sandbox on the stage's workspace: no drawer (⌃⌘N included).
+        guard listModel.policyDrawerOpen || listModel.hasSandboxDrawer(listModel.stageProfileID) else { return }
         setPolicyDrawerOpen(!listModel.policyDrawerOpen)
+    }
+
+    /// E2E (`/debug/fatclient` action policy-drawer): {op: toggle|state}.
+    func debugPolicyDrawer(_ p: [String: Any]) -> [String: Any] {
+        if (p["op"] as? String) == "toggle" { togglePolicyDrawer(nil) }
+        contentView?.layoutSubtreeIfNeeded()
+        return RemoteHostWindow.policyDrawerReport(listModel, host: policyDrawerHost, stage: stage)
     }
 
     func setPolicyDrawerOpen(_ open: Bool) {
