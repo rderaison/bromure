@@ -199,6 +199,69 @@ struct TransparentInterceptionTests {
     }
 }
 
+/// A TCP listener that only counts the connections it gets.
+final class CountingListener: @unchecked Sendable {
+    let accepted = NIOLockedValueBox<Int>(0)
+    let channel: Channel
+    var port: Int { channel.localAddress!.port! }
+    init(host: String) throws {
+        let accepted = self.accepted
+        channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { ch in accepted.withLockedValue { $0 += 1 }; return ch.close() }
+            .bind(host: host, port: 0).wait()
+    }
+    func stop() { channel.close(promise: nil) }
+}
+
+@Suite("Transparent interception limits", .serialized)
+struct TransparentInterceptionLimitTests {
+    @Test func aFlowThatSendsNothingIsNeverSpliced() throws {
+        // A guest that opens a :443 flow and closes it (or stays silent):
+        // nothing to decide, so no host connect on its behalf.
+        let ip = try #require(Daemon.primaryIPv4())
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let target = try CountingListener(host: ip); defer { target.stop() }
+        MitmProxy.firstByteTimeoutMs = 300
+        defer { MitmProxy.firstByteTimeoutMs = 5000 }
+        for silent in [false, true] {
+            let (guest, app) = try GuestEnd.pair()
+            if !silent { shutdown(guest, Int32(SHUT_WR)) }    // closed with no byte sent
+            proxy.acceptTransparentFlow(appFD: app, profileID: UUID(), destIP: ip, destPort: target.port)
+            #expect(GuestEnd.readAll(guest) == "", silent ? "a silent flow is closed" : "an empty flow is closed")
+            close(guest)
+        }
+        usleep(300_000)
+        #expect(target.accepted.withLockedValue { $0 } == 0, "no host connect for either")
+    }
+
+    @Test func aPortsFlowsAreCappedAndHalfOpenOnesExpire() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let injected = NIOLockedValueBox<[[UInt8]]>([])
+        let interceptor = SwitchInterceptor(proxy: proxy, guestMTU: 1500) { _, ip in injected.withLockedValue { $0.append(ip) } }
+        defer { interceptor.portClosed(portID: 9) }
+        // SYNs to an always-blocked address (refused by the proxy at once):
+        // the flows stay half-open, as a SYN flood's would.
+        for i in 0..<SwitchInterceptor.maxFlowsPerPort {
+            let syn = Array(TestFrames.tcp(to: TestFrames.ip("169.254.169.254"), port: 80, flags: 0x02,
+                                           seq: 100, sport: UInt16(20000 + i)).dropFirst(14))
+            interceptor.handleDivertedPacket(portID: 9, profileID: UUID(), ipPacket: syn)
+        }
+        #expect(interceptor.openFlows == SwitchInterceptor.maxFlowsPerPort)
+        let over = Array(TestFrames.tcp(to: TestFrames.ip("169.254.169.254"), port: 80, flags: 0x02,
+                                        seq: 100, sport: 30000).dropFirst(14))
+        interceptor.handleDivertedPacket(portID: 9, profileID: UUID(), ipPacket: over)
+        #expect(interceptor.openFlows == SwitchInterceptor.maxFlowsPerPort, "the port's cap holds")
+        #expect(injected.withLockedValue { $0 }.contains { UtunPacket.parse($0).map { $0.dstPort == 30000 && $0.flags & UtunPacket.RST != 0 } == true },
+                "the SYN past the cap is reset")
+        // None completed its handshake: swept once past the timeout.
+        interceptor.sweepHalfOpen(now: Date().addingTimeInterval(SwitchInterceptor.synTimeout + 1))
+        #expect(interceptor.openFlows == 0)
+    }
+}
+
 /// A minimal TLS 1.2-shaped ClientHello, with or without server_name.
 enum TestHello {
     static func clientHello(sni: String?) -> [UInt8] {

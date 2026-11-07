@@ -24,19 +24,51 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
 
     private let lock = NIOLock()
     private var flows: [FlowRef: TCPFlow] = [:]
+    /// Flows whose handshake hasn't completed (the guest's ACK of our
+    /// SYN-ACK), with when they opened: dropped after `synTimeout`.
+    private var halfOpen: [FlowRef: Date] = [:]
+    /// Open flows a VM port may hold; past it, a new SYN gets a RST.
+    static let maxFlowsPerPort = 256
+    nonisolated(unsafe) static var synTimeout: TimeInterval = 30
+    private var sweeper: DispatchSourceTimer?
 
     // @port SwitchMitmForwarder.init(engine: MitmEngine, switch: VMNetSwitch, guestMTU: Int) h=ac67de5df85baa30 @da668bda
     init(proxy: MitmProxy, guestMTU: Int, inject: @escaping @Sendable (_ portID: Int, _ ipPacket: [UInt8]) -> Void) {
         self.proxy = proxy
         self.inject = inject
         self.mss = max(536, guestMTU - 40)
+        let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        t.schedule(deadline: .now() + 5, repeating: 5)
+        t.setEventHandler { [weak self] in self?.sweepHalfOpen() }
+        sweeper = t
+        t.resume()
+    }
+
+    // @port-skip linux-only: the half-open sweeper's timer
+    deinit { sweeper?.cancel() }
+
+    /// Half-open flows past their time (a SYN flood, a guest that went
+    /// away mid-handshake) closed: their socketpairs and the proxy's end go.
+    // @port-skip linux-only: the Linux interceptor's SYN-RECEIVED timeout (macOS's forwarder has none)
+    func sweepHalfOpen(now: Date = Date()) {
+        let stale: [TCPFlow] = lock.withLock {
+            let refs = halfOpen.filter { now.timeIntervalSince($0.value) >= Self.synTimeout }.map(\.key)
+            for r in refs { halfOpen.removeValue(forKey: r) }
+            return refs.compactMap { flows.removeValue(forKey: $0) }
+        }
+        for f in stale { f.close() }
     }
 
     // @port SwitchMitmForwarder.handleDivertedPacket(portID: Int, profileID: UUID?, ipPacket: [UInt8]) h=0a1c17edfd57ffa9 @da668bda
     func handleDivertedPacket(portID: Int, profileID: UUID?, ipPacket: [UInt8]) {
         guard let seg = UtunPacket.parse(ipPacket) else { return }
         let ref = FlowRef(portID: portID, key: UtunPacket.FlowKey(seg))
-        if let existing = lock.withLock({ flows[ref] }) {
+        if let existing = lock.withLock({ () -> TCPFlow? in
+            let f = flows[ref]
+            // The guest's ACK completes the handshake.
+            if f != nil, seg.flags & UtunPacket.ACK != 0 { halfOpen.removeValue(forKey: ref) }
+            return f
+        }) {
             existing.onInbound(seg)
             return
         }
@@ -44,6 +76,11 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         // gets a RST so the guest kernel gives up rather than retransmitting.
         guard seg.flags & UtunPacket.SYN != 0, seg.flags & UtunPacket.ACK == 0 else {
             if seg.flags & UtunPacket.RST == 0 { sendRST(portID: portID, to: seg) }
+            return
+        }
+        // A port at its cap (a SYN flood): refused, nothing opened.
+        if lock.withLock({ flows.keys.filter { $0.portID == portID }.count >= Self.maxFlowsPerPort }) {
+            sendRST(portID: portID, to: seg)
             return
         }
         openFlow(ref, profileID: profileID, seg: seg)
@@ -55,7 +92,10 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
     func flowDenied(portID: Int, ipPacket: [UInt8]) {
         guard let seg = UtunPacket.parse(ipPacket) else { return }
         let ref = FlowRef(portID: portID, key: UtunPacket.FlowKey(seg))
-        let victim = lock.withLock { flows.removeValue(forKey: ref) }
+        let victim = lock.withLock { () -> TCPFlow? in
+            halfOpen.removeValue(forKey: ref)
+            return flows.removeValue(forKey: ref)
+        }
         victim?.close()
     }
 
@@ -63,7 +103,7 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
     func portClosed(portID: Int) {
         let victims: [TCPFlow] = lock.withLock {
             let v = flows.filter { $0.key.portID == portID }
-            for (k, _) in v { flows.removeValue(forKey: k) }
+            for (k, _) in v { flows.removeValue(forKey: k); halfOpen.removeValue(forKey: k) }
             return Array(v.values)
         }
         for f in victims { f.close() }
@@ -98,9 +138,12 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
             send: { s in inject(portID, UtunPacket.build(s)) },
             onClosed: { [weak self] _ in
                 guard let self else { return }
-                _ = self.lock.withLock { self.flows.removeValue(forKey: ref) }
+                self.lock.withLock {
+                    _ = self.flows.removeValue(forKey: ref)
+                    _ = self.halfOpen.removeValue(forKey: ref)
+                }
             })
-        lock.withLock { flows[ref] = flow }
+        lock.withLock { flows[ref] = flow; halfOpen[ref] = Date() }
 
         // Hand end B to the proxy (SNI peek → passthrough or MiTM); it owns
         // and closes it. Without a profile identity a flow is NEVER MiTM'd (a

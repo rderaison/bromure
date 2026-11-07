@@ -19,8 +19,10 @@ extension MitmProxy {
     // partial: no binary identity (no attestor on Linux)
     // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=85d1555a8e0b2840 @8e2543eb
     func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int = 0) {
-        // Off the event loops: the peeks block on the socket.
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
+        // Off the event loops, on a thread of its own: the peeks block on the
+        // socket, and a pool would let a few hundred idle guest connections
+        // starve every other VM's.
+        Thread.detachNewThread { [self] in
             // A frame the guest addressed to loopback / link-local reaches
             // the switch only if it was forged; never dial the host's own.
             // A multi-user server's own addresses are refused too, as the
@@ -30,6 +32,11 @@ extension MitmProxy {
                let reason = Self.destinationDenial(host: destIP, resolved: [ip], hostAddresses: blocksHostAddresses) {
                 SupplyChainLog.shared.record(
                     "[firewall] ✗ deny tcp \(destIP):\(destPort) — \(reason) (\(profileID.uuidString.prefix(8)))")
+                close(appFD); return
+            }
+            // Nothing from the guest within 5 s (or it closed first): no
+            // decision to make and nothing to splice, so no host connect.
+            guard Self.waitForData(appFD, timeoutMs: Self.firstByteTimeoutMs) else {
                 close(appFD); return
             }
             let identity: OpenShellPolicy.BinaryIdentity? = nil
@@ -190,6 +197,18 @@ extension MitmProxy {
             close(appFD); return
         }
         splice(ch, to: [ip], port: destPort, pending: ByteBuffer())
+    }
+
+    /// How long a diverted flow may stay silent before it's closed.
+    nonisolated(unsafe) static var firstByteTimeoutMs: Int32 = 5000
+
+    /// Whether `fd` has a byte to read within `timeoutMs` (not an EOF).
+    // @port-skip linux-only: the transparent entry's first-byte wait (macOS peeks without one)
+    static func waitForData(_ fd: Int32, timeoutMs: Int32) -> Bool {
+        var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, timeoutMs) > 0 else { return false }
+        var b: UInt8 = 0
+        return recv(fd, &b, 1, Int32(MSG_PEEK)) == 1
     }
 
     /// The HTTP request's host, peeked (not consumed): an absolute-form
