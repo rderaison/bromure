@@ -92,11 +92,12 @@ final class MitmProxy: @unchecked Sendable {
     private let upstreamContext: NIOSSLContext
     /// Tests: every upstream connection goes here instead (SNI kept), trusting `extraRoots`.
     var routeAllTo: (host: String, port: Int)?
-    /// An e2e run (BROMURE_AC_E2E=1) without its test upstream: every
-    /// upstream is refused, never dialed. Its guests' requests (and the
-    /// credentials swapped into them) must reach only the local stand-in, so
-    /// a build that lost the test route (a release build has none) fails
-    /// closed instead of falling back to the real hosts.
+    /// An e2e run (BROMURE_AC_E2E=1): every upstream goes to the test
+    /// upstream (`routeAllTo`) or is refused, never dialed; a splice goes to
+    /// the test host only. Its guests' requests (and the credentials swapped
+    /// into them) must reach only the local stand-in, so a build that lost
+    /// the test route (a release build has none), or a route that doesn't
+    /// parse, fails closed instead of falling back to the real hosts.
     var refusesRealUpstreams = false
     /// A multi-user server: the host's own addresses are refused too
     /// (ProxyDestination.swift), as the switch refuses them.
@@ -361,6 +362,11 @@ final class MitmProxy: @unchecked Sendable {
         return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
                 return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop)
+            }
+            if refusesRealUpstreams {
+                FileHandle.standardError.write(Data("[mitm] ✗ e2e mode: the test upstream isn't usable: refused \(host):\(port)\n".utf8))
+                return loop.makeFailedFuture(ProxyDestinationDenied(
+                    host: host, port: port, reason: "e2e mode: the test upstream isn't usable, so no real host is dialed"))
             }
             let addrs = resolved.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
             return dial(host: host, to: addrs, tls: routed.tls, ctx: ctx, on: loop)

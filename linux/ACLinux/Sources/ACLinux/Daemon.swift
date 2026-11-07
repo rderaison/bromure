@@ -248,11 +248,13 @@ public actor Daemon {
                                  extraRoots: Self.testUpstreamRoots())
             mitm?.blocksHostAddresses = config.multiUser
             mitm?.routeAllTo = Self.testUpstream()
-            // An e2e run marks itself; without its test upstream it reaches
-            // no real host (any build: a release build has no test route).
-            if ProcessInfo.processInfo.environment["BROMURE_AC_E2E"] == "1", mitm?.routeAllTo == nil {
+            // An e2e run marks itself: it reaches its test upstream or no
+            // host at all (any build: a release build has no test route).
+            if ProcessInfo.processInfo.environment["BROMURE_AC_E2E"] == "1" {
                 mitm?.refusesRealUpstreams = true
-                FileHandle.standardError.write(Data("bromure-ac daemon: e2e mode with no test upstream: every upstream is refused\n".utf8))
+                if mitm?.routeAllTo == nil {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: e2e mode with no test upstream: every upstream is refused\n".utf8))
+                }
             }
         } catch {
             mitm = nil

@@ -295,6 +295,33 @@ struct E2eUpstreamGuardTests {
         usleep(300_000)
         #expect(target.accepted.withLockedValue { $0 } >= 1, "spliced to the address the guest chose")
     }
+
+    /// With a test route that can't be used (a name that doesn't resolve),
+    /// a request isn't dialed to the real host instead; and a splice goes to
+    /// the test host only.
+    @Test func aRouteThatFailsFallsBackToNothing() throws {
+        let ip = try #require(Daemon.primaryIPv4())
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let target = try CountingListener(host: ip); defer { target.stop() }
+        proxy.refusesRealUpstreams = true
+        proxy.routeAllTo = ("no-such-test-upstream.invalid", 1)
+        let pid = UUID()
+        let l = try proxy.serve(udsPath: dir + "/vm.sock", profileID: pid, fdStoreName: "e2eg2-\(pid)")
+        defer { l.stop() }
+        let out = try RawProxyClient.exchange(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                              "GET http://\(ip):\(target.port)/ HTTP/1.1\r\nHost: \(ip):\(target.port)\r\n\r\n")
+        #expect(out.hasPrefix("HTTP/1.1 403") && out.contains("e2e mode"), "\(out)")
+        // A splice to an address that isn't the test host's: none.
+        proxy.routeAllTo = ("127.0.0.1", 1)
+        let (guest, app) = try GuestEnd.pair()
+        GuestEnd.send(guest, "not tls, not http\r\n")
+        proxy.acceptTransparentFlow(appFD: app, profileID: pid, destIP: ip, destPort: target.port)
+        #expect(GuestEnd.readAll(guest) == "")
+        close(guest)
+        usleep(300_000)
+        #expect(target.accepted.withLockedValue { $0 } == 0, "no host connect")
+    }
 }
 
 /// A TCP echo server: what a connection sends comes straight back.
