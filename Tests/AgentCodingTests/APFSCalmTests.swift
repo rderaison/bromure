@@ -167,6 +167,45 @@ struct APFSCalmTests {
         #expect(left == ["ip.txt", "tabs.txt", "ports.txt"])
     }
 
+    /// The finding (CWE-367): a relaunch cancelled the poll task, but a tick
+    /// already queued on the outbox's queue still ran: it removed one-shot
+    /// files the new guest wrote (reboot-intent, a URL to open, the home's
+    /// migration mark), and its events were applied anyway, to the outgoing
+    /// sandbox, whose callbacks reach the workspace's new session.
+    @Test("a cancelled scanner's tick, queued or not, consumes nothing; a cancelled poll applies nothing")
+    func cancelledScannerConsumesNothing() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        func put(_ name: String) throws { try "x".write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        try put("reboot-intent"); try put("url-1.txt")
+        // Cancelled before it ticks.
+        let old = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        old.cancel()
+        #expect(await old.tick().isEmpty)
+        // Queued behind a stalled tick, then cancelled before its turn.
+        let stalled = DispatchSemaphore(value: 0)
+        let q = UbuntuSandboxVM.OutboxScanner.queue(for: dir)
+        q.async { stalled.wait() }
+        let queuedScanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        async let queued = queuedScanner.tick()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        queuedScanner.cancel()
+        stalled.signal()
+        #expect(await queued.isEmpty)
+        // The next guest's one-shots are still there, for the new scanner.
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        #expect(left.isSuperset(of: ["reboot-intent", "url-1.txt"]))
+        let fresh = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        #expect(!(await fresh.tick()).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("reboot-intent").path))
+        // The poll: a tick that finished after the cancel isn't applied, and
+        // every stop goes through the one that cancels the scanner too.
+        let src = try source("Sources/AgentCoding/UbuntuSandboxVM.swift")
+        let poll = try body(of: "private func startOutboxPolling() {", in: src)
+        #expect(poll.contains("guard !Task.isCancelled, !scanner.isCancelled, let self else { return }"))
+        #expect(src.components(separatedBy: "outboxPollTask?.cancel()").count - 1 == 1)   // only in cancelOutboxPoll
+        #expect(src.components(separatedBy: "cancelOutboxPoll()").count - 1 >= 6)
+    }
+
     @Test("two scanners of one outbox share a queue, so a relaunch's waits behind the old tick")
     func scannersShareAQueue() throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
