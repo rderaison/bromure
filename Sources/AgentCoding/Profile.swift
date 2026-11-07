@@ -1708,6 +1708,24 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         !networkPolicy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether anything restricts the workspace's traffic: its OpenShell
+    /// policy, the organization boundary (which puts every workspace under
+    /// OpenShell), or a Bromure Firewall ruleset that restricts something.
+    /// What the Sandbox drawer (the shield) is for -- not only OpenShell:
+    /// the firewall blocks too, and the drawer allows them (Finding:
+    /// "Sandbox shield disappears for workspaces using the Bromure
+    /// Firewall").
+    public var restrictsEgress: Bool {
+        if usesOpenShellPolicy { return true }
+        #if canImport(SandboxEngine)
+        if OpenShellGovernance.shared.boundaryYAML != nil { return true }
+        let rules = egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !rules.isEmpty && ((try? EgressPolicy.parse(rules))?.isActive ?? false)
+        #else
+        return !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        #endif
+    }
+
     /// "Log allowed connections" (Firewall pane): whether the Security
     /// Timeline gets a row for connections the firewall lets through, not just
     /// the blocked ones. nil = automatic — logged while the workspace has

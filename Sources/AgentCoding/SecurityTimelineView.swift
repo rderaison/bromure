@@ -35,11 +35,10 @@ extension SecurityPosture {
     @MainActor init(profile p: Profile) {
         var credentialsOnly = p
         credentialsOnly.egressRules = ""
-        let ruleset = p.egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
-        // An OpenShell policy denies by default: that's a firewall too.
+        // An OpenShell policy denies by default: that's a firewall too; so is
+        // the organization boundary, which applies to a workspace without one.
         self.init(id: p.id, name: p.name, colorHex: p.color.hexInUI,
-                  firewall: p.usesOpenShellPolicy
-                      || (!ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false)),
+                  firewall: p.restrictsEgress,
                   supplyChain: p.supplyChain.isActive,
                   guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
                   promptInjection: p.promptInjection.isActive,

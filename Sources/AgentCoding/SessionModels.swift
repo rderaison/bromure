@@ -432,8 +432,10 @@ final class SessionListModel {
     var filePaneOpen = false
     /// True while the Sandbox drawer (blocked connections, proposals) is open.
     var policyDrawerOpen = false
-    /// Workspaces known to run without an OpenShell sandbox: no shield, no
-    /// drawer. Unknown (a fat client's older host) isn't in it.
+    /// Workspaces known to run with nothing restricting their traffic (no
+    /// OpenShell policy, no organization boundary, no Bromure Firewall rule
+    /// that restricts): no shield, no drawer. Unknown (a fat client's older
+    /// host) isn't in it.
     var unsandboxedProfileIDs: Set<Profile.ID> = []
     /// The Sandbox drawer can show this workspace.
     func hasSandboxDrawer(_ id: Profile.ID?) -> Bool {

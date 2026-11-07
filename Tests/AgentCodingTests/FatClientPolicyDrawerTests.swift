@@ -176,8 +176,8 @@ struct FatClientPolicyDrawerTests {
         #expect(list.hasSandboxDrawer(boxed))
         #expect(!list.hasSandboxDrawer(nil))
         let ac = try src("Sources/AgentCoding/BromureAC.swift")
-        #expect(ac.contains("\"sandboxed\": p.usesOpenShellPolicy,"))
-        #expect(ac.contains("profiles.filter { !$0.usesOpenShellPolicy }"))
+        #expect(ac.contains("\"sandboxed\": p.restrictsEgress,"))
+        #expect(ac.contains("profiles.filter { !$0.restrictsEgress }"))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("if (w[\"sandboxed\"] as? Bool) == false { unsandboxed.insert(id) }"))
         #expect(fc.contains("guard list.policyDrawerOpen || list.hasSandboxDrawer(list.stageProfileID) else { return }"))
@@ -186,5 +186,31 @@ struct FatClientPolicyDrawerTests {
         let drawer = try src("Sources/AgentCoding/PolicyDrawer.swift")
         #expect(drawer.contains("if list.hasSandboxDrawer(profileID) { button }"))
         #expect(drawer.contains(".onChange(of: list.unsandboxedProfileIDs) { _, _ in closeIfUnsandboxed() }"))
+    }
+
+
+    /// Finding: "Sandbox shield disappears for workspaces using the Bromure
+    /// Firewall". The shield was hidden for every workspace without an
+    /// OpenShell policy -- but the Bromure Firewall blocks too, and the
+    /// drawer shows and allows its blocks; so does a workspace under the
+    /// organization boundary's policy. Only a workspace nothing restricts
+    /// has no shield.
+    @Test("the shield is there whenever something restricts the workspace's traffic")
+    @MainActor func shieldForAnyRestriction() {
+        func profile(_ rules: String = "", policy: String = "") -> bromure_ac.Profile {
+            var p = bromure_ac.Profile(name: "ws", tool: .claude, authMode: .token)
+            p.egressRules = rules
+            p.networkPolicy = policy
+            return p
+        }
+        #expect(profile(policy: "version: 1\nnetwork_policies: {}\n").restrictsEgress)
+        #expect(profile("allow web github.com\ndefault deny").restrictsEgress)     // the Bromure Firewall
+        #expect(profile("deny tcp 203.0.113.9:443").restrictsEgress)
+        #expect(!profile().restrictsEgress)                                          // nothing at all
+        #expect(!profile("default allow").restrictsEgress)                           // rules that restrict nothing
+        #expect(!profile("this is not a ruleset ((").restrictsEgress)                // never blocks (allow-all)
+        // The Overview's Firewall column says the same.
+        #expect(SecurityPosture(profile: profile("allow web github.com\ndefault deny")).firewall)
+        #expect(!SecurityPosture(profile: profile()).firewall)
     }
 }
