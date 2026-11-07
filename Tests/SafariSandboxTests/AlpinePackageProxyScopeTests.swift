@@ -23,7 +23,9 @@ struct AlpinePackageProxyScopeTests {
 
     // MARK: End to end, on loopback
 
-    private func dial(_ port: UInt16) -> Int32 {
+    /// `wait`: how long a read may take. The proxy accepts on a utility-QoS
+    /// queue, which the full suite in parallel can starve for seconds.
+    private func dial(_ port: UInt16, wait: Int = 5) -> Int32 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -36,7 +38,7 @@ struct AlpinePackageProxyScopeTests {
             }
         }
         #expect(rc == 0)
-        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        var tv = timeval(tv_sec: wait, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         return fd
     }
@@ -47,7 +49,7 @@ struct AlpinePackageProxyScopeTests {
         // Loopback stands in for the guest subnet: 127.0.0.1 is a peer of 127.0.0.2.
         try proxy.start(guestGateway: "127.0.0.2")
         defer { proxy.stop() }
-        let fd = dial(proxy.port)
+        let fd = dial(proxy.port, wait: 30)
         defer { close(fd) }
         // Answered (not dropped): a bad request gets its 400.
         #expect(exchange(fd, "BOGUS\r\n\r\n").hasPrefix("HTTP/1.1 400"))
