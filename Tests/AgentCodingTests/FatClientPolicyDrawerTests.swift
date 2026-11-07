@@ -206,11 +206,16 @@ struct FatClientPolicyDrawerTests {
         #expect(profile(policy: "version: 1\nnetwork_policies: {}\n").restrictsEgress)
         #expect(profile("allow web github.com\ndefault deny").restrictsEgress)     // the Bromure Firewall
         #expect(profile("deny tcp 203.0.113.9:443").restrictsEgress)
+        #expect(SecurityPosture(profile: profile("allow web github.com\ndefault deny")).firewall)
+        if OpenShellGovernance.shared.boundaryYAML != nil {
+            // An organization boundary on this Mac restricts every workspace.
+            #expect(profile().restrictsEgress && SecurityPosture(profile: profile()).firewall)
+            return
+        }
         #expect(!profile().restrictsEgress)                                          // nothing at all
         #expect(!profile("default allow").restrictsEgress)                           // rules that restrict nothing
         #expect(!profile("this is not a ruleset ((").restrictsEgress)                // never blocks (allow-all)
         // The Overview's Firewall column says the same.
-        #expect(SecurityPosture(profile: profile("allow web github.com\ndefault deny")).firewall)
         #expect(!SecurityPosture(profile: profile()).firewall)
     }
 }
