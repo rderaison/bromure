@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import bromure_ac
+import SandboxEngine
 
 /// Board report: the Sandbox drawer (the toolbar's shield: OpenShell's
 /// blocks, file denials and the advisor's proposals) showed only in this
@@ -81,7 +82,7 @@ struct FatClientPolicyDrawerTests {
     @Test("wired: the fat client's toolbar and window, the host's routes, a drawer with no local reach")
     func wired() throws {
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }"))
+        #expect(fc.contains("PolicyDrawerButton(list: model, profileID: entry.id, machine: controller.securityMirrorKey)"))
         #expect(fc.contains("onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer() },"))
         #expect(fc.contains("backend: policyBackend)"))
         let server = try src("Sources/AgentCoding/AutomationServer.swift")
@@ -92,5 +93,48 @@ struct FatClientPolicyDrawerTests {
         #expect(!body.contains("OpenShellAdvisor.shared."))
         #expect(!body.contains("delegate?."))
         #expect(body.contains("e.machine == backend.machine"))
+    }
+
+    /// Review: the Blocked tab and the shield's badge took only this Mac's
+    /// events, so a fat client's showed nothing of the host's.
+    @MainActor
+    @Test("blocks and the badge count the machine the drawer is for")
+    func blocksPerMachine() {
+        let pid = UUID()
+        func block(_ machine: String?, host: String) -> SecurityTimeline.Event {
+            var e = SecurityTimeline.Event(time: Date(), engine: "Firewall", condition: "c", decision: "d",
+                                           kind: .blocked, profileID: pid, machine: machine)
+            e.firewall = SecurityTimeline.Firewall(wire: ["host": host, "port": 443, "denied": true, "byPolicy": true])
+            return e
+        }
+        let events = [block(nil, host: "local.test"), block("Mac Studio", host: "host.test")]
+        let since = Date().addingTimeInterval(-60)
+        #expect(PolicyDrawer.blockedRows(events, profileID: pid, since: since).map(\.host) == ["local.test"])
+        #expect(PolicyDrawer.blockedRows(events, profileID: pid, since: since, machine: "Mac Studio").map(\.host) == ["host.test"])
+        let fc = (try? src("Sources/AgentCoding/FatClientController.swift")) ?? ""
+        #expect(fc.contains("PolicyDrawerButton(list: model, profileID: entry.id, machine: controller.securityMirrorKey)"))
+        let drawer = (try? src("Sources/AgentCoding/PolicyDrawer.swift")) ?? ""
+        #expect(drawer.contains("e.profileID == profileID, e.machine == machine, let fw = e.firewall"))
+        #expect(drawer.contains("machine: backend.machine)"))
+    }
+
+    /// Review: the path went into the policy's YAML raw -- a comma split it
+    /// into two list items, `#` started a comment. The drawer's route is a
+    /// second writer of that helper.
+    @Test("a path with YAML-significant characters reads back as itself")
+    func yamlPaths() throws {
+        let base = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n  read_write: [/tmp]\n"
+        for path in ["/opt/a,b", "/data/#notes", "/srv/x: y", "/opt/plain-tool"] {
+            let out = try OpenShellPolicy.addingFilesystemPath(path, readWrite: false, to: base)
+            let fs = try #require(try OpenShellPolicy.parse(out).filesystem)
+            #expect(fs.readOnly.contains(path), "\(path) → \(fs.readOnly)")
+            #expect(fs.readOnly.contains("/usr"))
+        }
+        #expect(try OpenShellPolicy.addingFilesystemPath("/opt/plain-tool", readWrite: false, to: base)
+            .contains("[/usr, /opt/plain-tool]"))
+        // A block list too.
+        let block = "version: 1\nfilesystem_policy:\n  read_write:\n    - /tmp\n"
+        let out = try OpenShellPolicy.addingFilesystemPath("/home/u/a,b", readWrite: true, to: block)
+        #expect(try #require(try OpenShellPolicy.parse(out).filesystem).readWrite.contains("/home/u/a,b"))
     }
 }

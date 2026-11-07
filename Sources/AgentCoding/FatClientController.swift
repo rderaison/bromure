@@ -3280,7 +3280,9 @@ struct RemoteToolbarBar: View {
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
-                PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
+                PolicyDrawerButton(list: model, profileID: entry.id, machine: controller.securityMirrorKey) {
+                    onTogglePolicyDrawer()
+                }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",

@@ -189,7 +189,8 @@ struct PolicyDrawer: View {
     /// The workspace's distinct blocked destinations from the last two
     /// hours, newest first.
     private func blocked(_ profile: Profile) -> [Blocked] {
-        Self.blockedRows(timeline.allEvents, profileID: profile.id, since: now.addingTimeInterval(-2 * 3600))
+        Self.blockedRows(timeline.allEvents, profileID: profile.id, since: now.addingTimeInterval(-2 * 3600),
+                         machine: backend.machine)
             .filter { !dismissed.contains($0.key) }
     }
 
@@ -200,9 +201,11 @@ struct PolicyDrawer: View {
         "\(host.lowercased()):\(port)" + (exe.map { "|" + $0 } ?? "")
     }
 
-    static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date) -> [Blocked] {
+    /// `machine`: whose events (nil = this Mac's, else a fat client's host's).
+    static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date,
+                            machine: String? = nil) -> [Blocked] {
         var byKey: [String: Blocked] = [:]
-        for e in events where e.profileID == profileID && e.machine == nil && e.time > cutoff {
+        for e in events where e.profileID == profileID && e.machine == machine && e.time > cutoff {
             guard let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port, port > 0 else { continue }
             let key = rowKey(host: host, port: port, exe: fw.exe)
@@ -663,12 +666,12 @@ struct PolicyDrawer: View {
 
     /// Distinct rows (destination and program) blocked since the drawer was last seen (the
     /// toolbar badge).
-    @MainActor static func unseenCount(profileID: UUID, list: SessionListModel) -> Int {
+    @MainActor static func unseenCount(profileID: UUID, list: SessionListModel, machine: String? = nil) -> Int {
         let since = list.policyDrawerSeen[profileID] ?? Date().addingTimeInterval(-2 * 3600)
         var keys = Set<String>()
         for e in SecurityTimeline.shared.allEvents.reversed() {
             if e.time <= since { break }
-            guard e.profileID == profileID, e.machine == nil, let fw = e.firewall, fw.denied, fw.byPolicy,
+            guard e.profileID == profileID, e.machine == machine, let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port else { continue }
             keys.insert(rowKey(host: host, port: port, exe: fw.exe))
         }
@@ -715,11 +718,13 @@ private struct DrawerSurface: ViewModifier {
 struct PolicyDrawerButton: View {
     @Bindable var list: SessionListModel
     let profileID: UUID
+    /// Whose blocks it counts (nil = this Mac's, else a fat client's host's).
+    var machine: String? = nil
     let action: () -> Void
 
     var body: some View {
         let _ = SecurityTimeline.shared.allEvents.count
-        let n = list.policyDrawerOpen ? 0 : PolicyDrawer.unseenCount(profileID: profileID, list: list)
+        let n = list.policyDrawerOpen ? 0 : PolicyDrawer.unseenCount(profileID: profileID, list: list, machine: machine)
         HeaderIcon(system: "shield.lefthalf.filled",
                    help: NSLocalizedString("Sandbox: what it blocked, ready to allow (⌃⌘N)", comment: "toolbar"),
                    active: list.policyDrawerOpen, action: action)
