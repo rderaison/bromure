@@ -695,9 +695,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     private var buf = ByteBuffer()
     private var started = false
     /// After the request went upstream: the guest's further bytes (a
-    /// WebSocket's frames) go to the upstream channel.
+    /// WebSocket's frames) go to the upstream channel, once its reply
+    /// switched protocols (`upgraded`).
     private var upstream: Channel?
     private var pending: [ByteBuffer] = []
+    private var pendingBytes = 0
+    /// One request per connection (each is checked, swapped and decided
+    /// alone): past the first, the guest's bytes go upstream only for an
+    /// upgrade the upstream accepted (101). Until it answers they're held,
+    /// up to `maxHeld`; a request pipelined behind a plain one is dropped
+    /// (the guest gets its reply and the close, and asks again).
+    private var awaitingUpgrade = false
+    private var upgraded = false
+    static let maxHeld = 1 << 20
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
@@ -714,7 +724,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
         if started {
-            if let upstream { upstream.writeAndFlush(b, promise: nil) } else { pending.append(b) }
+            if upgraded, let upstream { upstream.writeAndFlush(b, promise: nil); return }
+            guard awaitingUpgrade || upstream == nil else { return }   // behind a plain request: dropped
+            pendingBytes += b.readableBytes
+            guard pendingBytes <= Self.maxHeld else { context.close(promise: nil); return }
+            pending.append(b)
             return
         }
         buf.writeBuffer(&b)
@@ -725,7 +739,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             reply(context, Self.simple(400, "Bad Request"))
         case .complete(let request, let extra):
             started = true
-            if !extra.isEmpty { pending.append(context.channel.allocator.buffer(bytes: extra)) }
+            if !extra.isEmpty {
+                pending.append(context.channel.allocator.buffer(bytes: extra))
+                pendingBytes += extra.count
+            }
             let loop = context.eventLoop
             let channel = context.channel
             let (proxy, pid, host, port, tls) = (self.proxy, profileID, self.host, self.port, self.tls)
@@ -899,12 +916,27 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
                                               capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
                                               mint: mint.map { (self.proxy.credentialMinter, $0) })
+                    // The upgrade's held bytes follow the 101; anything else's are dropped.
+                    relay.onSwitched = { switched in
+                        channel.eventLoop.execute {
+                            self.awaitingUpgrade = false
+                            if switched {
+                                self.upgraded = true
+                                for p in self.pending { up.write(p, promise: nil) }
+                                up.flush()
+                            }
+                            self.pending.removeAll()
+                            self.pendingBytes = 0
+                        }
+                    }
                     up.pipeline.addHandler(relay).whenComplete { _ in
                         self.upstream = up
-                        up.write(up.allocator.buffer(bytes: req), promise: nil)
-                        for p in self.pending { up.write(p, promise: nil) }
-                        self.pending.removeAll()
-                        up.flush()
+                        self.awaitingUpgrade = upgrade
+                        up.writeAndFlush(up.allocator.buffer(bytes: req), promise: nil)
+                        if !upgrade {
+                            self.pending.removeAll()
+                            self.pendingBytes = 0
+                        }
                     }
                 }
             }
@@ -992,6 +1024,10 @@ final class ResponseRelay: ChannelInboundHandler {
     let trace: RequestReader.Trace?
     private var head = ByteBuffer()
     private var headDone = false
+    /// An upgrade's reply: told whether it switched protocols (a 101),
+    /// once its status line is in.
+    var onSwitched: ((Bool) -> Void)?
+    private var statusLine = Data()
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1047,6 +1083,14 @@ final class ResponseRelay: ChannelInboundHandler {
             }
             whole.append(contentsOf: b.readableBytesView)
             return
+        }
+        if upgrade, let tell = onSwitched {
+            statusLine.append(contentsOf: b.readableBytesView.prefix(64 - statusLine.count))
+            if let eol = statusLine.firstIndex(of: 0x0D) ?? (statusLine.count >= 64 ? statusLine.endIndex : nil) {
+                let line = String(decoding: statusLine[statusLine.startIndex..<eol], as: UTF8.self)
+                onSwitched = nil
+                tell(line.split(separator: " ").dropFirst().first == "101")
+            }
         }
         if headDone || upgrade {
             headDone = true
