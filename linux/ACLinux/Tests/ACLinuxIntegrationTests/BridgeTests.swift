@@ -288,7 +288,7 @@ struct StallTests {
         return Double(r.output.split(separator: " ").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
     }
 
-    @Test("a VM that stops draining doesn't slow another VM by more than ~10%, and passt's reader never pauses")
+    @Test("a VM that stops draining doesn't hold another VM: its queue stays bounded, the other loses nothing, passt's reader never pauses")
     func stalledPort() async throws {
         let dir = "/tmp/acl-st-\(UUID().uuidString.prefix(8))"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -364,28 +364,25 @@ struct StallTests {
         let droppedBefore = sw.portStats(mac: macB)?.dropped ?? 0
         var during: [Double] = []
         for _ in 0..<samples { during.append(try await upload(a, lan, base, mib: mib)) }
-        // Compared on the lower quartile (below). The host's scheduling still
-        // puts a whole round in the slow mode now and then: one miss is
-        // measured again, B still paused, and the retry decides (the 10%
-        // bound stays). A real slowdown from the paused VM misses both.
         func q1(_ xs: [Double]) -> Double { let v = xs.filter { $0 > 0 }.sorted(); return v.isEmpty ? 0 : v[v.count / 4] }
-        if q1(during) < q1(alone) * 0.9 {
-            print("STALL first round with B paused: \(during) MB/s, lower quartile \(q1(during)) < 90% of \(q1(alone)): measured again")
-            during = []
-            for _ in 0..<samples { during.append(try await upload(a, lan, base, mib: mib)) }
-        }
         let stalled = median(during)
         let droppedAfter = sw.portStats(mac: macB)?.dropped ?? 0
         let statsB = sw.portStats(mac: macB)
         try await b.vm.resume()
         print("STALL A alone: median \(baseline) of \(alone) MB/s; with B paused: median \(stalled) of \(during) MB/s (\(String(format: "%.0f", stalled / baseline * 100))%); "
               + "B's port: dropped \(droppedBefore) -> \(droppedAfter), queued \(statsB?.queued ?? -1); A's port dropped \(sw.portStats(mac: macA)?.dropped ?? -1)")
-        // Compared on the lower quartile: in the release build A's transfers are
-        // bimodal (~170-190 or ~400-1400 MB/s, host scheduling), so a median
-        // lands in either mode run to run; the slow mode is stable, and a real
-        // slowdown from the paused VM would move it too.
+        // The property, checked directly: B's port holds at most its queue
+        // while B is paused (its frames past that are its own drops), A's
+        // port loses nothing, and passt's reader never pauses (below). A's
+        // throughput is reported, not compared at 10%: its transfers are
+        // bimodal under host scheduling (~170-190 or ~400-1400 MB/s; a 90%
+        // ratio on the lower quartile failed 2 of 3 daily CI runs on
+        // 2026-11-07 with no regression). Only a gross slowdown, which is
+        // what a held reader looks like, fails it.
         print("STALL A lower quartile: alone \(q1(alone)), with B paused \(q1(during)) MB/s (\(String(format: "%.0f", q1(during) / max(q1(alone), 1) * 100))%)")
-        #expect(q1(during) >= q1(alone) * 0.9, "A slowed to \(q1(during)) from \(q1(alone)) MB/s (lower quartile)")
+        #expect((statsB?.queued ?? Int.max) <= FramePortCore.defaultQueueFrames, "B's queue stayed within its limit: \(statsB?.queued ?? -1)")
+        #expect((sw.portStats(mac: macA)?.dropped ?? 1) == 0, "A's port lost nothing while B was paused")
+        #expect(q1(during) >= q1(alone) * 0.5, "A slowed to \(q1(during)) from \(q1(alone)) MB/s (lower quartile): held by the paused VM")
         print("STALL B's port while paused: dropped \(droppedBefore) -> \(droppedAfter) (not asserted, see above)")
         #expect(during.allSatisfy { $0 > 0 } && alone.allSatisfy { $0 > 0 }, "a transfer of A stalled")
         // The regression for the passt stall: passt's reader never paused
