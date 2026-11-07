@@ -27,8 +27,8 @@ Deliberate differences from OpenShell, each argued in DESIGN.md:
   * `allow_inet` is pinned true. OpenShell derives it from `network_policies`,
     which is not one of the three sections this work covers, and Bromure's
     egress control is the host MITM proxy plus attestd, not a socket-domain ban.
-  * `allow_vsock` is pinned true (for now): the main filter doesn't ban
-    AF_VSOCK. Bromure's in-guest helpers the agent starts (its MCP servers,
+  * `allow_vsock` is pinned true by bromure-sandboxd (for now): the main
+    filter it installs doesn't ban AF_VSOCK. Bromure's in-guest helpers the agent starts (its MCP servers,
     the Claude/Codex token agents, the plan driver, the VM bridge) reach the
     host over vsock, and with the ban none of them worked under the strict
     sandbox. Temporary: the plan (5.4.3) is to bridge them through agentd,
@@ -929,8 +929,9 @@ def build_main_filter_rules(allow_inet=True, allow_vsock=False):
     Default-allow with targeted blocks. `allow_inet` is pinned true by
     `apply_seccomp` (see module docstring); the parameter exists so the
     differential harness can exercise both arms. `allow_vsock` defaults to
-    OpenShell's ban, which is what the harness compares against; the sandbox
-    itself pins it true (see module docstring).
+    OpenShell's ban here and in `apply_seccomp`/`enforce`, which is what the
+    harness and the guest tests compare against; only bromure-sandboxd passes
+    it true (see module docstring).
     """
     rules = {}
 
@@ -1088,7 +1089,7 @@ ENOSYS_ACTION = SECCOMP_RET_ERRNO | errno.ENOSYS
 
 
 def apply_seccomp(supervisor_tgid=None, supervisor_pgid=None, allow_inet=True,
-                  child_hardening=True, allow_vsock=True):
+                  child_hardening=True, allow_vsock=False):
     """sandbox-linux/mod.rs::enforce_capability_free, filter half.
 
     Order is mandatory and is OpenShell's:
@@ -1397,7 +1398,7 @@ def drop_to_user(uid, gid, groups):
 
 
 def enforce(prepared, outcome, supervisor_tgid, supervisor_pgid=None,
-            child_hardening=True, allow_inet=True, allow_vsock=True):
+            child_hardening=True, allow_inet=True, allow_vsock=False):
     """sandbox-linux/mod.rs::enforce_capability_free, with nnp made explicit.
 
     OpenShell reaches `restrict_self` with `no_new_privs` already set, because

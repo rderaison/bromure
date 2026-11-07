@@ -406,7 +406,9 @@ check "seccomp" "$(status_field seccomp)" "enforced"
 check "run_as uid" "$(python3 -c "
 import json;print(json.load(open('$WORK/run/status.json'))['run_as']['uid'])")" "$(id -u)"
 
-probe_pane "AF_VSOCK is blocked in a pane" "EPERM" <<'PROBE'
+# Temporarily allowed (DESIGN.md §1.9, item 6): Bromure's helpers reach the
+# host over vsock. 5.4.3 bridges them through agentd and restores "EPERM".
+probe_pane "AF_VSOCK is allowed in a pane (until 5.4.3)" "ALLOWED" <<'PROBE'
 python3 -c '
 import socket, errno
 try:

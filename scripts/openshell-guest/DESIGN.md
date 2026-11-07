@@ -606,7 +606,11 @@ the point of divergence in the source.
    under the strict sandbox none of them worked: no Bromure MCP tools, no
    token-mode sign-in. The ban is lifted for now. The cost: a sandboxed process
    can open a vsock to any port the host listens on, i.e. to Bromure's host
-   services directly. The plan (5.4.3) is to bridge those helpers through
+   services directly. Those accept any guest connection: the exec pool (5800)
+   in particular hands a host `vm exec` to whichever connection it dequeues, so
+   a sandboxed process can take one meant for agentd -- read the command, and
+   answer it. File transfer, the credential and attestor listeners take any
+   connection the same way. The plan (5.4.3) is to bridge those helpers through
    agentd, outside the sandbox, with a per-port allowlist, and restore the
    ban. `build_main_filter_rules` still defaults to the ban, which is what
    `differential/` compares.

@@ -26,11 +26,15 @@ struct StrictSandboxVsockTests {
         #expect(osh.contains("def build_main_filter_rules(allow_inet=True, allow_vsock=False):"))
         #expect(osh.contains("blocked_domains = [AF_PACKET, AF_BLUETOOTH]\n    if not allow_vsock:\n        blocked_domains.append(AF_VSOCK)"))
         #expect(!osh.contains("blocked_domains = [AF_PACKET, AF_BLUETOOTH, AF_VSOCK]"))
-        // What the sandbox installs: vsock allowed, all the way down.
-        #expect(osh.contains("child_hardening=True, allow_vsock=True):"))
+        // apply_seccomp and enforce keep the ban by default too (the
+        // differential harness and the guest tests call them without it);
+        // they pass it down.
+        #expect(osh.contains("child_hardening=True, allow_vsock=False):"))
         #expect(osh.contains("build_main_filter_rules(allow_inet, allow_vsock)"))
-        #expect(osh.contains("child_hardening=True, allow_inet=True, allow_vsock=True):"))
+        #expect(osh.contains("child_hardening=True, allow_inet=True, allow_vsock=False):"))
         #expect(osh.contains("allow_vsock=allow_vsock)"))
+        #expect(!osh.contains("allow_vsock=True):"))
+        // Only the sandbox lifts it.
         let sandboxd = try source("bromure-sandboxd")
         let call = try #require(sandboxd.range(of: "osh.enforce(prepared, outcome, supervisor_tgid=tgid,"))
         #expect(sandboxd[call.upperBound...].prefix(400).contains("allow_vsock=True)"))
