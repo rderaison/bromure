@@ -55,6 +55,70 @@ struct NetworkLineageTests {
         #expect(row.decision == "passed (not filtered)")
     }
 
+    /// Board report: when the agent fetched a page with its own built-in tool
+    /// (Claude's WebFetch, omp's fetch...), lineage showed the flow with no
+    /// reasoning -- no process was spawned for the exec match to link. A flow
+    /// from the agent's own process goes to that agent's recent call naming
+    /// the host; its API traffic, naming no call's host, links to nothing.
+    @Test("an agent's own fetch is tied to the call that asked for it; its API traffic to none")
+    func agentsOwnFetch() async throws {
+        let sink = LineageSink(), l = store(sink), pid = UUID()
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 100, "comm": "claude", "path": "/usr/bin/node", "argv": "claude"])
+        // The hook's line (input as JSON, the agent's pid), then the AI
+        // proxy's, carrying the reasoning, under the same id.
+        l.noteToolCall(profileID: pid, id: "toolu_fetch", tool: "WebFetch",
+                       command: #"{"prompt":"summarize","url":"https://docs.example.org/guide/intro"}"#,
+                       reasoning: "", agentPid: 412, agent: "claude")
+        l.noteToolCall(profileID: pid, id: "toolu_fetch", tool: "WebFetch", command: nil,
+                       reasoning: "The user asked what the guide says; let me read it.")
+        // The fetch, from the agent itself (no child process).
+        l.noteDecision(profileID: pid, proto: "tcp", dst: "203.0.113.20", dport: 443, action: "allow", layer: "l4",
+                       host: "docs.example.org")
+        l.noteFlow(profileID: pid, ["pid": 412, "start_ns": 100, "proto": "tcp", "dst": "203.0.113.20", "dport": 443,
+                                    "sport": 40100, "comm": "claude"])
+        // Its model API, from the same process at the same time.
+        l.noteDecision(profileID: pid, proto: "tcp", dst: "203.0.113.30", dport: 443, action: "allow", layer: "l4",
+                       host: "api.anthropic.com")
+        l.noteFlow(profileID: pid, ["pid": 412, "start_ns": 100, "proto": "tcp", "dst": "203.0.113.30", "dport": 443,
+                                    "sport": 40101, "comm": "claude"])
+        await waitFor(sink, 2)
+        let fetch = try #require(sink.flows.first { Self.S($0["dst"]) == "203.0.113.20" })
+        guard case .object(let agent)? = fetch["agent"] else { Issue.record("the fetch has no agent link"); return }
+        #expect(Self.S(agent["tool_use_id"]) == "toolu_fetch" && Self.S(agent["confidence"]) == "likely")
+        #expect(l.toolCall(profileID: pid, id: "toolu_fetch")?.reasoning == "The user asked what the guide says; let me read it.")
+        let api = try #require(sink.flows.first { Self.S($0["dst"]) == "203.0.113.30" })
+        #expect(api["agent"] == nil)
+    }
+
+    @Test("the agent-fetch match: the agent's pid, the host named, a recent call, the newest")
+    func agentFetchMatch() {
+        let now = Date()
+        func call(_ id: String, _ cmd: String?, pid: Int? = 412, ago: TimeInterval = 5) -> NetworkLineage.ToolCall {
+            NetworkLineage.ToolCall(id: id, tool: "WebFetch", command: cmd, reasoning: "", at: now.addingTimeInterval(-ago),
+                                    agentPid: pid, agent: "claude")
+        }
+        typealias L = NetworkLineage
+        let url = #"{"url":"https://www.example.com/a"}"#
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url)], at: now)?.toolUseID == "a")
+        #expect(L.matchAgentFetch(host: "cdn.example.com", chainPids: [412], calls: [call("a", url)], at: now)?.toolUseID == "a")
+        #expect(L.matchAgentFetch(host: "example.com:443", chainPids: [412], calls: [call("a", url)], at: now) != nil)
+        // Not the agent's process, another host, too old, no input, no pid.
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [999], calls: [call("a", url)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "api.anthropic.com", chainPids: [412], calls: [call("a", url)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url, ago: 600)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", nil)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url, pid: nil)], at: now) == nil)
+        // A host a suffix only by letters, not by label, doesn't match.
+        #expect(L.matchAgentFetch(host: "notexample.com", chainPids: [412], calls: [call("a", url)], at: now) == nil)
+        // The newest of two matching calls.
+        let two = [call("old", url, ago: 60), call("new", url, ago: 3)]
+        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: two, at: now)?.toolUseID == "new")
+        // Hosts named: URLs anywhere in the input, and host-like fields.
+        #expect(L.hostsNamed(in: #"{"query":"see http://a.test:8080/x and https://user@B.test/?q"}"#) == ["a.test", "b.test"])
+        #expect(L.hostsNamed(in: #"{"domain":"Example.org."}"#) == ["example.org"])
+        #expect(L.hostsNamed(in: "plain words, no host").isEmpty)
+    }
+
     @Test("A TCP flow takes the switch's decision; an L7 deny for its hostname overrides an L4 allow")
     func decisions() async throws {
         let sink = LineageSink(), l = store(sink), pid = UUID()
