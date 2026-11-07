@@ -30,11 +30,11 @@ struct StopKeyTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let v = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
         let start = try #require(v.range(of: "    func interrupt() {"))
-        let body = v[start.upperBound...].prefix(1600)
+        let body = v[start.upperBound...].prefix(2600)
         #expect(body.contains("let key = Self.interruptKey(screen: await self.paneTail(), agent: kind)"))
         #expect(!body.contains(#"pressKeys(["Escape"])"#))
         let again = try #require(body.range(of: "if self.stoppedTurnStillCurrent(turn), Self.screenShowsBusy(await self.paneTail()),"))
-        #expect(body[again.upperBound...].prefix(260).contains("await self.provider.pressKeys([key])"))
+        #expect(body[again.upperBound...].prefix(400).contains("await self.provider.pressKeys([key])"))
         // omp's queue comes back on Esc only.
         #expect(body.contains(#"if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind)"#))
         let sb = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Switchboard.swift"), encoding: .utf8)
@@ -60,17 +60,31 @@ struct StopKeyTests {
         let v = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
         let start = try #require(v.range(of: "    func interrupt() {"))
         let body = v[start.upperBound...].prefix(2200)
-        let taken = try #require(body.range(of: "let turn = gate.turns"))
+        let taken = try #require(body.range(of: "let turn = StopTurn(gate: gate.turns,"))
         let task = try #require(body.range(of: "Task { [weak self] in"))
         #expect(taken.lowerBound < task.lowerBound, "the turn is taken when Stop is pressed, not later")
         #expect(body.contains("await self.reclaimAfterEscape(restoring, turn: turn)"))
-        let check = try #require(v.range(of: "private func stoppedTurnStillCurrent(_ turn: Int) -> Bool {"))
-        #expect(v[check.upperBound...].prefix(200).contains("gate.sameTurn(as: turn) && !sending"))
-        let reclaim = try #require(v.range(of: "private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: Int) async {"))
+        let check = try #require(v.range(of: "private func stoppedTurnStillCurrent(_ turn: StopTurn) -> Bool {"))
+        #expect(v[check.upperBound...].prefix(300).contains("guard gate.sameTurn(as: turn.gate), !sending else { return false }"))
+        #expect(v[check.upperBound...].prefix(400).contains("queueStartedTurn(queueStore.messages(queueKey), since: turn.delivered)"))
+        #expect(check.lowerBound < v.endIndex)
+        let reclaim = try #require(v.range(of: "private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: StopTurn) async {"))
         let rb = v[reclaim.upperBound...].prefix(2400)
         let guardAt = try #require(rb.range(of: "guard stoppedTurnStillCurrent(turn) else {"))
         let clear = try #require(rb.range(of: #"await runKeys(Array(repeating: ["C-u"]"#))
         #expect(guardAt.lowerBound < clear.lowerBound)
+        // Off stage, the store's drain types held messages without the gate:
+        // one delivered since the Stop (or being typed) is a new turn too.
+        typealias M = BeautifiedSessionModel
+        let old = QueuedMessage(text: "already in", held: false, editable: false, baseline: 0)
+        var delivered = old; delivered.delivered = true
+        var fresh = QueuedMessage(text: "typed since", held: true, editable: true, baseline: 0)
+        #expect(!M.queueStartedTurn([delivered, fresh], since: [delivered.id]))
+        fresh.delivered = true
+        #expect(M.queueStartedTurn([delivered, fresh], since: [delivered.id]))
+        var typing = QueuedMessage(text: "going in", held: true, editable: true, baseline: 0)
+        typing.sending = true
+        #expect(M.queueStartedTurn([typing], since: []))
         // Every turn start goes through userSent: the user's send and a held one.
         #expect(v.components(separatedBy: "gate.userSent()").count - 1 >= 2)
     }
