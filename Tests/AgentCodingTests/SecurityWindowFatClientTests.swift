@@ -34,7 +34,7 @@ struct SecurityWindowFatClientTests {
         #expect(body.contains("scope: securityWindowScope,"))
         // The mirror's bucket and the scope use the same key.
         let fc = try source("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains("SecurityTimeline.shared.applyMirror(rows, host: securityMirrorKey)"))
+        #expect(fc.contains("SecurityTimeline.shared.applyMirror(\n                rows, host: securityMirrorKey,"))
     }
 
     @MainActor

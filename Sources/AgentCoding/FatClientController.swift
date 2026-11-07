@@ -1083,7 +1083,9 @@ final class RemoteHostController {
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
         if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
-            SecurityTimeline.shared.applyMirror(rows, host: securityMirrorKey)
+            SecurityTimeline.shared.applyMirror(
+                rows, host: securityMirrorKey,
+                oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)))
         }
 #endif
         revision &+= 1

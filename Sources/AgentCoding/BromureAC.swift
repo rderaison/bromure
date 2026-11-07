@@ -6321,6 +6321,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }
+        server.onSecurityTimelineOldest = {
+            MainActor.assumeIsolated { SecurityTimeline.shared.oldestRetained?.timeIntervalSince1970 }
+        }
         server.onSecurityHistory = { hours in
             MainActor.assumeIsolated { SecurityTimeline.shared.historyRows(hours: hours) }
         }
