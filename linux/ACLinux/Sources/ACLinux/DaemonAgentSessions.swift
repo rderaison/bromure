@@ -53,6 +53,7 @@ extension Daemon {
                                          rootDirectory: URL(fileURLWithPath: state, isDirectory: true)
                                             .appendingPathComponent("kube", isDirectory: true))
             stores.kubeEngine = kube
+            Daemon.kubeEngineReady(kube)
             // The Switchboard (macOS: the app delegate's lazy switchboardEngine);
             // the user's phone and Slack (the messaging connector) talk to it.
             if let engine = stores.engine {

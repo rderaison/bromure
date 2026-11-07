@@ -863,6 +863,16 @@ final class RepairMarks: @unchecked Sendable {
 }
 
 extension Daemon {
+    /// The cluster engine is up: every known cluster's MetalLB range is kept
+    /// out of the DHCP at once. macOS reserves them once the switch is up,
+    /// when a cluster starts; a restarted daemon here takes its clusters'
+    /// nodes back running, so no start comes, and the range stayed open to
+    /// the next VM's lease until one did.
+    // @port-skip linux-only: the Linux daemon's moment for reserveKnownMetalLBRanges (its switch is up before the engine)
+    @MainActor static func kubeEngineReady(_ kube: KubeClusterEngine) {
+        kube.reserveKnownMetalLBRanges()
+    }
+
     /// A cluster node's port may answer for its cluster's allocated
     /// LoadBalancer range (InterimSwitch.speaksAsItself); a cluster with none
     /// allocated (yet, or any more), nothing.
