@@ -513,6 +513,15 @@ struct ProfileEditorView: View {
     /// (the Security Overview's "turn on" cells): consumed on init when the
     /// edited workspace matches.
     static var pendingWorkspaceCategory: (id: UUID, category: EditorCategory)?
+
+    /// The pane a workspace editor opens on: the one asked for with it, else
+    /// a pending one for this workspace.
+    nonisolated static func openingCategory(requested: EditorCategory?, pending: (id: UUID, category: EditorCategory)?,
+                                            profileID: UUID?) -> EditorCategory? {
+        if let requested { return requested }
+        guard let pending, let profileID, pending.id == profileID else { return nil }
+        return pending.category
+    }
     /// The sidebar's search.
     @State private var categorySearch = ""
     #if os(iOS) || os(visionOS)
@@ -743,7 +752,11 @@ struct ProfileEditorView: View {
         onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil,
         localModelsRemoteAny: Any? = nil,
         modelsPane: ModelsPaneMode? = nil,
-        onSaveGlobalModels: ((ModelSettings) -> Void)? = nil
+        onSaveGlobalModels: ((ModelSettings) -> Void)? = nil,
+        /// The pane to open on, asked for with this editor (not through the
+        /// shared `pendingWorkspaceCategory`, which another open overwrote
+        /// while a fat client's editor was still loading).
+        initialCategory: EditorCategory? = nil
     ) {
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
@@ -784,9 +797,10 @@ struct ProfileEditorView: View {
             _remoteGlobalDraft = State(initialValue: initial)
         }
         var p = profile ?? Profile(name: "", tool: .claude, authMode: .token)
-        if let pending = Self.pendingWorkspaceCategory, profile?.id == pending.id {
-            Self.pendingWorkspaceCategory = nil
-            _selectedCategory = State(initialValue: pending.category)
+        let pending = Self.pendingWorkspaceCategory
+        if let pending, profile?.id == pending.id { Self.pendingWorkspaceCategory = nil }
+        if let cat = Self.openingCategory(requested: initialCategory, pending: pending, profileID: profile?.id) {
+            _selectedCategory = State(initialValue: cat)
         }
         // New profiles: pre-fill custom appearance fields with Terminal.app
         // defaults so the editor opens with sensible, editable starting
