@@ -253,11 +253,50 @@ async function test(name, fn) {
   }
 }
 
+// Every test's name, by section ("34." → ["34.0 …", "34.1 …"]), read from
+// this file: a section gate has to know what its tests are called.
+const SECTION_TESTS = (() => {
+  const bySection = new Map();
+  try {
+    const src = readFileSync(new URL(import.meta.url), "utf-8");
+    for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {
+      const key = m[1] + ".";
+      if (!bySection.has(key)) bySection.set(key, []);
+      const name = `${m[1]}.${m[2]}`;
+      bySection.get(key).push(name);
+      // A name built at run time (`32.${round + 1} …`): its numbers too, so
+      // `--filter 32.2` finds it.
+      if (name.includes("${")) {
+        for (let d = 0; d <= 9; d++) bySection.get(key).push(name.replace(/\$\{[^}]*\}/g, String(d)));
+      }
+    }
+  } catch {}
+  return bySection;
+})();
+
 // A section's bring-up/teardown can be expensive or stateful (VM boots,
 // remote-access toggles, hosts.json rewrites). When --filter can't match any
 // of the section's test names, skip the whole block — running `--filter
-// "^26\\."` must not fire section 25's teardown on a developer machine.
-const sectionActive = (prefix) => !FILTER || new RegExp(FILTER, "i").test(prefix);
+// "^26\\."` must not fire section 25's teardown on a developer machine. It
+// matches the section's number OR its tests' names: matched against the
+// number alone, `--filter Landlock` skipped section 34 whole, and the run
+// passed having tested nothing.
+const sectionActive = (prefix) => {
+  if (!FILTER) return true;
+  const re = new RegExp(FILTER, "i");
+  return re.test(prefix) || (SECTION_TESTS.get(prefix) || []).some((name) => re.test(name));
+};
+
+// A filter that names no test at all (a typo) fails at once, rather than a
+// run that "passes" having run nothing.
+if (FILTER) {
+  const re = new RegExp(FILTER, "i");
+  const any = [...SECTION_TESTS.values()].some((names) => names.some((n) => re.test(n)));
+  if (SECTION_TESTS.size > 0 && !any) {
+    console.error(`--filter ${JSON.stringify(FILTER)} matches no test name — nothing would run.`);
+    process.exit(1);
+  }
+}
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || "Assertion failed");
