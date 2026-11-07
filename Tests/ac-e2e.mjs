@@ -4584,13 +4584,13 @@ for n, c in enumerate(calls, 1):
   // ======================================================================
   // A workspace whose OpenShell policy has filesystem_policy/landlock
   // sections and the strict sandbox on, probed from INSIDE the sandbox:
-  // `bromure-ac vm exec` runs on agentd's interactive path, which spawns into
-  // the sandboxed tree when a spec is active (what an agent sees). The
-  // automation API's /exec runs through shell-agent, OUTSIDE it (used here
-  // only to read what the sandbox reports about itself). OpenShell's own
+  // with a spec active, agentd runs a host exec (`bromure-ac vm exec`, and the
+  // API's /exec alike) in the sandboxed tree -- what an agent sees. The
+  // probes check what's enforced directly rather than what the sandbox
+  // reports about itself (its status file is outside the policy). OpenShell's own
   // upstream suites replay against Bromure separately
   // (scripts/openshell-e2e, the "OpenShell upstream replay" stage).
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("34.")) {
     console.log("\n--- 34. OpenShell sandbox (filesystem + strict) ---");
 
     await test("34.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
@@ -4652,20 +4652,13 @@ for n, c in enumerate(calls, 1):
           throw new Error(`no answer from inside the sandbox: ${last.slice(0, 300)}`);
         });
 
-        await test("34.2 the sandbox reports filesystem and seccomp enforced", async () => {
-          const out = await gx(id, "cat /run/bromure-sandbox/status.json");
-          const st = JSON.parse(out);
-          assertEq(st.filesystem, "enforced", `status: ${out.slice(0, 300)}`);
-          assertEq(st.seccomp, "enforced", `status: ${out.slice(0, 300)}`);
-        });
-
-        await test("34.3 vm exec runs inside it: no_new_privs and a seccomp filter on the shell", async () => {
+        await test("34.2 vm exec runs inside it: no_new_privs and a seccomp filter on the shell", async () => {
           const out = sx("grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status");
           assert(/NoNewPrivs:\s*1/.test(out), `NoNewPrivs: ${out}`);
           assert(/Seccomp:\s*2/.test(out), `Seccomp: ${out}`);
         });
 
-        await test("34.4 Landlock: read-only paths can't be written, read-write ones can, others can't be read", async () => {
+        await test("34.3 Landlock: read-only paths can't be written, read-write ones can, others can't be read", async () => {
           const o = outcomes(await py(
             "t('write_usr', lambda: open('/usr/ace2e-probe','w'))\n" +
             "t('write_etc', lambda: open('/etc/ace2e-probe','w'))\n" +
@@ -4681,12 +4674,12 @@ for n, c in enumerate(calls, 1):
           assert(["EACCES", "EPERM"].includes(o.read_outside), `list /var/lib (outside the policy): ${o.read_outside}`);
         });
 
-        await test("34.5 strict: no root — sudo is refused", async () => {
+        await test("34.4 strict: no root — sudo is refused", async () => {
           const out = sx("sudo -n true 2>/dev/null && echo ace2e-HAS-ROOT || echo ace2e-noroot");
           assert(out.includes("ace2e-noroot") && !out.includes("ace2e-HAS-ROOT"), `sudo: ${out.slice(0, 300)}`);
         });
 
-        await test("34.6 strict: seccomp refuses memfd, ptrace, user namespaces and raw packet sockets", async () => {
+        await test("34.5 strict: seccomp refuses memfd, ptrace, user namespaces and raw packet sockets", async () => {
           const o = outcomes(await py(
             "libc=ctypes.CDLL(None,use_errno=True)\n" +
             "def sc(f):\n" +
@@ -4704,22 +4697,22 @@ for n, c in enumerate(calls, 1):
 
         // Allowed until 5.4.3, which bridges Bromure's helpers through agentd
         // and restores OpenShell's ban: then this expects EPERM.
-        await test("34.7 strict: Bromure's helpers can reach the host over vsock (until 5.4.3)", async () => {
+        await test("34.6 strict: Bromure's helpers can reach the host over vsock (until 5.4.3)", async () => {
           const o = outcomes(await py("t('vsock', lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM))\n"));
           assertEq(o.vsock, "ok", `AF_VSOCK: ${JSON.stringify(o)}`);
         });
 
-        await test("34.8 the code agentd runs (the meta share) can't be modified from the sandbox", async () => {
+        await test("34.7 the code agentd runs (the meta share) can't be modified from the sandbox", async () => {
           const o = outcomes(await py("t('meta', lambda: open('/mnt/bromure-meta/ace2e-probe','w'))\n"));
           assert(["EACCES", "EPERM", "EROFS"].includes(o.meta), `write the meta share: ${o.meta}`);
         });
 
-        await test("34.9 Yama keeps the sandbox off agentd's memory (ptrace_scope >= 1)", async () => {
+        await test("34.8 Yama keeps the sandbox off agentd's memory (ptrace_scope >= 1)", async () => {
           const v = parseInt(sx("cat /proc/sys/kernel/yama/ptrace_scope").trim(), 10);
           assert(v >= 1, `kernel.yama.ptrace_scope = ${v}`);
         });
 
-        await test("34.10 the outbox's signals can't be written from the sandbox; its URL relay can, and is read", async () => {
+        await test("34.9 the outbox's signals can't be written from the sandbox; its URL relay can, and is read", async () => {
           const o = outcomes(await py(
             "t('outbox', lambda: open('/mnt/bromure-outbox/ace2e-probe.txt','w'))\n" +
             // Not http(s): the host takes it and drops it, so no browser opens.
