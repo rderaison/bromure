@@ -31,6 +31,25 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
     static let maxFlowsPerPort = 256
     nonisolated(unsafe) static var synTimeout: TimeInterval = 30
     private var sweeper: DispatchSourceTimer?
+    /// Each flow's segments go to it on its own serial queue, in order:
+    /// TCPFlow writes to its socketpair with blocking writes (on macOS from
+    /// its utun thread), and a slow reader on the proxy's end must hold that
+    /// flow's queue only, never the switch's task (a thread of the shared
+    /// cooperative pool) nor the VM's other flows. A flow has at most
+    /// `flowBudget` bytes queued; past it a segment is dropped, and the
+    /// guest's TCP sends it again.
+    /// `generation`: a flow's own, so a block still queued for a closed flow
+    /// doesn't count against a new one on the same four-tuple.
+    private struct Delivery { let queue: DispatchQueue; var queued: Int; var segments: Int; let generation: UInt64 }
+    private var nextGeneration: UInt64 = 0
+    private var deliveries: [FlowRef: Delivery] = [:]
+    static let flowBudget = 1 << 20
+    /// Segments queued per flow, payload or not (a stream of bare ACKs
+    /// behind a blocked write is bounded too).
+    static let flowSegments = 4096
+    /// Tests: the application end of each new flow goes here instead of
+    /// the proxy.
+    var handOffForTesting: ((Int32) -> Void)?
 
     // @port SwitchMitmForwarder.init(engine: MitmEngine, switch: VMNetSwitch, guestMTU: Int) h=ac67de5df85baa30 @da668bda
     init(proxy: MitmProxy, guestMTU: Int, inject: @escaping @Sendable (_ portID: Int, _ ipPacket: [UInt8]) -> Void) {
@@ -53,7 +72,7 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
     func sweepHalfOpen(now: Date = Date()) {
         let stale: [TCPFlow] = lock.withLock {
             let refs = halfOpen.filter { now.timeIntervalSince($0.value) >= Self.synTimeout }.map(\.key)
-            for r in refs { halfOpen.removeValue(forKey: r) }
+            for r in refs { halfOpen.removeValue(forKey: r); deliveries.removeValue(forKey: r) }
             return refs.compactMap { flows.removeValue(forKey: $0) }
         }
         for f in stale { f.close() }
@@ -69,7 +88,7 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
             if f != nil, seg.flags & UtunPacket.ACK != 0 { halfOpen.removeValue(forKey: ref) }
             return f
         }) {
-            existing.onInbound(seg)
+            deliver(seg, to: existing, ref: ref)
             return
         }
         // Only a bare SYN opens a flow; any other packet for an unknown flow
@@ -94,6 +113,7 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         let ref = FlowRef(portID: portID, key: UtunPacket.FlowKey(seg))
         let victim = lock.withLock { () -> TCPFlow? in
             halfOpen.removeValue(forKey: ref)
+            deliveries.removeValue(forKey: ref)
             return flows.removeValue(forKey: ref)
         }
         victim?.close()
@@ -104,10 +124,44 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         let victims: [TCPFlow] = lock.withLock {
             let v = flows.filter { $0.key.portID == portID }
             for (k, _) in v { flows.removeValue(forKey: k); halfOpen.removeValue(forKey: k) }
+            deliveries = deliveries.filter { $0.key.portID != portID }
             return Array(v.values)
         }
         for f in victims { f.close() }
     }
+
+    /// Hands `seg` to `flow` on the flow's own queue, within its budget of
+    /// bytes and segments; over it, dropped (the guest retransmits; a lost
+    /// bare ACK is made up by the next).
+    // @port-skip linux-only: the Linux interceptor's per-flow delivery
+    private func deliver(_ seg: UtunPacket.TCPSegment, to flow: TCPFlow, ref: FlowRef) {
+        let size = seg.payload.count
+        let slot: (DispatchQueue, UInt64)? = lock.withLock {
+            var d: Delivery
+            if let had = deliveries[ref] { d = had } else {
+                nextGeneration += 1
+                d = Delivery(queue: DispatchQueue(label: "bromure.intercept.flow"), queued: 0, segments: 0, generation: nextGeneration)
+            }
+            if d.queued + size > Self.flowBudget || d.segments >= Self.flowSegments { return nil }
+            d.queued += size
+            d.segments += 1
+            deliveries[ref] = d
+            return (d.queue, d.generation)
+        }
+        guard let (queue, generation) = slot else { return }
+        queue.async { [weak self] in
+            flow.onInbound(seg)
+            self?.lock.withLock {
+                guard self?.deliveries[ref]?.generation == generation else { return }
+                self?.deliveries[ref]?.queued -= size
+                self?.deliveries[ref]?.segments -= 1
+            }
+        }
+    }
+
+    /// Bytes queued for flows, over every flow (tests).
+    // @port-skip linux-only: tests
+    var queuedBytes: Int { lock.withLock { deliveries.values.reduce(0) { $0 + $1.queued } } }
 
     /// Open flows (tests).
     // @port-skip linux-only: tests
@@ -141,6 +195,7 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
                 self.lock.withLock {
                     _ = self.flows.removeValue(forKey: ref)
                     _ = self.halfOpen.removeValue(forKey: ref)
+                    _ = self.deliveries.removeValue(forKey: ref)
                 }
             })
         lock.withLock { flows[ref] = flow; halfOpen[ref] = Date() }
@@ -149,7 +204,9 @@ final class SwitchInterceptor: VMNetTCPInterceptor, @unchecked Sendable {
         // and closes it. Without a profile identity a flow is NEVER MiTM'd (a
         // mis-attributed connection would inject another session's real
         // credentials): spliced raw instead, to the address the guest chose.
-        if let pid = profileID {
+        if let test = handOffForTesting {
+            test(endB)
+        } else if let pid = profileID {
             proxy.acceptTransparentFlow(appFD: endB, profileID: pid, destIP: destIP, destPort: destPort,
                                         srcPort: Int(seg.srcPort))
         } else {

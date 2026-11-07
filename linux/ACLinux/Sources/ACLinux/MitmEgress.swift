@@ -124,7 +124,11 @@ final class ByteGlue: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
     private var peer: Channel?
     private var held: [ByteBuffer] = []
+    private var heldBytes = 0
     private var gone = false
+    /// Held past this before the peer connects: this side stops reading
+    /// until it does.
+    static let holdLimit = 256 << 10
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(peer: Channel?) { self.peer = peer }
@@ -137,13 +141,46 @@ final class ByteGlue: ChannelInboundHandler {
         for b in held { p.write(b, promise: nil) }
         held.removeAll()
         p.flush()
-        if gone { p.close(promise: nil) }
+        if gone { p.close(promise: nil); return }
+        // Reading again (the held bytes, past the peer's write watermark,
+        // also resume it through channelWritabilityChanged as they drain;
+        // this one doesn't depend on the watermarks).
+        if heldBytes > Self.holdLimit, let own { _ = own.setOption(ChannelOptions.autoRead, value: true) }
+        heldBytes = 0
     }
+
+    /// This side's channel (set as it's added).
+    private weak var own: Channel?
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func handlerAdded(context: ChannelHandlerContext) { own = context.channel }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let b = unwrapInboundIn(data)
-        if let peer { peer.write(b, promise: nil) } else { held.append(b) }
+        guard let peer else {
+            held.append(b)
+            heldBytes += b.readableBytes
+            // Backpressure until the peer connects, not an unbounded buffer.
+            if heldBytes > Self.holdLimit { _ = context.channel.setOption(ChannelOptions.autoRead, value: false) }
+            return
+        }
+        peer.write(b, promise: nil)
+        // The peer can't take more: this side stops reading until it drains
+        // (the peer's glue resumes it, channelWritabilityChanged). Paused
+        // before the flush: a flush that drains at once fires that resume
+        // inside it, and a pause after would never be lifted.
+        if !peer.isWritable {
+            _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
+            peer.flush()
+        }
+    }
+
+    /// This side drained: the side writing into it may read again.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable, let peer { _ = peer.setOption(ChannelOptions.autoRead, value: true) }
+        context.fireChannelWritabilityChanged()
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
