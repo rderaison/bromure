@@ -427,6 +427,12 @@ public final class SessionDisk {
     public private(set) var outboxDirectory: URL?
     /// The outbox's folder for URL relay requests (`urls/url-*.txt`).
     public static let outboxURLRelayFolder = "urls"
+    /// The outbox's folder for the agents' hooks (agent-status.sh): tab
+    /// status (`agent-status-<win>.txt`), tool-call lineage
+    /// (`agent-tool-<win>.jsonl`) and its own owed-note marks. The hooks run
+    /// inside the OpenShell sandbox when one is on, which may write here
+    /// (bromure-sandboxd) and nowhere else in the outbox.
+    public static let outboxAgentFolder = "agent"
 
     /// True if `ensureDiskExists()` had to clonefile() a fresh disk on the
     /// most recent call. Caller uses this to stamp the profile with the
@@ -2496,6 +2502,11 @@ public final class SessionDisk {
         // be let write there (bromure-sandboxd) and nowhere else in the
         // outbox, where agentd's own signals (tabs, status, liveness) live.
         try? fm.createDirectory(at: tmp.appendingPathComponent(Self.outboxURLRelayFolder, isDirectory: true),
+                                withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
+        // Same for the agents' hooks (status, tool calls): they run in the
+        // sandbox too, so they get a folder of their own.
+        try? fm.createDirectory(at: tmp.appendingPathComponent(Self.outboxAgentFolder, isDirectory: true),
                                 withIntermediateDirectories: true,
                                 attributes: [.posixPermissions: NSNumber(value: 0o777)])
         outboxDirectory = tmp

@@ -687,6 +687,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
                 try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
             }
+            // And the hooks' own folder's (a real folder only: never
+            // through a symlink the guest left onto the Mac).
+            let agentDir = outbox.appendingPathComponent(SessionDisk.outboxAgentFolder, isDirectory: true)
+            if (try? FileManager.default.attributesOfItem(atPath: agentDir.path))?[.type] as? FileAttributeType == .typeDirectory,
+               let names = Self.listing(agentDir, max: Self.maxOutboxEntriesPerTick) {
+                for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
+                    try? FileManager.default.removeItem(at: agentDir.appendingPathComponent(n))
+                }
+            }
             // The last boot's heartbeat isn't this one's.
             try? FileManager.default.removeItem(at: outbox.appendingPathComponent("liveness.txt"))
         }
@@ -891,6 +900,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// url-*.txt kept from the relay per tick (names that aren't one are
     /// skipped while reading, so they can't fill this).
     nonisolated static let maxRelayEntriesPerTick = 256
+    /// What the host takes from the outbox's agent/ folder: a hook's tab
+    /// status or tool-call log, nothing named like the outbox's own signals.
+    nonisolated static func isAgentHookFile(_ name: String) -> Bool {
+        (name.hasPrefix("agent-status-") && name.hasSuffix(".txt"))
+            || (name.hasPrefix("agent-tool-") && name.hasSuffix(".jsonl"))
+    }
     /// More URL files than this in one tick's listing is a flood: past the
     /// per-tick cap they're removed unopened, so the backlog drains with
     /// bounded work instead of delaying a real sign-in URL forever. Fewer
@@ -1221,6 +1236,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // The outbox and its URL relay, read a bounded slice per heavy tick.
         private let outboxCursor = DirCursor()
         private let relayCursor = DirCursor()
+        private let agentCursor = DirCursor()
         // agent-tool-<win>.jsonl: bytes already read, per file.
         private var toolLogs: [String: ToolLog] = [:]
 
@@ -1360,6 +1376,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 } else {
                     relayCursor.reset()
                 }
+                // The agents' hooks' folder (what a sandboxed agent's hooks
+                // can write): their status and tool-call files only. Same
+                // real-folder check and bounded slices as the relay.
+                let agentDir = outbox.appendingPathComponent(SessionDisk.outboxAgentFolder, isDirectory: true)
+                if (try? fm.attributesOfItem(atPath: agentDir.path))?[.type] as? FileAttributeType == .typeDirectory {
+                    entries += (agentCursor.next(agentDir, examine: VM.maxRelayNamesPerTick,
+                                                 keep: VM.maxRelayEntriesPerTick) {
+                        VM.isAgentHookFile($0)
+                    } ?? []).map { agentDir.appendingPathComponent($0) }
+                } else {
+                    agentCursor.reset()
+                }
                 let urlBacklog = entries.filter {
                     $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt"
                 }.count
@@ -1378,8 +1406,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // without bound (the hook appends with O_APPEND).
                 for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
                     && entry.pathExtension == "jsonl" {
-                    let key = entry.lastPathComponent
-                    let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    let name = entry.lastPathComponent
+                    let window = Int(name.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    // Per file: the outbox's and agent/'s same-named logs
+                    // keep their own offsets.
+                    let key = entry.deletingLastPathComponent().lastPathComponent == SessionDisk.outboxAgentFolder
+                        ? SessionDisk.outboxAgentFolder + "/" + name : name
                     // Bounded: a window per tick from the saved offset,
                     // never the whole file (the guest can make it huge).
                     var log = toolLogs[key] ?? ToolLog()

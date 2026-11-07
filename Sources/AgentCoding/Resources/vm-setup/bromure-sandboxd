@@ -136,6 +136,14 @@ ADDITIONS_READ_WRITE = [
     # page on the Mac. Only this folder, never the outbox itself: agentd's
     # own signals to the host (tabs, status, liveness) stay out of reach.
     ("/mnt/bromure-outbox/urls", "the URL relay to the Mac's browser (bromure-open, xdg-open, $BROWSER)"),
+    # The agents' hooks (~/.bromure/agent-status.sh) run in the sandbox, as
+    # children of the agent CLI, and report each tab's state (working, done,
+    # needs input), the tool calls behind its network flows, and their own
+    # owed-note marks. Without it a sandboxed tab never leaves "idle", tasks
+    # never finish and the lineage loses the agent's reasoning. Its own
+    # folder: the host reads only agent-status-*.txt and agent-tool-*.jsonl
+    # from it.
+    ("/mnt/bromure-outbox/agent", "the agents' status and tool-call hooks (agent-status.sh)"),
     # bash opens /dev/tty to look for a controlling terminal -- on every
     # `sh -c`, not only interactive ones. A policy that does not list it
     # therefore produces one `sandbox_denied` per `vm exec`, forever, which is

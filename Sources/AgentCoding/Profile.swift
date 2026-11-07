@@ -5625,6 +5625,10 @@ public final class ProfileStore {
             fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
+            # The host's folder for these reports: under an OpenShell sandbox
+            # the hook may write there and nowhere else in the outbox. A host
+            # that didn't make it reads them from the outbox itself.
+            [ -d "$d/agent" ] && d="$d/agent"
             # No pane → bail. An empty -t target resolves to the ACTIVE window,
             # which stamps this signal onto whatever tab the user is looking at
             # (a task's "done" once killed the plan interview).
