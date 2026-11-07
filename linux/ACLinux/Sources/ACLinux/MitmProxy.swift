@@ -92,6 +92,12 @@ final class MitmProxy: @unchecked Sendable {
     private let upstreamContext: NIOSSLContext
     /// Tests: every upstream connection goes here instead (SNI kept), trusting `extraRoots`.
     var routeAllTo: (host: String, port: Int)?
+    /// An e2e run (BROMURE_AC_E2E=1) without its test upstream: every
+    /// upstream is refused, never dialed. Its guests' requests (and the
+    /// credentials swapped into them) must reach only the local stand-in, so
+    /// a build that lost the test route (a release build has none) fails
+    /// closed instead of falling back to the real hosts.
+    var refusesRealUpstreams = false
     /// A multi-user server: the host's own addresses are refused too
     /// (ProxyDestination.swift), as the switch refuses them.
     var blocksHostAddresses = false
@@ -336,6 +342,11 @@ final class MitmProxy: @unchecked Sendable {
                 return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: port))
             }
             return dial(host: host, to: [to], tls: routed.tls, ctx: upstreamContext, on: loop)
+        }
+        if refusesRealUpstreams, routeAllTo == nil {
+            FileHandle.standardError.write(Data("[mitm] ✗ e2e mode with no test upstream: refused \(host):\(port)\n".utf8))
+            return loop.makeFailedFuture(ProxyDestinationDenied(
+                host: host, port: port, reason: "e2e mode with no test upstream: no real host is dialed"))
         }
         let ctx = profileID.flatMap { kubeTrust.endpoint(for: host, port: port, profileID: $0) }?.context
             ?? upstreamContext

@@ -262,6 +262,41 @@ struct TransparentInterceptionLimitTests {
     }
 }
 
+@Suite("E2e mode without a test upstream", .serialized)
+struct E2eUpstreamGuardTests {
+    @Test func everyUpstreamIsRefusedNeverDialed() throws {
+        let ip = try #require(Daemon.primaryIPv4())
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let target = try CountingListener(host: ip); defer { target.stop() }
+        proxy.refusesRealUpstreams = true
+        let pid = UUID()
+        let l = try proxy.serve(udsPath: dir + "/vm.sock", profileID: pid, fdStoreName: "e2eg-\(pid)")
+        defer { l.stop() }
+        // Through the proxy: refused with the reason, no connect.
+        let out = try RawProxyClient.exchange(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort),
+                                              "GET http://\(ip):\(target.port)/ HTTP/1.1\r\nHost: \(ip):\(target.port)\r\n\r\n")
+        #expect(out.hasPrefix("HTTP/1.1 403") && out.contains("e2e mode"), "\(out)")
+        // A raw splice (a transparent flow's fail-open, a tls: skip endpoint): none.
+        let (guest, app) = try GuestEnd.pair()
+        GuestEnd.send(guest, "not tls, not http\r\n")
+        proxy.acceptTransparentFlow(appFD: app, profileID: pid, destIP: ip, destPort: target.port)
+        #expect(GuestEnd.readAll(guest) == "")
+        close(guest)
+        usleep(300_000)
+        #expect(target.accepted.withLockedValue { $0 } == 0, "no host connect")
+        // With the test route on, the guard stands aside.
+        proxy.routeAllTo = (ip, target.port)
+        let (g2, a2) = try GuestEnd.pair()
+        GuestEnd.send(g2, "not tls, not http\r\n")
+        proxy.acceptTransparentFlow(appFD: a2, profileID: pid, destIP: ip, destPort: target.port)
+        _ = GuestEnd.readAll(g2)
+        close(g2)
+        usleep(300_000)
+        #expect(target.accepted.withLockedValue { $0 } >= 1, "spliced to the address the guest chose")
+    }
+}
+
 /// A minimal TLS 1.2-shaped ClientHello, with or without server_name.
 enum TestHello {
     static func clientHello(sni: String?) -> [UInt8] {

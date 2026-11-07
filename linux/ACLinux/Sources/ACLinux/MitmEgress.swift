@@ -74,6 +74,11 @@ extension MitmProxy {
     /// the checked addresses, never terminated (macOS: MitmPassthrough.splice).
     // @port-skip linux-only: MitmPassthrough.splice on NIO
     func splice(_ guest: Channel, to addresses: [OpenShellPolicy.IPAddress], port: Int, pending: ByteBuffer) {
+        if refusesRealUpstreams, routeAllTo == nil {
+            FileHandle.standardError.write(Data("[mitm] ✗ e2e mode with no test upstream: no splice to \(addresses.first.map { "\($0)" } ?? "?"):\(port)\n".utf8))
+            guest.close(promise: nil)
+            return
+        }
         let targets = addresses.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
         guard let first = targets.first else { guest.close(promise: nil); return }
         ClientBootstrap(group: guest.eventLoop)
