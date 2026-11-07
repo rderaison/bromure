@@ -86,6 +86,42 @@ func fdClose(_ fd: Int32) -> Int32 {
 #endif
 }
 
+/// A send that never blocks (and never raises SIGPIPE: MSG_NOSIGNAL on
+/// Linux, fdNoSigPipe's SO_NOSIGPIPE on Darwin): EAGAIN when the socket's
+/// buffer is full.
+func fdSendNonBlocking(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int {
+#if canImport(Darwin)
+    send(fd, buf, count, MSG_DONTWAIT)
+#else
+    send(fd, buf, count, Int32(MSG_DONTWAIT | MSG_NOSIGNAL))
+#endif
+}
+
+/// O_NONBLOCK on `fd` (a send on a full macOS socketpair blocks even with
+/// MSG_DONTWAIT unless the descriptor itself is non-blocking).
+func fdSetNonBlocking(_ fd: Int32) {
+    _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+}
+
+/// A send to a closed peer fails with EPIPE instead of raising SIGPIPE
+/// (Darwin's SO_NOSIGPIPE; Linux sends with MSG_NOSIGNAL instead). Not every
+/// host ignores SIGPIPE: a test runner doesn't.
+func fdNoSigPipe(_ fd: Int32) {
+#if canImport(Darwin)
+    var on: Int32 = 1
+    _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+#endif
+}
+
+/// SO_SNDBUF raised to at least `bytes` (as far as the system allows).
+func fdRaiseSendBuffer(_ fd: Int32, _ bytes: Int32) {
+    var have: Int32 = 0
+    var len = socklen_t(MemoryLayout<Int32>.size)
+    if getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &have, &len) == 0, have >= bytes { return }
+    var want = bytes
+    _ = setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &want, socklen_t(MemoryLayout<Int32>.size))
+}
+
 /// Half-close: no more writes on `fd` (SHUT_WR is an Int32 in Darwin, an Int
 /// in Glibc).
 @discardableResult
