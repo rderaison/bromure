@@ -262,13 +262,12 @@ const SECTION_TESTS = (() => {
     for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {
       const key = m[1] + ".";
       if (!bySection.has(key)) bySection.set(key, []);
-      const name = `${m[1]}.${m[2]}`;
-      bySection.get(key).push(name);
-      // A name built at run time (`32.${round + 1} …`): its numbers too, so
-      // `--filter 32.2` finds it.
-      if (name.includes("${")) {
-        for (let d = 0; d <= 9; d++) bySection.get(key).push(name.replace(/\$\{[^}]*\}/g, String(d)));
-      }
+      // A part built at run time (`, ${ROUNDS} times`) is indexed as "…",
+      // never as made-up values: digits put in for it named tests that don't
+      // exist (`32.9`), so a mistyped filter booted a section and ran nothing
+      // (Finding: "Generated filter names let nonexistent tests pass the E2E
+      // suite"). A test's number is always literal.
+      bySection.get(key).push(`${m[1]}.${m[2]}`.replace(/\$\{[^}]*\}/g, "…"));
     }
   } catch {}
   return bySection;
@@ -4505,8 +4504,9 @@ for n, c in enumerate(calls, 1):
           if (vm.error) throw new Error(vm.error);
         });
         if (!vm.error) {
-          for (const round of [1, 2]) {
-            await test(`32.${round + 1} round ${round}: two simultaneous launches each bind their own tab and conversation`, async () => {
+          // Each round a literal name: the filter index reads names from this
+          // file and never guesses what a template's number turns into.
+          const raceRound = async () => {
               const n = nonce();
               const specs = ["x", "y"].map((k) => ({
                 folder: `ace2e-race-${k}-${n}`, message: `ace2e race ${k} ${n}: which tab is mine`,
@@ -4540,8 +4540,9 @@ for n, c in enumerate(calls, 1):
                        && !st.path.includes(specs[1 - i].folder),
                        `session ${i}'s beautified view isn't its own conversation: ${JSON.stringify(st).slice(0, 300)}`);
               }
-            });
-          }
+          };
+          await test("32.2 round 1: two simultaneous launches each bind their own tab and conversation", raceRound);
+          await test("32.3 round 2: two simultaneous launches each bind their own tab and conversation", raceRound);
         }
       } finally {
         await stubVMDown(vm);
@@ -4845,6 +4846,13 @@ for n, c in enumerate(calls, 1):
   console.log(
     `\n=== ${passed} passed, ${failed} failed, ${skipped} skipped ===\n`
   );
+
+  // A filtered run that ran nothing tested nothing: not a pass (a typo the
+  // index matched, or tests that all skipped themselves).
+  if (FILTER && passed + failed === 0) {
+    console.log(`--filter ${JSON.stringify(FILTER)} ran no test.`);
+    process.exit(1);
+  }
 
   if (failed > 0) {
     console.log("Failures:");
