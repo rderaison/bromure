@@ -36,6 +36,11 @@ final class SessionStores {
     /// The cluster engine and its machine host (DaemonKube.swift).
     var kubeEngine: KubeClusterEngine?
     var kubeHost: LinuxKubeHost?
+    /// Streamed planning sessions (macOS: the app delegate's planStreamHub)
+    /// and each running workspace's plan-stream listener (its
+    /// planEventBridges), DaemonPlanStreams.swift.
+    let planStreamHub = PlanStreamHub()
+    var planBridges: [UUID: PlanStreamListener] = [:]
 
     // @port-skip linux-only: daemon layout
     init(stateDir: String) {
@@ -49,6 +54,7 @@ final class SessionStores {
         kube = KubeClusterStore(fileURL: dir.appendingPathComponent("kube", isDirectory: true)
             .appendingPathComponent("clusters.json"))
         instructionPresets = InstructionPresetStore(fileURL: dir.appendingPathComponent("instruction-presets.json"))
+        wirePlanStreamHub()
     }
 
     /// The /state keys macOS adds on a server with the sessions-first home.

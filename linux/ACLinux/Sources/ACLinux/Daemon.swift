@@ -93,6 +93,9 @@ public actor Daemon {
         var mitm: MitmListener?
         /// The agents' MCP sockets: the coding board (:5831), automations (:5833).
         var mcp: [MCPLineListener] = []
+        /// The streamed planning driver's socket (vsock :5832) and its
+        /// workspace; none on a cluster machine.
+        var plan: UUID?
         /// The guest's local-model bridge (vsock :8446); nil for a sign-in VM.
         var inference: InferenceBridgeListener?
         /// The guest's AWS credential_process helper's end (vsock 8445).
@@ -134,6 +137,13 @@ public actor Daemon {
     /// When a callback relay last opened, by guest address: an SSH-forwarded
     /// one is the shared server's to close, so its end isn't seen here.
     var relayOpened: [String: Date] = [:]
+
+    /// The fd store entries a VM holds, `<prefix><short id>`: its network
+    /// end and every vsock listener. Adoption takes them back, a stop
+    /// removes them; one list, so a new listener can't be left out of one.
+    // @port-skip linux-only: systemd fd store layout
+    static let perVMStorePrefixes = ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-",
+                                     "plan-", "llm-", "aws-", "ssh-"]
 
     /// The soft open-file limit up to the hard one: systemd starts services at
     /// 1024, and every VM, SSH session and forward holds several.
@@ -185,7 +195,7 @@ public actor Daemon {
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything
         // else is stale.
-        let perVM = { (name: String) in ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-", "llm-", "aws-", "ssh-"].contains { name.hasPrefix($0) } }
+        let perVM = { (name: String) in perVMStorePrefixes.contains { name.hasPrefix($0) } }
         for (name, fds) in stored where !["passt", "passt-pid", "control"].contains(name) && !(perVM(name) && fds.count == 1) {
             for fd in fds { close(fd) }
         }
@@ -1078,6 +1088,7 @@ public actor Daemon {
         l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         startTraceSession(rec)
         if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: [:]) }
+        if rec.kube == nil { l.plan = await servePlanStream(rec, udsPath: qc.firecrackerVsockPath, stored: nil) }
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
@@ -1244,6 +1255,10 @@ public actor Daemon {
                     if let fd = storedNet.removeValue(forKey: name + rec.shortId) { storedMCP[name] = fd }
                 }
                 if rec.kube == nil { l.mcp = await serveMCP(rec, udsPath: qc.firecrackerVsockPath, stored: storedMCP) }
+                if rec.kube == nil {
+                    l.plan = await servePlanStream(rec, udsPath: qc.firecrackerVsockPath,
+                                                   stored: storedNet.removeValue(forKey: "plan-" + rec.shortId))
+                }
                 l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath,
                                              stored: storedNet.removeValue(forKey: "llm-" + rec.shortId))
                 l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath,
@@ -1544,10 +1559,8 @@ public actor Daemon {
         l.aws?.stop()
         l.ssh?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
-        for name in ["mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-", "llm-", "aws-", "ssh-"] { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
-        FDStore.remove(l.storedNet)
-        FDStore.remove("vsock-" + l.storedNet.dropFirst("net-".count))
-        FDStore.remove("bmcp-" + l.storedNet.dropFirst("net-".count))
+        if let pid = l.plan { await MainActor.run { SessionStores.shared?.detachPlanBridge(pid: pid) } }
+        for name in Self.perVMStorePrefixes { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
     }
 
     /// Stops every VM (killed: systemd's stop is not a graceful shutdown of

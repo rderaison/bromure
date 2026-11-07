@@ -166,15 +166,22 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
 
     // MARK: Plan streams
 
-    /// No streamed planning sessions here (macOS's plan-stream hub and its
-    /// per-workspace bridges): planning runs in a tab.
-    // partial: no plan-stream bridge on Linux
-    // @port-skip linux-only: no plan-stream hub on Linux (ACAppDelegate.planStreamLive)
-    func planStreamLive(profileID: Profile.ID, branch: String) -> Bool { false }
+    /// True while a streamed planning session for this branch is running:
+    /// the plan watchdog's "the session exists" signal in driver mode.
+    // @port ACAppDelegate.planStreamLive(profileID: Profile.ID, branch: String) h=bdfe0a6387699d1a @ac3ea65d
+    func planStreamLive(profileID: Profile.ID, branch: String) -> Bool {
+        SessionStores.shared?.planStreamHub.isLive(profileID: profileID, branch: branch) ?? false
+    }
 
-    // partial: no plan-stream bridge on Linux
-    // @port-skip linux-only: no plan-stream hub on Linux (ACAppDelegate.endPlanStream)
-    func endPlanStream(profileID: Profile.ID, branch: String) {}
+    /// Tear a streamed planning session down: the driver replies with its
+    /// terminal result and exits. A no-op when no live stream claims the
+    /// branch.
+    // @port ACAppDelegate.endPlanStream(profileID: Profile.ID, branch: String) h=d13b0e0c9f3fbf03 @ac3ea65d
+    func endPlanStream(profileID: Profile.ID, branch: String) {
+        guard let stores = SessionStores.shared,
+              stores.planStreamHub.isLive(profileID: profileID, branch: branch) else { return }
+        _ = stores.planBridges[profileID]?.send(branch: branch, .end)
+    }
 
     // MARK: Sessions and the task dispatcher
 
@@ -214,11 +221,11 @@ extension LinuxSessionHost: TaskDispatchHost {
         agentSessionStore.sessions + (LinuxMachines.shared?.attached.values.flatMap(\.sessionStore.sessions) ?? [])
     }
     /// The session list's model, kept without a window (refreshSidebar).
-    // @port ACAppDelegate.var sessionListModel h=b55aac90da9b04da @1e72cfdb
+    // @port ACAppDelegate.var sessionListModel h=b55aac90da9b04da @a1896aec
     var sessionListModel: SessionListModel? { listModel }
     // @port ACAppDelegate.attachedMachineName(_: Profile.ID) h=2b2c216aa08778df @fa0f94e5
     func attachedMachineName(_ id: Profile.ID) -> String? { LinuxMachines.shared?.attached[id]?.name }
-    // @port ACAppDelegate.ensureSwitchboard(room: AgentRoom?) h=68b9817700f6a730 @1e72cfdb
+    // @port ACAppDelegate.ensureSwitchboard(room: AgentRoom?) h=68b9817700f6a730 @a1896aec
     func ensureSwitchboard(room: AgentRoom?) -> UUID? { SessionStores.shared?.switchboardEngine?.ensureSwitchboard(room: room) }
 }
 

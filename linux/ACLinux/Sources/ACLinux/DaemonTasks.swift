@@ -140,8 +140,8 @@ extension SessionStores {
 
     /// One coding-board verb on one task (`POST /tasks/<id>/<action>`,
     /// `DELETE /tasks/<id>`): macOS's, less what needs its task dispatcher
-    /// (assign, answer, recall, locate) or its plan-stream bridge.
-    // partial: no plan stream (plan-events, plan-cmd) on Linux
+    /// (assign, answer, recall, locate); the plan stream's relay is
+    /// DaemonPlanStreams.swift's.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=09891b7729777755 @9936e30c
     func taskCommand(_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any] {
         guard let engine = codingTaskEngine else { return ["error": "no task engine"] }
@@ -243,10 +243,9 @@ extension SessionStores {
         case "destroy":
             engine.destroy(id)
         case "plan-events":
-            // No streamed planning session here: the client shows the tab's.
-            return ["live": false, "items": [], "since": 0]
+            return planEvents(id, body)
         case "plan-cmd":
-            return ["ok": false, "error": "no live plan stream"]
+            return planCommand(id, body)
         default:
             return ["error": "unknown action", "action": action]
         }

@@ -157,6 +157,8 @@
     "Sources/AgentCoding/P2P/P2PEnroll.swift",
     "Sources/AgentCoding/P2P/P2PIdentity.swift",
     "Sources/AgentCoding/PendingPromptBroker.swift",
+    "Sources/AgentCoding/PlanStreamHub.swift",
+    "Sources/AgentCoding/PlanStreamProtocol.swift",
     "Sources/AgentCoding/PlatformCompat.swift",
     "Sources/AgentCoding/PolicyHistory.swift",
     "Sources/AgentCoding/PolicySteering.swift",
