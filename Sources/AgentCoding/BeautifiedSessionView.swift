@@ -1330,19 +1330,12 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         queueStore.update(queueKey) { queued in
           var lost: Set<UUID> = []
-          // Messages that were only files, each matched to a turn of its own.
-          let filesIn = Self.fileOnlyArrivals(queued, turns: turns)
-          // The turns each text has resolved a row with: the same words sent
-          // twice need two turns carrying them, not one.
-          var textTurns: [String: Set<Int>] = [:]
+          // Files-only messages and words, each to a turn of its own; the
+          // ones still waiting are moved past the turns taken (`resolveByTurns`).
+          Self.resolveByTurns(&queued, turns: turns)
           queued.removeAll { q in
             if Self.arrivedAnyway(q, turns: turns) { return true }
             guard !q.held else { return false }
-            if filesIn.contains(q.id) { return true }
-            // A TUI may merge several queued messages into one turn.
-            if let i = Self.textTurn(q, turns: turns, taken: textTurns[q.text] ?? []) {
-                textTurns[q.text, default: []].insert(i); return true
-            }
             // Sent with files: the agent takes their paths in as attachments,
             // so its turn never carries the text Bromure typed.
             if Self.attachmentTurnArrived(q.text, since: turns.dropFirst(q.baseline)) { return true }
@@ -1452,25 +1445,66 @@ final class BeautifiedSessionModel: ObservableObject {
     /// other row has taken, the earliest first. A turn with words is never
     /// one of these.
     nonisolated static func fileOnlyArrivals(_ rows: [QueuedMessage], turns: [String]) -> Set<UUID> {
+        Set(fileOnlyClaims(rows, turns: turns).keys)
+    }
+
+    /// The not-held messages that have become a turn, files only
+    /// (`fileOnlyArrivals`) or words (`textTurn`), taken out of `rows`. A
+    /// claim lasted one pass only: the next poll, the resolved row gone, the
+    /// same turn resolved the next one queued like it, a message the agent
+    /// hadn't got. So each one still waiting that was queued after a
+    /// resolved one like it (files only; the same words) has its baseline
+    /// moved past that turn: its own turn comes later. In the rows, so it
+    /// holds from poll to poll, and across launches. The ids removed.
+    @discardableResult
+    nonisolated static func resolveByTurns(_ rows: inout [QueuedMessage], turns: [String]) -> Set<UUID> {
+        let files = fileOnlyClaims(rows, turns: turns)
+        var claims: [(id: UUID, turn: Int, words: String?)] = files.map { ($0.key, $0.value, nil) }
+        var textTurns: [String: Set<Int>] = [:]
+        for q in rows where !q.held && files[q.id] == nil {
+            // A TUI may merge several queued messages into one turn; the same
+            // words sent twice need two turns carrying them.
+            if let i = textTurn(q, turns: turns, taken: textTurns[q.text] ?? []) {
+                textTurns[q.text, default: []].insert(i)
+                claims.append((q.id, i, q.text))
+            }
+        }
+        guard !claims.isEmpty else { return [] }
+        let position = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($1.id, $0) })
+        let gone = Set(claims.map(\.id))
+        rows.removeAll { gone.contains($0.id) }
+        for c in claims {
+            guard let p = position[c.id] else { continue }
+            for k in rows.indices where !rows[k].held && (position[rows[k].id] ?? 0) > p
+                && rows[k].baseline <= c.turn {
+                let alike = c.words.map { rows[k].text == $0 } ?? isFileOnly(rows[k].text)
+                if alike { rows[k].baseline = c.turn + 1 }
+            }
+        }
+        return gone
+    }
+
+    /// Each files-only message that has become a turn, and the turn.
+    nonisolated static func fileOnlyClaims(_ rows: [QueuedMessage], turns: [String]) -> [UUID: Int] {
         let candidates = rows.filter { !$0.held && isFileOnly($0.text) }
-        guard !candidates.isEmpty else { return [] }
+        guard !candidates.isEmpty else { return [:] }
         func paths(_ s: String) -> [Substring] {
             s.split(whereSeparator: \.isWhitespace).filter { $0.hasPrefix(GuestDrop.baseDir) }
         }
-        var arrived: Set<UUID> = []
+        var arrived: [UUID: Int] = [:]
         var taken: Set<Int> = []
         // Named first (whole paths: a.png isn't a.png.bak): those turns are theirs.
         let named = turns.map { Set(paths($0)) }
         for q in candidates {
             let mine = paths(q.text)
             for i in turns.indices where i >= q.baseline && mine.contains(where: { named[i].contains($0) }) {
-                arrived.insert(q.id); taken.insert(i)
+                arrived[q.id] = max(arrived[q.id] ?? i, i); taken.insert(i)
             }
         }
         // Then one attachment-only turn each, in order.
-        for q in candidates where !arrived.contains(q.id) {
+        for q in candidates where arrived[q.id] == nil {
             if let i = turns.indices.first(where: { $0 >= q.baseline && !taken.contains($0) && withoutAttachments(turns[$0]).isEmpty }) {
-                arrived.insert(q.id); taken.insert(i)
+                arrived[q.id] = i; taken.insert(i)
             }
         }
         return arrived
