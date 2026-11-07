@@ -4389,6 +4389,22 @@ final class RemoteHostWindow: NSWindow {
     /// blanked) → edit → secret-preserving PUT. Host-side-only affordances
     /// (SSH-key import, subscription registration) stay hidden — their
     /// callbacks are nil, exactly like a freshly-created local profile.
+    /// This host's workspace editor on one pane (the Security Overview's
+    /// protection cells).
+    func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {
+        if settingsSessions[id]?.window == nil {
+            // A new editor reads the pane when it's made.
+            ProfileEditorView.pendingWorkspaceCategory = (id, category)
+            openWorkspaceSettings(id)
+        } else {
+            // An open one is brought forward and switched, as this Mac's is.
+            openWorkspaceSettings(id)
+            NotificationCenter.default.post(
+                name: .bromureACSelectEditorCategory,
+                object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")
+        }
+    }
+
     private func openWorkspaceSettings(_ id: Profile.ID) {
         if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
         let c = controller

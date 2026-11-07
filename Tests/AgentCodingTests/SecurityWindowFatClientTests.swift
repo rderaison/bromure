@@ -120,4 +120,33 @@ struct SecurityWindowFatClientTests {
         #expect(view.contains("SecurityOverview.shown(timeline.allEvents, machine: machineFilter,"))
         #expect(!view.contains("for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {"))
     }
+
+    /// Finding: the Overview lists a host's workspaces, but a protection
+    /// cell opened only this Mac's editor, looked up among this Mac's
+    /// profiles -- a host's cell did nothing (or, with a matching id, opened
+    /// the wrong machine's). A posture names its machine; the cell opens it.
+    @Test("a protection cell opens its own machine's editor, never a host id looked up here")
+    func cellOpensItsMachine() throws {
+        typealias L = SecurityEditorLauncher
+        let mine = UUID(), theirs = UUID()
+        #expect(L.route(profileID: mine, machine: nil, localProfiles: [mine], connectedHosts: ["Mac Studio"]) == .local)
+        #expect(L.route(profileID: theirs, machine: "Mac Studio", localProfiles: [mine], connectedHosts: ["Mac Studio"])
+                == .host("Mac Studio"))
+        // A host id that happens to match a local one still goes to the host.
+        #expect(L.route(profileID: mine, machine: "Mac Studio", localProfiles: [mine], connectedHosts: ["Mac Studio"])
+                == .host("Mac Studio"))
+        // Neither known here, nor a connected host: nowhere.
+        #expect(L.route(profileID: theirs, machine: nil, localProfiles: [mine], connectedHosts: []) == nil)
+        #expect(L.route(profileID: theirs, machine: "Gone", localProfiles: [mine], connectedHosts: ["Mac Studio"]) == nil)
+
+        let app = try source("Sources/AgentCoding/BromureAC.swift")
+        #expect(app.contains("c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; return s }"))
+        let view = try source("Sources/AgentCoding/SecurityTimelineView.swift")
+        #expect(view.contains("SecurityEditorLauncher.open(profileID: p.id, machine: p.machine, category: Self.columnCategories[i])"))
+        let fc = try source("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {"))
+        #expect(fc.contains("ProfileEditorView.pendingWorkspaceCategory = (id, category)"))
+        // An open host editor is switched to the pane, as this Mac's is.
+        #expect(fc.contains(#"object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")"#))
+    }
 }

@@ -9278,7 +9278,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let local = self.profiles.map { SecurityPosture(profile: $0) }
                 let hosts = self.connectedRemoteHostWindows().map(\.controller)
                 @MainActor func remote(_ c: RemoteHostController) -> [SecurityPosture] {
-                    c.profiles.map { SecurityPosture(profile: $0) }
+                    // Marked with the host, so a cell opens the host's editor.
+                    c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; return s }
                 }
                 switch machine {
                 case nil: return local + hosts.flatMap(remote)
