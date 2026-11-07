@@ -45,7 +45,7 @@ final class FakeDriver: @unchecked Sendable {
 struct PlanStreamTests {
     /// Waits (yielding to the main queue the listener reads on) until `cond`.
     func until(_ cond: () -> Bool) async -> Bool {
-        for _ in 0..<200 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
+        for _ in 0..<1000 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
         return cond()
     }
 

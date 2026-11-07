@@ -110,7 +110,9 @@ public actor GuestShell {
                      wait: Duration = .seconds(30)) async throws -> Result {
         var req: [String: Any] = ["cmd": cmd, "timeout": timeout]
         if let workdir { req["workdir"] = workdir }
-        let o = try await request(req, wait: wait)
+        // The guest enforces `timeout`; a guest that can't (paused, hung)
+        // would leave the reply waited on forever: a host-side deadline too.
+        let o = try await request(req, wait: wait, deadline: .seconds(min(max(timeout, 0), 86_400) + 15))
         return Result(stdout: o["stdout"] as? String ?? (o["output"] as? String ?? ""),
                       stderr: o["stderr"] as? String ?? "", exitCode: o["exit_code"] as? Int ?? -1)
     }
@@ -118,16 +120,38 @@ public actor GuestShell {
     /// One JSON request to agentd's shell channel (`{"cmd"}`, `{"file"}`,
     /// …) and its JSON reply, as it came. Same retry rule as exec.
     // @port-skip linux-only: the request half of ACAppDelegate.guestJSONRequest over NIO vsock
-    public func request(_ req: [String: Any], wait: Duration = .seconds(30)) async throws -> [String: Any] {
+    /// `deadline`: how long a reply may take once the request is written;
+    /// past it the connection is closed and the request fails (noReply).
+    public func request(_ req: [String: Any], wait: Duration = .seconds(30),
+                        deadline: Duration? = nil) async throws -> [String: Any] {
         let body = try JSONSerialization.data(withJSONObject: req)
         for _ in 0..<32 {
             guard let c = await connection(timeout: wait) else { throw ShellError.notReady }
-            switch try await Self.roundTrip(c, body) {
+            switch try await Self.roundTrip(c, body, deadline: deadline) {
             case .deadBeforeWrite: continue
             case .reply(let r): return r
             }
         }
         throw ShellError.notReady
+    }
+
+    /// roundTrip, given up past `deadline`: the underlying channel is closed
+    /// (withStreams owns the connection, so VsockConnection.close can't end
+    /// the read) and the read is cancelled.
+    // @port-skip linux-only: exec over NIO vsock
+    static func roundTrip(_ conn: VsockConnection, _ body: Data, deadline: Duration?) async throws -> Attempt {
+        guard let deadline else { return try await roundTrip(conn, body) }
+        return try await withThrowingTaskGroup(of: Attempt?.self) { g in
+            g.addTask { try await roundTrip(conn, body) }
+            g.addTask { try? await Task.sleep(for: deadline); return nil }
+            guard let first = try await g.next(), let attempt = first else {
+                g.cancelAll()
+                try? await conn.channel.channel.close()
+                throw ShellError.noReply("no reply within \(deadline)")
+            }
+            g.cancelAll()
+            return attempt
+        }
     }
 
     // @port-skip linux-only: exec over NIO vsock
