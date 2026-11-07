@@ -22,8 +22,13 @@ struct SecurityPosture: Identifiable {
     /// enforced (`confinesGuest(_:)`).
     var sandbox: Bool = false
     /// Whose workspace: nil = this Mac's, else a fat client's host (its
-    /// `securityMirrorKey`). Its editor is that machine's.
+    /// `securityMirrorKey`): the label and the filter.
     var machine: String? = nil
+    /// That host's own id: what a cell's editor is routed by. Two hosts
+    /// can share a name, and the first window by name was another host's
+    /// (Finding: "Protection cell can open a different host's workspace
+    /// editor when host labels match").
+    var hostID: UUID? = nil
 }
 
 extension SecurityPosture {
@@ -108,25 +113,26 @@ extension SecurityTimeline.Event {
 /// Mac's profiles: it matched none (the cell did nothing), or the wrong one.
 @MainActor
 enum SecurityEditorLauncher {
-    enum Route: Equatable { case local, host(String) }
+    enum Route: Equatable { case local, host(UUID) }
 
     /// Where a cell's editor opens: this Mac's, when it's a workspace of this
-    /// Mac's; the host's, when that host is connected; else nowhere.
-    nonisolated static func route(profileID: UUID, machine: String?, localProfiles: Set<UUID>,
-                                  connectedHosts: Set<String>) -> Route? {
-        guard let machine else { return localProfiles.contains(profileID) ? .local : nil }
-        return connectedHosts.contains(machine) ? .host(machine) : nil
+    /// Mac's; its host's (by the host's id, never its name), when that host
+    /// is connected; else nowhere.
+    nonisolated static func route(profileID: UUID, hostID: UUID?, localProfiles: Set<UUID>,
+                                  connectedHosts: Set<UUID>) -> Route? {
+        guard let hostID else { return localProfiles.contains(profileID) ? .local : nil }
+        return connectedHosts.contains(hostID) ? .host(hostID) : nil
     }
 
-    static func open(profileID: UUID, machine: String?, category: EditorCategory) {
+    static func open(profileID: UUID, hostID: UUID?, category: EditorCategory) {
         guard let d = NSApp.delegate as? ACAppDelegate else { return }
         let hosts = d.connectedRemoteHostWindows()
-        switch route(profileID: profileID, machine: machine, localProfiles: Set(d.profiles.map(\.id)),
-                     connectedHosts: Set(hosts.map(\.controller.securityMirrorKey))) {
+        switch route(profileID: profileID, hostID: hostID, localProfiles: Set(d.profiles.map(\.id)),
+                     connectedHosts: Set(hosts.map(\.controller.host.id))) {
         case .local?:
             if let p = d.profiles.first(where: { $0.id == profileID }) { d.openEditorWindow(editing: p, category: category) }
-        case .host(let key)?:
-            hosts.first { $0.controller.securityMirrorKey == key }?.openWorkspaceSettings(profileID, category: category)
+        case .host(let id)?:
+            hosts.first { $0.controller.host.id == id }?.openWorkspaceSettings(profileID, category: category)
         case nil:
             break
         }
@@ -1122,7 +1128,7 @@ struct SecurityOverview: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true, p.sandbox].enumerated()), id: \.offset) { i, on in
                 PostureCell(on: on, workspace: p.name, column: Self.columns[i]) {
-                    SecurityEditorLauncher.open(profileID: p.id, machine: p.machine, category: Self.columnCategories[i])
+                    SecurityEditorLauncher.open(profileID: p.id, hostID: p.hostID, category: Self.columnCategories[i])
                 }
                 .frame(width: 84)
             }

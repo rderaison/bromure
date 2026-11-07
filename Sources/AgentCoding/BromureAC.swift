@@ -9289,7 +9289,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let hosts = self.connectedRemoteHostWindows().map(\.controller)
                 @MainActor func remote(_ c: RemoteHostController) -> [SecurityPosture] {
                     // Marked with the host, so a cell opens the host's editor.
-                    c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; return s }
+                    c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; s.hostID = c.host.id; return s }
                 }
                 switch machine {
                 case nil: return local + hosts.flatMap(remote)

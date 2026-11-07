@@ -8816,8 +8816,26 @@ final class RegistrationCallbackTunnel: @unchecked Sendable {
 /// on the parent's side through the same tunnel the mirror uses.
 extension RemoteHostController: RemoteDelegationLink {
     var hostName: String { host.name }
-    /// The host's bucket in the Security window (its events' `machine`).
-    var securityMirrorKey: String { host.name.isEmpty ? host.address : host.name }
+    /// The host's bucket in the Security window (its events' `machine`), its
+    /// label there, and its filter's key: unique among the saved hosts.
+    var securityMirrorKey: String { Self.securityMirrorKey(for: host, among: RemoteHostStore.shared.hosts) }
+
+    /// The host's name (or address); with its address too when another
+    /// saved host has the same name, and its id when even that matches.
+    /// Two same-named hosts shared one key: one timeline bucket, one filter,
+    /// and a protection cell opened the first one's editor (Finding:
+    /// "Protection cell can open a different host's workspace editor when
+    /// host labels match").
+    nonisolated static func securityMirrorKey(for host: RemoteHost, among hosts: [RemoteHost]) -> String {
+        func label(_ h: RemoteHost) -> String { h.name.isEmpty ? h.address : h.name }
+        let others = hosts.filter { $0.id != host.id }
+        let base = label(host)
+        guard others.contains(where: { label($0) == base }) else { return base }
+        func withAddress(_ h: RemoteHost) -> String { "\(label(h)) (\(h.address):\(h.port))" }
+        let addressed = withAddress(host)
+        guard others.contains(where: { withAddress($0) == addressed }) else { return addressed }
+        return "\(addressed) · \(host.id.uuidString.prefix(8))"
+    }
 
 #if os(macOS)
     /// The host's security timeline for the last `hours` (0 = all it holds),

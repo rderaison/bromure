@@ -128,21 +128,22 @@ struct SecurityWindowFatClientTests {
     @Test("a protection cell opens its own machine's editor, never a host id looked up here")
     func cellOpensItsMachine() throws {
         typealias L = SecurityEditorLauncher
-        let mine = UUID(), theirs = UUID()
-        #expect(L.route(profileID: mine, machine: nil, localProfiles: [mine], connectedHosts: ["Mac Studio"]) == .local)
-        #expect(L.route(profileID: theirs, machine: "Mac Studio", localProfiles: [mine], connectedHosts: ["Mac Studio"])
-                == .host("Mac Studio"))
+        let mine = UUID(), theirs = UUID(), studio = UUID(), gone = UUID()
+        #expect(L.route(profileID: mine, hostID: nil, localProfiles: [mine], connectedHosts: [studio]) == .local)
+        #expect(L.route(profileID: theirs, hostID: studio, localProfiles: [mine], connectedHosts: [studio])
+                == .host(studio))
         // A host id that happens to match a local one still goes to the host.
-        #expect(L.route(profileID: mine, machine: "Mac Studio", localProfiles: [mine], connectedHosts: ["Mac Studio"])
-                == .host("Mac Studio"))
+        #expect(L.route(profileID: mine, hostID: studio, localProfiles: [mine], connectedHosts: [studio])
+                == .host(studio))
         // Neither known here, nor a connected host: nowhere.
-        #expect(L.route(profileID: theirs, machine: nil, localProfiles: [mine], connectedHosts: []) == nil)
-        #expect(L.route(profileID: theirs, machine: "Gone", localProfiles: [mine], connectedHosts: ["Mac Studio"]) == nil)
+        #expect(L.route(profileID: theirs, hostID: nil, localProfiles: [mine], connectedHosts: []) == nil)
+        #expect(L.route(profileID: theirs, hostID: gone, localProfiles: [mine], connectedHosts: [studio]) == nil)
 
         let app = try source("Sources/AgentCoding/BromureAC.swift")
-        #expect(app.contains("c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; return s }"))
+        #expect(app.contains("c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; s.hostID = c.host.id; return s }"))
         let view = try source("Sources/AgentCoding/SecurityTimelineView.swift")
-        #expect(view.contains("SecurityEditorLauncher.open(profileID: p.id, machine: p.machine, category: Self.columnCategories[i])"))
+        #expect(view.contains("SecurityEditorLauncher.open(profileID: p.id, hostID: p.hostID, category: Self.columnCategories[i])"))
+        #expect(view.contains("hosts.first { $0.controller.host.id == id }?.openWorkspaceSettings(profileID, category: category)"))
         let fc = try source("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {"))
         #expect(fc.contains("openWorkspaceSettings(id, initialCategory: category)"))
@@ -204,5 +205,35 @@ struct SecurityWindowFatClientTests {
         let win = try source("Sources/AgentCoding/UnifiedSessionWindow.swift")
         #expect(win.contains("d.openEditorWindow(editing: p, category: .firewall)"))
         #expect(!win.contains("pendingWorkspaceCategory"))
+    }
+
+    /// Finding: "Protection cell can open a different host's workspace editor
+    /// when host labels match". Hosts are unique by id only; the key was the
+    /// name, so two hosts named alike shared a timeline bucket and a filter,
+    /// and a cell opened the first one's editor (a cloned workspace: the
+    /// wrong machine's settings saved). Cells route by the host's id, and
+    /// the key is unique.
+    @Test("two hosts with one name: each keeps its own key, and a cell routes by host id")
+    func sameNamedHosts() {
+        let a = RemoteHost(name: "studio", address: "10.0.0.2", user: "u")
+        var b = RemoteHost(name: "studio", address: "10.0.0.3", user: "u")
+        let other = RemoteHost(name: "mini", address: "10.0.0.9", user: "u")
+        let all = [a, b, other]
+        let ka = RemoteHostController.securityMirrorKey(for: a, among: all)
+        let kb = RemoteHostController.securityMirrorKey(for: b, among: all)
+        #expect(ka != kb)
+        #expect(ka == "studio (10.0.0.2:2222)" && kb == "studio (10.0.0.3:2222)")
+        // A name of its own stays the plain name; so does a lone host.
+        #expect(RemoteHostController.securityMirrorKey(for: other, among: all) == "mini")
+        #expect(RemoteHostController.securityMirrorKey(for: a, among: [a]) == "studio")
+        // The same address and port too (two records of one machine): the id tells them apart.
+        b.address = a.address
+        let k1 = RemoteHostController.securityMirrorKey(for: a, among: [a, b])
+        let k2 = RemoteHostController.securityMirrorKey(for: b, among: [a, b])
+        #expect(k1 != k2 && k1.hasPrefix("studio (10.0.0.2:2222) · "))
+        // Routing never goes by the label: b's cell opens b, whatever a is called.
+        let ws = UUID()
+        #expect(SecurityEditorLauncher.route(profileID: ws, hostID: b.id, localProfiles: [],
+                                             connectedHosts: [a.id, b.id]) == .host(b.id))
     }
 }
