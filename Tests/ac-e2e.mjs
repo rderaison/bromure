@@ -262,7 +262,13 @@ const SECTION_TESTS = (() => {
     for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {
       const key = m[1] + ".";
       if (!bySection.has(key)) bySection.set(key, []);
-      bySection.get(key).push(`${m[1]}.${m[2]}`);
+      const name = `${m[1]}.${m[2]}`;
+      bySection.get(key).push(name);
+      // A name built at run time (`32.${round + 1} …`): its numbers too, so
+      // `--filter 32.2` finds it.
+      if (name.includes("${")) {
+        for (let d = 0; d <= 9; d++) bySection.get(key).push(name.replace(/\$\{[^}]*\}/g, String(d)));
+      }
     }
   } catch {}
   return bySection;

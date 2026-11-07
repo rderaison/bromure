@@ -19,7 +19,14 @@ struct E2EFilterTests {
         var by: [String: [String]] = [:]
         for m in re.matches(in: src, range: NSRange(location: 0, length: ns.length)) {
             let n = ns.substring(with: m.range(at: 1))
-            by[n + ".", default: []].append(n + "." + ns.substring(with: m.range(at: 2)))
+            let name = n + "." + ns.substring(with: m.range(at: 2))
+            by[n + ".", default: []].append(name)
+            if name.contains("${") {
+                for d in 0...9 {
+                    by[n + ".", default: []].append(
+                        name.replacingOccurrences(of: #"\$\{[^}]*\}"#, with: String(d), options: .regularExpression))
+                }
+            }
         }
         return by
     }
@@ -43,10 +50,13 @@ struct E2EFilterTests {
         #expect(try selected(#"^8\."#) == ["8."])
         #expect(try selected("deny-web-POST") == ["27."])
         #expect(try selected("nosuchtestxyz").isEmpty)
+        // A name built at run time (`32.${round + 1} …`) is found by its number.
+        #expect(try selected(#"32\.2"#) == ["32."])
 
         // The harness does what this test does.
         #expect(src.contains(#"for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {"#))
         #expect(src.contains("return re.test(prefix) || (SECTION_TESTS.get(prefix) || []).some((name) => re.test(name));"))
         #expect(src.contains("matches no test name — nothing would run."))
+        #expect(src.contains("bySection.get(key).push(name.replace(/\\$\\{[^}]*\\}/g, String(d)));"))
     }
 }
