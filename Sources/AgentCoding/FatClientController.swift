@@ -31,8 +31,11 @@ private final class PollTimerBox {
 @Observable
 final class RemoteHostController {
     let host: RemoteHost
-    /// Stamps the Security window's history fetches (only the latest lands).
+    /// Stamps the Security window's history fetches; the range last asked
+    /// for; the stamp of the reply last applied (see `acceptsHistory`).
     @ObservationIgnored var securityHistoryGeneration = 0
+    @ObservationIgnored var securityHistoryHours = 0
+    @ObservationIgnored var securityHistoryApplied = 0
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -8745,25 +8748,39 @@ extension RemoteHostController: RemoteDelegationLink {
     func fetchSecurityHistory(hours: Int) {
         let host = self.host
         let key = securityMirrorKey
-        // Each fetch stamped: only the latest one's reply is applied. A slower
-        // earlier one (24 h, still in flight when the range went to 7 days)
-        // landing last would cut the history back.
+        // Each fetch stamped with its range (see `acceptsHistory`).
         securityHistoryGeneration &+= 1
         let generation = securityHistoryGeneration
+        let range = max(0, hours)
+        securityHistoryHours = range
         // Not the poll queue: a slow fetch must not hold the state polls.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let resp = try? RemoteTransport.client(for: host).request(
-                "GET", "/security-timeline?hours=\(max(0, hours))", recvTimeoutSeconds: 30)
+                "GET", "/security-timeline?hours=\(range)", recvTimeoutSeconds: 30)
             guard let resp, resp.status == 200, let rows = resp.json["rows"] as? [[String: Any]] else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, Self.isLatest(generation, of: self.securityHistoryGeneration) else { return }
+                    guard let self, Self.acceptsHistory(generation: generation, hours: range,
+                                                        requestedHours: self.securityHistoryHours,
+                                                        applied: self.securityHistoryApplied) else { return }
+                    self.securityHistoryApplied = generation
                     SecurityTimeline.shared.applyHistory(rows, host: key)
                 }
             }
         }
     }
-    nonisolated static func isLatest(_ generation: Int, of current: Int) -> Bool { generation == current }
+    /// Whether a history reply lands: it covers the range asked for last (a
+    /// slower 24 h reply after the window went to 7 days would cut the
+    /// history back), and it's newer than the reply applied last (an older
+    /// one never replaces fresher rows). Not "only the newest request's":
+    /// a repeat for the same range that failed discarded the earlier one's
+    /// good reply, leaving only the live mirror (Finding: "Failed repeat
+    /// history fetch discards an earlier successful reply").
+    nonisolated static func acceptsHistory(generation: Int, hours: Int, requestedHours: Int, applied: Int) -> Bool {
+        guard generation > applied else { return false }
+        if hours == 0 { return true }                      // all it holds covers any range
+        return requestedHours != 0 && hours >= requestedHours
+    }
 #endif
     var remoteSessions: AgentSessionStore { sessionStore }
     var remoteDelegations: DelegationStore { delegationStore }

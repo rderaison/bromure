@@ -82,16 +82,38 @@ struct FatClientSecurityCountsTests {
         let server = try src("Sources/AgentCoding/AutomationServer.swift")
         #expect(server.contains(#"case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"):"#))
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
-        #expect(fc.contains(#""GET", "/security-timeline?hours=\(max(0, hours))""#))
+        #expect(fc.contains(#""GET", "/security-timeline?hours=\(range)""#))
         #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key)"))
-        // Only the latest fetch's reply lands (review: a slow 24 h reply
-        // after a 7-day one cut the history back).
-        #expect(fc.contains("guard let self, Self.isLatest(generation, of: self.securityHistoryGeneration) else { return }"))
-        #expect(RemoteHostController.isLatest(3, of: 3) && !RemoteHostController.isLatest(2, of: 3))
+        // A reply lands when it covers the range asked for last and is newer
+        // than the one applied last.
+        #expect(fc.contains("guard let self, Self.acceptsHistory(generation: generation, hours: range,"))
+        #expect(fc.contains("self.securityHistoryApplied = generation"))
         let app = try src("Sources/AgentCoding/BromureAC.swift")
         #expect(app.contains("SecurityTimeline.shared.historyRows(hours: hours)"))
         #expect(app.contains("w.controller.fetchSecurityHistory(hours: hours)"))
         let view = try src("Sources/AgentCoding/SecurityTimelineView.swift")
         #expect(view.contains(".onChange(of: rangeHours) { _, h in"))
+    }
+
+    /// Finding: every fetch bumped the stamp and only the newest request's
+    /// reply was taken, so a repeat for the same range that failed threw away
+    /// the earlier request's good reply -- the Overview fell back to the live
+    /// mirror. Now: a reply that covers the range asked for, and is newer
+    /// than the last applied, lands.
+    @Test("a failed repeat keeps the earlier good reply; a narrower or older one still doesn't land")
+    func historyAcceptance() {
+        typealias C = RemoteHostController
+        // A (24 h, #1) in flight, B (24 h, #2) fails: A's reply lands.
+        #expect(C.acceptsHistory(generation: 1, hours: 24, requestedHours: 24, applied: 0))
+        // The window went from 24 h (#1) to 7 days (#2): #1's late reply would cut it back.
+        #expect(!C.acceptsHistory(generation: 1, hours: 24, requestedHours: 168, applied: 0))
+        #expect(C.acceptsHistory(generation: 2, hours: 168, requestedHours: 168, applied: 0))
+        // An older reply after a newer one was applied: never.
+        #expect(!C.acceptsHistory(generation: 1, hours: 168, requestedHours: 168, applied: 2))
+        // All history covers any range; a bounded one never covers "all".
+        #expect(C.acceptsHistory(generation: 3, hours: 0, requestedHours: 24, applied: 2))
+        #expect(!C.acceptsHistory(generation: 3, hours: 720, requestedHours: 0, applied: 2))
+        // A wider reply for a narrower request: fine.
+        #expect(C.acceptsHistory(generation: 4, hours: 168, requestedHours: 24, applied: 3))
     }
 }
