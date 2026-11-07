@@ -225,7 +225,7 @@ public actor Daemon {
         // took them (before their proxy listeners served); their kubeconfigs
         // are rewritten now that the session host is up (the kube fakes were
         // made anew), as a live refresh does.
-        let n = await d.refreshWorkspaceKubeconfigs(create: false)
+        let n = await d.refreshWorkspaceKubeconfigs()
         if n > 0 { FileHandle.standardError.write(Data("bromure-ac daemon: \(n) taken-back workspace(s): kubeconfigs refreshed\n".utf8)) }
         await d.setUpRemoteAccess()
         return d
@@ -935,7 +935,10 @@ public actor Daemon {
         do {
             try await launchVM(&rec, restoreFrom: restoreFrom)
         } catch {
-            // What it set up for the proxy goes with it, as a stop's does.
+            // What it set up for the proxy goes with it, as a stop's does
+            // (a live refresh under way first, as finishStop waits for it).
+            await liveRefreshTail.removeValue(forKey: rec.id)?.value
+            liveApplied[rec.id] = nil
             if let pid = UUID(uuidString: rec.id) { await clearWorkspaceProxyState(pid) }
             throw error
         }

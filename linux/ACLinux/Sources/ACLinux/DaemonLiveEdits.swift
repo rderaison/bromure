@@ -54,13 +54,15 @@ extension Daemon {
     func applyLiveRefresh(_ rec: VMRecord, force: Bool = false) async {
         guard !rec.managed, let mitm, let new = existingProfile(for: rec) else { return }
         let steps = Self.liveSteps(from: force ? nil : liveApplied[rec.id], to: new)
-        liveApplied[rec.id] = new
         // The local model's route: a host-side remap (the guest calls
         // bromure.llm either way), no restage.
         if steps.routing { startLocalEngineIfNeeded(for: await stagedProfile(new)) }
         // The SSH key's "ask before use" gate is the host agent's.
         if steps.sshGate { mitm.sshAgent.setKeys(Self.loadAgentKeys(for: new, store: profileStore), for: new.id) }
-        if steps.restage { await pushLiveCredentials(rec, new) }
+        // Applied only once all of it is: a restage that failed is done
+        // again on the next refresh.
+        if steps.restage, !(await pushLiveCredentials(rec, new)) { return }
+        liveApplied[rec.id] = new
     }
 
     /// Which of a live refresh's steps an edit from `old` (nil: unknown)
@@ -92,8 +94,9 @@ extension Daemon {
     /// guest's files, as the launch stages them, with the map merged.
     // partial: no supply-chain or PII policy, fusion, 1Password error prompt, or grok/kimi stand-in files (not on Linux yet)
     // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=12a93ff58499be07 @0e28fd20
-    func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async {
-        guard let mitm else { return }
+    @discardableResult
+    func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {
+        guard let mitm else { return false }
         let profile = await stagedProfile(raw)
         await MainActor.run {
             mitm.applyWorkspacePolicies(raw)
@@ -105,10 +108,12 @@ extension Daemon {
         let kubeYAML = await kubeconfig(for: profile, plan: plan, live: true)
         let meta = URL(fileURLWithPath: vmDir(rec.id) + "/meta")
         pushAWSCredentials(for: profile, meta: meta.path)
+        var ok = true
         do {
             try writeCredentialFiles(profile, plan: plan, registration: false, meta: meta, kubeYAML: kubeYAML)
             HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
         } catch {
+            ok = false
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': live home-seed refresh failed: \(error)\n".utf8))
         }
         do {
@@ -116,8 +121,10 @@ extension Daemon {
                                extraNoProxy: await kubeNoProxy(for: raw.id), registries: await kubeRegistries(for: raw.id))
             HomeSeed.bumpGenerationCounter(named: "env.generation", in: meta)
         } catch {
+            ok = false
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': live env refresh failed: \(error)\n".utf8))
         }
+        return ok
     }
 
     /// The workspace's credential files in its meta share, as a launch and

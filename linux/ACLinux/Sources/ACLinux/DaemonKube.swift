@@ -246,39 +246,18 @@ extension Daemon {
         return mat.yaml.isEmpty ? nil : mat.yaml
     }
 
-    /// Every running workspace's ~/.kube/config and swap map, made again
-    /// (a cluster came up, went away, or changed who may use it) and
-    /// written into its guest (macOS: refreshKubeAccessForRunningWorkspaces →
-    /// pushLiveCredentials).
-    // partial: the kubeconfig and its swaps only (macOS restages every live credential)
+    /// Every running workspace's credentials restaged, its ~/.kube/config
+    /// among them (a cluster came up, went away, or changed who may use it),
+    /// through the live refresh queue (macOS: refreshKubeAccessForRunningWorkspaces
+    /// → pushLiveCredentials). Also a restarted daemon's, for its taken-back
+    /// workspaces (their kube fakes were made anew). The number restaged.
     // @port-skip linux-only: refreshKubeAccessForRunningWorkspaces on the Linux daemon
-    /// `create`: as launchProfile (a restarted daemon's refresh: false).
-    /// A workspace with no kube contexts gets nothing written, and the
-    /// guest's file is never removed: a user's own ~/.kube/config (kind,
-    /// doctl …) stays.
     @discardableResult
-    func refreshWorkspaceKubeconfigs(create: Bool = true) async -> Int {
-        var n = 0
-        for rec in registry.records where rec.state == .running && !rec.managed {
-            guard let profile = await launchProfile(for: rec, create: create) else { continue }
-            n += 1
-            var yaml = ""
-            if let mitm { yaml = await Self.liveKubeconfig(for: profile, mitm: mitm) ?? "" }
-            // No kube contexts (nothing imported, no Bromure cluster it may
-            // use): the materializer's skeleton isn't written over whatever
-            // the guest has.
-            let direct = await MainActor.run { SessionStores.shared?.kubeEngine?.directClusters(for: profile.id).isEmpty ?? true }
-            guard !yaml.isEmpty, !profile.kubeconfigs.isEmpty || !direct else { continue }
-            let b64 = Data(yaml.utf8).base64EncodedString()
-            let cmd = "mkdir -p ~/.kube && chmod 700 ~/.kube && umask 077 && echo \(b64) | base64 -d > ~/.kube/config.tmp "
-                + "&& mv -f ~/.kube/config.tmp ~/.kube/config && echo ok"
-            let pid = profile.id
-            let out = try? await MainActor.run { LinuxSessionHost.shared }?.guestExec(profileID: pid, command: cmd, timeout: 20)
-            if out?.contains("ok") != true {
-                FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': couldn't update its kubeconfig\n".utf8))
-            }
-        }
-        return n
+    func refreshWorkspaceKubeconfigs() async -> Int {
+        let tasks = registry.records.filter { $0.state == .running && !$0.managed && live[$0.id] != nil }
+            .map { scheduleLiveRestage($0.id) }
+        for t in tasks { await t.value }
+        return tasks.count
     }
 
     /// The node and registry addresses a workspace reaches directly (macOS:
@@ -736,7 +715,6 @@ final class LinuxKubeHost: KubeEngineHost {
         Task { completion(await daemon.kubeRelayFD(id: id, target: target)) }
     }
 
-    // partial: the kubeconfig and its swaps only (macOS restages every live credential)
     // @port-skip linux-only: ACAppDelegate.refreshKubeAccessForRunningWorkspaces on the Linux daemon
     func refreshKubeAccessForRunningWorkspaces() {
         guard let daemon else { return }

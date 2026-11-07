@@ -146,6 +146,33 @@ struct LiveEditTests {
         await MainActor.run { mitm.clearKube(for: p.id) }
         await d.shutdown()
     }
+
+    /// A restage that failed (here: its meta share isn't a directory) isn't
+    /// recorded as applied: the next refresh, with no edit since, does it.
+    @Test func aFailedRestageIsDoneAgainNextTime() async throws {
+        let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let prior = ProfileStore.defaultRootDir
+        ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
+        defer { ProfileStore.defaultRootDir = prior }
+        var p = Profile(name: "fail", tool: .claude, authMode: .token)
+        p.manualTokens = [ManualToken(name: "s", realValue: Self.realStripe, envVarName: "S", hostFilters: ["api.stripe.com"])]
+        p = try ProfileStore().save(p)
+        let rec = RepairMarksTests.stopped(p.id.uuidString)
+        try await d.registerForTesting(rec)
+        let vm = await d.vmDir(rec.id)
+        try FileManager.default.createDirectory(atPath: vm, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: vm + "/meta", contents: Data("not a directory".utf8))
+        await d.applyLiveRefresh(rec)
+        try FileManager.default.removeItem(atPath: vm + "/meta")
+        let meta = URL(fileURLWithPath: vm + "/meta", isDirectory: true)
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        await d.applyLiveRefresh(rec)              // no edit since: the restage is still owed
+        #expect(Self.counter(meta, "env.generation") == 1 && Self.counter(meta, "seed.generation") == 1)
+        let proxy = await d.mitm
+        if let proxy { await MainActor.run { proxy.clearKube(for: p.id) } }
+        await d.shutdown()
+    }
 }
 
 extension Daemon {
