@@ -2590,25 +2590,30 @@ final class BeautifiedSessionModel: ObservableObject {
             if await ownInBox() { inBox = true; break }
         }
         // A send under way: wait it out (a fat client's can take tens of
-        // seconds). One that failed or was held started no turn, and left
-        // the box as it was: still ours to take back, or these messages,
-        // never held, would age out of the strip undelivered. Look again.
+        // seconds). One that failed or was held started no turn: the queue
+        // omp gave back is still ours to hold, or these messages would age
+        // out of the strip undelivered. The box is looked at again, as that
+        // send may have left its own text in it (or emptied it).
+        var stillInBox = inBox
         if sending {
             for _ in 0..<300 where sending { try? await Task.sleep(nanoseconds: 200_000_000) }
-            if stoppedTurnStillCurrent(turn) { inBox = await ownInBox() }
+            if stoppedTurnStillCurrent(turn) { stillInBox = await ownInBox() }
         }
         // A turn sent since the Stop: what's in the box may be the user's now.
         guard stoppedTurnStillCurrent(turn) else {
             BACDebug.log("beautified", "after Esc: a turn started since the stop — box left as is")
             return
         }
-        guard inBox else {
+        guard inBox || stillInBox else {
             BACDebug.log("beautified", "after Esc: queued text not in the input box — left as is")
             return
         }
-        // One C-u per line (the restore joins them with blank lines).
-        let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
-        await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        // Emptied only while it still shows the queue: one C-u per line (the
+        // restore joins them with blank lines).
+        if stillInBox {
+            let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+            await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        }
         let pinned = await provider.pinnedTarget(window: w)
         let ids = Set(restored.map(\.id))
         queueStore.update(queueKey) { l in

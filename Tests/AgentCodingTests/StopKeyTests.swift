@@ -117,8 +117,18 @@ struct StopKeyTests {
         let reclaim = try #require(v.range(of: "private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: StopTurn) async {"))
         let rb = v[reclaim.upperBound...].prefix(3200)
         let wait = try #require(rb.range(of: "for _ in 0..<300 where sending {"))
-        let again = try #require(rb.range(of: "if stoppedTurnStillCurrent(turn) { inBox = await ownInBox() }"))
+        let again = try #require(rb.range(of: "if stoppedTurnStillCurrent(turn) { stillInBox = await ownInBox() }"))
         let guardAt = try #require(rb.range(of: "guard stoppedTurnStillCurrent(turn) else {"))
         #expect(wait.lowerBound < again.lowerBound && again.lowerBound < guardAt.lowerBound)
+        // Seen in the box once, the queue is held even if that send left the
+        // box empty or its own (.dropped, .unconfirmed); only C-u waits on
+        // the box still showing it.
+        let seen = try #require(rb.range(of: "guard inBox || stillInBox else {"))
+        let clearIf = try #require(rb.range(of: "if stillInBox {"))
+        let clear = try #require(rb.range(of: #"await runKeys(Array(repeating: ["C-u"]"#))
+        let hold = try #require(rb.range(of: "l[i].held = true"))
+        #expect(seen.lowerBound < clearIf.lowerBound && clearIf.lowerBound < clear.lowerBound)
+        #expect(clear.lowerBound < hold.lowerBound)
+        #expect(!rb[clearIf.upperBound..<hold.lowerBound].contains("return"), "holding never depends on the C-u")
     }
 }
