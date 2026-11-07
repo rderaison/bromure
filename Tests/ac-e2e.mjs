@@ -4770,6 +4770,27 @@ for n, c in enumerate(calls, 1):
           }
           assert(gone, "the host never took the relayed URL file");
         });
+
+        // The agents' hooks run in the sandbox too: their status (and tool
+        // calls) go through the outbox's agent/ folder. Without it a
+        // sandboxed tab never left idle and tasks never finished.
+        await test("34.10 the agents' hook reports a tab's status from inside the sandbox", async () => {
+          const o = outcomes(await py("t('agent', lambda: open('/mnt/bromure-outbox/agent/ace2e-probe','w').write('x'))\n"));
+          sx("rm -f /mnt/bromure-outbox/agent/ace2e-probe");
+          assertEq(o.agent, "ok", "write the hooks' folder");
+          const T = "tmux -S /run/bromure-sandbox/server/tmux.sock";
+          const status = async () => {
+            const st = await api("GET", "/state");
+            const vm = (st.vms || []).find((v) => v.name === NAME);
+            return ((vm && vm.tabs) || []).find((t) => t.index === 0)?.agentStatus;
+          };
+          for (const want of ["working", "done"]) {
+            sx(`${T} send-keys -t bromure:0 'sh ~/.bromure/agent-status.sh ${want} </dev/null' Enter`);
+            let got;
+            for (let i = 0; i < 20 && got !== want; i++) { await sleep(500); got = await status(); }
+            assertEq(got, want, `tab 0's status after the hook said ${want}`);
+          }
+        });
       } finally {
         await stubVMDown(id ? { id, name: NAME } : null);
       }
