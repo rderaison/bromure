@@ -137,6 +137,11 @@ public actor Daemon {
     /// When a callback relay last opened, by guest address: an SSH-forwarded
     /// one is the shared server's to close, so its end isn't seen here.
     var relayOpened: [String: Date] = [:]
+    /// The stored workspace each running VM's staging last applied, by VM
+    /// id (DaemonLiveEdits.swift); unknown after a daemon restart.
+    var liveApplied: [String: Profile] = [:]
+    /// Each workspace's last queued live refresh (they run one at a time).
+    var liveRefreshTail: [String: Task<Void, Never>] = [:]
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -994,6 +999,9 @@ public actor Daemon {
         // dotfiles, the agents' hooks (~/.bromure/agent-status.sh, omp's),
         // settings and the Claude spec. A VM with no Profile gets the
         // profile-independent subset.
+        // The workspace as it is stored, for the live refresh to tell what a
+        // later edit changed (macOS: the session's captured profile).
+        let raw = rec.managed ? nil : existingProfile(for: rec)
         let staged = await launchProfile(for: rec)
         var launchPlan: SessionTokenPlan?
         if let profile = staged {
@@ -1010,22 +1018,8 @@ public actor Daemon {
                 throw MachineError.invalidConfig(why)
             }
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
-            try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
-                                         kubeconfigYAML: kubeYAML)
-            // The agents' MCP configs (the built-ins and the workspace's own
-            // servers, their tokens as stand-ins), as macOS writes them.
-            try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
-            if rec.registration != true {
-                seedCodexAuthFile(for: profile, homeRoot: seed.appendingPathComponent("files", isDirectory: true))
-            }
-            try store.finalizeHomeSeed(for: profile, seedDir: seed)
-            // The guest's credential environment, sourced by its .bashrc: the
-            // plan's fakes under their env vars (API keys, manual tokens,
-            // MCP bearers), as macOS's session disk writes it.
-            try SessionDisk.apiKeyEnvLines(profile: Self.envProfile(profile, plan: plan), tokenPlan: plan,
-                                           registrationMode: rec.registration == true)
-                .joined(separator: "\n").appending("\n")
-                .write(to: meta.appendingPathComponent("api_key.env"), atomically: true, encoding: .utf8)
+            try writeCredentialFiles(profile, plan: plan, registration: rec.registration == true,
+                                     meta: meta, kubeYAML: kubeYAML)
             if rec.registration != true {
                 pushAWSCredentials(for: profile, meta: meta.path)
                 // The workspace's SSH key, signing for the guest through the
@@ -1110,6 +1104,7 @@ public actor Daemon {
             throw KubeClusterEngine.KubeError.message("'\(rec.name)' is having its disks repaired")
         }
         live[id] = l
+        if let raw { liveApplied[id] = raw }
         // A save between this launch's profile read and now found the VM not
         // running yet (profilesDidChange skipped it): its policy, as it is
         // now. Read and applied in one step on the main actor, where
@@ -1122,6 +1117,8 @@ public actor Daemon {
                     sw.egress.update(.init(now))
                 }
             }
+            // …and its credentials and files, if it changed them.
+            if existingProfile(for: rec) != raw { _ = scheduleLiveRefresh(id) }
         }
         do {
             try await machine.start()
@@ -1498,6 +1495,10 @@ public actor Daemon {
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
+        // A live refresh under way finishes first (a queued one sees the VM
+        // gone): none puts its proxy state back after this clears it.
+        await liveRefreshTail.removeValue(forKey: id)?.value
+        liveApplied[id] = nil
         if let pid = UUID(uuidString: id) { await clearWorkspaceProxyState(pid) }
         // A workspace that stopped: its "until the workspace stops" firewall
         // rules end (macOS: unregisterSession).

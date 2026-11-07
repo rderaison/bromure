@@ -86,6 +86,7 @@
     "Sources/AgentCoding/KubeconfigImport.swift",
     "Sources/AgentCoding/LLMEventExtractor.swift",
     "Sources/AgentCoding/LiveModelRefresh.swift",
+    "Sources/AgentCoding/LiveSessionRefresh.swift",
     "Sources/AgentCoding/MachineLinks.swift",
     "Sources/AgentCoding/MemoryAdmission.swift",
     "Sources/AgentCoding/MessagingConnectorEngine.swift",

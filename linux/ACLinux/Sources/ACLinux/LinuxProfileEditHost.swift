@@ -68,18 +68,18 @@ extension LinuxSessionHost: ProfileEditHost {
         return pubText
     }
 
-    /// An edit lands at the workspace's next boot here: the meta share and
-    /// home seed are staged at launch.
-    // partial: no live edit of a running workspace on Linux (applies at its next boot)
-    /// A running workspace's edit: its trace level applies at once (the
-    /// proxy reads it per request), its session id kept so the trace isn't
-    /// split (macOS: applyLiveSessionRefresh's trace step).
-    // partial: only the trace level is applied live on Linux; the rest waits for the next launch
-    // @port ACAppDelegate.applyLiveSessionRefresh(from: Profile, to: Profile, terminalDefaults: TerminalAppDefaults, window: SessionPane?, sandbox: UbuntuSandboxVM?) h=ca482e2c12f5ab30 @7057d502
+    /// A running workspace's edit: its trace level at once (the proxy reads
+    /// it per request), its session id kept so the trace isn't split; the
+    /// rest (routing, the SSH key's gate, the credential restage) is the
+    /// daemon's live refresh, queued behind any other of the workspace's.
+    // @port-skip linux-only: the entry of applyLiveSessionRefresh (Daemon.liveRefresh), with its trace step
     func applyLiveEditToRunningSession(_ new: Profile) {
-        guard let mitm = daemon?.mitm, let cur = mitm.sessionTrace(for: new.id),
-              cur.level != new.traceLevel else { return }
-        mitm.setSessionTrace(TraceSession(sessionID: cur.sessionID, level: new.traceLevel), for: new.id)
+        if let mitm = daemon?.mitm, let cur = mitm.sessionTrace(for: new.id), cur.level != new.traceLevel {
+            mitm.setSessionTrace(TraceSession(sessionID: cur.sessionID, level: new.traceLevel), for: new.id)
+        }
+        guard let daemon, LinuxSessionHost.running.withLockedValue({ $0.contains(new.id) }) else { return }
+        let pid = new.id
+        Task { if let id = await daemon.runningVMID(of: pid) { await daemon.scheduleLiveRefresh(id) } }
     }
 
     // @port-skip linux-only: Daemon.describe's summary without the actor's VM records
@@ -103,9 +103,9 @@ extension LinuxSessionHost: ProfileEditHost {
     }
 
     /// A save's live part (no sidebar or launch agent on a server): the
-    /// guardrails, egress and prompt-injection policies, as macOS applies
-    /// them to a running workspace.
-    // partial: no supply-chain, PII or credential restage (macOS does those too)
+    /// guardrails, egress and prompt-injection policies at once, as macOS
+    /// applies them to a running workspace (the credential restage is
+    /// applyLiveEditToRunningSession's).
     // @port-skip linux-only: no app surfaces to refresh on a server
     func profilesDidChange(saved: Profile?, editing: Profile?) {
         // A running workspace's only: a stopped one's comes with its launch

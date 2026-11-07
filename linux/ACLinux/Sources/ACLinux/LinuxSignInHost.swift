@@ -77,8 +77,7 @@ extension LinuxSessionHost: ProxySignInHost {
     }
 
     /// The workspace runs the agent on its subscription now (macOS: the
-    /// same profile edit, then a live credential push the relaunch does here).
-    // partial: the relaunch pushes the stand-in (no pushLiveCredentials / live profile edit on Linux)
+    /// same profile edit, then a live credential push).
     // @port ACAppDelegate.applyRegisteredSubscription(provider: SubscriptionProvider, profileID: UUID) h=6e8dabf79e5bbc2c @dd7ba30d
     func applyRegisteredSubscription(provider: SubscriptionProvider, profileID: UUID) {
         let store = ProfileStore()
@@ -98,6 +97,12 @@ extension LinuxSessionHost: ProxySignInHost {
             do { try store.update(p) } catch {
                 FileHandle.standardError.write(Data("bromure-ac daemon: sign-in: couldn't save profile: \(error)\n".utf8))
             }
+            applyLiveEditToRunningSession(p)
+        } else if let daemon, Self.running.withLockedValue({ $0.contains(p.id) }) {
+            // Nothing in the profile moved, but a credential exists now: the
+            // whole restage (macOS: pushLiveCredentials).
+            let pid = p.id
+            Task { if let id = await daemon.runningVMID(of: pid) { await daemon.scheduleLiveRestage(id) } }
         }
     }
 

@@ -19,6 +19,13 @@ extension Daemon {
     func launchProfile(for rec: VMRecord, create: Bool = true) async -> Profile? {
         guard let raw = create ? profile(for: rec) : existingProfile(for: rec) else { return nil }
         if rec.registration == true { return raw }
+        return await stagedProfile(raw)
+    }
+
+    /// A workspace with Preferences › Models projected on, as a launch and
+    /// a live refresh stage it.
+    // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch and pushLiveCredentials)
+    func stagedProfile(_ raw: Profile) async -> Profile {
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {
             raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
