@@ -440,7 +440,14 @@ struct SecurityTimelineView: View {
         func field(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
         let iso = ISO8601DateFormatter()
         var out = "time,machine,workspace,engine,condition,decision,outcome\n"
-        for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {
+        // What's on screen: the Timeline's filtered rows, or the Overview's
+        // machine and range -- not every machine's events (a host's Overview
+        // exported this Mac's and other hosts' too).
+        let exported = tab == .timeline
+            ? Array(rows.reversed())
+            : SecurityOverview.shown(timeline.allEvents, machine: machineFilter,
+                                     rangeHours: SecurityTimeline.defaultRangeHours)
+        for e in exported {
             // Never export secret characters, whatever an older row carries.
             out += [iso.string(from: e.time), e.machine ?? "This Mac", e.workspace ?? "", e.engine,
                     SecretFingerprint.redactLegacy(e.condition), SecretFingerprint.redactLegacy(e.decision),
@@ -891,9 +898,16 @@ struct SecurityOverview: View {
     let showTimeline: (SecurityTimelineFilter) -> Void
 
     private var recent: [SecurityTimeline.Event] {
-        let mine = Self.events(timeline.allEvents, machine: machine)
+        Self.shown(timeline.allEvents, machine: machine, rangeHours: rangeHours)
+    }
+
+    /// What the Overview counts: one machine's events (nil = all) over its
+    /// range (0 = all history). Its CSV export saves this same set.
+    nonisolated static func shown(_ all: [SecurityTimeline.Event], machine: String?, rangeHours: Int,
+                                  now: Date = Date()) -> [SecurityTimeline.Event] {
+        let mine = events(all, machine: machine)
         guard rangeHours > 0 else { return mine }
-        let since = Date().addingTimeInterval(-Double(rangeHours) * 3600)
+        let since = now.addingTimeInterval(-Double(rangeHours) * 3600)
         return mine.filter { $0.time >= since }
     }
 

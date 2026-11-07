@@ -97,4 +97,27 @@ struct SecurityWindowFatClientTests {
         #expect(proxy.components(separatedBy: "HTTPMitmConnection.emitClientCertEvent(entry,").count - 1 == 2)
         #expect(proxy.contains("Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)"))
     }
+
+    /// Finding: the Overview counts one machine's events over its range, but
+    /// its CSV export saved every machine's -- viewing one host, the file
+    /// carried this Mac's and other hosts' activity too.
+    @Test("the Overview's export saves what it shows: its machine, its range")
+    func overviewExportScoped() throws {
+        let now = Date()
+        func ev(_ machine: String?, hoursAgo: Double) -> SecurityTimeline.Event {
+            var e = SecurityTimeline.Event(time: now.addingTimeInterval(-hoursAgo * 3600), engine: "Firewall",
+                                           condition: "c", decision: "d", kind: .blocked, profileID: UUID())
+            e.machine = machine
+            return e
+        }
+        let all = [ev(nil, hoursAgo: 1), ev("Mac Studio", hoursAgo: 1), ev("Mac Studio", hoursAgo: 30), ev("Mini", hoursAgo: 2)]
+        let shown = SecurityOverview.shown(all, machine: "Mac Studio", rangeHours: 24, now: now)
+        #expect(shown.count == 1 && shown.allSatisfy { $0.machine == "Mac Studio" })
+        #expect(SecurityOverview.shown(all, machine: "Mac Studio", rangeHours: 0, now: now).count == 2)
+        #expect(SecurityOverview.shown(all, machine: "", rangeHours: 24, now: now).count == 1)
+        #expect(SecurityOverview.shown(all, machine: nil, rangeHours: 24, now: now).count == 3)
+        let view = try source("Sources/AgentCoding/SecurityTimelineView.swift")
+        #expect(view.contains("SecurityOverview.shown(timeline.allEvents, machine: machineFilter,"))
+        #expect(!view.contains("for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {"))
+    }
 }
