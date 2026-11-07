@@ -222,4 +222,81 @@ struct FatClientSecurityCountsTests {
         #expect(try src("Sources/AgentCoding/FatClientController.swift")
             .contains(#"oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)))"#))
     }
+
+
+    /// Finding: "Legacy timeline rows duplicate after a host restart and
+    /// repeat". Rows logged before ids got a fresh id at every load: a fat
+    /// client that fetched one before the host restarted saw its next repeat
+    /// under another id, kept both, and counted the decision twice. The same
+    /// with history from an older host that sends no ids.
+    @Test("a legacy row keeps its id across reloads, and its repeat after a host restart counts once")
+    func legacyRowsAcrossRestart() throws {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tl-legacy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let now = Date()
+        func line(_ ago: TimeInterval, ck: String?, c: String) -> String {
+            var d: [String: Any] = ["t": now.addingTimeInterval(-ago).timeIntervalSince1970, "e": "Credential brokering",
+                                    "c": c, "d": "swapped", "k": "info", "p": pid.uuidString, "n": 2]
+            if let ck { d["ck"] = ck }
+            return String(decoding: try! JSONSerialization.data(withJSONObject: d), as: UTF8.self)
+        }
+        // Two rows logged before ids (no "rid"), in the order they came: one
+        // an hour ago, a swap 2 minutes ago.
+        let day = SecurityTimeline.dayFormatter.string(from: now)
+        try ([line(3600, ck: nil, c: "older"), line(120, ck: "swap|a", c: "swap a")].joined(separator: "\n") + "\n")
+            .write(to: dir.appendingPathComponent(day + ".jsonl"), atomically: true, encoding: .utf8)
+
+        let first = SecurityTimeline.load(from: dir, limit: 5000, after: 0)
+        let again = SecurityTimeline.load(from: dir, limit: 5000, after: 0)
+        #expect(first.count == 2)
+        #expect(first.map(\.stableID) == again.map(\.stableID), "a legacy row's id changed between loads")
+
+        // The client fetched the host's history; the host restarts and the
+        // swap repeats (it folds into the legacy row and moves to the mirror).
+        let client = SecurityTimeline(directory: nil)
+        let hostBefore = SecurityTimeline(directory: dir)
+        client.applyHistory(hostBefore.historyRows(hours: 0), host: "h")
+        let hostAfter = SecurityTimeline(directory: dir)
+        var repeatSwap = SecurityTimeline.Event(time: now, engine: "Credential brokering", condition: "swap a",
+                                            decision: "swapped", kind: .info, profileID: pid, count: 1)
+        repeatSwap.coalesceKey = "swap|a"
+        hostAfter.append(repeatSwap)
+        #expect(hostAfter.events.count == 2)                       // folded into the logged row
+        client.applyMirror(Array(hostAfter.mirrorRows().suffix(1)), host: "h")
+        let rows = try #require(client.remote["h"])
+        #expect(rows.filter { $0.coalesceKey == "swap|a" }.count == 1, "the swap counted twice")
+        #expect(rows.first { $0.coalesceKey == "swap|a" }?.count == 3)
+        #expect(rows.count == 2)
+    }
+
+    @Test("history from a host without ids merges with a mirror that has them; a distinct row stays")
+    func noIDHistoryMergesWithIDMirror() {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        // Fetched from an older host: no ids. The swap row from 3 minutes ago.
+        var oldSwap = ev(3, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 2)
+        oldSwap.rowID = nil
+        let history = [ev(100), oldSwap]
+        // The upgraded host's mirror: the same row repeated, with an id.
+        var mirrored = ev(0, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 3)
+        mirrored.rowID = UUID()
+        let merged = SecurityTimeline.merged(history: history, mirror: [mirrored])
+        #expect(merged.filter { $0.coalesceKey == "swap|a" }.count == 1)
+        #expect(merged.count == 2)
+
+        // A repeat whose id the history holds is that row only: a distinct
+        // row with the same key (a new row the host started) is kept.
+        var same = ev(5, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 1)
+        same.rowID = UUID()
+        var distinct = ev(8, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 1)
+        distinct.rowID = UUID()
+        var sameNow = ev(0, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 2)
+        sameNow.rowID = same.rowID
+        let kept = SecurityTimeline.merged(history: [distinct, same], mirror: [sameNow])
+        let keptIDs = Set(kept.map(\.stableID))
+        let wanted: Set<UUID> = [distinct.stableID, sameNow.stableID]
+        #expect(keptIDs == wanted)
+        #expect(kept.count == 2)
+    }
 }

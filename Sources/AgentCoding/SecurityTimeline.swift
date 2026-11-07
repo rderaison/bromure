@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// A live, on-device record of what Bromure's security engines actually did —
 /// every credential swap, firewall verdict, package check, prompt-injection
@@ -312,7 +313,7 @@ public final class SecurityTimeline {
 
     // MARK: - Disk
 
-    nonisolated private static let dayFormatter: DateFormatter = {
+    nonisolated static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(identifier: "UTC")
@@ -353,8 +354,26 @@ public final class SecurityTimeline {
         e.denials = d["dn"] as? Int
         e.firewall = Firewall(wire: d["fw"] as? [String: Any])
         e.package = PackageRef(wire: d["pk"] as? String)
-        e.rowID = (d["rid"] as? String).flatMap(UUID.init)
+        // A row logged before rows had ids: one derived from what it says,
+        // the same at every load. A fresh one each launch made the row a
+        // stranger to a fat client that fetched it before the restart: its
+        // next repeat came back under another id and counted twice (Finding:
+        // "Legacy timeline rows duplicate after a host restart and repeat").
+        e.rowID = (d["rid"] as? String).flatMap(UUID.init) ?? legacyRowID(e)
         return e
+    }
+
+    /// A stable id for a logged row without one: a hash of its persisted
+    /// fields, as read (redacted -- the log's one rewrite redacts them too).
+    nonisolated static func legacyRowID(_ e: Event) -> UUID {
+        let fields: [String] = ["legacy-row", String(e.time.timeIntervalSince1970.bitPattern), e.engine,
+                                e.condition, e.decision, e.kind.wire, e.profileID.uuidString,
+                                e.coalesceKey ?? "", e.workspace ?? "", e.count.map(String.init) ?? ""]
+        var b = Array(SHA256.hash(data: Data(fields.joined(separator: "\u{1F}").utf8)).prefix(16))
+        b[6] = (b[6] & 0x0F) | 0x50   // a name-based UUID (version 5 layout)
+        b[8] = (b[8] & 0x3F) | 0x80
+        return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                           b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
     }
 
     /// Rewrite the daily logs so no legacy secret preview stays on disk.
@@ -527,16 +546,26 @@ public final class SecurityTimeline {
         // event removes distinct older events with the same key"). A host
         // that sends no ids: only a copy within the window of a mirrored
         // repeat is the same row.
+        //
+        // A mirrored repeat whose id the history doesn't hold may be a row it
+        // holds under another id, or none: fetched from an older host (no
+        // ids), or before the host restarted (rows logged without ids got a
+        // new one each launch). Then the window decides, as with no ids -- the
+        // host folds a repeat into exactly such a row. A repeat whose id the
+        // history does hold is that row, so it never takes a distinct one
+        // with it (Finding: "Legacy timeline rows duplicate after a host
+        // restart and repeat").
         let mirroredRows = Set(mirror.compactMap(\.rowID))
+        let historyRows = Set(history.compactMap(\.rowID))
         var repeatTimes: [String: [Date]] = [:]
-        for e in mirror where e.rowID == nil {
+        for e in mirror where e.rowID.map({ !historyRows.contains($0) }) ?? true {
             if let ck = e.coalesceKey { repeatTimes["\(e.profileID)|\(ck)", default: []].append(e.time) }
         }
         let kept = history.filter { e in
             // Older than the mirror, still held by the host (its cap prunes
             // the oldest), and not the row the mirror carries again.
             guard e.time < oldest, oldestRetained.map({ e.time >= $0 }) ?? true else { return false }
-            if let rid = e.rowID { return !mirroredRows.contains(rid) }
+            if let rid = e.rowID, mirroredRows.contains(rid) { return false }
             guard let ck = e.coalesceKey, let times = repeatTimes["\(e.profileID)|\(ck)"] else { return true }
             return !times.contains { $0 >= e.time && $0.timeIntervalSince(e.time) <= coalesceWindow }
         }
