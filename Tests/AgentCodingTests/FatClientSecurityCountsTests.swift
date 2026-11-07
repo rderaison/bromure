@@ -84,6 +84,10 @@ struct FatClientSecurityCountsTests {
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains(#""GET", "/security-timeline?hours=\(max(0, hours))""#))
         #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key)"))
+        // Only the latest fetch's reply lands (review: a slow 24 h reply
+        // after a 7-day one cut the history back).
+        #expect(fc.contains("guard let self, Self.isLatest(generation, of: self.securityHistoryGeneration) else { return }"))
+        #expect(RemoteHostController.isLatest(3, of: 3) && !RemoteHostController.isLatest(2, of: 3))
         let app = try src("Sources/AgentCoding/BromureAC.swift")
         #expect(app.contains("SecurityTimeline.shared.historyRows(hours: hours)"))
         #expect(app.contains("w.controller.fetchSecurityHistory(hours: hours)"))

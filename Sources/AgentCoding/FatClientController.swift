@@ -31,6 +31,8 @@ private final class PollTimerBox {
 @Observable
 final class RemoteHostController {
     let host: RemoteHost
+    /// Stamps the Security window's history fetches (only the latest lands).
+    @ObservationIgnored var securityHistoryGeneration = 0
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -8678,16 +8680,25 @@ extension RemoteHostController: RemoteDelegationLink {
     func fetchSecurityHistory(hours: Int) {
         let host = self.host
         let key = securityMirrorKey
+        // Each fetch stamped: only the latest one's reply is applied. A slower
+        // earlier one (24 h, still in flight when the range went to 7 days)
+        // landing last would cut the history back.
+        securityHistoryGeneration &+= 1
+        let generation = securityHistoryGeneration
         // Not the poll queue: a slow fetch must not hold the state polls.
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let resp = try? RemoteTransport.client(for: host).request(
                 "GET", "/security-timeline?hours=\(max(0, hours))", recvTimeoutSeconds: 30)
             guard let resp, resp.status == 200, let rows = resp.json["rows"] as? [[String: Any]] else { return }
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { SecurityTimeline.shared.applyHistory(rows, host: key) }
+                MainActor.assumeIsolated {
+                    guard let self, Self.isLatest(generation, of: self.securityHistoryGeneration) else { return }
+                    SecurityTimeline.shared.applyHistory(rows, host: key)
+                }
             }
         }
     }
+    nonisolated static func isLatest(_ generation: Int, of current: Int) -> Bool { generation == current }
 #endif
     var remoteSessions: AgentSessionStore { sessionStore }
     var remoteDelegations: DelegationStore { delegationStore }
