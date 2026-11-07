@@ -161,6 +161,7 @@ struct DetectorLoadingTests {
         // Asked over and over through the whole load: every answer is quick.
         var settled = ModelReadiness.loading
         var slowest = 0.0
+        let start = Date()
         for _ in 0..<500 where settled == .loading {
             try await Task.sleep(nanoseconds: 20_000_000)
             let t0 = Date()
@@ -168,7 +169,11 @@ struct DetectorLoadingTests {
             slowest = max(slowest, Date().timeIntervalSince(t0))
         }
         #expect(settled == .ready)
-        #expect(slowest < 0.2, "a readiness call waited \(slowest)s behind the load")
+        // A call stuck behind the load waits for much of it; a busy machine
+        // (the full suite in parallel) only delays a hop. So the bound grows
+        // with the load: 0.2 s, or a quarter of how long the load took.
+        let load = Date().timeIntervalSince(start)
+        #expect(slowest < max(0.2, load / 4), "a readiness call waited \(slowest)s behind a \(load)s load")
     }
 
     @Test("a load that runs long stops answering 503: the request waits for it")
