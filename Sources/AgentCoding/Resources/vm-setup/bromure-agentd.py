@@ -7628,14 +7628,21 @@ def task_bromure_open():
                 return
     except OSError:
         return   # not installed (dev run): setup.sh owns creation
-    tmp = "/tmp/.bromure-open"
-    with open(tmp, "w") as f:
-        f.write(_BROMURE_OPEN)
-    _sudo(["install", "-m", "755", tmp, _BROMURE_OPEN_PATH])
+    if not _have_sudo():
+        return
+    # The content goes to root on stdin, into root's own folder, then into
+    # place: never through /tmp, which a sandboxed agent can write (a file
+    # it planted there would be what root installed).
+    staged = _BROMURE_OPEN_PATH + ".new"
     try:
-        os.unlink(tmp)
-    except OSError:
-        pass
+        subprocess.run(["sudo", "sh", "-c",
+                        'umask 022 && cat > "$1" && chmod 755 "$1" && mv -f "$1" "$2"',
+                        "sh", staged, _BROMURE_OPEN_PATH],
+                       input=_BROMURE_OPEN, text=True, stdout=_DEVNULL, stderr=_DEVNULL,
+                       check=True, timeout=30)
+    except Exception as e:
+        log("session", "bromure-open: could not upgrade it: %s" % e)
+        return
     log("session", "bromure-open upgraded (relays through the outbox's urls/ folder)")
 
 

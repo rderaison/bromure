@@ -1209,9 +1209,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // The URL relay's own folder (what a sandboxed agent can
                 // write): its url-*.txt only, never anything else named
                 // like the outbox's own signals.
+                // A real folder only: the guest can replace it with a symlink
+                // to a folder of the Mac's (attributesOfItem doesn't follow one).
                 let relay = outbox.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
-                entries += ((try? fm.contentsOfDirectory(at: relay, includingPropertiesForKeys: nil)) ?? [])
-                    .filter { $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt" }
+                if (try? fm.attributesOfItem(atPath: relay.path))?[.type] as? FileAttributeType == .typeDirectory {
+                    entries += ((try? fm.contentsOfDirectory(at: relay, includingPropertiesForKeys: nil)) ?? [])
+                        .filter { $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt" }
+                }
                 // agent-tool-<win>.jsonl — append-only, one line per tool
                 // call, written by the agents' PreToolUse hooks before the
                 // tool runs (NETWORK_LINEAGE.md). Read new complete lines;

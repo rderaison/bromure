@@ -42,6 +42,26 @@ struct OpenShellTemplateTests {
         #expect(FileManager.default.fileExists(atPath: urls.appendingPathComponent("home-migrated.txt").path))
     }
 
+    /// FileManager's contentsOfDirectory already refuses a symlinked folder;
+    /// the scanner checks it's a real one too, so this never rests on that.
+    @Test("a urls/ the guest made a symlink isn't followed onto the Mac")
+    @MainActor func symlinkedRelayIgnored() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let mac = try tempDir(); defer { try? FileManager.default.removeItem(at: mac) }
+        let victim = mac.appendingPathComponent("url-keep.txt")
+        try "https://example.com/not-the-guests\n".write(to: victim, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: dir.appendingPathComponent(SessionDisk.outboxURLRelayFolder),
+                                                   withDestinationURL: mac)
+        let tmp = try tempDir(); defer { try? FileManager.default.removeItem(at: tmp) }
+        let vm = UbuntuSandboxVM(imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp))
+        var opened: [URL] = []
+        vm.onURLOpen = { opened.append($0) }
+        let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        for _ in 0..<24 { for apply in await scanner.tick() { apply(vm) } }
+        #expect(opened.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: victim.path), "a file on the Mac was consumed")
+    }
+
     @Test("bromure-open writes into urls/ when the host made it, else the outbox as before")
     func scriptUsesRelayFolder() throws {
         let sh = try text("setup.sh")
@@ -91,6 +111,10 @@ struct OpenShellTemplateTests {
         let tasks = try #require(agentd.range(of: "_run_once(\"bromure-open\", task_bromure_open)"))
         let strict = try #require(agentd.range(of: "_run_once(\"strict\", task_strict_sandbox)"))
         #expect(tasks.lowerBound < strict.lowerBound, "it needs sudo, which strict takes away")
+        let task = try #require(agentd.range(of: "def task_bromure_open():"))
+        let tb = agentd[task.upperBound...].prefix(1400)
+        #expect(!tb.contains("\"/tmp"), "staged where a sandboxed agent can write")
+        #expect(tb.contains("input=_BROMURE_OPEN"))
         let sandboxd = try text("bromure-sandboxd")
         #expect(sandboxd.contains(#"("/mnt/bromure-outbox/urls", "#))
         #expect(!sandboxd.contains(#"("/mnt/bromure-outbox", "#))
