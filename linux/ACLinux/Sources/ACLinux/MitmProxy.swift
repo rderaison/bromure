@@ -730,7 +730,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
         if started {
-            if upgraded, let upstream { upstream.writeAndFlush(b, promise: nil); return }
+            if upgraded, let upstream {
+                upstream.write(b, promise: nil)
+                // The upstream can't take more: the guest isn't read until it
+                // drains (its ResponseRelay resumes it). Paused before the flush.
+                if !upstream.isWritable { _ = context.channel.setOption(ChannelOptions.autoRead, value: false) }
+                upstream.flush()
+                return
+            }
             guard awaitingUpgrade || upstream == nil else { return }   // behind a plain request: dropped
             pendingBytes += b.readableBytes
             guard pendingBytes <= Self.maxHeld else { context.close(promise: nil); return }
@@ -809,6 +816,20 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let method = line.first.map(String.init) ?? ""
         let path = line.count > 1 ? String(line[1]) : "/"
         var upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
+        // Only a WebSocket upgrade is offered: another protocol (h2c above
+        // all) would carry every later request past the per-request policy.
+        // Every other token goes, across every Upgrade header; none left, and
+        // the request is served as plain HTTP/1.1.
+        if upgrade {
+            switch ResponseRelay.websocketOnly(head) {
+            case .some(true):
+                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings"], add: "Upgrade: websocket")
+            case .some(false):
+                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings", "connection"], add: "Connection: close")
+                upgrade = false
+            case .none: break
+            }
+        }
         var injected = SubscriptionAuthRewrite.Injected()
         // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace
         // (our own stand-ins aren't leaks).
@@ -900,6 +921,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             return .answer(response)
         }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint)
+    }
+
+    /// The guest drained: the upstream may be read again (ResponseRelay
+    /// paused it while the guest was full).
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable { _ = upstream?.setOption(ChannelOptions.autoRead, value: true) }
+        context.fireChannelWritabilityChanged()
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1031,9 +1060,8 @@ final class ResponseRelay: ChannelInboundHandler {
     private var head = ByteBuffer()
     private var headDone = false
     /// An upgrade's reply: told whether it switched protocols (a 101),
-    /// once its status line is in.
+    /// once its head is in.
     var onSwitched: ((Bool) -> Void)?
-    private var statusLine = Data()
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1090,19 +1118,11 @@ final class ResponseRelay: ChannelInboundHandler {
             whole.append(contentsOf: b.readableBytesView)
             return
         }
-        if upgrade, let tell = onSwitched {
-            statusLine.append(contentsOf: b.readableBytesView.prefix(64 - statusLine.count))
-            if let eol = statusLine.firstIndex(of: 0x0D) ?? (statusLine.count >= 64 ? statusLine.endIndex : nil) {
-                let line = String(decoding: statusLine[statusLine.startIndex..<eol], as: UTF8.self)
-                onSwitched = nil
-                tell(line.split(separator: " ").dropFirst().first == "101")
-            }
-        }
-        if headDone || upgrade {
-            headDone = true
+        if headDone {
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
             relayed = true
             guest.write(b, promise: nil)
+            holdIfGuestFull(context)
             return
         }
         head.writeBuffer(&b)
@@ -1110,16 +1130,88 @@ final class ResponseRelay: ChannelInboundHandler {
             if head.readableBytes > 64 << 10 { context.close(promise: nil) }
             return
         }
-        headDone = true
         let all = Data(head.readableBytesView)
         let split = end.upperBound - head.readerIndex
-        let h = HTTPRequestFraming.replacingHeaders(Data(all.prefix(split)),
-                                                    drop: ["connection", "keep-alive"], add: "Connection: close")
-        noteStatus(h)
-        let out = h + all.dropFirst(split)
+        // An upgrade's interim answers (100 Continue, 103 Early Hints) go to
+        // the guest as they are (through the same backpressure); the next
+        // head decides.
+        var head0 = Data(all.prefix(split)), rest = Data(all.dropFirst(split))
+        while upgrade, let st = Self.status(head0), (100..<200).contains(st), st != 101 {
+            relayed = true
+            keepForTrace(head0)
+            guest.write(guest.allocator.buffer(bytes: head0), promise: nil)
+            holdIfGuestFull(context)
+            guard let next = rest.range(of: Data("\r\n\r\n".utf8)) else {
+                head.clear()
+                head.writeBytes(rest)
+                return
+            }
+            head0 = Data(rest[rest.startIndex..<next.upperBound])
+            rest = Data(rest[next.upperBound...])
+        }
+        headDone = true
+        let out: Data
+        if upgrade, Self.status(head0) == 101 {
+            // Switched: the head as it is, then the stream both ways.
+            noteStatus(head0)
+            onSwitched?(true)
+            out = head0 + rest
+        } else {
+            // One response, then the close: an upgrade the upstream refused
+            // too (the request side drops what the guest sends after it, so a
+            // client reusing the connection must be told it's done).
+            if upgrade { onSwitched?(false) }
+            let h = HTTPRequestFraming.replacingHeaders(head0, drop: ["connection", "keep-alive"], add: "Connection: close")
+            noteStatus(h)
+            out = h + rest
+        }
+        onSwitched = nil
         keepForTrace(out)
         relayed = true
         guest.write(guest.allocator.buffer(bytes: out), promise: nil)
+        holdIfGuestFull(context)
+    }
+
+    /// The guest can't take more: the upstream isn't read until it drains
+    /// (RequestReader, on the guest's channel, resumes it). Paused before
+    /// the flush: a flush that drains at once fires that resume inside it.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    private func holdIfGuestFull(_ context: ChannelHandlerContext) {
+        guard !guest.isWritable else { return }
+        _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
+        guest.flush()
+    }
+
+    /// The upstream drained: the guest (an upgraded stream's) may be read again.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable { _ = guest.setOption(ChannelOptions.autoRead, value: true) }
+        context.fireChannelWritabilityChanged()
+    }
+
+    /// An upgrade request's tokens over every Upgrade header: nil when the
+    /// only one is `websocket` (nothing to change), true when websocket is
+    /// among others (the others go), false when it isn't there at all.
+    // @port-skip linux-only: the Linux proxy's upgrade policy
+    static func websocketOnly(_ head: String) -> Bool? {
+        let tokens = head.components(separatedBy: "\r\n").dropFirst().compactMap { line -> [String]? in
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { return nil }
+            return line[line.index(after: colon)...].split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces).lowercased()
+            }
+        }.flatMap { $0 }
+        let ws = tokens.filter { $0 == "websocket" || $0.hasPrefix("websocket/") }
+        if ws.isEmpty { return false }
+        return ws.count == tokens.count ? nil : true
+    }
+
+    /// A response head's status code.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    static func status(_ head: Data) -> Int? {
+        guard let eol = head.firstIndex(of: 0x0D) else { return nil }
+        let parts = String(decoding: head[head.startIndex..<eol], as: UTF8.self).split(separator: " ")
+        return parts.count >= 2 ? Int(parts[1]) : nil
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy

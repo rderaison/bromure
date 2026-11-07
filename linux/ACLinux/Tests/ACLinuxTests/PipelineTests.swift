@@ -93,9 +93,11 @@ struct PipelineTests {
         let no = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nno")
         defer { no.stop() }
         var h = "\(ip):\(no.port)"
-        _ = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\n\(ws)\r\n"
-                          + "POST http://\(h)/smuggled HTTP/1.1\r\nHost: \(h)\r\nContent-Length: 0\r\n\r\n",
-                          then: "POST http://\(h)/later HTTP/1.1\r\nHost: \(h)\r\nContent-Length: 0\r\n\r\n")
+        let refused = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\n\(ws)\r\n"
+                                    + "POST http://\(h)/smuggled HTTP/1.1\r\nHost: \(h)\r\nContent-Length: 0\r\n\r\n",
+                                    then: "POST http://\(h)/later HTTP/1.1\r\nHost: \(h)\r\nContent-Length: 0\r\n\r\n")
+        #expect(refused.hasPrefix("HTTP/1.1 200") && refused.contains("Connection: close\r\n"),
+                "the guest is told the connection is done (it would wait on it otherwise): \(refused.prefix(120))")
         var seen = no.received.withLockedValue { $0 }
         #expect(seen.contains("GET /ws"), "\(seen)")
         #expect(!seen.contains("smuggled") && !seen.contains("later"), "nothing after a refused upgrade: \(seen)")
@@ -110,5 +112,108 @@ struct PipelineTests {
         #expect(out.hasPrefix("HTTP/1.1 101"), "\(out.prefix(80))")
         #expect(seen.contains("EARLY-FRAME"), "the frame held for the 101 went up: \(seen)")
         #expect(seen.contains("FRAME-AFTER-101"), "the upgraded stream's bytes went up: \(seen)")
+    }
+
+    /// A response the guest doesn't read is read from the upstream no faster
+    /// than the guest takes it (not all into the proxy's memory).
+    @Test func aResponseIsReadNoFasterThanTheGuestTakesIt() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        // The upstream: answers with a 256 MiB body, counting what its
+        // (blocking, 1 s send timeout) socket gets to send.
+        let srv = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        var one: Int32 = 1
+        setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        var sin = sockaddr_in(); sin.sin_family = sa_family_t(AF_INET); sin.sin_port = 0
+        inet_pton(AF_INET, ip, &sin.sin_addr)
+        _ = withUnsafePointer(to: &sin) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(srv, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        listen(srv, 4)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &sin) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(srv, $0, &len) } }
+        let port = Int(UInt16(bigEndian: sin.sin_port))
+        let sent = NIOLockedValueBox(0)
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            defer { done.signal() }
+            let c = accept(srv, nil, nil)
+            guard c >= 0 else { return }
+            defer { close(c) }
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            var buf = [UInt8](repeating: 0, count: 4096)
+            _ = recv(c, &buf, buf.count, 0)
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: \(256 << 20)\r\n\r\n"
+            _ = head.withCString { send(c, $0, strlen($0), Int32(MSG_NOSIGNAL)) }
+            let chunk = [UInt8](repeating: 0x41, count: 65536)
+            while sent.withLockedValue({ $0 }) < 256 << 20 {
+                let n = chunk.withUnsafeBytes { send(c, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+                if n <= 0 { break }       // the send timeout: the proxy stopped reading
+                sent.withLockedValue { $0 += n }
+            }
+        }
+        defer { close(srv) }
+        // The guest asks, reads nothing for a while.
+        let fd = try ProxyEgressPolicyTests.connectUDS(rig.path())
+        defer { close(fd) }
+        GuestEnd.send(fd, "GET http://\(ip):\(port)/big HTTP/1.1\r\nHost: \(ip):\(port)\r\n\r\n")
+        _ = done.wait(timeout: .now() + 20)
+        #expect(sent.withLockedValue { $0 } < 64 << 20, "the proxy stopped reading the upstream: \(sent.withLockedValue { $0 } >> 20) MiB went out")
+    }
+
+    /// h2c isn't offered: the request goes up as plain HTTP/1.1, closing.
+    @Test func anH2cUpgradeIsServedAsHTTP11() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        _ = try Self.talk(rig.path(), "GET http://\(h)/ HTTP/1.1\r\nHost: \(h)\r\nConnection: Upgrade, HTTP2-Settings\r\n"
+                          + "Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n\r\n")
+        let seen = up.received.withLockedValue { $0 }.lowercased()
+        #expect(seen.contains("get / ") && !seen.contains("upgrade: h2c") && !seen.contains("http2-settings")
+                && seen.contains("connection: close"), "\(seen)")
+    }
+
+    /// An interim answer (100 Continue) before an upgrade's 101 isn't a refusal.
+    @Test func a100BeforeThe101IsntARefusal() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        let ws = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        let out = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\n\(ws)\r\nEARLY", then: "LATER")
+        let seen = up.received.withLockedValue { $0 }
+        #expect(out.hasPrefix("HTTP/1.1 100") && out.contains("HTTP/1.1 101"), "\(out.prefix(160))")
+        #expect(seen.contains("EARLY") && seen.contains("LATER"), "the stream opened after the 101: \(seen)")
+    }
+
+    /// Only websocket is offered: other tokens go, across every Upgrade header.
+    @Test func onlyWebSocketIsOfferedAsAnUpgrade() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        _ = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\nConnection: Upgrade\r\nUpgrade: h2c, websocket\r\nUpgrade: foo\r\n"
+                          + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        let seen = up.received.withLockedValue { $0 }.lowercased()
+        #expect(seen.contains("upgrade: websocket") && !seen.contains("h2c") && !seen.contains("foo"), "\(seen)")
+        let plain = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        defer { plain.stop() }
+        let h2 = "\(ip):\(plain.port)"
+        _ = try Self.talk(rig.path(), "GET http://\(h2)/ HTTP/1.1\r\nHost: \(h2)\r\nConnection: Upgrade\r\nUpgrade: foo/1\r\n\r\n")
+        let seen2 = plain.received.withLockedValue { $0 }.lowercased()
+        #expect(!seen2.contains("upgrade:") && seen2.contains("connection: close"), "no websocket token: plain HTTP/1.1: \(seen2)")
+    }
+
+    /// Several interim answers (100, 103, 100) before the 101.
+    @Test func severalInterimAnswersBeforeThe101() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        let ws = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n"
+                                 + "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        let out = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\n\(ws)\r\nEARLY", then: "LATER")
+        #expect(out.contains("103 Early Hints") && out.contains("HTTP/1.1 101"), "\(out.prefix(240))")
+        let seen = up.received.withLockedValue { $0 }
+        #expect(seen.contains("EARLY") && seen.contains("LATER"), "\(seen)")
     }
 }
