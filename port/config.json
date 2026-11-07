@@ -149,6 +149,7 @@
     "Sources/AgentCoding/Mitm/TraceEmitter.swift",
     "Sources/AgentCoding/Mitm/TraceRecord.swift",
     "Sources/AgentCoding/Mitm/TraceStore.swift",
+    "Sources/AgentCoding/Mitm/UnmanagedCredentialGuard.swift",
     "Sources/AgentCoding/NetworkLineage.swift",
     "Sources/AgentCoding/OpenShellAdvisor.swift",
     "Sources/AgentCoding/OpenShellGovernance.swift",

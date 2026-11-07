@@ -1076,6 +1076,11 @@ final class ResponseRelay: ChannelInboundHandler {
     private var traceCopy = Data()
     private var traceWire = 0
     private var traceTruncated = false
+    /// What the guest got, up to `learnCap`, for strict credential mode to
+    /// learn the tokens this site issues it (a cookie, an access_token):
+    /// the guest may send those back here (macOS: relayUpstream's learn).
+    private var learnBuf = Data()
+    static let learnCap = 256 << 10
     static let traceCap = 8 * 1024 * 1024
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1120,6 +1125,7 @@ final class ResponseRelay: ChannelInboundHandler {
         }
         if headDone {
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
+            keepForLearning(b.readableBytesView)
             relayed = true
             guest.write(b, promise: nil)
             holdIfGuestFull(context)
@@ -1167,9 +1173,17 @@ final class ResponseRelay: ChannelInboundHandler {
         }
         onSwitched = nil
         keepForTrace(out)
+        keepForLearning(out)
         relayed = true
         guest.write(guest.allocator.buffer(bytes: out), promise: nil)
         holdIfGuestFull(context)
+    }
+
+    /// Kept for learning while strict credential mode is on for the workspace.
+    // @port-skip linux-only: relayUpstream's response buffer for UnmanagedCredentialGuard.learn, on NIO
+    private func keepForLearning<C: Collection>(_ bytes: C) where C.Element == UInt8 {
+        guard learnBuf.count < Self.learnCap, UnmanagedCredentialGuard.shared.isEnabled(for: profileID) else { return }
+        learnBuf.append(contentsOf: bytes.prefix(Self.learnCap - learnBuf.count))
     }
 
     /// The guest can't take more: the upstream isn't read until it drains
@@ -1219,6 +1233,10 @@ final class ResponseRelay: ChannelInboundHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
+        if !learnBuf.isEmpty {
+            UnmanagedCredentialGuard.shared.learn(response: learnBuf, host: host, profileID: profileID)
+            learnBuf = Data()
+        }
         if let (minter, kind) = mint {
             // Rewritten before any byte reaches the guest, the credentials in
             // it kept on the host; a reply it can't account for (still encoded,

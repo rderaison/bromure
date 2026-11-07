@@ -20,7 +20,7 @@ extension Daemon {
     }
 
     /// The paused VM, the question, and its answer applied.
-    // partial: Save for Investigation needs a local folder picker (macOS-only, as on a headless Mac); strict-credential approvals come with UnmanagedCredentialGuard
+    // partial: Save for Investigation needs a local folder picker (macOS-only, as on a headless Mac)
     // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=e4f537275a5a956e @a0266d0e
     func handleCompromise(_ event: CompromiseEvent) async {
         let pid = event.profileID
@@ -42,6 +42,14 @@ extension Daemon {
             buttons: ["Shut down", "Block", "Allow"], fallback: 0, timeout: 180)
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(profile.name)': compromise: answer \(choice) at \(Date()) (a client watching: \(PendingPromptBroker.hasLiveListener()))\n".utf8))
         switch choice {
+        case 2 where !event.unmanagedFingerprints.isEmpty:
+            // Strict credential mode: exactly these credentials, for this
+            // session (not the host for every other credential).
+            UnmanagedCredentialGuard.shared.allowForSession(event.unmanagedFingerprints, profileID: pid)
+            BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "credential.exfiltration_allowed",
+                                                eventData: ["observed_host": .string(event.observedHost),
+                                                            "scope": .string("session"), "unmanaged": .bool(true)])
+            try? await machine.resume()
         case 2:
             // The user vouches for the destination: the credential may go
             // there for the rest of the session (cleared at teardown).

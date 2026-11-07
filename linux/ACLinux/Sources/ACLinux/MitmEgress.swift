@@ -8,9 +8,10 @@ import SandboxEngine
 /// firewall may cut. The decisions themselves are ProxyPolicy's, shared
 /// with macOS.
 extension MitmProxy {
-    // partial: strict credentials (UnmanagedCredentialGuard) aren't on Linux yet
     // @port MitmEngine.setGuardrailsConfig(_: GuardrailsConfig, for: UUID) h=c9069918294de82f @8e2543eb
     func setGuardrailsConfig(_ config: GuardrailsConfig, for profileID: UUID) {
+        // Strict credential mode follows the workspace's setting, live.
+        UnmanagedCredentialGuard.shared.setEnabled(config.strictCredentials, for: profileID)
         let prior = guardrailsConfigs.withLockedValue { all -> EgressPolicy? in
             defer { all[profileID] = config }
             return all[profileID]?.egressPolicy
@@ -26,9 +27,10 @@ extension MitmProxy {
         guardrailsConfigs.withLockedValue { $0[profileID] }
     }
 
-    // partial: strict credentials (UnmanagedCredentialGuard) aren't on Linux yet
     // @port MitmEngine.clearGuardrailsConfig(for: UUID) h=0e852c5a469fc917 @8e2543eb
     func clearGuardrailsConfig(for profileID: UUID) {
+        UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
+        UnmanagedCredentialGuard.shared.reset(profileID: profileID)
         _ = guardrailsConfigs.withLockedValue { $0.removeValue(forKey: profileID) }
         EgressConnectionRegistry.shared.forget(profileID: profileID)
     }
@@ -220,6 +222,49 @@ extension RequestReader {
                      + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body).utf8)
     }
 
+    /// Strict credential mode: a credential Bromure didn't put in the request
+    /// (found on disk, dumped from an env, guessed) never leaves the VM.
+    /// Bromure's own stand-ins and subscription placeholders, the
+    /// workspace's AWS key id, tokens this site issued to the guest earlier
+    /// and ones approved for the session are exempt. Refused with a 451,
+    /// recorded, and raised as a compromise (the daemon pauses the VM and
+    /// asks; "Allow" approves exactly these credentials for the session).
+    /// macOS: HTTPProxy's UnmanagedCredentialGuard step.
+    // @port-skip linux-only: HTTPProxy's strict-credential step on the Linux request chain
+    static func unmanagedAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String) -> Data? {
+        guard host.lowercased() != InferenceService.localMitmHost else { return nil }
+        let unmanaged = UnmanagedCredentialGuard.shared.check(
+            rawRequest: request, host: host, profileID: profileID,
+            fakes: proxy.swapper.entries(for: profileID).map(\.fake),
+            awsAccessKeyID: proxy.awsResigner.accessKeyID(for: profileID),
+            isPlaceholder: { ProxyPolicy.isSubscriptionPlaceholder($0) })
+        guard !unmanaged.isEmpty else { return nil }
+        let alertsOff = proxy.guardrailsConfig(for: profileID)?.exfiltrationAlertsDisabled ?? false
+        for u in unmanaged {
+            FileHandle.standardError.write(Data("[mitm] UNMANAGED CREDENTIAL \(u.kind) \(u.preview) (\(u.location)) → \(host)\n".utf8))
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "credential.unmanaged", eventData: [
+                "kind": .string(u.kind), "location": .string(u.location), "preview": .string(u.preview),
+                "fingerprint": .string(u.fingerprint), "host": .string(host), "blocked": .bool(true),
+                "vm_paused": .bool(!alertsOff),
+            ])
+        }
+        if !alertsOff {
+            var event = CompromiseEvent(
+                profileID: profileID, observedHost: host,
+                leaks: unmanaged.map {
+                    CompromiseLeak(fakeTokenPreview: $0.preview,
+                                   credentialDisplayName: "Unmanaged \($0.kind) (\($0.location))",
+                                   declaredHost: "not issued by Bromure", observedHost: host)
+                },
+                timestamp: Date())
+            event.unmanagedFingerprints = unmanaged.map(\.fingerprint)
+            proxy.swapper.raiseCompromise(event)
+        }
+        let body = "Bromure: outbound request blocked — it carries a credential Bromure did not issue for \(host) (strict credential mode).\n"
+        return Data(("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                     + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body).utf8)
+    }
+
     /// The workspace's policy chain for one request, before any credential is
     /// swapped in, in macOS's order (HTTPMitmConnection.driveTLS, steps 4–4b
     /// and the guardrails): OpenShell's head checks (which may rewrite the
@@ -231,6 +276,7 @@ extension RequestReader {
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                              host: String, port: Int, tls: Bool) async -> Data? {
         if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
+        if let refused = unmanagedAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"
