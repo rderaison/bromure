@@ -816,7 +816,7 @@ async function main() {
   // ======================================================================
   // 6. Session control (host-side only — VM verification deferred)
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("6.")) {
     console.log("\n--- 6. Session control ---");
 
     await test("6.1 list ac sessions returns an array (possibly empty)", async () => {
@@ -905,7 +905,7 @@ async function main() {
         }
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 6. Session control --- (skipped via --no-sessions)");
   }
 
@@ -942,7 +942,7 @@ async function main() {
   // ======================================================================
   // 8. VM-side verification via /exec (requires base image + debug shell)
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("8.")) {
     console.log("\n--- 8. VM-side verification ---");
 
     // The debug shell is required here — CI exports BROMURE_DEBUG_CLAUDE=1
@@ -1087,7 +1087,7 @@ async function main() {
         );
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 8. VM-side verification --- (skipped via --no-sessions)");
   }
 
@@ -1316,7 +1316,7 @@ async function main() {
   // Ubuntu session VM and exercise the proxy from the guest's
   // perspective.
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("10.")) {
     console.log("\n--- 10. Supply Chain Security — VM-side ---");
 
     // Same contract as 8.0: the debug shell is guaranteed by CI/the
@@ -1551,7 +1551,7 @@ async function main() {
         );
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 10. SC VM-side --- (skipped via --no-sessions)");
   }
 
@@ -1835,7 +1835,8 @@ async function main() {
 
   // Reuse the section 6/8 base-image gate. (The app itself is guaranteed by
   // the preflight — only environment gates may skip: no image, --no-sessions.)
-  let cliVMable = !SKIP_SESSIONS;
+  // Only when section 15 runs: every filtered Jenkins stage booted this probe.
+  let cliVMable = !SKIP_SESSIONS && sectionActive("15.");
   if (cliVMable) {
     try {
       const pid = createProfile("ACE2E_CLI_Probe");
@@ -1850,7 +1851,7 @@ async function main() {
   }
 
   if (!cliVMable) {
-    console.log(
+    if (sectionActive("15.")) console.log(
       "  \x1b[33mSKIP\x1b[0m  CLI VM tests (no base image — run `bromure-ac init` — or --no-sessions)"
     );
   } else {
@@ -2405,7 +2406,7 @@ async function main() {
         });
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 24. Worktrees (VM-side) --- (skipped via --no-sessions)");
   }
 
@@ -3171,7 +3172,7 @@ async function main() {
   //   i.e. the firewall is unbypassable — and that the per-profile
   //   `disableTransparentProxy` opt-out actually opts out.
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("27.")) {
     console.log("\n--- 27. Egress firewall — VM-side ---");
 
     await test("27.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
