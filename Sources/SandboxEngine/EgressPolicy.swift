@@ -51,14 +51,24 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
                 else { return false }
                 return (ip & mask) == (net & mask)
             case .host(let domain, let apex):
+                // A fully qualified name (`evil.com.`) resolves like `evil.com`:
+                // compared without its trailing dots, on both sides.
+                let d = EgressPolicy.withoutTrailingDots(domain)
                 for h in hostnames {
-                    let l = h.lowercased()
-                    if apex && l == domain { return true }
-                    if l.hasSuffix("." + domain) { return true }
+                    let l = EgressPolicy.withoutTrailingDots(h.lowercased())
+                    if apex && l == d { return true }
+                    if l.hasSuffix("." + d) { return true }
                 }
                 return false
             }
         }
+    }
+
+    /// `name` without the trailing dots of a fully qualified spelling.
+    static func withoutTrailingDots(_ name: String) -> String {
+        var n = Substring(name)
+        while n.hasSuffix(".") { n = n.dropLast() }
+        return String(n)
     }
 
     /// A set of port ranges; empty means "any port".
