@@ -423,11 +423,19 @@ public final class NetworkLineage: @unchecked Sendable {
         // process for the exec match. The agent's recent call whose input
         // names this host. Without a host to match, nothing: the same process
         // talks to its model's API all the time.
+        // Only the flow's own process -- the leaf -- can be the agent here:
+        // an ancestor's pid in the chain made every descendant (a dev server
+        // it started, a command whose own link expired) eligible (Finding
+        // CWE-670, "Agent-fetch fallback attributes descendant process
+        // traffic to the agent's tool call").
         var link = link
-        if link == nil {
-            let pids = Set(processes.compactMap { p -> Int? in if case .int(let v)? = p["pid"] { return v }; return nil })
+        if link == nil, let leaf = processes.last, case .int(let leafPid)? = leaf["pid"] {
+            var leafKey = ProcKey(pid: leafPid, startNs: 0)
+            if case .int(let ns)? = leaf["start_ns"] { leafKey.startNs = UInt64(truncatingIfNeeded: ns) }
             let host = decision?.host ?? dst
-            if let m = Self.matchAgentFetch(host: host, chainPids: pids, calls: vm.toolCalls, at: t),
+            if let m = Self.matchAgentFetch(host: host, leafPid: leafPid,
+                                            leafSeenAt: Self.resolve(leafKey, in: vm).flatMap { vm.procs[$0]?.at },
+                                            calls: vm.toolCalls, at: t),
                let call = vm.toolCalls.first(where: { $0.id == m.toolUseID }) {
                 link = (call, m.confidence)
             }
@@ -491,18 +499,21 @@ public final class NetworkLineage: @unchecked Sendable {
     /// process can be that call's fetch (a slow page, a redirect).
     static let agentFetchWindow: TimeInterval = 120
 
-    /// A flow the agent's own process opened (its pid in the flow's chain)
-    /// to `host`: the newest tool call of that agent, within
-    /// `agentFetchWindow`, whose input names that host -- in a URL, or as the
-    /// host itself (`www.` aside; a subdomain of it counts, a redirect to
-    /// one being common). An IP destination matches only an input naming
-    /// that IP. "likely": the match is by host and time, not by process.
-    static func matchAgentFetch(host: String, chainPids: Set<Int>, calls: [ToolCall], at: Date)
+    /// A flow the agent's own process opened -- its pid is the flow's leaf,
+    /// never just somewhere in its ancestry -- to `host`: the newest tool
+    /// call of that agent, within `agentFetchWindow`, whose input names that
+    /// host -- in a URL, or as the host itself (`www.` aside; a subdomain of
+    /// it counts, a redirect to one being common). An IP destination matches
+    /// only an input naming that IP. `leafSeenAt`, when the host saw the leaf
+    /// exec: a process started after the call isn't the one that made it (a
+    /// reused pid). "likely": the match is by host and time, not by process.
+    static func matchAgentFetch(host: String, leafPid: Int, leafSeenAt: Date?, calls: [ToolCall], at: Date)
         -> (toolUseID: String, confidence: String)? {
         let h = Self.bareHost(host)
         guard !h.isEmpty, h != "?" else { return nil }
         let candidates = calls.filter { c in
-            guard let pid = c.agentPid, chainPids.contains(pid), let cmd = c.command else { return false }
+            guard let pid = c.agentPid, pid == leafPid, let cmd = c.command else { return false }
+            if let seen = leafSeenAt, seen > c.at.addingTimeInterval(1) { return false }
             let age = at.timeIntervalSince(c.at)
             guard age >= -2, age <= agentFetchWindow else { return false }
             return Self.hostsNamed(in: cmd).contains { named in
