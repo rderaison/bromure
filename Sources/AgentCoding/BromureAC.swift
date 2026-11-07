@@ -16428,13 +16428,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// way). Pure.
     /// A one-shot a sandbox reported (a reboot intent, a URL, a status, an
     /// error) is for the workspace's session only while that session still
-    /// runs on it (or none is registered). A poll a relaunch stopped still
-    /// applies what it had taken from the outbox, and these callbacks are
-    /// keyed by the workspace: without this, the old guest's events reached
-    /// the replacement (CWE-367). A sandbox gone is nobody's.
+    /// runs on it. A poll a relaunch stopped still applies what it had taken
+    /// from the outbox, and these callbacks are keyed by the workspace:
+    /// without this, the old guest's events reached the replacement
+    /// (CWE-367). No session registered (a relaunch between unregistering
+    /// the old and registering the new) is nobody's either, unlike a stop's
+    /// (`stopEndsSession`): a sandbox's callbacks are wired just before it
+    /// registers, with no wait between, so its own events always find it.
     nonisolated static func eventIsForCurrent(_ sandbox: AnyObject?, current: AnyObject?) -> Bool {
-        guard let sandbox else { return false }
-        return stopEndsSession(of: sandbox, current: current)
+        guard let sandbox, let current else { return false }
+        return sandbox === current
     }
 
     nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {

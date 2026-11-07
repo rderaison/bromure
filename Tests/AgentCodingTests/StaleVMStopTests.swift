@@ -33,7 +33,9 @@ struct StaleVMStopTests {
         let old = Box(), new = Box()
         #expect(ACAppDelegate.eventIsForCurrent(new, current: new))
         #expect(!ACAppDelegate.eventIsForCurrent(old, current: new))
-        #expect(ACAppDelegate.eventIsForCurrent(old, current: nil))     // no session registered
+        // No session registered: a relaunch between the old one's and the
+        // new one's — the old guest's events don't wait for the new one.
+        #expect(!ACAppDelegate.eventIsForCurrent(old, current: nil))
         #expect(!ACAppDelegate.eventIsForCurrent(nil, current: new))    // the sandbox is gone
 
         // Wired: every one-shot the cancelled poll still applies checks it.
@@ -47,6 +49,11 @@ struct StaleVMStopTests {
             let r = try #require(src.range(of: "sandbox." + cb), "\(cb)")
             #expect(src[r.upperBound...].prefix(700).contains("Self.eventIsForCurrent(sandbox, current: "), "\(cb)")
         }
+        // A sandbox's callbacks are wired right before it registers (no
+        // wait between), so its own events never meet "no session".
+        let wired = src.components(separatedBy: "self.wireSandboxCallbacks(sandbox)\n            self.registerSession(sandbox, profile: profile)").count - 1
+        #expect(wired == src.components(separatedBy: "self.wireSandboxCallbacks(sandbox)").count - 1)
+        #expect(wired >= 2)
         // The reboot's check comes before it marks anything.
         let reboot = try #require(src.range(of: "sandbox.onGuestReboot = { [weak self, weak sandbox] in"))
         let body = src[reboot.upperBound...].prefix(1200)
