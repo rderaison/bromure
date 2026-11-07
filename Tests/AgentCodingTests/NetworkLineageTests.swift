@@ -90,6 +90,55 @@ struct NetworkLineageTests {
         #expect(api["agent"] == nil)
     }
 
+    /// Finding CWE-670: the fallback took every pid in the flow's ancestry,
+    /// so a descendant of the agent -- here a dev server a Bash call started
+    /// long ago, connecting to a host a fresh WebFetch names -- was labelled
+    /// with that call and its reasoning. Only the agent's own connection is.
+    @Test("a descendant's connection never takes the agent's fetch call; only the agent's own does")
+    func descendantNotAttributed() async throws {
+        let sink = LineageSink(), l = store(sink), pid = UUID()
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 100, "comm": "claude", "path": "/usr/bin/node", "argv": "claude"])
+        // A long-running child of the agent, unlinked (its call long gone).
+        // (Its own executable: identical flows of one program within a
+        // minute fold into one row.)
+        l.noteExec(profileID: pid, ["pid": 900, "ppid": 412, "start_ns": 150, "comm": "devserver",
+                                    "path": "/usr/local/bin/devserver", "argv": "devserver --port 3000"])
+        l.noteToolCall(profileID: pid, id: "toolu_web", tool: "WebFetch",
+                       command: #"{"url":"https://registry.example.org/pkg"}"#, reasoning: "Check the package page.",
+                       agentPid: 412, agent: "claude")
+        l.noteDecision(profileID: pid, proto: "tcp", dst: "203.0.113.40", dport: 443, action: "allow", layer: "l4",
+                       host: "registry.example.org")
+        // The child connects to that host: not the WebFetch.
+        l.noteFlow(profileID: pid, ["pid": 900, "start_ns": 150, "proto": "tcp", "dst": "203.0.113.40", "dport": 443,
+                                    "sport": 40200, "comm": "devserver"])
+        await waitFor(sink, 1)
+        let child = try #require(sink.flows.first { Self.I($0["sport"]) == 40200 })
+        #expect(comms(child) == ["claude", "devserver"])
+        #expect(child["agent"] == nil)
+        // The agent itself connecting there: the WebFetch.
+        l.noteFlow(profileID: pid, ["pid": 412, "start_ns": 100, "proto": "tcp", "dst": "203.0.113.40", "dport": 443,
+                                    "sport": 40201, "comm": "claude"])
+        await waitFor(sink, 2)
+        let own = try #require(sink.flows.first { Self.I($0["sport"]) == 40201 })
+        guard case .object(let agent)? = own["agent"] else { Issue.record("the agent's own fetch lost its link"); return }
+        #expect(Self.S(agent["tool_use_id"]) == "toolu_web")
+    }
+
+    @Test("a process that started after the call isn't the agent that made it (a reused pid)")
+    func reusedPidNotAttributed() {
+        let now = Date()
+        let call = NetworkLineage.ToolCall(id: "a", tool: "WebFetch", command: #"{"url":"https://example.com/"}"#,
+                                           reasoning: "", at: now.addingTimeInterval(-30), agentPid: 412, agent: "claude")
+        typealias L = NetworkLineage
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: now.addingTimeInterval(-3600),
+                                  calls: [call], at: now)?.toolUseID == "a")
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: now.addingTimeInterval(-5),
+                                  calls: [call], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: [call], at: now) != nil)
+        // An ancestor's pid alone is no longer enough.
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 900, leafSeenAt: nil, calls: [call], at: now) == nil)
+    }
+
     @Test("the agent-fetch match: the agent's pid, the host named, a recent call, the newest")
     func agentFetchMatch() {
         let now = Date()
@@ -99,20 +148,20 @@ struct NetworkLineageTests {
         }
         typealias L = NetworkLineage
         let url = #"{"url":"https://www.example.com/a"}"#
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url)], at: now)?.toolUseID == "a")
-        #expect(L.matchAgentFetch(host: "cdn.example.com", chainPids: [412], calls: [call("a", url)], at: now)?.toolUseID == "a")
-        #expect(L.matchAgentFetch(host: "example.com:443", chainPids: [412], calls: [call("a", url)], at: now) != nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url)], at: now)?.toolUseID == "a")
+        #expect(L.matchAgentFetch(host: "cdn.example.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url)], at: now)?.toolUseID == "a")
+        #expect(L.matchAgentFetch(host: "example.com:443", leafPid: 412, leafSeenAt: nil, calls: [call("a", url)], at: now) != nil)
         // Not the agent's process, another host, too old, no input, no pid.
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [999], calls: [call("a", url)], at: now) == nil)
-        #expect(L.matchAgentFetch(host: "api.anthropic.com", chainPids: [412], calls: [call("a", url)], at: now) == nil)
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url, ago: 600)], at: now) == nil)
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", nil)], at: now) == nil)
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: [call("a", url, pid: nil)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 999, leafSeenAt: nil, calls: [call("a", url)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "api.anthropic.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url, ago: 600)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", nil)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url, pid: nil)], at: now) == nil)
         // A host a suffix only by letters, not by label, doesn't match.
-        #expect(L.matchAgentFetch(host: "notexample.com", chainPids: [412], calls: [call("a", url)], at: now) == nil)
+        #expect(L.matchAgentFetch(host: "notexample.com", leafPid: 412, leafSeenAt: nil, calls: [call("a", url)], at: now) == nil)
         // The newest of two matching calls.
         let two = [call("old", url, ago: 60), call("new", url, ago: 3)]
-        #expect(L.matchAgentFetch(host: "example.com", chainPids: [412], calls: two, at: now)?.toolUseID == "new")
+        #expect(L.matchAgentFetch(host: "example.com", leafPid: 412, leafSeenAt: nil, calls: two, at: now)?.toolUseID == "new")
         // Hosts named: URLs anywhere in the input, and host-like fields.
         #expect(L.hostsNamed(in: #"{"query":"see http://a.test:8080/x and https://user@B.test/?q"}"#) == ["a.test", "b.test"])
         #expect(L.hostsNamed(in: #"{"domain":"Example.org."}"#) == ["example.org"])
