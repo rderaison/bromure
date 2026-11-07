@@ -150,14 +150,13 @@ final class RemotePolicyDrawerBackend: PolicyDrawerBackend {
     }
 
     func editFirewall(_ edit: FirewallRuleActions.Edit, profileID: UUID) async -> Bool {
-        // The rules as the host has them now, edited, committed whole.
-        let seg = ControlClient.encodeSegment(profileID.uuidString)
-        guard let r = await call("GET", "/profiles/\(seg)?full=1"), r.status == 200,
-              let current = Self.decodeProfile(r.json),
-              let text = FirewallRuleActions.apply(edit, to: current.egressRules) else { return false }
-        let ok = await call("POST", "/profiles/\(seg)/firewall", body: ["rules": text])?.status == 200
+        // The edit itself, applied by the host to the rules it holds then --
+        // not a whole document edited here, which a concurrent edit (another
+        // Allow, the editor, an expiry) between the read and the commit lost.
+        let r = await call("POST", "/profiles/\(ControlClient.encodeSegment(profileID.uuidString))/firewall-edit",
+                           body: edit.wire)
         refresh(profileID)
-        return ok
+        return r?.status == 200
     }
 
     func allowOpenShell(profileID: UUID, host: String, port: Int, exe: String?) async -> String? {

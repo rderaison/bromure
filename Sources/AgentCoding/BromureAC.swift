@@ -5762,6 +5762,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return self.commitFirewallRules(rules, profileID: uuid)
             }
         }
+        server.onFirewallEdit = { [weak self] id, edit in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id),
+                      self.profiles.contains(where: { $0.id == uuid }) else { return nil }
+                // Applied to the rules as they are now, on the main thread:
+                // concurrent edits each land, in the order they arrive.
+                return self.applyFirewallEdit(edit, profileID: uuid)
+            }
+        }
         server.onSetSquelch = { [weak self] id, on in
             MainActor.assumeIsolated {
                 guard let self, let uuid = UUID(uuidString: id) else { return false }
