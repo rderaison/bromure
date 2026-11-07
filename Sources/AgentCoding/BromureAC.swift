@@ -4056,6 +4056,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // enterprise-enrolled installs, uploaded to the cloud. The switch
         // (SandboxEngine) can't reach these AgentCoding sinks directly, so it
         // calls out through this observer.
+        // Read here, on the main thread: the observer runs on the switch's.
+        let egressEngine = mitmEngine
         VMNetSwitch.shared.setEgressObserver { ev in
             let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
             let host = ev.proto == 41 ? "(no IPv6 rules)"
@@ -4086,7 +4088,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 "by_policy": .bool(ev.byPolicy),
             ]
             // The program the identity gate denied: the drawer row's Allow names it.
-            if let exe = ev.exe { eventData["exe"] = .string(exe) }
+            if let exe = ev.exe {
+                eventData["exe"] = .string(exe)
+                // And why: the policy allows the destination, but not for this
+                // program. Without it the timeline said "default policy" and the
+                // agent was told the firewall "denies what no rule allows".
+                if ev.denied, let pid = ev.profileID,
+                   let why = egressEngine?.guardrailsConfig(for: pid)?.egressPolicy?
+                    .identityDenialReason(hostnames: ev.hostnames, ip: ev.dstIP, port: ev.port, exe: exe) {
+                    eventData["reason"] = .string(why)
+                }
+            }
             // One more connection to a destination already listed: count it
             // on the timeline's folded row (local only — no log line, no
             // cloud event per connection).

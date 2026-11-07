@@ -332,6 +332,21 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     /// forces MiTM (overriding passthrough); `.allow` = permit (normal MiTM-vs-
     /// passthrough logic still applies at the SNI layer). Used by both the switch
     /// (IP/snoop) and the MiTM (SNI).
+    /// Why the binary-identity gate refused a connection `exe` opened that
+    /// the policy otherwise allows: the rule that matched lists no binaries
+    /// (under the strict sandbox it then applies to no program, as in
+    /// OpenShell), or doesn't list this one. nil when binaries aren't
+    /// enforced, or the policy denies the destination anyway.
+    public func identityDenialReason(hostnames: [String], ip: UInt32?, port: UInt16, exe: String) -> String? {
+        guard enforceBinaries, let openShell else { return nil }
+        let hosts = hostnames.isEmpty ? (ip.map { [Self.ipv4String($0)] } ?? []) : hostnames
+        guard case .allow(let key, _, _) = openShell.evaluateConnect(hostnames: hosts, ip: ip, port: port),
+              let rule = openShell.networkPolicies.first(where: { $0.key == key }), !rule.isManaged else { return nil }
+        return rule.binaries.isEmpty
+            ? "rule `\(key)` lists no binaries, so with the strict sandbox it applies to no program (\(exe) included)"
+            : "rule `\(key)` doesn't list \(exe) in its binaries (the strict sandbox enforces them)"
+    }
+
     public func verdict(ip: UInt32?, hostnames: [String], proto: Proto, port: UInt16,
                         identity: OpenShellPolicy.BinaryIdentity? = nil,
                         now: Date = Date()) -> Verdict {
