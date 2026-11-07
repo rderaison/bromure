@@ -1600,6 +1600,7 @@
 "Upstream TLS" = "TLS ascendente";
 "Prompt injection" = "Inyección de prompts";
 "swapped in %@" = "intercambiado por %@";
+"presented client certificate" = "certificado de cliente presentado";
 "signed" = "firmado";
 "blocked — exfiltration attempt, VM paused" = "bloqueado — intento de exfiltración, VM en pausa";
 

@@ -1598,6 +1598,7 @@
 "Upstream TLS" = "上流 TLS";
 "Prompt injection" = "プロンプトインジェクション";
 "swapped in %@" = "%@ に差し替え";
+"presented client certificate" = "クライアント証明書を提示";
 "signed" = "署名済み";
 "blocked — exfiltration attempt, VM paused" = "ブロック — 資格情報流出の試み、VM を一時停止";
 

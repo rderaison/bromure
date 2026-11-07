@@ -1081,7 +1081,7 @@ final class RemoteHostController {
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
         if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
-            SecurityTimeline.shared.applyMirror(rows, host: host.name.isEmpty ? host.address : host.name)
+            SecurityTimeline.shared.applyMirror(rows, host: securityMirrorKey)
         }
 #endif
         revision &+= 1
@@ -8667,6 +8667,8 @@ final class RegistrationCallbackTunnel: @unchecked Sendable {
 /// on the parent's side through the same tunnel the mirror uses.
 extension RemoteHostController: RemoteDelegationLink {
     var hostName: String { host.name }
+    /// The host's bucket in the Security window (its events' `machine`).
+    var securityMirrorKey: String { host.name.isEmpty ? host.address : host.name }
     var remoteSessions: AgentSessionStore { sessionStore }
     var remoteDelegations: DelegationStore { delegationStore }
     func remoteWorkspaceName(_ id: UUID) -> String { profile(for: id)?.name ?? "" }
