@@ -512,11 +512,17 @@ enum DropImageStore {
 /// reports idle on its own, or the user sends a new message.
 struct WorkingGate {
     private(set) var interrupted = false
+    /// Turns started (a send, a held message typed in): what a Stop's delayed
+    /// second press checks, so it never lands on a turn begun after the Stop.
+    private(set) var turns = 0
 
     /// User hit Stop/Esc — suppress "working" until reality catches up.
     mutating func interrupt() { interrupted = true }
     /// User sent a new message — a fresh turn supersedes the stop.
-    mutating func userSent() { interrupted = false }
+    mutating func userSent() { interrupted = false; turns &+= 1 }
+
+    /// Still the turn a Stop at `turn` stopped: none started since.
+    func sameTurn(as turn: Int) -> Bool { turns == turn }
 
     /// The effective working state for a raw `isWorking()` reading. While
     /// interrupted it stays `false`; the first idle reading releases the latch
@@ -2500,20 +2506,44 @@ final class BeautifiedSessionModel: ObservableObject {
         // taken back and held here, typed in (and confirmed) once it's idle.
         let kind = agentKind
         let restoring = queued.filter { !$0.held && !$0.isDelivered && !$0.sending }
+        // The turn this Stop is for: Stop drops the cue at once, so a message
+        // can be sent before the second press is due, and a new turn's busy
+        // line would read as the old one still going (CWE-367).
+        // And what the queue had typed in by then: off stage, the store's
+        // drain types held messages without passing through the gate.
+        let turn = StopTurn(gate: gate.turns,
+                            delivered: Set(queueStore.messages(queueKey).filter(\.isDelivered).map(\.id)))
         Task { [weak self] in
             guard let self else { return }
             let key = Self.interruptKey(screen: await self.paneTail(), agent: kind)
             await self.provider.pressKeys([key])
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if Self.screenShowsBusy(await self.paneTail()) {
+            if self.stoppedTurnStillCurrent(turn), Self.screenShowsBusy(await self.paneTail()),
+               self.stoppedTurnStillCurrent(turn) {
                 BACDebug.log("beautified", "stop: still busy after \(key), once more")
                 await self.provider.pressKeys([key])
             }
             if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind), !restoring.isEmpty {
-                await self.reclaimAfterEscape(restoring)
+                await self.reclaimAfterEscape(restoring, turn: turn)
             }
             await self.rescanSoon()
         }
+    }
+
+    /// Which turn a Stop was for: the gate's count, and the queue's
+    /// messages already typed in.
+    struct StopTurn { let gate: Int; let delivered: Set<UUID> }
+
+    /// No turn started since the Stop at `turn` (a send, a held message the
+    /// chat or the store's drain typed in), and nothing being typed in now.
+    private func stoppedTurnStillCurrent(_ turn: StopTurn) -> Bool {
+        guard gate.sameTurn(as: turn.gate), !sending else { return false }
+        return !Self.queueStartedTurn(queueStore.messages(queueKey), since: turn.delivered)
+    }
+
+    /// A message of `queue` typed in since `delivered` was taken, or being typed now.
+    nonisolated static func queueStartedTurn(_ queue: [QueuedMessage], since delivered: Set<UUID>) -> Bool {
+        queue.contains { $0.sending || ($0.isDelivered && !delivered.contains($0.id)) }
     }
 
     /// The tmux key that interrupts this agent: what its busy line says, else
@@ -2538,7 +2568,7 @@ final class BeautifiedSessionModel: ObservableObject {
 
     /// After Esc: when the agent put our queued messages back into its input
     /// box, empty the box and hold them here instead.
-    private func reclaimAfterEscape(_ restored: [QueuedMessage]) async {
+    private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: StopTurn) async {
         guard let first = restored.first, let w = provider.activeTabIndex() else { return }
         let target = provider.paneTarget(window: w)
         let probe = PaneTypeGuard.resolve(target)
@@ -2551,6 +2581,11 @@ final class BeautifiedSessionModel: ObservableObject {
                 inBox = true
                 break
             }
+        }
+        // A turn sent since the Stop: what's in the box may be the user's now.
+        guard stoppedTurnStillCurrent(turn) else {
+            BACDebug.log("beautified", "after Esc: a turn started since the stop — box left as is")
+            return
         }
         guard inBox else {
             BACDebug.log("beautified", "after Esc: queued text not in the input box — left as is")
