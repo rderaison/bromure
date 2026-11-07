@@ -5177,7 +5177,7 @@ private func emitSupplyChainFetch(profileID: UUID,
 /// by installing a CA on the host, and the one we record on the Security
 /// Timeline. `body` is a plain-text explanation surfaced to the guest tool.
 // internal (not private) so `UpstreamErrorTests` can exercise the mapping.
-func describeUpstreamError(_ error: Error, host: String, port: Int = 443, allowInsecureHint: Bool = false)
+func describeUpstreamError(_ error: Error, host: String, dialerFailure: String? = nil, allowInsecureHint: Bool = false)
     -> (isTrust: Bool, reason: String, body: String) {
     let ns = error as NSError
     var isTrust = false
@@ -5211,7 +5211,7 @@ func describeUpstreamError(_ error: Error, host: String, port: Int = 443, allowI
         // pinned dialer refused the destination or couldn't connect to it.
         // It noted why; the bare code alone says nothing.
         reason = "the host running Bromure AC could not connect to \(host)"
-            + (PinnedUpstreamDialer.lastFailure(host: host, port: port).map { " (\($0))" } ?? "")
+            + (dialerFailure.map { " (\($0))" } ?? "")
     } else {
         reason = "the upstream request to \(host) failed: \(error.localizedDescription)"
     }
@@ -5497,7 +5497,11 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         // streamed a status line + body we can't inject a new status, so
         // rethrow and let the connection close.
         if responseStarted { throw error }
-        let d = describeUpstreamError(error, host: host, port: port, allowInsecureHint: insecureBypassAllowed)
+        // The reason THIS request's dialer noted (its session's own), never
+        // another request's.
+        let dialerFailure = (session.delegate as? ClientCertChallengeDelegate)?.dialer?.lastFailure
+        let d = describeUpstreamError(error, host: host, dialerFailure: dialerFailure,
+                                      allowInsecureHint: insecureBypassAllowed)
         var resp = "HTTP/1.1 502 Bad Gateway\r\n"
         resp += "Content-Type: text/plain; charset=utf-8\r\n"
         resp += "Content-Length: \(d.body.utf8.count)\r\n"
