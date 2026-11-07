@@ -54,6 +54,47 @@ struct QuickTaskMachinesTests {
         #expect(owner(TaskAssignment(kind: .session, id: UUID(), label: "@gone")) == "local")
     }
 
+    /// The finding: the full editor was offered only the opening board's
+    /// workspaces; a session picked on another host set the draft's workspace
+    /// to that host's, the editor found none selected, and Add Task stayed off.
+    @Test("the full editor offers every machine's workspaces, so a host's session can be saved")
+    func editorKnowsEveryWorkspace() {
+        let mine = Profile(name: "Personal", tool: .claude, authMode: .token)
+        var theirs = Profile(name: "Storefront", tool: .codex, authMode: .token)
+        theirs.tool = .codex
+        let lux = TaskAssigneeChoices.Session(id: UUID(), label: "@lux", workspace: "Storefront",
+                                              busy: false, profileID: theirs.id)
+        func target(_ key: String, _ machine: String, _ p: Profile, _ s: [TaskAssigneeChoices.Session]) -> T {
+            T(key: key, machine: machine, profiles: [p],
+              toolSpecs: { _ in [Profile.ToolSpec(tool: key == "local" ? .claude : .codex)] },
+              choices: TaskAssigneeChoices(sessions: s, rooms: []), current: nil,
+              label: { $0.title }, save: { _ in }, assign: { _, _ in }, plan: { _ in })
+        }
+        let local = target("local", "This Mac", mine, [])
+        let studio = target("host-1", "Mac Studio", theirs, [lux])
+        let all = [local, studio]
+        // The editor's workspaces: both machines', named with their machine.
+        let offered = QuickTaskPanel.editorProfiles(all)
+        #expect(offered.map(\.id) == [mine.id, theirs.id])
+        #expect(offered.map(\.name) == ["This Mac · Personal", "Mac Studio · Storefront"])
+        // The workspace a host session's task gets is among them (Save on).
+        let merged = QuickTaskPanel.merged(all)
+        let chosen = merged.workspace(for: TaskAssignment(kind: .session, id: lux.id, label: "@lux"))
+        #expect(chosen == theirs.id && offered.contains { $0.id == chosen })
+        // One machine: its workspaces as they are.
+        #expect(QuickTaskPanel.editorProfiles([local]).map(\.name) == ["Personal"])
+        // Each workspace's agents come from its own machine.
+        #expect(QuickTaskPanel.editorToolSpecs(all)(offered[1]).map(\.tool) == [.codex])
+        #expect(QuickTaskPanel.editorToolSpecs(all)(offered[0]).map(\.tool) == [.claude])
+        // A host workspace picked with no assignee files on that host.
+        #expect(QuickTaskPanel.owner(of: nil, profileID: theirs.id, in: all, else: local).key == "host-1")
+        #expect(QuickTaskPanel.owner(of: nil, profileID: mine.id, in: all, else: local).key == "local")
+        #expect(QuickTaskPanel.owner(of: .newAgent, profileID: theirs.id, in: all, else: local).key == "host-1")
+        // The assignee still wins where it says.
+        #expect(QuickTaskPanel.owner(of: TaskAssignment(kind: .session, id: lux.id, label: "@lux"),
+                                     profileID: mine.id, in: all, else: local).key == "host-1")
+    }
+
     @Test("from another app the panel takes every connected host; from a window, that window's board")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -61,6 +102,7 @@ struct QuickTaskMachinesTests {
         #expect(src.contains("targets = [local] + delegate.connectedRemoteHostWindows().map(Target.remote)"))
         #expect(src.contains("let choices = Self.merged(targets)"))
         #expect(src.contains("let target = Self.owner(of: assignment, in: targets, else: main)"))
-        #expect(src.contains("let target = Self.owner(of: task.assignment, in: targets, else: main)"))
+        #expect(src.contains("let target = Self.owner(of: task.assignment, profileID: task.profileID, in: targets, else: main)"))
+        #expect(src.contains("profiles: Self.editorProfiles(targets),"))
     }
 }

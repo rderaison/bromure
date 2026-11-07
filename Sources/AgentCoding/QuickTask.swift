@@ -120,6 +120,37 @@ final class QuickTaskPanel {
         }
     }
 
+    /// As `owner(of:)`, and when the assignee doesn't say (none, a new
+    /// agent, the Switchboard), the machine whose workspace `profileID` is:
+    /// the full editor can pick another machine's.
+    static func owner(of assignment: TaskAssignment?, profileID: UUID, in targets: [Target], else main: Target) -> Target {
+        let byAssignee = owner(of: assignment, in: targets, else: main)
+        if byAssignee.key != main.key || main.profile(profileID) != nil { return byAssignee }
+        return targets.first { $0.profile(profileID) != nil } ?? main
+    }
+
+    /// The workspaces the full editor offers: the opening board's, or, with
+    /// several machines listed, every machine's, each named with its machine
+    /// (two can share a name). A session picked on another machine sets the
+    /// draft's workspace to that machine's: offered only the first board's,
+    /// the editor found none selected and kept Add Task off.
+    static func editorProfiles(_ targets: [Target]) -> [Profile] {
+        guard targets.count > 1 else { return targets.first?.profiles ?? [] }
+        return targets.flatMap { t in
+            t.profiles.map { p in var named = p; named.name = t.machine + " · " + p.name; return named }
+        }
+    }
+
+    /// The agents a workspace can run, asked of the machine it's on.
+    static func editorToolSpecs(_ targets: [Target]) -> (Profile) -> [Profile.ToolSpec] {
+        { p in
+            guard let t = targets.first(where: { $0.profile(p.id) != nil }), let real = t.profile(p.id) else {
+                return p.allToolSpecs
+            }
+            return t.toolSpecs(real)
+        }
+    }
+
     /// The app that was in front when the panel was summoned from outside
     /// Bromure — it gets focus back when the panel closes.
     private var previousApp: NSRunningApplication?
@@ -183,8 +214,8 @@ final class QuickTaskPanel {
             folder: folder,
             workspaceName: target.profile(workspace)?.name ?? "",
             initialAssignment: initial,
-            profiles: profiles,
-            toolSpecs: target.toolSpecs,
+            profiles: Self.editorProfiles(targets),
+            toolSpecs: Self.editorToolSpecs(targets),
             profileID: workspace,
             tool: tool,
             onAdd: { [weak self] title, details, assignment, keepOpen in
@@ -247,15 +278,18 @@ final class QuickTaskPanel {
     /// A task from the full editor.
     private func add(_ task: CodingTask, plan: Bool) {
         guard let main = target else { return }
-        let target = Self.owner(of: task.assignment, in: targets, else: main)
+        let target = Self.owner(of: task.assignment, profileID: task.profileID, in: targets, else: main)
         var t = task
         t.stage = .backlog
-        // The editor offered the first board's workspaces: on another
-        // machine, the assignee's (or that machine's first).
+        // The workspace picked, when it's that machine's; else the assignee's,
+        // or that machine's first.
         let own = target.profile(t.profileID) != nil ? t.profileID : (target.profiles.first?.id ?? t.profileID)
         t.profileID = target.workspace(for: t.assignment, else: own)
         if target.key != main.key {
-            if let p = target.profile(t.profileID) { t.tool = p.tool }
+            // The agent picked, when that workspace can run it; else its own.
+            if let p = target.profile(t.profileID), !target.toolSpecs(p).contains(where: { $0.tool == t.tool }) {
+                t.tool = p.tool
+            }
             // The editor started on this board's folder, a path on another machine.
             if t.repoPath == folder { t.repoPath = "~" }
         }
