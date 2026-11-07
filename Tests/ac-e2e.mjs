@@ -2666,6 +2666,48 @@ async function main() {
                   await api("DELETE", `/tasks/${TID}`);
                 }
               });
+
+              // The shield in a fat client: the drawer opened, then a stage
+              // mount (the dashboard again) used to remove it from the window,
+              // so the shield did nothing. And no shield for a workspace with
+              // no sandbox (wsID has no policy).
+              await test("25.11 the mirror's shield opens the drawer, which survives a remount; none without a sandbox", async () => {
+                const made = await api("POST", "/profiles", {
+                  name: "ACE2E_RC_Sandboxed", closeAction: "shutdown",
+                  networkPolicy: "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n  read_write: [/tmp]\n",
+                });
+                assert(made.ok === true && made.id, `POST /profiles: ${JSON.stringify(made).slice(0, 200)}`);
+                const boxed = made.id;
+                try {
+                  let r = null;
+                  for (let i = 0; i < 20; i++) {
+                    await fc("select", { workspace: boxed });
+                    r = await fc("policy-drawer", { op: "state" });
+                    if (r.shield === true) break;
+                    await sleep(500);
+                  }
+                  assert(r && r.shield === true, `no shield for a sandboxed workspace: ${JSON.stringify(r)}`);
+                  r = await fc("policy-drawer", { op: "toggle" });
+                  assert(r.open === true && r.inStage === true, `the drawer didn't open: ${JSON.stringify(r)}`);
+                  await fc("select", { workspace: boxed });   // mounts its dashboard again
+                  await sleep(600);
+                  r = await fc("policy-drawer", { op: "state" });
+                  assert(r.open === true && r.inStage === true && r.topmost === true && r.onScreen === true,
+                         `the drawer left the window on a remount: ${JSON.stringify(r)}`);
+                  for (let i = 0; i < 20; i++) {
+                    await fc("select", { workspace: wsID });
+                    r = await fc("policy-drawer", { op: "state" });
+                    if (r.shield === false) break;
+                    await sleep(500);
+                  }
+                  assert(r.shield === false && r.open === false,
+                         `a workspace without a sandbox kept the shield or the drawer: ${JSON.stringify(r)}`);
+                  r = await fc("policy-drawer", { op: "toggle" });
+                  assert(r.open === false, `the drawer opened for a workspace without a sandbox: ${JSON.stringify(r)}`);
+                } finally {
+                  deleteProfile(boxed);
+                }
+              });
             } finally {
               deleteProfile(wsID);
             }

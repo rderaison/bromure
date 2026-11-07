@@ -5625,7 +5625,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 if let action = params["action"] as? String,
                    action.hasPrefix("room-") || action.hasPrefix("branch-") || action.hasPrefix("review-") || ["sidebar-search", "sidebar-folds", "session-surface", "select-session", "undo-toast",
-                                                 "activity-open", "command-held", "appearance"].contains(action) {
+                                                 "activity-open", "command-held", "appearance", "policy-drawer"].contains(action),
+                   (params["host"] as? String) == nil || action != "policy-drawer" {
                     return self.roomDebug(action, params)
                 }
                 let key = (params["host"] as? String) ?? ""
@@ -9782,6 +9783,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let w = ensureUnifiedWindow()
         func uuid(_ k: String) -> UUID? { (p[k] as? String).flatMap(UUID.init(uuidString:)) }
         switch action {
+        case "policy-drawer":
+            // This Mac's window (no host given): pick the workspace, then the shield.
+            if let id = uuid("workspace") { w.select(profileID: id) }
+            return w.debugPolicyDrawer(p)
         case "room-create":
             let r = roomCreate(name: (p["name"] as? String) ?? "",
                                sessions: ((p["sessions"] as? [String]) ?? []).compactMap(UUID.init(uuidString:)))

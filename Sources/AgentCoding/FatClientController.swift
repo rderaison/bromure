@@ -4330,6 +4330,20 @@ final class RemoteHostWindow: NSWindow {
         })
     }
 
+    /// E2E: the drawer as the user would see it. The shield shows for the
+    /// stage's workspace; the drawer is on screen when its host is in the
+    /// window, unhidden, opaque, inside the stage, and topmost there.
+    static func policyDrawerReport(_ list: SessionListModel, host: NSView?, stage: NSView) -> [String: Any] {
+        let inStage = host?.superview === stage
+        let onScreen = inStage && host?.window != nil && host?.isHidden == false && (host?.alphaValue ?? 0) > 0.5
+            && stage.bounds.intersects(host?.frame ?? .zero)
+        return ["ok": true, "open": list.policyDrawerOpen,
+                "shield": list.hasSandboxDrawer(list.stageProfileID),
+                "stageProfile": list.stageProfileID?.uuidString ?? "",
+                "built": host != nil, "inStage": inStage, "onScreen": onScreen,
+                "topmost": stage.subviews.last === host && host != nil]
+    }
+
     /// A stage occupant goes under the drawer, which stays on top.
     static func addBelow(_ drawer: NSView?, _ view: NSView, on stage: NSView) {
         if let drawer, drawer.superview === stage {
@@ -6694,6 +6708,11 @@ final class RemoteHostWindow: NSWindow {
                 "sidebarWidth": Double(sidebarWidthConstraint.constant),
                 "terminalFocused": focused(),
             ]
+        case "policy-drawer":
+            // {op: toggle|state}: the shield's click, and what's on screen.
+            if (p["op"] as? String) == "toggle" { togglePolicyDrawer() }
+            contentView?.layoutSubtreeIfNeeded()
+            return Self.policyDrawerReport(controller.listModel, host: policyDrawerHost, stage: stage)
         case "select":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             selectWorkspaceName(id)

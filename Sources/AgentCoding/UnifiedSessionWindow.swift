@@ -1016,6 +1016,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         setPolicyDrawerOpen(!listModel.policyDrawerOpen)
     }
 
+    /// E2E (`/debug/fatclient` action policy-drawer): {op: toggle|state}.
+    func debugPolicyDrawer(_ p: [String: Any]) -> [String: Any] {
+        if (p["op"] as? String) == "toggle" { togglePolicyDrawer(nil) }
+        contentView?.layoutSubtreeIfNeeded()
+        return RemoteHostWindow.policyDrawerReport(listModel, host: policyDrawerHost, stage: stage)
+    }
+
     func setPolicyDrawerOpen(_ open: Bool) {
         let host = ensurePolicyDrawer()
         listModel.policyDrawerOpen = open
