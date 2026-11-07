@@ -34,9 +34,14 @@ struct FatClientSecurityCountsTests {
         let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         // Fetched: 100 old rows, one coalesced swap row (3 repeats) from an hour ago.
         var history = (0..<100).map { ev(Double(120 + $0)) }
-        history.append(ev(60, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 3))
-        // Mirror: the last rows, the swap row again (now 5 repeats, moved forward).
-        let mirror = [ev(5), ev(4, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 5), ev(1)]
+        var swapRow = ev(60, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 3)
+        swapRow.rowID = UUID()
+        history.append(swapRow)
+        // Mirror: the last rows, the swap row again (the same row, by its id:
+        // now 5 repeats, moved forward).
+        var grown = ev(4, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 5)
+        grown.rowID = swapRow.rowID
+        let mirror = [ev(5), grown, ev(1)]
         let merged = SecurityTimeline.merged(history: history, mirror: mirror)
         #expect(merged.count == 103)                                 // 100 old + 3 mirrored; old swap copy dropped
         let swaps = merged.filter { $0.coalesceKey == "swap|a" }
@@ -93,5 +98,58 @@ struct FatClientSecurityCountsTests {
         #expect(app.contains("w.controller.fetchSecurityHistory(hours: hours)"))
         let view = try src("Sources/AgentCoding/SecurityTimelineView.swift")
         #expect(view.contains(".onChange(of: rangeHours) { _, h in"))
+    }
+
+    /// Finding: the host starts a new row when a key recurs after the
+    /// coalescing window, but the client's merge dropped every older fetched
+    /// row with the mirror's key -- distinct earlier decisions vanished.
+    @Test("the mirror replaces exactly its own row; an older, distinct row with the same key stays")
+    func sameKeyDistinctRows() {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        var a = ev(90, engine: "Credential brokering", ck: "swap|x", pid: pid, count: 4)   // an earlier row
+        a.rowID = UUID()
+        var b = ev(30, engine: "Credential brokering", ck: "swap|x", pid: pid, count: 2)   // a later row, same key
+        b.rowID = UUID()
+        var bNow = ev(2, engine: "Credential brokering", ck: "swap|x", pid: pid, count: 6)  // b, grown
+        bNow.rowID = b.rowID
+        let merged = SecurityTimeline.merged(history: [a, b] + (0..<10).map { ev(Double(100 + $0)) },
+                                             mirror: [ev(5), bNow])
+        let swaps = merged.filter { $0.coalesceKey == "swap|x" }
+        #expect(swaps.count == 2)                                   // a kept, b's old copy replaced
+        #expect(Set(swaps.compactMap(\.count)) == [4, 6])
+
+        // A host that sends no ids: only a copy within the window of the
+        // mirrored repeat counts as the same row.
+        let old = ev(40, engine: "Credential brokering", ck: "swap|y", pid: pid, count: 1)
+        let recent = ev(8, engine: "Credential brokering", ck: "swap|y", pid: pid, count: 3)
+        let repeatNow = ev(1, engine: "Credential brokering", ck: "swap|y", pid: pid, count: 4)
+        let legacy = SecurityTimeline.merged(history: [old, recent, ev(50)], mirror: [ev(3), repeatNow])
+        #expect(legacy.filter { $0.coalesceKey == "swap|y" }.map(\.count) == [1, 4])
+    }
+
+    @MainActor
+    @Test("a row keeps the id it started with through every fold, on disk and on the wire")
+    func rowIdentityIsStable() throws {
+        let tl = SecurityTimeline(directory: nil)
+        let pid = UUID()
+        func swap(_ minutesAgo: Double) -> SecurityTimeline.Event {
+            var e = SecurityTimeline.Event(time: Date().addingTimeInterval(-minutesAgo * 60), engine: "Credential brokering",
+                                           condition: "c", decision: "d", kind: .info, profileID: pid)
+            e.coalesceKey = "swap|z"
+            return e
+        }
+        let first = swap(9)
+        tl.append(first); tl.append(swap(6)); tl.append(swap(3))
+        let row = try #require(tl.events.last)
+        #expect(tl.events.count == 1 && row.count == 3)
+        #expect(row.stableID == first.id)
+        // The wire and the disk carry it.
+        let wire = try #require(tl.mirrorRows().last)
+        #expect(wire["rid"] as? String == first.id.uuidString)
+        let line = try #require(SecurityTimeline.line(row))
+        #expect(SecurityTimeline.event(fromLine: line)?.stableID == first.id)
+        let client = SecurityTimeline(directory: nil)
+        client.applyMirror([wire], host: "h")
+        #expect(client.remote["h"]?.first?.stableID == first.id)
     }
 }
