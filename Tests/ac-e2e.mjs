@@ -3178,7 +3178,9 @@ async function main() {
           // Everything runs with `--noproxy '*'` — a direct connection that
           // ignores the guest's HTTP(S)_PROXY, so the only thing that can
           // enforce is host-side interception. No `-f`: we want the 403 status
-          // without curl bailing out. neverssl.com is guaranteed plain HTTP.
+          // without curl bailing out. example.com (IANA's reserved example
+          // domain) serves plain HTTP on 80 -- neverssl.com went silent once
+          // and failed this test with a bare 502.
           // Every curl is `--max-time 25`: an external upstream that connects
           // slowly (e.g. a dual-stack host whose IPv6 route black-holes on the
           // CI LAN) must fail THAT probe cleanly, not stall the whole exec past
@@ -3190,11 +3192,12 @@ ISSUER=$(curl --noproxy '*' --max-time 25 -sSv https://bromure.io/ 2>&1 | grep -
 GET443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' https://bromure.io/en)
 POST443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
 BODY443=$(curl --noproxy '*' --max-time 25 -sS -X POST https://bromure.io/en | head -c 200)
-GET80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' http://neverssl.com/)
-POST80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST http://neverssl.com/)
-BODY80=$(curl --noproxy '*' --max-time 25 -sS -X POST http://neverssl.com/ | head -c 200)
+GET80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' http://example.com/)
+WHY80=$(curl --noproxy '*' --max-time 25 -sS -D - -o /dev/null http://example.com/ | grep -i '^x-bromure-upstream-error:' | head -1)
+POST80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST http://example.com/)
+BODY80=$(curl --noproxy '*' --max-time 25 -sS -X POST http://example.com/ | head -c 200)
 echo "ISSUER=$ISSUER"; echo "GET443=$GET443"; echo "POST443=$POST443"; echo "BODY443=$BODY443"
-echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
+echo "GET80=$GET80"; echo "WHY80=$WHY80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           });
           assertEq(r._status, 200);
           const out = r.stdout || "";
@@ -3206,7 +3209,8 @@ echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           assert(Number(grab(out, "GET443")) < 400, `GET https should be allowed, got ${grab(out, "GET443")}`);
           assertEq(grab(out, "POST443"), "403", `POST https should be blocked (403), got ${grab(out, "POST443")}`);
           assertIncludes(grab(out, "BODY443"), "Bromure firewall rule", "443 POST 403 not from the Bromure firewall");
-          assert(Number(grab(out, "GET80")) < 400, `GET http:80 should be allowed, got ${grab(out, "GET80")}`);
+          assert(Number(grab(out, "GET80")) < 400,
+            `GET http:80 should be allowed, got ${grab(out, "GET80")} ${grab(out, "WHY80")}`);
           assertEq(grab(out, "POST80"), "403", `POST http:80 should be blocked (403), got ${grab(out, "POST80")}`);
           assertIncludes(grab(out, "BODY80"), "Bromure firewall rule", "80 POST 403 not from the Bromure firewall");
         });

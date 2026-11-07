@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SandboxEngine
 
 /// OpenShell's "resolve once, validate every answer, dial only what passed"
@@ -118,6 +119,8 @@ enum UpstreamPinning {
     /// Returns a blocking fd; the caller owns it.
     static func connect(_ addresses: [IPAddress], port: Int) throws -> Int32 {
         var fds: [Int32: Int32] = [:]          // fd → saved flags
+        var target: [Int32: String] = [:]      // fd → the address it dials
+        var failures: [String] = []            // "address: why", for the error
         for ip in addresses {
             let fd: Int32
             var rc: Int32
@@ -152,7 +155,13 @@ enum UpstreamPinning {
                 fds.keys.filter { $0 != fd }.forEach { close($0) }
                 return prepared(fd)
             }
-            if errno != EINPROGRESS { close(fd); fds[fd] = nil }
+            let e = errno
+            if e != EINPROGRESS {
+                failures.append("\(ip.description): \(String(cString: strerror(e)))")
+                close(fd); fds[fd] = nil
+            } else {
+                target[fd] = ip.description
+            }
         }
         let start = Date()
         while !fds.isEmpty, Date().timeIntervalSince(start) < 10 {
@@ -168,11 +177,19 @@ enum UpstreamPinning {
                     fds.keys.filter { $0 != p.fd }.forEach { close($0) }
                     return prepared(p.fd)
                 }
+                failures.append("\(target[p.fd] ?? "?"): \(String(cString: strerror(soErr == 0 ? EIO : soErr)))")
                 close(p.fd); fds[p.fd] = nil
             }
         }
+        for fd in fds.keys { failures.append("\(target[fd] ?? "?"): timed out after 10 s") }
         fds.keys.forEach { close($0) }
-        throw MitmError.upstreamFailed("connect to validated address(es) \(addresses.map(\.description).joined(separator: ", ")) port \(port) failed")
+        throw MitmError.upstreamFailed(Self.connectFailure(addresses, port: port, failures: failures))
+    }
+
+    /// Why a pinned connect failed, address by address.
+    static func connectFailure(_ addresses: [IPAddress], port: Int, failures: [String]) -> String {
+        if addresses.isEmpty { return "no validated address to connect to on port \(port)" }
+        return "could not connect on port \(port): " + failures.joined(separator: "; ")
     }
 
     private static func prepared(_ fd: Int32) -> Int32 {
@@ -203,6 +220,24 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
     private let others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)?
     private let lock = NSLock()
     private var closed = false
+
+    /// The last reason a dialer refused or failed a destination, by
+    /// "host:port": URLSession reports a proxy failure only as CFNetwork
+    /// 306/310, so the proxy's 502 reads the real reason here.
+    private static let failures = OSAllocatedUnfairLock(initialState: [String: String]())
+    static func lastFailure(host: String, port: Int) -> String? {
+        failures.withLock { $0[failureKey(host, port)] }
+    }
+    private static func failureKey(_ host: String, _ port: Int) -> String {
+        host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[].")) + ":\(port)"
+    }
+    static func noteFailure(host: String, port: Int, _ reason: String) {
+        failures.withLock { m in
+            if m.count > 256 { m.removeAll() }   // a diagnostic, not a record
+            m[failureKey(host, port)] = reason
+        }
+        FileHandle.standardError.write(Data("[mitm] pinned dial \(host):\(port): \(reason)\n".utf8))
+    }
 
     init(host: String, port upstreamPort: Int, addresses: [OpenShellPolicy.IPAddress],
          others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)? = nil) throws {
@@ -287,10 +322,23 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
         } else if let checked = others?(a.host, p) {
             dial = checked
         } else {
+            Self.noteFailure(host: a.host, port: p, others == nil
+                ? "refused: not this request's destination"
+                : "refused: \(a.host) did not resolve, or every address it resolved to is one the guest may not reach")
             refuse(client); return
         }
-        guard let upstream = try? UpstreamPinning.connect(dial, port: p) else {
-            _ = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".withCString { write(client, $0, strlen($0)) }
+        let upstream: Int32
+        do {
+            upstream = try UpstreamPinning.connect(dial, port: p)
+        } catch {
+            let reason: String
+            if case MitmError.upstreamFailed(let why) = error { reason = why } else { reason = "\(error)" }
+            Self.noteFailure(host: a.host, port: p, reason)
+            let body = "Bromure: could not connect to \(a.host):\(p) — \(reason)\n"
+            let resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                + "X-Bromure-Upstream-Error: \(Self.headerSafe(reason))\r\n"
+                + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body
+            _ = resp.withCString { write(client, $0, strlen($0)) }
             close(client); return
         }
         if isConnect {
@@ -352,6 +400,14 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
         var data = Data((out.joined(separator: "\r\n") + "\r\n\r\n").utf8)
         data.append(head[end.upperBound...])      // any body bytes already read
         return data
+    }
+
+    /// A reason as one header line (no CR/LF, bounded).
+    static func headerSafe(_ s: String) -> String {
+        // By scalar: "\r\n" is ONE Character, which matched neither.
+        var out = String.UnicodeScalarView()
+        for u in s.unicodeScalars.prefix(300) { out.append(u == "\r" || u == "\n" ? " " : u) }
+        return String(out)
     }
 
     private func refuse(_ fd: Int32) {
