@@ -29,10 +29,32 @@ extension MitmProxy {
 
     // @port MitmEngine.clearGuardrailsConfig(for: UUID) h=0e852c5a469fc917 @8e2543eb
     func clearGuardrailsConfig(for profileID: UUID) {
-        UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
-        UnmanagedCredentialGuard.shared.reset(profileID: profileID)
+        // The next session starts here: a late reply from this one teaches
+        // the guard nothing (learnIssued checks under the same lock).
+        strictSessions.withLockedValue { all in
+            all[profileID, default: 0] &+= 1
+            UnmanagedCredentialGuard.shared.setEnabled(false, for: profileID)
+            UnmanagedCredentialGuard.shared.reset(profileID: profileID)
+        }
         _ = guardrailsConfigs.withLockedValue { $0.removeValue(forKey: profileID) }
         EgressConnectionRegistry.shared.forget(profileID: profileID)
+    }
+
+    /// Workspace `profileID`'s current strict-credential session.
+    // @port-skip linux-only: the session tag macOS's per-VM proxy doesn't need
+    func strictSession(of profileID: UUID) -> UInt64 {
+        strictSessions.withLockedValue { $0[profileID] ?? 0 }
+    }
+
+    /// The tokens a reply issued the guest, learned for strict credential
+    /// mode (macOS: relayUpstream's learn), if its session is still the
+    /// workspace's: a stop in between already forgot what that VM learned.
+    // @port-skip linux-only: relayUpstream's learn, tagged with its session
+    func learnIssued(_ response: Data, host: String, profileID: UUID, session: UInt64) {
+        strictSessions.withLockedValue { all in
+            guard (all[profileID] ?? 0) == session else { return }
+            UnmanagedCredentialGuard.shared.learn(response: response, host: host, profileID: profileID)
+        }
     }
 
     /// A workspace's live policies, from its profile, as macOS pushes them at
@@ -217,6 +239,7 @@ extension RequestReader {
                 "vm_paused": .bool(!alertsOff),
             ])
         }
+        BromureBlockLog.shared.record(.credentialLeak, profileID: profileID)
         let body = "Bromure: outbound request blocked — leaked credential to non-designated host.\n"
         return Data(("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: text/plain; charset=utf-8\r\n"
                      + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body).utf8)
@@ -266,17 +289,16 @@ extension RequestReader {
     }
 
     /// The workspace's policy chain for one request, before any credential is
-    /// swapped in, in macOS's order (HTTPMitmConnection.driveTLS, steps 4–4b
-    /// and the guardrails): OpenShell's head checks (which may rewrite the
-    /// request-target in `request`), `policy.local`, OpenShell request rules,
-    /// the middleware chain (which may rewrite the body), the guardrails.
+    /// swapped in, in macOS's order (HTTPProxy's driveTLS steps): OpenShell's
+    /// head checks (which may rewrite the request-target in `request`),
+    /// `policy.local`, OpenShell request rules, the middleware chain (which
+    /// may rewrite the body), the guardrails, then compromise detection and
+    /// strict credential mode.
     /// The guest's answer, or nil to go on with `request`.
     // partial: OpenShell's strict framing limits (chunk-line, header and trailer sizes) aren't applied; the Linux framer re-frames every body with a Content-Length
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                              host: String, port: Int, tls: Bool) async -> Data? {
-        if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
-        if let refused = unmanagedAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"
@@ -308,6 +330,9 @@ extension RequestReader {
                                                            broker: proxy.guardrailsBroker, profileID: profileID) {
             return answer
         }
+        // A stand-in bound elsewhere, then a credential Bromure didn't issue.
+        if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
+        if let refused = unmanagedAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
         return nil
     }
 }

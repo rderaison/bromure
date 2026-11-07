@@ -195,88 +195,93 @@ struct RepairMarksTests {
     }
 }
 
-/// The repair gate on a real daemon: its own `start` held at an await in
-/// launch (the test hook), and a repair taken through kubeMachineDiskImages.
-/// Nothing boots, so its uplink is a no-op stand-in, not passt: no passt
-/// process for the passt suite's counts to trip on.
-@Suite("Repair marks on a daemon", .serialized)
-struct DaemonRepairGateTests {
-    /// A daemon in a temp dir, with one stopped machine registered.
-    static func daemon() async throws -> (Daemon, VMRecord, String) {
-        let dir = try shortTempDir()
-        let standIn = dir + "/uplink-standin"
-        try "#!/bin/sh\nexec cat >/dev/null\n".write(toFile: standIn, atomically: true, encoding: .utf8)
-        chmod(standIn, 0o755)
-        let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run",
-                                  imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
-        // A script just written can be "Text file busy" to exec while another
-        // test's fork still holds a copy of its write descriptor: tried again.
-        var made: Daemon?
-        for attempt in 1...20 {
-            do { made = try await Daemon.makeForTesting(config, uplink: standIn); break } catch {
-                guard "\(error)".contains("Text file busy"), attempt < 20 else { throw error }
-                try await Task.sleep(for: .milliseconds(50))
+extension DaemonGlobalSuites {
+    /// The repair gate on a real daemon: its own `start` held at an await in
+    /// launch (the test hook), and a repair taken through kubeMachineDiskImages.
+    /// Nothing boots, so its uplink is a no-op stand-in, not passt: no passt
+    /// process for the passt suite's counts to trip on.
+    @Suite("Repair marks on a daemon", .serialized)
+    struct DaemonRepairGateTests {
+        /// A daemon in a temp dir, with one stopped machine registered.
+        static func daemon() async throws -> (Daemon, VMRecord, String) {
+            let dir = try shortTempDir()
+            let standIn = dir + "/uplink-standin"
+            try "#!/bin/sh\nexec cat >/dev/null\n".write(toFile: standIn, atomically: true, encoding: .utf8)
+            chmod(standIn, 0o755)
+            let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run",
+                                      imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
+            // A script just written can be "Text file busy" to exec while another
+            // test's fork still holds a copy of its write descriptor: tried again.
+            var made: Daemon?
+            for attempt in 1...20 {
+                do { made = try await Daemon.makeForTesting(config, uplink: standIn); break } catch {
+                    guard "\(error)".contains("Text file busy"), attempt < 20 else { throw error }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
             }
+            let d = try #require(made)
+            let rec = RepairMarksTests.stopped()
+            try await d.registerForTesting(rec)
+            return (d, rec, dir)
         }
-        let d = try #require(made)
-        let rec = RepairMarksTests.stopped()
-        try await d.registerForTesting(rec)
-        return (d, rec, dir)
-    }
 
-    /// Holds the next launch until `release` and then aborts it.
-    final class Gate: @unchecked Sendable {
-        let entered = NIOLockedValueBoxShim(false)
-        let released = NIOLockedValueBoxShim(false)
-        func install() {
-            Daemon.launchHookForTesting.withLockedValue { $0 = { [self] _ in
-                entered.mutate { $0 = true }
-                while !released.value { try await Task.sleep(for: .milliseconds(10)) }
-                throw CancellationError()        // never boot anything here
-            } }
+        /// Holds the next launch until `release` and then aborts it.
+        final class Gate: @unchecked Sendable {
+            let entered = NIOLockedValueBoxShim(false)
+            let released = NIOLockedValueBoxShim(false)
+            func install() {
+                Daemon.launchHookForTesting.withLockedValue { $0 = { [self] _ in
+                    entered.mutate { $0 = true }
+                    while !released.value { try await Task.sleep(for: .milliseconds(10)) }
+                    throw CancellationError()        // never boot anything here
+                } }
+            }
+            func waitEntered() async { while !entered.value { try? await Task.sleep(for: .milliseconds(10)) } }
+            /// (Not in deinit: the hook holds the gate, and replacing it under
+            /// the box's lock would run deinit there.)
+            static func uninstall() { Daemon.launchHookForTesting.withLockedValue { $0 = nil } }
         }
-        func waitEntered() async { while !entered.value { try? await Task.sleep(for: .milliseconds(10)) } }
-        /// (Not in deinit: the hook holds the gate, and replacing it under
-        /// the box's lock would run deinit there.)
-        static func uninstall() { Daemon.launchHookForTesting.withLockedValue { $0 = nil } }
-    }
 
-    @Test func aStartHeldInLaunchKeepsARepairAndARemoveOut() async throws {
-        let (d, rec, dir) = try await Self.daemon()
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        let gate = Gate(); gate.install()
-        defer { Gate.uninstall() }
-        let start = Task { await d.start(rec) }
-        await gate.waitEntered()            // the start passed its checks and awaits in launch
-        #expect(await d.kubeMachineDiskImages(id: rec.id) == nil, "a repair can't take a machine that's starting")
-        #expect(!d.repairMarks.contains(rec.id))
-        let rm = await d.remove(rec)
-        #expect(rm.status == 409 && rm.body["error"]?.stringValue?.contains("starting") == true, "\(rm.body)")
-        gate.released.mutate { $0 = true }
-        let r = await start.value
-        #expect(r.status == 500, "the held launch was aborted")
-        #expect(await d.kubeMachineDiskImages(id: rec.id) != nil, "once the start ended, a repair may take it")
-        d.repairMarks.remove(rec.id)
-        await d.shutdown()
-    }
+        @Test func aStartHeldInLaunchKeepsARepairAndARemoveOut() async throws {
+            let (d, rec, dir) = try await Self.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let gate = Gate(); gate.install()
+            defer { Gate.uninstall() }
+            let start = Task { await d.start(rec) }
+            await gate.waitEntered()            // the start passed its checks and awaits in launch
+            #expect(await d.kubeMachineDiskImages(id: rec.id) == nil, "a repair can't take a machine that's starting")
+            #expect(!d.repairMarks.contains(rec.id))
+            let rm = await d.remove(rec)
+            #expect(rm.status == 409 && rm.body["error"]?.stringValue?.contains("starting") == true, "\(rm.body)")
+            gate.released.mutate { $0 = true }
+            let r = await start.value
+            #expect(r.status == 500, "the held launch was aborted")
+            #expect(await d.kubeMachineDiskImages(id: rec.id) != nil, "once the start ended, a repair may take it")
+            d.repairMarks.remove(rec.id)
+            await d.shutdown()
+        }
 
-    @Test func aRepairInProgressKeepsAStartAndARemoveOut() async throws {
-        let (d, rec, dir) = try await Self.daemon()
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        let gate = Gate(); gate.install(); gate.released.mutate { $0 = true }
-        defer { Gate.uninstall() }
-        #expect(await d.kubeMachineDiskImages(id: rec.id) != nil, "the repair takes the stopped machine")
-        let s = await d.start(rec)
-        #expect(s.status == 409 && s.body["error"]?.stringValue?.contains("disks repaired") == true, "\(s.body)")
-        #expect(!gate.entered.value, "the start never reached launch")
-        let rm = await d.remove(rec)
-        #expect(rm.status == 409 && rm.body["error"]?.stringValue?.contains("repaired") == true, "\(rm.body)")
-        await d.repairMarks.whileMarked(rec.id) {}   // the repair ends
-        let after = await d.start(rec)
-        #expect(gate.entered.value && after.status == 500, "after it, the start got as far as launch (aborted by the hook)")
-        await d.shutdown()
+        @Test func aRepairInProgressKeepsAStartAndARemoveOut() async throws {
+            let (d, rec, dir) = try await Self.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let gate = Gate(); gate.install(); gate.released.mutate { $0 = true }
+            defer { Gate.uninstall() }
+            #expect(await d.kubeMachineDiskImages(id: rec.id) != nil, "the repair takes the stopped machine")
+            let s = await d.start(rec)
+            #expect(s.status == 409 && s.body["error"]?.stringValue?.contains("disks repaired") == true, "\(s.body)")
+            #expect(!gate.entered.value, "the start never reached launch")
+            let rm = await d.remove(rec)
+            #expect(rm.status == 409 && rm.body["error"]?.stringValue?.contains("repaired") == true, "\(rm.body)")
+            await d.repairMarks.whileMarked(rec.id) {}   // the repair ends
+            let after = await d.start(rec)
+            #expect(gate.entered.value && after.status == 500, "after it, the start got as far as launch (aborted by the hook)")
+            await d.shutdown()
+        }
     }
 }
+
+/// The daemon test rig, by its old name (every daemon test builds through it).
+typealias DaemonRepairGateTests = DaemonGlobalSuites.DaemonRepairGateTests
 
 /// The boot console scan a cluster machine's start runs (the serial log
 /// appended to as the guest boots).

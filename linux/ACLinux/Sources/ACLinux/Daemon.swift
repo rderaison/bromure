@@ -507,7 +507,7 @@ public actor Daemon {
         let body: [String: JSONValue] = [
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
-            "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(\.workspaceJSON)),
+            "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(compromisedRow)),
             "workspacesListed": true,
             "supportsPush": true,
             "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
@@ -1035,6 +1035,8 @@ public actor Daemon {
             if let why = Self.launchRefusal(registration: rec.registration == true, plan: plan) {
                 throw MachineError.invalidConfig(why)
             }
+            // A new session: no swap map or "Allow"ed destination from the last.
+            if rec.registration != true, let pid = UUID(uuidString: rec.id) { mitm?.swapper.clearMap(for: pid) }
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
             try writeCredentialFiles(profile, plan: plan, registration: rec.registration == true,
                                      meta: meta, kubeYAML: kubeYAML)

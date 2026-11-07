@@ -21,9 +21,10 @@ import X509
 /// (SubscriptionAuthRewrite, TokenSwapper), a sign-in's token exchange
 /// answered by the host (SignInCapture), and the response streamed back.
 /// Each request is traced as macOS traces it (TraceEmitter, at the
-/// workspace's trace level). Guardrails, PII, supply-chain and the egress
-/// firewall are macOS's alone for now.
-// partial: no PII, supply-chain or strict-credentials policy on Linux yet; prompt injection logs only
+/// workspace's trace level). The workspace's policy chain runs on each
+/// request first (MitmEgress.swift): OpenShell's checks, the middleware,
+/// the guardrails, compromise detection and strict credential mode.
+// partial: no PII or supply-chain policy on Linux yet; prompt injection logs only
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -47,6 +48,10 @@ final class MitmProxy: @unchecked Sendable {
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).
     let guardrailsConfigs = NIOLockedValueBox<[UUID: GuardrailsConfig]>([:])
+    /// Each workspace's current session, for strict credential mode: a stop
+    /// (clearGuardrailsConfig) starts the next, and what a reply from an
+    /// older one would teach the guard is dropped (MitmEgress.swift).
+    let strictSessions = NIOLockedValueBox<[UUID: UInt64]>([:])
     /// `.promptOnWrite` guardrails' consent (macOS: MitmEngine.guardrailsBroker):
     /// asked of the connected client (ConsentPrompt).
     let guardrailsBroker = GuardrailsConsentBroker()
@@ -902,10 +907,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 upgrade = false
             }
         }
-        // A trace that keeps this host's bodies reads them as text: the
-        // reply is asked for uncompressed (what a guest behind macOS's
-        // URLSession gets; nothing here decodes gzip or br).
-        if capture == nil, !upgrade, let t = trace, t.session.level.capturesBodyForHost(host) {
+        // A trace that keeps this host's bodies reads them as text, and
+        // strict credential mode learns the tokens a reply issues: the reply
+        // is asked for uncompressed (what a guest behind macOS's URLSession
+        // gets; nothing here decodes gzip or br).
+        if capture == nil, !upgrade,
+           trace.map({ $0.session.level.capturesBodyForHost(host) }) == true
+            || UnmanagedCredentialGuard.shared.isEnabled(for: profileID) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
         var out = upgrade ? req : closing(req)
@@ -1081,6 +1089,11 @@ final class ResponseRelay: ChannelInboundHandler {
     /// the guest may send those back here (macOS: relayUpstream's learn).
     private var learnBuf = Data()
     static let learnCap = 256 << 10
+    /// Whether this reply is one to learn from: a final 2xx, not an
+    /// upgrade's stream.
+    private var learning = false
+    /// The strict-credential session this reply belongs to.
+    private let strictSession: UInt64
     static let traceCap = 8 * 1024 * 1024
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1096,6 +1109,7 @@ final class ResponseRelay: ChannelInboundHandler {
         self.upgrade = upgrade
         self.proxy = proxy
         self.trace = trace
+        self.strictSession = proxy?.strictSession(of: profileID) ?? 0
     }
 
     /// What reached the guest, for the trace.
@@ -1156,6 +1170,8 @@ final class ResponseRelay: ChannelInboundHandler {
             rest = Data(rest[next.upperBound...])
         }
         headDone = true
+        let final = Self.status(head0) ?? 0
+        learning = (200..<300).contains(final) && !(upgrade && final == 101)
         let out: Data
         if upgrade, Self.status(head0) == 101 {
             // Switched: the head as it is, then the stream both ways.
@@ -1179,10 +1195,11 @@ final class ResponseRelay: ChannelInboundHandler {
         holdIfGuestFull(context)
     }
 
-    /// Kept for learning while strict credential mode is on for the workspace.
+    /// Kept for learning while strict credential mode is on for the workspace
+    /// (a final 2xx only: an upgrade's stream carries no tokens to learn).
     // @port-skip linux-only: relayUpstream's response buffer for UnmanagedCredentialGuard.learn, on NIO
     private func keepForLearning<C: Collection>(_ bytes: C) where C.Element == UInt8 {
-        guard learnBuf.count < Self.learnCap, UnmanagedCredentialGuard.shared.isEnabled(for: profileID) else { return }
+        guard learning, learnBuf.count < Self.learnCap, UnmanagedCredentialGuard.shared.isEnabled(for: profileID) else { return }
         learnBuf.append(contentsOf: bytes.prefix(Self.learnCap - learnBuf.count))
     }
 
@@ -1234,7 +1251,9 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
         if !learnBuf.isEmpty {
-            UnmanagedCredentialGuard.shared.learn(response: learnBuf, host: host, profileID: profileID)
+            // De-chunked, as macOS's URLSession hands it the body.
+            proxy?.learnIssued(HTTPRequestFraming.dechunkedResponse(learnBuf), host: host,
+                               profileID: profileID, session: strictSession)
             learnBuf = Data()
         }
         if let (minter, kind) = mint {

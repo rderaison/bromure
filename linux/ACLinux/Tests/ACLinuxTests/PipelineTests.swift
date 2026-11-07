@@ -108,6 +108,10 @@ struct PipelineTests {
         // A frame sent with the request is held until the 101, then goes up.
         let out = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\n\(ws)\r\nEARLY-FRAME",
                                 then: "FRAME-AFTER-101")
+        // Relayed after the guest's last read returned: waited for (a loaded
+        // machine takes longer than the read's quiet period).
+        let deadline = Date().addingTimeInterval(5)
+        while !yes.received.withLockedValue({ $0 }).contains("FRAME-AFTER-101"), Date() < deadline { usleep(20_000) }
         seen = yes.received.withLockedValue { $0 }
         #expect(out.hasPrefix("HTTP/1.1 101"), "\(out.prefix(80))")
         #expect(seen.contains("EARLY-FRAME"), "the frame held for the 101 went up: \(seen)")
