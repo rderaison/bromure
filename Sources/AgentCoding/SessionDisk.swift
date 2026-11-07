@@ -425,6 +425,8 @@ public final class SessionDisk {
     /// wants the host to open (e.g. when the user clicks a URL in kitty);
     /// the host polls + relays to NSWorkspace.
     public private(set) var outboxDirectory: URL?
+    /// The outbox's folder for URL relay requests (`urls/url-*.txt`).
+    public static let outboxURLRelayFolder = "urls"
 
     /// True if `ensureDiskExists()` had to clonefile() a fresh disk on the
     /// most recent call. Caller uses this to stamp the profile with the
@@ -2489,6 +2491,13 @@ public final class SessionDisk {
             // those; leave the live roster (tabs-alive.txt) and host commands.
             purgeStaleEvents(in: tmp)
         }
+        // Where the guest's URL relay (bromure-open, xdg-open, $BROWSER)
+        // drops its requests: a folder of its own, so a sandboxed agent can
+        // be let write there (bromure-sandboxd) and nowhere else in the
+        // outbox, where agentd's own signals (tabs, status, liveness) live.
+        try? fm.createDirectory(at: tmp.appendingPathComponent(Self.outboxURLRelayFolder, isDirectory: true),
+                                withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
         outboxDirectory = tmp
         return tmp
     }

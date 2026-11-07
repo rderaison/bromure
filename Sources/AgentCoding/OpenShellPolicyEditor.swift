@@ -399,11 +399,12 @@ struct OpenShellPolicyEditor: View {
         # policies use, with the workload home (/sandbox there) at
         # /home/ubuntu, plus /opt, where the Bromure image installs tools
         # (grok, bun for omp, gcloud). The agent may read the system and
-        # write only its home, its project folders (include_workdir) and /tmp.
+        # write only its home, its project folders (include_workdir), /tmp,
+        # and /dev/shm (Python's multiprocessing and anything parallel on it).
         filesystem_policy:
           include_workdir: true
-          read_only: [/bin, /usr, /lib, /opt, /proc, /dev/urandom, /etc, /var/log]
-          read_write: [/home/ubuntu, /tmp, /dev/null]
+          read_only: [/bin, /usr, /lib, /opt, /proc, /dev/urandom, /dev/random, /dev/zero, /etc, /var/log]
+          read_write: [/home/ubuntu, /tmp, /dev/null, /dev/shm]
         landlock:
           compatibility: best_effort
 

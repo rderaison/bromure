@@ -1205,7 +1205,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             let maxURLFileSize = 8 * 1024
             var urlsProcessedThisTick = 0
             var oneShotsThisTick = 0
-            if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+            if var entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+                // The URL relay's own folder (what a sandboxed agent can
+                // write): its url-*.txt only, never anything else named
+                // like the outbox's own signals.
+                let relay = outbox.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
+                entries += ((try? fm.contentsOfDirectory(at: relay, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt" }
                 // agent-tool-<win>.jsonl — append-only, one line per tool
                 // call, written by the agents' PreToolUse hooks before the
                 // tool runs (NETWORK_LINEAGE.md). Read new complete lines;

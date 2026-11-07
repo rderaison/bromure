@@ -7589,6 +7589,53 @@ def task_fix_systemd_unit():
     log("session", "systemd unit upgraded (KillMode=process, python3 -s)")
 
 
+# The guest's URL relay (setup.sh installs it; `xdg-open` is a link to it and
+# $BROWSER names it): the same script, kept in step on images built before
+# it wrote to the outbox's `urls/` folder. Under an OpenShell filesystem
+# policy that folder is the only part of the outbox a sandboxed agent may
+# write, and without it no agent could open a URL on the Mac (a sign-in
+# page included).
+_BROMURE_OPEN_PATH = "/usr/local/bin/bromure-open"
+_BROMURE_OPEN = """#!/bin/sh
+# Usage: bromure-open <URL>
+# Sends the URL to the macOS host's default browser via the outbox share.
+URL="$1"
+[ -z "$URL" ] && exit 1
+OUTBOX=/mnt/bromure-outbox
+if [ ! -d "$OUTBOX" ]; then
+    echo "bromure-open: outbox share not mounted; cannot relay $URL" >&2
+    exit 2
+fi
+# The relay's own folder when the host made one: a sandboxed agent may
+# write there and nowhere else in the outbox.
+DIR="$OUTBOX/urls"
+[ -d "$DIR" ] || DIR="$OUTBOX"
+# Unique filename per call so concurrent opens don't collide.
+F="$DIR/url-$(date +%s)-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \\n').txt"
+printf '%s\\n' "$URL" > "$F"
+"""
+
+
+def task_bromure_open():
+    """Converge /usr/local/bin/bromure-open to _BROMURE_OPEN (before the
+    strict sandbox takes sudo away)."""
+    try:
+        with open(_BROMURE_OPEN_PATH) as f:
+            if f.read() == _BROMURE_OPEN:
+                return
+    except OSError:
+        return   # not installed (dev run): setup.sh owns creation
+    tmp = "/tmp/.bromure-open"
+    with open(tmp, "w") as f:
+        f.write(_BROMURE_OPEN)
+    _sudo(["install", "-m", "755", tmp, _BROMURE_OPEN_PATH])
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    log("session", "bromure-open upgraded (relays through the outbox's urls/ folder)")
+
+
 def _sudo_write(path, content, mode="0644"):
     """Write `content` to `path` as root (tee), then chmod. Returns success."""
     try:
@@ -8385,6 +8432,7 @@ def main():
         _run_once("home", task_home_setup)
         _run_once("folder-shares", task_folder_shares)
         _run_once("agent-stubs", task_heal_agent_stubs)
+        _run_once("bromure-open", task_bromure_open)
         # Only for workspaces without the strict sandbox; with strict, the root
         # script below starts attestd, the sentry and the supervisor before
         # revoking sudo, in that same order.

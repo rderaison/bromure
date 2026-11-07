@@ -130,6 +130,12 @@ ADDITIONS_READ_WRITE = [
     # session plumbing, which is exactly what makes a real denial hard to see.
     # Inert under the strict sandbox for the reason below.
     ("/var/log/wtmp", "the login-record log utempter writes alongside /run/utmp"),
+    # The URL relay to the Mac's browser: bromure-open (also xdg-open and
+    # $BROWSER) drops url-*.txt files here, the host opens them. Every agent's
+    # sign-in goes through it, and without it no sandboxed agent could open a
+    # page on the Mac. Only this folder, never the outbox itself: agentd's
+    # own signals to the host (tabs, status, liveness) stay out of reach.
+    ("/mnt/bromure-outbox/urls", "the URL relay to the Mac's browser (bromure-open, xdg-open, $BROWSER)"),
     # bash opens /dev/tty to look for a controlling terminal -- on every
     # `sh -c`, not only interactive ones. A policy that does not list it
     # therefore produces one `sandbox_denied` per `vm exec`, forever, which is
