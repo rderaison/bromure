@@ -2927,9 +2927,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
             }
         }
         let clientIdentity = identityEntry?.identity
-        if let entry = identityEntry, !cleartext {
-            Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)
-        }
         let pinnedCA = clusterCAs.ca(for: host, port: port, profileID: profileID)
 
         guard let upstreamAddrs = upstreamAddresses(host: host, port: port) else {
@@ -2959,6 +2956,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
             throw error
         }
         defer { close(upstreamFD) }
+        // Recorded once the handshake succeeded and the upstream asked for,
+        // and got, the identity -- not when it was merely looked up: a
+        // refused destination, a failed connect or handshake, or a server
+        // that asks for none presented nothing (Finding: "Failed WebSocket
+        // connections are logged as presented client certificates").
+        if let entry = identityEntry, (upstreamTLS as? TLSClientStream)?.clientCertificateSent == true {
+            Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)
+        }
 
         // Forward the upgrade request as-is. URLSession's hop-by-hop
         // header strip would have eaten Upgrade/Connection — that's
