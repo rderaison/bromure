@@ -248,7 +248,13 @@ final class KubeClusterEngine {
         guard let cluster = store.cluster(id) else { return }
         await stop(id)
         store.setStatus(id) { $0.phase = .deleting }
-        if let range = cluster.metallbRange { unreserveMetalLBRange(range) }
+        // Every cluster shares the one LoadBalancer range (reserveMetalLBRange):
+        // it's freed only with the last cluster that holds it, never under
+        // another cluster's Services (the DHCP pool would hand them out).
+        if let range = cluster.metallbRange,
+           !Self.rangeStillHeld(range, byOtherThan: id, in: store.clusters) {
+            unreserveMetalLBRange(range)
+        }
         for node in cluster.nodes { MACBindings.shared.release(profileID: node.id) }
         try? FileManager.default.removeItem(at: clusterDirectory(id))
         runtimes[id] = nil
@@ -1329,6 +1335,11 @@ final class KubeClusterEngine {
         let first = base | 230, last = base | 249
         VMNetSwitch.shared.reserveIPs(Set(first...last))
         return "\(VMNetSwitch.ipString(first))-\(VMNetSwitch.ipString(last))"
+    }
+
+    /// Whether a cluster other than `id` still holds `range`.
+    nonisolated static func rangeStillHeld(_ range: String, byOtherThan id: UUID, in clusters: [KubeCluster]) -> Bool {
+        clusters.contains { $0.id != id && $0.metallbRange == range }
     }
 
     private func unreserveMetalLBRange(_ range: String) {
