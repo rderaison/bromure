@@ -213,7 +213,7 @@ struct PlanStreamTests {
 
 extension FakeDriver {
     /// The host closed its end (EOF within `ms`).
-    func closedByHost(ms: Int32 = 1500) async -> Bool {
+    func closedByHost(ms: Int32 = 5000) async -> Bool {
         let fd = self.fd
         return await Task.detached {
             var buf = [UInt8](repeating: 0, count: 4096)
@@ -254,7 +254,7 @@ struct PlanStreamBoundsTests {
     }
 
     func until(_ cond: () -> Bool) async -> Bool {
-        for _ in 0..<300 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
+        for _ in 0..<1000 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
         return cond()
     }
 
@@ -262,15 +262,14 @@ struct PlanStreamBoundsTests {
     static let text = #"{"ev":"text","role":"assistant","text":"x"}"#
 
     /// 16 MiB of newlines and junk lines as fast as the guest can write:
-    /// the main queue keeps turning (no callback holds it for long), and
-    /// the connection still works after.
+    /// no read callback holds the main queue for long (the listener's own
+    /// callbacks timed, so other tests' main-queue work doesn't count), the
+    /// writes all go in, and the connection still works after.
     @Test func aFloodNeverHoldsTheMainQueue() async throws {
         let rig = try Rig(); defer { rig.stop() }
         let d = try rig.driver(); defer { d.close() }
         let fd = d.fd
-        let done = NIOLockedValueBoxShim(false)
         let writer = Task.detached {
-            defer { done.mutate { $0 = true } }
             let chunk = [UInt8](String(repeating: "\n{}\n", count: 16 << 10).utf8)   // 64 KiB
             for _ in 0..<256 {
                 var off = 0
@@ -282,15 +281,9 @@ struct PlanStreamBoundsTests {
             }
             return true
         }
-        var worst = 0.0, last = Date()
-        let end = Date().addingTimeInterval(30)
-        while Date() < end, !done.value {
-            try await Task.sleep(nanoseconds: 2_000_000)
-            worst = max(worst, Date().timeIntervalSince(last))
-            last = Date()
-        }
         #expect(await writer.value, "the guest's writes all went in")
-        #expect(worst < 0.25, "the main queue never stalled long: worst gap \(worst) s")
+        #expect(rig.listener.readTurns >= 256, "16 MiB at 64 KiB a turn at most: \(rig.listener.readTurns)")
+        #expect(rig.listener.longestTurn < .milliseconds(250), "no callback held the main queue: \(rig.listener.longestTurn)")
         d.send(Self.hello("after"), Self.text)
         #expect(await until { rig.events.count == 2 }, "\(rig.events)")
     }

@@ -27,9 +27,10 @@ final class PlanStreamListener {
     private var accepted = 0
     /// Event bytes delivered over every branch.
     private var deliveredBytes = 0
-    /// Read callbacks run so far, over every connection (the tests' view of
-    /// the read budget).
+    /// Read callbacks run so far over every connection, and the longest
+    /// one: the tests' view of the read budget.
     private(set) var readTurns = 0
+    private(set) var longestTurn: Duration = .zero
 
     /// The guest is untrusted: what one VM's driver end may hold of the
     /// daemon. Everything here runs on the main queue, so no single
@@ -119,7 +120,11 @@ final class PlanStreamListener {
             accepted += 1
             let c = Connection(fd: fd, order: accepted, lineBytes: limits.lineBytes, readBudget: limits.readBudget,
                                onEvent: { [weak self] c, event, size in self?.handle(c, event, size: size) },
-                               onTurn: { [weak self] in self?.readTurns += 1 },
+                               onTurn: { [weak self] took in
+                                   guard let self else { return }
+                                   readTurns += 1
+                                   longestTurn = max(longestTurn, took)
+                               },
                                onClose: { [weak self] c in self?.closed(c) })
             connections[ObjectIdentifier(c)] = c
             c.start()
@@ -204,7 +209,7 @@ final class PlanStreamListener {
         private let readBudget: Int
         private let onEvent: (Connection, PlanEvent, Int) -> Void
         private let onClose: (Connection) -> Void
-        private let onTurn: () -> Void
+        private let onTurn: (Duration) -> Void
         private var readSource: DispatchSourceRead?
         private var pending = [UInt8]()
         /// Where the next newline search starts in `pending` (the bytes
@@ -220,7 +225,7 @@ final class PlanStreamListener {
         // @port PlanEventBridge.Connection.init(conn: VZVirtioSocketConnection, onEvent: @escaping(Connection,PlanEvent)->Void, onClose: @escaping(Connection)->Void) h=43af0ce4aa6fe33a @7a5b82ab
         init(fd: Int32, order: Int, lineBytes: Int, readBudget: Int,
              onEvent: @escaping (Connection, PlanEvent, Int) -> Void,
-             onTurn: @escaping () -> Void = {},
+             onTurn: @escaping (Duration) -> Void = { _ in },
              onClose: @escaping (Connection) -> Void) {
             self.fd = fd
             self.order = order
@@ -259,7 +264,8 @@ final class PlanStreamListener {
         // @port PlanEventBridge.Connection.readAvailable() h=1d3d2e5b603e7f31 @7a5b82ab
         private func readAvailable() {
             guard open else { return }
-            onTurn()
+            let start = ContinuousClock.now
+            defer { onTurn(ContinuousClock.now - start) }
             var buf = [UInt8](repeating: 0, count: 65536)
             var eof = false, budget = readBudget, more = false
             while true {
