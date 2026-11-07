@@ -599,3 +599,64 @@ extension ACAppDelegate {
         gone(self)
     }
 }
+
+
+// MARK: - One edit over the wire (a fat client's drawer → the host)
+
+extension FirewallRuleActions.Duration {
+    var wire: String {
+        switch self {
+        case .always: return "always"
+        case .fifteenMinutes: return "15m"
+        case .oneHour: return "1h"
+        case .untilStop: return "untilStop"
+        }
+    }
+    init?(wire: String) {
+        guard let d = Self.allCases.first(where: { $0.wire == wire }) else { return nil }
+        self = d
+    }
+}
+
+extension FirewallRuleActions.Edit {
+    /// One edit as a fat client sends it, for the host to apply to the rules
+    /// it holds at that moment (POST /profiles/{id}/firewall-edit). Sending
+    /// the whole edited document instead lost a concurrent edit: two quick
+    /// Allows each read the same rules, and the second's commit dropped the
+    /// first's rule (Finding CWE-362, "Concurrent remote firewall allows can
+    /// discard an earlier rule"). An inserted rule travels as a one-rule
+    /// document, so its on/off and time limit come along.
+    var wire: [String: Any] {
+        switch self {
+        case .insert(let rule):
+            return ["op": "insert", "rule": EgressPolicy(rules: [rule]).serialize()]
+        case .disable(let text):
+            return ["op": "disable", "ruleText": text]
+        case .enable(let text, let duration):
+            return ["op": "enable", "ruleText": text, "duration": duration.wire]
+        case .remove(let text):
+            return ["op": "remove", "ruleText": text]
+        }
+    }
+
+    init?(wire d: [String: Any]) {
+        switch d["op"] as? String {
+        case "insert":
+            guard let doc = d["rule"] as? String, doc.count <= 16_384,
+                  let policy = try? EgressPolicy.parse(doc), policy.rules.count == 1 else { return nil }
+            self = .insert(policy.rules[0])
+        case "disable":
+            guard let t = d["ruleText"] as? String, !t.isEmpty else { return nil }
+            self = .disable(ruleText: t)
+        case "enable":
+            guard let t = d["ruleText"] as? String, !t.isEmpty,
+                  let du = (d["duration"] as? String).flatMap(FirewallRuleActions.Duration.init(wire:)) else { return nil }
+            self = .enable(ruleText: t, du)
+        case "remove":
+            guard let t = d["ruleText"] as? String, !t.isEmpty else { return nil }
+            self = .remove(ruleText: t)
+        default:
+            return nil
+        }
+    }
+}

@@ -253,6 +253,10 @@ final class ACAutomationServer {
     /// puts its rules in force as they're edited (saved and applied live).
     /// nil: not found or the rules don't parse.
     var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
+    /// POST /profiles/{id}/firewall-edit {op, …}: ONE edit, applied on the
+    /// main thread to the rules in force then (a fat client's drawer). nil:
+    /// no such workspace; else whether the rules changed.
+    var onFirewallEdit: ((_ id: String, _ edit: FirewallRuleActions.Edit) -> Bool?)?
     /// POST /profiles/{id}/squelch {enabled}: Squelch on or off for a
     /// workspace (saved, applies to its next model request). false: no such
     /// workspace.
@@ -1908,6 +1912,19 @@ final class ACAutomationServer {
             let result = DispatchQueue.main.sync(execute: { self.onCompromise?(id, action) })
                 ?? ["ok": false, "error": "unavailable"]
             sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 409, body: result)
+            return
+        }
+        if method == "POST", raw.hasSuffix("/firewall-edit") {
+            let key = String(raw.dropLast("/firewall-edit".count))
+            guard let edit = FirewallRuleActions.Edit(wire: bodyJSON) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "a valid edit (op insert|disable|enable|remove) required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            switch DispatchQueue.main.sync(execute: { self.onFirewallEdit?(id, edit) }) {
+            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .none: sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
+            }
             return
         }
         if method == "POST", raw.hasSuffix("/firewall") {
