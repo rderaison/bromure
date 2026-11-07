@@ -4580,6 +4580,166 @@ for n, c in enumerate(calls, 1):
   }
 
   // ======================================================================
+  // 34. OpenShell sandbox (filesystem + strict process layer)
+  // ======================================================================
+  // A workspace whose OpenShell policy has filesystem_policy/landlock
+  // sections and the strict sandbox on, probed from INSIDE the sandbox:
+  // `bromure-ac vm exec` runs on agentd's interactive path, which spawns into
+  // the sandboxed tree when a spec is active (what an agent sees). The
+  // automation API's /exec runs through shell-agent, OUTSIDE it (used here
+  // only to read what the sandbox reports about itself). OpenShell's own
+  // upstream suites replay against Bromure separately
+  // (scripts/openshell-e2e, the "OpenShell upstream replay" stage).
+  if (!SKIP_SESSIONS) {
+    console.log("\n--- 34. OpenShell sandbox (filesystem + strict) ---");
+
+    await test("34.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  OpenShell sandbox tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const NAME = "ACE2E_OpenShell";
+      const POLICY = [
+        "version: 1",
+        "",
+        "filesystem_policy:",
+        "  include_workdir: true",
+        "  read_only: [/usr, /lib, /etc, /bin, /proc, /dev/urandom, /var/log]",
+        "  read_write: [/home/ubuntu, /tmp, /dev/null]",
+        "",
+        "landlock:",
+        "  compatibility: best_effort",
+        "",
+      ].join("\n");
+      // Per-provider consent prompts would stop an unattended run on a modal.
+      const GUARDRAILS_OFF = Object.fromEntries(
+        ["aws", "bitbucket", "digitalOcean", "docker", "github", "gitlab", "kubernetes"].map((k) => [k, "off"]));
+      let id = null, bootErr = "";
+      try {
+        const stale = await api("GET", "/profiles");
+        for (const p of stale.profiles || []) if (p.name === NAME) await deleteWorkspace(p.id);
+        const r = await api("POST", "/profiles", {
+          name: NAME, closeAction: "shutdown", networkPolicy: POLICY, strictSandbox: true,
+          kernelSentry: "off", openShellAdvisorMode: "off", guardrails: GUARDRAILS_OFF,
+        });
+        if (r.ok !== true || !r.id) throw new Error(`POST /profiles: ${r._status} ${r.error || r._error || ""}`);
+        id = r.id;
+        await api("POST", "/sessions", { profile: id }, { timeoutMs: 120000 });
+      } catch (e) { bootErr = e.message; }
+
+      // A command inside the sandbox: its combined output (never throws —
+      // the probes print what happened, and the tests read that).
+      const sx = (script, timeoutMs = 60000) =>
+        cli(["vm", "exec", NAME, "--", "bash", "-c", script], { timeoutMs, allowFail: true });
+      // One Python probe line per outcome: "ok" or the errno name.
+      const PY_TRY = "import errno,os,socket,ctypes\n" +
+        "def t(label,f):\n" +
+        "  try:\n    f(); print(label,'ok')\n" +
+        "  except OSError as e: print(label, errno.errorcode.get(e.errno, e.errno))\n";
+      const py = (body) => sx(`python3 - <<'ACE2E'\n${PY_TRY}${body}\nACE2E`);
+      const outcomes = (out) => Object.fromEntries(
+        out.split("\n").map((l) => l.trim().split(/\s+/)).filter((w) => w.length === 2));
+
+      try {
+        await test("34.1 the workspace boots with the sandbox and answers from inside it", async () => {
+          assert(!bootErr, bootErr);
+          let last = "";
+          for (let i = 0; i < 60; i++) {
+            last = sx("echo ace2e-ready", 30000);
+            if (last.includes("ace2e-ready")) return;
+            await sleep(3000);
+          }
+          throw new Error(`no answer from inside the sandbox: ${last.slice(0, 300)}`);
+        });
+
+        await test("34.2 the sandbox reports filesystem and seccomp enforced", async () => {
+          const out = await gx(id, "cat /run/bromure-sandbox/status.json");
+          const st = JSON.parse(out);
+          assertEq(st.filesystem, "enforced", `status: ${out.slice(0, 300)}`);
+          assertEq(st.seccomp, "enforced", `status: ${out.slice(0, 300)}`);
+        });
+
+        await test("34.3 vm exec runs inside it: no_new_privs and a seccomp filter on the shell", async () => {
+          const out = sx("grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status");
+          assert(/NoNewPrivs:\s*1/.test(out), `NoNewPrivs: ${out}`);
+          assert(/Seccomp:\s*2/.test(out), `Seccomp: ${out}`);
+        });
+
+        await test("34.4 Landlock: read-only paths can't be written, read-write ones can, others can't be read", async () => {
+          const o = outcomes(await py(
+            "t('write_usr', lambda: open('/usr/ace2e-probe','w'))\n" +
+            "t('write_etc', lambda: open('/etc/ace2e-probe','w'))\n" +
+            "t('read_etc', lambda: open('/etc/hostname').read())\n" +
+            "t('write_home', lambda: open(os.path.expanduser('~/ace2e-probe'),'w').write('x'))\n" +
+            "t('write_tmp', lambda: open('/tmp/ace2e-probe','w').write('x'))\n" +
+            "t('read_outside', lambda: os.listdir('/var/lib'))\n"));
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.write_usr), `write /usr: ${o.write_usr}`);
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.write_etc), `write /etc: ${o.write_etc}`);
+          assertEq(o.read_etc, "ok", "read /etc");
+          assertEq(o.write_home, "ok", "write $HOME");
+          assertEq(o.write_tmp, "ok", "write /tmp");
+          assert(["EACCES", "EPERM"].includes(o.read_outside), `list /var/lib (outside the policy): ${o.read_outside}`);
+        });
+
+        await test("34.5 strict: no root — sudo is refused", async () => {
+          const out = sx("sudo -n true 2>/dev/null && echo ace2e-HAS-ROOT || echo ace2e-noroot");
+          assert(out.includes("ace2e-noroot") && !out.includes("ace2e-HAS-ROOT"), `sudo: ${out.slice(0, 300)}`);
+        });
+
+        await test("34.6 strict: seccomp refuses memfd, ptrace, user namespaces and raw packet sockets", async () => {
+          const o = outcomes(await py(
+            "libc=ctypes.CDLL(None,use_errno=True)\n" +
+            "def sc(f):\n" +
+            "  def g():\n" +
+            "    if f()<0: raise OSError(ctypes.get_errno(),'')\n" +
+            "  return g\n" +
+            "t('memfd', sc(lambda: libc.memfd_create(b'ace2e',0)))\n" +
+            "t('ptrace', sc(lambda: libc.ptrace(0,0,0,0)))\n" +
+            "t('userns', sc(lambda: libc.unshare(0x10000000)))\n" +
+            "t('packet', lambda: socket.socket(17, socket.SOCK_RAW, 0))\n"));
+          for (const k of ["memfd", "ptrace", "userns", "packet"]) {
+            assertEq(o[k], "EPERM", `${k}: ${JSON.stringify(o)}`);
+          }
+        });
+
+        // Allowed until 5.4.3, which bridges Bromure's helpers through agentd
+        // and restores OpenShell's ban: then this expects EPERM.
+        await test("34.7 strict: Bromure's helpers can reach the host over vsock (until 5.4.3)", async () => {
+          const o = outcomes(await py("t('vsock', lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM))\n"));
+          assertEq(o.vsock, "ok", `AF_VSOCK: ${JSON.stringify(o)}`);
+        });
+
+        await test("34.8 the code agentd runs (the meta share) can't be modified from the sandbox", async () => {
+          const o = outcomes(await py("t('meta', lambda: open('/mnt/bromure-meta/ace2e-probe','w'))\n"));
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.meta), `write the meta share: ${o.meta}`);
+        });
+
+        await test("34.9 Yama keeps the sandbox off agentd's memory (ptrace_scope >= 1)", async () => {
+          const v = parseInt(sx("cat /proc/sys/kernel/yama/ptrace_scope").trim(), 10);
+          assert(v >= 1, `kernel.yama.ptrace_scope = ${v}`);
+        });
+
+        await test("34.10 the outbox's signals can't be written from the sandbox; its URL relay can, and is read", async () => {
+          const o = outcomes(await py(
+            "t('outbox', lambda: open('/mnt/bromure-outbox/ace2e-probe.txt','w'))\n" +
+            // Not http(s): the host takes it and drops it, so no browser opens.
+            "t('relay', lambda: open('/mnt/bromure-outbox/urls/url-ace2e.txt','w').write('ace2e:not-a-web-page'))\n"));
+          assert(["EACCES", "EPERM"].includes(o.outbox), `write the outbox itself: ${o.outbox}`);
+          assertEq(o.relay, "ok", "write the URL relay");
+          let gone = false;
+          for (let i = 0; i < 20 && !gone; i++) {
+            await sleep(500);
+            gone = sx("test -e /mnt/bromure-outbox/urls/url-ace2e.txt && echo there || echo gone").includes("gone");
+          }
+          assert(gone, "the host never took the relayed URL file");
+        });
+      } finally {
+        await stubVMDown(id ? { id, name: NAME } : null);
+      }
+    }
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(

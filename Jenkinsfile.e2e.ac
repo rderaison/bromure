@@ -503,6 +503,39 @@ pipeline {
                 }
             }
         }
+
+        stage('34. OpenShell sandbox (filesystem + strict)') {
+            // A workspace with an OpenShell filesystem policy and the strict
+            // sandbox, probed from inside it (bromure-ac vm exec): Landlock
+            // read-only / read-write / outside, no root, seccomp's refusals,
+            // vsock reachable for Bromure's helpers (until 5.4.3), the meta
+            // share and the outbox out of reach, the URL relay working.
+            // Base image required; SKIP without.
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh 'node Tests/ac-e2e.mjs --filter "^34\\."'
+                }
+            }
+        }
+
+        stage('OpenShell upstream replay') {
+            // OpenShell's own e2e suites (scripts/openshell-e2e), replayed
+            // against real workspaces of the running app. --known-ok: the
+            // divergences RESULTS.md documents don't fail the stage; any other
+            // failure does, and a known one that starts passing is reported.
+            options { timeout(time: 120, unit: 'MINUTES') }
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh '''
+                        APP_BUNDLE=$(cat .app_bundle_path)
+                        BROMURE_AC="$APP_BUNDLE/Contents/MacOS/bromure-ac" \\
+                        CFFIXED_USER_HOME="$HOME" \\
+                        E2E_RESULTS="$PWD/openshell-replay-results.json" \\
+                            python3 scripts/openshell-e2e/run.py --known-ok
+                    '''
+                }
+            }
+        }
     }
 
     post {
@@ -521,7 +554,7 @@ pipeline {
                 # archived alongside the Start App log.
                 cp /tmp/bromure-ac-e2e.log bromure-ac-e2e.log 2>/dev/null || true
             '''
-            archiveArtifacts artifacts: 'bromure-ac.log, bromure-ac-e2e.log', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'bromure-ac.log, bromure-ac-e2e.log, openshell-replay-results.json', allowEmptyArchive: true
         }
     }
 }
