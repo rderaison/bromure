@@ -1476,6 +1476,11 @@ public actor Daemon {
         guard var rec = registry.find(id) else { return }
         await teardown(l, mac: rec.mac)
         if let pid = UUID(uuidString: id) { await clearWorkspaceProxyState(pid) }
+        // A workspace that stopped: its "until the workspace stops" firewall
+        // rules end (macOS: unregisterSession).
+        if rec.registration != true, rec.kube == nil, !rec.managed, let pid = UUID(uuidString: id) {
+            endUntilStopFirewallRules(for: pid)
+        }
         // A sign-in VM that stopped on its own ends its sign-in.
         if rec.registration == true, let pid = UUID(uuidString: id) {
             await MainActor.run { LinuxSessionHost.shared?.registrationVMStopped(pid) }

@@ -112,6 +112,10 @@ extension Daemon {
                 }
             }
         }
+        // Temporary firewall rules: the expired ones switched off (and
+        // saved), and the previous run's "until the workspace stops" ones
+        // ended (macOS: launch's startFirewallExpirySweep).
+        startFirewallExpirySweep()
     }
 
     /// `GET /agent-sessions/<id>/pending`: what the session waits on (the
