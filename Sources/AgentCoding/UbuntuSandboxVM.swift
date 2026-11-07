@@ -1154,6 +1154,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             }
         }
 
+        /// Remove a one-shot the scan has read, unless the scanner was
+        /// cancelled meanwhile (a scan stalled on the disk while the guest was
+        /// relaunched): then it's left for the next guest's scanner, and the
+        /// scan stops there.
+        private func consume(_ url: URL) -> Bool {
+            guard !isCancelled else { return false }
+            try? FileManager.default.removeItem(at: url)
+            return true
+        }
+
         private func scan() -> [Event] {
             var events: [Event] = []
             let fm = FileManager.default
@@ -1165,7 +1175,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // would otherwise trigger the close-action shutdown.
             let rebootMarker = outbox.appendingPathComponent("reboot-intent")
             if fm.fileExists(atPath: rebootMarker.path) {
-                try? fm.removeItem(at: rebootMarker)
+                guard consume(rebootMarker) else { return [] }
                 events.append { $0.onGuestReboot?() }
             }
 
@@ -1271,7 +1281,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             // consume + drop so it can't recur.
                             raw = ""
                         }
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         // mailto: is intentionally NOT here.
                         // Historically Mail.app / Outlook /
                         // Thunderbird have leaked local file paths
@@ -1306,7 +1316,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     // copy is verified and the image is mounted over
                     // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
                     if name == "home-migrated.txt" {
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         events.append { $0.onHomeMigrated?() }
                         continue
                     }
@@ -1461,7 +1471,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if !raw.isEmpty { events.append { $0.onDockerError?(raw) } }
                         continue
                     }
@@ -1474,7 +1484,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if !raw.isEmpty { events.append { $0.onWorktreeError?(raw) } }
                         continue
                     }
@@ -1486,7 +1496,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if let idx = Int(idxStr), !raw.isEmpty { events.append { $0.onAgentStatus?(idx, raw) } }
                         continue
                     }
