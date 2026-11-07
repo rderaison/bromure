@@ -122,6 +122,8 @@ struct SecurityWindowFatClientTests {
         #expect(view.contains("SecurityEditorLauncher.open(profileID: p.id, machine: p.machine, category: Self.columnCategories[i])"))
         let fc = try source("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {"))
-        #expect(fc.contains("if settingsSessions[id]?.window == nil { ProfileEditorView.pendingWorkspaceCategory = (id, category) }"))
+        #expect(fc.contains("ProfileEditorView.pendingWorkspaceCategory = (id, category)"))
+        // An open host editor is switched to the pane, as this Mac's is.
+        #expect(fc.contains(#"object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")"#))
     }
 }

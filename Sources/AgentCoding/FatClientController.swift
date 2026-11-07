@@ -4389,10 +4389,17 @@ final class RemoteHostWindow: NSWindow {
     /// This host's workspace editor on one pane (the Security Overview's
     /// protection cells).
     func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {
-        // Only for an editor about to be made: an open one is just brought
-        // forward, and a pending pane would wait for the next one instead.
-        if settingsSessions[id]?.window == nil { ProfileEditorView.pendingWorkspaceCategory = (id, category) }
-        openWorkspaceSettings(id)
+        if settingsSessions[id]?.window == nil {
+            // A new editor reads the pane when it's made.
+            ProfileEditorView.pendingWorkspaceCategory = (id, category)
+            openWorkspaceSettings(id)
+        } else {
+            // An open one is brought forward and switched, as this Mac's is.
+            openWorkspaceSettings(id)
+            NotificationCenter.default.post(
+                name: .bromureACSelectEditorCategory,
+                object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")
+        }
     }
 
     private func openWorkspaceSettings(_ id: Profile.ID) {
