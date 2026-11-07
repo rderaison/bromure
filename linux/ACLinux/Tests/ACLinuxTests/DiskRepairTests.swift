@@ -207,9 +207,18 @@ struct DaemonRepairGateTests {
         let standIn = dir + "/uplink-standin"
         try "#!/bin/sh\nexec cat >/dev/null\n".write(toFile: standIn, atomically: true, encoding: .utf8)
         chmod(standIn, 0o755)
-        let d = try await Daemon.makeForTesting(DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run",
-                                                             imageDir: dir + "/image", agentdPath: dir + "/agentd.py"),
-                                                uplink: standIn)
+        let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run",
+                                  imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
+        // A script just written can be "Text file busy" to exec while another
+        // test's fork still holds a copy of its write descriptor: tried again.
+        var made: Daemon?
+        for attempt in 1...20 {
+            do { made = try await Daemon.makeForTesting(config, uplink: standIn); break } catch {
+                guard "\(error)".contains("Text file busy"), attempt < 20 else { throw error }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        let d = try #require(made)
         let rec = RepairMarksTests.stopped()
         try await d.registerForTesting(rec)
         return (d, rec, dir)
