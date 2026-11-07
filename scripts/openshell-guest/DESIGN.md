@@ -599,6 +599,18 @@ the point of divergence in the source.
    and it is what makes §1.4 work. With an empty tuple the function is
    byte-for-byte upstream's, which is what `differential/` exercises.
 
+6. **`allow_vsock` pinned true (temporary).** OpenShell's main filter refuses
+   `socket(AF_VSOCK, …)`. Bromure's in-guest helpers that the agent starts --
+   its MCP servers (browser, Switchboard, board), the Claude and Codex token
+   agents, the plan driver, the VM bridge -- reach the host over vsock, so
+   under the strict sandbox none of them worked: no Bromure MCP tools, no
+   token-mode sign-in. The ban is lifted for now. The cost: a sandboxed process
+   can open a vsock to any port the host listens on, i.e. to Bromure's host
+   services directly. The plan (5.4.3) is to bridge those helpers through
+   agentd, outside the sandbox, with a per-port allowlist, and restore the
+   ban. `build_main_filter_rules` still defaults to the ban, which is what
+   `differential/` compares.
+
 **Not a divergence, though it looks like one:** `no_new_privs` is set explicitly
 before `restrict_self`. OpenShell reaches `restrict_self` with nnp already set,
 inherited across fork from the workload-launcher thread that sets it in

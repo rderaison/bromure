@@ -1046,7 +1046,11 @@ def confine_self(plan, prepared, outcome, supervisor_tgid):
         with stage("installing the Landlock ruleset and seccomp filters"):
             osh.enforce(prepared, outcome, supervisor_tgid=tgid,
                         supervisor_pgid=pgid,
-                        child_hardening=True, allow_inet=True)
+                        child_hardening=True, allow_inet=True,
+                        # Bromure's helpers reach the host over vsock (see
+                        # bromure_openshell's docstring); until 5.4.3 bridges
+                        # them through agentd, the filter lets them.
+                        allow_vsock=True)
     else:
         # Landlock while still root -- no nnp, no filters, bounding set intact.
         # `plan.groups` was resolved in the parent precisely so nothing here
