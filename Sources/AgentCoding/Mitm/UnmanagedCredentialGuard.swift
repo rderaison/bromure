@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// Strict credential mode ("only credentials Bromure injected"): blocks an
 /// outbound request that carries a credential Bromure didn't put there — a
