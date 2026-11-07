@@ -468,6 +468,26 @@ struct Ext4FsckTests {
     /// The finding (CWE-404): Extract opened the chosen destination for
     /// writing before reading the guest's file, so one that failed to read
     /// left the user's existing file emptied.
+    /// The finding: the temporary file's name wrapped the destination's, so
+    /// a valid name near the 255-byte limit made one too long to create.
+    @Test("Extract saves and replaces a file whose name is at the 255-byte limit")
+    func extractLongName() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("extract-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dst = dir.appendingPathComponent(String(repeating: "n", count: 251) + ".txt")   // 255 bytes
+        #expect(dst.lastPathComponent.utf8.count == 255)
+        try withImage(Self.buildImage()) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) == UInt64(Self.helloContent.count))
+            try Data("old".utf8).write(to: dst)
+            _ = try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst)   // replacing it
+        }
+        #expect(try Data(contentsOf: dst) == Data(Self.helloContent))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [dst.lastPathComponent])
+        #expect(Ext4BrowserModel.extractTempName().utf8.count < 40)
+    }
+
     @Test("a failed Extract leaves the file it would have replaced as it was")
     func extractKeepsDestination() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("extract-\(UUID().uuidString)")
