@@ -131,10 +131,17 @@ final class Ext4BrowserModel: ObservableObject {
     /// leaves whatever was at `url` as it was. It used to open `url` for
     /// writing first: the file the user picked to replace was emptied, and
     /// then the guest's was never written.
+    /// The temporary file's name: short and fixed, not built on the
+    /// destination's. A destination named near the 255-byte limit, wrapped in
+    /// a prefix and a suffix, made a name too long to create (ENAMETOOLONG).
+    static func extractTempName() -> String {
+        ".bromure-extract-" + UUID().uuidString.prefix(12).lowercased()
+    }
+
     static func extract(_ node: Ext4Inode, from volume: Ext4Volume, to url: URL) throws -> UInt64 {
         let fm = FileManager.default
         let tmp = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).bromure-\(UUID().uuidString.prefix(8))", isDirectory: false)
+            .appendingPathComponent(Self.extractTempName(), isDirectory: false)
         // A new name only (never an existing file or a link planted there),
         // and the owner's alone while the guest's bytes go in.
         let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
