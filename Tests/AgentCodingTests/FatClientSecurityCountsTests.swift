@@ -374,4 +374,28 @@ struct FatClientSecurityCountsTests {
         #expect(keptIDs == wanted)
         #expect(kept.count == 2)
     }
+
+
+    /// The two fixes together: history fetched before the host restarted
+    /// (another run: its numbers say nothing now) and a repeat of one of
+    /// its rows since, under another id -- counted once, by the window.
+    @Test("after a host restart, a repeat under a new id replaces the copy fetched before")
+    func restartRepeatAcrossRuns() {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        func row(_ minutesAgo: Double, ck: String?, rid: UUID, sq: Int, n: Int = 1) -> [String: Any] {
+            var r: [String: Any] = ["engine": "Credential brokering", "condition": "c", "decision": "d", "kind": "info",
+                                    "t": Date().addingTimeInterval(-minutesAgo * 60).timeIntervalSince1970,
+                                    "profileID": pid.uuidString, "rid": rid.uuidString, "sq": sq, "count": n]
+            if let ck { r["ck"] = ck }
+            return r
+        }
+        let client = SecurityTimeline(directory: nil)
+        client.applyHistory([row(60, ck: nil, rid: UUID(), sq: 0), row(3, ck: "swap|a", rid: UUID(), sq: 1, n: 2)],
+                            host: "h", epoch: "before")
+        // The restarted host: the swap repeated, under the id this run gave it.
+        client.applyMirror([row(0, ck: "swap|a", rid: UUID(), sq: 7, n: 3)], host: "h", oldestSeq: 0, epoch: "after")
+        let rows = client.remote["h"] ?? []
+        #expect(rows.filter { $0.coalesceKey == "swap|a" }.count == 1)
+        #expect(rows.count == 2)
+    }
 }
