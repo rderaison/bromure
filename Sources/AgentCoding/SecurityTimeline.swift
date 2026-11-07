@@ -53,6 +53,12 @@ public final class SecurityTimeline {
         /// repeat; this stays.
         public var rowID: UUID? = nil
         public var stableID: UUID { rowID ?? id }
+        /// Where the row sits in its host's timeline: a number that only
+        /// grows as rows are added (a repeat folded in moves the row to the
+        /// end, with a new one). Retention follows this order, not the
+        /// rows' times, which a clock set back makes go backwards. nil = a
+        /// host that doesn't number its rows.
+        public var seq: Int? = nil
         public let time: Date
         /// The engine that fired ("Firewall", "Credential brokering", …).
         public let engine: String
@@ -206,6 +212,11 @@ public final class SecurityTimeline {
     /// Mirrored hosts' events (fat client), by host name.
     public private(set) var remote: [String: [Event]] = [:]
     private static let cap = 5000
+    /// The next row's `seq`. Starts over at each launch: `epoch` says which.
+    private var nextSeq = 0
+    /// This run of the timeline: a fat client compares `seq`s only between
+    /// rows of the same one.
+    public let epoch = UUID().uuidString
     /// Days of history kept on disk (Preferences › Tracing › Security
     /// history): 0 = forever. Unset = 90.
     nonisolated static let retentionKey = "securityTimeline.retentionDays"
@@ -258,6 +269,7 @@ public final class SecurityTimeline {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let clearedAt = UserDefaults.standard.double(forKey: Self.clearedAtKey)
         events = Self.load(from: directory, limit: Self.cap, after: clearedAt)
+        for i in events.indices { events[i].seq = nextSeq; nextSeq += 1 }
         let dir = directory
         io.async { Self.prune(dir); Self.redactLegacyPreviews(in: dir) }
     }
@@ -296,6 +308,9 @@ public final class SecurityTimeline {
         // Routine repeats fold into one row; the disk log keeps every raw
         // event (with its key) and `load` folds them the same way.
         Self.coalesce(e, into: &events)
+        // The new (or moved) row is the last one: numbered after every other.
+        events[events.count - 1].seq = nextSeq
+        nextSeq += 1
         if events.count > Self.cap { events.removeFirst(events.count - Self.cap) }
         persist(e)
     }
@@ -477,6 +492,7 @@ public final class SecurityTimeline {
             if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
             if let ck = e.coalesceKey { r["ck"] = ck }
             r["rid"] = e.stableID.uuidString
+            if let sq = e.seq { r["sq"] = sq }
             if let dn = e.denials { r["dn"] = dn }
             if let fw = e.firewall { r["fw"] = fw.wire }
             if let pk = e.package { r["pk"] = pk.allowlistEntry }
@@ -495,34 +511,72 @@ public final class SecurityTimeline {
     /// Rebuild a mirrored host's events from its snapshot (fat client). The
     /// host is authoritative for its own bucket, which this replaces; this
     /// Mac's events and other hosts' are left alone.
-    /// `oldestRetained`: the oldest event the host still holds (its
-    /// in-memory cap prunes from the front): fetched rows older than that
-    /// are gone on the host and go here too.
-    public func applyMirror(_ rows: [[String: Any]], host: String, oldestRetained: Date? = nil) {
+    /// What the host still holds (its in-memory cap prunes from the front):
+    /// `oldestSeq` with its `epoch`, the first row it holds; fetched rows
+    /// before it are gone on the host and go here too. An older host sends
+    /// only `oldestRetained`, its first row's time.
+    public func applyMirror(_ rows: [[String: Any]], host: String, oldestRetained: Date? = nil,
+                            oldestSeq: Int? = nil, epoch: String? = nil) {
         let mirror = Self.events(rows, host: host)
         // No rows: the host holds none -- its bucket empties, history too.
-        if mirror.isEmpty { fetched[host] = nil }
-        if let oldestRetained, let history = fetched[host] {
-            fetched[host] = history.filter { $0.time >= oldestRetained }
+        if mirror.isEmpty { fetched[host] = nil; fetchedEpoch[host] = nil }
+        let retention: Retention
+        if let oldestSeq, let epoch {
+            // Numbers from another run of the host (it restarted since the
+            // fetch) say nothing about these rows: none dropped until a new
+            // fetch replaces them (`historyIsStale`).
+            retention = fetchedEpoch[host] == epoch ? .sequence(oldestSeq) : .unknown
+        } else {
+            retention = .time(oldestRetained)
         }
-        remote[host] = Self.merged(history: fetched[host] ?? [], mirror: mirror, oldestRetained: oldestRetained)
+        if let history = fetched[host] {
+            switch retention {
+            case .sequence(let first): fetched[host] = history.filter { $0.seq.map { $0 >= first } ?? true }
+            case .time(let t?):        fetched[host] = history.filter { $0.time >= t }
+            case .time(nil), .unknown: break
+            }
+        }
+        remote[host] = Self.merged(history: fetched[host] ?? [], mirror: mirror, retention: retention)
+    }
+
+    /// The host's history was fetched from an earlier run of it (or from a
+    /// host that didn't say which): fetch it again.
+    public func historyIsStale(host: String, epoch: String?) -> Bool {
+        guard let epoch, fetched[host] != nil else { return false }
+        return fetchedEpoch[host] != epoch
     }
 
     /// The oldest event this Mac holds in memory (what its window counts
-    /// from), for a fat client's mirror: nil with none.
+    /// from), for an older fat client's mirror: nil with none. Not the
+    /// oldest TIME: a clock set back puts later rows before it.
     public var oldestRetained: Date? { events.first?.time }   // oldest first; a repeat moves to the end
+    /// The first row this Mac holds in memory, by `seq` (with `epoch`).
+    public var oldestRetainedSeq: Int? { events.first?.seq }
 
     /// A host's history for the window's range, as last fetched (fat
     /// client): the mirror merges into this one, not into earlier mirrors,
     /// so rows the host has since pruned don't linger.
     @ObservationIgnored private var fetched: [String: [Event]] = [:]
+    /// The run of the host each fetched history came from.
+    @ObservationIgnored private var fetchedEpoch: [String: String] = [:]
 
     /// A host's full history for the window's range (fetched): replaces its
     /// bucket. Later mirrors merge into it.
-    public func applyHistory(_ rows: [[String: Any]], host: String) {
+    public func applyHistory(_ rows: [[String: Any]], host: String, epoch: String? = nil) {
         let history = Self.events(rows, host: host)
         fetched[host] = history
+        fetchedEpoch[host] = epoch
         remote[host] = history
+    }
+
+    /// How a mirror tells which fetched rows its host still holds.
+    enum Retention {
+        /// Rows numbered by the host (same run): it holds `seq` >= this.
+        case sequence(Int)
+        /// An older host: rows at or after its first row's time (nil: no word).
+        case time(Date?)
+        /// Numbered by another run of the host: can't tell, none dropped.
+        case unknown
     }
 
     /// The live mirror (the host's most recent rows) over what the bucket
@@ -537,7 +591,41 @@ public final class SecurityTimeline {
     /// them (Finding: "Client retains security rows after the host prunes
     /// its 5000-row timeline").
     nonisolated static func merged(history: [Event], mirror: [Event], oldestRetained: Date? = nil) -> [Event] {
+        merged(history: history, mirror: mirror, retention: .time(oldestRetained))
+    }
+
+    nonisolated static func merged(history: [Event], mirror: [Event], retention: Retention) -> [Event] {
         guard !history.isEmpty else { return mirror }
+        guard !mirror.isEmpty else { return [] }
+        let mirroredRows = Set(mirror.compactMap(\.rowID))
+        switch retention {
+        case .time(let oldestRetained):
+            return timeMerged(history: history, mirror: mirror, mirroredRows: mirroredRows, oldestRetained: oldestRetained)
+        case .sequence(let first):
+            // In the host's own order: what it holds is from `first` on, and
+            // the mirror is its last rows, so a fetched row is still there
+            // when it's numbered between them -- whatever its time says (a
+            // clock set back makes later rows older; Finding: "Security
+            // timeline cutoff hides retained rows after a backward clock
+            // change"). The mirror's copy of a row replaces it.
+            let mirrorFirst = mirror.compactMap(\.seq).min()
+            let kept = history.filter { e in
+                if let rid = e.rowID, mirroredRows.contains(rid) { return false }
+                guard let s = e.seq, let mirrorFirst else { return true }
+                return s >= first && s < mirrorFirst
+            }
+            return (kept + mirror).sorted { ($0.seq ?? -1, $0.time) < ($1.seq ?? -1, $1.time) }.suffix(cap).map { $0 }
+        case .unknown:
+            // History from another run of the host (it restarted): a repeat
+            // since may carry another id than the copy fetched before.
+            let kept = notCarriedAgain(history, history: history, mirror: mirror, mirroredRows: mirroredRows)
+            return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
+        }
+    }
+
+    /// An older host (rows not numbered): by time, as it sends nothing else.
+    private nonisolated static func timeMerged(history: [Event], mirror: [Event], mirroredRows: Set<UUID>,
+                                               oldestRetained: Date?) -> [Event] {
         guard let oldest = mirror.map(\.time).min() else { return [] }
         // The mirror's copy of a row replaces exactly that row: by its stable
         // id. A key alone matched every older row with it -- and the host
@@ -555,21 +643,31 @@ public final class SecurityTimeline {
         // history does hold is that row, so it never takes a distinct one
         // with it (Finding: "Legacy timeline rows duplicate after a host
         // restart and repeat").
-        let mirroredRows = Set(mirror.compactMap(\.rowID))
+        // Older than the mirror, still held by the host (its cap prunes the
+        // oldest), and not the row the mirror carries again.
+        let candidates = history.filter { e in
+            e.time < oldest && (oldestRetained.map { e.time >= $0 } ?? true)
+        }
+        let kept = notCarriedAgain(candidates, history: history, mirror: mirror, mirroredRows: mirroredRows)
+        return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
+    }
+
+    /// The `candidates` (from `history`) the mirror doesn't carry again: not
+    /// by id, nor -- for a mirrored repeat whose id the history doesn't
+    /// hold (no ids, or ids from another run of the host) -- by being within
+    /// the coalescing window before it.
+    private nonisolated static func notCarriedAgain(_ candidates: [Event], history: [Event], mirror: [Event],
+                                                    mirroredRows: Set<UUID>) -> [Event] {
         let historyRows = Set(history.compactMap(\.rowID))
         var repeatTimes: [String: [Date]] = [:]
         for e in mirror where e.rowID.map({ !historyRows.contains($0) }) ?? true {
             if let ck = e.coalesceKey { repeatTimes["\(e.profileID)|\(ck)", default: []].append(e.time) }
         }
-        let kept = history.filter { e in
-            // Older than the mirror, still held by the host (its cap prunes
-            // the oldest), and not the row the mirror carries again.
-            guard e.time < oldest, oldestRetained.map({ e.time >= $0 }) ?? true else { return false }
+        return candidates.filter { e in
             if let rid = e.rowID, mirroredRows.contains(rid) { return false }
             guard let ck = e.coalesceKey, let times = repeatTimes["\(e.profileID)|\(ck)"] else { return true }
             return !times.contains { $0 >= e.time && $0.timeIntervalSince(e.time) <= coalesceWindow }
         }
-        return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
     }
 
     private static func events(_ rows: [[String: Any]], host: String) -> [Event] {
@@ -587,6 +685,7 @@ public final class SecurityTimeline {
                           detail: Self.anyJSON(r["detail"]))
             e.coalesceKey = r["ck"] as? String
             e.rowID = (r["rid"] as? String).flatMap(UUID.init)
+            e.seq = r["sq"] as? Int
             e.denials = r["dn"] as? Int
             e.firewall = Firewall(wire: r["fw"] as? [String: Any])
             e.package = PackageRef(wire: r["pk"] as? String)

@@ -36,6 +36,8 @@ final class RemoteHostController {
     @ObservationIgnored var securityHistoryGeneration = 0
     @ObservationIgnored var securityHistoryHours = 0
     @ObservationIgnored var securityHistoryApplied = 0
+    /// The host run whose history was last re-fetched for being stale.
+    @ObservationIgnored var securityHistoryRefetchEpoch: String?
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -1086,9 +1088,19 @@ final class RemoteHostController {
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
         if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+            let epoch = snapshot["securityTimelineEpoch"] as? String
             SecurityTimeline.shared.applyMirror(
                 rows, host: securityMirrorKey,
-                oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)))
+                oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)),
+                oldestSeq: snapshot["securityTimelineOldestSeq"] as? Int, epoch: epoch)
+            // The fetched history is from an earlier run of the host (it
+            // restarted) or didn't say: its rows' numbers can't be compared,
+            // so fetch it again, once per run.
+            if let epoch, securityHistoryApplied > 0, securityHistoryRefetchEpoch != epoch,
+               SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch) {
+                securityHistoryRefetchEpoch = epoch
+                fetchSecurityHistory(hours: securityHistoryHours)
+            }
         }
 #endif
         revision &+= 1
@@ -8855,13 +8867,14 @@ extension RemoteHostController: RemoteDelegationLink {
             let resp = try? RemoteTransport.client(for: host).request(
                 "GET", "/security-timeline?hours=\(range)", recvTimeoutSeconds: 30)
             guard let resp, resp.status == 200, let rows = resp.json["rows"] as? [[String: Any]] else { return }
+            let epoch = resp.json["epoch"] as? String
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, Self.acceptsHistory(generation: generation, hours: range,
                                                         requestedHours: self.securityHistoryHours,
                                                         applied: self.securityHistoryApplied) else { return }
                     self.securityHistoryApplied = generation
-                    SecurityTimeline.shared.applyHistory(rows, host: key)
+                    SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
                 }
             }
         }
