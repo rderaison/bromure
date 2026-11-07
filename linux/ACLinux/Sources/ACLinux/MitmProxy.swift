@@ -499,6 +499,9 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        // Handed off (a TLS session, a request reader, a splice's relay):
+        // what still arrives here goes on to them.
+        if case .handedOff = phase { context.fireChannelRead(data); return }
         var b = unwrapInboundIn(data)
         buf.writeBuffer(&b)
         step(context)

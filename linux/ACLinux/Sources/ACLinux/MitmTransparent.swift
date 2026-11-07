@@ -192,11 +192,15 @@ extension MitmProxy {
     /// when either side ends.
     // @port-skip linux-only: MitmPassthrough.splice(appFD:destIP:destPort:) on NIO
     func spliceRaw(appFD: Int32, destIP: String, destPort: Int) {
+        // The relay is in the pipeline from the channel's first read: the
+        // bytes the peeks left in the socket (a ClientHello) are held, not lost.
+        let glue = ByteGlue(peer: nil)
+        let bootstrap = ClientBootstrap(group: group).channelInitializer { ch in ch.pipeline.addHandler(glue) }
         guard let ip = OpenShellPolicy.IPAddress(destIP),
-              let ch = try? ClientBootstrap(group: group).withConnectedSocket(appFD).wait() else {
+              let ch = try? bootstrap.withConnectedSocket(appFD).wait() else {
             close(appFD); return
         }
-        splice(ch, to: [ip], port: destPort, pending: ByteBuffer())
+        ch.eventLoop.execute { [self] in splice(ch, to: [ip], port: destPort, pending: ByteBuffer(), glue: glue) }
     }
 
     /// How long a diverted flow may stay silent before it's closed.

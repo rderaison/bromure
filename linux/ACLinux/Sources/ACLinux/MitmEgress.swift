@@ -70,17 +70,33 @@ extension MitmProxy {
                                               host: host, port: port, identity: nil)
     }
 
-    /// An OpenShell `tls: skip` endpoint: the guest's bytes relayed raw to
-    /// the checked addresses, never terminated (macOS: MitmPassthrough.splice).
+    /// An OpenShell `tls: skip` endpoint, or a transparent flow left alone:
+    /// the guest's bytes relayed raw to the checked addresses, never
+    /// terminated (macOS: MitmPassthrough.splice). `pending`: what the guest
+    /// sent before the splice; `glue`: the guest side's relay, already in
+    /// its pipeline (a transparent flow's, installed as its channel was
+    /// made); otherwise one is added now. Either way it holds every byte the
+    /// guest sends until the upstream connects, then forwards them in order.
+    /// Called on the guest channel's event loop.
     // @port-skip linux-only: MitmPassthrough.splice on NIO
-    func splice(_ guest: Channel, to addresses: [OpenShellPolicy.IPAddress], port: Int, pending: ByteBuffer) {
-        if refusesRealUpstreams, routeAllTo == nil {
-            FileHandle.standardError.write(Data("[mitm] ✗ e2e mode with no test upstream: no splice to \(addresses.first.map { "\($0)" } ?? "?"):\(port)\n".utf8))
+    func splice(_ guest: Channel, to addresses: [OpenShellPolicy.IPAddress], port: Int, pending: ByteBuffer,
+                glue: ByteGlue? = nil) {
+        // An e2e run reaches the local stand-ins only: with no test upstream
+        // nothing, with one only the test host.
+        if refusesRealUpstreams, routeAllTo.map({ r in addresses.allSatisfy { "\($0)" == r.host } }) != true {
+            FileHandle.standardError.write(Data("[mitm] ✗ e2e mode: no splice to \(addresses.first.map { "\($0)" } ?? "?"):\(port)\n".utf8))
             guest.close(promise: nil)
             return
         }
         let targets = addresses.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
         guard let first = targets.first else { guest.close(promise: nil); return }
+        let guestGlue: ByteGlue
+        if let glue {
+            guestGlue = glue
+        } else {
+            guestGlue = ByteGlue(peer: nil)
+            do { try guest.pipeline.syncOperations.addHandler(guestGlue) } catch { guest.close(promise: nil); return }
+        }
         ClientBootstrap(group: guest.eventLoop)
             .connectTimeout(.seconds(10))
             .channelInitializer { up in up.pipeline.addHandler(ByteGlue(peer: guest)) }
@@ -90,34 +106,52 @@ extension MitmProxy {
                 case .failure:
                     guest.close(promise: nil)
                 case .success(let up):
-                    if pending.readableBytes > 0 { up.writeAndFlush(pending, promise: nil) }
-                    guest.pipeline.addHandler(ByteGlue(peer: up)).whenFailure { _ in up.close(promise: nil) }
+                    guest.eventLoop.execute {
+                        if pending.readableBytes > 0 { up.write(pending, promise: nil) }
+                        guestGlue.attach(up)
+                    }
                 }
             }
     }
 }
 
 /// One direction of a raw relay: what this channel reads goes to `peer`;
-/// either side closing closes the other.
+/// either side closing closes the other. Until the peer is set (an upstream
+/// still connecting), what it reads is held, and forwarded in order once
+/// it is.
 // @port-skip linux-only: NIO plumbing of the Linux proxy
 final class ByteGlue: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
-    private let peer: Channel
+    private var peer: Channel?
+    private var held: [ByteBuffer] = []
+    private var gone = false
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
-    init(peer: Channel) { self.peer = peer }
+    init(peer: Channel?) { self.peer = peer }
 
+    /// The other side, now connected: what was held goes first. Called on
+    /// this side's event loop.
     // @port-skip linux-only: NIO plumbing of the Linux proxy
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        peer.write(unwrapInboundIn(data), promise: nil)
+    func attach(_ p: Channel) {
+        peer = p
+        for b in held { p.write(b, promise: nil) }
+        held.removeAll()
+        p.flush()
+        if gone { p.close(promise: nil) }
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
-    func channelReadComplete(context: ChannelHandlerContext) { peer.flush() }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let b = unwrapInboundIn(data)
+        if let peer { peer.write(b, promise: nil) } else { held.append(b) }
+    }
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func channelReadComplete(context: ChannelHandlerContext) { peer?.flush() }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
-        peer.close(promise: nil)
+        if let peer { peer.close(promise: nil) } else { gone = true }
         context.fireChannelInactive()
     }
 

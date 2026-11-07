@@ -297,6 +297,92 @@ struct E2eUpstreamGuardTests {
     }
 }
 
+/// A TCP echo server: what a connection sends comes straight back.
+final class EchoServer: @unchecked Sendable {
+    let channel: Channel
+    var port: Int { channel.localAddress!.port! }
+    init(host: String) throws {
+        channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { $0.pipeline.addHandler(Echo()) }
+            .bind(host: host, port: 0).wait()
+    }
+    func stop() { channel.close(promise: nil) }
+    final class Echo: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        typealias OutboundOut = ByteBuffer
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) { context.writeAndFlush(data, promise: nil) }
+    }
+}
+
+@Suite("Raw splices keep every byte", .serialized)
+struct SpliceByteTests {
+    /// Reads until `n` bytes or 5 s.
+    static func read(_ fd: Int32, _ n: Int) -> [UInt8] {
+        var out = [UInt8](), buf = [UInt8](repeating: 0, count: 4096)
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        while out.count < n {
+            let k = recv(fd, &buf, buf.count, 0)
+            if k <= 0 { break }
+            out += buf[0..<k]
+        }
+        return out
+    }
+
+    @Test func aTLSSkipCONNECTsFirstBytesArrive() throws {
+        // The client's first bytes (a ClientHello) right after the 200, before
+        // the upstream has connected: every one reaches the endpoint, in order.
+        let ip = try #require(Daemon.primaryIPv4())
+        let echo = try EchoServer(host: ip); defer { echo.stop() }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        let yaml = """
+        version: 1
+        network_policies:
+          raw:
+            endpoints: [{ host: "\(ip)", port: \(echo.port), tls: skip }]
+        """
+        proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [],
+                                                   egressPolicy: EgressPolicy(openShell: try OpenShellPolicy.parse(yaml))), for: pid)
+        let l = try proxy.serve(udsPath: dir + "/vm.sock", profileID: pid, fdStoreName: "sb-\(pid)"); defer { l.stop() }
+        let fd = try ProxyEgressPolicyTests.connectUDS(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort))
+        defer { close(fd) }
+        let payload = (0..<3000).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
+        let req = Array("CONNECT \(ip):\(echo.port) HTTP/1.1\r\nHost: \(ip):\(echo.port)\r\n\r\n".utf8)
+        // The CONNECT and the first bytes in one write: the proxy has them
+        // before it even dials.
+        _ = (req + payload).withUnsafeBufferPointer { Glibc.send(fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        let head = Array("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
+        let got = Self.read(fd, head.count + payload.count)
+        #expect(Array(got.prefix(head.count)) == head, "\(String(decoding: got.prefix(80), as: UTF8.self))")
+        #expect(Array(got.dropFirst(head.count)) == payload, "byte for byte: \(got.count - head.count) of \(payload.count)")
+        // A client that waits for the 200 first (most do), then sends at once.
+        let fd2 = try ProxyEgressPolicyTests.connectUDS(HybridVsockListener.path(uds: dir + "/vm.sock", port: MitmProxy.vsockPort))
+        defer { close(fd2) }
+        _ = req.withUnsafeBufferPointer { Glibc.send(fd2, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        #expect(Self.read(fd2, head.count) == head)
+        _ = payload.withUnsafeBufferPointer { Glibc.send(fd2, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        #expect(Self.read(fd2, payload.count) == payload, "after the 200: byte for byte too")
+    }
+
+    @Test func aTransparentSpliceKeepsWhatThePeekSaw() throws {
+        // A flow the proxy leaves alone (not TLS here; a pinned host's
+        // ClientHello in life): the bytes in the socket before it's accepted,
+        // which the peeks only looked at, reach the destination, in order.
+        let ip = try #require(Daemon.primaryIPv4())
+        let echo = try EchoServer(host: ip); defer { echo.stop() }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let (guest, app) = try GuestEnd.pair(); defer { close(guest) }
+        let payload = Array("not TLS, not HTTP: a raw protocol's first words".utf8)
+        _ = payload.withUnsafeBufferPointer { Glibc.send(guest, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        proxy.acceptTransparentFlow(appFD: app, profileID: UUID(), destIP: ip, destPort: echo.port)
+        #expect(Self.read(guest, payload.count) == payload)
+    }
+}
+
 /// A minimal TLS 1.2-shaped ClientHello, with or without server_name.
 enum TestHello {
     static func clientHello(sni: String?) -> [UInt8] {
