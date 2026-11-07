@@ -418,6 +418,20 @@ public final class NetworkLineage: @unchecked Sendable {
             // The switch filters TCP and UDP only; anything else passes untouched.
             data["decision"] = .string(proto == "tcp" || proto == "udp" ? "unknown" : "unfiltered")
         }
+        // No spawned process claims it, and the agent itself made it: its own
+        // built-in fetch (Claude's WebFetch, omp's fetch...), which starts no
+        // process for the exec match. The agent's recent call whose input
+        // names this host. Without a host to match, nothing: the same process
+        // talks to its model's API all the time.
+        var link = link
+        if link == nil {
+            let pids = Set(processes.compactMap { p -> Int? in if case .int(let v)? = p["pid"] { return v }; return nil })
+            let host = decision?.host ?? dst
+            if let m = Self.matchAgentFetch(host: host, chainPids: pids, calls: vm.toolCalls, at: t),
+               let call = vm.toolCalls.first(where: { $0.id == m.toolUseID }) {
+                link = (call, m.confidence)
+            }
+        }
         if let link {
             data["agent"] = .object(["tool": .string(link.call.tool), "tool_use_id": .string(String(link.call.id.prefix(128))),
                                      "confidence": .string(link.confidence)])
@@ -471,6 +485,63 @@ public final class NetworkLineage: @unchecked Sendable {
         }
         guard let best else { return nil }
         return (best.call.id, best.length >= exactMinLength ? "exact" : "likely")
+    }
+
+    /// How long after an agent's tool call a connection from the agent's own
+    /// process can be that call's fetch (a slow page, a redirect).
+    static let agentFetchWindow: TimeInterval = 120
+
+    /// A flow the agent's own process opened (its pid in the flow's chain)
+    /// to `host`: the newest tool call of that agent, within
+    /// `agentFetchWindow`, whose input names that host -- in a URL, or as the
+    /// host itself (`www.` aside; a subdomain of it counts, a redirect to
+    /// one being common). An IP destination matches only an input naming
+    /// that IP. "likely": the match is by host and time, not by process.
+    static func matchAgentFetch(host: String, chainPids: Set<Int>, calls: [ToolCall], at: Date)
+        -> (toolUseID: String, confidence: String)? {
+        let h = Self.bareHost(host)
+        guard !h.isEmpty, h != "?" else { return nil }
+        let candidates = calls.filter { c in
+            guard let pid = c.agentPid, chainPids.contains(pid), let cmd = c.command else { return false }
+            let age = at.timeIntervalSince(c.at)
+            guard age >= -2, age <= agentFetchWindow else { return false }
+            return Self.hostsNamed(in: cmd).contains { named in
+                named == h || h.hasSuffix("." + named) || named.hasSuffix("." + h)
+            }
+        }
+        guard let best = candidates.max(by: { $0.at < $1.at }) else { return nil }
+        return (best.id, "likely")
+    }
+
+    /// A host as compared: lowercased, no port, brackets, trailing dot or `www.`.
+    static func bareHost(_ s: String) -> String {
+        var h = s.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]. "))
+        if h.hasPrefix("host:") { h = String(h.dropFirst(5)) }
+        if !h.contains("::"), let colon = h.lastIndex(of: ":"), h[h.index(after: colon)...].allSatisfy(\.isNumber) {
+            h = String(h[..<colon])
+        }
+        if h.hasPrefix("www.") { h = String(h.dropFirst(4)) }
+        return h
+    }
+
+    /// The hosts a tool call's input names: every URL's host, and the
+    /// values of host-like fields (`host`, `domain`, `hostname`).
+    static func hostsNamed(in input: String) -> Set<String> {
+        var out = Set<String>()
+        let ns = input as NSString
+        if let urls = try? NSRegularExpression(pattern: #"[a-zA-Z][a-zA-Z0-9+.-]*://([^/\s"'?#@]+@)?([^/\s"'?#:\\]+)"#) {
+            for m in urls.matches(in: input, range: NSRange(location: 0, length: ns.length)) where m.numberOfRanges > 2 {
+                let r = m.range(at: 2)
+                if r.location != NSNotFound { out.insert(bareHost(ns.substring(with: r))) }
+            }
+        }
+        if let data = input.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["host", "hostname", "domain"] {
+                if let v = obj[key] as? String { out.insert(bareHost(v)) }
+            }
+        }
+        out.remove("")
+        return out
     }
 
     /// Below this many characters (quoting and spaces aside) a command is
