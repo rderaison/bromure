@@ -1048,8 +1048,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             list: listModel,
             onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
             onOpenSettings: { [weak self] id in
-                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
-                self?.acDelegate?.sidebarEditProfile(id)
+                // One call: a new editor opens on the pane, an open one is
+                // switched to it (the slot set here and never read, when the
+                // editor was open, opened a later editor on Firewall).
+                guard let d = self?.acDelegate, let p = d.profiles.first(where: { $0.id == id }) else { return }
+                d.openEditorWindow(editing: p, category: .firewall)
             })
         let host = NSHostingView(rootView: drawer)
         host.translatesAutoresizingMaskIntoConstraints = false

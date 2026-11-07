@@ -4360,8 +4360,7 @@ final class RemoteHostWindow: NSWindow {
             list: controller.listModel,
             onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
             onOpenSettings: { [weak self] id in
-                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
-                self?.openWorkspaceSettings(id)
+                self?.openWorkspaceSettings(id, category: .firewall)
             },
             backend: policyBackend)
         let host = NSHostingView(rootView: drawer)
@@ -4424,22 +4423,27 @@ final class RemoteHostWindow: NSWindow {
     /// callbacks are nil, exactly like a freshly-created local profile.
     /// This host's workspace editor on one pane (the Security Overview's
     /// protection cells).
+    /// The pane goes with the request, through the fetch, into the editor
+    /// it makes: a shared slot was overwritten by the next cell clicked (or
+    /// cleared by a local editor) while this one loaded, and the editor
+    /// opened on General (Finding: "Remote protection cells lose their
+    /// requested pane while the editor loads"). An editor already open is
+    /// brought forward and switched, as this Mac's is.
     func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {
-        if settingsSessions[id]?.window == nil {
-            // A new editor reads the pane when it's made.
-            ProfileEditorView.pendingWorkspaceCategory = (id, category)
-            openWorkspaceSettings(id)
-        } else {
-            // An open one is brought forward and switched, as this Mac's is.
-            openWorkspaceSettings(id)
-            NotificationCenter.default.post(
-                name: .bromureACSelectEditorCategory,
-                object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")
-        }
+        openWorkspaceSettings(id, initialCategory: category)
     }
 
-    private func openWorkspaceSettings(_ id: Profile.ID) {
-        if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
+    /// Bring an open editor forward, switched to `category` when one's asked.
+    private func showOpenSettings(_ win: NSWindow, _ id: Profile.ID, _ category: EditorCategory?) {
+        win.makeKeyAndOrderFront(nil)
+        guard let category else { return }
+        NotificationCenter.default.post(
+            name: .bromureACSelectEditorCategory,
+            object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")
+    }
+
+    private func openWorkspaceSettings(_ id: Profile.ID, initialCategory: EditorCategory? = nil) {
+        if let win = settingsSessions[id]?.window { showOpenSettings(win, id, initialCategory); return }
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -4470,7 +4474,8 @@ final class RemoteHostWindow: NSWindow {
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
             }
-            if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
+            // Another request made the editor meanwhile: this one's pane on it.
+            if let win = self.settingsSessions[id]?.window { self.showOpenSettings(win, id, initialCategory); return }
             self.settingsOriginals[id] = profile   // baseline for the restart diff
             let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
                                         commit: { [c] text in c.commitFirewall(id, rules: text); return true },
@@ -4524,7 +4529,8 @@ final class RemoteHostWindow: NSWindow {
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
                 onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
                 localModelsRemoteAny: modelBackend,
-                modelsPane: .workspace(global: remoteGlobalModels))
+                modelsPane: .workspace(global: remoteGlobalModels),
+                initialCategory: initialCategory)
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
             // Closed any way but a save: the firewall edits go back, and the

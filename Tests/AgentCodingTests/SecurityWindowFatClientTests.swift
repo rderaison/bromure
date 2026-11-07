@@ -145,7 +145,7 @@ struct SecurityWindowFatClientTests {
         #expect(view.contains("SecurityEditorLauncher.open(profileID: p.id, machine: p.machine, category: Self.columnCategories[i])"))
         let fc = try source("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains("func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {"))
-        #expect(fc.contains("ProfileEditorView.pendingWorkspaceCategory = (id, category)"))
+        #expect(fc.contains("openWorkspaceSettings(id, initialCategory: category)"))
         // An open host editor is switched to the pane, as this Mac's is.
         #expect(fc.contains(#"object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")"#))
     }
@@ -168,5 +168,37 @@ struct SecurityWindowFatClientTests {
         let gate = try #require(proxy.range(of: "if let entry = identityEntry, (upstreamTLS as? TLSClientStream)?.clientCertificateSent == true {"))
         #expect(handshake.lowerBound < gate.lowerBound && gate.lowerBound < emit.lowerBound)
         #expect(proxy.components(separatedBy: "Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)").count - 1 == 1)
+    }
+
+
+    /// Finding: "Remote protection cells lose their requested pane while the
+    /// editor loads". A host's editor is made after three fetches; its pane
+    /// waited in one shared slot that the next cell clicked (or a local
+    /// editor) overwrote meanwhile, and it opened on General. The pane now
+    /// goes with the request, into the editor it makes.
+    @Test("a host's editor opens on the pane its own request asked for")
+    func paneTravelsWithTheRequest() throws {
+        let a = UUID(), b = UUID()
+        typealias V = ProfileEditorView
+        // Asked for with the editor: wins, whatever the shared slot says.
+        #expect(V.openingCategory(requested: .firewall, pending: (b, .guardrails), profileID: a) == .firewall)
+        #expect(V.openingCategory(requested: .firewall, pending: (a, .guardrails), profileID: a) == .firewall)
+        // Nothing asked: the slot, only for this workspace.
+        #expect(V.openingCategory(requested: nil, pending: (a, .guardrails), profileID: a) == .guardrails)
+        #expect(V.openingCategory(requested: nil, pending: (b, .guardrails), profileID: a) == nil)
+        #expect(V.openingCategory(requested: nil, pending: nil, profileID: a) == nil)
+
+        let fc = try source("Sources/AgentCoding/FatClientController.swift")
+        // The fat client never uses the shared slot: the pane rides the fetch.
+        #expect(!fc.contains("pendingWorkspaceCategory"))
+        #expect(fc.contains("private func openWorkspaceSettings(_ id: Profile.ID, initialCategory: EditorCategory? = nil) {"))
+        #expect(fc.contains("initialCategory: initialCategory)"))
+        // An editor made meanwhile by another request is switched to this one's pane.
+        #expect(fc.contains("if let win = self.settingsSessions[id]?.window { self.showOpenSettings(win, id, initialCategory); return }"))
+        #expect(fc.contains("self?.openWorkspaceSettings(id, category: .firewall)"))
+        // This Mac's drawer: one call that also switches an open editor.
+        let win = try source("Sources/AgentCoding/UnifiedSessionWindow.swift")
+        #expect(win.contains("d.openEditorWindow(editing: p, category: .firewall)"))
+        #expect(!win.contains("pendingWorkspaceCategory"))
     }
 }
