@@ -865,11 +865,14 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// One-shot reports surfaced per poll; the rest wait for the next tick.
     nonisolated static let maxOneShotsPerTick = 32
 
-    /// Outbox entries read per heavy tick, and of its URL relay folder: the
-    /// guest (and in the relay, a sandboxed agent) can fill either with
+    /// Outbox names looked at per heavy tick, and of its URL relay folder:
+    /// the guest (and in the relay, a sandboxed agent) can fill either with
     /// files, and listing them whole each tick made the host's work and
     /// memory grow with the backlog (CWE-400).
     nonisolated static let maxOutboxEntriesPerTick = 2048
+    nonisolated static let maxRelayNamesPerTick = 4096
+    /// url-*.txt kept from the relay per tick (names that aren't one are
+    /// skipped while reading, so they can't fill this).
     nonisolated static let maxRelayEntriesPerTick = 256
     /// More URL files than this in one tick's listing is a flood: past the
     /// per-tick cap they're removed unopened, so the backlog drains with
@@ -877,21 +880,51 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// wait for the next tick, as before.
     nonisolated static let urlBacklogHighWater = 64
 
-    /// At most `max` names of `dir` (no "." or ".."), read with readdir so
-    /// the rest of a huge directory is never materialized; nil when it can't
-    /// be opened. In no particular order.
-    nonisolated static func listing(_ dir: URL, max: Int) -> [String]? {
-        guard let d = opendir(dir.path) else { return nil }
-        defer { closedir(d) }
-        var names: [String] = []
-        while names.count < max, let ent = readdir(d) {
-            let name = withUnsafePointer(to: ent.pointee.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+    /// A folder read a bounded slice at a time, each slice where the last
+    /// one stopped: a huge folder is never materialized, and every name in it
+    /// comes up in turn (a listing restarted at the top each tick kept
+    /// returning the same first names, and a flood of them hid the rest).
+    /// At the end it closes, so the next slice reopens: new files, and the
+    /// folder as it is now. Not thread-safe: one owner, one queue.
+    final class DirCursor {
+        private var dir: UnsafeMutablePointer<DIR>?
+        deinit { if let dir { closedir(dir) } }
+
+        /// Up to `keep` names that pass `match`, looking at `examine` names
+        /// at most (no "." or ".."); nil when the folder can't be opened.
+        func next(_ url: URL, examine: Int, keep: Int, match: (String) -> Bool = { _ in true }) -> [String]? {
+            if dir == nil { dir = opendir(url.path) }
+            guard let d = dir else { return nil }
+            var names: [String] = []
+            var seen = 0
+            while seen < examine, names.count < keep {
+                guard let ent = readdir(d) else {
+                    closedir(d)
+                    dir = nil
+                    break
+                }
+                let name = withUnsafePointer(to: ent.pointee.d_name) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+                }
+                if name == "." || name == ".." { continue }
+                seen += 1
+                if match(name) { names.append(name) }
             }
-            if name == "." || name == ".." { continue }
-            names.append(name)
+            return names
         }
-        return names
+
+        /// Close now: the next slice starts over (the folder is gone, or
+        /// isn't one any more).
+        func reset() {
+            if let dir { closedir(dir) }
+            dir = nil
+        }
+    }
+
+    /// At most `max` names of `dir`, read with readdir so the rest of a huge
+    /// directory is never materialized; nil when it can't be opened.
+    nonisolated static func listing(_ dir: URL, max: Int) -> [String]? {
+        DirCursor().next(dir, examine: max, keep: max)
     }
 
     nonisolated static func boundedText(_ url: URL, max: Int = maxOutboxTextFile) -> String? {
@@ -1161,6 +1194,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // relay / titles / roster) is latency-tolerant and stays on the
         // ~480ms cadence via the tick gate below.
         private var ticks = 0
+        // The outbox and its URL relay, read a bounded slice per heavy tick.
+        private let outboxCursor = DirCursor()
+        private let relayCursor = DirCursor()
         // agent-tool-<win>.jsonl: bytes already read, per file.
         private var toolLogs: [String: ToolLog] = [:]
 
@@ -1271,7 +1307,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             let maxURLFileSize = 8 * 1024
             var urlsProcessedThisTick = 0
             var oneShotsThisTick = 0
-            if var entries = VM.listing(outbox, max: VM.maxOutboxEntriesPerTick)?.map({ outbox.appendingPathComponent($0) }) {
+            if var entries = outboxCursor.next(outbox, examine: VM.maxOutboxEntriesPerTick,
+                                               keep: VM.maxOutboxEntriesPerTick)?
+                .map({ outbox.appendingPathComponent($0) }) {
                 // The URL relay's own folder (what a sandboxed agent can
                 // write): its url-*.txt only, never anything else named
                 // like the outbox's own signals.
@@ -1279,9 +1317,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // to a folder of the Mac's (attributesOfItem doesn't follow one).
                 let relay = outbox.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
                 if (try? fm.attributesOfItem(atPath: relay.path))?[.type] as? FileAttributeType == .typeDirectory {
-                    entries += (VM.listing(relay, max: VM.maxRelayEntriesPerTick) ?? [])
-                        .filter { $0.hasPrefix("url-") && $0.hasSuffix(".txt") }
-                        .map { relay.appendingPathComponent($0) }
+                    entries += (relayCursor.next(relay, examine: VM.maxRelayNamesPerTick,
+                                                 keep: VM.maxRelayEntriesPerTick) {
+                        $0.hasPrefix("url-") && $0.hasSuffix(".txt")
+                    } ?? []).map { relay.appendingPathComponent($0) }
+                } else {
+                    relayCursor.reset()
                 }
                 let urlBacklog = entries.filter {
                     $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt"

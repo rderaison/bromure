@@ -64,13 +64,51 @@ struct OutboxFloodTests {
         #expect(opened == 8 + left)
     }
 
+    /// The review: names that aren't url-*.txt counted toward the relay's
+    /// window, and a listing restarted at the top each tick: 256 of them
+    /// kept a real sign-in URL out of every tick. They're skipped while
+    /// reading, and each tick resumes where the last stopped.
+    @Test("junk in the relay, or a flood of the outbox, never hides a URL or a status for good")
+    func junkCantHide() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let relay = dir.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
+        try FileManager.default.createDirectory(at: relay, withIntermediateDirectories: true)
+        for i in 0..<5000 {
+            FileManager.default.createFile(atPath: relay.appendingPathComponent("junk-\(i)").path, contents: nil)
+            FileManager.default.createFile(atPath: dir.appendingPathComponent("junk-\(i).dat").path, contents: nil)
+        }
+        try "https://example.com/login".write(to: relay.appendingPathComponent("url-1.txt"), atomically: false, encoding: .utf8)
+        try "working".write(to: dir.appendingPathComponent("agent-status-2.txt"), atomically: false, encoding: .utf8)
+        let tmp = try tempDir(); defer { try? FileManager.default.removeItem(at: tmp) }
+        let vm = UbuntuSandboxVM(imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp))
+        var urls: [URL] = [], statuses = 0
+        vm.onURLOpen = { urls.append($0) }
+        vm.onAgentStatus = { _, _ in statuses += 1 }
+        let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        // 5000 junk names: the relay's 4096 a tick and the outbox's 2048 a
+        // tick reach every one within 3 heavy ticks.
+        for _ in 0..<(12 * 4) { for apply in await scanner.tick() { apply(vm) } }
+        #expect(urls == [URL(string: "https://example.com/login")!])
+        #expect(statuses == 1)
+        // The junk itself is left alone (never deleted through a folder the
+        // guest controls).
+        #expect(count(relay) == 5000)
+
+        // A slice resumes where the last stopped, and starts over at the end.
+        let cursor = UbuntuSandboxVM.DirCursor()
+        var seen = Set<String>()
+        for _ in 0..<3 { seen.formUnion(cursor.next(relay, examine: 2000, keep: 2000) ?? []) }
+        #expect(seen.count == 5000)          // url-1.txt was taken above
+        #expect(cursor.next(relay, examine: 10, keep: 10)?.count == 10)   // reopened at the top
+    }
+
     @Test("the scan and the boot cleanup read the outbox through the bounded listing")
     func wired() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/UbuntuSandboxVM.swift"), encoding: .utf8)
         #expect(!src.contains("contentsOfDirectory"))
-        #expect(src.contains("VM.listing(outbox, max: VM.maxOutboxEntriesPerTick)"))
-        #expect(src.contains("VM.listing(relay, max: VM.maxRelayEntriesPerTick)"))
+        #expect(src.contains("outboxCursor.next(outbox, examine: VM.maxOutboxEntriesPerTick,"))
+        #expect(src.contains("relayCursor.next(relay, examine: VM.maxRelayNamesPerTick,"))
         #expect(src.contains("Self.listing(outbox, max: Self.maxOutboxEntriesPerTick)"))
     }
 }
