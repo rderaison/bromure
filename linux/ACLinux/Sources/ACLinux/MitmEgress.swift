@@ -197,6 +197,29 @@ final class ByteGlue: ChannelInboundHandler {
 }
 
 extension RequestReader {
+    /// A stand-in on its way to a host it isn't bound to: the VM is
+    /// exfiltrating. Refused with a plain 451 (not a byte goes upstream),
+    /// recorded, and the swapper's compromise handler raised (the daemon
+    /// pauses the VM and asks). macOS: HTTPProxy's detectCompromise step.
+    // @port-skip linux-only: HTTPProxy's detectCompromise step on the Linux request chain
+    static func compromiseAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String) -> Data? {
+        let leaks = proxy.swapper.detectCompromise(rawRequest: request, host: host, profileID: profileID)
+        guard !leaks.isEmpty else { return nil }
+        let alertsOff = proxy.guardrailsConfig(for: profileID)?.exfiltrationAlertsDisabled ?? false
+        for c in leaks {
+            FileHandle.standardError.write(Data(
+                "[mitm] COMPROMISE \(c.fakeTokenPreview) (declared \(c.declaredHost)) → \(c.observedHost)\n".utf8))
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "credential.exfiltration", eventData: [
+                "credential": .string(c.credentialDisplayName), "fake_preview": .string(c.fakeTokenPreview),
+                "declared_host": .string(c.declaredHost), "observed_host": .string(c.observedHost),
+                "vm_paused": .bool(!alertsOff),
+            ])
+        }
+        let body = "Bromure: outbound request blocked — leaked credential to non-designated host.\n"
+        return Data(("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                     + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body).utf8)
+    }
+
     /// The workspace's policy chain for one request, before any credential is
     /// swapped in, in macOS's order (HTTPMitmConnection.driveTLS, steps 4–4b
     /// and the guardrails): OpenShell's head checks (which may rewrite the
@@ -207,6 +230,7 @@ extension RequestReader {
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                              host: String, port: Int, tls: Bool) async -> Data? {
+        if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"

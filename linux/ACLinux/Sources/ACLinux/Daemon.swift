@@ -142,6 +142,8 @@ public actor Daemon {
     var liveApplied: [String: Profile] = [:]
     /// Each workspace's last queued live refresh (they run one at a time).
     var liveRefreshTail: [String: Task<Void, Never>] = [:]
+    /// Workspaces whose compromise question is up (DaemonCompromise.swift).
+    var compromiseAsking: Set<UUID> = []
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -206,6 +208,7 @@ public actor Daemon {
         }
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
         let d = Daemon(config: config, passt: passt)
+        await d.wireCompromiseHandler()
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
@@ -748,6 +751,13 @@ public actor Daemon {
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false) async -> ControlResponse {
         if let refusal = Self.startRefusal(rec, repairing: repairMarks, rescued: hasRescue(for: rec.id)) { return refusal }
+        // A workspace marked compromised boots only once the mark is gone
+        // (macOS: launch's compromised-disk check).
+        if !rec.managed, let p = existingProfile(for: rec), Self.isCompromised(p, store: profileStore) {
+            return .error(409, "'\(rec.name)' is marked compromised (a credential was sent to the wrong host): "
+                          + "clear the mark (POST /profiles/<id>/compromised {\"action\":\"clear\"}) or remove it",
+                          ["compromised": .bool(true)])
+        }
         // Marked in the same actor step as the check, before any await: a
         // repair (kubeMachineDiskImages) or a remove sees the VM as busy
         // until launch has it live, or failed.
@@ -957,6 +967,9 @@ public actor Daemon {
         AWSSSORefusals.set(false, for: pid)
         mitm?.clearWorkspacePolicies(pid)
         if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
+        // Its swap map, and the destinations a compromise alert's "Allow"
+        // trusted for the session (macOS: MitmEngine.unregister's clearMap).
+        mitm?.swapper.clearMap(for: pid)
         InferenceRepairProxy.shared.setExternalEngine(pid, nil)
     }
 

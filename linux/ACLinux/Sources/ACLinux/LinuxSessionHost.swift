@@ -89,7 +89,8 @@ final class LinuxSessionHost: AgentSessionHost {
         let sorted = machines.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let rows = profiles.map { p in
             SessionListModel.ProfileRow(id: p.id, name: p.name, accentHex: p.color.hexInUI,
-                                        state: running.contains(p.id) ? .running : .off, compromised: false)
+                                        state: running.contains(p.id) ? .running : .off,
+                                        compromised: Daemon.isCompromised(p, store: ProfileStore()))
         } + sorted.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)

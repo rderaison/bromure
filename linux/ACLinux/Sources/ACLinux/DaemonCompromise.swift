@@ -21,7 +21,7 @@ extension Daemon {
 
     /// The paused VM, the question, and its answer applied.
     // partial: Save for Investigation needs a local folder picker (macOS-only, as on a headless Mac); strict-credential approvals come with UnmanagedCredentialGuard
-    // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=0000000000000000 @0000000
+    // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=e4f537275a5a956e @a0266d0e
     func handleCompromise(_ event: CompromiseEvent) async {
         let pid = event.profileID
         guard let profile = profileStore.loadAll().first(where: { $0.id == pid }) else { return }
@@ -79,7 +79,7 @@ extension Daemon {
     // MARK: The compromise mark (SessionDisk's files, in the profile directory)
 
     /// `compromised.flag` in the workspace's directory (macOS: SessionDisk.compromiseMarkURL).
-    // @port SessionDisk.static compromiseMarkURL(profile: Profile, store: ProfileStore) h=0000000000000000 @0000000
+    // @port SessionDisk.static compromiseMarkURL(profile: Profile, store: ProfileStore) h=f360ea547e538e83 @9c8246cb
     static func compromiseMarkURL(_ profile: Profile, store: ProfileStore) -> URL {
         store.profileDirectory(for: profile).appendingPathComponent("compromised.flag", isDirectory: false)
     }
