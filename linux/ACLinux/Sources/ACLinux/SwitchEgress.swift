@@ -144,9 +144,39 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     func handle(_ f: Data, from src: MAC) -> Action {
         f.withUnsafeBytes { raw -> Action in
             guard let base = raw.baseAddress else { return .pass }
+            if let early = precheck(raw, src) { return early }
             // Read only (the shared helpers take macOS's frame pointer type).
             return decide(UnsafeMutablePointer(mutating: base.assumingMemoryBound(to: UInt8.self)), raw.count, src)
         }
+    }
+
+    /// The Linux checks before the firewall's own (decide is macOS's, which
+    /// passes what it can't read: vmnet drops it there, passt here would
+    /// take it out). On a governed port, a frame the firewall can't read is
+    /// dropped: a short header, an IPv4 header length under 20 or a total
+    /// length past the frame, VLAN tags and other ethertypes. IPv4 multicast
+    /// and the limited broadcast reach the peers only (as a subnet broadcast
+    /// does), never passt and the server's network. nil: on to decide.
+    // @port-skip linux-only: the Linux switch's fail-closed parse ahead of handleEgress
+    func precheck(_ b: UnsafeRawBufferPointer, _ src: MAC) -> Action? {
+        let n = b.count
+        let ethertype = n >= 14 ? UInt16(b[12]) << 8 | UInt16(b[13]) : 0
+        let readable: Bool
+        switch ethertype {
+        case 0x0800:
+            let ihl = n >= 15 ? Int(b[14] & 0x0F) * 4 : 0
+            let total = n >= 18 ? Int(b[16]) << 8 | Int(b[17]) : 0
+            readable = n >= 34 && b[14] >> 4 == 4 && ihl >= 20 && total >= ihl && 14 + total <= n
+        case 0x0806: readable = n >= 42
+        case 0x86DD: readable = n >= 54 && b[14] >> 4 == 6
+        default: readable = false
+        }
+        if !readable { return portGovernance(src).pid == nil ? nil : .consumed }
+        if ethertype == 0x0800, closesSubnet {
+            let dst = UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33])
+            if dst == 0xFFFF_FFFF || dst >> 28 == 0xE { return .peersOnly }
+        }
+        return nil
     }
 
     // @port VMNetSwitch.handleEgress(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=c790fa1982cff6dc @ac3ea65d

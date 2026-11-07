@@ -46,6 +46,10 @@ public final class InterimSwitch: Sendable {
     /// allocated the same .230-.249 range (KubeClusterEngine), so an address
     /// is the first claiming cluster's until its last node goes: one
     /// cluster's node can't answer for another's.
+    /// IPv6 addresses by the port that speaks as them (v6Claims), and how
+    /// many each port holds (at most `v6PerPort`).
+    let v6Owners = NIOLockedValueBox<(owners: [[UInt8]: MAC], count: [MAC: Int], iids: [[UInt8]: MAC])>(([:], [:], [:]))
+    static let v6PerPort = 16
     let reservedClaims = NIOLockedValueBox<(nodes: [MAC: (cluster: String, range: ClosedRange<UInt32>)],
                                             owners: [UInt32: String])>(([:], [:]))
 
@@ -55,6 +59,11 @@ public final class InterimSwitch: Sendable {
         self.uplink = uplink
         let gwMAC = MAC(Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"))
         gatewayMAC = gwMAC
+        // The gateway's link-local address is the gateway's (passt's), never a VM's.
+        v6Owners.withLockedValue {
+            $0.owners[Self.linkLocal(gwMAC)] = gwMAC
+            $0.iids[Array(Self.linkLocal(gwMAC)[8..<16])] = gwMAC
+        }
         let ports = NIOLockedValueBox<[(mac: MAC, port: any FramePort, task: Task<Void, Never>)]>([])
         self.ports = ports
         // A packet the switch answers a VM with (a RST, an interceptor's
@@ -115,6 +124,18 @@ public final class InterimSwitch: Sendable {
     // @port-skip linux-only: interim switch
     public func attach(_ port: any FramePort, mac: String) {
         let m = MAC(Self.mac(mac))
+        // Its own EUI-64 link-local: its, before it speaks (MACs are predictable).
+        v6Owners.withLockedValue { v in
+            let ll = Self.linkLocal(m), iid = Array(ll[8..<16])
+            // Whatever another port took of its addresses before it attached
+            // (its link-local, its interface id under any prefix) is its now.
+            for (a, o) in v.owners where o != m && Array(a[8..<16]) == iid {
+                v.owners[a] = nil
+                v.count[o] = max(0, (v.count[o] ?? 1) - 1)
+            }
+            if v.owners[ll] == nil { v.owners[ll] = m; v.count[m, default: 0] += 1 }
+            v.iids[iid] = m
+        }
         let t = Task { [self, dhcp, uplink, blockedDestination, egress] in
             for await f in port.inbound {
                 // A VM speaks as itself only: its own MAC, its own lease.
@@ -122,8 +143,11 @@ public final class InterimSwitch: Sendable {
                 if let r = dhcp.handle(f, port: m.bytes) { port.send(r); continue }
                 switch egress.handle(f, from: m) {
                 case .consumed: continue
-                case .peersOnly: _ = self.toPeers(f, from: m); continue
-                case .pass: break
+                case .peersOnly:
+                    guard self.claimV6(f, m) else { continue }
+                    _ = self.toPeers(f, from: m); continue
+                case .pass:
+                    guard self.claimV6(f, m) else { continue }
                 }
                 guard self.toPeers(f, from: m) else { continue }
                 if let blocked = blockedDestination.withLockedValue({ $0 }), let dst = Self.ipv4Destination(f), blocked(dst) { continue }
@@ -205,8 +229,16 @@ public final class InterimSwitch: Sendable {
             func u32(_ o: Int) -> UInt32 { UInt32(b[o]) << 24 | UInt32(b[o + 1]) << 16 | UInt32(b[o + 2]) << 8 | UInt32(b[o + 3]) }
             switch (b[12], b[13]) {
             case (0x08, 0x00): guard b.count >= 34 else { return false }; addr = u32(26)
-            case (0x08, 0x06): guard b.count >= 42 else { return false }; addr = u32(28)
-            default: return true                     // IPv6 (the firewall's), others
+            case (0x08, 0x06):
+                guard b.count >= 42 else { return false }
+                // The ARP sender hardware address is the port's too.
+                var sha: UInt64 = 0
+                for i in 0..<6 { sha = sha << 8 | UInt64(b[22 + i]) }
+                guard MAC(raw: sha) == m else { return false }
+                addr = u32(28)
+            case (0x86, 0xDD): return v6Claims(b, m) != nil
+            case (0x81, 0x00), (0x88, 0xA8), (0x91, 0x00): return false   // VLAN tags: no port's to send
+            default: return true                     // others (the firewall's)
             }
             if addr == 0 { return true }
             if dhcp.leaseAddress(for: m) == addr { return true }
@@ -218,6 +250,104 @@ public final class InterimSwitch: Sendable {
                 return true
             }
         }
+    }
+
+    /// An IPv6 frame's source, and a Neighbor Advertisement's target, are
+    /// the port's: there's no IPv6 lease here, so an address belongs to the
+    /// first port that speaks as it until that port detaches, at most
+    /// `v6PerPort` of them (its own EUI-64 link-local, reserved at attach,
+    /// among them). A peer's interface id (its EUI-64, under any prefix: its
+    /// link-local and its SLAAC addresses) is the peer's, and so is the
+    /// target of a duplicate address detection probe for one of its
+    /// addresses; the gateway's link-local is nobody's; a multicast source is
+    /// refused. A VM may send only TCP, UDP, ICMPv6, ESP or no next header
+    /// right after the fixed header: another extension header (hop-by-hop,
+    /// destination options, routing, a fragment) could carry a router or
+    /// neighbor advertisement past these checks, so it's dropped (MLD
+    /// reports with it: the switch floods multicast anyway). Router
+    /// advertisements, redirects and DHCPv6 server replies are the gateway's.
+    /// The unspecified source (duplicate address detection) is anyone's.
+    /// Checked here; claimed (claimV6) once the firewall let the frame
+    /// through, checked again in the same step.
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    struct V6Frame { var claims: [[UInt8]]; var probed: [UInt8]? }
+
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    static func v6Frame(_ b: UnsafeRawBufferPointer) -> V6Frame? {
+        guard b.count >= 54 else { return nil }
+        func addr(_ o: Int) -> [UInt8] { Array(b[o..<(o + 16)]) }
+        var f = V6Frame(claims: [addr(22)], probed: nil)
+        let unspecified = !f.claims[0].contains { $0 != 0 }
+        switch b[20] {
+        case 6:
+            guard b.count >= 54 + 20 else { return nil }
+        case 17:
+            guard b.count >= 54 + 8 else { return nil }
+            if b[54] == 0x02, b[55] == 0x23 { return nil }           // from port 547: a DHCPv6 server's reply
+        case 58:
+            guard b.count >= 54 + 4 else { return nil }
+            switch b[54] {
+            case 134, 137: return nil                                // a router advertisement, a redirect
+            case 135 where unspecified:                              // a duplicate address detection probe
+                guard b.count >= 78 else { return nil }
+                f.probed = addr(62)
+            case 136:                                                // a neighbor advertisement: its target too
+                guard b.count >= 78 else { return nil }
+                f.claims.append(addr(62))
+            default: break
+            }
+        case 50, 59: break                                           // ESP (a guest's IPsec), no next header
+        default:
+            return nil                                               // an extension header, or another protocol
+        }
+        if f.claims[0][0] == 0xff { return nil }                     // a multicast source
+        f.claims = f.claims.filter { $0.contains { $0 != 0 } }
+        return f
+    }
+
+    /// Whether port `m` may speak as `f`'s addresses (`v`: v6Owners, locked).
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    static func v6Allowed(_ f: V6Frame, _ m: MAC,
+                          _ v: (owners: [[UInt8]: MAC], count: [MAC: Int], iids: [[UInt8]: MAC])) -> Bool {
+        var fresh = 0
+        for a in Set(f.claims + (f.probed.map { [$0] } ?? [])) {
+            if let o = v.iids[Array(a[8..<16])], o != m { return false }
+            if let o = v.owners[a] { if o != m { return false } } else if f.claims.contains(a) { fresh += 1 }
+        }
+        return (v.count[m] ?? 0) + fresh <= v6PerPort
+    }
+
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    func v6Claims(_ b: UnsafeRawBufferPointer, _ m: MAC) -> [[UInt8]]? {
+        guard let f = Self.v6Frame(b) else { return nil }
+        return v6Owners.withLockedValue { Self.v6Allowed(f, m, $0) } ? f.claims : nil
+    }
+
+    /// The addresses an IPv6 frame the firewall let through claims for its
+    /// port, checked and claimed in one step: false when another port holds
+    /// one by now (it won a race), and the frame is dropped. Any other frame:
+    /// true.
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    func claimV6(_ f: Data, _ m: MAC) -> Bool {
+        f.withUnsafeBytes { b -> Bool in
+            guard b.count >= 14, b[12] == 0x86, b[13] == 0xDD else { return true }
+            guard let frame = Self.v6Frame(b) else { return false }
+            return v6Owners.withLockedValue { v in
+                guard Self.v6Allowed(frame, m, v) else { return false }
+                for a in Set(frame.claims) where v.owners[a] == nil {
+                    v.owners[a] = m
+                    v.count[m, default: 0] += 1
+                }
+                return true
+            }
+        }
+    }
+
+    /// The EUI-64 link-local address (fe80::/64) of `mac`.
+    // @port-skip linux-only: the Linux switch's source pinning, IPv6
+    static func linkLocal(_ mac: MAC) -> [UInt8] {
+        let b = mac.bytes
+        return [0xfe, 0x80, 0, 0, 0, 0, 0, 0, b[0] ^ 0x02, b[1], b[2], 0xff, 0xfe, b[3], b[4], b[5]]
     }
 
     /// The VM on `mac` is a node of `cluster`, which was allocated `range`
@@ -258,6 +388,11 @@ public final class InterimSwitch: Sendable {
             ps.removeAll { $0.mac == m }
         }
         learned.withLockedValue { l in l = l.filter { $0.value != m } }
+        v6Owners.withLockedValue { v in
+            v.owners = v.owners.filter { $0.value != m }
+            v.iids = v.iids.filter { $0.value != m }
+            v.count[m] = nil
+        }
         reservedClaims.withLockedValue { c in
             guard let gone = c.nodes.removeValue(forKey: m) else { return }
             // Its cluster's last node: the addresses it held are free again.
