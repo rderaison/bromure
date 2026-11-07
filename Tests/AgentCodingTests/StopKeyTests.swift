@@ -33,13 +33,45 @@ struct StopKeyTests {
         let body = v[start.upperBound...].prefix(1600)
         #expect(body.contains("let key = Self.interruptKey(screen: await self.paneTail(), agent: kind)"))
         #expect(!body.contains(#"pressKeys(["Escape"])"#))
-        let again = try #require(body.range(of: "if Self.screenShowsBusy(await self.paneTail()) {"))
-        #expect(body[again.upperBound...].prefix(200).contains("await self.provider.pressKeys([key])"))
+        let again = try #require(body.range(of: "if self.stoppedTurnStillCurrent(turn), Self.screenShowsBusy(await self.paneTail()),"))
+        #expect(body[again.upperBound...].prefix(260).contains("await self.provider.pressKeys([key])"))
         // omp's queue comes back on Esc only.
         #expect(body.contains(#"if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind)"#))
         let sb = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Switchboard.swift"), encoding: .utf8)
         #expect(sb.contains("let key = BeautifiedSessionModel.interruptKey(screen: screen, agent: tool)"))
         #expect(M.screenShowsBusy("Thinking… (ctrl-c to interrupt)"))
         #expect(!sb.contains(#"send-keys -t bromure:\(w) Escape"#))
+    }
+
+    /// The finding (CWE-367): Stop drops the cue at once, so a message can go
+    /// in before the second press is due; the new turn's busy line read as the
+    /// old one still going, and the second Esc / Ctrl-C interrupted the new
+    /// request. The second press (and omp's queue reclaim) is for the turn
+    /// the Stop was for, only.
+    @Test("a turn started after Stop is never hit by Stop's second press")
+    func secondPressOnlyForTheStoppedTurn() throws {
+        var gate = WorkingGate()
+        gate.interrupt()
+        let turn = gate.turns
+        #expect(gate.sameTurn(as: turn))
+        gate.userSent()                    // a send (or a held message typed in)
+        #expect(!gate.sameTurn(as: turn))
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let v = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
+        let start = try #require(v.range(of: "    func interrupt() {"))
+        let body = v[start.upperBound...].prefix(2200)
+        let taken = try #require(body.range(of: "let turn = gate.turns"))
+        let task = try #require(body.range(of: "Task { [weak self] in"))
+        #expect(taken.lowerBound < task.lowerBound, "the turn is taken when Stop is pressed, not later")
+        #expect(body.contains("await self.reclaimAfterEscape(restoring, turn: turn)"))
+        let check = try #require(v.range(of: "private func stoppedTurnStillCurrent(_ turn: Int) -> Bool {"))
+        #expect(v[check.upperBound...].prefix(200).contains("gate.sameTurn(as: turn) && !sending"))
+        let reclaim = try #require(v.range(of: "private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: Int) async {"))
+        let rb = v[reclaim.upperBound...].prefix(2400)
+        let guardAt = try #require(rb.range(of: "guard stoppedTurnStillCurrent(turn) else {"))
+        let clear = try #require(rb.range(of: #"await runKeys(Array(repeating: ["C-u"]"#))
+        #expect(guardAt.lowerBound < clear.lowerBound)
+        // Every turn start goes through userSent: the user's send and a held one.
+        #expect(v.components(separatedBy: "gate.userSent()").count - 1 >= 2)
     }
 }
