@@ -6304,6 +6304,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
         }
+        server.onSecurityHistory = { hours in
+            MainActor.assumeIsolated { SecurityTimeline.shared.historyRows(hours: hours) }
+        }
         // Fat-client Local Models: the server owns the engine + the downloads,
         // so it reports its OWN unified memory (the RAM-fit gate), which models
         // are installed here, and any in-flight download state.
@@ -9221,6 +9224,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             },
             scope: securityWindowScope,
+            // A fat client's host: its full history for the range, so the
+            // counts are the server's (the live mirror is its last rows).
+            loadHistory: { [weak self] hours in
+                for w in self?.connectedRemoteHostWindows() ?? [] { w.controller.fetchSecurityHistory(hours: hours) }
+            },
             // Doc/video captures: open on the event log instead of the Overview.
             startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
         win.makeKeyAndOrderFront(nil)

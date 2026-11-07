@@ -299,6 +299,9 @@ final class ACAutomationServer {
     /// Recent Security Timeline rows for the fat-client mirror (the security
     /// engines run host-side, so the client can't build this itself).
     var onSecurityTimeline: (() -> [[String: Any]])?
+    /// A fat client's Security window: the host's timeline rows for the
+    /// last N hours (0 = all it holds), as many as its own window counts.
+    var onSecurityHistory: ((Int) -> [[String: Any]])?
     /// Local-model management for the fat client: the SERVER's unified memory
     /// (for the RAM-fit gate), which models are installed there, and any
     /// in-flight download state — the engine + downloads run host-side, so the
@@ -859,6 +862,20 @@ final class ACAutomationServer {
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
+
+        // The fat client's Security window counts what this host's does:
+        // the live mirror in /state carries only the most recent rows.
+        case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var hours = 24
+            if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
+                for kv in q.split(separator: "&") {
+                    let pair = kv.split(separator: "=", maxSplits: 1)
+                    if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
+                }
+            }
+            let rows = DispatchQueue.main.sync { self.onSecurityHistory?(hours) ?? [] }
+            sendResponse(fd: fd, status: 200, body: ["rows": rows])
 
         // Fat-client local-model management: download/cancel/discard/remove a
         // model ON THE SERVER (that's where the engine + downloads live). The

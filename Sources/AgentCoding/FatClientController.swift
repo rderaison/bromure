@@ -8669,6 +8669,26 @@ extension RemoteHostController: RemoteDelegationLink {
     var hostName: String { host.name }
     /// The host's bucket in the Security window (its events' `machine`).
     var securityMirrorKey: String { host.name.isEmpty ? host.address : host.name }
+
+#if os(macOS)
+    /// The host's security timeline for the last `hours` (0 = all it holds),
+    /// replacing its bucket: the snapshot's mirror is only its most recent
+    /// rows, so counts made from it fell short of the server's own. A host
+    /// without the route (older) keeps the mirror.
+    func fetchSecurityHistory(hours: Int) {
+        let host = self.host
+        let key = securityMirrorKey
+        // Not the poll queue: a slow fetch must not hold the state polls.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resp = try? RemoteTransport.client(for: host).request(
+                "GET", "/security-timeline?hours=\(max(0, hours))", recvTimeoutSeconds: 30)
+            guard let resp, resp.status == 200, let rows = resp.json["rows"] as? [[String: Any]] else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { SecurityTimeline.shared.applyHistory(rows, host: key) }
+            }
+        }
+    }
+#endif
     var remoteSessions: AgentSessionStore { sessionStore }
     var remoteDelegations: DelegationStore { delegationStore }
     func remoteWorkspaceName(_ id: UUID) -> String { profile(for: id)?.name ?? "" }

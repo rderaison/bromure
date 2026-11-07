@@ -145,6 +145,14 @@ struct SecurityTimelineView: View {
     var postures: (String?) -> [SecurityPosture] = { _ in [] }
     /// The machine it's for (the window in front when it opened).
     var scope = SecurityWindowScope()
+    /// Fetch the fat-client hosts' history for this many hours (0 = all).
+    var loadHistory: (Int) -> Void = { _ in }
+
+    /// The hours of history the window needs: the Timeline's range, at least
+    /// the Overview's (0 = all).
+    nonisolated static func historyHours(range: Int, overview: Int) -> Int {
+        range == 0 || overview == 0 ? 0 : max(range, overview)
+    }
 
     /// Open on the Timeline tab instead of the Overview (screenshots).
     var startOnTimeline = false
@@ -261,9 +269,16 @@ struct SecurityTimelineView: View {
         .onAppear {
             if startOnTimeline { tab = .timeline }
             machineFilter = scope.machine
+            loadHistory(Self.historyHours(range: rangeHours, overview: SecurityTimeline.defaultRangeHours))
         }
-        // Reopened from another window: show that machine.
-        .onChange(of: scope.generation) { _, _ in machineFilter = scope.machine }
+        // Reopened from another window: show that machine, freshly fetched.
+        .onChange(of: scope.generation) { _, _ in
+            machineFilter = scope.machine
+            loadHistory(Self.historyHours(range: rangeHours, overview: SecurityTimeline.defaultRangeHours))
+        }
+        .onChange(of: rangeHours) { _, h in
+            loadHistory(Self.historyHours(range: h, overview: SecurityTimeline.defaultRangeHours))
+        }
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
             rulesGeneration &+= 1
         }

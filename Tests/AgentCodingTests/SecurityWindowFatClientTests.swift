@@ -52,7 +52,7 @@ struct SecurityWindowFatClientTests {
         #expect(SecurityOverview.events(all, machine: "Mac Studio").count == 2)
         let view = try source("Sources/AgentCoding/SecurityTimelineView.swift")
         #expect(view.contains("SecurityOverview(timeline: timeline, postures: postures(machineFilter),\n                                 machine: machineFilter,"))
-        #expect(view.contains(".onChange(of: scope.generation) { _, _ in machineFilter = scope.machine }"))
+        #expect(view.contains(".onChange(of: scope.generation) { _, _ in\n            machineFilter = scope.machine"))
     }
 
     @Test("token swaps are recorded whatever the trace level")

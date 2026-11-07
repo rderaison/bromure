@@ -297,6 +297,7 @@ public final class SecurityTimeline {
     public func clear() {
         events.removeAll()
         remote.removeAll()
+        fetched.removeAll()
         if directory != nil {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
         }
@@ -432,8 +433,9 @@ public final class SecurityTimeline {
 
     /// Serialize the most recent events for the `/state` snapshot. Bounded —
     /// the window is a "what just happened" view, not the full 5000-cap history.
-    public func mirrorRows(limit: Int = 750) -> [[String: Any]] {
-        events.suffix(limit).map { e in
+    public func mirrorRows(limit: Int = 750, since: Date? = nil) -> [[String: Any]] {
+        let pool = since.map { t in events.filter { $0.time >= t } } ?? events
+        return pool.suffix(limit).map { e in
             var r: [String: Any] = [
                 "t": e.time.timeIntervalSince1970,
                 "engine": e.engine,
@@ -453,11 +455,54 @@ public final class SecurityTimeline {
         }
     }
 
+    /// A host's events in the last `hours` (0 = all it holds), as many as its
+    /// own window counts (the in-memory cap): what a fat client's Security
+    /// window fetches, so its numbers are the server's. The live mirror is
+    /// only the most recent rows.
+    public func historyRows(hours: Int) -> [[String: Any]] {
+        mirrorRows(limit: Self.cap, since: hours > 0 ? Date().addingTimeInterval(-Double(hours) * 3600) : nil)
+    }
+
     /// Rebuild a mirrored host's events from its snapshot (fat client). The
     /// host is authoritative for its own bucket, which this replaces; this
     /// Mac's events and other hosts' are left alone.
     public func applyMirror(_ rows: [[String: Any]], host: String) {
-        remote[host] = rows.compactMap { r in
+        let mirror = Self.events(rows, host: host)
+        // No rows: the host holds none -- its bucket empties, history too.
+        if mirror.isEmpty { fetched[host] = nil }
+        remote[host] = Self.merged(history: fetched[host] ?? [], mirror: mirror)
+    }
+
+    /// A host's history for the window's range, as last fetched (fat
+    /// client): the mirror merges into this one, not into earlier mirrors,
+    /// so rows the host has since pruned don't linger.
+    @ObservationIgnored private var fetched: [String: [Event]] = [:]
+
+    /// A host's full history for the window's range (fetched): replaces its
+    /// bucket. Later mirrors merge into it.
+    public func applyHistory(_ rows: [[String: Any]], host: String) {
+        let history = Self.events(rows, host: host)
+        fetched[host] = history
+        remote[host] = history
+    }
+
+    /// The live mirror (the host's most recent rows) over what the bucket
+    /// held: rows older than the mirror's oldest are kept -- a fetched
+    /// history would otherwise shrink back to the mirror's size at every
+    /// snapshot -- except a coalesced row the mirror carries again (its
+    /// repeat count grew and its time moved: counted once, the new copy).
+    nonisolated static func merged(history: [Event], mirror: [Event]) -> [Event] {
+        guard !history.isEmpty else { return mirror }
+        guard let oldest = mirror.map(\.time).min() else { return [] }
+        let again = Set(mirror.compactMap { e in e.coalesceKey.map { "\(e.profileID)|\($0)" } })
+        let kept = history.filter { e in
+            e.time < oldest && !(e.coalesceKey.map { again.contains("\(e.profileID)|\($0)") } ?? false)
+        }
+        return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap + 1000).map { $0 }
+    }
+
+    private static func events(_ rows: [[String: Any]], host: String) -> [Event] {
+        rows.compactMap { r in
             guard let engine = r["engine"] as? String,
                   let condition = r["condition"] as? String,
                   let decision = r["decision"] as? String else { return nil }
