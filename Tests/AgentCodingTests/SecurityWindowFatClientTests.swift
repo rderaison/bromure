@@ -192,9 +192,13 @@ struct SecurityWindowFatClientTests {
         // The fat client never uses the shared slot: the pane rides the fetch.
         #expect(!fc.contains("pendingWorkspaceCategory"))
         #expect(fc.contains("private func openWorkspaceSettings(_ id: Profile.ID, initialCategory: EditorCategory? = nil) {"))
-        #expect(fc.contains("initialCategory: initialCategory)"))
-        // An editor made meanwhile by another request is switched to this one's pane.
-        #expect(fc.contains("if let win = self.settingsSessions[id]?.window { self.showOpenSettings(win, id, initialCategory); return }"))
+        // The latest click's pane, whichever fetch finishes last.
+        #expect(fc.contains("if let initialCategory { settingsRequestedPane[id] = initialCategory }"))
+        #expect(fc.contains("let pane = self.settingsRequestedPane.removeValue(forKey: id) ?? initialCategory"))
+        #expect(fc.contains("initialCategory: pane)"))
+        // An editor another request made meanwhile already took this pane
+        // (asked before it was built): brought forward, not switched back.
+        #expect(fc.contains("if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }"))
         #expect(fc.contains("self?.openWorkspaceSettings(id, category: .firewall)"))
         // This Mac's drawer: one call that also switches an open editor.
         let win = try source("Sources/AgentCoding/UnifiedSessionWindow.swift")
