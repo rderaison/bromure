@@ -45,26 +45,40 @@ enum FirewallRuleActions {
     /// `text` with `edit` applied, or nil when the text doesn't parse or the
     /// edit changes nothing (rule not found).
     static func apply(_ edit: Edit, to text: String, now: Date = Date()) -> String? {
-        guard var policy = try? EgressPolicy.parse(text) else { return nil }
+        if case .changed(let out) = outcome(edit, to: text, now: now) { return out }
+        return nil
+    }
+
+    /// What an edit does to a ruleset: new rules, nothing (it's already so:
+    /// an Allow whose rule is there), or it can't be made, and why.
+    enum Outcome: Equatable {
+        case changed(String)
+        case unchanged
+        case failed(String)
+    }
+
+    static func outcome(_ edit: Edit, to text: String, now: Date = Date()) -> Outcome {
+        guard var policy = try? EgressPolicy.parse(text) else { return .failed("the workspace's firewall rules don't parse") }
+        let gone = Outcome.failed("that rule is no longer in the workspace's firewall")
         switch edit {
         case .insert(let rule):
             policy.rules.removeAll { $0.text == rule.text }
             policy.rules.insert(rule, at: 0)
         case .disable(let ruleText):
-            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return nil }
+            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return gone }
             policy.rules[i].enabled = false
             policy.rules[i].expiresAt = nil
             policy.rules[i].untilStop = false
         case .enable(let ruleText, let duration):
-            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return nil }
+            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return gone }
             duration.apply(to: &policy.rules[i], now: now)
         case .remove(let ruleText):
             let before = policy.rules.count
             policy.rules.removeAll { $0.text == ruleText }
-            guard policy.rules.count != before else { return nil }
+            guard policy.rules.count != before else { return gone }
         }
         let out = policy.serialize()
-        return out == text ? nil : out
+        return out == text ? .unchanged : .changed(out)
     }
 
     /// Whether `text` has a rule named `ruleText` (the timeline only offers to
@@ -439,23 +453,44 @@ extension ACAppDelegate {
     }
 
     /// Apply a quick edit to a workspace's rules: save, push live to the
-    /// running VM, tell an open editor. False when nothing changed.
+    /// running VM, tell an open editor. Whether the edit holds now: made, or
+    /// already so (an Allow whose rule is there); false when it couldn't be
+    /// made or saved.
     @MainActor @discardableResult
     func applyFirewallEdit(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> Bool {
-        guard let p = profiles.first(where: { $0.id == profileID }),
-              let text = FirewallRuleActions.apply(edit, to: p.egressRules) else { return false }
-        return commitFirewallRules(text, profileID: profileID)
+        applyFirewallEditResult(edit, profileID: profileID).succeeded
     }
 
-    /// Persist `text` as a workspace's rules and apply it live.
+    /// The edit applied to the workspace's rules as they are now, and saved.
+    /// A failure says why: a fat client's drawer must not show an Allow that
+    /// installed nothing (Finding: "Remote firewall drawer reports failed
+    /// edits as successful").
+    @MainActor
+    func applyFirewallEditResult(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> FirewallCommitResult {
+        guard let p = profiles.first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
+        switch FirewallRuleActions.outcome(edit, to: p.egressRules) {
+        case .changed(let text): return commitFirewallRulesResult(text, profileID: profileID)
+        case .unchanged:         return .unchanged
+        case .failed(let why):   return .failed(why)
+        }
+    }
+
+    /// Persist `text` as a workspace's rules and apply it live. True when
+    /// they changed.
     @MainActor @discardableResult
     func commitFirewallRules(_ text: String, profileID: UUID) -> Bool {
-        guard var p = profiles.first(where: { $0.id == profileID }), p.egressRules != text else { return false }
+        commitFirewallRulesResult(text, profileID: profileID) == .changed
+    }
+
+    @MainActor @discardableResult
+    func commitFirewallRulesResult(_ text: String, profileID: UUID) -> FirewallCommitResult {
+        guard var p = profiles.first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
+        guard p.egressRules != text else { return .unchanged }
         let previous = p.egressRules
         p.egressRules = text
         do { try store.update(p) } catch {
             NSLog("[bromure-ac] firewall: couldn't save rules for \(p.name): \(error)")
-            return false
+            return .failed("couldn't save the workspace's firewall rules")
         }
         if let i = profiles.firstIndex(where: { $0.id == profileID }) { profiles[i] = p }
         // Running: switch port + MiTM now. Only the rules are patched into the
@@ -474,7 +509,7 @@ extension ACAppDelegate {
         NotificationCenter.default.post(name: .bromureFirewallRulesChanged, object: profileID,
                                         userInfo: ["rules": text, "previous": previous])
         scheduleNextFirewallExpiry()
-        return true
+        return .changed
     }
 
     /// (Re)arm the one-shot timer for the soonest timed-rule expiry across
@@ -659,4 +694,12 @@ extension FirewallRuleActions.Edit {
             return nil
         }
     }
+}
+
+/// A firewall commit's result: the rules changed, were already so, or
+/// couldn't be changed (why).
+enum FirewallCommitResult: Equatable {
+    case changed, unchanged
+    case failed(String)
+    var succeeded: Bool { if case .failed = self { return false }; return true }
 }

@@ -156,7 +156,15 @@ final class RemotePolicyDrawerBackend: PolicyDrawerBackend {
         let r = await call("POST", "/profiles/\(ControlClient.encodeSegment(profileID.uuidString))/firewall-edit",
                            body: edit.wire)
         refresh(profileID)
-        return r?.status == 200
+        return Self.editSucceeded(r)
+    }
+
+    /// The host made the edit (or it already held): a 200 that says ok. A
+    /// host answered ok for edits it couldn't make; status alone isn't
+    /// enough.
+    nonisolated static func editSucceeded(_ r: ControlClient.Response?) -> Bool {
+        guard let r, r.status == 200 else { return false }
+        return r.json["ok"] as? Bool == true
     }
 
     func allowOpenShell(profileID: UUID, host: String, port: Int, exe: String?) async -> String? {

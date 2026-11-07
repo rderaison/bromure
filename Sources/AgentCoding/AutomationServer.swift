@@ -252,11 +252,11 @@ final class ACAutomationServer {
     /// POST /profiles/{id}/firewall {rules}: a fat client's firewall editor
     /// puts its rules in force as they're edited (saved and applied live).
     /// nil: not found or the rules don't parse.
-    var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
+    var onCommitFirewall: ((_ id: String, _ rules: String) -> FirewallCommitResult?)?
     /// POST /profiles/{id}/firewall-edit {op, …}: ONE edit, applied on the
     /// main thread to the rules in force then (a fat client's drawer). nil:
     /// no such workspace; else whether the rules changed.
-    var onFirewallEdit: ((_ id: String, _ edit: FirewallRuleActions.Edit) -> Bool?)?
+    var onFirewallEdit: ((_ id: String, _ edit: FirewallRuleActions.Edit) -> FirewallCommitResult?)?
     /// POST /profiles/{id}/squelch {enabled}: Squelch on or off for a
     /// workspace (saved, applies to its next model request). false: no such
     /// workspace.
@@ -1927,7 +1927,7 @@ final class ACAutomationServer {
             }
             let id = key.removingPercentEncoding ?? key
             switch DispatchQueue.main.sync(execute: { self.onFirewallEdit?(id, edit) }) {
-            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .some(let result): sendFirewallResult(fd: fd, result)
             case .none: sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
             }
             return
@@ -1940,7 +1940,7 @@ final class ACAutomationServer {
             }
             let id = key.removingPercentEncoding ?? key
             switch DispatchQueue.main.sync(execute: { self.onCommitFirewall?(id, rules) }) {
-            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .some(let result): sendFirewallResult(fd: fd, result)
             case .none: sendResponse(fd: fd, status: 400, body: ["ok": false, "error": "unknown workspace or invalid rules"])
             }
             return
@@ -3096,4 +3096,24 @@ struct ACShellExecResult {
     let stdout: String
     let stderr: String
     let exitCode: Int
+}
+
+extension ACAutomationServer {
+    /// A firewall change's answer: 200 when it holds (changed, or already
+    /// so), 409 with why when it couldn't be made or saved -- an `ok: true`
+    /// for a failed edit had a fat client's drawer show an Allow that
+    /// installed nothing (Finding: "Remote firewall drawer reports failed
+    /// edits as successful").
+    static func firewallResponse(_ result: FirewallCommitResult) -> (status: Int, body: [String: Any]) {
+        switch result {
+        case .changed:          return (200, ["ok": true, "changed": true])
+        case .unchanged:        return (200, ["ok": true, "changed": false])
+        case .failed(let why):  return (409, ["ok": false, "error": why])
+        }
+    }
+
+    func sendFirewallResult(fd: Int32, _ result: FirewallCommitResult) {
+        let r = Self.firewallResponse(result)
+        sendResponse(fd: fd, status: r.status, body: r.body)
+    }
 }
