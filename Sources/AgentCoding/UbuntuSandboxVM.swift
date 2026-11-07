@@ -1398,7 +1398,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // the excess goes unopened, so it drains.
                         if urlsProcessedThisTick >= maxURLsPerTick {
                             if shedding {
-                                guard consume(entry) else { return [] }
+                                guard consume(entry) else { return found() }
                                 shed += 1
                             }
                             continue

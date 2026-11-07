@@ -47,7 +47,7 @@ struct OutboxFloodTests {
         var opened = 0
         vm.onURLOpen = { _ in opened += 1 }
         let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
-        func heavyTick() async { for _ in 0..<12 { for apply in await scanner.tick() { apply(vm) } } }
+        func heavyTick() async { for _ in 0..<12 { for apply in await scanner.tick().all { apply(vm) } } }
 
         // One heavy tick: the relay's listing is bounded (256), over the
         // high-water mark, so 8 open and the rest of the listed are dropped.
@@ -87,7 +87,7 @@ struct OutboxFloodTests {
         let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
         // 5000 junk names: the relay's 4096 a tick and the outbox's 2048 a
         // tick reach every one within 3 heavy ticks.
-        for _ in 0..<(12 * 4) { for apply in await scanner.tick() { apply(vm) } }
+        for _ in 0..<(12 * 4) { for apply in await scanner.tick().all { apply(vm) } }
         #expect(urls == [URL(string: "https://example.com/login")!])
         #expect(statuses == 1)
         // The junk itself is left alone (never deleted through a folder the
