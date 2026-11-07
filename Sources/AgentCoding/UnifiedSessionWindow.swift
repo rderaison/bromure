@@ -533,8 +533,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         // Default sizing, unlike the fat client's sidebar: without it the
         // window collapsed to its header (118 pt) and couldn't be resized, even
-        // past a contentMinSize. The cost: every frame of a working dot's pulse
-        // re-measures the sidebar for the window's minimum size.
+        // past a contentMinSize. It costs nothing while rows animate: the
+        // working dot's pulse is scale and opacity, which SwiftUI draws without
+        // measuring, and the unread orb turns in Core Animation (0 measure
+        // passes each; SidebarRedrawTests). What re-measured the sidebar on a
+        // busy server was its rows being rebuilt on every roster pass, which
+        // no longer happens. Anything that animates in the sidebar has to keep
+        // it that way.
         self.sidebarHost = sidebarHost
 
         // Empty stage — shows the selected off/suspended profile's Start card.
