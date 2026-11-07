@@ -112,21 +112,56 @@ final class QuickTaskPanel {
     /// The machine whose board a task assigned this way goes to: the one its
     /// session or room is on, else `main`'s.
     static func owner(of assignment: TaskAssignment?, in targets: [Target], else main: Target) -> Target {
-        guard let a = assignment else { return main }
+        assigneeMachine(assignment, in: targets) ?? main
+    }
+
+    /// The machine the assigned session or room is on; nil when the
+    /// assignee names none (none, a new agent, the Switchboard, or one no
+    /// machine lists).
+    static func assigneeMachine(_ assignment: TaskAssignment?, in targets: [Target]) -> Target? {
+        guard let a = assignment else { return nil }
         switch a.kind {
-        case .session: return targets.first { t in t.choices.sessions.contains { $0.id == a.id } } ?? main
-        case .room: return targets.first { t in t.choices.rooms.contains { $0.id == a.id } } ?? main
-        default: return main
+        case .session: return targets.first { t in t.choices.sessions.contains { $0.id == a.id } }
+        case .room: return targets.first { t in t.choices.rooms.contains { $0.id == a.id } }
+        default: return nil
         }
     }
 
     /// As `owner(of:)`, and when the assignee doesn't say (none, a new
     /// agent, the Switchboard), the machine whose workspace `profileID` is:
     /// the full editor can pick another machine's.
+    ///
+    /// A session or room picked wins, this Mac's included: a workspace picked
+    /// after it on another machine used to send the task (and this Mac's
+    /// session id) to that machine's board, where nobody could take it.
     static func owner(of assignment: TaskAssignment?, profileID: UUID, in targets: [Target], else main: Target) -> Target {
-        let byAssignee = owner(of: assignment, in: targets, else: main)
-        if byAssignee.key != main.key || main.profile(profileID) != nil { return byAssignee }
+        if let byAssignee = assigneeMachine(assignment, in: targets) { return byAssignee }
+        if main.profile(profileID) != nil { return main }
         return targets.first { $0.profile(profileID) != nil } ?? main
+    }
+
+    /// Where a task from the full editor goes, and as what: the machine its
+    /// assignee is on (else its workspace's), with that machine's workspace,
+    /// an agent it runs, and a folder that means something there.
+    static func placed(_ task: CodingTask, in targets: [Target], else main: Target,
+                       folder: String) -> (Target, CodingTask) {
+        let target = owner(of: task.assignment, profileID: task.profileID, in: targets, else: main)
+        var t = task
+        t.stage = .backlog
+        // The workspace picked, when it's that machine's; else the assignee's,
+        // or that machine's first.
+        let own = target.profile(t.profileID) != nil ? t.profileID : (target.profiles.first?.id ?? t.profileID)
+        t.profileID = target.workspace(for: t.assignment, else: own)
+        // The agent picked, when that workspace can run it; else its own —
+        // on another machine, or when the workspace picked (another
+        // machine's) gave way to the assignee's here.
+        if target.key != main.key || t.profileID != task.profileID,
+           let p = target.profile(t.profileID), !target.toolSpecs(p).contains(where: { $0.tool == t.tool }) {
+            t.tool = p.tool
+        }
+        // The editor started on this board's folder, a path on another machine.
+        if target.key != main.key, t.repoPath == folder { t.repoPath = "~" }
+        return (target, t)
     }
 
     /// The workspaces the full editor offers: the opening board's, or, with
@@ -278,21 +313,7 @@ final class QuickTaskPanel {
     /// A task from the full editor.
     private func add(_ task: CodingTask, plan: Bool) {
         guard let main = target else { return }
-        let target = Self.owner(of: task.assignment, profileID: task.profileID, in: targets, else: main)
-        var t = task
-        t.stage = .backlog
-        // The workspace picked, when it's that machine's; else the assignee's,
-        // or that machine's first.
-        let own = target.profile(t.profileID) != nil ? t.profileID : (target.profiles.first?.id ?? t.profileID)
-        t.profileID = target.workspace(for: t.assignment, else: own)
-        if target.key != main.key {
-            // The agent picked, when that workspace can run it; else its own.
-            if let p = target.profile(t.profileID), !target.toolSpecs(p).contains(where: { $0.tool == t.tool }) {
-                t.tool = p.tool
-            }
-            // The editor started on this board's folder, a path on another machine.
-            if t.repoPath == folder { t.repoPath = "~" }
-        }
+        let (target, t) = Self.placed(task, in: targets, else: main, folder: folder)
         target.save(t)
         if plan {
             target.plan(t.id)

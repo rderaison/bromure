@@ -95,6 +95,57 @@ struct QuickTaskMachinesTests {
                                      profileID: mine.id, in: all, else: local).key == "host-1")
     }
 
+    /// The finding: in the full editor, a session or room of this Mac picked,
+    /// then a host's workspace, sent the task — and this Mac's session id —
+    /// to that host's board, where no session could take it. The assignee's
+    /// machine wins, this Mac included; the workspace follows the assignee.
+    @Test("this Mac's session or room keeps the task here when a host's workspace is picked after it")
+    func localAssigneeWinsOverHostWorkspace() {
+        let mine = Profile(name: "Personal", tool: .claude, authMode: .token)
+        let theirs = Profile(name: "Storefront", tool: .codex, authMode: .token)
+        let notes = TaskAssigneeChoices.Session(id: UUID(), label: "@notes", workspace: "Personal",
+                                                busy: false, profileID: mine.id)
+        let room = TaskAssigneeChoices.Room(id: UUID(), name: "release")
+        func target(_ key: String, _ machine: String, _ p: Profile, _ s: [TaskAssigneeChoices.Session],
+                    _ r: [TaskAssigneeChoices.Room]) -> T {
+            T(key: key, machine: machine, profiles: [p],
+              toolSpecs: { _ in [Profile.ToolSpec(tool: key == "local" ? .claude : .codex)] },
+              choices: TaskAssigneeChoices(sessions: s, rooms: r), current: nil,
+              label: { $0.title }, save: { _ in }, assign: { _, _ in }, plan: { _ in })
+        }
+        let local = target("local", "This Mac", mine, [notes], [room])
+        let studio = target("host-1", "Mac Studio", theirs, [], [])
+        let all = [local, studio]
+        let toNotes = TaskAssignment(kind: .session, id: notes.id, label: "@notes")
+        let toRoom = TaskAssignment(kind: .room, id: room.id, label: "#release")
+        #expect(QuickTaskPanel.owner(of: toNotes, profileID: theirs.id, in: all, else: local).key == "local")
+        #expect(QuickTaskPanel.owner(of: toRoom, profileID: theirs.id, in: all, else: local).key == "local")
+        // Nothing naming a machine: the workspace still says.
+        #expect(QuickTaskPanel.owner(of: .switchboard, profileID: theirs.id, in: all, else: local).key == "host-1")
+        #expect(QuickTaskPanel.owner(of: TaskAssignment(kind: .session, id: UUID(), label: "@gone"),
+                                     profileID: theirs.id, in: all, else: local).key == "host-1")
+
+        // Saved here, in the session's own workspace, with an agent it runs
+        // (the host workspace's Codex isn't one this Mac's offers).
+        var task = CodingTask(title: "t", details: "", profileID: theirs.id, repoPath: "~/site",
+                              tool: .codex, stage: .backlog)
+        task.assignment = toNotes
+        let (where_, placed) = QuickTaskPanel.placed(task, in: all, else: local, folder: "~/site")
+        #expect(where_.key == "local")
+        #expect(placed.profileID == mine.id)
+        #expect(placed.tool == .claude)
+        #expect(placed.repoPath == "~/site")
+        // A room here: this Mac's workspace, not the host's.
+        task.assignment = toRoom
+        let (roomAt, inRoom) = QuickTaskPanel.placed(task, in: all, else: local, folder: "~/site")
+        #expect(roomAt.key == "local" && inRoom.profileID == mine.id && inRoom.tool == .claude)
+        // No assignee: the host's workspace takes it there, as picked.
+        task.assignment = nil
+        let (hostAt, onHost) = QuickTaskPanel.placed(task, in: all, else: local, folder: "~/site")
+        #expect(hostAt.key == "host-1" && onHost.profileID == theirs.id && onHost.tool == .codex)
+        #expect(onHost.repoPath == "~")
+    }
+
     @Test("from another app the panel takes every connected host; from a window, that window's board")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -102,7 +153,7 @@ struct QuickTaskMachinesTests {
         #expect(src.contains("targets = [local] + delegate.connectedRemoteHostWindows().map(Target.remote)"))
         #expect(src.contains("let choices = Self.merged(targets)"))
         #expect(src.contains("let target = Self.owner(of: assignment, in: targets, else: main)"))
-        #expect(src.contains("let target = Self.owner(of: task.assignment, profileID: task.profileID, in: targets, else: main)"))
+        #expect(src.contains("let (target, t) = Self.placed(task, in: targets, else: main, folder: folder)"))
         #expect(src.contains("profiles: Self.editorProfiles(targets),"))
     }
 }
