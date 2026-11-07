@@ -221,23 +221,20 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
     private let lock = NSLock()
     private var closed = false
 
-    /// The last reason a dialer refused or failed a destination, by
-    /// "host:port": URLSession reports a proxy failure only as CFNetwork
-    /// 306/310, so the proxy's 502 reads the real reason here.
-    private static let failures = OSAllocatedUnfairLock(initialState: [String: String]())
-    static func lastFailure(host: String, port: Int) -> String? {
-        failures.withLock { $0[failureKey(host, port)] }
-    }
-    private static func failureKey(_ host: String, _ port: Int) -> String {
-        host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[].")) + ":\(port)"
-    }
-    static func noteFailure(host: String, port: Int, _ reason: String) {
-        failures.withLock { m in
-            if m.count > 256 { m.removeAll() }   // a diagnostic, not a record
-            m[failureKey(host, port)] = reason
-        }
+    /// Why this dialer last refused or failed a destination, since its last
+    /// successful dial: URLSession reports a proxy failure only as CFNetwork
+    /// 306/310, so the request's 502 reads the real reason from ITS dialer
+    /// (one per request's session). A process-wide map by host:port handed a
+    /// later request, or another workspace, an old or unrelated reason
+    /// (Finding: "Pinned dialer can report a stale failure from another
+    /// request").
+    private var failure: String?
+    var lastFailure: String? { lock.lock(); defer { lock.unlock() }; return failure }
+    func noteFailure(host: String, port: Int, _ reason: String) {
+        lock.lock(); failure = "\(host):\(port): \(reason)"; lock.unlock()
         FileHandle.standardError.write(Data("[mitm] pinned dial \(host):\(port): \(reason)\n".utf8))
     }
+    private func noteSuccess() { lock.lock(); failure = nil; lock.unlock() }
 
     init(host: String, port upstreamPort: Int, addresses: [OpenShellPolicy.IPAddress],
          others: (@Sendable (String, Int) -> [OpenShellPolicy.IPAddress]?)? = nil) throws {
@@ -322,7 +319,7 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
         } else if let checked = others?(a.host, p) {
             dial = checked
         } else {
-            Self.noteFailure(host: a.host, port: p, others == nil
+            noteFailure(host: a.host, port: p, others == nil
                 ? "refused: not this request's destination"
                 : "refused: \(a.host) did not resolve, or every address it resolved to is one the guest may not reach")
             refuse(client); return
@@ -333,7 +330,7 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
         } catch {
             let reason: String
             if case MitmError.upstreamFailed(let why) = error { reason = why } else { reason = "\(error)" }
-            Self.noteFailure(host: a.host, port: p, reason)
+            noteFailure(host: a.host, port: p, reason)
             let body = "Bromure: could not connect to \(a.host):\(p) — \(reason)\n"
             let resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\n"
                 + "X-Bromure-Upstream-Error: \(Self.headerSafe(reason))\r\n"
@@ -341,6 +338,7 @@ final class PinnedUpstreamDialer: @unchecked Sendable {
             _ = resp.withCString { write(client, $0, strlen($0)) }
             close(client); return
         }
+        noteSuccess()   // an earlier failure of this request no longer explains what follows
         if isConnect {
             let ok = "HTTP/1.1 200 Connection established\r\n\r\n"
             _ = ok.withCString { write(client, $0, strlen($0)) }
