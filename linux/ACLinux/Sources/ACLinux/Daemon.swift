@@ -1169,6 +1169,15 @@ public actor Daemon {
                 // Its own Firecracker holds the CID.
                 guard CIDAllocator.shared.adopt(rec.cid) else { throw MachineError.invalidConfig("CID \(rec.cid) is taken") }
                 guard rec.machine == Self.machineType else { throw MachineError.invalidConfig("a pre-Firecracker VM") }
+                // Its workspace, read first: a session VM's port is governed
+                // (its egress policy, its interception opt-out) the moment it
+                // is back on the switch, so one whose workspace can't be read
+                // isn't taken back at all (the catch below ends it) rather
+                // than attached ungoverned.
+                let adoptedProfile = rec.managed ? nil : await launchProfile(for: rec, create: false)
+                if !rec.managed, adoptedProfile == nil {
+                    throw MachineError.invalidConfig("its workspace profile can't be read, so its network can't be governed")
+                }
                 let qc = try machineConfig(rec)
                 // Its network is the socketpair end the fd store kept;
                 // without it (no systemd store) the VM has no network back.
@@ -1216,12 +1225,9 @@ public actor Daemon {
                 // with start's refresh, once the session engine (and its
                 // cluster engine) is up: until then they fail closed. start
                 // then rewrites its kubeconfig.
-                let adoptedProfile = rec.managed ? nil : await launchProfile(for: rec, create: false)
                 if let profile = adoptedProfile {
                     await setUpWorkspaceCredentials(profile, meta: vmDir(rec.id) + "/meta")
                     if rec.registration != true { sw.egress.govern(MAC(InterimSwitch.mac(rec.mac)), .init(profile)) }
-                } else if !rec.managed {
-                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no workspace profile; its credentials aren't set up\n".utf8))
                 }
                 l.mitm = serveProxy(rec, udsPath: qc.firecrackerVsockPath,
                                     stored: storedNet.removeValue(forKey: "mitm-" + rec.shortId))
