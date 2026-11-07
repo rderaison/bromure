@@ -68,6 +68,9 @@ struct SidebarRedrawTests {
     func workingDotsAtDefaultSizing() async throws {
         let working = await measures(AgentStatusDot(status: .working), rows: 60)
         #expect(working == 0, "AgentStatusDot × 60: \(working) measure passes")
+        // A busy machine or cluster row's spinner (AppKit's, spinning in its own layer).
+        let spinner = await measures(ProgressView().controlSize(.mini), rows: 60)
+        #expect(spinner == 0, "ProgressView × 60: \(spinner) measure passes")
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let w = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/UnifiedSessionWindow.swift"), encoding: .utf8)
         let host = try #require(w.range(of: "let sidebarHost = NonMovableHostingView(rootView: sidebar)"))
