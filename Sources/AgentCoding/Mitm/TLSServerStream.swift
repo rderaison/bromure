@@ -390,6 +390,16 @@ final class TLSClientStream: MitmClientStream, @unchecked Sendable {
         }
     }
 
+    /// After the handshake: the upstream asked for a client certificate and
+    /// this side sent it (a configured identity it never asked for, or a
+    /// handshake that failed, presented nothing).
+    var clientCertificateSent: Bool {
+        var state = SSLClientCertificateState.certNone
+        guard SSLGetClientCertificateState(ctx, &state) == errSecSuccess else { return false }
+        return Self.presented(state)
+    }
+    static func presented(_ state: SSLClientCertificateState) -> Bool { state == .certSent }
+
     /// Anchor the upstream's server cert at the pinned cluster CA, using
     /// the same verdict logic as the URLSession path.
     private func evaluatePinnedServerTrust() throws {

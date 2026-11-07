@@ -149,4 +149,24 @@ struct SecurityWindowFatClientTests {
         // An open host editor is switched to the pane, as this Mac's is.
         #expect(fc.contains(#"object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")"#))
     }
+
+    /// Finding: on the WebSocket upgrade (kubectl exec / logs -f) the
+    /// client-certificate event was recorded as soon as the identity was
+    /// looked up -- before the destination check, the connect and the
+    /// handshake -- so a refused or failed upgrade, or a server that asked
+    /// for no certificate, still counted as credential brokering.
+    @Test("a WebSocket upgrade records the certificate only once the upstream asked for it and got it")
+    func wsClientCertAfterHandshake() throws {
+        // Only a sent certificate was presented.
+        #expect(TLSClientStream.presented(.certSent))
+        #expect(!TLSClientStream.presented(.certRequested))
+        #expect(!TLSClientStream.presented(.certNone))
+        #expect(!TLSClientStream.presented(.certRejected))
+        let proxy = try source("Sources/AgentCoding/Mitm/HTTPProxy.swift")
+        let emit = try #require(proxy.range(of: "Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)"))
+        let handshake = try #require(proxy.range(of: "try upstreamTLS.handshake()"))
+        let gate = try #require(proxy.range(of: "if let entry = identityEntry, (upstreamTLS as? TLSClientStream)?.clientCertificateSent == true {"))
+        #expect(handshake.lowerBound < gate.lowerBound && gate.lowerBound < emit.lowerBound)
+        #expect(proxy.components(separatedBy: "Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)").count - 1 == 1)
+    }
 }
