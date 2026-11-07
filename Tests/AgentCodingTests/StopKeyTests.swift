@@ -85,7 +85,50 @@ struct StopKeyTests {
         var typing = QueuedMessage(text: "going in", held: true, editable: true, baseline: 0)
         typing.sending = true
         #expect(M.queueStartedTurn([typing], since: []))
-        // Every turn start goes through userSent: the user's send and a held one.
-        #expect(v.components(separatedBy: "gate.userSent()").count - 1 >= 2)
+        // Every turn start counts: a held one typed in (userSent), the
+        // composer's send once typed (turnStarted).
+        #expect(v.contains("self.gate.userSent()"))
+        #expect(v.components(separatedBy: "self.gate.turnStarted()").count - 1 >= 2)
+    }
+
+    /// The finding: the composer's send counted a turn before it was typed.
+    /// A send during omp's reclaim wait that failed, or was held, started no
+    /// turn, yet the reclaim saw one and left the restored box alone — and
+    /// the queue rows, never held, aged out of the strip undelivered.
+    @Test("a send that fails or is held during the reclaim wait doesn't strand omp's queue")
+    func failedSendKeepsTheStoppedTurn() throws {
+        var gate = WorkingGate()
+        gate.interrupt()
+        let turn = gate.turns
+        gate.userSending()                 // under way: the cue shows…
+        #expect(!gate.interrupted)
+        #expect(gate.sameTurn(as: turn))   // …but no turn yet (it may fail)
+        gate.turnStarted()                 // typed in
+        #expect(!gate.sameTurn(as: turn))
+
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let v = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
+        // The composer's send: no turn counted up front, only once typed.
+        #expect(!v.contains("        gate.userSent()                   // a fresh send"))
+        #expect(v.contains("        gate.userSending()                // a fresh send supersedes any prior stop"))
+        #expect(v.contains("if native, outcome == .typed {\n                    self.gate.turnStarted()"))
+        #expect(v.contains("case .typed:\n                self.gate.turnStarted()\n            }"))
+        // The reclaim waits out a send under way, then looks at the box again.
+        let reclaim = try #require(v.range(of: "private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: StopTurn) async {"))
+        let rb = v[reclaim.upperBound...].prefix(3200)
+        let wait = try #require(rb.range(of: "for _ in 0..<300 where sending {"))
+        let again = try #require(rb.range(of: "if stoppedTurnStillCurrent(turn) { stillInBox = await ownInBox() }"))
+        let guardAt = try #require(rb.range(of: "guard stoppedTurnStillCurrent(turn) else {"))
+        #expect(wait.lowerBound < again.lowerBound && again.lowerBound < guardAt.lowerBound)
+        // Seen in the box once, the queue is held even if that send left the
+        // box empty or its own (.dropped, .unconfirmed); only C-u waits on
+        // the box still showing it.
+        let seen = try #require(rb.range(of: "guard inBox || stillInBox else {"))
+        let clearIf = try #require(rb.range(of: "if stillInBox {"))
+        let clear = try #require(rb.range(of: #"await runKeys(Array(repeating: ["C-u"]"#))
+        let hold = try #require(rb.range(of: "l[i].held = true"))
+        #expect(seen.lowerBound < clearIf.lowerBound && clearIf.lowerBound < clear.lowerBound)
+        #expect(clear.lowerBound < hold.lowerBound)
+        #expect(!rb[clearIf.upperBound..<hold.lowerBound].contains("return"), "holding never depends on the C-u")
     }
 }

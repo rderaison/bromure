@@ -520,6 +520,12 @@ struct WorkingGate {
     mutating func interrupt() { interrupted = true }
     /// User sent a new message — a fresh turn supersedes the stop.
     mutating func userSent() { interrupted = false; turns &+= 1 }
+    /// The composer's send, under way: the cue shows at once, but no turn
+    /// counts until it is typed in (`turnStarted`). A send that fails, or is
+    /// held, starts none, and a Stop's reclaim of omp's queue still applies.
+    mutating func userSending() { interrupted = false }
+    /// The composer's send was typed in: a turn begun.
+    mutating func turnStarted() { turns &+= 1 }
 
     /// Still the turn a Stop at `turn` stopped: none started since.
     func sameTurn(as turn: Int) -> Bool { turns == turn }
@@ -2573,27 +2579,41 @@ final class BeautifiedSessionModel: ObservableObject {
         let target = provider.paneTarget(window: w)
         let probe = PaneTypeGuard.resolve(target)
             + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+        func ownInBox() async -> Bool {
+            let screen = await provider.execGuest(probe, timeout: 8) ?? ""
+            if case .text(let d) = AgentInputBox.content(screen) { return AgentInputBox.isOwn(d, of: first.text) }
+            return false
+        }
         var inBox = false
         for _ in 0..<8 {
             try? await Task.sleep(nanoseconds: 400_000_000)
-            let screen = await provider.execGuest(probe, timeout: 8) ?? ""
-            if case .text(let d) = AgentInputBox.content(screen), AgentInputBox.isOwn(d, of: first.text) {
-                inBox = true
-                break
-            }
+            if await ownInBox() { inBox = true; break }
+        }
+        // A send under way: wait it out (a fat client's can take tens of
+        // seconds). One that failed or was held started no turn: the queue
+        // omp gave back is still ours to hold, or these messages would age
+        // out of the strip undelivered. The box is looked at again, as that
+        // send may have left its own text in it (or emptied it).
+        var stillInBox = inBox
+        if sending {
+            for _ in 0..<300 where sending { try? await Task.sleep(nanoseconds: 200_000_000) }
+            if stoppedTurnStillCurrent(turn) { stillInBox = await ownInBox() }
         }
         // A turn sent since the Stop: what's in the box may be the user's now.
         guard stoppedTurnStillCurrent(turn) else {
             BACDebug.log("beautified", "after Esc: a turn started since the stop — box left as is")
             return
         }
-        guard inBox else {
+        guard inBox || stillInBox else {
             BACDebug.log("beautified", "after Esc: queued text not in the input box — left as is")
             return
         }
-        // One C-u per line (the restore joins them with blank lines).
-        let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
-        await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        // Emptied only while it still shows the queue: one C-u per line (the
+        // restore joins them with blank lines).
+        if stillInBox {
+            let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+            await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        }
         let pinned = await provider.pinnedTarget(window: w)
         let ids = Set(restored.map(\.id))
         queueStore.update(queueKey) { l in
@@ -2712,7 +2732,7 @@ final class BeautifiedSessionModel: ObservableObject {
         failure = nil
         prompt = nil
         settleRecordedFailure()
-        gate.userSent()                   // a fresh send supersedes any prior stop
+        gate.userSending()                // a fresh send supersedes any prior stop
         // A slash command (/model, /cost, /help…) drives the TUI's own overlay;
         // it does NOT start an agent turn. Marking it "working" showed the
         // "Thinking…" cue the moment the command was sent, and — because a
@@ -2775,6 +2795,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
                 if native, outcome == .typed {
+                    self.gate.turnStarted()
                     self.queueStore.update(key) { l in
                         guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
                         l[i].handedOver = true
@@ -2869,7 +2890,7 @@ final class BeautifiedSessionModel: ObservableObject {
                                        failure: ChatQueueStore.notTypedText)
                 return
             case .typed:
-                break
+                self.gate.turnStarted()
             }
             if isCommand { self.watchCommand(raw, before: before) }
             await self.poll()
