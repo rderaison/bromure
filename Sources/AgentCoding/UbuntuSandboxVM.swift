@@ -285,6 +285,20 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
 
     private var outboxPollTask: Task<Void, Never>?
+    /// The poll's scanner: cancelled with it, so a tick it has queued
+    /// consumes nothing (`OutboxScanner.cancel`).
+    private var outboxScanner: OutboxScanner?
+
+    /// Stop the outbox poll: its task, and its scanner, whose queued tick
+    /// would otherwise still read (and remove) what a relaunched guest
+    /// writes to the same outbox.
+    @MainActor
+    private func cancelOutboxPoll() {
+        outboxPollTask?.cancel()
+        outboxPollTask = nil
+        outboxScanner?.cancel()
+        outboxScanner = nil
+    }
     private var guestLiveness = GuestLiveness()
     private var guestSilent = false
 
@@ -688,8 +702,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the outbox before we hand the same directory to a fresh sandbox.
     @MainActor
     public func stopPolling() {
-        outboxPollTask?.cancel()
-        outboxPollTask = nil
+        cancelOutboxPoll()
     }
 
     /// Restore the VM from a previously-saved RAM snapshot. The VZ
@@ -756,7 +769,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard vm.canPause else {
             throw UbuntuImageError.installerStoppedEarly
         }
-        outboxPollTask?.cancel()
+        cancelOutboxPoll()
         try await vm.pause()
         // VZ refuses to overwrite the destination (Code 11). restore()
         // consumes the snapshot, so normally nothing is here — but clear
@@ -943,7 +956,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard let vm = vm, let session = sessionDisk else {
             throw UbuntuImageError.installerStoppedEarly
         }
-        outboxPollTask?.cancel()
+        cancelOutboxPoll()
         try? FileManager.default.removeItem(at: session.savedStateURL)
         try await vm.saveMachineStateTo(url: session.savedStateURL)
         Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
@@ -1064,7 +1077,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// `bromure-open` script and forwards each one to `onURLOpen`.
     private func startOutboxPolling() {
         guard let outbox = sessionDisk?.outboxDirectory else { return }
-        outboxPollTask?.cancel()
+        cancelOutboxPoll()
         guestLiveness = GuestLiveness()
         guestSilent = false
         onGuestResponsive?(true)
@@ -1072,12 +1085,15 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // thread, a stalled disk (a panic caught one, two minutes long) froze
         // the app with it. Only what a tick found comes back here.
         let scanner = OutboxScanner(outbox: outbox)
+        outboxScanner = scanner
         outboxPollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 let events = await scanner.tick()
-                // A finished tick is applied even if cancelled meanwhile, as
-                // the tick run here used to be: it may have consumed a file.
-                guard let self else { return }
+                // Cancelled meanwhile (a relaunch, a stop): not applied. The
+                // outbox is the next guest's now, and this sandbox's callbacks
+                // (keyed by the workspace) would tell its session stale news.
+                // A tick queued after the cancel consumed nothing.
+                guard !Task.isCancelled, !scanner.isCancelled, let self else { return }
                 for apply in events { apply(self) }
                 try? await Task.sleep(nanoseconds: 40_000_000)
             }
@@ -1121,10 +1137,31 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
 
         init(outbox: URL) { self.outbox = outbox; queue = Self.queue(for: outbox) }
 
+        private let cancelled = OSAllocatedUnfairLock(initialState: false)
+        /// From now on a tick, queued or not, scans nothing: the one-shot
+        /// files it would take (reboot-intent, a URL to open, the home's
+        /// migration mark) may be the next guest's.
+        func cancel() { cancelled.withLock { $0 = true } }
+        var isCancelled: Bool { cancelled.withLock { $0 } }
+
         func tick() async -> [Event] {
             await withCheckedContinuation { cont in
-                queue.async { cont.resume(returning: self.scan()) }
+                queue.async {
+                    // Checked on the queue, where the scan runs: a cancel
+                    // before it starts means it never touches the outbox.
+                    cont.resume(returning: self.isCancelled ? [] : self.scan())
+                }
             }
+        }
+
+        /// Remove a one-shot the scan has read, unless the scanner was
+        /// cancelled meanwhile (a scan stalled on the disk while the guest was
+        /// relaunched): then it's left for the next guest's scanner, and the
+        /// scan stops there.
+        private func consume(_ url: URL) -> Bool {
+            guard !isCancelled else { return false }
+            try? FileManager.default.removeItem(at: url)
+            return true
         }
 
         private func scan() -> [Event] {
@@ -1138,7 +1175,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // would otherwise trigger the close-action shutdown.
             let rebootMarker = outbox.appendingPathComponent("reboot-intent")
             if fm.fileExists(atPath: rebootMarker.path) {
-                try? fm.removeItem(at: rebootMarker)
+                guard consume(rebootMarker) else { return [] }
                 events.append { $0.onGuestReboot?() }
             }
 
@@ -1254,7 +1291,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             // consume + drop so it can't recur.
                             raw = ""
                         }
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         // mailto: is intentionally NOT here.
                         // Historically Mail.app / Outlook /
                         // Thunderbird have leaked local file paths
@@ -1289,7 +1326,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     // copy is verified and the image is mounted over
                     // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
                     if name == "home-migrated.txt" {
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         events.append { $0.onHomeMigrated?() }
                         continue
                     }
@@ -1444,7 +1481,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if !raw.isEmpty { events.append { $0.onDockerError?(raw) } }
                         continue
                     }
@@ -1457,7 +1494,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if !raw.isEmpty { events.append { $0.onWorktreeError?(raw) } }
                         continue
                     }
@@ -1469,7 +1506,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return [] }
                         if let idx = Int(idxStr), !raw.isEmpty { events.append { $0.onAgentStatus?(idx, raw) } }
                         continue
                     }
@@ -1522,7 +1559,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 return
             }
             self.state = .stopped
-            self.outboxPollTask?.cancel()
+            self.cancelOutboxPoll()
             self.sessionDisk?.cleanupMetadataShare()
             self.releaseSerialConsole()
             self.releaseMACToPool()
