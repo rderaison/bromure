@@ -2067,6 +2067,12 @@ struct LANPoolsTests {
         #expect(try client.publish(ip: ip, ports: ports, owner: UUID(), service: "default/web") == Array(ports.keys))
         // A grant written just now: the helper says wait; the client waits
         // once and gets the real answer (here: no CAP_NET_ADMIN to add it).
+        // The premise: the address isn't on lo already (the helper takes one
+        // that is as someone else's and uses it). Another run with the
+        // capability (CI's netns step, under sudo, run alongside) can leave
+        // it there for a moment: say so rather than blame the publish.
+        try #require(!LANHelper.slash32s(on: "lo").contains(ip + 1),
+                     "10.250.0.101 is on lo already (another run's?): this test needs it absent")
         try LANPoolsAdmin.write(LANPoolsFile(interface: "lo", grants: [me: ["10.250.0.101"]]), to: pools)
         let helper = LANHelper(poolsPath: pools, socketPath: sock, recordPath: d + "/added.json")
         Thread.detachNewThread { try? helper.run() }
