@@ -476,12 +476,22 @@ public final class SecurityTimeline {
     /// Rebuild a mirrored host's events from its snapshot (fat client). The
     /// host is authoritative for its own bucket, which this replaces; this
     /// Mac's events and other hosts' are left alone.
-    public func applyMirror(_ rows: [[String: Any]], host: String) {
+    /// `oldestRetained`: the oldest event the host still holds (its
+    /// in-memory cap prunes from the front): fetched rows older than that
+    /// are gone on the host and go here too.
+    public func applyMirror(_ rows: [[String: Any]], host: String, oldestRetained: Date? = nil) {
         let mirror = Self.events(rows, host: host)
         // No rows: the host holds none -- its bucket empties, history too.
         if mirror.isEmpty { fetched[host] = nil }
-        remote[host] = Self.merged(history: fetched[host] ?? [], mirror: mirror)
+        if let oldestRetained, let history = fetched[host] {
+            fetched[host] = history.filter { $0.time >= oldestRetained }
+        }
+        remote[host] = Self.merged(history: fetched[host] ?? [], mirror: mirror, oldestRetained: oldestRetained)
     }
+
+    /// The oldest event this Mac holds in memory (what its window counts
+    /// from), for a fat client's mirror: nil with none.
+    public var oldestRetained: Date? { events.first?.time }   // oldest first; a repeat moves to the end
 
     /// A host's history for the window's range, as last fetched (fat
     /// client): the mirror merges into this one, not into earlier mirrors,
@@ -501,7 +511,13 @@ public final class SecurityTimeline {
     /// history would otherwise shrink back to the mirror's size at every
     /// snapshot -- except a coalesced row the mirror carries again (its
     /// repeat count grew and its time moved: counted once, the new copy).
-    nonisolated static func merged(history: [Event], mirror: [Event]) -> [Event] {
+    ///
+    /// Rows the host no longer holds (older than `oldestRetained`, when it
+    /// says) are dropped, and the result never exceeds the host's own cap:
+    /// it pruned its oldest as new events came, while this kept counting
+    /// them (Finding: "Client retains security rows after the host prunes
+    /// its 5000-row timeline").
+    nonisolated static func merged(history: [Event], mirror: [Event], oldestRetained: Date? = nil) -> [Event] {
         guard !history.isEmpty else { return mirror }
         guard let oldest = mirror.map(\.time).min() else { return [] }
         // The mirror's copy of a row replaces exactly that row: by its stable
@@ -517,12 +533,14 @@ public final class SecurityTimeline {
             if let ck = e.coalesceKey { repeatTimes["\(e.profileID)|\(ck)", default: []].append(e.time) }
         }
         let kept = history.filter { e in
-            guard e.time < oldest else { return false }
+            // Older than the mirror, still held by the host (its cap prunes
+            // the oldest), and not the row the mirror carries again.
+            guard e.time < oldest, oldestRetained.map({ e.time >= $0 }) ?? true else { return false }
             if let rid = e.rowID { return !mirroredRows.contains(rid) }
             guard let ck = e.coalesceKey, let times = repeatTimes["\(e.profileID)|\(ck)"] else { return true }
             return !times.contains { $0 >= e.time && $0.timeIntervalSince(e.time) <= coalesceWindow }
         }
-        return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap + 1000).map { $0 }
+        return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
     }
 
     private static func events(_ rows: [[String: Any]], host: String) -> [Event] {

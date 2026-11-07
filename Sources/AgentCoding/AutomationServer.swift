@@ -308,6 +308,11 @@ final class ACAutomationServer {
     /// Recent Security Timeline rows for the fat-client mirror (the security
     /// engines run host-side, so the client can't build this itself).
     var onSecurityTimeline: (() -> [[String: Any]])?
+    /// The oldest timeline row this host still holds (epoch seconds), nil with none.
+    var onSecurityTimelineOldest: (() -> Double?)?
+    /// A JSON value for an optional number: the number, or null (never a
+    /// boxed Optional, which JSONSerialization refuses).
+    nonisolated static func jsonNumberOrNull(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
     /// A fat client's Security window: the host's timeline rows for the
     /// last N hours (0 = all it holds), as many as its own window counts.
     var onSecurityHistory: ((Int) -> [[String: Any]])?
@@ -2608,6 +2613,9 @@ final class ACAutomationServer {
                 "pendingPrompts": self.onListPendingPrompts?() ?? [],
                 "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
                 "securityTimeline": self.onSecurityTimeline?() ?? [],
+                // The oldest row this host still holds: a fat client drops
+                // fetched history older than that (the host pruned it).
+                "securityTimelineOldest": Self.jsonNumberOrNull(self.onSecurityTimelineOldest?() ?? nil),
                 "localModels": self.onLocalModels?() ?? [:],
                 "kubeClusters": self.onListKubeClusters?() ?? ["clusters": [], "status": [:]],
             ]

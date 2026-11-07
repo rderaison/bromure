@@ -174,4 +174,52 @@ struct FatClientSecurityCountsTests {
         client.applyMirror([wire], host: "h")
         #expect(client.remote["h"]?.first?.stableID == first.id)
     }
+
+    /// Finding: the host keeps 5000 rows and prunes its oldest as events
+    /// come; the client kept every fetched row older than the mirror, so its
+    /// bucket grew to 6000 and counted up to 1000 the host no longer held.
+    @Test("rows the host pruned leave the client too; the bucket never exceeds the host's cap")
+    func prunedRowsLeave() {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let history = (0..<100).map { ev(Double(200 + $0)) }            // 200…299 minutes ago
+        let mirror = [ev(10), ev(5)]
+        // The host now holds nothing older than 250 and a half minutes (between rows).
+        let cutoff = Date().addingTimeInterval(-250.5 * 60)
+        let merged = SecurityTimeline.merged(history: history, mirror: mirror, oldestRetained: cutoff)
+        #expect(merged.allSatisfy { $0.time >= cutoff })
+        #expect(merged.count == 51 + 2)                                  // 200…250 kept, plus the mirror
+        // No marker (an older host): capped at the host's own size.
+        let big = (0..<6000).map { ev(Double(100 + $0) / 10) }
+        #expect(SecurityTimeline.merged(history: big, mirror: [ev(1)]).count <= 5000)
+
+        // Through the timeline: the fetched history is pruned too, so a later
+        // mirror without the marker doesn't bring the rows back.
+        let tl = SecurityTimeline(directory: nil)
+        func row(_ minutesAgo: Double) -> [String: Any] {
+            ["engine": "Firewall", "condition": "c", "decision": "d", "kind": "blocked",
+             "t": Date().addingTimeInterval(-minutesAgo * 60).timeIntervalSince1970, "profileID": pid.uuidString]
+        }
+        tl.applyHistory((0..<100).map { row(Double(200 + $0)) }, host: "h")
+        tl.applyMirror([row(10)], host: "h", oldestRetained: cutoff)
+        #expect(tl.remote["h"]?.count == 52)
+        tl.applyMirror([row(9)], host: "h")
+        #expect(tl.remote["h"]?.count == 52)
+    }
+
+    @Test("the host sends its oldest retained row, as JSON; the client passes it on")
+    func hostSendsOldest() throws {
+        let tl = SecurityTimeline(directory: nil)
+        #expect(tl.oldestRetained == nil)
+        let first = ev(30)
+        tl.append(first); tl.append(ev(20))
+        #expect(tl.oldestRetained == first.time)
+        #expect(JSONSerialization.isValidJSONObject(["o": ACAutomationServer.jsonNumberOrNull(nil)]))
+        #expect(JSONSerialization.isValidJSONObject(["o": ACAutomationServer.jsonNumberOrNull(1_700_000_000.5)]))
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        func src(_ p: String) throws -> String { try String(contentsOf: top.appendingPathComponent(p), encoding: .utf8) }
+        #expect(try src("Sources/AgentCoding/AutomationServer.swift")
+            .contains(#""securityTimelineOldest": Self.jsonNumberOrNull(self.onSecurityTimelineOldest?() ?? nil),"#))
+        #expect(try src("Sources/AgentCoding/FatClientController.swift")
+            .contains(#"oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)))"#))
+    }
 }
