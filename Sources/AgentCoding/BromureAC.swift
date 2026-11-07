@@ -2108,6 +2108,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                         state: m.connected ? .running : .off, compromised: false)
         }
         if w.listModel.profileRows != rows { w.listModel.profileRows = rows }
+        let unsandboxed = Set(profiles.filter { !$0.usesOpenShellPolicy }.map(\.id))
+        if w.listModel.unsandboxedProfileIDs != unsandboxed { w.listModel.unsandboxedProfileIDs = unsandboxed }
         // Attached machines: a row always, a tab entry while connected (its
         // roster, like a VM's). Kept out of every local reconcile/probe.
         let former = w.listModel.machineIDs
@@ -7255,6 +7257,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
                 "squelch": p.squelch.enabled,
+                // Runs under an OpenShell sandbox: a fat client shows the
+                // Sandbox drawer's shield only then.
+                "sandboxed": p.usesOpenShellPolicy,
                 // Its notes: the fat client's dashboard card and row tooltip.
                 "comments": p.comments,
             ]

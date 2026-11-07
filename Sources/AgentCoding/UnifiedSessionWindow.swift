@@ -1011,6 +1011,8 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// ⌃⌘N / the toolbar's shield button.
     @objc func togglePolicyDrawer(_ sender: Any?) {
+        // No sandbox on the stage's workspace: no drawer (⌃⌘N included).
+        guard listModel.policyDrawerOpen || listModel.hasSandboxDrawer(listModel.stageProfileID) else { return }
         setPolicyDrawerOpen(!listModel.policyDrawerOpen)
     }
 

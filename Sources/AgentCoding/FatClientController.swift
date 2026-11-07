@@ -1107,6 +1107,7 @@ final class RemoteHostController {
         var newProfiles: [Profile.ID: Profile] = [:]
         var newCredentials: [Profile.ID: WorkspaceCredentials] = [:]
         var newSpecs: [Profile.ID: WorkspaceSpec] = [:]
+        var unsandboxed = Set<Profile.ID>()
         for w in workspaces {
             guard let idStr = w["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             let name = w["name"] as? String ?? "?"
@@ -1127,6 +1128,8 @@ final class RemoteHostController {
                         .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
                 },
                 notes: w["comments"] as? String ?? ""))
+            // Absent (an older host): unknown, so the shield stays.
+            if (w["sandboxed"] as? Bool) == false { unsandboxed.insert(id) }
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
@@ -1177,6 +1180,7 @@ final class RemoteHostController {
         let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
+        if listModel.unsandboxedProfileIDs != unsandboxed { listModel.unsandboxedProfileIDs = unsandboxed }
         for id in storageMoved {
             NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
         }
@@ -4302,7 +4306,11 @@ final class RemoteHostWindow: NSWindow {
     private var policyDrawerTrailing: NSLayoutConstraint?
     private lazy var policyBackend = RemotePolicyDrawerBackend(controller: controller)
 
-    func togglePolicyDrawer() { setPolicyDrawerOpen(!controller.listModel.policyDrawerOpen) }
+    func togglePolicyDrawer() {
+        let list = controller.listModel
+        guard list.policyDrawerOpen || list.hasSandboxDrawer(list.stageProfileID) else { return }
+        setPolicyDrawerOpen(!list.policyDrawerOpen)
+    }
 
     func setPolicyDrawerOpen(_ open: Bool) {
         let host = ensurePolicyDrawer()
@@ -4320,6 +4328,15 @@ final class RemoteHostWindow: NSWindow {
                 self.policyDrawerHost?.isHidden = true
             }
         })
+    }
+
+    /// A stage occupant goes under the drawer, which stays on top.
+    static func addBelow(_ drawer: NSView?, _ view: NSView, on stage: NSView) {
+        if let drawer, drawer.superview === stage {
+            stage.addSubview(view, positioned: .below, relativeTo: drawer)
+        } else {
+            stage.addSubview(view)
+        }
     }
 
     /// Built on first open, on top of the stage.
@@ -8110,7 +8127,7 @@ final class RemoteHostWindow: NSWindow {
         // ON TOP of the mounted terminal; the next `mount(_:)` removes it.
         if host.superview !== stage {
             host.removeFromSuperview()
-            stage.addSubview(host)   // last subview = topmost
+            Self.addBelow(policyDrawerHost, host, on: stage)   // topmost but for the drawer
             NSLayoutConstraint.activate([
                 host.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
                 host.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -8410,11 +8427,17 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func mount(_ view: NSView) {
-        // Remove any current stage occupant except the one we're mounting.
-        for sub in stage.subviews where sub !== view { sub.removeFromSuperview() }
+        Self.mount(view, on: stage, keeping: policyDrawerHost)
+    }
+
+    /// Make `view` the stage's one occupant. Every other subview goes but the
+    /// Sandbox drawer, which floats over every occupant: removed with them,
+    /// the shield toggled a view no longer in the window.
+    static func mount(_ view: NSView, on stage: NSView, keeping drawer: NSView?) {
+        for sub in stage.subviews where sub !== view && sub !== drawer { sub.removeFromSuperview() }
         if view.superview !== stage {
             view.removeFromSuperview()
-            stage.addSubview(view)
+            addBelow(drawer, view, on: stage)
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -8440,7 +8463,9 @@ final class RemoteHostWindow: NSWindow {
         let reconnecting = presentation == .reconnecting
         let contentShown = presentation == .live || reconnecting
         statusHost?.isHidden = contentShown
-        stage.subviews.forEach { $0.isHidden = !contentShown }
+        for v in stage.subviews where v !== policyDrawerHost { v.isHidden = !contentShown }
+        // The drawer: shown only while open (and the content is).
+        policyDrawerHost?.isHidden = !(contentShown && controller.listModel.policyDrawerOpen)
         // The banner (down) or the slow-link pill. Non-blocking either way:
         // focus stays where the user left it — a terminal has its own
         // reconnect, and a blip shouldn't cost them a click back in.
