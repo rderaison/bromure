@@ -35,7 +35,7 @@ struct OpenShellTemplateTests {
         vm.onURLOpen = { opened.append($0) }
         vm.onHomeMigrated = { migrated += 1 }
         let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
-        for _ in 0..<24 { for apply in await scanner.tick() { apply(vm) } }
+        for _ in 0..<24 { for apply in await scanner.tick().all { apply(vm) } }
         #expect(opened == [URL(string: "https://example.com/login")!])
         #expect(migrated == 0)
         #expect(!FileManager.default.fileExists(atPath: urls.appendingPathComponent("url-1-2-ab.txt").path))
@@ -57,7 +57,7 @@ struct OpenShellTemplateTests {
         var opened: [URL] = []
         vm.onURLOpen = { opened.append($0) }
         let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
-        for _ in 0..<24 { for apply in await scanner.tick() { apply(vm) } }
+        for _ in 0..<24 { for apply in await scanner.tick().all { apply(vm) } }
         #expect(opened.isEmpty)
         #expect(FileManager.default.fileExists(atPath: victim.path), "a file on the Mac was consumed")
     }
