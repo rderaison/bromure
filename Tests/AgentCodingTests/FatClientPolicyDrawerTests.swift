@@ -1,0 +1,96 @@
+import Foundation
+import Testing
+@testable import bromure_ac
+
+/// Board report: the Sandbox drawer (the toolbar's shield: OpenShell's
+/// blocks, file denials and the advisor's proposals) showed only in this
+/// Mac's own window, never in a fat client's. The drawer now reads and
+/// decides through a backend: this Mac's, or the host's over its control
+/// socket, where every decision is made.
+@Suite("The Sandbox drawer in a fat client: the host's blocks and proposals")
+struct FatClientPolicyDrawerTests {
+    private static let top = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    private func src(_ p: String) throws -> String {
+        try String(contentsOf: Self.top.appendingPathComponent(p), encoding: .utf8)
+    }
+
+    @Test("the host's routes for the drawer's one-click decisions validate, decide and say why not")
+    func decisionRoute() {
+        let pid = UUID()
+        typealias A = ACAppDelegate
+        let allowOK: @Sendable (UUID, String, Int, String?) async -> String? = { _, _, _, _ in nil }
+        let allowNo: @Sendable (UUID, String, Int, String?) async -> String? = { _, _, _, _ in "Enforce binaries is on" }
+        var added: [(String, Bool)] = []
+        let add: (UUID, String, Bool) -> String? = { _, p, rw in added.append((p, rw)); return nil }
+
+        #expect(A.sandboxDecisionRoute(profileID: pid, "openshell-allow", body: ["host": "api.example.com", "port": 443],
+                                       allow: allowOK, addPath: add).status == 200)
+        let refused = A.sandboxDecisionRoute(profileID: pid, "openshell-allow",
+                                             body: ["host": "api.example.com", "port": 443, "exe": "/usr/bin/curl"],
+                                             allow: allowNo, addPath: add)
+        #expect(refused.status == 409 && refused.body["error"] as? String == "Enforce binaries is on")
+        #expect(A.sandboxDecisionRoute(profileID: pid, "openshell-allow", body: ["host": "", "port": 443],
+                                       allow: allowOK, addPath: add).status == 400)
+        #expect(A.sandboxDecisionRoute(profileID: pid, "openshell-allow", body: ["host": "h", "port": 0],
+                                       allow: allowOK, addPath: add).status == 400)
+
+        #expect(A.sandboxDecisionRoute(profileID: pid, "sandbox-path", body: ["path": "/opt/tool", "readWrite": true],
+                                       allow: allowOK, addPath: add).status == 200)
+        #expect(added.count == 1 && added[0].0 == "/opt/tool" && added[0].1)
+        #expect(A.sandboxDecisionRoute(profileID: pid, "sandbox-path", body: ["path": "relative/x"],
+                                       allow: allowOK, addPath: add).status == 400)
+        #expect(A.sandboxDecisionRoute(profileID: pid, "sandbox-path", body: ["path": "/a\nb"],
+                                       allow: allowOK, addPath: add).status == 400)
+        #expect(added.count == 1)
+        #expect(A.sandboxDecisionRoute(profileID: pid, "nope", body: [:], allow: allowOK, addPath: add).status == 404)
+    }
+
+    @Test("the host's proposals and package requests decode as the drawer shows them")
+    func wire() throws {
+        let p = try #require(DrawerProposal(wire: [
+            "id": "p-3", "status": "pending", "source": "agent_authored", "intent": "fetch the docs",
+            "host": "docs.example.com", "port": 443, "binaries": ["/usr/bin/curl"], "findings": ["new_host"]]))
+        #expect(p.host == "docs.example.com" && p.port == 443 && p.status == .pending && p.binaries == ["/usr/bin/curl"])
+        #expect(DrawerProposal(wire: ["id": "p-4", "status": "bogus"]) == nil)
+        let r = try #require(DrawerPackage(wire: ["id": "pkg-1", "status": "failed", "packages": ["jq"],
+                                                  "exit_code": 100, "output": "E: Unable to locate package"]))
+        #expect(r.status == .failed && r.exitCode == 100 && r.packages == ["jq"])
+    }
+
+    @Test("a host's answer: ok, refused with its reason, or no answer")
+    func failures() {
+        typealias B = RemotePolicyDrawerBackend
+        #expect(B.failure(ControlClient.Response(status: 200, json: ["ok": true])) == nil)
+        #expect(B.failure(ControlClient.Response(status: 409, json: ["error": "nope"])) == "nope")
+        #expect(B.failure(ControlClient.Response(status: 500, json: [:]))?.contains("500") == true)
+        #expect(B.failure(nil) != nil)
+    }
+
+    @Test("the host's full profile decodes (ISO 8601 dates, bare or under \"profile\")")
+    func profileDecodes() throws {
+        var p = Profile(id: UUID(), name: "Storefront", tool: .claude, authMode: .token)
+        p.egressRules = "deny web any POST"
+        p.networkPolicy = "version: 1\n"
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        let doc = try #require(try JSONSerialization.jsonObject(with: enc.encode(p)) as? [String: Any])
+        #expect(RemotePolicyDrawerBackend.decodeProfile(doc)?.egressRules == "deny web any POST")
+        #expect(RemotePolicyDrawerBackend.decodeProfile(["profile": doc])?.networkPolicy == "version: 1\n")
+    }
+
+    @Test("wired: the fat client's toolbar and window, the host's routes, a drawer with no local reach")
+    func wired() throws {
+        let fc = try src("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }"))
+        #expect(fc.contains("onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer() },"))
+        #expect(fc.contains("backend: policyBackend)"))
+        let server = try src("Sources/AgentCoding/AutomationServer.swift")
+        #expect(server.contains(#"case "openshell-allow", "sandbox-path": handler = onProfileSandboxDecision"#))
+        // The drawer itself reaches nothing of this Mac's but through its backend.
+        let drawer = try src("Sources/AgentCoding/PolicyDrawer.swift")
+        let body = try #require(drawer.components(separatedBy: "\nextension ACAppDelegate").first)
+        #expect(!body.contains("OpenShellAdvisor.shared."))
+        #expect(!body.contains("delegate?."))
+        #expect(body.contains("e.machine == backend.machine"))
+    }
+}

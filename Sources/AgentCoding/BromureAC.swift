@@ -5729,6 +5729,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             return Self.advisorProposalsRoute(profileID: pid, method: method, sub: sub, body: body)
         }
+        server.onProfileSandboxDecision = { [weak self] key, method, sub, body in
+            guard let pid = DispatchQueue.main.sync(execute: { self?.profileByNameOrID(key)?.id }) else {
+                return (404, ["error": "Profile not found"])
+            }
+            guard method == "POST", sub.count == 1 else { return (405, ["error": "POST only"]) }
+            return Self.sandboxDecisionRoute(profileID: pid, sub[0], body: body,
+                                             allow: { pid, host, port, exe in
+                                                 await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
+                                             },
+                                             addPath: { pid, path, rw in
+                                                 DispatchQueue.main.sync {
+                                                     MainActor.assumeIsolated {
+                                                         self?.addSandboxPath(profileID: pid, path: path, readWrite: rw) ?? "unavailable"
+                                                     }
+                                                 }
+                                             })
+        }
         server.onDescribeStorage = { [weak self] key in
             guard let self, let p = self.profileByNameOrID(key) else { return nil }
             return self.makeStorageContext(for: p)
@@ -6909,6 +6926,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///   POST /profiles/{id}/proposals/{proposal}/approve
     ///   POST /profiles/{id}/proposals/{proposal}/reject     {"reason": "…"}
     /// Runs on the automation server's thread.
+    /// The Sandbox drawer's one-click decisions from a fat client, as its own
+    /// window makes them here: `openshell-allow` (OpenShellAdvisor.allow) and
+    /// `sandbox-path` (a filesystem path into the policy, at the next start).
+    /// Runs on the automation server's thread. 200 {"ok": true}, else
+    /// 400/409 {"error"}.
+    nonisolated static func sandboxDecisionRoute(
+        profileID: UUID, _ action: String, body: [String: Any],
+        allow: @escaping @Sendable (UUID, String, Int, String?) async -> String?,
+        addPath: (UUID, String, Bool) -> String?
+    ) -> (status: Int, body: [String: Any]) {
+        switch action {
+        case "openshell-allow":
+            guard let host = body["host"] as? String, !host.isEmpty, host.count <= 253,
+                  let port = body["port"] as? Int, (1...65535).contains(port) else {
+                return (400, ["error": "host and port (1-65535) required"])
+            }
+            let exe = (body["exe"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(4096)) }
+            let box = SendableBox<String?>(nil)
+            let done = DispatchSemaphore(value: 0)
+            Task.detached { box.value = await allow(profileID, host, port, exe); done.signal() }
+            if done.wait(timeout: .now() + 30) == .timedOut { return (504, ["error": "Allowing \(host):\(port) timed out"]) }
+            if let error = box.value { return (409, ["error": error]) }
+            return (200, ["ok": true])
+        case "sandbox-path":
+            guard let path = body["path"] as? String, path.hasPrefix("/"), path.count <= 4096,
+                  !path.contains("\n"), !path.contains("\0") else {
+                return (400, ["error": "an absolute path required"])
+            }
+            if let error = addPath(profileID, path, (body["readWrite"] as? Bool) ?? false) {
+                return (409, ["error": error])
+            }
+            return (200, ["ok": true])
+        default:
+            return (404, ["error": "Unknown sandbox decision"])
+        }
+    }
+
     nonisolated static func advisorProposalsRoute(profileID: UUID, method: String, sub: [String],
                                                   body: [String: Any], advisor: OpenShellAdvisor = .shared)
         -> (status: Int, body: [String: Any]) {

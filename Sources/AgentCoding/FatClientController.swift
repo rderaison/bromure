@@ -3189,6 +3189,8 @@ struct RemoteToolbarBar: View {
     var onToggleLinux: () -> Void = {}
     /// The machine's dashboard (the machine menu's "Machine Details").
     var onDetails: ((Profile.ID) -> Void)? = nil
+    /// The Sandbox drawer (the shield): the host's blocks and proposals.
+    var onTogglePolicyDrawer: () -> Void = {}
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -3278,6 +3280,7 @@ struct RemoteToolbarBar: View {
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
+                PolicyDrawerButton(list: model, profileID: entry.id) { onTogglePolicyDrawer() }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
@@ -4267,6 +4270,7 @@ final class RemoteHostWindow: NSWindow {
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showMachineDashboard(id) },
+            onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer() },
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
@@ -4281,6 +4285,65 @@ final class RemoteHostWindow: NSWindow {
         tb.allowsUserCustomization = false
         toolbarStyle = .unified
         toolbar = tb
+    }
+
+    // MARK: Sandbox drawer
+
+    /// The host's Sandbox drawer: blocks, file denials, the advisor's
+    /// proposals -- decided on the host, as in its own window.
+    private var policyDrawerHost: NSView?
+    private var policyDrawerTrailing: NSLayoutConstraint?
+    private lazy var policyBackend = RemotePolicyDrawerBackend(controller: controller)
+
+    func togglePolicyDrawer() { setPolicyDrawerOpen(!controller.listModel.policyDrawerOpen) }
+
+    func setPolicyDrawerOpen(_ open: Bool) {
+        let host = ensurePolicyDrawer()
+        controller.listModel.policyDrawerOpen = open
+        if open { host.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            policyDrawerTrailing?.animator().constant = open ? -10 : 400
+            host.animator().alphaValue = open ? 1 : 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.controller.listModel.policyDrawerOpen else { return }
+                self.policyDrawerHost?.isHidden = true
+            }
+        })
+    }
+
+    /// Built on first open, on top of the stage.
+    private func ensurePolicyDrawer() -> NSView {
+        if let h = policyDrawerHost { return h }
+        let drawer = PolicyDrawer(
+            list: controller.listModel,
+            onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
+            onOpenSettings: { [weak self] id in
+                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
+                self?.openWorkspaceSettings(id)
+            },
+            backend: policyBackend)
+        let host = NSHostingView(rootView: drawer)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.wantsLayer = true
+        host.alphaValue = 0
+        host.isHidden = true
+        stage.addSubview(host, positioned: .above, relativeTo: nil)
+        let trailing = host.trailingAnchor.constraint(equalTo: stage.trailingAnchor, constant: 400)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: stage.topAnchor, constant: 10),
+            host.bottomAnchor.constraint(equalTo: stage.bottomAnchor, constant: -10),
+            host.widthAnchor.constraint(equalToConstant: 368),
+            trailing,
+        ])
+        stage.layoutSubtreeIfNeeded()
+        policyDrawerHost = host
+        policyDrawerTrailing = trailing
+        return host
     }
 
     // MARK: File-explorer pane + file-browser windows

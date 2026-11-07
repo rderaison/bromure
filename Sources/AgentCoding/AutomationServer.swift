@@ -225,6 +225,11 @@ final class ACAutomationServer {
     /// policy advisor's pending proposals. Called on the server thread.
     var onProfileProposals: ((_ idOrName: String, _ method: String, _ sub: [String],
                               _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
+    /// `POST /profiles/{id}/openshell-allow {host, port, exe?}` and
+    /// `POST /profiles/{id}/sandbox-path {path, readWrite}`: the Sandbox
+    /// drawer's one-click decisions, from a fat client.
+    var onProfileSandboxDecision: ((_ idOrName: String, _ method: String, _ sub: [String],
+                                    _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
     /// `/profiles/{id}/policy/revisions[/{n}]`: the workspace's saved policy
     /// versions. Called on the server thread.
     var onProfilePolicyRevisions: ((_ idOrName: String, _ method: String, _ sub: [String],
@@ -1927,6 +1932,7 @@ final class ACAutomationServer {
             switch sub.first {
             case "proposals": handler = onProfileProposals
             case "policy": handler = onProfilePolicyRevisions
+            case "openshell-allow", "sandbox-path": handler = onProfileSandboxDecision
             default: handler = nil
             }
             guard let handler else {

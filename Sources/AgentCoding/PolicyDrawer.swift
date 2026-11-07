@@ -21,22 +21,32 @@ struct PolicyDrawer: View {
     @State private var needsRestart: Set<String> = []
     @State private var busy: Set<String> = []
     @State private var errors: [String: String] = [:]
-    @State private var proposals: [OpenShellAdvisor.Proposal] = []
-    @State private var packages: [OpenShellAdvisor.PackageRequest] = []
+    /// Bumped when this Mac's advisor changes (it isn't observable).
+    @State private var advisorTick = 0
     @State private var now = Date()
     @ObservedObject private var ticker = FirewallRulesTicker.shared
     /// The timeline and workspace to show (screenshots pass stand-ins; the
     /// app uses its own).
     var timeline: SecurityTimeline = .shared
     var profileOverride: Profile? = nil
+    /// Whose workspaces: this Mac's, or a fat client's host's (decisions go
+    /// to the host).
+    var backend: PolicyDrawerBackend = LocalPolicyDrawerBackend.shared
     private let clock = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
-    private var delegate: ACAppDelegate? { NSApp.delegate as? ACAppDelegate }
     private var profile: Profile? {
         let _ = ticker.generation
         if let profileOverride { return profileOverride }
         guard let id = list.stageProfileID else { return nil }
-        return delegate?.profiles.first { $0.id == id }
+        return backend.profile(id)
+    }
+    private var proposals: [DrawerProposal] {
+        let _ = advisorTick
+        return list.stageProfileID.map { backend.proposals($0) } ?? []
+    }
+    private var packages: [DrawerPackage] {
+        let _ = advisorTick
+        return list.stageProfileID.map { backend.packages($0) } ?? []
     }
     private var isOpenShell: Bool { profile?.usesOpenShellPolicy ?? false }
 
@@ -84,7 +94,10 @@ struct PolicyDrawer: View {
             if open { reloadProposals() }
             PolicyDrawer.markSeen(list, closing: !open)
         }
-        .onReceive(clock) { now = $0; markSeen() }
+        .onReceive(clock) {
+            now = $0; markSeen()
+            if list.policyDrawerOpen { reloadProposals() }   // a host's: fetched again
+        }
     }
 
     // MARK: Header, tabs, footer
@@ -315,10 +328,16 @@ struct PolicyDrawer: View {
     private func allowFirewall(_ item: Blocked, _ rule: EgressPolicy.Rule, _ d: FirewallRuleActions.Duration, _ profile: Profile) {
         var r = rule
         d.apply(to: &r, now: Date())
-        if delegate?.applyFirewallEdit(.insert(r), profileID: profile.id) == true || allowedNow(item, profile) {
-            allowed.insert(item.key); errors[item.key] = nil
-        } else {
-            errors[item.key] = NSLocalizedString("Couldn't add the rule.", comment: "network drawer")
+        let key = item.key, pid = profile.id
+        busy.insert(key)
+        Task { @MainActor in
+            let ok = await backend.editFirewall(.insert(r), profileID: pid)
+            busy.remove(key)
+            if ok || (self.profile.map { allowedNow(item, $0) } ?? false) {
+                allowed.insert(key); errors[key] = nil
+            } else {
+                errors[key] = NSLocalizedString("Couldn't add the rule.", comment: "network drawer")
+            }
         }
     }
 
@@ -330,7 +349,7 @@ struct PolicyDrawer: View {
         busy.insert(item.key)
         let pid = profile.id, host = item.host, port = item.port, key = item.key, exe = item.fw.exe
         Task { @MainActor in
-            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
+            let error = await backend.allowOpenShell(profileID: pid, host: host, port: port, exe: exe)
             busy.remove(key)
             if let error { errors[key] = error } else { allowed.insert(key); errors[key] = nil }
         }
@@ -368,7 +387,7 @@ struct PolicyDrawer: View {
     private func fileDenials(_ profile: Profile) -> [FileDenial] {
         let cutoff = now.addingTimeInterval(-2 * 3600)
         var byFolder: [String: FileDenial] = [:]
-        for e in timeline.allEvents where e.profileID == profile.id && e.machine == nil && e.time > cutoff
+        for e in timeline.allEvents where e.profileID == profile.id && e.machine == backend.machine && e.time > cutoff
             && e.eventType == "sentry.event" {
             guard let d = e.detail, case .string(let path)? = d["path"], path.hasPrefix("/") else { continue }
             if case .string("seccomp_denied")? = d["kind"] { continue }
@@ -400,7 +419,7 @@ struct PolicyDrawer: View {
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Restart") { delegate?.restartProfile(profile.id) }
+                    Button("Restart") { backend.restart(profile.id) }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).tint(.orange)
                 }
             }
@@ -469,11 +488,13 @@ struct PolicyDrawer: View {
     }
 
     private func allowPath(_ path: String, readWrite: Bool, _ profile: Profile, key: String? = nil) {
-        let k = key ?? path
-        if let error = delegate?.addSandboxPath(profileID: profile.id, path: path, readWrite: readWrite) {
-            errors["fs:" + k] = error
-        } else {
-            needsRestart.insert(k); errors["fs:" + k] = nil
+        let k = key ?? path, pid = profile.id
+        Task { @MainActor in
+            if let error = await backend.addSandboxPath(profileID: pid, path: path, readWrite: readWrite) {
+                errors["fs:" + k] = error
+            } else {
+                needsRestart.insert(k); errors["fs:" + k] = nil
+            }
         }
     }
 
@@ -503,8 +524,8 @@ struct PolicyDrawer: View {
                         Text(verbatim: p.intent).font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if !p.rule.binaries.isEmpty {
-                        Label(p.rule.binaries.joined(separator: ", "), systemImage: "terminal")
+                    if !p.binaries.isEmpty {
+                        Label(p.binaries.joined(separator: ", "), systemImage: "terminal")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if !p.findings.isEmpty {
@@ -521,12 +542,11 @@ struct PolicyDrawer: View {
                     HStack {
                         Spacer()
                         Button("Reject") {
-                            OpenShellAdvisor.shared.reject(id: p.id, profileID: profile.id, reason: "")
+                            backend.decideProposal(id: p.id, profileID: profile.id, approve: false)
                         }
                         .buttonBorderShape(.capsule)
                         Button("Approve") {
-                            let id = p.id, pid = profile.id
-                            Task { await OpenShellAdvisor.shared.approve(id: id, profileID: pid) }
+                            backend.decideProposal(id: p.id, profileID: profile.id, approve: true)
                         }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
                     }
@@ -537,9 +557,8 @@ struct PolicyDrawer: View {
     }
 
     private func reloadProposals() {
-        guard let id = list.stageProfileID else { proposals = []; packages = []; return }
-        proposals = OpenShellAdvisor.shared.proposals(for: id)
-        packages = OpenShellAdvisor.shared.packageRequests(for: id)
+        if let id = list.stageProfileID { backend.refresh(id) }
+        advisorTick &+= 1
     }
 
     /// System packages the agent asked for: waiting, installing, or just
@@ -564,12 +583,11 @@ struct PolicyDrawer: View {
                         HStack {
                             Spacer()
                             Button("Reject") {
-                                OpenShellAdvisor.shared.rejectPackages(id: r.id, profileID: profile.id, reason: "")
+                                backend.decidePackages(id: r.id, profileID: profile.id, approve: false)
                             }
                             .buttonBorderShape(.capsule)
                             Button("Install") {
-                                let id = r.id, pid = profile.id
-                                Task.detached { await OpenShellAdvisor.shared.approvePackages(id: id, profileID: pid) }
+                                backend.decidePackages(id: r.id, profileID: profile.id, approve: true)
                             }
                             .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
                         }
@@ -620,7 +638,10 @@ struct PolicyDrawer: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("End") { _ = delegate?.applyFirewallEdit(.remove(ruleText: r.text), profileID: profile.id) }
+                    Button("End") {
+                        let pid = profile.id, text = r.text
+                        Task { _ = await backend.editFirewall(.remove(ruleText: text), profileID: pid) }
+                    }
                         .buttonBorderShape(.capsule).controlSize(.small)
                 }
             }
