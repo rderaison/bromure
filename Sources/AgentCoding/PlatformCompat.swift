@@ -97,6 +97,17 @@ func fdShutdownWrite(_ fd: Int32) -> Int32 {
 #endif
 }
 
+/// Both directions shut: a thread blocked reading `fd` wakes (with an EOF),
+/// as a bare close(2) only guarantees on Darwin.
+@discardableResult
+func fdShutdownBoth(_ fd: Int32) -> Int32 {
+#if canImport(Darwin)
+    shutdown(fd, SHUT_RDWR)
+#else
+    shutdown(fd, Int32(SHUT_RDWR))
+#endif
+}
+
 /// State behind a lock, with OSAllocatedUnfairLock's `withLock` shape, for
 /// code that also builds where Apple's `os` module isn't there.
 final class LockedState<State>: @unchecked Sendable {

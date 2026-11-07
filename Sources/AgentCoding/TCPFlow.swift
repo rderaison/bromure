@@ -196,7 +196,10 @@ final class TCPFlow {
     private func closeLocked() {
         guard state != .closed else { return }
         state = .closed
-        if rfd >= 0 { FDGuard.close(rfd, "tcpflow.rfd"); rfd = -1 }
+        // Shut before the close: the reader thread blocks in read(2) on this
+        // fd, and on Linux a close doesn't wake it, so a cut or a RST would
+        // leave the upstream leg running.
+        if rfd >= 0 { fdShutdownBoth(rfd); FDGuard.close(rfd, "tcpflow.rfd"); rfd = -1 }
         cond.broadcast()
         onClosed(key)
     }
