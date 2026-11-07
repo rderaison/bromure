@@ -20,13 +20,8 @@ struct E2EFilterTests {
         for m in re.matches(in: src, range: NSRange(location: 0, length: ns.length)) {
             let n = ns.substring(with: m.range(at: 1))
             let name = n + "." + ns.substring(with: m.range(at: 2))
-            by[n + ".", default: []].append(name)
-            if name.contains("${") {
-                for d in 0...9 {
-                    by[n + ".", default: []].append(
-                        name.replacingOccurrences(of: #"\$\{[^}]*\}"#, with: String(d), options: .regularExpression))
-                }
-            }
+            by[n + ".", default: []].append(
+                name.replacingOccurrences(of: #"\$\{[^}]*\}"#, with: "…", options: .regularExpression))
         }
         return by
     }
@@ -50,13 +45,28 @@ struct E2EFilterTests {
         #expect(try selected(#"^8\."#) == ["8."])
         #expect(try selected("deny-web-POST") == ["27."])
         #expect(try selected("nosuchtestxyz").isEmpty)
-        // A name built at run time (`32.${round + 1} …`) is found by its number.
         #expect(try selected(#"32\.2"#) == ["32."])
+        #expect(try selected(#"32\.3"#) == ["32."])
+        // Finding: "Generated filter names let nonexistent tests pass the E2E
+        // suite" -- the index put 0-9 in for `32.${round + 1}`, so `32.9`
+        // selected section 32 and the run passed with nothing tested.
+        #expect(try selected(#"32\.9"#).isEmpty)
+        #expect(try selected(#"33\.2 .* 7 times"#).isEmpty)   // a run-time count isn't guessed either
+        #expect(try selected(#"33\.2 a sign-in"#) == ["33."])
 
         // The harness does what this test does.
         #expect(src.contains(#"for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {"#))
         #expect(src.contains("return re.test(prefix) || (SECTION_TESTS.get(prefix) || []).some((name) => re.test(name));"))
         #expect(src.contains("matches no test name — nothing would run."))
-        #expect(src.contains("bySection.get(key).push(name.replace(/\\$\\{[^}]*\\}/g, String(d)));"))
+        #expect(src.contains(#"bySection.get(key).push(`${m[1]}.${m[2]}`.replace(/\$\{[^}]*\}/g, "…"));"#))
+        #expect(!src.contains("String(d)));"))
+        // A test's number is literal: no `NN.${…}` name the index can't read.
+        #expect(src.range(of: #"\btest\(\s*`\d+\.\$\{"#, options: .regularExpression) == nil)
+        #expect(src.range(of: #"\btest\(\s*`\$\{"#, options: .regularExpression) == nil)
+        // And a filtered run that ran nothing fails.
+        #expect(src.contains("if (FILTER && passed + failed === 0) {"))
+        // The web app's suite too.
+        let web = try String(contentsOf: Self.suite.deletingLastPathComponent().appendingPathComponent("e2e.mjs"), encoding: .utf8)
+        #expect(web.contains("if (FILTER && passed + failed === 0) {"))
     }
 }

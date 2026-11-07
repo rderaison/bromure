@@ -2567,6 +2567,11 @@ AllowedIPs = 10.99.0.0/24
   );
   console.log("========================================\n");
 
+  // A filtered run that ran nothing tested nothing (a mistyped filter): not a pass.
+  if (FILTER && passed + failed === 0) {
+    console.log(`--filter ${JSON.stringify(FILTER)} ran no test.`);
+    process.exit(1);
+  }
   process.exit(failed > 0 ? 1 : 0);
 }
 
