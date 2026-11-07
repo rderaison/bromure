@@ -85,7 +85,7 @@ struct SettingsKeepsAppEditsTests {
         #expect(ios.contains("built = RemoteHostController.settingsDocument(edited: edited, opened: original)"))
         let mac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
         let doc = try #require(mac.range(of: "static func settingsDocument("))
-        #expect(mac[doc.upperBound...].prefix(1500).contains("if let opened { dropUnedited(&doc, edited: edited, opened: opened) }"))
+        #expect(mac[doc.upperBound...].prefix(1800).contains("dropUnedited(&doc, edited: edited, opened: opened)"))
     }
 
     /// The other way round: a dashboard draft left open while settings saved

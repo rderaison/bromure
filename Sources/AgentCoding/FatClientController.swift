@@ -1906,38 +1906,49 @@ final class RemoteHostController {
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
 
+    /// The document the settings window saves to the host: what the user
+    /// changed, nothing else.
+    ///
+    /// - A field changed is sent.
+    /// - A field cleared (the window opened with it, the edit no longer has
+    ///   it: the Profile encoder leaves a default out, `agentReach` nil is
+    ///   "Every workspace", `browserPersistent` only says true) is sent as an
+    ///   explicit null, which the host takes as "clear", as the CLI's
+    ///   `workspaces edit` does (`ProfileDocument.editedDocument`).
+    /// - A field as it opened stays out, and the host keeps what it has now,
+    ///   which may be newer: another window or the CLI may have changed it
+    ///   since. Sending the whole window back undid those, a restriction of
+    ///   the workspace's reach included (CWE-367).
+    ///
+    /// Without the baseline: reach is never widened (no null for it), and an
+    /// empty kube list is sent explicitly, as before (the host treats an
+    /// explicit array as the whole set). Notes and the Squelch switch follow
+    /// `dropUnedited`.
+    static func settingsDocument(edited: Profile, opened: Profile?) -> [String: Any]? {
+        guard var doc = ACAppDelegate.codableToDict(edited) else { return nil }
+        if let opened, let was = ACAppDelegate.codableToDict(opened) {
+            // `ProfileDocument.editedDocument`, which the iOS app doesn't build.
+            for key in was.keys where doc[key] == nil { doc[key] = NSNull() }
+            for key in Array(doc.keys) {
+                guard let now = doc[key], !(now is NSNull), let old = was[key] else { continue }
+                if (old as AnyObject).isEqual(now) { doc.removeValue(forKey: key) }
+            }
+            // The last kube context removed: an explicit empty list (a null
+            // would leave the host's contexts as they are).
+            if edited.kubeconfigs.isEmpty, !opened.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
+            dropUnedited(&doc, edited: edited, opened: opened)
+        } else if edited.kubeconfigs.isEmpty {
+            doc["kubeconfigs"] = [[String: Any]]()
+        }
+        return doc
+    }
+
     /// A settings document without what the editor left as it opened it and
     /// the app saves meanwhile (the dashboard's notes, the sidebar's Squelch
     /// switch): the host's merge keeps a key left out (Finding CWE-362,
     /// "Saving workspace settings overwrites notes edited on the VM
     /// dashboard"). An edited Squelch policy goes whole: its encoder omits
     /// the default one, which would read as "unchanged".
-    /// The document the settings window saves to the host. The Profile
-    /// encoder leaves out a field at its default (a nil, an empty list, a
-    /// switch off: `agentReach` nil is "Every workspace", `browserPersistent`
-    /// only says true), and the host keeps a field the document doesn't name:
-    /// turning one of those back from the fat client never reached the host.
-    /// Reach opened to every workspace kept enforcing the old list. So a field
-    /// the window opened with and the edit no longer has is sent as an
-    /// explicit null, which the host takes as "clear" (its default), as the
-    /// CLI's `workspaces edit` does (`ProfileDocument.editedDocument`). Notes
-    /// and the Squelch switch left as they opened stay out (`dropUnedited`).
-    /// For an existing workspace only: a new one's absent reach must stay the
-    /// host's default (none), not be sent as "every workspace".
-    static func settingsDocument(edited: Profile, opened: Profile?) -> [String: Any]? {
-        guard var doc = ACAppDelegate.codableToDict(edited) else { return nil }
-        if let opened, let was = ACAppDelegate.codableToDict(opened) {
-            // `ProfileDocument.editedDocument`, which the iOS app doesn't build.
-            for key in was.keys where doc[key] == nil { doc[key] = NSNull() }
-        }
-        // Without a baseline, at least the two whose absence was read as
-        // "unchanged": the last kube context removed, reach to every workspace.
-        if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
-        if edited.agentReach == nil { doc["agentReach"] = NSNull() }
-        if let opened { dropUnedited(&doc, edited: edited, opened: opened) }
-        return doc
-    }
-
     static func dropUnedited(_ doc: inout [String: Any], edited: Profile, opened: Profile) {
         if edited.comments == opened.comments { doc.removeValue(forKey: "comments") }
         if edited.squelch == opened.squelch {

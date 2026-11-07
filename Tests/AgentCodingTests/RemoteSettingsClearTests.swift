@@ -28,11 +28,13 @@ struct RemoteSettingsClearTests {
         // The old save: the edited profile encoded as is.
         let old = try #require(ACAppDelegate.codableToDict(edited))
         #expect(try host(stored, applying: old).agentReach == [other], "the bug: the list stayed")
-        // Now: with the window's baseline, and without one.
-        for opened in [stored, nil] as [Profile?] {
-            let doc = try #require(RemoteHostController.settingsDocument(edited: edited, opened: opened))
-            #expect(try host(stored, applying: doc).agentReach == nil)
-        }
+        // Now: with the window's baseline, it's cleared.
+        let doc = try #require(RemoteHostController.settingsDocument(edited: edited, opened: stored))
+        #expect(try host(stored, applying: doc).agentReach == nil)
+        // Without one, reach is never widened: the host keeps its list.
+        let blind = try #require(RemoteHostController.settingsDocument(edited: edited, opened: nil))
+        #expect(blind["agentReach"] == nil)
+        #expect(try host(stored, applying: blind).agentReach == [other])
         // And narrowing it still goes through.
         edited.agentReach = []
         let narrow = try #require(RemoteHostController.settingsDocument(edited: edited, opened: stored))
@@ -65,6 +67,46 @@ struct RemoteSettingsClearTests {
         #expect(got.modelRouting == .cloud && got.browserAllowUploads && got.customFontSize == nil)
         #expect(got.environmentVariables.isEmpty)
         #expect(got.comments == "host notes")
+    }
+
+    /// The finding (CWE-367): a window opened on "Every workspace", saved
+    /// for an unrelated setting after another client restricted the reach,
+    /// sent reach null and reopened it. The whole window going back undid
+    /// any change made meanwhile the same way.
+    @Test("a field left as the window opened it isn't sent: a restriction made meanwhile stands")
+    func unchangedStaysOut() throws {
+        let a = UUID(), b = UUID()
+        var opened = Profile(name: "ws", tool: .claude, authMode: .token)
+        opened.agentReach = nil                          // the window opened on "Every workspace"
+        var edited = opened
+        edited.customFontSize = 15                       // the user changes something else
+        var host = opened
+        host.agentReach = [a]                            // another client restricted it meanwhile
+        let doc = try #require(RemoteHostController.settingsDocument(edited: edited, opened: opened))
+        #expect(doc["agentReach"] == nil && doc["customFontSize"] as? Int == 15)
+        let saved = try self.host(host, applying: doc)
+        #expect(saved.agentReach == [a], "the save reopened the restricted reach")
+        #expect(saved.customFontSize == 15)
+
+        // A list narrowed meanwhile isn't put back either.
+        opened.agentReach = [a, b]
+        edited = opened; edited.privateMode = true
+        host = opened; host.agentReach = [a]
+        let narrowed = try self.host(host, applying: try #require(
+            RemoteHostController.settingsDocument(edited: edited, opened: opened)))
+        #expect(narrowed.agentReach == [a] && narrowed.privateMode)
+
+        // What the user did change to reach still goes: narrowed, or opened up.
+        edited = opened; edited.agentReach = [b]
+        #expect(try self.host(host, applying: try #require(
+            RemoteHostController.settingsDocument(edited: edited, opened: opened))).agentReach == [b])
+        edited = opened; edited.agentReach = nil
+        #expect(try self.host(host, applying: try #require(
+            RemoteHostController.settingsDocument(edited: edited, opened: opened))).agentReach == nil)
+
+        // Unchanged kube contexts stay out; the last one removed is an explicit [].
+        let unchanged = try #require(RemoteHostController.settingsDocument(edited: opened, opened: opened))
+        #expect(unchanged["kubeconfigs"] == nil && unchanged["agentReach"] == nil)
     }
 
     @Test("the settings window saves through it")
