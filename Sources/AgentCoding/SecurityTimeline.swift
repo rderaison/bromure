@@ -46,6 +46,12 @@ public final class SecurityTimeline {
 
     public struct Event: Identifiable, Sendable {
         public let id = UUID()
+        /// The row this event stands for across coalescing, restarts and the
+        /// fat-client mirror: the id of the event the row started as (nil =
+        /// this one's). A coalesced row is a new Event each time it folds a
+        /// repeat; this stays.
+        public var rowID: UUID? = nil
+        public var stableID: UUID { rowID ?? id }
         public let time: Date
         /// The engine that fired ("Firewall", "Credential brokering", …).
         public let engine: String
@@ -178,6 +184,7 @@ public final class SecurityTimeline {
                                        workspace: e.workspace ?? old.workspace, machine: e.machine,
                                        count: (old.count ?? 1) + (e.count ?? 1))
                     merged.coalesceKey = key
+                    merged.rowID = old.stableID
                     merged.firewall = e.firewall ?? old.firewall
                     merged.package = e.package ?? old.package
                     merged.eventType = e.eventType ?? old.eventType
@@ -323,6 +330,7 @@ public final class SecurityTimeline {
         if let dn = e.denials { d["dn"] = dn }
         if let fw = e.firewall { d["fw"] = fw.wire }
         if let pk = e.package { d["pk"] = pk.allowlistEntry }
+        d["rid"] = e.stableID.uuidString
         guard var data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
         data.append(0x0A)
         return data
@@ -345,6 +353,7 @@ public final class SecurityTimeline {
         e.denials = d["dn"] as? Int
         e.firewall = Firewall(wire: d["fw"] as? [String: Any])
         e.package = PackageRef(wire: d["pk"] as? String)
+        e.rowID = (d["rid"] as? String).flatMap(UUID.init)
         return e
     }
 
@@ -448,6 +457,7 @@ public final class SecurityTimeline {
             if let n = e.count { r["count"] = n }
             if let t = e.eventType, let x = e.detail.flatMap(Self.foundation) { r["type"] = t; r["detail"] = x }
             if let ck = e.coalesceKey { r["ck"] = ck }
+            r["rid"] = e.stableID.uuidString
             if let dn = e.denials { r["dn"] = dn }
             if let fw = e.firewall { r["fw"] = fw.wire }
             if let pk = e.package { r["pk"] = pk.allowlistEntry }
@@ -494,9 +504,23 @@ public final class SecurityTimeline {
     nonisolated static func merged(history: [Event], mirror: [Event]) -> [Event] {
         guard !history.isEmpty else { return mirror }
         guard let oldest = mirror.map(\.time).min() else { return [] }
-        let again = Set(mirror.compactMap { e in e.coalesceKey.map { "\(e.profileID)|\($0)" } })
+        // The mirror's copy of a row replaces exactly that row: by its stable
+        // id. A key alone matched every older row with it -- and the host
+        // starts a new row when a key recurs after the coalescing window, so
+        // distinct earlier decisions were dropped (Finding: "Recent coalesced
+        // event removes distinct older events with the same key"). A host
+        // that sends no ids: only a copy within the window of a mirrored
+        // repeat is the same row.
+        let mirroredRows = Set(mirror.compactMap(\.rowID))
+        var repeatTimes: [String: [Date]] = [:]
+        for e in mirror where e.rowID == nil {
+            if let ck = e.coalesceKey { repeatTimes["\(e.profileID)|\(ck)", default: []].append(e.time) }
+        }
         let kept = history.filter { e in
-            e.time < oldest && !(e.coalesceKey.map { again.contains("\(e.profileID)|\($0)") } ?? false)
+            guard e.time < oldest else { return false }
+            if let rid = e.rowID { return !mirroredRows.contains(rid) }
+            guard let ck = e.coalesceKey, let times = repeatTimes["\(e.profileID)|\(ck)"] else { return true }
+            return !times.contains { $0 >= e.time && $0.timeIntervalSince(e.time) <= coalesceWindow }
         }
         return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap + 1000).map { $0 }
     }
@@ -515,6 +539,7 @@ public final class SecurityTimeline {
                           count: r["count"] as? Int, eventType: r["type"] as? String,
                           detail: Self.anyJSON(r["detail"]))
             e.coalesceKey = r["ck"] as? String
+            e.rowID = (r["rid"] as? String).flatMap(UUID.init)
             e.denials = r["dn"] as? Int
             e.firewall = Firewall(wire: r["fw"] as? [String: Any])
             e.package = PackageRef(wire: r["pk"] as? String)
