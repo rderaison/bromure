@@ -40,6 +40,14 @@ public final class InterimSwitch: Sendable {
     /// IPv4 destinations a guest may not send to (multi-user: the host's
     /// own addresses); their frames are dropped before the uplink.
     public let blockedDestination = NIOLockedValueBox<(@Sendable (UInt32) -> Bool)?>(nil)
+    /// Cluster nodes' ports: their cluster and its allocated LoadBalancer
+    /// range (MetalLB on the node answers ARP for those addresses), and
+    /// which cluster holds each address claimed so far. Every cluster is
+    /// allocated the same .230-.249 range (KubeClusterEngine), so an address
+    /// is the first claiming cluster's until its last node goes: one
+    /// cluster's node can't answer for another's.
+    let reservedClaims = NIOLockedValueBox<(nodes: [MAC: (cluster: String, range: ClosedRange<UInt32>)],
+                                            owners: [UInt32: String])>(([:], [:]))
 
     // @port-skip linux-only: interim switch
     public init(uplink: any Uplink, gateway: String = "192.168.64.1", dns: String = "192.168.64.1",
@@ -54,8 +62,13 @@ public final class InterimSwitch: Sendable {
         let dhcp = InterimDHCP(server: Self.ipv4(gateway), dns: Self.ipv4(dns),
                                serverMAC: Self.mac(uplink.gatewayMAC ?? "9a:55:9a:55:9a:55"), mtu: mtu)
         self.dhcp = dhcp
+        // A peer: an address leased to another attached VM.
         egress = SwitchEgressFirewall(gatewayIP: InterimDHCP.u32(Self.ipv4(gateway)),
-                                      isLeased: { ip in dhcp.mac(forIP: ip) != nil },
+                                      isLeased: { ip, sender in
+                                          guard let owner = dhcp.mac(forIP: ip), owner != sender else { return false }
+                                          return ports.withLockedValue { $0.contains { $0.mac == owner } }
+                                      },
+                                      isReserved: { VMNetSwitch.shared.isReserved($0) },
                                       closesSubnet: uplink.natsSubnet) { mac, ip in
             guard let p = ports.withLockedValue({ $0.first(where: { $0.mac == mac }) }) else { return }
             var frame = Data(mac.bytes + gwMAC.bytes + [0x08, 0x00])
@@ -104,7 +117,9 @@ public final class InterimSwitch: Sendable {
         let m = MAC(Self.mac(mac))
         let t = Task { [self, dhcp, uplink, blockedDestination, egress] in
             for await f in port.inbound {
-                if let r = dhcp.handle(f) { port.send(r); continue }
+                // A VM speaks as itself only: its own MAC, its own lease.
+                guard self.speaksAsItself(f, from: m) else { continue }
+                if let r = dhcp.handle(f, port: m.bytes) { port.send(r); continue }
                 switch egress.handle(f, from: m) {
                 case .consumed: continue
                 case .peersOnly: _ = self.toPeers(f, from: m); continue
@@ -153,10 +168,77 @@ public final class InterimSwitch: Sendable {
         }
         for p in all where p.mac != from { _ = p.port.send(f) }
         // An ARP request for a peer's lease: the peer answers; passt would too.
-        if let target = Self.arpRequestTarget(f), dhcp.mac(forIP: target).map({ $0 != from }) == true {
-            return false
+        // So for a reserved LoadBalancer address (a cluster node answers),
+        // where the uplink would take the traffic onto the server's network.
+        if let target = Self.arpRequestTarget(f) {
+            if dhcp.mac(forIP: target).map({ $0 != from }) == true { return false }
+            if uplink.natsSubnet, VMNetSwitch.shared.isReserved(target) { return false }
         }
+        // A node's announcement of a LoadBalancer address: the peers' business only.
+        if uplink.natsSubnet, let sender = Self.arpSender(f), VMNetSwitch.shared.isReserved(sender) { return false }
         return true
+    }
+
+    /// The sender IP (big-endian u32) of an ARP frame; nil for anything else.
+    // @port-skip linux-only: interim switch
+    static func arpSender(_ f: Data) -> UInt32? {
+        f.withUnsafeBytes { b in
+            guard b.count >= 42, b[12] == 0x08, b[13] == 0x06 else { return nil }
+            return UInt32(b[28]) << 24 | UInt32(b[29]) << 16 | UInt32(b[30]) << 8 | UInt32(b[31])
+        }
+    }
+
+    /// Whether a frame from the VM on `m` speaks as itself: its Ethernet
+    /// source is the port's MAC, and an IPv4 source or ARP sender address is
+    /// the port's lease (the unspecified address before it has one: DHCP,
+    /// ARP probes) or, for a cluster node's port, one of the reserved
+    /// LoadBalancer addresses. A guest can't claim the gateway, a peer, or
+    /// another VM's MAC, and so can't draw their traffic (their DNS).
+    // @port-skip linux-only: the Linux switch's source pinning (vmnet does its own on macOS)
+    func speaksAsItself(_ f: Data, from m: MAC) -> Bool {
+        f.withUnsafeBytes { b -> Bool in
+            guard b.count >= 14 else { return false }
+            var s: UInt64 = 0
+            for i in 0..<6 { s = s << 8 | UInt64(b[6 + i]) }
+            guard MAC(raw: s) == m else { return false }
+            let addr: UInt32
+            func u32(_ o: Int) -> UInt32 { UInt32(b[o]) << 24 | UInt32(b[o + 1]) << 16 | UInt32(b[o + 2]) << 8 | UInt32(b[o + 3]) }
+            switch (b[12], b[13]) {
+            case (0x08, 0x00): guard b.count >= 34 else { return false }; addr = u32(26)
+            case (0x08, 0x06): guard b.count >= 42 else { return false }; addr = u32(28)
+            default: return true                     // IPv6 (the firewall's), others
+            }
+            if addr == 0 { return true }
+            if dhcp.leaseAddress(for: m) == addr { return true }
+            guard VMNetSwitch.shared.isReserved(addr) else { return false }
+            return reservedClaims.withLockedValue { c in
+                guard let node = c.nodes[m], node.range.contains(addr) else { return false }
+                if let owner = c.owners[addr] { return owner == node.cluster }
+                c.owners[addr] = node.cluster
+                return true
+            }
+        }
+    }
+
+    /// The VM on `mac` is a node of `cluster`, which was allocated `range`
+    /// (big-endian u32s): it may speak as those addresses (see speaksAsItself).
+    // @port-skip linux-only: the Linux switch's source pinning
+    public func allowReservedClaims(mac: String, cluster: String, range: ClosedRange<UInt32>) {
+        let m = MAC(Self.mac(mac))
+        reservedClaims.withLockedValue { $0.nodes[m] = (cluster, range) }
+    }
+
+    /// The VM on `mac` may no longer speak as reserved addresses (its
+    /// cluster has no range any more).
+    // @port-skip linux-only: the Linux switch's source pinning
+    public func withdrawReservedClaims(mac: String) {
+        let m = MAC(Self.mac(mac))
+        reservedClaims.withLockedValue { c in
+            guard let gone = c.nodes.removeValue(forKey: m) else { return }
+            if !c.nodes.values.contains(where: { $0.cluster == gone.cluster }) {
+                c.owners = c.owners.filter { $0.value != gone.cluster }
+            }
+        }
     }
 
     /// The target IP (big-endian u32) of an ARP request; nil for anything else.
@@ -176,6 +258,13 @@ public final class InterimSwitch: Sendable {
             ps.removeAll { $0.mac == m }
         }
         learned.withLockedValue { l in l = l.filter { $0.value != m } }
+        reservedClaims.withLockedValue { c in
+            guard let gone = c.nodes.removeValue(forKey: m) else { return }
+            // Its cluster's last node: the addresses it held are free again.
+            if !c.nodes.values.contains(where: { $0.cluster == gone.cluster }) {
+                c.owners = c.owners.filter { $0.value != gone.cluster }
+            }
+        }
         egress.portClosed(m)
     }
 
@@ -296,9 +385,18 @@ public final class InterimDHCP: Sendable {
     // @port-skip linux-only: interim DHCP
     public func ackedAt(_ mac: [UInt8]) -> ContinuousClock.Instant? { acked.withLockedValue { $0[mac] } }
 
-    /// The reply to `frame` if it's a DHCP request from a client, else nil.
+    /// The address leased to `mac` (big-endian u32), if any.
     // @port-skip linux-only: interim DHCP
-    public func handle(_ f: Data) -> Data? {
+    func leaseAddress(for mac: MAC) -> UInt32? {
+        leases.withLockedValue { $0.byMAC[mac.bytes].map { Self.u32($0) } }
+    }
+
+    /// The reply to `frame` if it's a DHCP request from a client, else nil.
+    /// `port`: the MAC of the port it came from; a request for any other
+    /// hardware address (its chaddr or its Ethernet source) gets no lease,
+    /// so a guest can't take the pool or another VM's address.
+    // @port-skip linux-only: interim DHCP
+    public func handle(_ f: Data, port: [UInt8]? = nil) -> Data? {
         let b = [UInt8](f)
         guard b.count >= 14 + 20 + 8 + 240, b[12] == 0x08, b[13] == 0x00, b[23] == 17 else { return nil }
         let udp = 14 + Int(b[14] & 0x0F) * 4
@@ -313,6 +411,7 @@ public final class InterimDHCP: Sendable {
             i += 2 + Int(b[i + 1])
         }
         let chaddr = Array(b[bootp + 28..<bootp + 34])
+        if let port, chaddr != port || Array(b[6..<12]) != port { return nil }
         // No free address: no offer (the client keeps asking).
         guard let yiaddr = lease(for: chaddr) else { return nil }
         let reply: UInt8

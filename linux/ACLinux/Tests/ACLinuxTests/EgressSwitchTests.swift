@@ -74,7 +74,8 @@ final class FirewallRig: @unchecked Sendable {
         let injected = self.injected
         let leases = self.leases
         fw = SwitchEgressFirewall(gatewayIP: TestFrames.ip("192.168.64.1"),
-                                  isLeased: { ip in leases.withLockedValue { $0.contains(ip) } },
+                                  isLeased: { ip, _ in leases.withLockedValue { $0.contains(ip) } },
+                                  isReserved: { ip in ip >= TestFrames.ip("192.168.64.230") && ip <= TestFrames.ip("192.168.64.249") },
                                   closesSubnet: closesSubnet) { mac, ip in
             injected.withLockedValue { $0.append((mac, ip)) }
         }
@@ -155,7 +156,9 @@ struct SwitchEgressFirewallTests {
         let other = MAC([0x52, 0x54, 0, 0, 0, 0x0b])
         for (who, port) in [("a session port", rig.a), ("an ungoverned port", other)] {
             if who == "a session port" { try rig.govern(nil) }
-            #expect(rig.fw.handle(TestFrames.tcp(to: peer, port: 8080, flags: 0x02), from: port) == .pass, "\(who): a peer")
+            #expect(rig.fw.handle(TestFrames.tcp(to: peer, port: 8080, flags: 0x02), from: port) == .peersOnly, "\(who): a peer, never the uplink")
+            #expect(rig.fw.handle(TestFrames.tcp(to: TestFrames.ip("192.168.64.240"), port: 80, flags: 0x02), from: port) == .peersOnly,
+                    "\(who): a cluster's LoadBalancer address, to the node that answers for it")
             #expect(rig.fw.handle(TestFrames.udp(to: gw, port: 53), from: port) == .pass, "\(who): DNS")
             #expect(rig.fw.handle(TestFrames.tcp(to: gw, port: 53, flags: 0x02), from: port) == .pass, "\(who): DNS over TCP")
             #expect(rig.fw.handle(TestFrames.udp(to: TestFrames.ip("192.168.64.255"), port: 9), from: port) == .peersOnly, "\(who): broadcast")

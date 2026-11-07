@@ -1087,6 +1087,7 @@ public actor Daemon {
         // same one back (the guest keeps it) and so does its next boot.
         let leased = sw.dhcp.lease(for: InterimSwitch.mac(rec.mac), preferring: rec.lease.map(InterimSwitch.ipv4))
         sw.attach(l.port, mac: rec.mac)
+        await allowLoadBalancerClaims(rec)
         rec.lease = leased?.map(String.init).joined(separator: ".")
         let machine = l.machine
         let id = rec.id
@@ -1251,6 +1252,7 @@ public actor Daemon {
                                       stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
                 if let staged = adoptedProfile { startLocalEngineIfNeeded(for: staged) }
                 sw.attach(l.port, mac: rec.mac)
+                await allowLoadBalancerClaims(rec)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }

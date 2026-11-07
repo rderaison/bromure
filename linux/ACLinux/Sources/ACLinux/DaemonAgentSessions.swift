@@ -116,6 +116,9 @@ extension Daemon {
         // saved), and the previous run's "until the workspace stops" ones
         // ended (macOS: launch's startFirewallExpirySweep).
         startFirewallExpirySweep()
+        // Cluster nodes answer for their cluster's LoadBalancer range once
+        // the engine has reserved it.
+        startLoadBalancerClaimRefresh()
     }
 
     /// `GET /agent-sessions/<id>/pending`: what the session waits on (the

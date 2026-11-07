@@ -59,19 +59,25 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// Hands an IPv4 packet (IP header onward) to the VM on `mac`, framed by
     /// the switch (a RST answering a denied segment, an interceptor's reply).
     let inject: @Sendable (_ mac: MAC, _ ipPacket: [UInt8]) -> Void
-    /// Whether an address on the subnet is a VM's lease (a peer).
-    let isLeased: @Sendable (UInt32) -> Bool
+    /// Whether an address on the subnet is leased to another attached VM
+    /// than the sender (a peer).
+    let isLeased: @Sendable (UInt32, MAC) -> Bool
+    /// Whether an address is in a cluster's reserved LoadBalancer range
+    /// (never leased; a cluster node answers ARP for it).
+    let isReserved: @Sendable (UInt32) -> Bool
     /// The subnet is closed (the uplink NATs it into host connects): only
     /// peers and the gateway's DNS pass. Open: macOS's native path.
     let closesSubnet: Bool
 
     // @port-skip linux-only: the Linux switch's egress firewall
     init(gatewayIP: UInt32, subnetMask: UInt32 = 0xFFFF_FF00,
-         isLeased: @escaping @Sendable (UInt32) -> Bool = { _ in false }, closesSubnet: Bool = true,
+         isLeased: @escaping @Sendable (UInt32, MAC) -> Bool = { _, _ in false },
+         isReserved: @escaping @Sendable (UInt32) -> Bool = { _ in false }, closesSubnet: Bool = true,
          inject: @escaping @Sendable (_ mac: MAC, _ ipPacket: [UInt8]) -> Void) {
         self.gatewayIP = gatewayIP
         self.subnetMask = subnetMask
         self.isLeased = isLeased
+        self.isReserved = isReserved
         self.closesSubnet = closesSubnet
         self.inject = inject
     }
@@ -279,8 +285,12 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// An on-subnet IPv4 frame from `src` (see decide).
     // @port-skip linux-only: the closed subnet vmnet gives macOS, kept on a switch whose uplink is passt
     private func onSubnet(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int, _ dstIP: UInt32, _ src: MAC) -> Action {
-        if dstIP == gatewayIP | ~subnetMask { return .peersOnly }          // the subnet broadcast
-        if dstIP != gatewayIP, isLeased(dstIP) { return .pass }             // a peer VM
+        // A peer VM, a cluster's LoadBalancer address, the subnet broadcast:
+        // to the peers only, never the uplink (an unknown MAC is flooded to
+        // the peers, and a frame to the guest's own address or to a peer's
+        // behind the gateway's MAC would otherwise reach passt).
+        if dstIP == gatewayIP | ~subnetMask { return .peersOnly }
+        if dstIP != gatewayIP, isLeased(dstIP, src) || isReserved(dstIP) { return .peersOnly }
         let l4 = VMNetSwitch.offSubnetL4(buf, n)
         if dstIP == gatewayIP, let l4, l4.2 == 53 { return .pass }          // DNS (passt forwards it)
         // Refused: answered at once for a TCP connect, reported for a session port.

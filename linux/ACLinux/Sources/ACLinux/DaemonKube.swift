@@ -861,3 +861,41 @@ final class RepairMarks: @unchecked Sendable {
         return try await body()
     }
 }
+
+extension Daemon {
+    /// A cluster node's port may answer for its cluster's allocated
+    /// LoadBalancer range (InterimSwitch.speaksAsItself); a cluster with none
+    /// allocated (yet, or any more), nothing.
+    // @port-skip linux-only: the Linux switch's source pinning for a cluster's nodes
+    func allowLoadBalancerClaims(_ rec: VMRecord) async {
+        guard let cluster = rec.kube else { return }
+        let text = await MainActor.run {
+            SessionStores.shared?.kube.clusters.first { $0.id.uuidString.caseInsensitiveCompare(cluster) == .orderedSame }?.metallbRange
+        }
+        let parts = (text ?? "").split(separator: "-").map(String.init)
+        guard parts.count == 2, let a = VMNetSwitch.parseIPv4(parts[0]), let b = VMNetSwitch.parseIPv4(parts[1]), a <= b
+        else { sw.withdrawReservedClaims(mac: rec.mac); return }
+        sw.allowReservedClaims(mac: rec.mac, cluster: cluster, range: a...b)
+    }
+
+    /// The running cluster nodes' claims, kept in step with their clusters'
+    /// ranges: the engine reserves a cluster's range once its nodes are up
+    /// (after they attached), and releases it when the cluster goes.
+    // @port-skip linux-only: the Linux switch's source pinning for a cluster's nodes
+    func startLoadBalancerClaimRefresh() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                await self.refreshLoadBalancerClaims()
+            }
+        }
+    }
+
+    // @port-skip linux-only: the Linux switch's source pinning for a cluster's nodes
+    func refreshLoadBalancerClaims() async {
+        for rec in registry.records where rec.kube != nil && live[rec.id] != nil {
+            await allowLoadBalancerClaims(rec)
+        }
+    }
+}
