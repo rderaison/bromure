@@ -16077,10 +16077,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         }
-        sandbox.onGuestReboot = { [weak self] in
+        sandbox.onGuestReboot = { [weak self, weak sandbox] in
             Task { @MainActor in
                 guard let self, let session = self.runningSessions[pid],
                       !session.rebootRequested else { return }   // dedupe repeats
+                // The old guest's intent, read by a poll a relaunch stopped,
+                // isn't the replacement's: it marked the new boot rebooting
+                // (saved state cleared, its shutdown taken for a reboot).
+                guard Self.eventIsForCurrent(sandbox, current: session.sandbox) else { return }
                 // Flag the reboot so the empty rosters the guest publishes on its
                 // way down don't trigger the close-action shutdown
                 // (SessionPane.applyTabList guards on rebootRequested). Then just
@@ -16108,7 +16112,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
                 // browser's callback reaches the in-VM CLI before we open it
@@ -16281,14 +16286,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerVolumes(volumes)
             }
         }
-        sandbox.onDockerError = { [weak self] message in
+        sandbox.onDockerError = { [weak self, weak sandbox] message in
             Task { @MainActor in
-                self?.pane(for: pid)?.applyDockerError(message)
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
+                self.pane(for: pid)?.applyDockerError(message)
             }
         }
-        sandbox.onWorktreeError = { [weak self] raw in
+        sandbox.onWorktreeError = { [weak self, weak sandbox] raw in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // An automation (or task) run's refusal names its slug on the
                 // first line: that run failed — it isn't left "launched".
                 let (slug, message) = Self.splitWorktreeError(raw)
@@ -16319,9 +16327,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 alert.beginSheetModal(for: win) { _ in }
             }
         }
-        sandbox.onAgentStatus = { [weak self] index, signal in
+        sandbox.onAgentStatus = { [weak self, weak sandbox] index, signal in
             Task { @MainActor in
-                guard let self, let status = AgentStatus(signal: signal) else { return }
+                guard let self, let status = AgentStatus(signal: signal),
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // Line 2 names the hook's conversation: a report Codex's
                 // shared server filed under another tab goes to its own.
                 let lines = signal.split(whereSeparator: \.isNewline)
@@ -16417,6 +16426,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Whether `stopped` stopping ends the workspace's session: it is the
     /// session's sandbox, or no session has one yet (a boot still on its
     /// way). Pure.
+    /// A one-shot a sandbox reported (a reboot intent, a URL, a status, an
+    /// error) is for the workspace's session only while that session still
+    /// runs on it (or none is registered). A poll a relaunch stopped still
+    /// applies what it had taken from the outbox, and these callbacks are
+    /// keyed by the workspace: without this, the old guest's events reached
+    /// the replacement (CWE-367). A sandbox gone is nobody's.
+    nonisolated static func eventIsForCurrent(_ sandbox: AnyObject?, current: AnyObject?) -> Bool {
+        guard let sandbox else { return false }
+        return stopEndsSession(of: sandbox, current: current)
+    }
+
     nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {
         guard let current else { return true }
         return stopped === current
