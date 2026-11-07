@@ -110,11 +110,41 @@ enum SecurityEditorLauncher {
     }
 }
 
+/// Which machine the Security window is for: set from the window in front
+/// when it's opened (a fat client's host, or this Mac), and again when it's
+/// reopened from another one.
+@MainActor
+@Observable
+final class SecurityWindowScope {
+    /// The machine filter it opens on: nil = all machines, "" = this Mac, a
+    /// host = that fat-client host (its `securityMirrorKey`).
+    var machine: String?
+    /// Bumped by every open, so reopening for the same machine still applies.
+    private(set) var generation = 0
+
+    init(machine: String? = nil) { self.machine = machine }
+
+    func focus(_ machine: String?) {
+        self.machine = machine
+        generation &+= 1
+    }
+
+    /// The scope for the window in front: a fat client's host is that host;
+    /// anything else is this Mac -- told apart only when hosts are mirrored.
+    nonisolated static func machine(frontHost: String?, mirroredHosts: Bool) -> String? {
+        if let frontHost { return frontHost }
+        return mirroredHosts ? "" : nil
+    }
+}
+
 struct SecurityTimelineView: View {
     var timeline = SecurityTimeline.shared
     let onClose: () -> Void
-    /// This Mac's workspaces and which protections each has on.
-    var postures: () -> [SecurityPosture] = { [] }
+    /// The workspaces of a machine (nil = all, "" = this Mac, else a fat
+    /// client's host) and which protections each has on.
+    var postures: (String?) -> [SecurityPosture] = { _ in [] }
+    /// The machine it's for (the window in front when it opened).
+    var scope = SecurityWindowScope()
 
     /// Open on the Timeline tab instead of the Overview (screenshots).
     var startOnTimeline = false
@@ -157,7 +187,7 @@ struct SecurityTimelineView: View {
     private var workspaces: [(id: UUID, name: String)] {
         var names: [UUID: String] = [:]
         for e in timeline.allEvents { names[e.profileID] = e.workspace ?? names[e.profileID] }
-        for p in postures() { names[p.id] = p.name }
+        for p in postures(nil) { names[p.id] = p.name }
         return names.map { ($0.key, $0.value ?? "—") }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -166,7 +196,7 @@ struct SecurityTimelineView: View {
         engineFilter = f.engine
         outcomeFilter = f.outcome
         workspaceFilter = f.workspace
-        machineFilter = nil
+        // The Overview counted the machine shown: its tiles open on it too.
         query = f.query
         blockFilter = f.block.map { ($0, f.query) }
         tab = .timeline
@@ -202,7 +232,8 @@ struct SecurityTimelineView: View {
             toolbar
             Divider()
             if tab == .overview {
-                SecurityOverview(timeline: timeline, postures: postures(),
+                SecurityOverview(timeline: timeline, postures: postures(machineFilter),
+                                 machine: machineFilter,
                                  rangeHours: SecurityTimeline.defaultRangeHours,
                                  showTimeline: { f in
                                      open(f)
@@ -227,7 +258,12 @@ struct SecurityTimelineView: View {
         .sheet(item: $lineage) { e in
             NetworkLineageView(timeline: timeline, focus: e, onClose: { lineage = nil })
         }
-        .onAppear { if startOnTimeline { tab = .timeline } }
+        .onAppear {
+            if startOnTimeline { tab = .timeline }
+            machineFilter = scope.machine
+        }
+        // Reopened from another window: show that machine.
+        .onChange(of: scope.generation) { _, _ in machineFilter = scope.machine }
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
             rulesGeneration &+= 1
         }
@@ -832,15 +868,25 @@ private struct SupplyChainRowActionButton: View {
 struct SecurityOverview: View {
     var timeline: SecurityTimeline
     let postures: [SecurityPosture]
+    /// The machine counted: nil = all, "" = this Mac, else a fat client's host.
+    var machine: String? = nil
     /// The range counted, in hours (0 = all history).
     var rangeHours = 24
     /// Open the Timeline with these filters.
     let showTimeline: (SecurityTimelineFilter) -> Void
 
     private var recent: [SecurityTimeline.Event] {
-        guard rangeHours > 0 else { return timeline.allEvents }
+        let mine = Self.events(timeline.allEvents, machine: machine)
+        guard rangeHours > 0 else { return mine }
         let since = Date().addingTimeInterval(-Double(rangeHours) * 3600)
-        return timeline.allEvents.filter { $0.time >= since }
+        return mine.filter { $0.time >= since }
+    }
+
+    /// A machine's events: nil = all, "" = this Mac's (no machine), else that
+    /// host's.
+    nonisolated static func events(_ all: [SecurityTimeline.Event], machine: String?) -> [SecurityTimeline.Event] {
+        guard let machine else { return all }
+        return all.filter { ($0.machine ?? "") == machine }
     }
 
     /// The latest blocks, one row per distinct block: repeats fold into a

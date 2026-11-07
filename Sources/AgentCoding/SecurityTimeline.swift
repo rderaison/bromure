@@ -767,6 +767,18 @@ public final class SecurityTimeline {
                            : NSLocalizedString("blocked — exfiltration attempt (alerts off, VM not paused)", comment: "Security Timeline decision"),
                        .blocked)
 
+        case "credential.client_cert":
+            // The proxy presented a client certificate upstream for the
+            // guest (kubectl with a client-cert kubeconfig): brokered, like a
+            // token swap, but no token went in.
+            let host = str(d, "host") ?? "?"
+            let identity = str(d, "identity") ?? "client certificate"
+            var e = row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
+                        "\(identity) → \(host)",
+                        NSLocalizedString("presented client certificate", comment: "Security Timeline decision"), .info)
+            e.coalesceKey = "client_cert|\(identity)|\(host)"
+            return e
+
         case "credential.exfiltration_allowed":
             let observed = str(d, "observed_host") ?? "?"
             return row(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),

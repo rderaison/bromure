@@ -1599,6 +1599,7 @@
 "Upstream TLS" = "Upstream TLS";
 "Prompt injection" = "Prompt injection";
 "swapped in %@" = "swapped in %@";
+"presented client certificate" = "presented client certificate";
 "signed" = "signed";
 "blocked — exfiltration attempt, VM paused" = "blocked — exfiltration attempt, VM paused";
 

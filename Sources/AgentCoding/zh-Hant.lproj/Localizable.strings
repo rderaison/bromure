@@ -1601,6 +1601,7 @@
 "Upstream TLS" = "上游 TLS";
 "Prompt injection" = "提示注入";
 "swapped in %@" = "已替換為 %@";
+"presented client certificate" = "已出示用戶端憑證";
 "signed" = "已簽署";
 "blocked — exfiltration attempt, VM paused" = "已封鎖 — 憑證外洩嘗試,虛擬機器已暫停";
 

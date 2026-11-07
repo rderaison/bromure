@@ -337,7 +337,7 @@ struct BromureAC: ParsableCommand {
                     SecurityPosture(id: osID, name: "Payments API", colorHex: "#22C55E", firewall: true, supplyChain: true,
                                     guardrails: true, promptInjection: false, sandbox: true),
                 ]
-                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
+                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { _ in postures },
                                                     startOnTimeline: which == "timeline"))
                 size = NSSize(width: 980, height: 720)
             case "lineage", "lineage-allowed":
@@ -9105,6 +9105,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var preferencesWindow: NSWindow?
     private var remoteAccessWindow: NSWindow?
     private var securityTimelineWindow: NSWindow?
+    /// The machine the Security window shows (the window in front at open).
+    private let securityWindowScope = SecurityWindowScope()
     private var inferenceLogWindow: NSWindow?
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
@@ -9174,6 +9176,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The tracked window, or one still on screen whose reference was
         // dropped — never a second "Security" window.
         let id = NSUserInterfaceItemIdentifier("io.bromure.security-timeline")
+        // For the window in front: a fat client's host shows that host's
+        // security data, not this Mac's. Asked from the Security window
+        // itself, it stays on what it shows.
+        let front = NSApp.keyWindow ?? NSApp.mainWindow
+        if front?.identifier != id {
+            let host = (front as? RemoteHostWindow)?.controller.securityMirrorKey
+            securityWindowScope.focus(SecurityWindowScope.machine(
+                frontHost: host, mirroredHosts: !SecurityTimeline.shared.remote.isEmpty))
+        }
         if let win = securityTimelineWindow
             ?? NSApp.windows.first(where: { $0.identifier == id && $0.isVisible }) {
             securityTimelineWindow = win
@@ -9196,9 +9207,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // which let the next open (`ui-shot which=timeline`) make a
             // second window.
             onClose: {},
-            postures: { [weak self] in
-                (self?.profiles ?? []).map { SecurityPosture(profile: $0) }
+            postures: { [weak self] machine in
+                guard let self else { return [] }
+                let local = self.profiles.map { SecurityPosture(profile: $0) }
+                let hosts = self.connectedRemoteHostWindows().map(\.controller)
+                @MainActor func remote(_ c: RemoteHostController) -> [SecurityPosture] {
+                    c.profiles.map { SecurityPosture(profile: $0) }
+                }
+                switch machine {
+                case nil: return local + hosts.flatMap(remote)
+                case ""?: return local
+                case let key?: return hosts.first { $0.securityMirrorKey == key }.map(remote) ?? []
+                }
             },
+            scope: securityWindowScope,
             // Doc/video captures: open on the event log instead of the Overview.
             startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
         win.makeKeyAndOrderFront(nil)
