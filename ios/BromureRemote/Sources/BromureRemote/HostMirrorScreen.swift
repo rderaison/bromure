@@ -48,6 +48,8 @@ struct HostMirrorScreen: View {
     @State private var didRestoreFocus = false
     /// The Virtual Machines caret, shared with the iPad sidebar.
     @AppStorage("machines.vmExpanded") private var machinesExpanded = false
+    /// The Native Machines caret, shared with the iPad sidebar.
+    @AppStorage("machines.nativeExpanded") private var nativeExpanded = false
     #if DEBUG
     @State private var didDebugRoute = false
     #endif
@@ -468,16 +470,32 @@ struct HostMirrorScreen: View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
-                    Text("Native Machines").font(.headline)
+                    // Folded away by default, like the Virtual Machines.
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) { nativeExpanded.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("Native Machines").font(.headline).foregroundStyle(.primary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.tertiary)
+                                .rotationEffect(.degrees(nativeExpanded ? 90 : 0))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(nativeExpanded ? "Hide native machines" : "Show native machines")
                     Spacer()
                     Text("\(runningCount(rows)) running")
                         .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
-                ForEach(rows) { row in
-                    NavigationLink {
-                        WorkspaceScreen(controller: controller, profileID: row.id)
-                    } label: { workspaceCard(row, native: true) }
-                    .buttonStyle(.plain)
+                if nativeExpanded {
+                    ForEach(rows) { row in
+                        NavigationLink {
+                            WorkspaceScreen(controller: controller, profileID: row.id)
+                        } label: { workspaceCard(row, native: true) }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }

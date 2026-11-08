@@ -48,6 +48,8 @@ struct PadHostMirror: View {
     @State private var width: CGFloat = 0
     /// The Virtual Machines caret, shared with the iPhone list.
     @AppStorage("machines.vmExpanded") private var machinesExpanded = false
+    /// The Native Machines caret, shared with the iPhone list.
+    @AppStorage("machines.nativeExpanded") private var nativeExpanded = false
     private var narrow: Bool { width > 0 && width < PadHostMirror.narrowWidth }
     /// An iPad mini's portrait width; anything narrower in the regular size
     /// class is a foldable's inner screen.
@@ -190,7 +192,8 @@ struct PadHostMirror: View {
     @ViewBuilder private var nativeSection: some View {
         let rows = nativeRows
         if !rows.isEmpty {
-            Section {
+            // Folded away by default, like the Virtual Machines.
+            Section(isExpanded: $nativeExpanded) {
                 ForEach(rows) { row in
                     workspaceRow(row, native: true)
                         .tag(PadSelection.workspace(row.id))
