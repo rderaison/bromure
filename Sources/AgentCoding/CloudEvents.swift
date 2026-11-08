@@ -234,8 +234,10 @@ public final class BACEventEmitter: @unchecked Sendable {
                 profileID: profileID, proto: s("proto") ?? "tcp", dst: dst, dport: port,
                 action: action, layer: layer, reason: s("reason"), host: s("host"))
         }
+        #endif
         // The agent watchdog judges the session as a whole (off by default).
         AgentWatchdog.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
+        #if os(macOS)
         // OCSF JSONL export (SIEM) — local like the timeline; off by default.
         if OCSFExporter.shared.isEnabled {
             let workspace = await MainActor.run { SecurityTimeline.shared.workspaceName(profileID) }
