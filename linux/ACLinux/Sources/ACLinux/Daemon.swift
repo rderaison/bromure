@@ -792,13 +792,18 @@ public actor Daemon {
         }
     }
 
-    // partial: no attach (a server has no pane), fusion, routing, checkpoints, revert or type yet
+    // partial: no attach (a server has no pane), fusion, routing, checkpoints or revert yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
-        guard let raw = parts.first, let key = raw.removingPercentEncoding,
-              let rec = registry.find(key) else { return .error(404, "VM not found") }
         let sub = parts.count > 1 ? parts[1] : ""
+        guard let raw = parts.first, let key = raw.removingPercentEncoding,
+              let rec = registry.find(key) else {
+            // A client tells the type route from an older server's 404 by
+            // its "typeRoute" mark: an unknown VM is just unreachable.
+            if method == "POST", sub == "type" { return await typeRoute(nil, body) }
+            return .error(404, "VM not found")
+        }
         switch (method, sub) {
         case ("GET", ""): return getVM(rec)
         case ("DELETE", ""): return await deleteVM(rec, action: body["action"]?.stringValue ?? "shutdown")
@@ -811,6 +816,7 @@ public actor Daemon {
         case ("POST", "reboot"): return await rebootRoute(rec, body)
         case ("POST", "model"): return await setModelRoute(rec, body)
         case ("POST", "docker"): return dockerRoute(rec, body)
+        case ("POST", "type"): return await typeRoute(rec, body)
         default: return .error(405, "Method not allowed")
         }
     }

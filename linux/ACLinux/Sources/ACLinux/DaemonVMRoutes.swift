@@ -117,3 +117,32 @@ extension Daemon {
         }
     }
 }
+
+extension Daemon {
+    /// `POST /vms/<id>/type {target, text}`: a chat message typed into one
+    /// of the workspace's panes, guarded and confirmed next to the agent
+    /// (PaneTypeGuard.runType through guest exec), in one request. Every
+    /// reply carries "typeRoute", so a client tells this route from an
+    /// older server's 404/405 (and types step by step there); "output" is
+    /// the guard's, "unreachable" when the machine couldn't be asked.
+    // @port ACAutomationServer.handleType(fd: Int32, profileID: String, bodyJSON: [String:Any], gzip: Bool) h=b3d460df248c6312 @30634ab2
+    func typeRoute(_ rec: VMRecord?, _ body: JSONValue) async -> ControlResponse {
+        let doc = (body.foundationObject as? [String: Any]) ?? [:]
+        guard let text = doc["text"] as? String,
+              let raw = doc["target"],
+              JSONSerialization.isValidJSONObject([raw]),
+              let data = try? JSONSerialization.data(withJSONObject: raw, options: [.fragmentsAllowed]),
+              let target = try? JSONDecoder().decode(PaneTarget.self, from: data) else {
+            return ControlResponse(400, ["typeRoute": true, "error": "target and text required"])
+        }
+        var out: String?
+        if let rec, live[rec.id] != nil, let id = UUID(uuidString: rec.id) {
+            out = await PaneTypeGuard.runType(target: target, text: text) { cmd in
+                try? await self.guestExec(profileID: id, command: cmd, timeout: 20)
+            }
+        }
+        var reply: [String: JSONValue] = ["typeRoute": true]
+        if let out { reply["output"] = .string(out) } else { reply["unreachable"] = true }
+        return ControlResponse(200, .object(reply))
+    }
+}
