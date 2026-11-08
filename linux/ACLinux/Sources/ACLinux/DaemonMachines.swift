@@ -11,7 +11,6 @@ extension Daemon {
     /// control connection here is the owner's (SO_PEERCRED), as macOS's
     /// isTrustedLocal; an agent host's key comes in through the SSH
     /// server's link verb, which writes the owner itself.
-    // partial: no /vms/<id>/type route on Linux (macOS types into a machine's pane here)
     // @port-skip linux-only: the /machines block of ACAutomationServer.route (inside its isTrustedLocal branch, not a segment of its own), over the Linux router
     func machineRoute(_ req: ControlRequest, _ path: String) -> ControlResponse? {
         let hub = MachineLinkHub.shared

@@ -832,7 +832,9 @@ public actor Daemon {
               let rec = registry.find(key) else {
             // A client tells the type route from an older server's 404 by
             // its "typeRoute" mark: an unknown VM is just unreachable.
-            if method == "POST", sub == "type" { return await typeRoute(nil, body) }
+            if method == "POST", sub == "type" {
+                return await typeRoute(nil, body, key: parts.first?.removingPercentEncoding)
+            }
             return .error(404, "VM not found")
         }
         switch (method, sub) {
