@@ -181,6 +181,11 @@ public actor Daemon {
     /// (DaemonModelRefresh.swift), by VM id.
     var lastStagedProfiles: [String: Profile] = [:]
     var modelRefreshObserver: NSObjectProtocol?
+    /// The latest /state build, and one under way (DaemonStateFeed.swift).
+    var stateCache: (body: JSONValue, at: ContinuousClock.Instant, generation: Int)?
+    var stateBuilding: (task: Task<JSONValue, Never>, generation: Int)?
+    /// /state/subscribe's one producer (DaemonStateFeed.swift).
+    nonisolated let stateFeed = StateFeed()
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -475,9 +480,8 @@ public actor Daemon {
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // partial: no instance-level snapshot cache (built per request)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
-    func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
+    func state() async -> ControlResponse { ControlResponse(200, await cachedStateBody()) }
 
     /// `GET /state/subscribe`: the octet-stream header, then `/state`
     /// frames `[u32be len][u8 flag][payload]` (len counts flag + payload;
@@ -488,41 +492,46 @@ public actor Daemon {
     /// client that merges sections (`x-bromure-state-delta: 1`) gets, after
     /// the first whole frame, only the sections that changed
     /// (`{"set": {section: value}, "unset": [section]}`); an older one the
-    /// whole state each time. Ends when a write fails; the client
-    /// half-closing (the SSH bridge forwards its EOF) doesn't end it.
-    // partial: one producer per subscriber (macOS shares one build among them)
+    /// whole state each time. One producer builds the state while anyone
+    /// is subscribed (StateFeed); each subscriber only sends. Ends when a
+    /// write fails; the client half-closing (the SSH bridge forwards its
+    /// EOF) doesn't end it.
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
     // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
     func stateSubscribe(delta: Bool = false) -> ControlResponse {
         let me = WeakDaemon(self)
+        let feed = stateFeed
         return .streaming { client in
-            let enc = JSONEncoder()
-            enc.outputFormatting = [.sortedKeys]
-            var sections: [String: Data] = [:]
+            feed.subscribe { await me.daemon?.cachedStateBody() }
+            defer { feed.unsubscribe() }
+            var seen = -1
             var lastSent = ContinuousClock.now - .seconds(60)
-            var started = false
+            func sendWhole() async -> Bool {
+                guard let w = feed.wholeFrame() else { return true }
+                do { try await client.write(ByteBuffer(bytes: w.frame)) } catch { return false }
+                seen = w.seq
+                lastSent = .now
+                return true
+            }
             while !Task.isCancelled {
-                guard let d = me.daemon else { return }
+                guard me.daemon != nil else { return }
                 // A held push stream is a connected fat client.
                 PendingPromptBroker.recordFatClientContact()
-                let body = await d.stateBody()
-                let now = Self.comparableSections(body, enc)
-                let (set, unset) = Self.changedSections(from: sections, to: now)
-                let keepalive = ContinuousClock.now - lastSent >= .seconds(15)
-                if !started || keepalive || !set.isEmpty || !unset.isEmpty {
-                    let frame: Data?
-                    if delta, started, !keepalive {
-                        frame = Self.deltaFrame(snapshot: body, set: set, unset: unset, enc)
+                let now = await feed.wait(after: max(seen, 0), timeout: .milliseconds(500))
+                if seen < 0 || ContinuousClock.now - lastSent > .seconds(15) {
+                    // The start, and a keepalive (a VM's uptime moves on in it).
+                    guard await sendWhole() else { return }
+                } else if now > seen {
+                    if delta, let frames = feed.deltas(after: seen) {
+                        for f in frames {
+                            do { try await client.write(ByteBuffer(bytes: f)) } catch { return }
+                        }
+                        seen = now
+                        lastSent = .now
                     } else {
-                        frame = (try? enc.encode(body)).map { Self.frame($0, delta: false) }
+                        guard await sendWhole() else { return }
                     }
-                    guard let frame else { return }
-                    do { try await client.write(ByteBuffer(bytes: frame)) } catch { return }
-                    sections = now
-                    lastSent = .now
-                    started = true
                 }
-                try? await Task.sleep(for: .milliseconds(500))
             }
         }
     }
