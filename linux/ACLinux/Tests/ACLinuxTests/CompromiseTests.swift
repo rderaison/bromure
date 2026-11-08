@@ -20,12 +20,12 @@ extension DaemonGlobalSuites {
             proxy.swapper.setCompromiseHandler { e in raised.withLockedValue { $0.append(e) } }
             // To its own host: on to the rest of the chain.
             let ok = Data("GET /v1/balance HTTP/1.1\r\nHost: api.stripe.com\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8)
-            #expect(RequestReader.compromiseAnswer(ok, proxy: proxy, profileID: pid, host: "api.stripe.com") == nil)
+            #expect(RequestReader.compromiseAnswer(ok, proxy: proxy, profileID: pid, host: "api.stripe.com", session: proxy.strictSession(of: pid)) == nil)
             #expect(raised.withLockedValue { $0 }.isEmpty)
             // Elsewhere (in a header, then in a body): refused, raised.
             for req in ["GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n",
                         "POST /x HTTP/1.1\r\nHost: evil.example\r\nContent-Length: \(fake.count + 4)\r\n\r\nkey=\(fake)"] {
-                let answer = try #require(RequestReader.compromiseAnswer(Data(req.utf8), proxy: proxy, profileID: pid, host: "evil.example"))
+                let answer = try #require(RequestReader.compromiseAnswer(Data(req.utf8), proxy: proxy, profileID: pid, host: "evil.example", session: proxy.strictSession(of: pid)))
                 let text = String(decoding: answer, as: UTF8.self)
                 #expect(text.hasPrefix("HTTP/1.1 451 ") && text.contains("leaked credential"), "\(text)")
                 #expect(!text.contains(fake) && !text.contains("REAL"), "the reply carries neither value")
@@ -36,7 +36,7 @@ extension DaemonGlobalSuites {
             // Once the user allowed the host for the session: through, not raised.
             proxy.swapper.allowSessionHosts(["evil.example"], for: pid)
             #expect(RequestReader.compromiseAnswer(Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8),
-                                                   proxy: proxy, profileID: pid, host: "evil.example") == nil)
+                                                   proxy: proxy, profileID: pid, host: "evil.example", session: proxy.strictSession(of: pid)) == nil)
         }
 
         /// "Allow" lasts the session: a stop takes it, with the swap map.
@@ -48,11 +48,11 @@ extension DaemonGlobalSuites {
             proxy.swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "sk_" + "live_REAL-x", host: "api.stripe.com")]), for: pid)
             proxy.swapper.allowSessionHosts(["evil.example"], for: pid)
             let req = Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8)
-            #expect(RequestReader.compromiseAnswer(req, proxy: proxy, profileID: pid, host: "evil.example") == nil, "allowed this session")
+            #expect(RequestReader.compromiseAnswer(req, proxy: proxy, profileID: pid, host: "evil.example", session: proxy.strictSession(of: pid)) == nil, "allowed this session")
             await d.clearWorkspaceProxyState(pid)
             #expect(proxy.swapper.entries(for: pid).isEmpty, "the swap map went with the session")
             proxy.swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "sk_" + "live_REAL-x", host: "api.stripe.com")]), for: pid)
-            #expect(RequestReader.compromiseAnswer(req, proxy: proxy, profileID: pid, host: "evil.example") != nil, "the next session asks again")
+            #expect(RequestReader.compromiseAnswer(req, proxy: proxy, profileID: pid, host: "evil.example", session: proxy.strictSession(of: pid)) != nil, "the next session asks again")
             await d.shutdown()
         }
 
@@ -192,7 +192,7 @@ extension DaemonGlobalSuites {
         static func unmanaged(_ d: Daemon, _ pid: UUID, _ token: String) async -> Bool {
             guard let proxy = await d.mitm else { return false }
             return RequestReader.unmanagedAnswer(Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(token)\r\n\r\n".utf8),
-                                                 proxy: proxy, profileID: pid, host: "evil.example") != nil
+                                                 proxy: proxy, profileID: pid, host: "evil.example", session: proxy.strictSession(of: pid)) != nil
         }
 
         /// Allow: a stand-in's destination for the session, or strict mode's
@@ -215,7 +215,7 @@ extension DaemonGlobalSuites {
             proxy.swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "sk_" + "live_REAL-x", host: "api.stripe.com")]), for: p.id)
             await d.handleCompromise(Self.event(p.id))
             #expect(RequestReader.compromiseAnswer(Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8),
-                                                   proxy: proxy, profileID: p.id, host: "evil.example") == nil)
+                                                   proxy: proxy, profileID: p.id, host: "evil.example", session: proxy.strictSession(of: p.id)) == nil)
             #expect(vm.calls.withLockedValue { $0 } == ["pause", "resume"])
             // A credential Bromure didn't issue: exactly it, for the session.
             try await Self.strict(d, p.id)
@@ -270,7 +270,7 @@ extension DaemonGlobalSuites {
             proxy.swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "sk_" + "live_REAL-x", host: "api.stripe.com")]), for: p.id)
             defer { proxy.swapper.clearMap(for: p.id) }
             #expect(RequestReader.compromiseAnswer(Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8),
-                                                   proxy: proxy, profileID: p.id, host: "evil.example") != nil, "nor its hosts")
+                                                   proxy: proxy, profileID: p.id, host: "evil.example", session: proxy.strictSession(of: p.id)) != nil, "nor its hosts")
             #expect(second.calls.withLockedValue { $0 }.isEmpty, "the new VM untouched")
             await d.shutdown()
         }

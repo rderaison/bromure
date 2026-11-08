@@ -819,7 +819,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// the 5f sign-in capture on what would go out.
     // @port-skip linux-only: the swap order of HTTPMitmConnection.driveTLS (5c–5f, then TokenSwapper)
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
-                        session: UInt64? = nil, trace: inout Trace?) async -> Plan {
+                        session: UInt64, trace: inout Trace?) async -> Plan {
         var req = origin(raw)
         if let answer = await policyAnswer(&req, proxy: proxy, profileID: profileID, host: host, port: port, tls: tls,
                                            session: session) {

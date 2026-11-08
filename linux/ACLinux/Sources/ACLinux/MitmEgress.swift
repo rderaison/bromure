@@ -228,7 +228,7 @@ extension RequestReader {
     /// pauses the VM and asks). macOS: HTTPProxy's detectCompromise step.
     // @port-skip linux-only: HTTPProxy's detectCompromise step on the Linux request chain
     static func compromiseAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
-                                 session: UInt64? = nil) -> Data? {
+                                 session: UInt64) -> Data? {
         // Raised with its request's session (the handler drops a stale one).
         let leaks = MitmProxy.$raisingSession.withValue(session) {
             proxy.swapper.detectCompromise(rawRequest: request, host: host, profileID: profileID)
@@ -260,7 +260,7 @@ extension RequestReader {
     /// macOS: HTTPProxy's UnmanagedCredentialGuard step.
     // @port-skip linux-only: HTTPProxy's strict-credential step on the Linux request chain
     static func unmanagedAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
-                                session: UInt64? = nil) -> Data? {
+                                session: UInt64) -> Data? {
         guard host.lowercased() != InferenceService.localMitmHost else { return nil }
         let unmanaged = UnmanagedCredentialGuard.shared.check(
             rawRequest: request, host: host, profileID: profileID,
@@ -304,7 +304,7 @@ extension RequestReader {
     // partial: OpenShell's strict framing limits (chunk-line, header and trailer sizes) aren't applied; the Linux framer re-frames every body with a Content-Length
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
-                             host: String, port: Int, tls: Bool, session: UInt64? = nil) async -> Data? {
+                             host: String, port: Int, tls: Bool, session: UInt64) async -> Data? {
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"

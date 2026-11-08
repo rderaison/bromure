@@ -1141,6 +1141,31 @@ struct FirecrackerBackendTests {
         #expect(!FileManager.default.fileExists(atPath: dir + "/v.sock_5800"))
     }
 
+    /// A timed wait returns at its timeout while the child still runs (a
+    /// task group didn't: it waited for the exit, so the caller's SIGTERM
+    /// and SIGKILL never came, and a passt that didn't exit held
+    /// Daemon.shutdown() forever).
+    @Test("a timed wait returns at its timeout while the child runs, so it can be signalled")
+    func timedWaitReturnsAtItsTimeout() async throws {
+        let log = try shortTempDir() + "/out"
+        let p = try ChildProcess(name: "sleep", executable: "/bin/sleep", arguments: ["30"], logPath: log)
+        try p.start()
+        let t0 = ContinuousClock.now
+        #expect(await p.waitForExit(timeout: .milliseconds(300)) == nil)
+        #expect(ContinuousClock.now - t0 < .seconds(3), "returned at its timeout, not at the exit")
+        p.signal(SIGKILL)
+        #expect(await p.waitForExit(timeout: .seconds(5)) != nil, "and then it can be stopped")
+    }
+
+    /// A tool that never ends its output doesn't hold its caller (the unseal
+    /// that hung the daily run): killed at the deadline, and an error.
+    @Test("capture gives up on a tool that never ends its output")
+    func captureIsBounded() throws {
+        let t0 = Date()
+        #expect(throws: MachineError.self) { try ChildProcess.capture("/bin/sh", ["-c", "exec sleep 30"], input: nil, timeout: 1) }
+        #expect(Date().timeIntervalSince(t0) < 5, "\(Date().timeIntervalSince(t0)) s")
+    }
+
     @Test("spawn: inherited descriptors become 3, 4, … in the child; nothing else leaks")
     func inheritedFDs() async throws {
         var a: [Int32] = [-1, -1], b: [Int32] = [-1, -1]

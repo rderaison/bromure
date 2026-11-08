@@ -183,7 +183,7 @@ struct StrictCredentialsTests {
         func reply(_ t: String) -> Data { Data("HTTP/1.1 200 OK\r\nContent-Length: \(t.count + 13)\r\n\r\naccess_token=\(t)".utf8) }
         func refused(_ t: String) -> Bool {
             RequestReader.unmanagedAnswer(Data("GET / HTTP/1.1\r\nHost: api.example\r\nAuthorization: Bearer \(t)\r\n\r\n".utf8),
-                                          proxy: proxy, profileID: pid, host: "api.example") != nil
+                                          proxy: proxy, profileID: pid, host: "api.example", session: proxy.strictSession(of: pid)) != nil
         }
         let stale = Self.token("St4le"), fresh = Self.token("Fr3sh")
         proxy.learnIssued(reply(stale), host: "api.example", profileID: pid, session: old)
@@ -202,7 +202,7 @@ struct StrictCredentialsTests {
         cfg.strictCredentials = true
         func refused(_ value: String, _ pid: UUID, header: String = "Authorization: Bearer") -> Bool {
             RequestReader.unmanagedAnswer(Data("GET / HTTP/1.1\r\nHost: api.example\r\n\(header) \(value)\r\n\r\n".utf8),
-                                          proxy: proxy, profileID: pid, host: "api.example") != nil
+                                          proxy: proxy, profileID: pid, host: "api.example", session: proxy.strictSession(of: pid)) != nil
         }
         proxy.setGuardrailsConfig(cfg, for: a)
         defer { proxy.clearGuardrailsConfig(for: a); proxy.clearGuardrailsConfig(for: b) }

@@ -234,14 +234,14 @@ struct ProxyEgressPolicyTests {
         let answer = try #require(waitAsync {
             var req = Data("POST /x HTTP/1.1\r\nHost: blocked.example\r\nContent-Length: 0\r\n\r\n".utf8)
             return await RequestReader.policyAnswer(&req, proxy: proxy, profileID: pid,
-                                                    host: "blocked.example", port: 443, tls: true)
+                                                    host: "blocked.example", port: 443, tls: true, session: proxy.strictSession(of: pid))
         })
         let text = String(decoding: answer, as: UTF8.self)
         #expect(text.hasPrefix("HTTP/1.1 403 Forbidden\r\n"), "\(text)")
         #expect(waitAsync {
             var get = Data("GET /x HTTP/1.1\r\nHost: blocked.example\r\n\r\n".utf8)
             return await RequestReader.policyAnswer(&get, proxy: proxy, profileID: pid,
-                                                    host: "blocked.example", port: 443, tls: true)
+                                                    host: "blocked.example", port: 443, tls: true, session: proxy.strictSession(of: pid))
         } == nil, "a GET goes on")
     }
 }

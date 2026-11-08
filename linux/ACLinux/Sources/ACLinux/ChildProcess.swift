@@ -192,12 +192,18 @@ final class ChildProcess: Sendable {
     /// The exit status, or nil if it's still running after `timeout`.
     // @port-skip linux-only: process supervision
     func waitForExit(timeout: Duration) async -> Int32? {
-        await withTaskGroup(of: Int32?.self) { g in
-            g.addTask { await self.waitForExit() }
-            g.addTask { try? await Task.sleep(for: timeout); return nil }
-            let first = await g.next() ?? nil
-            g.cancelAll()
-            return first ?? exitStatus
+        // One continuation, resumed by whichever comes first. (A task group
+        // can't be it: it doesn't return until every child task has, and the
+        // exit wait ends only with the process, so a timeout returned when
+        // the child exited, and callers never got to signal it.)
+        let pending = NIOLockedValueBox<CheckedContinuation<Int32?, Never>?>(nil)
+        let take: @Sendable () -> CheckedContinuation<Int32?, Never>? = {
+            pending.withLockedValue { c in defer { c = nil }; return c }
+        }
+        return await withCheckedContinuation { cont in
+            pending.withLockedValue { $0 = cont }
+            Task { let st = await self.waitForExit(); take()?.resume(returning: st) }
+            Task { try? await Task.sleep(for: timeout); take()?.resume(returning: self.exitStatus) }
         }
     }
 
@@ -222,7 +228,9 @@ final class ChildProcess: Sendable {
     /// bytes, but input or output larger than a pipe buffer (64 KiB) would
     /// deadlock. Not for bulk data.
     // @port-skip linux-only: process supervision
-    static func capture(_ executable: String, _ arguments: [String], input: Data?) throws -> Data {
+    static func capture(_ executable: String, _ arguments: [String], input: Data?,
+                        timeout: TimeInterval = 120) throws -> Data {
+        let deadline = Date().addingTimeInterval(timeout)
         var inP: [Int32] = [-1, -1], outP: [Int32] = [-1, -1]
         guard acl_pipe_cloexec(&inP) == 0 else { throw MachineError.io("pipe", errno) }
         guard acl_pipe_cloexec(&outP) == 0 else { close(inP[0]); close(inP[1]); throw MachineError.io("pipe", errno) }
@@ -248,12 +256,25 @@ final class ChildProcess: Sendable {
         close(inP[1])
         var out = Data()
         var buf = [UInt8](repeating: 0, count: 4096)
+        // Bounded: a tool that never ends its output (or one that hands it
+        // to something long-lived) doesn't hold the caller forever.
+        var timedOut = false
         while true {
+            let left = Int32(max(0, min(deadline.timeIntervalSinceNow * 1000, 60_000)))
+            var pfd = pollfd(fd: outP[0], events: Int16(POLLIN), revents: 0)
+            let r = poll(&pfd, 1, left)
+            if r < 0 { if errno == EINTR { continue }; break }
+            if r == 0 { if Date() >= deadline { timedOut = true; break }; continue }
             let n = buf.withUnsafeMutableBytes { read(outP[0], $0.baseAddress, $0.count) }
             if n > 0 { out.append(contentsOf: buf[0..<n]) } else if n < 0 && errno == EINTR { continue } else { break }
         }
         close(outP[0])
-        while p.exitStatus == nil { usleep(1000) }
+        if timedOut { p.signal(SIGKILL) }
+        while p.exitStatus == nil {
+            if Date() >= deadline { p.signal(SIGKILL) }
+            usleep(1000)
+        }
+        if timedOut { throw MachineError.toolFailed(p.name, -1, "no end of output within \(Int(timeout)) s: killed") }
         if p.exitStatus != 0 {
             let err = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
             throw MachineError.toolFailed(p.name, p.exitStatus ?? -1, err.trimmingCharacters(in: .whitespacesAndNewlines))

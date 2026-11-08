@@ -236,7 +236,12 @@ extension DaemonGlobalSuites {
                     throw CancellationError()        // never boot anything here
                 } }
             }
-            func waitEntered() async { while !entered.value { try? await Task.sleep(for: .milliseconds(10)) } }
+            /// Whether the held start reached launch within 10 s (bounded: a
+            /// start refused before launch would otherwise be waited on forever).
+            func waitEntered() async -> Bool {
+                for _ in 0..<1000 where !entered.value { try? await Task.sleep(for: .milliseconds(10)) }
+                return entered.value
+            }
             /// (Not in deinit: the hook holds the gate, and replacing it under
             /// the box's lock would run deinit there.)
             static func uninstall() { Daemon.launchHookForTesting.withLockedValue { $0 = nil } }
@@ -248,7 +253,15 @@ extension DaemonGlobalSuites {
             let gate = Gate(); gate.install()
             defer { Gate.uninstall() }
             let start = Task { await d.start(rec) }
-            await gate.waitEntered()            // the start passed its checks and awaits in launch
+            // The start passed its checks and awaits in launch; if it never
+            // got there, say what it answered instead of waiting forever.
+            guard await gate.waitEntered() else {
+                gate.released.mutate { $0 = true }
+                let r = await start.value
+                Issue.record("the start never reached launch: \(r.status) \(r.body)")
+                await d.shutdown()
+                return
+            }
             #expect(await d.kubeMachineDiskImages(id: rec.id) == nil, "a repair can't take a machine that's starting")
             #expect(!d.repairMarks.contains(rec.id))
             let rm = await d.remove(rec)
