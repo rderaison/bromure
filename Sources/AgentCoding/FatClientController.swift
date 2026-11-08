@@ -36,8 +36,14 @@ final class RemoteHostController {
     @ObservationIgnored var securityHistoryGeneration = 0
     @ObservationIgnored var securityHistoryHours = 0
     @ObservationIgnored var securityHistoryApplied = 0
-    /// The host run whose history was last re-fetched for being stale.
-    @ObservationIgnored var securityHistoryRefetchEpoch: String?
+    /// History fetches under way, and when a failed one may be tried again
+    /// (backing off). A fetch that failed -- a restart's refetch, or the
+    /// window's first -- is retried by a later snapshot; a marker set before
+    /// the reply never was (Finding: "Failed restart history refetch is
+    /// never retried").
+    @ObservationIgnored var securityHistoryInFlight = 0
+    @ObservationIgnored var securityHistoryFailures = 0
+    @ObservationIgnored var securityHistoryRetryAt: Date?
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -1094,11 +1100,13 @@ final class RemoteHostController {
                 oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)),
                 oldestSeq: snapshot["securityTimelineOldestSeq"] as? Int, epoch: epoch)
             // The fetched history is from an earlier run of the host (it
-            // restarted) or didn't say: its rows' numbers can't be compared,
-            // so fetch it again, once per run.
-            if let epoch, securityHistoryApplied > 0, securityHistoryRefetchEpoch != epoch,
-               SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch) {
-                securityHistoryRefetchEpoch = epoch
+            // restarted) or didn't say -- its rows' numbers can't be compared
+            // -- or the last one asked for never landed: fetch it (again).
+            if Self.shouldFetchHistory(
+                requested: securityHistoryGeneration > 0,
+                outstanding: securityHistoryGeneration > securityHistoryApplied,
+                stale: SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch),
+                inFlight: securityHistoryInFlight > 0, now: Date(), retryAt: securityHistoryRetryAt) {
                 fetchSecurityHistory(hours: securityHistoryHours)
             }
         }
@@ -8862,22 +8870,52 @@ extension RemoteHostController: RemoteDelegationLink {
         let generation = securityHistoryGeneration
         let range = max(0, hours)
         securityHistoryHours = range
+        securityHistoryInFlight += 1
         // Not the poll queue: a slow fetch must not hold the state polls.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let resp = try? RemoteTransport.client(for: host).request(
                 "GET", "/security-timeline?hours=\(range)", recvTimeoutSeconds: 30)
-            guard let resp, resp.status == 200, let rows = resp.json["rows"] as? [[String: Any]] else { return }
-            let epoch = resp.json["epoch"] as? String
+            let rows = resp.flatMap { $0.status == 200 ? $0.json["rows"] as? [[String: Any]] : nil }
+            let epoch = resp?.json["epoch"] as? String
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, Self.acceptsHistory(generation: generation, hours: range,
-                                                        requestedHours: self.securityHistoryHours,
-                                                        applied: self.securityHistoryApplied) else { return }
+                    guard let self else { return }
+                    self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)
+                    guard let rows else {
+                        // Failed: a later snapshot tries again, backing off.
+                        self.securityHistoryFailures += 1
+                        self.securityHistoryRetryAt = Date().addingTimeInterval(
+                            Self.historyRetryDelay(failures: self.securityHistoryFailures))
+                        return
+                    }
+                    self.securityHistoryFailures = 0
+                    self.securityHistoryRetryAt = nil
+                    guard Self.acceptsHistory(generation: generation, hours: range,
+                                              requestedHours: self.securityHistoryHours,
+                                              applied: self.securityHistoryApplied) else { return }
                     self.securityHistoryApplied = generation
+                    // From the run it came from: if the host restarted since,
+                    // the next snapshot finds it stale and fetches again.
                     SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
                 }
             }
         }
+    }
+
+    /// Whether a snapshot fetches the host's history: the window asked for it
+    /// once, and what's held is from another run of the host, or the last
+    /// request never landed -- unless one is under way, or a failed one's
+    /// back-off hasn't passed.
+    nonisolated static func shouldFetchHistory(requested: Bool, outstanding: Bool, stale: Bool, inFlight: Bool,
+                                               now: Date, retryAt: Date?) -> Bool {
+        guard requested, !inFlight else { return false }
+        if let retryAt, now < retryAt { return false }
+        return stale || outstanding
+    }
+
+    /// After `failures` failed fetches in a row: 10 s, doubling, at most 2 min.
+    nonisolated static func historyRetryDelay(failures: Int) -> TimeInterval {
+        min(120, 10 * pow(2, Double(max(0, failures - 1))))
     }
     /// Whether a history reply lands: it covers the range asked for last (a
     /// slower 24 h reply after the window went to 7 days would cut the
