@@ -109,7 +109,9 @@ extension VM {
         @Option(help: "Name for an on-the-fly workspace (default: cli-XXXX).") var name: String?
         @Option(help: "Tool for an on-the-fly workspace: claude | codex | grok | kimi | omp.") var tool: String?
         @Option(help: "Auth mode for an on-the-fly workspace: token | subscription | bedrock | local.") var auth: String?
-        @Option(name: .customLong("api-key"), help: "API key (for --auth token).") var apiKey: String?
+        @Option(name: .customLong("api-key"),
+                help: "API key (for --auth token); '-' reads it from stdin. Default: $BROMURE_AC_API_KEY. On the command line, other users of this server can see it.")
+        var apiKey: String?
         @Flag(help: "Delete the workspace + disk when the VM stops (ephemeral).") var rm = false
         @Option(help: "firecracker (the only backend; linux/firecracker/build.sh).") var machine = "firecracker"
         @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB: Double?
@@ -127,7 +129,11 @@ extension VM {
                 if let name { body["name"] = .string(name) }
                 if let tool = try Self.choice(tool, Profile.Tool.self, option: "--tool") { body["tool"] = .string(tool) }
                 if let auth = try Self.choice(auth, Profile.AuthMode.self, option: "--auth") { body["auth"] = .string(auth) }
-                if let apiKey { body["apiKey"] = .string(apiKey) }
+                let key = VMRunAPIKey.resolve(flag: apiKey, environment: ProcessInfo.processInfo.environment) {
+                    String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)
+                }
+                if key.onCommandLine { FileHandle.standardError.write(Data((VMRunAPIKey.argvWarning + "\n").utf8)) }
+                if let k = key.key { body["apiKey"] = .string(k) }
             } else {
                 throw ValidationError("Specify a workspace to start (e.g. `vm run iptest2` — see `vm ls`), "
                                       + "or pass --name/--tool to create a throwaway one.")

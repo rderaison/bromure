@@ -1008,6 +1008,8 @@ public actor Daemon {
             var r = rec
             r.state = .stopped
             try? registry.upsert(r)
+            // A `--rm` workspace left suspended is over now.
+            if let pid = UUID(uuidString: rec.id) { await dropAbandonedEphemeral(pid) }
             return ControlResponse(200, ["status": "stopped"])
         }
         guard let l = live[rec.id] else {
@@ -1959,9 +1961,9 @@ public actor Daemon {
         rec.pidStart = nil
         CIDAllocator.shared.release(rec.cid)
         try? registry.upsert(rec)
-        // `vm run --rm`: the workspace goes now it stopped -- not when it is
-        // only rebooting, nor suspended.
-        if rec.state == .stopped, let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
+        // `vm run --rm`: the workspace goes now it stopped (a suspend is a
+        // stop too, as macOS's session end) -- not when it is only rebooting.
+        if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
     }
 
     /// The VM's proxy listener (`stored`: a restarted daemon's); nil without

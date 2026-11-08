@@ -419,6 +419,16 @@ struct DaemonTests {
                 "--rm: its workspace went too")
         #expect(FileManager.default.fileExists(atPath: proj + "/host.txt"), "the host folder is the user's: kept")
 
+        // A suspend ends a --rm workspace too (macOS: its session's end).
+        #expect(try w.cli("vm", "run", "--name", "eph2", "--tool", "claude", "--rm").0 == 0)
+        #expect(try w.cli("vm", "suspend", "eph2").0 == 0)
+        var suspendedGone = false
+        for _ in 0..<40 where !suspendedGone {
+            suspendedGone = try w.vm("eph2") == nil
+            if !suspendedGone { try await Task.sleep(for: .milliseconds(250)) }
+        }
+        #expect(suspendedGone, "--rm: a suspended one goes")
+
         // A kept workspace runs again by name (its own VM, not a new one).
         #expect(try w.cli("vm", "run", "--name", "keep1").0 == 0)
         let id = try w.vm("keep1")?["id"]?.stringValue

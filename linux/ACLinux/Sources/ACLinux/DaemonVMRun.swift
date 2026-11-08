@@ -60,6 +60,12 @@ extension Daemon {
         var profile: Profile
         var existing: VMRecord?
         var minted = false
+        // A sign-in VM (its throwaway profile), a disk repair's rescue
+        // machine: not workspaces to run, answered as unknown, before
+        // anything is resolved (or saved) for them.
+        if let ref, let rec = registry.find(ref), rec.registration == true || rec.rescueFor != nil {
+            return .failure(VMRunRefusal(response: .error(404, "No workspace '\(ref)'", ["notFound": .bool(true)])))
+        }
         if let ref, let (p, rec) = workspace(ref) {
             profile = p
             existing = rec
@@ -130,13 +136,15 @@ extension Daemon {
         store.isEphemeral(p) && store.mayTakeEphemeral(p)
     }
 
-    /// A `--rm` workspace whose VM stopped, or never booted, goes: its
-    /// profile, VM record, images and saved state (deleteWorkspace). Not
-    /// while it runs, starts or reboots (a reboot boots it again).
+    /// A `--rm` workspace whose VM stopped (or suspended, or was shut down
+    /// suspended), or never booted, goes: its profile, VM record, images
+    /// and saved state (deleteWorkspace). Not while it runs, starts or
+    /// reboots (a reboot boots it again), nor a sign-in or rescue VM's.
     // @port ACAppDelegate.dropAbandonedEphemeral(_: Profile.ID) h=c41ef1fe55c485af @2134fc7a
     func dropAbandonedEphemeral(_ pid: Profile.ID) async {
         let key = pid.uuidString.lowercased()
         let store = profileStore
+        if let rec = registry.find(key), rec.registration == true || rec.rescueFor != nil || rec.managed { return }
         guard live[key] == nil, !starting.contains(key), !rebooting.contains(key),
               let p = store.loadAll().first(where: { $0.id == pid }), Self.takeEphemeral(p, store: store) else { return }
         let r = await deleteWorkspace(key)
@@ -179,5 +187,29 @@ extension Daemon {
         let lines = SessionDisk.sharedFolders(p.folderPaths).enumerated().map { "\($0.offset + 1) \($0.element.mountName)" }
         try (lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n")
             .write(toFile: meta + "/shares.txt", atomically: true, encoding: .utf8)
+    }
+}
+
+/// `vm run --api-key`: the key from the flag (as macOS takes it), from
+/// stdin with `--api-key -`, else from BROMURE_AC_API_KEY. A key on the
+/// command line is in /proc/<pid>/cmdline, which other users of a shared
+/// server can read: the CLI warns then.
+// @port-skip linux-only: a shared server's other users see argv (macOS's CLI takes the flag only)
+public enum VMRunAPIKey {
+    public static let environmentVariable = "BROMURE_AC_API_KEY"
+    public static let argvWarning = "warning: an --api-key on the command line is visible to other users of this server "
+        + "(ps, /proc); pass --api-key - (stdin) or \(environmentVariable) instead"
+
+    /// The key, and whether it came on the command line (warn).
+    // @port-skip linux-only: see VMRunAPIKey
+    public static func resolve(flag: String?, environment: [String: String],
+                               stdin: () -> String?) -> (key: String?, onCommandLine: Bool) {
+        if flag == "-" {
+            let key = stdin()?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (key?.isEmpty == false ? key : nil, false)
+        }
+        if let flag { return (flag, true) }
+        let env = environment[environmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (env?.isEmpty == false ? env : nil, false)
     }
 }

@@ -119,6 +119,54 @@ extension DaemonGlobalSuites {
             }
         }
 
+        /// A sign-in VM or a rescue machine isn't a workspace to run: refused
+        /// as unknown, nothing saved or marked for it; a --rm mark on its
+        /// id never deletes it.
+        @Test func signInAndRescueVMsAreNotWorkspaces() async throws {
+            try await Self.withStore { d, _ in
+                let store = ProfileStore()
+                var signIn = RepairMarksTests.stopped()
+                signIn.name = "register-claude-1234abcd"
+                signIn.registration = true
+                try await d.registerForTesting(signIn)
+                var rescue = RepairMarksTests.stopped()
+                rescue.name = "rescue-1"
+                rescue.rescueFor = UUID().uuidString.lowercased()
+                try await d.registerForTesting(rescue)
+                for name in [signIn.name, rescue.name, signIn.id] {
+                    guard case .failure(let r) = await d.vmRunWorkspace(.object(["profile": .string(name), "rm": true])) else {
+                        Issue.record("\(name) was run as a workspace"); continue
+                    }
+                    #expect(r.response.status == 404 && r.response.body["notFound"] == .bool(true))
+                }
+                #expect(store.loadAll().isEmpty, "nothing saved for them")
+                // A mark under a sign-in VM's id doesn't make its stop delete it.
+                var p = Profile(name: "under-sign-in", tool: .claude, authMode: .token)
+                p.id = try #require(UUID(uuidString: signIn.id))
+                p = try store.save(p)
+                store.markEphemeral(p)
+                await d.dropAbandonedEphemeral(p.id)
+                #expect(await d.registry.find(signIn.id) != nil && store.loadAll().contains { $0.id == p.id })
+            }
+        }
+
+        /// A --rm workspace shut down while suspended goes then (macOS: its
+        /// session's end deletes it, a suspend's included).
+        @Test func aSuspendedRmWorkspaceShutDownGoes() async throws {
+            try await Self.withStore { d, _ in
+                let store = ProfileStore()
+                let (p, _) = try #require(Self.saved(await d.vmRunWorkspace(.object(["name": "eph-s", "rm": true]))))
+                var vm = RepairMarksTests.stopped(p.id.uuidString.lowercased())
+                vm.name = "eph-s"
+                vm.state = .suspended
+                try await d.registerForTesting(vm)
+                let r = await d.deleteVM(vm, action: "shutdown")
+                #expect(r.status == 200)
+                let gone = await d.registry.find(vm.id) == nil
+                #expect(gone && !store.loadAll().contains { $0.id == p.id }, "deleted, VM and all")
+            }
+        }
+
         @Test func atStartTheStoppedOnesOfAGoneDaemonGo() async throws {
             try await Self.withStore { d, _ in
                 let store = ProfileStore()
