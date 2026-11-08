@@ -135,7 +135,6 @@ extension Daemon {
     }
 
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
-    // partial: no read yet
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
@@ -270,6 +269,19 @@ extension Daemon {
                 default:
                     return ["error": "op must be add, remove, viewed or send"]
                 }
+                return ["ok": true]
+            case (let sid?, "read"):
+                // {seen?}: the reply count the client's screen showed (macOS:
+                // markSessionRead). A machine's session: its count lives on
+                // the machine, so the read goes there (until it confirms).
+                if let m = LinuxMachines.shared?.machine(forSession: sid) {
+                    if m.unreadOnMachine(sid), let n = m.machineSessions.first(where: { $0.id == sid })?.replies {
+                        m.markRead(sid, upTo: min((doc["seen"] as? Int) ?? n, n))
+                    }
+                    return ["ok": true]
+                }
+                guard store.session(sid) != nil else { return ["error": "unknown session"] }
+                _ = store.markRead(sid, upTo: doc["seen"] as? Int)
                 return ["ok": true]
             case (let sid?, "rename"):
                 guard store.session(sid) != nil, let title = doc["title"] as? String else { return ["error": "unknown session or no title"] }
