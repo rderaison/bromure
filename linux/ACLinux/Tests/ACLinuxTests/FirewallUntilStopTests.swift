@@ -41,5 +41,30 @@ extension DaemonGlobalSuites {
             await d.sweepFirewallRules(launch: false)
             #expect(rules().contains("#@off allow tcp temp.example"), "\(rules())")
         }
+
+        /// A timed rule is switched off and saved at its expiry, not up to a
+        /// sweep later (macOS: scheduleNextFirewallExpiry's one-shot timer).
+        @Test func aTimedRuleIsSwitchedOffAtItsExpiry() async throws {
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let prior = ProfileStore.defaultRootDir
+            ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
+            defer { ProfileStore.defaultRootDir = prior }
+            let soon = Int(Date().timeIntervalSince1970) + 2
+            var p = Profile(name: "fw-timed", tool: .claude, authMode: .local)
+            p.egressRules = "allow tcp temp.example #@until=\(soon)\ndefault deny"
+            p = try ProfileStore().save(p)
+            let id = p.id
+            func rules() -> String { ProfileStore().loadAll().first { $0.id == id }?.egressRules ?? "" }
+            await d.scheduleNextFirewallExpiry()
+            #expect(rules().contains("#@until="), "not before it expires")
+            var off = false
+            for _ in 0..<60 where !off {
+                try await Task.sleep(for: .milliseconds(100))
+                off = rules().contains("#@off allow tcp temp.example")
+            }
+            #expect(off, "switched off within a second of its expiry, no sweep asked: \(rules())")
+            await d.shutdown()
+        }
     }
 }

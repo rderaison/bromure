@@ -161,6 +161,8 @@ public actor Daemon {
     /// VM held paused sends nothing, which the sentry mustn't take for silence.
     // @port-skip linux-only: the Linux daemon's pause bookkeeping (DaemonWatchdog.swift)
     var pauseHolds: [String: Int] = [:] { didSet { publishSentryRunState() } }
+    /// The one-shot wake at the soonest timed firewall rule's expiry (DaemonFirewall.swift).
+    var firewallExpiryTask: Task<Void, Never>?
     /// VMs whose watchdog Release waits for the other questions holding them.
     var releaseWhenFree: Set<String> = []
     /// VMs whose watchdog question is up.

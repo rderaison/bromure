@@ -23,6 +23,7 @@ extension Daemon {
             mitm?.applyWorkspacePolicies(p)
             sw.egress.update(.init(p))
         }
+        scheduleNextFirewallExpiry()
         return true
     }
 
@@ -46,13 +47,35 @@ extension Daemon {
                 commitFirewallRules(text, profileID: p.id)
             }
         }
+        // A timed rule saved another way (the profile route) arms its expiry here.
+        scheduleNextFirewallExpiry(now: now)
+    }
+
+    /// (Re)arm the one-shot wake at the soonest timed-rule expiry across
+    /// workspaces. The evaluators already ignore an expired rule on their
+    /// own; this switches it off and saves it at that instant (which
+    /// re-checks the connections it allowed), not up to a sweep later.
+    // @port ACAppDelegate.scheduleNextFirewallExpiry(now: Date) h=f53a9fea59399798 @d48dfc6f
+    func scheduleNextFirewallExpiry(now: Date = Date()) {
+        firewallExpiryTask?.cancel()
+        firewallExpiryTask = nil
+        let next = ProfileStore().loadAll().lazy.filter { $0.egressRules.contains("#@until=") }
+            .compactMap { (try? EgressPolicy.parse($0.egressRules))?.nextExpiry }
+            .min()
+        guard let next else { return }
+        let delay = max(next.timeIntervalSince(now), 0) + 0.2
+        firewallExpiryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1e9))
+            guard !Task.isCancelled else { return }
+            await self?.sweepFirewallRules(launch: false)
+        }
     }
 
     /// The sweep, at launch and every 15 s (macOS: startFirewallExpirySweep's
-    /// timer). The evaluators already ignore an expired rule, and the
-    /// connection registry cuts its connections at the instant: this saves
-    /// it switched off.
-    // partial: a 15 s sweep only (macOS also arms a one-shot timer at the soonest expiry to save it at that instant)
+    /// timer), besides the one-shot wake at the soonest expiry
+    /// (scheduleNextFirewallExpiry). The evaluators already ignore an
+    /// expired rule, and the connection registry cuts its connections at
+    /// the instant: this saves it switched off.
     // @port ACAppDelegate.startFirewallExpirySweep() h=55632e1734dfb938 @d48dfc6f
     func startFirewallExpirySweep() {
         Task { [weak self] in

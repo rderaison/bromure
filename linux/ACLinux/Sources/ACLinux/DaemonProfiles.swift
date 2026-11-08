@@ -107,6 +107,9 @@ extension Daemon {
             LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"]
         }
         let ok = r["ok"] as? Bool == true
+        // A timed rule saved here gets its instant switch-off too (macOS:
+        // firewallProfilesChanged re-arms the expiry timer).
+        if ok { scheduleNextFirewallExpiry() }
         let status = ok ? 200 : ((r["error"] as? String)?.contains("not found") == true ? 404 : 400)
         return ControlResponse(status, JSONValue(foundation: r) ?? .object([:]))
     }
