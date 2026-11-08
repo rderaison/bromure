@@ -155,7 +155,11 @@ struct WorkspaceScreen: View {
             // Constant item count (iOS 26 leaves ghost buttons behind removed
             // toolbar items) — render nothing when the pane doesn't apply.
             ToolbarItem(placement: .primaryAction) {
-                if hSize == .regular && pane == .terminals && isRunning {
+                if hSize != .regular, isSessionStage, isRunning, let cwd = sessionCwd {
+                    // The phone has no room beside the chat: the session's
+                    // files come up as a sheet.
+                    SessionFilesButton(controller: controller, profileID: profileID, cwd: cwd)
+                } else if hSize == .regular && pane == .terminals && isRunning {
                     Button {
                         withAnimation(.snappy(duration: 0.25)) {
                             controller.listModel.filePaneOpen.toggle()
@@ -258,7 +262,9 @@ struct WorkspaceScreen: View {
                                 withAnimation(.snappy(duration: 0.25)) {
                                     controller.listModel.filePaneOpen = open
                                 }
-                            })
+                            },
+                            // A session's stage browses the session's folder.
+                            pinnedContext: sessionCwd.map { (profileID, $0) })
                             .frame(width: controller.listModel.filePaneOpen ? 320 : 0)
                             .clipped()
                     }
@@ -1282,5 +1288,53 @@ private struct MachineTitle: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+// MARK: - A session's files
+
+/// The repo file pane for one session -- its machine and folder -- with its
+/// own explorer model. Beside the conversation on a regular width, in a
+/// sheet on the phone (`SessionFilesButton`).
+struct SessionFilesPane: View {
+    let controller: RemoteHostController
+    let profileID: Profile.ID
+    let cwd: String
+    @State private var model = FileExplorerModel()
+
+    var body: some View {
+        FileExplorerPane(model: model, listModel: controller.listModel,
+                         onAutoSetOpen: { _ in },
+                         pinnedContext: (profileID, cwd))
+            .onAppear { [controller] in
+                model.execProvider = { [weak controller] id, command, timeout in
+                    guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+                    return try await controller.guestExec(id, command: command, timeout: timeout)
+                }
+            }
+    }
+}
+
+/// The phone's way to a session's files: a toolbar button and its sheet.
+struct SessionFilesButton: View {
+    let controller: RemoteHostController
+    let profileID: Profile.ID
+    let cwd: String
+    @State private var shown = false
+
+    var body: some View {
+        Button { shown = true } label: { Image(systemName: "folder") }
+            .accessibilityLabel("Files")
+            .sheet(isPresented: $shown) {
+                NavigationStack {
+                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd)
+                        .navigationTitle("Files")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("Done") { shown = false } }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
     }
 }

@@ -46,6 +46,8 @@ struct HostMirrorScreen: View {
     /// must survive the swap.
     @Binding private var focus: PadSelection?
     @State private var didRestoreFocus = false
+    /// The Virtual Machines caret, shared with the iPad sidebar.
+    @AppStorage("machines.vmExpanded") private var machinesExpanded = false
     #if DEBUG
     @State private var didDebugRoute = false
     #endif
@@ -410,7 +412,21 @@ struct HostMirrorScreen: View {
     @ViewBuilder private var workspacesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Text("Virtual Machines").font(.headline)
+                // Folded away by default, as on the desktop: sessions first.
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { machinesExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Virtual Machines").font(.headline).foregroundStyle(.primary)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(machinesExpanded ? 90 : 0))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(machinesExpanded ? "Hide virtual machines" : "Show virtual machines")
                 Spacer()
                 if !vmRows.isEmpty {
                     Text("\(runningCount(vmRows)) running")
@@ -421,24 +437,26 @@ struct HostMirrorScreen: View {
                 }
                 .accessibilityLabel("New workspace")
             }
-            NavigationLink { GridScreen(controller: controller) } label: { gridCard }
-                .buttonStyle(.plain)
-            if vmRows.isEmpty {
-                Text(controller.hasSnapshot ? "No workspaces on this server."
-                                            : "Loading workspaces…")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                ForEach(vmRows) { row in
-                    NavigationLink {
-                        WorkspaceScreen(controller: controller, profileID: row.id)
-                    } label: { workspaceCard(row) }
+            if machinesExpanded {
+                NavigationLink { GridScreen(controller: controller) } label: { gridCard }
                     .buttonStyle(.plain)
-                    .contextMenu {
-                        Button {
-                            workspaceEdit = .existing(row.id)
-                        } label: { Label("Workspace Settings…", systemImage: "gearshape") }
+                if vmRows.isEmpty {
+                    Text(controller.hasSnapshot ? "No workspaces on this server."
+                                                : "Loading workspaces…")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(vmRows) { row in
+                        NavigationLink {
+                            WorkspaceScreen(controller: controller, profileID: row.id)
+                        } label: { workspaceCard(row) }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                workspaceEdit = .existing(row.id)
+                            } label: { Label("Workspace Settings…", systemImage: "gearshape") }
+                        }
                     }
                 }
             }
@@ -608,7 +626,9 @@ struct CodingBoardScreen: View {
             actions: CodingKanbanView.Actions(
                 start: { controller.taskCommand($0, "start") },
                 plan: { controller.taskCommand($0, "plan") },
-                openReview: { _ in },
+                // No diff review on iOS yet (the desktop's review window is
+                // AppKit): the agent's final report, the transcript a tap away.
+                openReview: { openedTask = TranscriptTarget(id: $0, report: true) },
                 jumpToRun: { _ in },
                 moveToTesting: { controller.taskCommand($0, "to-testing") },
                 backToInProgress: { controller.taskCommand($0, "to-in-progress") },
@@ -635,13 +655,18 @@ struct CodingBoardScreen: View {
                 title: controller.taskStore.task(t.id)?.title ?? "Task",
                 subtitle: nil,
                 fetch: { await controller.fetchTaskTranscript(t.id) },
-                agent: controller.taskStore.task(t.id)?.tool.rawValue)
+                agent: controller.taskStore.task(t.id)?.tool.rawValue,
+                reportOnly: t.report)
         }
     }
 }
 
-/// A UUID made presentable via `.sheet(item:)`.
-struct TranscriptTarget: Identifiable { let id: UUID }
+/// A UUID made presentable via `.sheet(item:)`; `report` opens a task's
+/// transcript on the agent's final report.
+struct TranscriptTarget: Identifiable {
+    let id: UUID
+    var report = false
+}
 
 /// A fetched-once transcript rendered natively — shared by a finished coding
 /// task and a completed automation run. Both pull the JSONL from the host over
@@ -653,14 +678,20 @@ struct TranscriptScreen: View {
     /// Canonical agent kind of the tool that wrote the transcript (the
     /// task's / automation's tool); nil sniffs the format from the lines.
     var agent: String? = nil
+    /// Open on the agent's final report (a finished task's "Read Report")
+    /// rather than the whole conversation; the toolbar switches.
+    @State var reportOnly = false
     @Environment(\.dismiss) private var dismiss
     @State private var items: [TranscriptItem]?
+    @State private var report: [TranscriptItem]?
     @State private var failed = false
+
+    private var shown: [TranscriptItem]? { reportOnly ? (report ?? items) : items }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let items {
+                if let items = shown {
                     if items.isEmpty {
                         ContentUnavailableView("Empty transcript", systemImage: "doc.text",
                             description: Text("This run captured no transcript."))
@@ -687,11 +718,20 @@ struct TranscriptScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    if report != nil {
+                        Button(reportOnly ? "Transcript" : "Report") { reportOnly.toggle() }
+                    }
+                }
             }
         }
         .task {
             if let data = await fetch(), !data.isEmpty {
                 items = AgentTranscript.parse(data, agent: agent)
+                if let r = TaskReviewSummary.finalReport(fromTranscript: String(decoding: data, as: UTF8.self),
+                                                         agent: agent), !r.isEmpty {
+                    report = [TranscriptItem(id: 0, kind: .assistantText(r), timestamp: nil)]
+                }
             } else {
                 failed = true
             }

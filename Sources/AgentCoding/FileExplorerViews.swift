@@ -26,6 +26,10 @@ struct FileExplorerPane: View {
     /// worktree. Left nil in remote (fat-client) mode, where worktrees are
     /// managed from the sidebar.
     var onWorktreeAction: ((TabAction) -> Void)? = nil
+    /// Browse this machine and folder (a session's), whatever the list
+    /// selection says -- the iOS session and room stages, which don't run
+    /// the sessions-first selection the desktop does.
+    var pinnedContext: (profile: Profile.ID, cwd: String)? = nil
 
     /// A Finder drag is over the pane.
     @State private var dropTargeted = false
@@ -51,7 +55,9 @@ struct FileExplorerPane: View {
     private var sessionContext: (profile: Profile.ID, cwd: String)? {
         // A room on stage: the focused cell's session.
         let pid: Profile.ID, cwd: String
-        if listModel.sessionsFirst, listModel.selectedRoomID != nil,
+        if let pinned = pinnedContext {
+            pid = pinned.profile; cwd = pinned.cwd
+        } else if listModel.sessionsFirst, listModel.selectedRoomID != nil,
            let p = listModel.roomFocusProfileID, let c = listModel.roomFocusCwd {
             pid = p; cwd = c
         } else {

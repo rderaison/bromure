@@ -70,6 +70,19 @@ enum MobileSessions {
         model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888"
     }
 
+    /// Paused: the machine is asleep or the agent stopped -- one group, as
+    /// on the desktop; both pick up again with a message.
+    static func isPaused(_ s: AgentSession, _ model: SessionListModel) -> Bool {
+        let b = SessionHome.bucket(for: s, in: model)
+        return b == .asleep || b == .ended
+    }
+
+    /// Whether a session belongs under a bucket's label (Ended files under
+    /// Paused, `.asleep`).
+    static func inGroup(_ s: AgentSession, _ bucket: SessionBucket, _ model: SessionListModel) -> Bool {
+        bucket == .asleep ? isPaused(s, model) : SessionHome.bucket(for: s, in: model) == bucket
+    }
+
     /// "3m" — when the session last did something ("now" while it works);
     /// nil while starting.
     @MainActor
@@ -563,12 +576,15 @@ struct MobileSessionsSection: View {
                 if list.isEmpty && rooms.isEmpty {
                     emptyCard
                 } else {
-                    // Grouped by state, Ended folded away.
-                    ForEach(SessionBucket.allCases) { bucket in
-                        let group = list.filter { SessionHome.bucket(for: $0, in: model) == bucket }
+                    // Grouped by state. Paused is one group, as on the
+                    // desktop -- asleep machines and stopped agents alike
+                    // pick up with a message -- folded away behind its caret.
+                    ForEach(SessionBucket.allCases.filter { $0 != .ended }) { bucket in
+                        let group = list.filter { MobileSessions.inGroup($0, bucket, model) }
                         if !group.isEmpty {
-                            let folded = bucket == .ended && !endedExpanded
-                            bucketLabel(bucket, count: group.count, folded: bucket == .ended ? folded : nil)
+                            let pausedGroup = bucket == .asleep
+                            let folded = pausedGroup && !endedExpanded
+                            bucketLabel(bucket, count: group.count, folded: pausedGroup ? folded : nil)
                             if !folded { ForEach(group) { card($0) } }
                         }
                     }
@@ -773,6 +789,8 @@ struct PadSessionSections<Boards: View>: View {
     @State private var deletingRoom: AgentRoom?
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// The Paused group's caret: folded by default (the phone list shares it).
+    @AppStorage("sessions.endedExpanded") private var pausedExpanded = false
     /// A right-click / long-press Delete on a running agent asks first.
     @State private var pendingDelete: AgentSession?
     /// A right-click / long-press "New worktree…": the session to branch off.
@@ -890,24 +908,16 @@ struct PadSessionSections<Boards: View>: View {
             .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
                                   renaming: $renamingRoom, deleting: $deletingRoom,
                                   onCreated: onOpenRoom))
-            ForEach(list) { s in
-                row(s)
-                    .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
-                    .tag(PadSelection.session(s.id))
-                    .contextMenu { rowMenu(s) }
-                    .draggable(s.id.uuidString)
-                    .dropDestination(for: String.self) { items, _ in
-                        let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
-                        guard controller.supportsRooms, !ids.isEmpty else { return false }
-                        for id in ids {
-                            Task {
-                                let r = await controller.roomCommand(
-                                    nil, "group", body: ["dragged": id.uuidString, "onto": s.id.uuidString])
-                                if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onOpenRoom(rid) }
-                            }
-                        }
-                        return true
-                    }
+            // Paused sessions fold away behind one caret, as on the desktop.
+            let paused = list.filter { MobileSessions.isPaused($0, model) }
+            ForEach(list.filter { !MobileSessions.isPaused($0, model) }) { sessionRow($0) }
+            if !paused.isEmpty {
+                pausedToggle(count: paused.count)
+                // Folded, the open session stays listed: its row carries the
+                // List selection, and a hidden one loses the highlight.
+                ForEach(pausedExpanded ? paused : paused.filter { $0.id == model.selectedSessionID }) {
+                    sessionRow($0)
+                }
             }
         } header: {
             HStack(spacing: 6) {
@@ -929,6 +939,45 @@ struct PadSessionSections<Boards: View>: View {
                 }
             }
         }
+    }
+
+    /// The Paused group's caret row: folds the paused sessions in and out.
+    private func pausedToggle(count: Int) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { pausedExpanded.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(SessionBucket.asleep.tint).frame(width: 7, height: 7)
+                Text(SessionBucket.asleep.title).font(.subheadline).foregroundStyle(.secondary)
+                Text("\(count)").font(.footnote.weight(.semibold)).monospacedDigit().foregroundStyle(.tertiary)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(pausedExpanded ? 90 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pausedExpanded ? "Hide paused sessions" : "Show paused sessions")
+    }
+
+    private func sessionRow(_ s: AgentSession) -> some View {
+                row(s)
+                    .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
+                    .tag(PadSelection.session(s.id))
+                    .contextMenu { rowMenu(s) }
+                    .draggable(s.id.uuidString)
+                    .dropDestination(for: String.self) { items, _ in
+                        let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
+                        guard controller.supportsRooms, !ids.isEmpty else { return false }
+                        for id in ids {
+                            Task {
+                                let r = await controller.roomCommand(
+                                    nil, "group", body: ["dragged": id.uuidString, "onto": s.id.uuidString])
+                                if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onOpenRoom(rid) }
+                            }
+                        }
+                        return true
+                    }
     }
 
     /// Right-click / long-press: the same choices as the session's own menu.

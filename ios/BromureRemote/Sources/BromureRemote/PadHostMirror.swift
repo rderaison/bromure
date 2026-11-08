@@ -43,14 +43,28 @@ struct PadHostMirror: View {
     /// the one that needs you (or the new-session composer) — same as the
     /// desktop — instead of an empty "Select a workspace".
     @State private var didPickInitialSession = false
+    /// The split view's width: under an iPad mini's it's an unfolded iPhone
+    /// Duo, which gets a slimmer sidebar and one-up rooms.
+    @State private var width: CGFloat = 0
+    /// The Virtual Machines caret, shared with the iPhone list.
+    @AppStorage("machines.vmExpanded") private var machinesExpanded = false
+    private var narrow: Bool { width > 0 && width < PadHostMirror.narrowWidth }
+    /// An iPad mini's portrait width; anything narrower in the regular size
+    /// class is a foldable's inner screen.
+    static let narrowWidth: CGFloat = 744
 
     var body: some View {
         NavigationSplitView {
             sidebar
+                // 30% under the stock sidebar (320 pt): the detail column
+                // is where the conversation is.
+                .modifier(SidebarWidth(ideal: narrow ? 224 : nil))
         } detail: {
             NavigationStack { detail }
         }
         .navigationSplitViewStyle(.balanced)
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width = $0 }
+        .environment(\.narrowRegular, narrow)
         .onAppear {
             controller.start()   // idempotent, same as the iPhone mirror
             AppBadge.set(waitingCount)
@@ -144,7 +158,8 @@ struct PadHostMirror: View {
     }
 
     private var machinesSection: some View {
-        Section {
+        // Folded away by default, as on the desktop: sessions first.
+        Section(isExpanded: $machinesExpanded) {
             boardRow(.grid, "Grid", icon: "square.grid.2x2.fill", tint: .purple,
                      count: controller.gridStore.cells.count)
             if vmRows.isEmpty {
@@ -412,4 +427,22 @@ struct PadHostMirror: View {
 
     // Decision prompts: `.decisionPrompts(controller)` above — the same
     // multi-button alert as the iPhone mirror (HostMirrorScreen.swift).
+}
+
+/// A fixed sidebar width when `ideal` is set; the system's otherwise.
+private struct SidebarWidth: ViewModifier {
+    let ideal: CGFloat?
+    func body(content: Content) -> some View {
+        if let ideal {
+            content.navigationSplitViewColumnWidth(min: ideal - 24, ideal: ideal, max: ideal + 40)
+        } else {
+            content
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// Regular width, but narrower than an iPad mini: an unfolded iPhone
+    /// Duo. Set by PadHostMirror; layouts that assume iPad room tighten up.
+    @Entry var narrowRegular: Bool = false
 }

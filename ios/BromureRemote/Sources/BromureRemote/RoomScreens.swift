@@ -284,6 +284,8 @@ struct MobileRoomScreen: View {
     var onGone: () -> Void = {}
 
     @Environment(\.horizontalSizeClass) private var hSize
+    /// An unfolded iPhone Duo: regular width, but too narrow for a grid.
+    @Environment(\.narrowRegular) private var narrowRegular
     /// The selected tab: a page of sessions, or `switchboardPage`.
     @State private var page = 0
     /// The first settle picks the opening tab: the Switchboard when the room
@@ -320,10 +322,12 @@ struct MobileRoomScreen: View {
     private var compact: Bool { hSize == .compact }
     private var accent: Color { Color(hex: room?.colorHex ?? "#6366F1") }
 
-    /// The phone shows one session at a time; the pad the room's grid.
+    /// The phone shows one session at a time; the pad the room's grid. An
+    /// unfolded Duo opens one-up too, until a grid is picked for the room.
     private var layout: RoomLayout {
         if compact { return RoomLayout(cols: 1, rows: 1) }
-        return room?.layout.flatMap(RoomLayout.init) ?? .fitting(members.count)
+        return room?.layout.flatMap(RoomLayout.init)
+            ?? (narrowRegular ? RoomLayout(cols: 1, rows: 1) : .fitting(members.count))
     }
     private var pages: [[AgentSession]] { layout.pages(members) }
     private var focused: AgentSession? { focusedID.flatMap { id in members.first { $0.id == id } } }
@@ -448,7 +452,17 @@ struct MobileRoomScreen: View {
             if members.isEmpty && !toSwitchboard {
                 empty
             } else {
-                content.frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack(spacing: 0) {
+                    content.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // Regular width: the full-screen session's files beside
+                    // it, as on a session's own stage (same toggle and state).
+                    if !compact, controller.listModel.filePaneOpen, let s = filesSession {
+                        SessionFilesPane(controller: controller, profileID: s.profileID, cwd: s.cwd)
+                            .frame(width: 320)
+                            .id(s.id)
+                            .transition(.move(edge: .trailing))
+                    }
+                }
             }
             composer
         }
@@ -537,6 +551,14 @@ struct MobileRoomScreen: View {
             .foregroundStyle(on ? Color.primary : Color.secondary)
         }
         .buttonStyle(.plain)
+    }
+
+    /// The session whose files the toolbar offers: one that fills the
+    /// screen -- zoomed, or alone on its tab (the phone, a 1×1 room) -- as
+    /// a session's own stage does.
+    private var filesSession: AgentSession? {
+        if let z = zoomedID { return members.first { $0.id == z } }
+        return (compact || layout.size == 1) && !toSwitchboard ? focused : nil
     }
 
     @ViewBuilder private var content: some View {
@@ -933,6 +955,18 @@ struct MobileRoomScreen: View {
         if zoomedID != nil {
             ToolbarItem(placement: .topBarLeading) {
                 Button { setZoom(nil) } label: { Label("Room", systemImage: "chevron.left") }
+            }
+        }
+        if let s = filesSession {
+            ToolbarItem(placement: .primaryAction) {
+                if compact {
+                    SessionFilesButton(controller: controller, profileID: s.profileID, cwd: s.cwd)
+                } else {
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) { controller.listModel.filePaneOpen.toggle() }
+                    } label: { Image(systemName: "sidebar.right") }
+                    .accessibilityLabel(controller.listModel.filePaneOpen ? "Hide files" : "Show files")
+                }
             }
         }
         if !compact, !members.isEmpty, zoomedID == nil {
