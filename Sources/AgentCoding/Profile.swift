@@ -3699,8 +3699,7 @@ public final class ProfileStore {
         } else if let root = Self.defaultRootDir {
             self.rootDir = root
         } else if isTestRun() {
-            self.rootDir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("bromure-test-profiles-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            self.rootDir = testRunDirectory("profiles")
         } else {
             let appSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory, in: .userDomainMask
