@@ -8,7 +8,7 @@ extension Daemon {
     /// `?storage=1`: its disk sizes; else the compact describe), a workspace's
     /// firewall (`POST …/firewall`, `…/firewall-edit`), and `POST
     /// /agent-sessions/folders`; nil for any other path.
-    // partial: no squelch, proposals, policy revisions, OpenShell/sandbox-path decisions or DELETE sub-routes yet
+    // partial: no advisor proposals or OpenShell/sandbox-path decisions yet (501)
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=59e55ae73cdc6185 @f127f8ab
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
@@ -21,7 +21,7 @@ extension Daemon {
                 return .error(404, "The machine's folders can't be read right now")
             }
             return ControlResponse(200, ["folders": .array(folders.map { .string($0) })])
-        case ("GET", let p) where p.hasPrefix("/profiles/"):
+        case ("GET", let p) where p.hasPrefix("/profiles/") && !p.dropFirst("/profiles/".count).contains("/"):
             let raw = String(p.dropFirst("/profiles/".count))
             guard let prof = Self.workspace(raw.removingPercentEncoding ?? raw) else { return .error(404, "Profile not found") }
             if query.contains("storage=1") { return ControlResponse(200, storage(prof)) }
@@ -35,15 +35,87 @@ extension Daemon {
         case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/firewall"):
             let raw = String(p.dropFirst("/profiles/".count).dropLast("/firewall".count))
             return firewallRoute(raw.removingPercentEncoding ?? raw, body)
+        case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/squelch"):
+            let raw = String(p.dropFirst("/profiles/".count).dropLast("/squelch".count))
+            guard case .bool(let enabled)? = body["enabled"] else { return .error(400, "enabled required") }
+            guard let prof = Self.workspace(raw.removingPercentEncoding ?? raw), setSquelch(prof.id, enabled) else {
+                return ControlResponse(404, ["ok": false, "error": "unknown workspace"])
+            }
+            return ControlResponse(200, ["ok": true, "enabled": .bool(enabled)])
         case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/compromised"):
             let raw = String(p.dropFirst("/profiles/".count).dropLast("/compromised".count))
             return await resolveCompromise(raw.removingPercentEncoding ?? raw, action: body["action"]?.stringValue ?? "")
+        // Sub-resources: /profiles/{id}/policy/revisions…, /proposals…, the
+        // Sandbox drawer's decisions.
+        case (_, let p) where p.hasPrefix("/profiles/") && p.dropFirst("/profiles/".count).contains("/"):
+            let segments = p.dropFirst("/profiles/".count).split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
+            guard segments.count >= 2, let prof = Self.workspace(segments[0]) else { return .error(404, "Profile not found") }
+            let sub = Array(segments.dropFirst())
+            let r: (status: Int, body: [String: Any])
+            switch sub[0] {
+            case "policy":
+                r = ProfileSubRoutes.policyRevisionsRoute(directory: profileStore.profileDirectory(for: prof), method: method, sub: sub)
+            case "proposals", "openshell-allow", "sandbox-path":
+                return .error(501, "The OpenShell advisor isn't on this server yet")
+            default:
+                return .error(404, "Unknown profile resource")
+            }
+            return ControlResponse(r.status, JSONValue(foundation: r.body) ?? .object([:]))
+        case ("DELETE", let p) where p.hasPrefix("/profiles/"):
+            let raw = String(p.dropFirst("/profiles/".count))
+            let r = await deleteWorkspace(raw.removingPercentEncoding ?? raw)
+            return ControlResponse(r["ok"] as? Bool == true ? 200 : 409, JSONValue(foundation: r) ?? .object([:]))
         case ("PUT", let p) where p.hasPrefix("/profiles/"), ("PATCH", let p) where p.hasPrefix("/profiles/"):
             let raw = String(p.dropFirst("/profiles/".count))
             return await updateProfile(raw.removingPercentEncoding ?? raw, body)
         default:
             return nil
         }
+    }
+
+    /// Squelch on or off for a workspace (the sidebar's switch), saved and
+    /// applied to its traffic at once. False for an unknown workspace or a
+    /// failed save.
+    // @port ACAppDelegate.setSquelch(_: Profile.ID, _: Bool) h=95dbcd51ff8ff787 @2134fc7a
+    @discardableResult
+    func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
+        let store = profileStore
+        guard var p = store.loadAll().first(where: { $0.id == id }) else { return false }
+        guard p.squelch.enabled != on else { return true }
+        p.squelch.enabled = on
+        do { try store.update(p) } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: squelch: couldn't save profile: \(error)\n".utf8))
+            return false
+        }
+        Self.refreshSquelchSettings()
+        return true
+    }
+
+    /// Delete a workspace: its profile, and its VM's record, images and
+    /// saved state. Refused while its VM runs or its disks are in use.
+    // @port ACAppDelegate.automationDeleteProfile(_: String) h=bfe7e40435bea98c @2134fc7a
+    func deleteWorkspace(_ key: String) async -> [String: Any] {
+        guard let p = Self.workspace(key) else { return ["ok": false, "error": "Workspace not found: \(key)"] }
+        let vmKey = p.id.uuidString.lowercased()
+        if live[vmKey] != nil || starting.contains(vmKey) {
+            // Read by the CLI and by a fat client's "Delete workspace".
+            return ["ok": false, "error": "“\(p.name)” is running — shut it down (or `vm kill` it), then delete it."]
+        }
+        if let rec = registry.find(vmKey) {
+            let r = remove(rec)
+            guard r.status == 200 else {
+                return ["ok": false, "error": "Couldn't delete '\(p.name)': " + (r.body["error"]?.stringValue ?? "its VM is busy")]
+            }
+        }
+        do {
+            try profileStore.delete(p)
+        } catch {
+            return ["ok": false, "error": "Couldn't delete '\(p.name)': \(error.localizedDescription)"]
+        }
+        // As the sidebar's own delete does: its cluster access goes too.
+        await MainActor.run { SessionStores.shared?.kubeEngine?.workspaceDeleted(p.id) }
+        Self.refreshSquelchSettings()
+        return ["ok": true, "name": p.name]
     }
 
     /// A workspace by id or name (macOS: profileByNameOrID).
