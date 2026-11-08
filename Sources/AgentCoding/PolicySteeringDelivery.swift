@@ -14,12 +14,10 @@ import Foundation
 /// plant one in a guest directory. (Finding CWE-345, "Any guest process can
 /// plant a policy note that blocks Stop".)
 extension ACAppDelegate {
-    /// The notes' folder in the meta share (host side) and as the guest sees it.
-    nonisolated static let policyNotesShareDir = "policy-notes"
-    nonisolated static let guestPolicyNotesDir = "/mnt/bromure-meta/policy-notes"
-    /// A note nobody's hook took within this long is dropped on the next write
-    /// (a closed tab's index gets reused).
-    nonisolated static let policyNoteLifetime: TimeInterval = 3600
+    /// The notes' folder and lifetime (PolicyNotes, shared with the Linux daemon).
+    nonisolated static let policyNotesShareDir = PolicyNotes.shareDir
+    nonisolated static let guestPolicyNotesDir = PolicyNotes.guestDir
+    nonisolated static let policyNoteLifetime = PolicyNotes.lifetime
 
     func wirePolicySteering(_ engine: MitmEngine) {
         let steering = PolicySteering.shared
@@ -90,16 +88,9 @@ extension ACAppDelegate {
         return delivered
     }
 
-    /// The non-Claude tabs a note is typed into (as the user's message — the
-    /// only way those agents learn of a block). Never broadcast into every
-    /// agent's composer: the tab whose process was blocked (`attributed`),
-    /// else the only non-Claude agent there is — an L7, guardrails or
-    /// unattributed sandbox block has no tab of its own, and that agent was
-    /// told nothing (Finding CWE-670, "Unattributed policy notes are never
-    /// typed into a non-Claude tab").
+    /// The non-Claude tabs a note is typed into (PolicyNotes.typedWindows).
     static func typedNoteWindows(targets: [(window: Int, tool: Profile.Tool)], attributed: Bool) -> [Int] {
-        let others = targets.filter { $0.tool != .claude }.map(\.window)
-        return attributed || others.count == 1 ? others : []
+        PolicyNotes.typedWindows(targets: targets, attributed: attributed)
     }
 
     /// One file per note, moved into place whole, so the hook never reads
@@ -119,27 +110,10 @@ extension ACAppDelegate {
         }
     }
 
-    /// Write `text` as window `window`'s next note under `meta`'s notes
-    /// folder, and drop the notes older than `policyNoteLifetime`.
+    /// Write `text` as window `window`'s next note (PolicyNotes.drop).
     @discardableResult
     nonisolated static func dropPolicyNote(in meta: URL, window: Int, text: String, now: Date = Date()) throws -> URL {
-        let fm = FileManager.default
-        let dir = meta.appendingPathComponent(policyNotesShareDir, isDirectory: true)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".note") {
-            let f = dir.appendingPathComponent(name)
-            if let at = (try? fm.attributesOfItem(atPath: f.path))?[.modificationDate] as? Date,
-               now.timeIntervalSince(at) > policyNoteLifetime {
-                try? fm.removeItem(at: f)
-            }
-        }
-        let stamp = UInt64(now.timeIntervalSince1970 * 1_000_000_000)
-        let name = "w\(window)-\(stamp)-\(UUID().uuidString.prefix(8).lowercased()).note"
-        let tmp = dir.appendingPathComponent(".\(name).tmp")
-        try Data((text + "\n").utf8).write(to: tmp)
-        let dest = dir.appendingPathComponent(name)
-        try fm.moveItem(at: tmp, to: dest)
-        return dest
+        try PolicyNotes.drop(in: meta, window: window, text: text, now: now)
     }
 
     /// Notes owed to non-Claude tabs, typed once the tab's agent is idle.
