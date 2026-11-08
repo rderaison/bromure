@@ -73,10 +73,10 @@ struct DrawerAllowEventExeTests {
         var policy = EgressPolicy(openShell: try OpenShellPolicy.parse(BinaryIdentityTests.policyYAML))
         policy.enforceBinaries = true
         let ip = try #require(EgressPolicy.parseIPv4Address("140.82.112.3"))
-        #expect(svc.gate(profileID: pid, sport: 4000, dstIP: ip, dport: 443, hostnames: ["api.github.com"], policy: policy) == nil)
+        #expect(svc.gate(profileID: pid, sport: 4000, dstIP: ip, dport: 443, isn: 1, hostnames: ["api.github.com"], policy: policy) == nil)
         var decided: (verdict: EgressPolicy.Verdict, exe: String?)?
         for _ in 0..<100 {
-            decided = svc.gate(profileID: pid, sport: 4000, dstIP: ip, dport: 443, hostnames: ["api.github.com"], policy: policy)
+            decided = svc.gate(profileID: pid, sport: 4000, dstIP: ip, dport: 443, isn: 1, hostnames: ["api.github.com"], policy: policy)
             if decided != nil { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
