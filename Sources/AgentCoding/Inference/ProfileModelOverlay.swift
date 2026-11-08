@@ -107,7 +107,7 @@ public extension Profile {
                     else if let c = Self.contextWindow(ofModel: ref.modelID, in: settings) { ompContext = c }
                 }
                 if case .localServer = ref.source, let ls = settings.localServer {
-                    localServerBackend = (ls.baseURL, ls.apiKey)
+                    localServerBackend = (ls.baseURL, ModelSettings.isRedactedSecret(ls.apiKey) ? nil : ls.apiKey)
                 }
                 return ref.modelID
             }
@@ -119,7 +119,7 @@ public extension Profile {
                     // the key, if any, rides on the spec and is swapped on the
                     // wire; without one the AWS resigner signs.
                     authMode = .bedrock
-                    apiKey = (key ?? "").isEmpty ? nil : key
+                    apiKey = ModelSettings.isRedactedSecret(key) ? nil : key
                     bedrock = (true, ref.modelID)
                     return nil
                 }
@@ -440,7 +440,9 @@ public extension Profile {
             : ModelProvider.native(for: tool)
         let cred = settings.credential(provider)
         let key = cred?.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasKey = !(key ?? "").isEmpty
+        // A stored redaction stand-in (saved by an older round trip) is no
+        // key: sent upstream it got every request refused.
+        let hasKey = !ModelSettings.isRedactedSecret(key)
 
         // 1. An explicitly pasted API key wins (the user chose pay-per-use).
         if hasKey, cred?.useSubscription != true { return (.token, key) }

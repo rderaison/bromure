@@ -3247,14 +3247,19 @@ struct ProfileSecrets: Codable {
         }
         if var o = profile.modelOverride {
             var keys: [String: String] = [:]
+            // The redaction stand-in ("••••••••", what a describe/export sends
+            // for a key) is no key: lifted as one, it overwrote the stored key
+            // on the round trip -- a fat client's save, or `PATCH` of a fetched
+            // document -- and the proxy then sent it upstream (non-ASCII: every
+            // request refused as malformed).
             for k in o.settings.providers.indices {
                 if let key = o.settings.providers[k].apiKey, !key.isEmpty {
-                    keys[o.settings.providers[k].provider.rawValue] = key
+                    if !ModelSettings.isRedactedSecret(key) { keys[o.settings.providers[k].provider.rawValue] = key }
                     o.settings.providers[k].apiKey = ""
                 }
             }
             if let key = o.settings.localServer?.apiKey, !key.isEmpty {
-                s.modelLocalServerKey = key
+                if !ModelSettings.isRedactedSecret(key) { s.modelLocalServerKey = key }
                 o.settings.localServer?.apiKey = ""
             }
             if !keys.isEmpty { s.modelProviderKeys = keys }
@@ -3468,10 +3473,10 @@ struct ProfileSecrets: Codable {
         if let v = newer.twilioSecret { twilioSecret = v }
         if let v = newer.modelProviderKeys {
             var merged = modelProviderKeys ?? [:]
-            for (k, key) in v { merged[k] = key }
+            for (k, key) in v where !ModelSettings.isRedactedSecret(key) { merged[k] = key }
             modelProviderKeys = merged
         }
-        if let v = newer.modelLocalServerKey { modelLocalServerKey = v }
+        if let v = newer.modelLocalServerKey, !ModelSettings.isRedactedSecret(v) { modelLocalServerKey = v }
         if let m = newer.dockerRegistryPasswords {
             dockerRegistryPasswords = (dockerRegistryPasswords ?? [:]).merging(m) { _, n in n }
         }
