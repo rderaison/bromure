@@ -89,7 +89,8 @@ struct HomeStorageTests {
 
         let attrs = try FileManager.default.attributesOfItem(atPath: disk.homeImageURL.path)
         let apparent = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        #expect(apparent == Int64(SessionDisk.resolvedHomeImageGB()) * 1024 * 1024 * 1024)
+        let free = SessionDisk.freeBytes(near: disk.homeImageURL.deletingLastPathComponent())
+        #expect(apparent == Int64(SessionDisk.resolvedHomeImageGB(freeBytes: free)) * 1024 * 1024 * 1024)
 
         let values = try disk.homeImageURL.resourceValues(
             forKeys: [.totalFileAllocatedSizeKey])

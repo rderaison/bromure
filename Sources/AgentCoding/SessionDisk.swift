@@ -147,16 +147,47 @@ public final class SessionDisk {
         try store.prepareBootstrapHomeDirectory(for: profile)
     }
 
-    /// Apparent (guest-visible) size of a freshly-created home image, GiB.
-    /// The host file is sparse, so this costs nothing up front; growing it
-    /// later is an online truncate + resize2fs, shrinking is not supported.
+    /// Apparent (guest-visible) size of a freshly-created home image, GiB:
+    /// `vm.homeImageGB` when set, else scaled to `freeBytes` (the free space
+    /// on the volume the workspaces live on; nil = unknown, the full default).
+    /// The host file is sparse, so this costs nothing up front -- but it is
+    /// how far the guest can fill the host's disk; growing it later is an
+    /// online truncate + resize2fs, shrinking is not supported.
     /// Override: defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
-    public static func resolvedHomeImageGB() -> Int {
-        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? defaultHomeImageGB
-        return min(1024, max(8, raw))
+    public static func resolvedHomeImageGB(freeBytes: UInt64? = nil) -> Int {
+        min(1024, max(8, homeImageOverrideGB ?? scaledHomeImageGB(freeBytes: freeBytes)))
     }
 
-    /// A new workspace's home, GiB, unless `vm.homeImageGB` says otherwise.
+    /// `vm.homeImageGB`, when the user set it.
+    static var homeImageOverrideGB: Int? {
+        UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int
+    }
+
+    /// A new home's size for the free space it will draw on:
+    ///   < 64 GB free  →  8 GB
+    ///   < 128 GB free → 12 GB
+    ///   otherwise     → 16 GB (`defaultHomeImageGB`)
+    /// 8 GB is the floor (`ProfileEditorView.minHomeGB`): the agents' CLIs, a
+    /// toolchain and one project's dependencies already take several.
+    public static func scaledHomeImageGB(freeBytes: UInt64?) -> Int {
+        guard let freeBytes else { return defaultHomeImageGB }
+        let gb = freeBytes >> 30
+        if gb < 64 { return 8 }
+        if gb < 128 { return 12 }
+        return defaultHomeImageGB
+    }
+
+    /// Free space where `url` is, or at its nearest existing parent (a new
+    /// workspace's directory doesn't exist yet).
+    static func freeBytes(near url: URL) -> UInt64? {
+        var dir = url
+        while !FileManager.default.fileExists(atPath: dir.path), dir.pathComponents.count > 1 {
+            dir = dir.deletingLastPathComponent()
+        }
+        return EphemeralDisk.freeBytes(at: dir.path)
+    }
+
+    /// The largest a new home gets, GiB, unless `vm.homeImageGB` says otherwise.
     public static let defaultHomeImageGB = 16
     /// A legacy (virtiofs) home is copied into a fresh image on its next
     /// boot, and that home can hold far more than a new one starts with: a
@@ -183,13 +214,23 @@ public final class SessionDisk {
     }
 
     /// The home image's guest-visible size: the workspace's own setting,
-    /// else the app-wide default (at least `migrationHomeImageGB` for a
-    /// legacy home's migration).
+    /// else the app-wide default for the free space where it lives (at least
+    /// `migrationHomeImageGB` for a legacy home's migration).
     public var homeImageTargetBytes: UInt64 {
+        let free = Self.freeBytes(near: homeImageURL.deletingLastPathComponent())
         let gb = profile.homeImageGB.map { min(1024, max(8, $0)) }
-            ?? (migrateHomeThisBoot ? max(Self.migrationHomeImageGB, Self.resolvedHomeImageGB())
-                                    : Self.resolvedHomeImageGB())
+            ?? (migrateHomeThisBoot ? max(Self.migrationHomeImageGB, Self.resolvedHomeImageGB(freeBytes: free))
+                                    : Self.resolvedHomeImageGB(freeBytes: free))
         return UInt64(gb) * 1024 * 1024 * 1024
+    }
+
+    /// Whether an existing home follows `homeImageTargetBytes` up: a size of
+    /// its own, or a migration. Not the app-wide default, free-space scaled or
+    /// `vm.homeImageGB` (which the manual says sizes new homes only): a home
+    /// made 8 GB on a full disk would otherwise grow at whichever cold boot
+    /// found more room, and a grow drops the home's checkpoints.
+    var homeGrowsToTarget: Bool {
+        profile.homeImageGB != nil || migrateHomeThisBoot
     }
 
     /// Grow an existing home image to its target size (never shrinks). The
@@ -207,6 +248,9 @@ public final class SessionDisk {
         }
         guard size < target else {
             return "home image \(gib(size)) (setting \(profile.homeImageGB.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
+        }
+        guard homeGrowsToTarget else {
+            return "home image \(gib(size)) (default size, kept: the default only sizes a new home) — nothing to grow"
         }
         try EphemeralDisk.checkDiskSpace(at: homeImageURL.deletingLastPathComponent().path)
         guard let handle = FileHandle(forWritingAtPath: homeImageURL.path) else {

@@ -52,12 +52,12 @@ The bottom layer is the shared base image — "Ubuntu Noble + Node, Claude Code,
 
 **Home folder size** sets how big the home disk is, in GB. The disk image is sparse: it only takes the space its files use, so the size is a ceiling — a smaller one makes a runaway process fail early instead of filling your Mac's disk.
 
-- Before the home exists (a new machine, or one whose home you erased), any size from 8 to 1024 GB can be picked: "The home is created at this size when the workspace first starts; after that it can grow but not shrink." The default is 16 GB (`vm.homeImageGB`, see [Advanced](../16a-advanced.mdx)).
+- Before the home exists (a new machine, or one whose home you erased), any size from 8 to 1024 GB can be picked: "The home is created at this size when the workspace first starts; after that it can grow but not shrink." The default depends on the free space on your Mac's disk: 8 GB with less than 64 GB free, 12 GB with less than 128 GB, 16 GB otherwise (`vm.homeImageGB` sets it instead, see [Advanced](../16a-advanced.mdx)). That default only sizes a new home; it never grows an existing one.
 - Once it exists, the size can only grow, from its current size up to 1024 GB. A bigger home takes effect the next time the machine starts. To make a home smaller, **Erase home…** and pick the new size before the next start.
 
 ## Memory
 
-The **VM RAM** stepper sets the machine's memory, from 2 to 32 GB in steps of 2 — "Bump this if Claude / Codex feels sluggish or rust builds OOM." The default depends on your Mac: 4 GB on Macs with less than 18 GB, 6 GB up to 36 GB, 8 GB above. The VM has 4 virtual CPUs; that is not configurable.
+The **VM RAM** stepper sets the machine's memory, from 2 to 32 GB in steps of 2 — "Bump this if Claude / Codex feels sluggish or rust builds OOM." The default depends on your Mac: 2 GB on Macs with less than 16 GB, 4 GB with less than 18 GB, 6 GB up to 36 GB, 8 GB above. The VM has 4 virtual CPUs; that is not configurable.
 
 Changing memory on a running machine asks to restart it.
 
@@ -82,10 +82,10 @@ Two app-wide sections appear at the bottom of Resources in this Mac's Preference
 |---|---|---|
 | **Your home folder** — **Erase home…** | Destructive button | — |
 | **Your home folder** — **Restore home…** / **Upgrade storage…** | Button | — |
-| **Home folder size** | Number field + stepper, 8–1024 GB (grow-only once the home exists) | 16 GB |
+| **Home folder size** | Number field + stepper, 8–1024 GB (grow-only once the home exists) | 8, 12 or 16 GB, by free disk space |
 | **Workspace system disk** — **Reset to base…** | Destructive button | — |
 | **Base OS image** | Read-only row | — |
-| **VM RAM** | Stepper, 2–32 GB, steps of 2 | 4, 6 or 8 GB depending on the Mac's memory |
+| **VM RAM** | Stepper, 2–32 GB, steps of 2 | 2, 4, 6 or 8 GB depending on the Mac's memory |
 | **Network** | **NAT** / **Bridged** | NAT |
 | **Interface** (bridged) | Picker | First available |
 | **Use a private subnet** (Preferences) | Toggle, with **Randomize** | On for new installs |
