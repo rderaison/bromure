@@ -51,8 +51,8 @@ extension ACAutomationServer {
     /// the chosen index to that id alone. One shared prompt/answer/semaphore
     /// let a second ask (another credential, or a fresh prompt after an
     /// overtaken one) overwrite the first, and a keystroke for one prompt
-    /// complete another.
-    final class PumpConsentGate {
+    /// complete another. Sendable: its asks are only touched under `lock`.
+    final class PumpConsentGate: @unchecked Sendable {
         private final class Ask {
             let id: UUID
             let prompt: String
