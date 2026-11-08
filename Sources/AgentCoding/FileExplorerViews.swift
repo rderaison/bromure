@@ -697,7 +697,9 @@ private struct FileDetailSection: View {
             CodePreview(text: text, language: language)
         case .media(let path, let reader):
             ScrollView {
-                MediaView(path: path, expanded: true)
+                // A video waits for Play, as in the chat: a click on a
+                // 500 MB movie shouldn't start fetching it.
+                MediaView(path: path, expanded: DisplayMediaKind(path: path) != .video)
                     .environment(\.displayFileReader, reader)
                     .padding(10)
             }
