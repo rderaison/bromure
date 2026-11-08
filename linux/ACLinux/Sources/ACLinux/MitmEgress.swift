@@ -334,7 +334,7 @@ extension RequestReader {
         let encoded = decodeRequestContentEncoding(request) != .identity
         guard !encoded, PIIRewriter.isEligible(host: host, method: method, body: body,
                                               localEngineOffMac: offMachineEngine != nil) else {
-            if encoded, TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) {
+            if encoded, TraceLevel.isAIHost(host) {
                 FileHandle.standardError.write(Data("[pii] \(host) \(path): compressed request body — not scanned\n".utf8))
             }
             return (nil, nil)
@@ -370,7 +370,7 @@ extension RequestReader {
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's prompt-injection step, on the Linux request chain
     static func promptInjectionAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                                       host: String, path: String, trace: inout Trace?) async -> Data? {
-        guard TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) else { return nil }
+        guard TraceLevel.isAIHost(host) else { return nil }
         let pi = proxy.promptInjectionPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
         let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false
         guard pi != nil || piiOn else { return nil }

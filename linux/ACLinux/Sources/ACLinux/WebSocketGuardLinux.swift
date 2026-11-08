@@ -54,7 +54,7 @@ final class WSPromptGuard: @unchecked Sendable {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this
         // machine (a custom server elsewhere): the conversation leaves it then.
-        guard TraceLevel.aiHosts.contains(where: { h.contains($0) }), !h.contains("huggingface.co"),
+        guard TraceLevel.isAIHost(h), !h.contains("huggingface.co"),
               h != InferenceService.localMitmHost || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil
         else { return nil }
         let piOn = proxy.promptInjectionPolicy(for: profileID)?.isActive ?? false
