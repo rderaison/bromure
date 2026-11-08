@@ -1,7 +1,18 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 import SandboxEngine
 
 /// Serves canned responses for the sentry store's session, per host (tests
@@ -93,7 +104,7 @@ struct SentryModuleStoreTests {
         let c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
         #expect(c.isSignatureValid(publicKeyBase64: Self.testPublicKey))
         #expect(c.isWellFormed(for: Self.hash))
-        #expect(!c.isSignatureValid(publicKeyBase64: ImageCatalogStore.pinnedPublicKeyBase64))
+        #expect(!c.isSignatureValid(publicKeyBase64: PinnedSigningKey.publicKeyBase64))
         var edited = c
         edited.modules[0].sha256 = String(repeating: "0", count: 64)
         #expect(!edited.isSignatureValid(publicKeyBase64: Self.testPublicKey))
@@ -120,7 +131,8 @@ struct SentryModuleStoreTests {
     /// is published under, and a fix to one never reaches a guest.
     @Test("The bundled sentry source is the one CI builds")
     func bundledSourceMatchesCI() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        // Through the symlink the Linux test target compiles it from, too.
+        let root = URL(fileURLWithPath: #filePath).resolvingSymlinksInPath().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let ci = root.appendingPathComponent("scripts/openshell-guest/sentry")
         let bundled = root.appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/sentry-dist/src")
@@ -330,6 +342,32 @@ struct SentryModuleStoreTests {
         #expect(await fresh.ensure(kernel: "6.8.0-139-generic", hash: Self.hash)?.contains("no module catalog") == true)
     }
 
+    /// What the host does when a running guest reports its kernels (settle,
+    /// shared by the app and the Linux daemon): a published kernel's module
+    /// lands in the VM's sentry/ at once; a kernel the server's current
+    /// catalog doesn't list gets the marker that stops a waiting guest.
+    @Test("A reported kernel is staged into the running VM, an unpublished one marked unavailable")
+    func settleStagesAndMarks() async throws {
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        let s = store(host: host, root: root)
+        serveCatalog(host)
+        let dir = root.appendingPathComponent("vm-sentry", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        await s.settle(profileID: UUID(), kernels: ["6.8.0-139-generic", "6.9.9-1-generic"], waiting: true,
+                       hash: Self.hash, sentryDir: dir)
+        #expect(try Data(contentsOf: dir.appendingPathComponent("bromure_sentry-6.8.0-139-generic.ko")) == Data("module-B".utf8))
+        let marker = try String(contentsOf: dir.appendingPathComponent("bromure_sentry-6.9.9-1-generic.unavailable"),
+                                encoding: .utf8)
+        #expect(marker.contains("no module published for 6.9.9-1-generic"), "\(marker)")
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("bromure_sentry-6.9.9-1-generic.ko").path))
+        // No sentry dir (the workspace's spec isn't active): cached, nothing staged.
+        let none = root.appendingPathComponent("absent", isDirectory: true)
+        await s.settle(profileID: UUID(), kernels: ["6.8.0-142-generic"], waiting: false, hash: Self.hash, sentryDir: none)
+        #expect(s.verifiedModule(kernel: "6.8.0-142-generic", hash: Self.hash) != nil)
+        #expect(!FileManager.default.fileExists(atPath: none.path))
+    }
+
     /// The publisher is a node script, run in a node container (Jenkinsfile.sentry).
     /// A Mac without node has nothing to run it with.
     private static let hasNode: Bool = {
@@ -346,7 +384,7 @@ struct SentryModuleStoreTests {
     @Test("The publisher re-signs kept statements a bucket write stripped, and refuses when nothing vouches for them",
           .enabled(if: hasNode, "needs node"))
     func publisherResignsStrippedModules() throws {
-        let tools = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let tools = URL(fileURLWithPath: #filePath).resolvingSymlinksInPath().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("tools/make-sentry-catalog.mjs")
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let driver = dir.appendingPathComponent("drive.mjs")

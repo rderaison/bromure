@@ -1,7 +1,11 @@
 import Foundation
 import Testing
 import SandboxEngine
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 @Suite("Kernel sentry (host side) + guest sandbox spec")
 struct KernelSentryTests {
@@ -42,10 +46,13 @@ struct KernelSentryTests {
         let tap = Tap()
         if b.tap == nil { b.tap = { tap.add($0, $1) } }
         var fds: [Int32] = [0, 0]
-        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
-        Thread.detachNewThread { b.serve(fds[0]) }
-        send(fds[1], first)
-        return (b, fds[1], tap)
+        precondition(fds.withUnsafeMutableBufferPointer {
+            socketpair(AF_UNIX, AttestorHandshakeTests.streamSocketType, 0, $0.baseAddress!)
+        } == 0)
+        let (host, guest) = (fds[0], fds[1])
+        Thread.detachNewThread { b.serve(host) }
+        send(guest, first)
+        return (b, guest, tap)
     }
 
     func send(_ fd: Int32, _ d: Data) {
