@@ -95,7 +95,7 @@ struct DrawerAllowEventExeTests {
         #expect(sw.contains("verdict = .deny; deniedExe = d.exe"))
         #expect(sw.contains("key.exe = denied ? exe : nil"))
         #expect(sw.contains("if denied { event.exe = exe }"))
-        #expect(try src("Sources/AgentCoding/BromureAC.swift").contains("if let exe = ev.exe { eventData[\"exe\"] = .string(exe) }"))
+        #expect(try src("Sources/AgentCoding/Mitm/SwitchEgressReport.swift").contains("if let exe = ev.exe { eventData[\"exe\"] = .string(exe) }"))
         #expect(try src("Sources/AgentCoding/CloudEvents.swift").contains("exe: s(\"exe\"))"))
         let drawer = try src("Sources/AgentCoding/PolicyDrawer.swift")
         #expect(!drawer.contains("BinaryIdentityService.shared"))
