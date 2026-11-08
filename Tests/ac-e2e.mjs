@@ -4591,7 +4591,17 @@ for n, c in enumerate(calls, 1):
       };
       const PORT = 41000 + Math.floor(Math.random() * 8000);
       const relayOnce = async (i, override) => {
-        const r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+        // A callback is single-use: once relayed, its listener lets the port
+        // go, and the listening sockets close a moment later, on the app's
+        // main queue. Re-armed straight away (each round here, far faster
+        // than any retried sign-in) the bind can land in that moment and be
+        // refused (seen on Jenkins, round 35 of 40). Give it that moment.
+        let r;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+          if (r.ok === true || !String(r.error || "").startsWith("couldn't bind")) break;
+          await sleep(50);
+        }
         assert(r.ok === true, `loopback-sim ${i}: ${JSON.stringify(r)}`);
         const res = await fetch(`http://127.0.0.1:${PORT}/callback?code=ace2e-${i}`,
                                 { signal: AbortSignal.timeout(20000) });
