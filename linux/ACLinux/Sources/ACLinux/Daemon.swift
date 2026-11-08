@@ -901,7 +901,7 @@ public actor Daemon {
         } catch {
             CIDAllocator.shared.release(cid)
             try? registry.remove(id: id)
-            if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
+            if let refusal = Self.launchRefusalResponse(error) { return refusal }
             return .error(500, "Failed to create VM: \(error)")
         }
     }
@@ -1133,10 +1133,10 @@ public actor Daemon {
                 var s = registry.find(rec.id) ?? rec
                 s.state = .suspended
                 try? registry.upsert(s)
-                if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
+                if let refusal = Self.launchRefusalResponse(error) { return refusal }
                 return .error(500, "Resume failed (still suspended; resume again, or start it fresh with stop then start): \(error)")
             }
-            if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
+            if let refusal = Self.launchRefusalResponse(error) { return refusal }
             return .error(500, "Start failed: \(error)")
         }
     }
@@ -1269,6 +1269,8 @@ public actor Daemon {
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         // A protection this server can't enforce refuses the launch (DaemonSandboxGuard.swift).
         try await refuseUnenforceableSandbox(rec)
+        // A shared server's daemon can't see a workspace folder under /home.
+        if let hidden = hiddenSharedFolders(rec) { throw hidden }
         do {
             try await launchVM(&rec, restoreFrom: restoreFrom)
         } catch {

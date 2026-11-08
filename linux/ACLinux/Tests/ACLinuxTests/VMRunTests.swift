@@ -1,4 +1,5 @@
 import Foundation
+import Glibc
 import Testing
 @testable import ACLinux
 
@@ -186,6 +187,48 @@ extension DaemonGlobalSuites {
                 #expect(!left.contains(orphan.id), "its owner is gone")
                 #expect(left.contains(mine.id) && left.contains(other.id), "a live process's stays")
             }
+        }
+
+        /// A shared server's daemon can't see /home (its sandbox): `vm run
+        /// -v` under it is refused, saying so and what it can see, and a
+        /// workspace folder under it refuses the start (409), not a bare
+        /// "Start failed". A single-user server shares them as before.
+        @Test func aSharedServerSaysItCantSeeHome() async throws {
+            #expect(Daemon.hiddenFolderRefusal("/home/u/proj", multiUser: false, stateDir: "/s") == nil)
+            let why = try #require(Daemon.hiddenFolderRefusal("/home/u/proj", multiUser: true, stateDir: "/var/lib/bromure-ac/u"))
+            #expect(why.contains("can't see /home/u/proj") && why.contains("/srv") && why.contains("/var/lib/bromure-ac/u"))
+            for hidden in ["/root/x", "/run/user/1000/x", "/tmp/x", "/var/tmp/x", "/home/../home/u"] {
+                #expect(Daemon.hiddenFolderRefusal(hidden, multiUser: true, stateDir: "/s") != nil, "\(hidden)")
+            }
+            #expect(Daemon.hiddenFolderRefusal("/srv/proj", multiUser: true, stateDir: "/s") == nil)
+            #expect(Daemon.hiddenFolderRefusal("/homework", multiUser: true, stateDir: "/s") == nil)
+
+            let dir = try shortTempDir()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let standIn = dir + "/uplink-standin"
+            try "#!/bin/sh\nexec cat >/dev/null\n".write(toFile: standIn, atomically: true, encoding: .utf8)
+            chmod(standIn, 0o755)
+            var config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
+            config.multiUser = true
+            let d = try await Daemon.makeForTesting(config, uplink: standIn)
+            let prior = ProfileStore.defaultRootDir
+            ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
+            defer { ProfileStore.defaultRootDir = prior }
+            guard case .failure(let r) = await d.vmRunWorkspace(.object(["name": "hm", "mounts": ["/home/someone/proj"]])) else {
+                Issue.record("a hidden mount was taken"); return
+            }
+            #expect(r.response.status == 400 && (r.response.body["error"]?.stringValue ?? "").contains("can't see /home/someone/proj"), "\(r.response.status) \(r.response.body)")
+            #expect(!ProfileStore().loadAll().contains { $0.name == "hm" }, "nothing saved")
+            // A workspace folder under /home (saved some other way): the start says why.
+            var p = Profile(name: "hf", tool: .claude, authMode: .token)
+            p.folderPaths = ["/home/someone/proj"]
+            p = try ProfileStore().save(p)
+            var vm = RepairMarksTests.stopped(p.id.uuidString.lowercased())
+            vm.name = "hf"
+            try await d.registerForTesting(vm)
+            let start = await d.start(vm)
+            #expect(start.status == 409 && (start.body["error"]?.stringValue ?? "").contains("can't see /home/someone/proj"), "\(start.status) \(start.body)")
+            await d.shutdown()
         }
 
         @Test func sharedFoldersAreTheVMsShares() async throws {

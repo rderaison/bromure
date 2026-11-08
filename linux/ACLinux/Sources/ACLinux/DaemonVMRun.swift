@@ -96,6 +96,10 @@ extension Daemon {
             var paths = profile.folderPaths
             for m in mounts.compactMap(\.stringValue) {
                 let host = (m as NSString).expandingTildeInPath
+                // Hidden from a shared server's daemon: said, not skipped.
+                if let why = Self.hiddenFolderRefusal(host, multiUser: config.multiUser, stateDir: config.stateDir) {
+                    return .failure(VMRunRefusal(response: .error(400, why, ["hiddenFolder": .string(host)])))
+                }
                 guard FileManager.default.fileExists(atPath: host) else {
                     FileHandle.standardError.write(Data("[vm run] mount not found, skipping: \(host)\n".utf8))
                     continue
@@ -211,5 +215,53 @@ public enum VMRunAPIKey {
         if let flag { return (flag, true) }
         let env = environment[environmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (env?.isEmpty == false ? env : nil, false)
+    }
+}
+
+/// A workspace folder a shared server's daemon can't see.
+// @port-skip linux-only: the multi-user unit's sandbox (ProtectHome, PrivateTmp)
+struct SharedFolderHidden: Error, CustomStringConvertible {
+    let folders: [String]
+    let reason: String
+    // @port-skip linux-only: the multi-user unit's sandbox
+    var description: String { reason }
+}
+
+extension Daemon {
+    /// Why a shared server's daemon can't share `path` (nil: it can). Its
+    /// sandbox (bromure-ac@.service: ProtectHome, PrivateTmp, and
+    /// ProtectSystem=strict) hides /home, /root, /run/user, /tmp and
+    /// /var/tmp; the rest of the system it sees read-only, and it writes
+    /// only its own state directory.
+    // @port-skip linux-only: the multi-user unit's sandbox
+    nonisolated static func hiddenFolderRefusal(_ path: String, multiUser: Bool, stateDir: String) -> String? {
+        guard multiUser else { return nil }
+        let p = (path as NSString).standardizingPath
+        guard let hidden = ["/home", "/root", "/run/user", "/tmp", "/var/tmp"].first(where: { p == $0 || p.hasPrefix($0 + "/") }) else {
+            return nil
+        }
+        return "This shared server's daemon can't see \(path): its sandbox hides \(hidden) (and /home, /root, /run/user, /tmp, /var/tmp). "
+            + "It can share folders elsewhere on the server (e.g. /srv, /opt, /mnt, read-only), and writes only under \(stateDir)."
+    }
+
+    /// `rec`'s workspace folders the daemon can't see (a shared server's),
+    /// as the launch's refusal; nil when there's none.
+    // @port-skip linux-only: the multi-user unit's sandbox
+    func hiddenSharedFolders(_ rec: VMRecord) -> SharedFolderHidden? {
+        let hidden = shareFolders(rec).compactMap { f in
+            Self.hiddenFolderRefusal(f, multiUser: config.multiUser, stateDir: config.stateDir).map { (f, $0) }
+        }
+        guard let first = hidden.first else { return nil }
+        return SharedFolderHidden(folders: hidden.map(\.0), reason: first.1)
+    }
+
+    /// A launch refused for a reason the caller is told (409), not a bare
+    /// "Start failed": a protection this server can't enforce, a folder it
+    /// can't see.
+    // @port-skip linux-only: the Linux launch's refusals
+    static func launchRefusalResponse(_ error: Error) -> ControlResponse? {
+        if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
+        if let r = error as? SharedFolderHidden { return .error(409, r.description, ["hiddenFolders": .array(r.folders.map(JSONValue.string))]) }
+        return nil
     }
 }
