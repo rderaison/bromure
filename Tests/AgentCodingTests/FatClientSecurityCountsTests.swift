@@ -91,7 +91,7 @@ struct FatClientSecurityCountsTests {
         #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)"))
         // A reply lands when it covers the range asked for last and is newer
         // than the one applied last.
-        #expect(fc.contains("guard let self, Self.acceptsHistory(generation: generation, hours: range,"))
+        #expect(fc.contains("guard Self.acceptsHistory(generation: generation, hours: range,"))
         #expect(fc.contains("self.securityHistoryApplied = generation"))
         let app = try src("Sources/AgentCoding/BromureAC.swift")
         #expect(app.contains("SecurityTimeline.shared.historyRows(hours: hours)"))
@@ -293,7 +293,7 @@ struct FatClientSecurityCountsTests {
         let fc = try src("Sources/AgentCoding/FatClientController.swift")
         #expect(fc.contains(#"oldestSeq: snapshot["securityTimelineOldestSeq"] as? Int, epoch: epoch)"#))
         #expect(fc.contains("SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)"))
-        #expect(fc.contains("SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch)"))
+        #expect(fc.contains("stale: SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch),"))
         #expect(try src("Sources/AgentCoding/BromureAC.swift")
             .contains("(SecurityTimeline.shared.oldestRetainedSeq, SecurityTimeline.shared.epoch)"))
     }
@@ -431,5 +431,44 @@ struct FatClientSecurityCountsTests {
             client.applyMirror([wire(newRow, sq: 900)], host: "h", oldestSeq: 0, epoch: epoch)
             #expect(client.remote["h"]?.count == 2, "\(epoch)")
         }
+    }
+
+    /// Finding: "Failed restart history refetch is never retried". The
+    /// client noted the host's new run as re-fetched before the reply came;
+    /// a failed reply left it so, and the previous run's rows stayed for the
+    /// rest of the connection. The same for the window's first fetch. A
+    /// later snapshot now fetches again, after a back-off, while what's held
+    /// is stale or the last request never landed.
+    @Test("a failed history fetch is retried by a later snapshot, backing off")
+    func failedFetchRetried() throws {
+        typealias C = RemoteHostController
+        let now = Date()
+        // A restart: the history held is the previous run's.
+        #expect(C.shouldFetchHistory(requested: true, outstanding: false, stale: true, inFlight: false, now: now, retryAt: nil))
+        // Its refetch under way: not again.
+        #expect(!C.shouldFetchHistory(requested: true, outstanding: true, stale: true, inFlight: true, now: now, retryAt: nil))
+        // It failed: once the back-off has passed, again -- still stale.
+        let retryAt = now.addingTimeInterval(C.historyRetryDelay(failures: 1))
+        #expect(!C.shouldFetchHistory(requested: true, outstanding: true, stale: true, inFlight: false, now: now, retryAt: retryAt))
+        #expect(C.shouldFetchHistory(requested: true, outstanding: true, stale: true, inFlight: false,
+                                     now: retryAt.addingTimeInterval(1), retryAt: retryAt))
+        // The window's first fetch failed (nothing held, so not stale): retried too.
+        #expect(C.shouldFetchHistory(requested: true, outstanding: true, stale: false, inFlight: false, now: now, retryAt: nil))
+        // Landed, current: nothing to do. Never asked (no window): nothing.
+        #expect(!C.shouldFetchHistory(requested: true, outstanding: false, stale: false, inFlight: false, now: now, retryAt: nil))
+        #expect(!C.shouldFetchHistory(requested: false, outstanding: false, stale: true, inFlight: false, now: now, retryAt: nil))
+        // Back-off: 10 s, doubling, at most 2 minutes.
+        #expect(C.historyRetryDelay(failures: 1) == 10 && C.historyRetryDelay(failures: 2) == 20)
+        #expect(C.historyRetryDelay(failures: 9) == 120)
+
+        // Wired: the fetch counts itself in flight and backs off on failure;
+        // no marker set before the reply.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fc = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
+        #expect(!fc.contains("securityHistoryRefetchEpoch"))
+        #expect(fc.contains("securityHistoryInFlight += 1"))
+        #expect(fc.contains("self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)"))
+        #expect(fc.contains("Self.historyRetryDelay(failures: self.securityHistoryFailures))"))
+        #expect(fc.contains("outstanding: securityHistoryGeneration > securityHistoryApplied,"))
     }
 }
