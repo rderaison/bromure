@@ -122,4 +122,125 @@ struct AgentdCaptureLimitTests {
         #expect(src.contains("if getattr(result, \"truncated\", False):"))
         #expect(!src.contains("resp_data = json.dumps(response).encode(\"utf-8\")"))
     }
+
+    /// Finding (CWE-772): a timed-out capture killed only the shell, which a
+    /// `sleep 60 &` had already outlived; the child kept the pipes open and
+    /// both reader threads stayed blocked in `os.read`, with their descriptors
+    /// and buffers, for as long as it lived. Five such `vm exec`s took agentd
+    /// from 1 to 11 threads. The command now runs in a session of its own whose
+    /// group is killed, and the readers are stopped either way.
+    @Test("timed-out captures leave no reader thread, descriptor or background child behind",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func timedOutCapturesClean() throws {
+        let out = try json(try run("""
+            import threading, tempfile, signal
+            m._SANDBOX = {}
+            m.openshell_requested = lambda: False
+            m._DRAIN_POLL_MS = 20
+            fds = lambda: len(os.listdir("/dev/fd"))
+            def alive(pid):
+                try:
+                    os.kill(pid, 0); return True
+                except OSError:
+                    return False
+            def settle(base):
+                for _ in range(100):
+                    if threading.active_count() <= base:
+                        break
+                    time.sleep(0.02)
+            base_t, base_f = threading.active_count(), fds()
+            d = tempfile.mkdtemp()
+            timeouts, pids = 0, []
+            for i in range(5):
+                pidf = os.path.join(d, "p%d" % i)
+                try:
+                    m._ws_run(["/bin/sh", "-c", "sleep 60 & echo $! > %s; exit 0" % pidf],
+                              capture_output=True, text=True, timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    timeouts += 1
+                pids.append(int(open(pidf).read()))
+            settle(base_t)
+            out["timeouts"] = timeouts
+            out["threads"] = threading.active_count() - base_t
+            out["fds"] = fds() - base_f
+            time.sleep(0.2)
+            out["children"] = sum(alive(p) for p in pids)
+            # One that leaves the group: not killed, but it can't hold the capture.
+            pidf = os.path.join(d, "escaped")
+            esc = "import os, time; os.setsid(); open('%s', 'w').write(str(os.getpid())); time.sleep(60)" % pidf
+            t = time.monotonic()
+            try:
+                m._ws_run(["/bin/sh", "-c", "%s -c \\"%s\\" & sleep 0.3; exit 0" % (sys.executable, esc)],
+                          capture_output=True, text=True, timeout=1)
+                out["escaped"] = "no timeout"
+            except subprocess.TimeoutExpired:
+                out["escaped"] = time.monotonic() - t < 5
+            settle(base_t)
+            out["escapedThreads"] = threading.active_count() - base_t
+            try:
+                os.kill(int(open(pidf).read()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+            # No deadline: the wait after exit is bounded too.
+            m.CAPTURE_EXIT_GRACE = 0.5
+            t = time.monotonic()
+            try:
+                m._ws_run(["/bin/sh", "-c", "sleep 60 & echo started"], capture_output=True, text=True)
+                out["nodeadline"] = "no timeout"
+            except subprocess.TimeoutExpired:
+                out["nodeadline"] = time.monotonic() - t < 5
+            settle(base_t)
+            out["nodeadlineThreads"] = threading.active_count() - base_t
+            # Output that ends with the command still comes back whole.
+            r = m._ws_run(["/bin/sh", "-c", "printf done"], capture_output=True, text=True)
+            out["normal"] = r.stdout
+            """))
+        #expect(out["timeouts"] as? Int == 5)
+        #expect(out["threads"] as? Int == 0)
+        #expect(out["fds"] as? Int == 0)
+        #expect(out["children"] as? Int == 0)
+        #expect(out["escaped"] as? Bool == true)
+        #expect(out["escapedThreads"] as? Int == 0)
+        #expect(out["nodeadline"] as? Bool == true)
+        #expect(out["nodeadlineThreads"] as? Int == 0)
+        #expect(out["normal"] as? String == "done")
+    }
+
+    @Test("a confined command's left-behind writer can't keep its capture alive",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/python3")))
+    func confinedLeftBehind() throws {
+        let out = try json(try run("""
+            import threading
+            m._SANDBOX = {"control_socket": "/nonexistent/ctl.sock"}
+            m._DRAIN_POLL_MS = 20
+            held = []
+            def orphan(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
+                os.write(fds[1], b"partial")
+                held.extend([os.dup(fds[1]), os.dup(fds[2])])   # the child left running
+                return {"ok": True, "exit": 0}
+            m._sandbox_exec = orphan
+            base = threading.active_count()
+            t = time.monotonic()
+            try:
+                m._ws_run(["/bin/sh", "-c", "true"], capture_output=True, text=True, timeout=0.3)
+                out["result"] = "no timeout"
+            except subprocess.TimeoutExpired:
+                out["result"] = time.monotonic() - t < 5
+            for _ in range(100):
+                if threading.active_count() <= base:
+                    break
+                time.sleep(0.02)
+            out["threads"] = threading.active_count() - base
+            for fd in held:
+                os.close(fd)
+            def plain(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
+                os.write(fds[1], b"whole")
+                return {"ok": True, "exit": 0}
+            m._sandbox_exec = plain
+            out["normal"] = m._ws_run(["/bin/sh", "-c", "true"], capture_output=True, text=True, timeout=5).stdout
+            """))
+        #expect(out["result"] as? Bool == true)
+        #expect(out["threads"] as? Int == 0)
+        #expect(out["normal"] as? String == "whole")
+    }
 }
