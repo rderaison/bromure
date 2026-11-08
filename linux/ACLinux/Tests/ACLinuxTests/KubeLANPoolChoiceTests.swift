@@ -31,7 +31,7 @@ struct KubeLANPoolChoiceTests {
         let d = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: d) }
         let p = d + "/lan-pools.json"
-        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        let me = try #require(LANAccount.name(of: getuid()))
         try LANPoolsAdmin.write(LANPoolsFile(grants: [me: ["10.250.0.10"], "root": ["10.250.0.20"]]), to: p)
         let pools = LANPools(path: p)
         let mine = UInt32(10) << 24 | 250 << 16 | 10, theirs = UInt32(10) << 24 | 250 << 16 | 20
@@ -51,7 +51,7 @@ struct KubeLANPoolChoiceTests {
         let d = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: d) }
         let p = d + "/lan-pools.json"
-        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        let me = try #require(LANAccount.name(of: getuid()))
         let ip = UInt32(10) << 24 | 250 << 16 | 40
         try LANPoolsAdmin.write(LANPoolsFile(grants: ["root": ["10.250.0.40"]]), to: p)
         let pools = LANPools(path: p)
@@ -69,7 +69,7 @@ struct KubeLANPoolChoiceTests {
         let d = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: d) }
         let p = d + "/lan-pools.json"
-        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        let me = try #require(LANAccount.name(of: getuid()))
         let ip = UInt32(10) << 24 | 250 << 16 | 50
         try LANPoolsAdmin.write(LANPoolsFile(grants: ["root": ["10.250.0.50"]]), to: p)
         let pools = LANPools(path: p)
