@@ -37,7 +37,7 @@ Environment=BROMURE_AC_MULTIUSER=1
 Environment=BROMURE_AC_GATEWAY_USER=bromure
 Environment=BROMURE_AC_CONTROL_SOCKET=/run/bromure-ac/sock/%i.sock
 Environment=BROMURE_AC_IMAGE=/var/lib/bromure-ac-image
-Environment=BROMURE_AGENTD=/usr/local/lib/bromure-ac/vm-setup/bromure-agentd.py
+Environment=BROMURE_AGENTD=/usr/local/lib/bromure-ac/resources/vm-setup/bromure-agentd.py
 Environment=BROMURE_AC_RESOURCES=/usr/local/lib/bromure-ac/resources
 Environment=BROMURE_FIRECRACKER=/usr/local/lib/bromure-ac/bin/firecracker
 Environment=LD_LIBRARY_PATH=/usr/local/lib/bromure-ac/lib

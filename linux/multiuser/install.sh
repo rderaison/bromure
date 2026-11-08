@@ -23,10 +23,13 @@ for req in libz.so.1:zlib1g libbrotlidec.so.1:libbrotli1; do
 done
 
 L=/usr/local/lib/bromure-ac
-install -d -m 755 $L/bin $L/lib $L/vm-setup
+install -d -m 755 $L/bin $L/lib
 install -m 755 "$BIN" $L/bin/bromure-ac.new && mv -f $L/bin/bromure-ac.new $L/bin/bromure-ac
 install -m 755 "$FC" $L/bin/firecracker.new && mv -f $L/bin/firecracker.new $L/bin/firecracker
-install -m 644 "$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" $L/vm-setup/
+# agentd runs from the resources' vm-setup/ (bromure-ac@.service's
+# BROMURE_AGENTD), beside the guest scripts the daemon stages with it; the
+# old lone copy goes.
+rm -rf /usr/local/lib/bromure-ac/vm-setup
 # The PII detector's model, beside the binary: where PIIDetector looks first
 # (Bundle.main's resources: macOS ships it in the app), for every user.
 # Pinned and SHA-256 checked; a failed fetch stops the install.
@@ -42,6 +45,9 @@ install -d -m 755 $L/resources.new
 git -c safe.directory="$ROOT" -C "$ROOT" ls-files -z Sources/AgentCoding/Resources \
   | tar -C "$ROOT" --null -T - -cf - | tar -C $L/resources.new --strip-components=3 --no-same-owner -xf -
 [ -e $L/resources.new/catalog.json ] || { echo "install.sh: the resources didn't copy" >&2; exit 1; }
+for f in bromure-agentd.py bromure-attestd.py bromure-strict.py bromure-sandboxd sentry-dist/src/bromure_sentry.c; do
+  [ -e $L/resources.new/vm-setup/$f ] || { echo "install.sh: the guest scripts didn't copy ($f)" >&2; exit 1; }
+done
 chmod -R u=rwX,go=rX $L/resources.new
 [ -d $L/resources ] && mv $L/resources $L/resources.old
 mv $L/resources.new $L/resources
