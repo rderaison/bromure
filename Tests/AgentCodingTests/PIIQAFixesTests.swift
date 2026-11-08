@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// QA round (Claude + omp): a lone "Blue" swapped as a name, a street address
 /// that went out unswapped, and a 200 KB paste that took 10.5 s to scan.
