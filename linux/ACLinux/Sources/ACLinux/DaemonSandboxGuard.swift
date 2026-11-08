@@ -33,6 +33,29 @@ extension Daemon {
         return out
     }
 
+    /// A VM taken back (adoptRunning) whose workspace asks for a protection
+    /// this server can't enforce yet keeps running (stopping it isn't the
+    /// daemon's call), but it's said loudly: a warning in the daemon log and
+    /// a degraded `sandbox.status` on the Security Timeline (what a guest
+    /// whose sandbox failed reports on macOS). TEMPORARY, with
+    /// SandboxUnavailable.
+    // @port-skip linux-only: a temporary Linux warning (macOS stages the guest sandbox)
+    static func warnUnenforceableAdopted(_ rec: VMRecord, profile: Profile) {
+        guard !rec.managed, rec.registration != true else { return }
+        let missing = unenforceableProtections(profile)
+        guard !missing.isEmpty else { return }
+        let reason = "\(missing.joined(separator: ", ")) not staged on this server: the guest runs without it"
+        FileHandle.standardError.write(Data("bromure-ac daemon: WARNING: '\(profile.name)' was taken back running UNPROTECTED: \(reason)\n".utf8))
+        var data: [String: AnyJSON] = ["filesystem": .string("failed"), "action": .string("degraded"), "reason": .string(reason)]
+        if missing.contains(where: { $0.hasPrefix("an OpenShell") || $0.hasPrefix("OpenShell") }) { data["requested_filesystem"] = .bool(true) }
+        if profile.effectiveStrictSandbox { data["strict_applied"] = .bool(false) }
+        if profile.effectiveKernelSentry != .off {
+            data["sentry"] = .string("unavailable")
+            data["sentry_reason"] = .string("not staged on this server")
+        }
+        BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "sandbox.status", eventData: data)
+    }
+
     /// Refuses `rec`'s launch when its workspace asks for a protection this
     /// server can't enforce yet. TEMPORARY, with SandboxUnavailable.
     // @port-skip linux-only: a temporary Linux refusal (macOS stages the guest sandbox)

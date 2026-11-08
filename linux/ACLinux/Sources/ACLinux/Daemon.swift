@@ -1478,6 +1478,9 @@ public actor Daemon {
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
                 live[id] = l
+                // TEMPORARY, with the launch refusal (DaemonSandboxGuard.swift):
+                // a VM taken back isn't stopped, but said to be unprotected.
+                if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile) }
                 if reask, let pid = UUID(uuidString: id) {
                     Task { await self.quarantineAndAsk(pid, signals: []) }
                 } else {

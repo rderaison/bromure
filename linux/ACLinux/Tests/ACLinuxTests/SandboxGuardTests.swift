@@ -46,5 +46,28 @@ extension DaemonGlobalSuites {
             #expect(await d.registry.find(rec.id)?.state == .stopped, "still stopped")
             await d.shutdown()
         }
+
+        /// A VM taken back running isn't stopped, but its workspace's
+        /// unstaged protection is said: on the Security Timeline as a
+        /// degraded sandbox (and loudly in the daemon log).
+        @Test func anAdoptedVMIsReportedUnprotected() async throws {
+            var p = Profile(name: "adopted-strict", tool: .claude, authMode: .token)
+            p.strictSandbox = true
+            p.kernelSentry = .bestEffort
+            let rec = RepairMarksTests.stopped(p.id.uuidString.lowercased())
+            Daemon.warnUnenforceableAdopted(rec, profile: p)
+            var seen: [SecurityTimeline.Event] = []
+            for _ in 0..<100 {
+                seen = await MainActor.run { SecurityTimeline.shared.allEvents.filter { $0.profileID == p.id } }
+                if !seen.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(!seen.isEmpty, "on the Security Timeline")
+            // Nothing for a workspace that asks for nothing.
+            let plain = Profile(name: "adopted-plain", tool: .claude, authMode: .token)
+            Daemon.warnUnenforceableAdopted(RepairMarksTests.stopped(plain.id.uuidString.lowercased()), profile: plain)
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await MainActor.run { SecurityTimeline.shared.allEvents.filter { $0.profileID == plain.id }.isEmpty })
+        }
     }
 }
