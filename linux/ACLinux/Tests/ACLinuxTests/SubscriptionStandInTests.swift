@@ -54,6 +54,8 @@ struct SubscriptionStandInTests {
         let access = try #require(creds["access_token"] as? String)
         #expect(access != realKimi && mitm.kimiStore.profileForBogusKey(access) == kimi.id)
         #expect(!kimiText.contains("REAL"), "no real value")
+        let kimiMode = try FileManager.default.attributesOfItem(atPath: kimiFile.path)[.posixPermissions] as? NSNumber
+        #expect(kimiMode?.intValue == 0o600)
 
         // The launch's staging (and a live refresh's) writes them into the
         // home seed's files/.
