@@ -2229,9 +2229,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) },
                     gate: inspector.map { i in { i.feed($0) } },
                     onGateStop: {
-                        // Tell the client why (1008), then end the session both ways.
+                        // Tell the client why (1008, or 1009 for a message too
+                        // big to hold), then end the session both ways.
                         _ = try? server.writeNB(OpenShellWebSocket.policyCloseFrame(
-                            reason: inspector?.closeReason ?? "Bromure: client message not permitted by policy"))
+                            reason: inspector?.closeReason ?? "Bromure: client message not permitted by policy",
+                            code: inspector?.closeCode ?? 1008))
                     })
             }
             group.addTask {   // upstream → client

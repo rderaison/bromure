@@ -1267,7 +1267,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         upstream.flush()
         if stop {
             let close = OpenShellWebSocket.policyCloseFrame(
-                reason: gate.closeReason ?? "Bromure: client message not permitted by policy")
+                reason: gate.closeReason ?? "Bromure: client message not permitted by policy", code: gate.closeCode)
             guest.writeAndFlush(guest.allocator.buffer(bytes: close)).whenComplete { _ in guest.close(promise: nil) }
             upstream.close(promise: nil)
             return

@@ -129,6 +129,10 @@ public enum OpenShellWebSocket {
         /// Payload bytes still to pass through for a streamed binary frame.
         private var passthroughRemaining = 0
         public private(set) var closeReason: String?
+        /// The close code the client is told with `closeReason`: 1008 (policy
+        /// violation), or 1009 (message too big) for a message too large to
+        /// hold while it's assembled.
+        public private(set) var closeCode: UInt16 = 1008
 
         public init(compression: Bool, decide: @escaping (String) -> MessageVerdict,
                     onAudit: @escaping (String) -> Void = { _ in },
@@ -179,6 +183,13 @@ public enum OpenShellWebSocket {
                 textPayload.append(payload)
                 if textPayload.count > OpenShellWebSocket.maxTextMessageBytes, !textCompressed {
                     return fail("websocket text message exceeds \(OpenShellWebSocket.maxTextMessageBytes) byte limit", out)
+                }
+                // A compressed message is judged only once it inflates, so its
+                // compressed form is bounded while it's assembled too: endless
+                // continuations would otherwise grow without limit (1009).
+                if textCompressed, textPayload.count > OpenShellWebSocket.maxRawFramePayloadBytes {
+                    return fail("websocket compressed text message exceeds \(OpenShellWebSocket.maxRawFramePayloadBytes) byte limit",
+                                out, code: 1009)
                 }
                 guard h.fin else { continue }
                 fragment = .none
@@ -232,8 +243,9 @@ public enum OpenShellWebSocket {
             return Data(f)
         }
 
-        private func fail(_ why: String, _ out: Data) -> (forward: Data, stop: Bool) {
+        private func fail(_ why: String, _ out: Data, code: UInt16 = 1008) -> (forward: Data, stop: Bool) {
             closeReason = why
+            closeCode = code
             buffer = Data(); heldFrames = Data(); textPayload = Data()
             return (out, true)
         }
@@ -292,9 +304,10 @@ public enum OpenShellWebSocket {
         }
     }
 
-    /// A server→client close frame (unmasked), 1008 "policy violation".
-    public static func policyCloseFrame(reason: String) -> Data {
-        var payload = Data([0x03, 0xF0])
+    /// A server→client close frame (unmasked), 1008 "policy violation" (or
+    /// another `code`: ClientStream.closeCode).
+    public static func policyCloseFrame(reason: String, code: UInt16 = 1008) -> Data {
+        var payload = Data([UInt8(code >> 8), UInt8(code & 0xFF)])
         payload.append(Data(reason.utf8.prefix(120)))
         var f = Data([0x88, UInt8(payload.count)])
         f.append(payload)
