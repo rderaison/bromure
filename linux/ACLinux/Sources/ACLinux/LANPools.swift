@@ -120,13 +120,14 @@ public enum LANAccount {
 public final class LANPools: Sendable {
     public static let shared = LANPools(path: LANPoolsFile.defaultPath)
     private let path: String
+    private let uid: uid_t
     private let state = NIOLockedValueBox<(set: Set<UInt32>, mtime: timespec?, checked: ContinuousClock.Instant, loaded: Bool,
-                                            leaving: [UInt32: ContinuousClock.Instant])>(
-        ([], nil, .now - .seconds(60), false, [:]))
+                                            leaving: [UInt32: ContinuousClock.Instant], own: Set<UInt32>)>(
+        ([], nil, .now - .seconds(60), false, [:], []))
     static let grace: Duration = .seconds(3)
 
     // @port-skip linux-only: multi-user LAN pools
-    init(path: String) { self.path = path }
+    init(path: String, uid: uid_t = getuid()) { self.path = path; self.uid = uid }
 
     // @port-skip linux-only: multi-user LAN pools
     public func contains(_ ip: UInt32) -> Bool {
@@ -145,10 +146,12 @@ public final class LANPools: Sendable {
                         if s.loaded { log("\(path) is missing; keeping the last LAN pools (\(s.set.count) addresses blocked)") }
                     } else {
                         do {
-                            let next = try LANPoolsFile.load(path, requireInterface: false).allAddresses
+                            let file = try LANPoolsFile.load(path, requireInterface: false)
+                            let next = file.allAddresses
                             let now = ContinuousClock.now
                             for ip in s.set.subtracting(next) { s.leaving[ip] = now }
                             s.set = next
+                            s.own = file.addresses(ofUID: uid)
                             s.loaded = true
                         } catch {
                             log("\(path) doesn't read (\(error)); keeping the last LAN pools (\(s.set.count) addresses blocked)")
@@ -162,6 +165,14 @@ public final class LANPools: Sendable {
             s.leaving[ip] = nil
             return false
         }
+    }
+
+    /// Granted, or just taken back, but not to this account: what a
+    /// single-user server's daemon refuses its VMs (another account's
+    /// published addresses), its own cluster's addresses aside.
+    // @port-skip linux-only: multi-user LAN pools
+    public func containsOther(_ ip: UInt32) -> Bool {
+        contains(ip) && !state.withLockedValue { $0.own.contains(ip) }
     }
 
     // @port-skip linux-only: multi-user LAN pools

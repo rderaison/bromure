@@ -48,9 +48,11 @@ extension MitmProxy {
         // checked then (connectUpstream, no pinned addresses).
         if servedLocally(host: host, port: port, profileID: profileID) { return loop.makeSucceededFuture([]) }
         let egress = profileID.flatMap { guardrailsConfig(for: $0)?.egressPolicy }
-        var future = Self.checkDestination(host: host, port: port, hostAddresses: blocksHostAddresses,
+        let refused = refusedDestination
+        var future = Self.checkDestination(host: host, port: port, hostAddresses: true,
                                            openShell: egress?.openShell, identity: identity,
-                                           enforceBinaries: egress?.enforceBinaries ?? false, on: loop)
+                                           enforceBinaries: egress?.enforceBinaries ?? false,
+                                           hostOwn: refused, on: loop)
         // No policy to judge it by: a name with no answer yet isn't refused
         // here but at the dial, as macOS fails it lazily (the request may be
         // one answered on this machine).
@@ -141,6 +143,13 @@ extension MitmProxy {
         case .v4(let v): return HostAddresses.shared.contains(v) || LANPools.shared.contains(v)
         case .v6(let b): return HostAddresses.shared.contains6(b)
         }
+    }
+
+    /// Another account's LAN pool address (a single-user server's refusal).
+    // @port-skip linux-only: multi-user isolation
+    static func isOtherLANPool(_ ip: IPAddress) -> Bool {
+        if case .v4(let v) = ip { return LANPools.shared.containsOther(v) }
+        return false
     }
 
     /// The IPv4 address `ip` is or carries: v4-mapped (::ffff:a.b.c.d),

@@ -316,6 +316,11 @@ public actor Daemon {
             // The host's own addresses and every user's LAN pool, granted
             // or published (LANPools: blocked before a first publish).
             sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) || LANPools.shared.contains($0) } }
+        } else {
+            // A single-user server can hold grants too (admin pool add
+            // --single-user): another account's LAN pool, published or not,
+            // is refused, this account's own aside.
+            sw.blockedDestination.withLockedValue { $0 = { LANPools.shared.containsOther($0) } }
         }
         // Binary identity: a new connection under a policy's `binaries` is
         // decided for the program the guest's attestor names (macOS: the

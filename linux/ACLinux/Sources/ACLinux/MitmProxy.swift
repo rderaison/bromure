@@ -152,6 +152,14 @@ final class MitmProxy: @unchecked Sendable {
     /// A multi-user server: the host's own addresses are refused too
     /// (ProxyDestination.swift), as the switch refuses them.
     var blocksHostAddresses = false
+    /// What a destination is refused for, as the switch's
+    /// blockedDestination: a shared server's own addresses and every LAN
+    /// pool; a single-user one's other accounts' LAN pools.
+    // @port-skip linux-only: multi-user isolation (macOS has one user)
+    var refusedDestination: @Sendable (OpenShellPolicy.IPAddress) -> Bool {
+        if blocksHostAddresses { return { ip in MitmProxy.isHostOwn(ip) } }
+        return { ip in MitmProxy.isOtherLANPool(ip) }
+    }
 
     /// The CA (`<dir>/cert.pem`, `key.pem`, made on first use) and the
     /// subscription stores the stand-in swaps read, wired where the swaps

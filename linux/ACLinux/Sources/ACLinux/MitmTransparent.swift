@@ -29,7 +29,7 @@ extension MitmProxy {
             // switch refuses them on the native path (blockedDestination),
             // which a diverted flow never takes.
             if let ip = OpenShellPolicy.IPAddress(destIP),
-               let reason = Self.destinationDenial(host: destIP, resolved: [ip], hostAddresses: blocksHostAddresses) {
+               let reason = Self.destinationDenial(host: destIP, resolved: [ip], hostAddresses: true, hostOwn: refusedDestination) {
                 SupplyChainLog.shared.record(
                     "[firewall] ✗ deny tcp \(destIP):\(destPort) — \(reason) (\(profileID.uuidString.prefix(8)))")
                 close(appFD); return

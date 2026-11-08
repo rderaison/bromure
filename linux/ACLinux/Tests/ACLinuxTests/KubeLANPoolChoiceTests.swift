@@ -1,4 +1,5 @@
 import Foundation
+import Glibc
 import Testing
 @testable import ACLinux
 
@@ -22,5 +23,25 @@ struct KubeLANPoolChoiceTests {
         #expect(LinuxKubeHost.lanPool(cluster: [99], grant: grant, multiUser: false, helperRunning: true) == nil, "outside the grant")
         #expect(LinuxKubeHost.lanPool(cluster: [], grant: grant, multiUser: false, helperRunning: true) == nil,
                 "no lanPool: host listeners, as macOS's")
+    }
+
+    /// A single-user server's VMs: another account's pool addresses are
+    /// refused (its switch and proxy), this account's own aren't.
+    @Test func anotherAccountsPoolIsRefusedOurOwnIsnt() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        try LANPoolsAdmin.write(LANPoolsFile(grants: [me: ["10.250.0.10"], "root": ["10.250.0.20"]]), to: p)
+        let pools = LANPools(path: p)
+        let mine = UInt32(10) << 24 | 250 << 16 | 10, theirs = UInt32(10) << 24 | 250 << 16 | 20
+        #expect(pools.contains(mine) && pools.contains(theirs), "a shared server's daemons refuse both")
+        #expect(pools.containsOther(theirs), "another account's: refused")
+        #expect(!pools.containsOther(mine), "this account's own cluster: reachable")
+        #expect(!pools.containsOther(UInt32(10) << 24 | 250 << 16 | 30), "no grant: not a pool address")
+        // The proxy takes the same rule on a single-user server.
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: d + "/mitm", isDirectory: true))
+        #expect(!proxy.blocksHostAddresses)
+        #expect(!proxy.refusedDestination(.v4(UInt32(10) << 24 | 250 << 16 | 30)))
     }
 }
