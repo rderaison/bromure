@@ -114,6 +114,12 @@ public enum SupplyChainRegistry {
     }
 
 
+    /// A request to a recognised package registry's host (whatever it
+    /// classifies as, passthrough included).
+    public static func isRegistryRequest(host: String, path: String) -> Bool {
+        classify(host: host, path: path) != nil
+    }
+
     /// Classify a request based on (host, path). Returns nil when
     /// the URL doesn't belong to any recognised registry.
     public static func classify(host: String, path: String)

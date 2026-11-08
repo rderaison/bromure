@@ -69,13 +69,18 @@ enum DepiRegistry {
 
     /// A path an upstream might normalise into another one: it doesn't
     /// decode, or has a `.`, `..` or empty segment (a single trailing slash
-    /// aside), or a NUL. `/./-/whoami` or `//-/npm/v1/tokens` would read as
+    /// aside), a NUL, a backslash, or a `%` still there after one decode.
+    /// `/./-/whoami`, `//-/npm/v1/tokens`, `/.\-/whoami` or
+    /// `/%252e/-/whoami` would read as
     /// lookups and be answered on the owner's account; such a request on an
     /// npm or Depi host is refused (400) while Depi is on, never forwarded
     /// unscanned.
     static func isMalformedPath(_ rawPath: String) -> Bool {
         let path = String(rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
         guard let decoded = path.removingPercentEncoding, decoded.hasPrefix("/"), !decoded.contains("\0") else { return true }
+        // A `\` (WHATWG parsers read it as `/`) or a `%` left after the one
+        // decode (double encoding: `%252e` is `.` to a second decoder).
+        if decoded.contains("\\") || decoded.contains("%") { return true }
         var segments = decoded.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         if segments == [""] { return false }                       // "/"
         if segments.count > 1, segments.last == "" { segments.removeLast() }

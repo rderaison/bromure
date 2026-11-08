@@ -46,7 +46,8 @@ struct DepiTests {
     @Test("A path an upstream might normalise is malformed, and never a lookup")
     func malformedPaths() {
         for p in ["/./-/whoami", "//-/npm/v1/tokens", "/%zz/%2e%2e/-/npm/v1/tokens", "/x/../left-pad/-/left-pad-1.3.0.tgz",
-                  "/left-pad//", "/%2e/left-pad", "/left-pad/.", "left-pad", "/a%00b"] {
+                  "/left-pad//", "/%2e/left-pad", "/left-pad/.", "left-pad", "/a%00b",
+                  "/.\\-/whoami", "/.%5C-/whoami", "/left-pad\\..\\-\\whoami", "/%252e/-/whoami", "/left%2525pad"] {
             #expect(DepiRegistry.isMalformedPath(p), "\(p)")
             #expect(!DepiRegistry.isReadOnlyLookup(method: "GET", path: p), "\(p)")
         }
@@ -54,6 +55,15 @@ struct DepiTests {
             #expect(!DepiRegistry.isMalformedPath(p), "\(p)")
         }
         #expect(DepiRegistry.isReadOnlyLookup(method: "GET", path: "/left-pad/"), "a single trailing slash")
+        #expect(DepiRegistry.isReadOnlyLookup(method: "GET", path: "/@scope%2fpkg"), "a scoped name decodes once to @scope/pkg")
+    }
+
+    @Test("Every recognised registry host is a registry request, whatever its path")
+    func registryRequests() {
+        #expect(SupplyChainRegistry.isRegistryRequest(host: "registry.npmjs.org", path: "/x/../left-pad/-/left-pad-1.3.0.tgz"))
+        #expect(SupplyChainRegistry.isRegistryRequest(host: DepiRegistry.host, path: "/socket"))
+        #expect(SupplyChainRegistry.isRegistryRequest(host: "pypi.org", path: "/anything"))
+        #expect(!SupplyChainRegistry.isRegistryRequest(host: "echo.websocket.org", path: "/"))
     }
 
     @Test("Depi host classifies as npm — metadata")
