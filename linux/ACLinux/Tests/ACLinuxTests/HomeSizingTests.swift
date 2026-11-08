@@ -24,9 +24,11 @@ struct HomeSizingTests {
     @Test func freeSpaceIsMeasuredAtTheNearestExistingFolder() throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        let here = Daemon.freeBytes(near: dir)
-        #expect(here != nil)
-        #expect(Daemon.freeBytes(near: dir + "/vms/not-made-yet") == here)
+        let here = try #require(Daemon.freeBytes(near: dir))
+        // A folder not made yet is measured at its nearest parent (the same
+        // volume; other tests write meanwhile, so within a margin).
+        let nested = try #require(Daemon.freeBytes(near: dir + "/vms/not-made-yet"))
+        #expect((here > nested ? here - nested : nested - here) < 1 << 30, "\(here) vs \(nested)")
     }
 
     @Test func aDefaultSizedHomeIsntGrownLater() throws {
