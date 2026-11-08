@@ -41,7 +41,14 @@ extension Daemon {
     // @port-skip linux-only: /state's workspace rows
     func compromisedRow(_ rec: VMRecord) -> JSONValue {
         guard case .object(var o) = rec.workspaceJSON else { return rec.workspaceJSON }
-        o["compromised"] = .bool(existingProfile(for: rec).map { Self.isCompromised($0, store: profileStore) } ?? false)
+        let profile = existingProfile(for: rec)
+        o["compromised"] = .bool(profile.map { Self.isCompromised($0, store: profileStore) } ?? false)
+        // Squelch's setting and what it saved (macOS: the workspace row's
+        // squelch / squelchSummary).
+        if let profile {
+            o["squelch"] = .bool(profile.squelch.enabled)
+            if let sum = SquelchLedger.shared.summary(profile.id), let v = JSONValue.encoding(sum) { o["squelchSummary"] = v }
+        }
         return .object(o)
     }
 

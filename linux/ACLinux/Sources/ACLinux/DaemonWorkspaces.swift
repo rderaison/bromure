@@ -72,8 +72,11 @@ extension Daemon {
             "running": live[p.id.uuidString.lowercased()] != nil,
             "comments": p.comments,
             "createdAt": iso.string(from: p.createdAt),
+            "squelch": p.squelch.enabled,
         ]
         if let last = p.lastUsedAt { d["lastUsedAt"] = iso.string(from: last) }
+        // What Squelch saved here (macOS: the workspace row's squelchSummary).
+        if let sum = SquelchLedger.shared.summary(p.id), let v = JSONValue.encoding(sum) { d["squelchSummary"] = v.foundationObject }
         return d
     }
 

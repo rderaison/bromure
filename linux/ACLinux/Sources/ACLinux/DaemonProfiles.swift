@@ -91,6 +91,7 @@ extension Daemon {
             if let p = Daemon.workspace(id) { try? FileManager.default.removeItem(at: profileStore.profileDirectory(for: p)) }
             return vm
         }
+        Self.refreshSquelchSettings()
         var out = r
         out["name"] = name
         out["shortId"] = String(id.lowercased().prefix(8))
@@ -107,6 +108,7 @@ extension Daemon {
             LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"]
         }
         let ok = r["ok"] as? Bool == true
+        if ok { Self.refreshSquelchSettings() }
         // A timed rule saved here gets its instant switch-off too (macOS:
         // firewallProfilesChanged re-arms the expiry timer).
         if ok { scheduleNextFirewallExpiry() }

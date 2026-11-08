@@ -62,7 +62,13 @@ final class SessionStores {
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentSessions h=98721b804428bec6 @b41d9876
     func stateEntries() -> [String: JSONValue] {
         [
-            "agentSessions": .array(sessions.sessions.compactMap(JSONValue.encoding)),
+            // What Squelch saved in each conversation rides along: a client
+            // has no ledger of the host's (macOS: the same).
+            "agentSessions": .array(sessions.sessions.map { s -> AgentSession in
+                var s = s
+                if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
+                return s
+            }.compactMap(JSONValue.encoding)),
             "delegations": .array(delegations.delegations.compactMap(JSONValue.encoding)),
             "agentRooms": .array(rooms.rooms.compactMap(JSONValue.encoding)),
         ].merging(registrationEntries()) { a, _ in a }.merging(instructionPresetEntries()) { a, _ in a }

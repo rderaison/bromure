@@ -248,6 +248,8 @@ public actor Daemon {
         await d.wireCompromiseHandler()
         await d.wireWatchdog()
         await d.wireSentryModules()
+        refreshSquelchSettings()
+        wireSquelchLedger()
         // The shared code's secrets (the enrollment's token and leaf key)
         // in this daemon's vault.
         if BACSecretStore.backend == nil { BACSecretStore.backend = VaultSecretBackend() }
@@ -1874,6 +1876,8 @@ public actor Daemon {
         // A stopping daemon leaves nothing for a next one to take back (each
         // VM's teardown drops its fd store entries).
         unwireWatchdog()
+        // Squelch's numbers written out (macOS: quit's flush).
+        SquelchLedger.shared.flush()
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }

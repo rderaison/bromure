@@ -1041,6 +1041,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                                     trace: &trace) {
             return .answer(answer)
         }
+        // Squelch: command-output noise cut before the model reads it (and
+        // before PII scans it), as macOS's driveTLS does.
+        squelchStep(&req, proxy: proxy, profileID: profileID, host: host, method: method, trace: &trace)
         // PII protection: stand-ins for personal data before it leaves; the
         // relay restores the reply (macOS: driveTLS's PII step).
         let pii = await piiSwap(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
