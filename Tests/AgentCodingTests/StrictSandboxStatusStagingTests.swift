@@ -24,6 +24,38 @@ struct StrictSandboxStatusStagingTests {
         return dir
     }
 
+    /// A sandbox whose guest scripts aren't beside agentd isn't staged at
+    /// all: writeSandboxFiles throws, naming them, and writes nothing (no
+    /// strict marker without its attestor, no spec without its launcher).
+    @Test func aSandboxWithoutItsScriptsFailsClosed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("strict-missing-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let setup = try Self.setupDir(root)
+        let meta = root.appendingPathComponent("meta", isDirectory: true)
+        try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+        func stage(_ p: Profile) throws {
+            try SessionDisk.writeSandboxFiles(into: meta, profile: p, setupDir: setup, workdirs: [],
+                                              stageSentryModules: { _ in })
+        }
+        try FileManager.default.removeItem(at: setup.appendingPathComponent("bromure-attestd.py"))
+        try FileManager.default.removeItem(at: setup.appendingPathComponent("bromure-sandboxd"))
+        var p = Profile(name: "strict", tool: .claude, authMode: .token)
+        p.strictSandbox = true
+        #expect(throws: SessionDisk.GuestSandboxScriptsMissing(files: ["bromure-attestd.py"], setupDir: setup.path)) {
+            try stage(p)
+        }
+        #expect(!FileManager.default.fileExists(atPath: meta.appendingPathComponent("strict-sandbox").path), "no marker")
+        // An active spec needs its launcher too.
+        p.strictSandbox = false
+        p.networkPolicy = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n"
+        #expect(throws: SessionDisk.GuestSandboxScriptsMissing(files: ["bromure-sandboxd"], setupDir: setup.path)) {
+            try stage(p)
+        }
+        #expect(!FileManager.default.fileExists(atPath: meta.appendingPathComponent("openshell-sandbox.json").path))
+        // A plain workspace needs none of them.
+        try stage(Profile(name: "plain", tool: .claude, authMode: .token))
+    }
+
     @Test func aStrictOnlyWorkspaceGetsTheStatusModule() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("strict-status-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

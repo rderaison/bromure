@@ -48,13 +48,42 @@ extension SessionDisk {
         return result
     }
 
+    /// A sandbox asked for whose guest scripts aren't in `setupDir`.
+    public struct GuestSandboxScriptsMissing: Error, CustomStringConvertible, Equatable {
+        public let files: [String]
+        public let setupDir: String
+        public var description: String {
+            "the guest sandbox's scripts \(files.joined(separator: ", ")) are missing from \(setupDir)"
+        }
+    }
+
+    /// The guest scripts `profile`'s sandbox needs (the strict sandbox's,
+    /// an active spec's) that aren't in `setupDir`.
+    static func missingGuestSandboxScripts(_ profile: Profile, setupDir: URL) -> [String] {
+        let spec = OpenShellSandboxSpec(policyYAML: profile.networkPolicy, workdirs: [],
+                                        strictSandbox: profile.effectiveStrictSandbox,
+                                        sentry: profile.effectiveKernelSentry.rawValue)
+        var need: [String] = []
+        if profile.effectiveStrictSandbox { need += strictGuestFiles + [sandboxStatusModule] }
+        if spec.isActive { need += specGuestFiles }
+        var seen = Set<String>()
+        return need.filter {
+            seen.insert($0).inserted && !FileManager.default.fileExists(atPath: setupDir.appendingPathComponent($0).path)
+        }
+    }
+
     /// The sandbox's files for `profile` into the meta share `tmp`, from
     /// the guest scripts in `setupDir`; `workdirs` are the shared folders'
     /// paths in the guest. `stageSentryModules` fills the spec's `sentry/`
     /// directory with the kernel modules it has (called only with an
-    /// active spec).
+    /// active spec). Fails closed: a sandbox asked for whose scripts aren't
+    /// in `setupDir` throws GuestSandboxScriptsMissing, writing nothing,
+    /// rather than leave the guest without it (a strict marker with no
+    /// attestor, a spec with no launcher).
     static func writeSandboxFiles(into tmp: URL, profile: Profile, setupDir: URL, workdirs: [String],
                                   stageSentryModules: (_ sentryDest: URL) -> Void) throws {
+        let missing = missingGuestSandboxScripts(profile, setupDir: setupDir)
+        guard missing.isEmpty else { throw GuestSandboxScriptsMissing(files: missing, setupDir: setupDir.path) }
         let fm = FileManager.default
         // Strict sandbox: the root attestor and the (runtime-only)
         // privilege revocation ship beside agentd, and the marker
