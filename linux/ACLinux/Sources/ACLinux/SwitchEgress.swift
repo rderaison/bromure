@@ -48,6 +48,14 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     private var governance: [MAC: Governance] = [:]
     private var egressSeen: [EgressKey: Date] = [:]
     private static let egressReportEvery: TimeInterval = 60
+    /// The most `egressSeen` holds; past it the table starts over (macOS:
+    /// VMNetSwitch.egressSeenCap).
+    static let egressSeenCap = 32_768
+    /// When `egressSeen` was last pruned of expired entries.
+    private var egressSeenPruned = Date.distantPast
+    /// How many flows `egressSeen` holds (tests).
+    // @port-skip linux-only: tests (macOS: VMNetSwitch.egressSeenCount)
+    var egressSeenCount: Int { lock.withLock { egressSeen.count } }
     private var interception: Interception?
     /// Ports the agent watchdog cut off (macOS: quarantinedPorts).
     private var quarantined: Set<MAC> = []
@@ -226,7 +234,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         return nil
     }
 
-    // @port VMNetSwitch.handleEgress(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=a53c6ddd46a9b4fa @62ecb8fd
+    // @port VMNetSwitch.handleEgress(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=6ce317dc958cab46 @49959cbb
     private func decide(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int, _ src: MAC) -> Action {
         guard n >= 14 else { return .pass }
         let ethertype = VMNetSwitch.u16(buf, 12)
@@ -307,8 +315,13 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         // cache may not hold for this address: on an intercepted port the
         // MiTM re-decides with the TLS SNI / Host header (and fails closed on
         // flows that carry neither), so the flow is handed over.
-        if verdict == .deny, proto == 6, g.policy?.defersToInterception(port: dport) == true,
-           g.interceptor != nil, g.interceptPorts.contains(dport) {
+        // Never an always-blocked address (loopback, the metadata address,
+        // unspecified): no hostname allows it, and handed over, the guest's
+        // connect() would succeed before the MiTM dropped the flow.
+        if verdict == .deny, VMNetSwitch.defersDenialToInterception(
+               proto: proto, dport: dport, dstIP: dstIP,
+               policyDefers: g.policy?.defersToInterception(port: dport) == true,
+               intercepted: g.interceptor != nil && g.interceptPorts.contains(dport)) {
             verdict = .allow
         }
 
@@ -437,7 +450,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// Report a new flow, deduped per (port, destination, port, proto) — the
     /// destination being the looked-up name, else the IP — separately for
     /// allow vs deny, so a state change re-logs.
-    // @port VMNetSwitch.fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String], proto: UInt8, port: UInt16, denied: Bool, policy: EgressPolicy?, ep: EgressPolicy.Proto, now: Date, midFlow: Bool, newConnection: Bool, exe: String?) h=e98bdbd973efaa44 @ac3ea65d
+    // @port VMNetSwitch.fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String], proto: UInt8, port: UInt16, denied: Bool, policy: EgressPolicy?, ep: EgressPolicy.Proto, now: Date, midFlow: Bool, newConnection: Bool, exe: String?) h=ac39b62a21aaed23 @49959cbb
     private func fireEgress(port: MAC, profileID: UUID, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, dport: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
@@ -450,9 +463,14 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         key.exe = denied ? exe : nil
         let fresh: Bool = lock.withLock {
             guard now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery else { return false }
-            if egressSeen.count > 8192 {
+            // Pruned at most once a second, and capped: a guest flooding fresh
+            // destinations can't make every report scan the whole table, nor
+            // grow it without bound (a dropped entry only means one more report).
+            if egressSeen.count > 8192, now.timeIntervalSince(egressSeenPruned) >= 1 {
                 egressSeen = egressSeen.filter { now.timeIntervalSince($0.value) < Self.egressReportEvery }
+                egressSeenPruned = now
             }
+            if egressSeen.count > Self.egressSeenCap { egressSeen.removeAll(keepingCapacity: true) }
             egressSeen[key] = now
             return true
         }
