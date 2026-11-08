@@ -371,6 +371,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             throw UbuntuImageError.installerStoppedEarly
         }
 
+        // Every boot, cold or restored, keeps a free-space floor (1 GB) on
+        // the volume holding the VM's disks. The system disk is a CoW clone
+        // and the home image is sparse: both grow as the guest writes, so
+        // how much a session will need can't be known up front. Checking
+        // only when a disk is first created let an existing workspace boot
+        // onto a full volume. Throws SandboxError.diskFull, which the launch
+        // site shows.
+        let diskDir = (sessionDisk?.diskURL ?? imageManager.baseDiskURL).deletingLastPathComponent()
+        try EphemeralDisk.checkDiskSpace(
+            at: FileManager.default.fileExists(atPath: diskDir.path)
+                ? diskDir.path : imageManager.storageDir.path)
+
         // Resolve the disk to boot. Profile sessions get their own CoW
         // clone (created on first launch); legacy mode boots base directly.
         let bootDiskURL: URL
@@ -520,7 +532,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         serialOut.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            scan.consoleFile?.write(data)
+            try? scan.consoleFile?.write(contentsOf: data)
             scan.logBuffer.append(data)
             while let nl = scan.logBuffer.firstIndex(of: 0x0A) {
                 let line = String(decoding: scan.logBuffer[..<nl], as: UTF8.self)
@@ -795,16 +807,56 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard vm.canPause else {
             throw UbuntuImageError.installerStoppedEarly
         }
+        // The RAM snapshot needs room (a few hundred MB for a typical guest,
+        // up to its RAM size). Below the 1 GB floor, refuse before touching
+        // the VM: it keeps running and the caller says why.
+        let stateDir = session.savedStateURL.deletingLastPathComponent().path
+        try EphemeralDisk.checkDiskSpace(at: stateDir)
         cancelOutboxPoll()
         try await vm.pause()
         // VZ refuses to overwrite the destination (Code 11). restore()
         // consumes the snapshot, so normally nothing is here — but clear
         // any leftover (e.g. a suspend that crashed mid-teardown) first.
         try? FileManager.default.removeItem(at: session.savedStateURL)
-        try await vm.saveMachineStateTo(url: session.savedStateURL)
+        do {
+            try await vm.saveMachineStateTo(url: session.savedStateURL)
+        } catch {
+            // Measured before the partial snapshot goes: deleting it frees
+            // the very space whose lack failed the save.
+            let free = EphemeralDisk.freeBytes(at: stateDir)
+            try? FileManager.default.removeItem(at: session.savedStateURL)
+            // Left paused. The caller resumes it (`resumeAfterFailedSuspend`)
+            // only once it knows its deadline didn't abandon this call: a
+            // resume from here could land after it force-stopped the VM.
+            if let free, free < EphemeralDisk.minimumFreeBytes {
+                throw SandboxError.diskFull(availableMB: free / (1024 * 1024), path: stateDir)
+            }
+            throw error
+        }
         Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
         await Self.discardPausedInstance(vm)
         state = .stopped
+    }
+
+    /// Run again a VM whose suspend failed after pausing it (a snapshot that
+    /// ran out of disk). True if it is running. Doesn't restart the outbox
+    /// poll: a caller whose deadline abandoned this call may have stopped
+    /// the VM by the time it returns (`restartOutboxPollAfterFailedSuspend`).
+    @MainActor
+    public func resumeAfterFailedSuspend() async -> Bool {
+        guard let vm else { return false }
+        if vm.state == .paused {
+            do { try await vm.resume() } catch { return false }
+        }
+        return self.vm === vm && vm.state == .running
+    }
+
+    /// The outbox poll a failed suspend cancelled, once the VM is kept
+    /// running. A no-op if it never stopped (the suspend refused before
+    /// pausing).
+    @MainActor
+    public func restartOutboxPollAfterFailedSuspend() {
+        if outboxPollTask == nil { startOutboxPolling() }
     }
 
     /// Stop the paused instance once its state is on disk. A paused
@@ -1102,9 +1154,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
         if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
         guard let h = try? FileHandle(forWritingTo: url) else { return nil }
-        h.seekToEndOfFile()
+        _ = try? h.seekToEnd()
         let stamp = ISO8601DateFormatter().string(from: Date())
-        h.write(Data("\n=== \(stamp) boot ===\n".utf8))
+        try? h.write(contentsOf: Data("\n=== \(stamp) boot ===\n".utf8))
         return h
     }
 

@@ -4360,3 +4360,7 @@
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "可能記憶體不足。此處顯示的內容可能已過時。";
 "Show this session's terminal (⌥⌘U)" = "顯示此工作階段的終端機 (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "無法暫停「%@」：磁碟幾乎已滿。";
+"The workspace is still running." = "工作區仍在執行中。";

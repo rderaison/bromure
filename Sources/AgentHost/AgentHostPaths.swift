@@ -123,8 +123,8 @@ enum AgentHostLog {
                 FileManager.default.createFile(atPath: url.path, contents: nil)
             }
             if let h = try? FileHandle(forWritingTo: url) {
-                h.seekToEndOfFile()
-                h.write(Data(line.utf8))
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: Data(line.utf8))
                 try? h.close()
             }
         }

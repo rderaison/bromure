@@ -206,7 +206,7 @@ final class ACAutomationServer {
     // docker-style VM control plane (CLI). Each returns plain dicts/bools so
     // the server stays free of app types.
     var onListVMs: (() -> [[String: Any]])?
-    var onStopVM: ((_ idOrName: String, _ action: String) async -> Bool)?
+    var onStopVM: ((_ idOrName: String, _ action: String) async -> (found: Bool, refusal: String?))?
     var onAttachVM: ((_ idOrName: String) async -> Bool)?
     /// Create (boot) a VM from a profile ref or inline spec + mounts. Returns
     /// the new VM's info dict, or nil on failure.
@@ -1807,13 +1807,22 @@ final class ACAutomationServer {
         case "DELETE":
             let action = (bodyJSON["action"] as? String) ?? "shutdown"
             let semaphore = DispatchSemaphore(value: 0)
-            var ok = false
+            var result: (found: Bool, refusal: String?) = (false, nil)
             DispatchQueue.main.async {
-                Task { @MainActor in ok = await self.onStopVM?(id, action) ?? false; semaphore.signal() }
+                Task { @MainActor in
+                    result = await self.onStopVM?(id, action) ?? (false, nil)
+                    semaphore.signal()
+                }
             }
             semaphore.wait()
-            sendResponse(fd: fd, status: ok ? 200 : 404,
-                         body: ok ? ["status": "stopped"] : ["error": "VM not found"])
+            if !result.found {
+                sendResponse(fd: fd, status: 404, body: ["error": "VM not found"])
+            } else if let refusal = result.refusal {
+                // A suspend refused for lack of disk space: still running.
+                sendResponse(fd: fd, status: 409, body: ["error": refusal])
+            } else {
+                sendResponse(fd: fd, status: 200, body: ["status": "stopped"])
+            }
         case "GET":
             let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
             if let vm = vms.first(where: {

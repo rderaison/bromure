@@ -41,7 +41,7 @@ enum FatClientLog {
                 FileManager.default.createFile(atPath: filePath, contents: nil)
             }
             if let h = FileHandle(forWritingAtPath: filePath) {
-                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+                _ = try? h.seekToEnd(); try? h.write(contentsOf: Data(line.utf8)); try? h.close()
             }
         }
     }

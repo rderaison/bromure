@@ -59,8 +59,8 @@ public final class OCSFExporter: @unchecked Sendable {
                                                attributes: [.posixPermissions: 0o600])
             }
             if let h = try? FileHandle(forWritingTo: url) {
-                h.seekToEndOfFile()
-                h.write(line + Data("\n".utf8))
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: line + Data("\n".utf8))
                 try? h.close()
             }
             if lastPrunedDay != day {

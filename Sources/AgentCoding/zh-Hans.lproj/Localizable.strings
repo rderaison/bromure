@@ -4357,3 +4357,7 @@
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "可能内存不足。此处显示的内容可能已过时。";
 "Show this session's terminal (⌥⌘U)" = "显示此会话的终端 (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "无法挂起“%@”：磁盘几乎已满。";
+"The workspace is still running." = "工作区仍在运行。";
