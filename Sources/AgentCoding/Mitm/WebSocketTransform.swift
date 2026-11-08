@@ -107,7 +107,7 @@ final class WSContentGuard: @unchecked Sendable {
     var conversation: String?
     var squelchLedger: SquelchLedger = .shared
 
-    private let restorer: PIIResponseRestorer
+    private let serverRestorer: WSServerRestorer
 
     init(host: String, path: String, profileID: UUID, vault: PIIVault,
          piiPolicy: @escaping @Sendable () -> PIIPolicy?,
@@ -118,7 +118,7 @@ final class WSContentGuard: @unchecked Sendable {
         self.vault = vault
         self.piiPolicy = piiPolicy
         self.injectionPolicy = injectionPolicy
-        self.restorer = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        self.serverRestorer = WSServerRestorer(vault: vault)
         consent = { f in
             await HTTPMitmConnection.promptInjectionBroker.consent(
                 profileID: profileID, detectorName: f.detector,
@@ -278,51 +278,23 @@ final class WSContentGuard: @unchecked Sendable {
         if squelch()?.enabled == true {
             SquelchCallRegistry.shared.learn(fromServerEvent: payload, profileID: profileID)
         }
-        guard !vault.isEmpty,
-              payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{") else { return nil }
-        var compact = payload
-        if payload.contains(0x0A) || payload.contains(0x0D) {
-            // One SSE `data:` line: the event must be single-line JSON.
-            guard let obj = try? JSONSerialization.jsonObject(with: payload),
-                  let d = try? JSONSerialization.data(withJSONObject: obj, options: [.withoutEscapingSlashes])
-            else { return nil }
-            compact = d
-        }
-        let out = restorer.feed(Data("data: ".utf8) + compact + Data("\n\n".utf8))
-        let messages = Self.sseData(out)
-        return messages == [compact] && compact == payload ? nil : messages
+        return serverRestorer.restore(payload)
     }
 
     /// Held text released when the server ends the stream.
     func serverFinish() -> [Data] {
-        guard !vault.isEmpty else { return [] }
-        return Self.sseData(restorer.finish())
+        serverRestorer.finish()
     }
 
     // MARK: Helpers
 
     private static func isSpace(_ b: UInt8) -> Bool { b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D }
 
-    /// The `data:` payload of each SSE event in `out`.
-    static func sseData(_ out: Data) -> [Data] {
-        guard !out.isEmpty else { return [] }
-        var result: [Data] = []
-        for event in String(decoding: out, as: UTF8.self).components(separatedBy: "\n\n") {
-            for line in event.components(separatedBy: "\n") where line.hasPrefix("data:") {
-                var v = line.dropFirst(5)
-                if v.first == " " { v = v.dropFirst() }
-                result.append(Data(v.utf8))
-            }
-        }
-        return result
-    }
+    /// WSServerRestorer's (shared with the Linux proxy).
+    static func sseData(_ out: Data) -> [Data] { WSServerRestorer.sseData(out) }
 
-    /// The top-level `type` of a JSON message.
-    static func messageType(_ payload: Data) -> String? {
-        let b = [UInt8](payload)
-        guard let refs = JSONStrings.scan(b) else { return nil }
-        return refs.first { $0.key == "type" && $0.top == "type" }.map { JSONStrings.decode(b, $0.range) }
-    }
+    /// WSMessages' (shared with the Linux proxy).
+    static func messageType(_ payload: Data) -> String? { WSMessages.messageType(payload) }
 
     /// WSMessages' (shared with the Linux proxy).
     static func conversationBody(_ payload: Data, type: String?) -> Data {
