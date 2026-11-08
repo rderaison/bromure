@@ -602,6 +602,19 @@ struct WebSocketTransformTests {
         #expect(rec.events == ["log:1"])
     }
 
+    @Test("A reserved bit with no extension negotiated ends the relay; nothing goes up", arguments: [0x1, 0x9] as [UInt8])
+    func reservedBitRefused(opcode: UInt8) {
+        let rec = Recorder()
+        let h = WSHarness(guard: makeGuard(pii: false, injection: .log, vault: PIIVault(secret: secret), recorder: rec))
+        defer { h.close() }
+        var f = frame(opcode, opcode == 0x1 ? createWithPII : "", masked: true)
+        f[f.startIndex] |= 0x40   // RSV1
+        // A clean turn behind it never goes either: the relay has ended.
+        h.guestSend(f + frame(0x1, createWithPII, masked: true))
+        #expect(h.serverFrames(1, timeout: 1).isEmpty)
+        #expect(rec.events.isEmpty)
+    }
+
     @Test("Close is relayed in both directions after pending data")
     func closeHandshake() {
         let vault = PIIVault(secret: secret)

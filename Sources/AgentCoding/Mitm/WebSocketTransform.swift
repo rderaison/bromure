@@ -426,6 +426,14 @@ enum WSTransformRelay {
                     }
                 }
                 while let f = reader.next() {
+                    // An extension bit with no extension negotiated (they're
+                    // stripped from the handshake, and one in use falls back
+                    // to the pump): RFC 6455 §5.2, the connection fails —
+                    // never a message sent on unscanned.
+                    if f.rsv != 0 {
+                        FileHandle.standardError.write(Data("[mitm] WS \(g.host): reserved bits set — closing\n".utf8))
+                        return false
+                    }
                     if f.isControl {
                         // Close waits behind held messages; ping/pong may go
                         // between them (RFC 6455 §5.4 lets control frames
@@ -437,7 +445,7 @@ enum WSTransformRelay {
                     case .incomplete: break
                     case .passthrough(let raw): queue.append(.raw(raw))
                     case .complete(let op, let payload, let raw):
-                        queue.append(f.rsv == 0 ? .message(opcode: op, payload: payload, raw: raw) : .raw(raw))
+                        queue.append(.message(opcode: op, payload: payload, raw: raw))
                     case .protocolError:
                         FileHandle.standardError.write(Data("[mitm] WS \(g.host): bad client framing — closing\n".utf8))
                         return false
