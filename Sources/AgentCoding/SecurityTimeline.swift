@@ -211,6 +211,41 @@ public final class SecurityTimeline {
     public private(set) var events: [Event] = []
     /// Mirrored hosts' events (fat client), by host name.
     public private(set) var remote: [String: [Event]] = [:]
+    /// The host behind each of `remote`'s keys (its id): what the window
+    /// calls it is made from these.
+    private(set) var machineHosts: [String: RemoteHost] = [:]
+
+    func noteMachine(_ key: String, host: RemoteHost) {
+        if machineHosts[key] != host { machineHosts[key] = host }
+    }
+
+    /// What the window calls a machine: this Mac (nil), else the host's
+    /// label, unique among every host it has rows from (saved or a peer).
+    func machineLabel(_ key: String?) -> String {
+        guard let key else { return NSLocalizedString("This Mac", comment: "security timeline") }
+        guard let host = machineHosts[key] else { return key }
+        return Self.machineLabels(Array(machineHosts.values))[host.id] ?? key
+    }
+
+    /// Hosts' labels, unique among them: the name (or address); with the
+    /// address and port when another host has the same name; then, for any
+    /// label still shared (a name spelled like another's addressed label,
+    /// two records of one machine), the id too.
+    nonisolated static func machineLabels(_ hosts: [RemoteHost]) -> [UUID: String] {
+        func base(_ h: RemoteHost) -> String { h.name.isEmpty ? h.address : h.name }
+        var bases: [String: Int] = [:]
+        for h in hosts { bases[base(h), default: 0] += 1 }
+        var out: [UUID: String] = [:]
+        for h in hosts { out[h.id] = bases[base(h)] == 1 ? base(h) : "\(base(h)) (\(h.address):\(h.port))" }
+        for pass in 0..<2 {
+            var counts: [String: Int] = [:]
+            for v in out.values { counts[v, default: 0] += 1 }
+            for h in hosts where (counts[out[h.id] ?? ""] ?? 0) > 1 {
+                out[h.id] = "\(out[h.id] ?? base(h)) · \(pass == 0 ? String(h.id.uuidString.prefix(8)) : h.id.uuidString)"
+            }
+        }
+        return out
+    }
     private static let cap = 5000
     /// The next row's `seq`. Starts over at each launch: `epoch` says which.
     private var nextSeq = 0

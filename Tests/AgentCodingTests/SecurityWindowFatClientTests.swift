@@ -218,22 +218,65 @@ struct SecurityWindowFatClientTests {
         let a = RemoteHost(name: "studio", address: "10.0.0.2", user: "u")
         var b = RemoteHost(name: "studio", address: "10.0.0.3", user: "u")
         let other = RemoteHost(name: "mini", address: "10.0.0.9", user: "u")
-        let all = [a, b, other]
-        let ka = RemoteHostController.securityMirrorKey(for: a, among: all)
-        let kb = RemoteHostController.securityMirrorKey(for: b, among: all)
-        #expect(ka != kb)
-        #expect(ka == "studio (10.0.0.2:2222)" && kb == "studio (10.0.0.3:2222)")
-        // A name of its own stays the plain name; so does a lone host.
-        #expect(RemoteHostController.securityMirrorKey(for: other, among: all) == "mini")
-        #expect(RemoteHostController.securityMirrorKey(for: a, among: [a]) == "studio")
-        // The same address and port too (two records of one machine): the id tells them apart.
+        // The bucket and filter key is the host's id (pinned in
+        // hostKeysNeverCollide): never two hosts' one.
+        // What the window calls them: unique.
+        let labels = SecurityTimeline.machineLabels([a, b, other])
+        #expect(labels[a.id] == "studio (10.0.0.2:2222)" && labels[b.id] == "studio (10.0.0.3:2222)")
+        #expect(labels[other.id] == "mini")
+        #expect(SecurityTimeline.machineLabels([a])[a.id] == "studio")
+        // Two records of one machine (same address and port): the id tells them apart.
         b.address = a.address
-        let k1 = RemoteHostController.securityMirrorKey(for: a, among: [a, b])
-        let k2 = RemoteHostController.securityMirrorKey(for: b, among: [a, b])
-        #expect(k1 != k2 && k1.hasPrefix("studio (10.0.0.2:2222) · "))
+        let same = SecurityTimeline.machineLabels([a, b])
+        #expect(same[a.id] != same[b.id] && same[a.id]?.hasPrefix("studio (10.0.0.2:2222) · ") == true)
+        b.address = "10.0.0.3"
         // Routing never goes by the label: b's cell opens b, whatever a is called.
         let ws = UUID()
         #expect(SecurityEditorLauncher.route(profileID: ws, hostID: b.id, localProfiles: [],
                                              connectedHosts: [a.id, b.id]) == .host(b.id))
+    }
+
+
+    /// Finding: "Security timeline host keys can still collide across
+    /// distinct hosts". The key was a display string made unique among the
+    /// saved hosts only: a third host named like another's addressed label
+    /// (or an unsaved peer with the same name) got the same key, and its rows
+    /// overwrote the other's. The key is the host's id; labels are made
+    /// unique among every host the window has rows from.
+    @Test("hosts never share a bucket, and their labels never match, peers included")
+    @MainActor func hostKeysNeverCollide() {
+        let a = RemoteHost(name: "studio", address: "10.0.0.2", user: "u")
+        let b = RemoteHost(name: "studio", address: "10.0.0.3", user: "u")
+        let c = RemoteHost(name: "studio (10.0.0.2:2222)", address: "10.0.0.4", user: "u")
+        let peer = RemoteHost(name: "studio", address: "fe80::1", user: "u")   // a peer: never saved
+        let all = [a, b, c, peer]
+        let labels = SecurityTimeline.machineLabels(all)
+        #expect(Set(labels.values).count == all.count, "\(labels)")
+
+        // Through the timeline: each host's rows in its own bucket, each named.
+        let tl = SecurityTimeline(directory: nil)
+        func row(_ cond: String) -> [String: Any] {
+            ["engine": "Firewall", "condition": cond, "decision": "d", "kind": "blocked",
+             "t": Date().timeIntervalSince1970, "profileID": UUID().uuidString]
+        }
+        for h in all {
+            let key = h.id.uuidString   // `securityMirrorKey`
+            tl.noteMachine(key, host: h)
+            tl.applyMirror([row("from \(h.address)")], host: key)
+        }
+        #expect(tl.remote.count == all.count)
+        for h in all { #expect(tl.remote[h.id.uuidString]?.first?.condition == "from \(h.address)") }
+        #expect(Set(all.map { tl.machineLabel($0.id.uuidString) }).count == all.count)
+        #expect(tl.machineLabel(nil) == "This Mac")
+
+        // The window shows labels, never the key.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let view = (try? String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/SecurityTimelineView.swift"), encoding: .utf8)) ?? ""
+        #expect(view.contains("Text(timeline.machineLabel($0)).tag(String?.some($0))"))
+        #expect(view.contains("\\(timeline.machineLabel(e.machine)) · "))
+        #expect(!view.contains("ForEach(machines, id: \\.self) { Text($0)"))
+        let fc = (try? String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)) ?? ""
+        #expect(fc.contains("var securityMirrorKey: String { host.id.uuidString }"))
+        #expect(fc.contains("SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)"))
     }
 }
