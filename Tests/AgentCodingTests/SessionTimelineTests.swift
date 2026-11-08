@@ -114,4 +114,77 @@ struct SessionTimelineTests {
         #expect(t.segments.first { $0.kind == .shell }?.end == at(9))
         #expect(SessionTimeline.Kind.of(tool: "mcp__display__show_chart") == .mcp)
     }
+
+    /// A day of work: one 30-minute turn per hour, for 48 hours.
+    private func twoDays() -> SessionTimeline {
+        var items: [TranscriptItem] = []
+        for h in 0..<48 {
+            let s = Double(h) * 3600
+            items.append(item(items.count, .userText("task \(h)"), s))
+            // An event every 200 s (under the idle gap) for 30 minutes.
+            for k in 1...9 { items.append(item(items.count, .assistantText("step"), s + Double(k) * 200)) }
+        }
+        return SessionTimeline.build(items)
+    }
+
+    @Test("a chat holding only the transcript's end counts the index's earlier turns too")
+    func liveWindowJoinsTheIndex() {
+        let index = twoDays()
+        #expect(index.busy == 48 * 1800)
+        // The chat downloaded the last few minutes: it starts mid-turn (the
+        // prompt cut off), then one whole turn.
+        let lastStart = 47.0 * 3600
+        let live = SessionTimeline.build([item(0, .assistantText("step"), lastStart - 3600 + 1600),
+                                          item(1, .userText("task 47"), lastStart)]
+            + (1...9).map { item(1 + $0, .assistantText("step"), lastStart + Double($0) * 200) })
+        #expect(live.busy == 1800)
+        let joined = SessionTimeline.live(live, startingMidFile: true, index: index)
+        #expect(joined.busy == 48 * 1800)
+        #expect(joined.turns.count == 48)
+        // No bar shares an id with another.
+        let ids = joined.turns.map(\.id) + joined.turns.flatMap { $0.segments.map(\.id) }
+        #expect(Set(joined.turns.map(\.id)).count == joined.turns.count)
+        #expect(Set(joined.turns.flatMap { $0.segments.map(\.id) }).count == ids.count - joined.turns.count)
+    }
+
+    @Test("a chat holding the whole transcript is the timeline, as is one the index doesn't know yet")
+    func liveWholeOrUnknown() {
+        let index = twoDays()
+        let live = SessionTimeline.build([item(0, .userText("x"), 0), item(1, .assistantText("y"), 60)])
+        #expect(SessionTimeline.live(live, startingMidFile: false, index: index) == live)
+        #expect(SessionTimeline.live(live, startingMidFile: true, index: nil) == live)
+        let empty = SessionTimeline(turns: [])
+        #expect(SessionTimeline.live(empty, startingMidFile: true, index: index) == empty)
+    }
+
+    @Test("after a /clear in the chat's window, the index's old conversation isn't added back")
+    func clearInTheWindow() {
+        // The index has the two days before the clear, not yet the turn after.
+        let index = twoDays()
+        let after = 48.0 * 3600 + 600
+        let live = SessionTimeline.build([item(0, .userText("fresh start"), after),
+                                          item(1, .assistantText("ok"), after + 120)])
+        #expect(SessionTimeline.live(live, startingMidFile: true, index: index) == live)
+        // Once the index has read the clear it starts over: its turns are
+        // the new conversation's, and the join counts the ones the chat lacks.
+        let restarted = SessionTimeline.build([item(0, .userText("fresh start"), after - 7200),
+                                               item(1, .assistantText("ok"), after - 7000),
+                                               item(2, .userText("next"), after),
+                                               item(3, .assistantText("ok"), after + 120)])
+        let joined = SessionTimeline.live(live, startingMidFile: true, index: restarted)
+        #expect(joined.turns.count == 2)
+        #expect(joined.busy == 200 + 120)
+    }
+
+    @MainActor @Test("the store joins a mid-file chat with the index, and forgets that when the chat holds it all")
+    func storeTracksMidFile() {
+        let store = SessionTimelineStore()
+        let id = UUID()
+        let items = [item(0, .userText("x"), 0), item(1, .assistantText("y"), 60)]
+        store.update(id, items: items, startingMidFile: true)
+        #expect(store.startsMidFile.contains(id))
+        // Same items, now loaded from the start ("load earlier"): the flag follows.
+        store.update(id, items: items, startingMidFile: false)
+        #expect(!store.startsMidFile.contains(id))
+    }
 }
