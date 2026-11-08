@@ -279,4 +279,41 @@ struct SecurityWindowFatClientTests {
         #expect(fc.contains("var securityMirrorKey: String { host.id.uuidString }"))
         #expect(fc.contains("SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)"))
     }
+
+
+    /// Finding: "Changing the saved host list leaves duplicate and stale
+    /// security timeline buckets". The key was computed from the saved
+    /// hosts at each snapshot: saving a second "studio" moved host A's rows
+    /// to a new key and left the old bucket behind (every row counted
+    /// twice, a stale machine in the filter); a rename or a removal did the
+    /// same. The key is the host's id, which none of that changes; only
+    /// the label follows.
+    @Test("saving, renaming or removing hosts never moves a host's bucket")
+    @MainActor func savedHostsChangeKeepsBuckets() {
+        var a = RemoteHost(name: "studio", address: "10.0.0.2", user: "u")
+        let b = RemoteHost(name: "studio", address: "10.0.0.3", user: "u")
+        let tl = SecurityTimeline(directory: nil)
+        func row(_ cond: String) -> [String: Any] {
+            ["engine": "Firewall", "condition": cond, "decision": "d", "kind": "blocked",
+             "t": Date().timeIntervalSince1970, "profileID": UUID().uuidString]
+        }
+        func snapshot(_ h: RemoteHost, _ rows: [[String: Any]]) {
+            let key = h.id.uuidString            // `securityMirrorKey`
+            tl.noteMachine(key, host: h)
+            tl.applyMirror(rows, host: key)
+        }
+        snapshot(a, [row("a1")])
+        #expect(tl.machineLabel(a.id.uuidString) == "studio")
+        // Another "studio" is saved and mirrored: A keeps its one bucket.
+        snapshot(b, [row("b1")])
+        snapshot(a, [row("a1"), row("a2")])
+        #expect(tl.remote.keys.sorted() == [a.id.uuidString, b.id.uuidString].sorted())
+        #expect(tl.allEvents.count == 3)                    // a1, a2, b1: none twice
+        #expect(tl.machineLabel(a.id.uuidString) == "studio (10.0.0.2:2222)")
+        // A renamed: same bucket, new label.
+        a.name = "rack"
+        snapshot(a, [row("a1"), row("a2")])
+        #expect(tl.remote.count == 2 && tl.allEvents.count == 3)
+        #expect(tl.machineLabel(a.id.uuidString) == "rack" && tl.machineLabel(b.id.uuidString) == "studio")
+    }
 }
