@@ -3687,7 +3687,9 @@ public final class ProfileStore {
     private let reaper: CheckpointReaper
 
     /// Where `ProfileStore()` keeps profiles when no root is given: unset,
-    /// Application Support (below); the Linux daemon sets its state dir.
+    /// Application Support (below), or in a test run a folder of the
+    /// process's own (a test never writes the user's profiles); the Linux
+    /// daemon sets its state dir.
     nonisolated(unsafe) public static var defaultRootDir: URL?
 
     public init(rootDir: URL? = nil, reaper: CheckpointReaper = .shared) {
@@ -3696,6 +3698,9 @@ public final class ProfileStore {
             self.rootDir = rootDir
         } else if let root = Self.defaultRootDir {
             self.rootDir = root
+        } else if isTestRun() {
+            self.rootDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("bromure-test-profiles-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         } else {
             let appSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory, in: .userDomainMask
