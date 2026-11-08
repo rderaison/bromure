@@ -470,6 +470,149 @@ enum ProxyPolicy {
         }
         return nil
     }
+
+    // MARK: - WebSocket (OpenShell `protocol: websocket` routes)
+
+    /// What an OpenShell policy does to a WebSocket upgrade: the request as
+    /// it goes upstream (its permessage-deflate offer rewritten), and the
+    /// per-message gate and rewrite for the client's text messages (nil:
+    /// none, the socket's frames pass opaquely).
+    struct WebSocketPolicy {
+        var request: Data
+        var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
+        var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+    }
+
+    enum WebSocketPlan {
+        case go(WebSocketPolicy)
+        /// Refused before the policy steps (a fail-closed middleware that
+        /// can't run, a malformed extension offer).
+        case reject(status: Int, error: String, detail: String)
+    }
+
+    /// An upgrade `request` to `host:port` `reqPath` under `policy`: every
+    /// client text message on an OpenShell `protocol: websocket` route is
+    /// judged before it's forwarded (`WEBSOCKET_TEXT` rules, or GraphQL
+    /// operation policy), for `identity` when the policy enforces
+    /// `binaries`; the route's middleware and credential placeholders
+    /// (`entries`: the workspace's swap map) rewrite them; and
+    /// permessage-deflate is only offered upstream without client context
+    /// takeover.
+    static func webSocketPlan(_ request: Data, policy: EgressPolicy?, entries: [TokenMap.Entry],
+                              host: String, port: Int, reqPath: String,
+                              identity: OpenShellPolicy.BinaryIdentity?) -> WebSocketPlan {
+        var upgradeRequest = request
+        var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
+        var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+        let wsChain = policy?.openShell?.middlewares(for: host) ?? []
+        if let mw = wsChain.first(where: { !$0.isBuiltinRegex && !$0.failOpen }) {
+            // An external middleware can't be reached, and this one fails
+            // closed: refuse the session (OpenShell's preflight failure).
+            return .reject(status: 403, error: "middleware_failed",
+                           detail: "middleware \(mw.name) (\(mw.kind)) is unavailable and fails closed")
+        }
+        if wsChain.contains(where: \.isBuiltinRegex) {
+            let fakes = entries.map(\.fake)
+            let regexFailOpen = wsChain.first(where: \.isBuiltinRegex)?.failOpen ?? false
+            messageTransform = { text in
+                switch OpenShellPolicy.regexMiddleware(Data(text.utf8), keep: { v in
+                    fakes.contains(v) || isSubscriptionPlaceholder(v) }) {
+                case .unchanged: return .unchanged
+                case .rewritten(let d, _): return .replaced(String(decoding: d, as: UTF8.self))
+                case .failed(let why): return .failed(why, failOpen: regexFailOpen)
+                }
+            }
+        }
+        // `websocket_credential_rewrite`: OpenShell credential placeholders
+        // in client text messages are resolved (after the middleware, so
+        // a redactor never sees the real secret), for the credentials
+        // scoped to this host only.
+        if policy?.openShell?
+            .credentialRewrite(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath).websocket == true {
+            let wsPath = OpenShellPolicy.canonicalPath(ofTarget: reqPath)
+            let placeholders = entries.filter { e in
+                e.fake.hasPrefix(TokenSwapper.openShellPlaceholderPrefix)
+                    && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, port: port, scope: $0) } ?? true)
+                    && (e.paths.isEmpty || wsPath.map { p in
+                        e.paths.contains { OpenShellPolicy.pathSelector($0, matches: p) } } ?? false)
+            }
+            if !placeholders.isEmpty {
+                let before = messageTransform
+                messageTransform = { text in
+                    var current = text
+                    var changed = false
+                    switch before?(text) ?? .unchanged {
+                    case .unchanged: break
+                    case .replaced(let t): current = t; changed = true
+                    case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
+                    }
+                    for e in placeholders where current.contains(e.fake) {
+                        current = current.replacingOccurrences(of: e.fake, with: e.real)
+                        changed = true
+                    }
+                    return changed ? .replaced(current) : .unchanged
+                }
+            }
+        }
+        let routesWS = policy?.openShell?
+            .routesToWebSocket(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath) ?? false
+        if routesWS || messageTransform != nil {
+            switch rewritingWebSocketExtensions(upgradeRequest) {
+            case .success(let rewritten): upgradeRequest = rewritten
+            case .failure(let rejection):
+                return .reject(status: 400, error: "invalid_http_request", detail: rejection.reason)
+            }
+            let enforce = policy?.enforceBinaries ?? false
+            if let openShell = policy?.openShell, routesWS { messagePolicy = { text in
+                openShell.websocketMessageDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
+                                                   text: text, identity: identity, enforceBinaries: enforce)
+            } }
+            if messagePolicy == nil { messagePolicy = { _ in .allow } }
+        }
+        return .go(WebSocketPolicy(request: upgradeRequest, messagePolicy: messagePolicy, messageTransform: messageTransform))
+    }
+
+    /// The log line and Timeline row for a client text message an OpenShell
+    /// WebSocket route denied (`enforced`) or audited.
+    static func webSocketViolation(profileID pid: UUID, host: String, port: Int, path wsPath: String,
+                                   scheme wsScheme: String) -> @Sendable (String, Bool) -> Void {
+        { reason, enforced in
+            SupplyChainLog.shared.record(
+                "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
+            BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
+                "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
+                "proto": .string("tcp"), "host": .string(host), "port": .int(port),
+                "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
+                "scheme": .string(wsScheme),
+            ])
+        }
+    }
+
+    /// Forward only a permessage-deflate offer without client context
+    /// takeover (`rewrite_websocket_extensions_for_permessage_deflate`).
+    static func rewritingWebSocketExtensions(_ request: Data) -> Result<Data, OpenShellHTTP.Rejection> {
+        guard let sep = request.range(of: Data("\r\n\r\n".utf8)) else { return .success(request) }
+        let head = String(decoding: request.subdata(in: 0..<sep.lowerBound), as: UTF8.self)
+        var lines = head.components(separatedBy: "\r\n")
+        let values = lines.dropFirst().compactMap { line -> String? in
+            guard let c = line.firstIndex(of: ":"),
+                  line[..<c].trimmingCharacters(in: .whitespaces).lowercased() == "sec-websocket-extensions" else { return nil }
+            return String(line[line.index(after: c)...])
+        }
+        let offer: String?
+        switch OpenShellWebSocket.rewrittenExtensionOffer(values) {
+        case .success(let o): offer = o
+        case .failure(let e): return .failure(e)
+        }
+        lines = lines.filter { line in
+            guard let c = line.firstIndex(of: ":") else { return true }
+            return line[..<c].trimmingCharacters(in: .whitespaces).lowercased() != "sec-websocket-extensions"
+        }
+        if let offer { lines.append("Sec-WebSocket-Extensions: \(offer)") }
+        var out = Data(lines.joined(separator: "\r\n").utf8)
+        out.append(request.subdata(in: sep.lowerBound..<request.count))
+        return .success(out)
+    }
 }
 
 // MARK: - Prompt-injection enforcement and content-scan records

@@ -579,30 +579,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     static func lowercasedHeaders(of request: Data) -> [String: String] { ProxyPolicy.lowercasedHeaders(of: request) }
 
     /// The buffered body bytes of a request (nil when there are none).
-    /// Forward only a permessage-deflate offer without client context
-    /// takeover (`rewrite_websocket_extensions_for_permessage_deflate`).
     static func rewritingWebSocketExtensions(_ request: Data) -> Result<Data, OpenShellHTTP.Rejection> {
-        guard let sep = request.range(of: Data("\r\n\r\n".utf8)) else { return .success(request) }
-        let head = String(decoding: request.subdata(in: 0..<sep.lowerBound), as: UTF8.self)
-        var lines = head.components(separatedBy: "\r\n")
-        let values = lines.dropFirst().compactMap { line -> String? in
-            guard let c = line.firstIndex(of: ":"),
-                  line[..<c].trimmingCharacters(in: .whitespaces).lowercased() == "sec-websocket-extensions" else { return nil }
-            return String(line[line.index(after: c)...])
-        }
-        let offer: String?
-        switch OpenShellWebSocket.rewrittenExtensionOffer(values) {
-        case .success(let o): offer = o
-        case .failure(let e): return .failure(e)
-        }
-        lines = lines.filter { line in
-            guard let c = line.firstIndex(of: ":") else { return true }
-            return line[..<c].trimmingCharacters(in: .whitespaces).lowercased() != "sec-websocket-extensions"
-        }
-        if let offer { lines.append("Sec-WebSocket-Extensions: \(offer)") }
-        var out = Data(lines.joined(separator: "\r\n").utf8)
-        out.append(request.subdata(in: sep.lowerBound..<request.count))
-        return .success(out)
+        ProxyPolicy.rewritingWebSocketExtensions(request)
     }
 
     static func rewritingRequestTarget(_ request: Data, method: String, target: String, version: String) -> Data {
@@ -1169,92 +1147,22 @@ final class HTTPMitmConnection: @unchecked Sendable {
             // is judged before it's forwarded (`WEBSOCKET_TEXT` rules, or
             // GraphQL operation policy), and permessage-deflate is only
             // offered upstream without client context takeover.
-            var upgradeRequest = swap.modified
+            var upgradeRequest: Data
             var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
             var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
-            let wsChain = guardrailsProvider()?.egressPolicy?.openShell?.middlewares(for: host) ?? []
-            if let mw = wsChain.first(where: { !$0.isBuiltinRegex && !$0.failOpen }) {
-                // An external middleware can't be reached, and this one fails
-                // closed: refuse the session (OpenShell's preflight failure).
-                rejectBeforePolicy(tls: tls, status: 403, error: "middleware_failed",
-                                   detail: "middleware \(mw.name) (\(mw.kind)) is unavailable and fails closed",
-                                   host: host, port: port)
+            switch ProxyPolicy.webSocketPlan(swap.modified, policy: guardrailsProvider()?.egressPolicy,
+                                             entries: swapper.entries(for: profileID), host: host, port: port,
+                                             reqPath: reqPath, identity: binaryIdentity) {
+            case .reject(let status, let error, let detail):
+                rejectBeforePolicy(tls: tls, status: status, error: error, detail: detail, host: host, port: port)
                 return
+            case .go(let ws):
+                upgradeRequest = ws.request
+                messagePolicy = ws.messagePolicy
+                messageTransform = ws.messageTransform
             }
-            if wsChain.contains(where: \.isBuiltinRegex) {
-                let fakes = swapper.entries(for: profileID).map(\.fake)
-                let regexFailOpen = wsChain.first(where: \.isBuiltinRegex)?.failOpen ?? false
-                messageTransform = { text in
-                    switch OpenShellPolicy.regexMiddleware(Data(text.utf8), keep: { v in
-                        fakes.contains(v) || Self.isSubscriptionPlaceholder(v) }) {
-                    case .unchanged: return .unchanged
-                    case .rewritten(let d, _): return .replaced(String(decoding: d, as: UTF8.self))
-                    case .failed(let why): return .failed(why, failOpen: regexFailOpen)
-                    }
-                }
-            }
-            // `websocket_credential_rewrite`: OpenShell credential placeholders
-            // in client text messages are resolved (after the middleware, so
-            // a redactor never sees the real secret), for the credentials
-            // scoped to this host only.
-            if guardrailsProvider()?.egressPolicy?.openShell?
-                .credentialRewrite(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath).websocket == true {
-                let wsPath = OpenShellPolicy.canonicalPath(ofTarget: reqPath)
-                let placeholders = swapper.entries(for: profileID).filter { e in
-                    e.fake.hasPrefix(TokenSwapper.openShellPlaceholderPrefix)
-                        && (e.host.map { $0.isEmpty || TokenSwapper.hostMatchesScope(host: host, port: port, scope: $0) } ?? true)
-                        && (e.paths.isEmpty || wsPath.map { p in
-                            e.paths.contains { OpenShellPolicy.pathSelector($0, matches: p) } } ?? false)
-                }
-                if !placeholders.isEmpty {
-                    let before = messageTransform
-                    messageTransform = { text in
-                        var current = text
-                        var changed = false
-                        switch before?(text) ?? .unchanged {
-                        case .unchanged: break
-                        case .replaced(let t): current = t; changed = true
-                        case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
-                        }
-                        for e in placeholders where current.contains(e.fake) {
-                            current = current.replacingOccurrences(of: e.fake, with: e.real)
-                            changed = true
-                        }
-                        return changed ? .replaced(current) : .unchanged
-                    }
-                }
-            }
-            let routesWS = guardrailsProvider()?.egressPolicy?.openShell?
-                .routesToWebSocket(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath) ?? false
-            if routesWS || messageTransform != nil {
-                switch Self.rewritingWebSocketExtensions(upgradeRequest) {
-                case .success(let rewritten): upgradeRequest = rewritten
-                case .failure(let rejection):
-                    rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request", detail: rejection.reason,
-                                       host: host, port: port)
-                    return
-                }
-                let enforce = guardrailsProvider()?.egressPolicy?.enforceBinaries ?? false
-                let identity = binaryIdentity
-                if let openShell = guardrailsProvider()?.egressPolicy?.openShell, routesWS { messagePolicy = { text in
-                    openShell.websocketMessageDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
-                                                       text: text, identity: identity, enforceBinaries: enforce)
-                } }
-                if messagePolicy == nil { messagePolicy = { _ in .allow } }
-            }
-            let pid = profileID
-            let wsPath = reqPath
-            let wsScheme = flowScheme == "http" ? "ws" : "wss"
-            let onViolation: @Sendable (String, Bool) -> Void = { reason, enforced in
-                SupplyChainLog.shared.record(
-                    "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
-                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
-                    "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
-                    "proto": .string("tcp"), "host": .string(host), "port": .int(port),
-                    "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
-                    "scheme": .string(wsScheme),
-                ])
-            }
+            let onViolation = ProxyPolicy.webSocketViolation(profileID: profileID, host: host, port: port, path: reqPath,
+                                                             scheme: flowScheme == "http" ? "ws" : "wss")
             // PII protection / prompt-injection detection on a model
             // provider's socket (Codex's Responses WebSocket): frame-level
             // relay instead of the opaque pump. nil → opaque pump.
