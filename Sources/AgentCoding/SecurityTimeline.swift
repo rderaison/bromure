@@ -258,8 +258,7 @@ public final class SecurityTimeline {
     /// The app's timeline: persisted in the support folder, except in a test
     /// run (which must never write the user's history).
     private static func defaultDirectory() -> URL? {
-        let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
-            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let testing = isTestRun()
         guard !testing else { return nil }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("BromureAC/security-timeline", isDirectory: true)

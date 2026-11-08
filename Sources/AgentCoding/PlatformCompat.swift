@@ -185,3 +185,14 @@ func performanceCoreCount() -> Int32 {
     return Int32(ProcessInfo.processInfo.activeProcessorCount)
 #endif
 }
+
+/// A test run, which must never write the user's own files (their Security
+/// Timeline, chat queue, keys): XCTest's bundle or configuration on Apple
+/// platforms, or SwiftPM's test runner elsewhere (`<Package>-test-runner`,
+/// or an `.xctest` executable), which loads no bundle.
+func isTestRun() -> Bool {
+    if Bundle.allBundles.contains(where: { $0.bundlePath.hasSuffix(".xctest") })
+        || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return true }
+    let name = ProcessInfo.processInfo.processName
+    return name.hasSuffix("-test-runner") || name.hasSuffix(".xctest")
+}
