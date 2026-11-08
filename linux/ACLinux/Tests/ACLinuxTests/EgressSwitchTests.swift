@@ -260,6 +260,53 @@ struct SwitchEgressFirewallTests {
         #expect(mitm.denied.withLockedValue { $0 } == 1)
     }
 
+    /// The agent watchdog's quarantine (macOS: handleEgress's first check):
+    /// no IP leaves the port, on or off the subnet, governed or not; ARP
+    /// still goes. A release lets it out again, a detach forgets it.
+    @Test func aQuarantinedPortSendsNoIP() throws {
+        let rig = FirewallRig()
+        try rig.govern(nil)
+        let gw = TestFrames.ip("192.168.64.1")
+        let arp = Data(TestFrames.gateway + TestFrames.guest + [0x08, 0x06] + [UInt8](repeating: 0, count: 28))
+        rig.fw.setQuarantined(true, for: rig.a)
+        for (what, f) in [("off-subnet", TestFrames.tcp(to: good, port: 443, flags: 0x02)),
+                          ("the gateway's DNS", TestFrames.udp(to: gw, port: 53)),
+                          ("a broadcast", TestFrames.udp(to: TestFrames.ip("192.168.64.255"), port: 9)),
+                          ("the limited broadcast", TestFrames.udp(to: 0xFFFF_FFFF, port: 67)),
+                          ("IPv6", TestFrames.ipv6(to: [0x20, 0x01, 0x0d, 0xb8] + [UInt8](repeating: 0, count: 11) + [1]))] {
+            #expect(rig.fw.handle(f, from: rig.a) == .consumed, "\(what)")
+        }
+        #expect(rig.fw.handle(arp, from: rig.a) == .pass, "ARP keeps the link up for a release")
+        #expect(rig.fw.egressByteCount(for: rig.a) == 0, "nothing left, nothing counted")
+        // An ungoverned port is cut off just the same.
+        let other = MAC([0x52, 0x54, 0, 0, 0, 0x0b])
+        rig.fw.setQuarantined(true, for: other)
+        #expect(rig.fw.handle(TestFrames.udp(to: gw, port: 53), from: other) == .consumed)
+        rig.fw.setQuarantined(false, for: rig.a)
+        #expect(rig.fw.handle(TestFrames.tcp(to: good, port: 443, flags: 0x02), from: rig.a) == .pass)
+        rig.fw.setQuarantined(true, for: rig.a)
+        rig.fw.portClosed(rig.a)
+        try rig.govern(nil)
+        #expect(rig.fw.handle(TestFrames.tcp(to: good, port: 443, flags: 0x02), from: rig.a) == .pass, "a detach drops the quarantine")
+    }
+
+    /// The watchdog's volume signal reads the switch's own count: a session
+    /// port's off-subnet frames, whole (not on-subnet ones, not an
+    /// ungoverned port's); a detach starts it over.
+    @Test func offSubnetBytesAreCountedPerSessionPort() throws {
+        let rig = FirewallRig()
+        let syn = TestFrames.tcp(to: good, port: 443, flags: 0x02)
+        _ = rig.fw.handle(syn, from: rig.a)
+        #expect(rig.fw.egressByteCount(for: rig.a) == 0, "not a session port yet")
+        try rig.govern("deny tcp 203.0.113.7\ndefault allow")
+        _ = rig.fw.handle(syn, from: rig.a)
+        _ = rig.fw.handle(TestFrames.tcp(to: evil, port: 443, flags: 0x02), from: rig.a)
+        _ = rig.fw.handle(TestFrames.udp(to: TestFrames.ip("192.168.64.1"), port: 53), from: rig.a)
+        #expect(rig.fw.egressByteCount(for: rig.a) == UInt64(2 * syn.count), "both off-subnet frames, denied or not; DNS isn't")
+        rig.fw.portClosed(rig.a)
+        #expect(rig.fw.egressByteCount(for: rig.a) == 0)
+    }
+
     @Test func aDetachedPortIsNoLongerGoverned() throws {
         let rig = FirewallRig()
         try rig.govern("deny tcp 203.0.113.7\ndefault allow")

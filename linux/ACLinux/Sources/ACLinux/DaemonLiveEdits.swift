@@ -101,6 +101,7 @@ extension Daemon {
         await MainActor.run {
             mitm.applyWorkspacePolicies(raw)
             sw.egress.update(.init(raw))
+            Self.refreshWatchdogModes()
         }
         let plan = Self.makeSessionTokenPlan(for: profile, mitm: mitm)
         // The swap map: the plan's, minted credentials' and the kubeconfigs'

@@ -140,6 +140,9 @@ public final class InterimSwitch: Sendable {
             for await f in port.inbound {
                 // A VM speaks as itself only: its own MAC, its own lease.
                 guard self.speaksAsItself(f, from: m) else { continue }
+                // A quarantined VM sends no IP, DHCP included (macOS drops
+                // it in handleEgress, ahead of everything).
+                if egress.quarantineDrops(f, from: m) { continue }
                 if let r = dhcp.handle(f, port: m.bytes) { port.send(r); continue }
                 switch egress.handle(f, from: m) {
                 case .consumed: continue

@@ -145,6 +145,14 @@ public actor Daemon {
     /// The sessions (`<workspace>#<session>`) whose compromise question is
     /// up (DaemonCompromise.swift).
     var compromiseAsking: Set<String> = []
+    /// The agent watchdog's 5 s egress sampler (DaemonWatchdog.swift).
+    var watchdogSampler: Task<Void, Never>?
+    /// Questions holding each VM paused (DaemonWatchdog.swift), by VM id.
+    var pauseHolds: [String: Int] = [:]
+    /// VMs whose watchdog Release waits for the other questions holding them.
+    var releaseWhenFree: Set<String> = []
+    /// VMs whose watchdog question is up.
+    var watchdogAsking: Set<String> = []
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -210,6 +218,7 @@ public actor Daemon {
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
+        await d.wireWatchdog()
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
@@ -978,6 +987,12 @@ public actor Daemon {
         // with it (macOS: MitmEngine.unregister).
         mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
+        // The watchdog's window and baseline start over with the next session,
+        // and no question holds the VM any more.
+        AgentWatchdog.shared.reset(profileID: pid)
+        clearPauseHolds(pid.uuidString.lowercased())
+        watchdogAsking.remove(pid.uuidString.lowercased())
+        Self.clearQuarantineMark(vmDir(pid.uuidString.lowercased()))
         if let mitm {
             await mitm.consent.revokeAll(profileID: pid)
             await mitm.consent.clearProfileName(for: pid)
@@ -1062,7 +1077,9 @@ public actor Daemon {
                 mitm?.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: store), for: profile.id)
                 mitm?.applyWorkspacePolicies(profile)
                 // Its VM's port, governed before the VM runs (macOS: attachPort's policy).
+                Self.clearQuarantineMark(vmDir(rec.id))
                 sw.egress.govern(MAC(InterimSwitch.mac(rec.mac)), .init(profile))
+                Self.refreshWatchdogModes()
             }
         } else {
             try HomeSeed.writeHomeSeedFiles(into: seed)
@@ -1150,6 +1167,7 @@ public actor Daemon {
                 if let now = ProfileStore().loadAll().first(where: { $0.id == pid }) {
                     mitm.applyWorkspacePolicies(now)
                     sw.egress.update(.init(now))
+                    Self.refreshWatchdogModes()
                 }
             }
             // …and its credentials and files, if it changed them.
@@ -1298,12 +1316,19 @@ public actor Daemon {
                 l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
                 if let staged = adoptedProfile { startLocalEngineIfNeeded(for: staged) }
+                // Quarantined before the restart: cut again before it's attached.
+                let reask = readoptQuarantine(rec)
                 sw.attach(l.port, mac: rec.mac)
                 await allowLoadBalancerClaims(rec)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
                 live[id] = l
+                if reask, let pid = UUID(uuidString: id) {
+                    Task { await self.quarantineAndAsk(pid, signals: []) }
+                } else {
+                    Task { await self.readoptPaused(id) }
+                }
                 r.state = .running
                 FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': took back its Firecracker (pid \(pid)), network and vsock from the fd store\n".utf8))
             } catch {
@@ -1605,6 +1630,7 @@ public actor Daemon {
     public func shutdown() async {
         // A stopping daemon leaves nothing for a next one to take back (each
         // VM's teardown drops its fd store entries).
+        unwireWatchdog()
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }

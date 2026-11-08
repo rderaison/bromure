@@ -8,7 +8,6 @@ import SandboxEngine
 /// whatever the guest's proxy settings. The frame helpers, the RST it answers
 /// with and the report it makes are macOS's own (VMNetSwitch+Packets.swift,
 /// SwitchEgressReport); the decision follows handleEgress step for step.
-// partial: no agent-watchdog quarantine or egress byte counts on Linux (no watchdog yet)
 // @port-skip linux-only: VMNetSwitch's egress firewall state for the Linux switch
 final class SwitchEgressFirewall: @unchecked Sendable {
     /// A session port's governance (macOS: portProfileID, portEgressPolicy,
@@ -50,6 +49,10 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     private var egressSeen: [EgressKey: Date] = [:]
     private static let egressReportEvery: TimeInterval = 60
     private var interception: Interception?
+    /// Ports the agent watchdog cut off (macOS: quarantinedPorts).
+    private var quarantined: Set<MAC> = []
+    /// Off-subnet bytes each session port has sent (macOS: egressByteCounts).
+    private var egressBytes: [MAC: UInt64] = [:]
     /// The guests' DNS answers, IP → names (macOS: VMNetSwitch.dnsCache).
     let dnsCache = DNSSnoopCache()
     /// Where a decided flow is reported (macOS: the app's egress observer).
@@ -104,6 +107,30 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         }
     }
 
+    /// Quarantine a VM's port: drop every IP frame it sends (see `decide`).
+    /// Used by the agent watchdog; reversible.
+    // @port VMNetSwitch.setQuarantined(_: Bool, for: FileHandle) h=b58f8f69b282e24f @ac3ea65d
+    func setQuarantined(_ on: Bool, for mac: MAC) {
+        lock.withLock { if on { quarantined.insert(mac) } else { quarantined.remove(mac) } }
+    }
+
+    /// Off-subnet bytes a VM's port has sent since it attached.
+    // @port VMNetSwitch.egressByteCount(for: FileHandle) h=eb8640fa28c6e8b2 @ac3ea65d
+    func egressByteCount(for mac: MAC) -> UInt64 { lock.withLock { egressBytes[mac] ?? 0 } }
+
+    // @port-skip linux-only: see setQuarantined
+    private func isQuarantined(_ mac: MAC) -> Bool { lock.withLock { quarantined.contains(mac) } }
+
+    /// Whether its quarantine drops a frame from `src` (the switch asks
+    /// before its DHCP server answers): everything but ARP, on any port (an
+    /// ungoverned one too, whose other ethertypes the firewall would pass).
+    // @port-skip linux-only: see setQuarantined
+    func quarantineDrops(_ f: Data, from src: MAC) -> Bool {
+        guard isQuarantined(src) else { return false }
+        guard f.count >= 14 else { return true }
+        return (UInt16(f[f.startIndex + 12]) << 8 | UInt16(f[f.startIndex + 13])) != 0x0806
+    }
+
     // @port-skip linux-only: the Linux switch's egress firewall
     func setInterception(_ i: Interception?) { lock.withLock { interception = i } }
 
@@ -115,6 +142,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         let i: Interception? = lock.withLock {
             governance[mac] = nil
             egressSeen = egressSeen.filter { $0.key.port != mac }
+            quarantined.remove(mac)
+            egressBytes[mac] = nil
             return interception
         }
         i?.interceptor.portClosed(portID: mac.portID)
@@ -139,7 +168,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// to forward it, `.consumed` when it was dropped by policy, answered, or
     /// diverted into the MITM. Only session ports are governed.
     // partial: a name the guest resolves itself (its own resolver, DoH, /etc/hosts) is unseen off the intercepted ports: there the verdict has only the snooped DNS (macOS has the same limit; :80/:443 are re-decided by the SNI / Host)
-    // partial: no binary-identity gate on Linux, so a flow an `enforceBinaries` policy would ask the guest's attestor about is denied (macOS without a gate does the same); no quarantine
+    // partial: no binary-identity gate on Linux, so a flow an `enforceBinaries` policy would ask the guest's attestor about is denied (macOS without a gate does the same)
     // @port-skip linux-only: the Data entry to decide (handleEgress's port)
     func handle(_ f: Data, from src: MAC) -> Action {
         f.withUnsafeBytes { raw -> Action in
@@ -174,7 +203,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         if !readable { return portGovernance(src).pid == nil ? nil : .consumed }
         if ethertype == 0x0800, closesSubnet {
             let dst = UInt32(b[30]) << 24 | UInt32(b[31]) << 16 | UInt32(b[32]) << 8 | UInt32(b[33])
-            if dst == 0xFFFF_FFFF || dst >> 28 == 0xE { return .peersOnly }
+            // A quarantined port's broadcast is dropped in decide on macOS.
+            if dst == 0xFFFF_FFFF || dst >> 28 == 0xE { return isQuarantined(src) ? .consumed : .peersOnly }
         }
         return nil
     }
@@ -183,6 +213,11 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     private func decide(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int, _ src: MAC) -> Action {
         guard n >= 14 else { return .pass }
         let ethertype = VMNetSwitch.u16(buf, 12)
+
+        // Quarantine (the agent watchdog): no IP leaves the VM — not
+        // off-subnet, not the gateway (DNS), not peers. ARP still answers so
+        // the link stays up for a release.
+        if ethertype == 0x0800 || ethertype == 0x86DD, isQuarantined(src) { return .consumed }
 
         // ---- IPv6 ----
         // The firewall + MiTM are IPv4-only, so routable IPv6 egress is an
@@ -216,6 +251,10 @@ final class SwitchEgressFirewall: @unchecked Sendable {
 
         let g = portGovernance(src)
         guard let pid = g.pid else { return .pass }          // non-session → native
+
+        // Outbound volume per VM, for the watchdog's exfiltration signal
+        // (counted here, independent of the proxy's own accounting).
+        lock.withLock { egressBytes[src, default: 0] &+= UInt64(n) }
 
         let hostnames = dnsCache.names(for: dstIP)
         let ipProto = buf[14 + 9]

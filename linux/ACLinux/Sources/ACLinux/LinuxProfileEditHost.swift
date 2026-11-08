@@ -113,5 +113,6 @@ extension LinuxSessionHost: ProfileEditHost {
         guard let saved, LinuxSessionHost.running.withLockedValue({ $0.contains(saved.id) }) else { return }
         daemon?.mitm?.applyWorkspacePolicies(saved)
         daemon?.sw.egress.update(.init(saved))
+        Daemon.refreshWatchdogModes()
     }
 }

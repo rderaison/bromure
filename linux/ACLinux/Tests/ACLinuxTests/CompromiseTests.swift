@@ -87,8 +87,13 @@ extension DaemonGlobalSuites {
 /// A VM the compromise handler pauses and resumes (counting both).
 final class FakeCompromiseVM: CompromiseVM, @unchecked Sendable {
     let calls = NIOLockedValueBox<[String]>([])
-    func pause() async throws { calls.withLockedValue { $0.append("pause") }; try? await Task.sleep(for: .milliseconds(100)) }
-    func resume() async throws { calls.withLockedValue { $0.append("resume") } }
+    let paused = NIOLockedValueBox(false)
+    func pause() async throws {
+        calls.withLockedValue { $0.append("pause") }; paused.withLockedValue { $0 = true }
+        try? await Task.sleep(for: .milliseconds(100))
+    }
+    func resume() async throws { calls.withLockedValue { $0.append("resume") }; paused.withLockedValue { $0 = false } }
+    func isPaused() async -> Bool? { paused.withLockedValue { $0 } }
 }
 
 extension DaemonGlobalSuites {

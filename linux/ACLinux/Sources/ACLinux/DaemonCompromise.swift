@@ -7,9 +7,20 @@ import NIOConcurrencyHelpers
 protocol CompromiseVM: AnyObject, Sendable {
     func pause() async throws
     func resume() async throws
+    /// true: paused; false: running; nil: unknown (the API didn't say).
+    func isPaused() async -> Bool?
 }
 
-extension FirecrackerMachine: CompromiseVM {}
+extension FirecrackerMachine: CompromiseVM {
+    // @port-skip linux-only: the handler's VM, for tests
+    func isPaused() async -> Bool? {
+        switch try? await api.instanceState() {
+        case "Paused"?: return true
+        case "Running"?: return false
+        default: return nil
+        }
+    }
+}
 
 extension Daemon {
     /// Tests: the VM the handler acts on, by workspace (nil: the live one).
@@ -84,7 +95,7 @@ extension Daemon {
         guard compromiseAsking.insert(asking).inserted else { return }
         defer { compromiseAsking.remove(asking) }
         guard let (id, machine) = compromiseVM(pid) else { return }
-        do { try await machine.pause() } catch {
+        do { try await holdPause(id, machine) } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(profile.name)': compromise: pause failed (\(error))\n".utf8))
         }
         let (title, message) = Self.compromiseQuestion(event, workspace: profile.name)
@@ -114,7 +125,7 @@ extension Daemon {
             BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "credential.exfiltration_allowed",
                                                 eventData: ["observed_host": .string(event.observedHost),
                                                             "scope": .string("session"), "unmanaged": .bool(true)])
-            try? await machine.resume()
+            await letGoPause(id, machine)
         case 2:
             // The user vouches for the destination: the credential may go
             // there for the rest of the session (cleared at teardown).
@@ -124,10 +135,10 @@ extension Daemon {
                 BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "credential.exfiltration_allowed",
                                                     eventData: ["observed_host": .string(host), "scope": .string("session")])
             }
-            try? await machine.resume()
+            await letGoPause(id, machine)
         case 1:
             // Just that request (already refused); a retry asks again.
-            try? await machine.resume()
+            await letGoPause(id, machine)
         default:
             // Contained: marked, and stopped. It boots again once the mark is
             // cleared (POST /profiles/<id>/compromised).
