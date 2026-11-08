@@ -13,7 +13,25 @@ daemon links these system libraries (Ubuntu/Debian packages):
 The install scripts check the libraries and stop with the package to
 install if one is missing.
 
+The install scripts also fetch the PII detector's model (Rampart, ~14 MB,
+CC BY 4.0) with `scripts/fetch-pii-model.sh`: a pinned revision, every file
+checked against its SHA-256. It needs `curl` and `shasum` and network access
+to huggingface.co (or the files already in `$BROMURE_PII_CACHE`). A fetch
+that fails stops the install. The user service puts it in
+`~/.local/share/BromureAC/Models/pii-rampart`; the multi-user server beside
+its binary, in `/usr/local/lib/bromure-ac/bin/pii-rampart`. Without the
+model, PII protection still runs its pattern rules (emails, cards, phone
+numbers…) and says so in the daemon's log, as macOS does.
+
 ## Upgrading
+
+### PII protection
+
+A workspace with PII protection on now has personal data in its model
+requests swapped for stand-ins before they leave the machine, and the real
+values put back in the replies, as on macOS (WebSocket turns: not yet).
+Rerun the install script to fetch the detector's model (see Host
+requirements).
 
 ### New host libraries: zlib and libbrotlidec (prompt injection's decoding)
 

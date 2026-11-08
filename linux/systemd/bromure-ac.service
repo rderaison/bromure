@@ -13,6 +13,9 @@ NotifyAccess=main
 ExecStart=@BIN@ daemon
 Environment=BROMURE_AC_IMAGE=@IMAGE@
 Environment=BROMURE_AGENTD=@AGENTD@
+# Where the install put the PII detector's model (quoted: the install escapes
+# what systemd would otherwise expand or split).
+Environment="BROMURE_PII_MODEL_DIR=@PIIMODEL@"
 # Only the daemon is signalled: on stop, the daemon's own SIGTERM path shuts
 # its VMs and passt down. If the daemon dies (crash, OOM), its VMs keep
 # running in the cgroup and the restarted daemon re-adopts them (pidfile

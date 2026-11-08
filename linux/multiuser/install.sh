@@ -27,6 +27,13 @@ install -d -m 755 $L/bin $L/lib $L/vm-setup
 install -m 755 "$BIN" $L/bin/bromure-ac.new && mv -f $L/bin/bromure-ac.new $L/bin/bromure-ac
 install -m 755 "$FC" $L/bin/firecracker.new && mv -f $L/bin/firecracker.new $L/bin/firecracker
 install -m 644 "$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" $L/vm-setup/
+# The PII detector's model, beside the binary: where PIIDetector looks first
+# (Bundle.main's resources: macOS ships it in the app), for every user.
+# Pinned and SHA-256 checked; a failed fetch stops the install.
+BROMURE_PII_CACHE=${BROMURE_PII_CACHE:-/var/cache/bromure-ac/pii-rampart} \
+  "$ROOT/scripts/fetch-pii-model.sh" $L/bin/pii-rampart >/dev/null \
+  || { echo "install.sh: the PII model couldn't be fetched (PII protection needs it): check the network, or put the pinned files in \$BROMURE_PII_CACHE, and run this again" >&2; exit 1; }
+chmod -R u=rwX,go=rX $L/bin/pii-rampart
 # The app's resources (catalog, vm-setup scripts: cluster nodes, registry,
 # probes, ...): the daemons can't read the source tree. Only what git
 # tracks, so a stray local file never becomes world-readable. Swapped in whole.

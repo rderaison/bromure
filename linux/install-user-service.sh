@@ -3,6 +3,8 @@
 #
 #   - the binary         -> ~/.local/bin/bromure-ac        (from linux/ACLinux, release build)
 #   - the guest agent    -> ~/.local/share/bromure-ac/vm-setup/bromure-agentd.py
+#   - the PII model      -> ~/.local/share/BromureAC/Models/pii-rampart (scripts/fetch-pii-model.sh:
+#                           pinned and SHA-256 checked; a failed fetch stops the install)
 #   - the unit           -> ~/.config/systemd/user/bromure-ac.service, then enabled and started
 #
 # Lingering: a user service runs only while the user has a session, unless lingering is on.
@@ -28,6 +30,7 @@ DATA=${XDG_DATA_HOME:-$HOME/.local/share}
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 BIN=$HOME/.local/bin/bromure-ac
 AGENTD=$DATA/bromure-ac/vm-setup/bromure-agentd.py
+PIIMODEL=$DATA/BromureAC/Models/pii-rampart
 IMAGE=$DATA/bromure-ac/image-amd64
 START=1
 while [ $# -gt 0 ]; do
@@ -50,7 +53,14 @@ swift build --package-path "$ROOT/linux/ACLinux" -c release --product bromure-ac
 mkdir -p "$(dirname "$BIN")" "$(dirname "$AGENTD")" "$UNIT_DIR"
 install -m 0755 "$(swift build --package-path "$ROOT/linux/ACLinux" -c release --show-bin-path)/bromure-ac" "$BIN"
 install -m 0644 "$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" "$AGENTD"
-sed -e "s|@BIN@|$BIN|" -e "s|@IMAGE@|$IMAGE|" -e "s|@AGENTD@|$AGENTD|" \
+# The PII detector's model, where PIIDetector looks (macOS ships it in the app).
+BROMURE_PII_CACHE=${BROMURE_PII_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/bromure-ac/pii-rampart} \
+  "$ROOT/scripts/fetch-pii-model.sh" "$PIIMODEL" >/dev/null \
+  || { echo "$(basename "$0"): the PII model couldn't be fetched (PII protection needs it): check the network, or put the pinned files in \$BROMURE_PII_CACHE, and run this again" >&2; exit 1; }
+# The model folder as a quoted systemd value: % doubled (specifiers), \ and "
+# escaped; then escaped again for sed's replacement (\, &, |).
+PIIMODEL_UNIT=$(printf '%s' "$PIIMODEL" | sed -e 's/%/%%/g' -e 's/[\\"]/\\&/g' -e 's/[\\&|]/\\&/g')
+sed -e "s|@BIN@|$BIN|" -e "s|@IMAGE@|$IMAGE|" -e "s|@AGENTD@|$AGENTD|" -e "s|@PIIMODEL@|$PIIMODEL_UNIT|" \
   "$ROOT/linux/systemd/bromure-ac.service" > "$UNIT_DIR/bromure-ac.service"
 systemctl --user daemon-reload
 if [ $START = 1 ]; then systemctl --user enable --now bromure-ac.service; else systemctl --user enable bromure-ac.service; fi
