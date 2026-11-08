@@ -233,6 +233,7 @@
     "Sources/SandboxEngine/CloudTraceUploader.swift",
     "Sources/SandboxEngine/DNSSnoop.swift",
     "Sources/SandboxEngine/EgressPolicy.swift",
+    "Sources/SandboxEngine/EphemeralDisk+Space.swift",
     "Sources/SandboxEngine/HostNetworkInfo.swift",
     "Sources/SandboxEngine/InitrdShim.swift",
     "Sources/SandboxEngine/InstallIdentity.swift",
