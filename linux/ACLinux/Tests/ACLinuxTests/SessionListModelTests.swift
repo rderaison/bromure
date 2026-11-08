@@ -19,6 +19,21 @@ struct SessionListModelTests {
         return s
     }
 
+    /// A row carries its workspace's Squelch switch and notes (macOS's
+    /// sidebar row: the shield's neighbours and the tooltip).
+    @Test func rowsCarrySquelchAndNotes() async throws {
+        let (h, _, dir) = try await Self.host()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        var p = Profile(name: "sq", tool: .claude, authMode: .local)
+        p.squelch.enabled = true
+        p.comments = "# Release\nShip on Friday"
+        let plain = Profile(name: "plain", tool: .claude, authMode: .local)
+        h.refreshSidebar(workspaces: [], profiles: [p, plain], machines: [])
+        let rows = Dictionary(uniqueKeysWithValues: h.listModel.profileRows.map { ($0.id, $0) })
+        #expect(rows[p.id]?.squelch == true && rows[p.id]?.notes == "# Release\nShip on Friday")
+        #expect(rows[plain.id]?.squelch == false && rows[plain.id]?.notes == "")
+    }
+
     @Test func rowsCoverEveryWorkspaceAndMachineWithTheirRunState() async throws {
         let (h, d, dir) = try await Self.host()
         defer { try? FileManager.default.removeItem(atPath: dir) }

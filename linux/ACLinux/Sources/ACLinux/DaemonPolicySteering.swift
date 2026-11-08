@@ -26,7 +26,7 @@ extension Daemon {
 extension LinuxSessionHost {
     /// True once the note reached a tab: a Claude note file is in place (its
     /// hook reads it), or a typed note is queued.
-    // partial: no pid attribution from the agents' tool-call reports (the daemon doesn't read agent-tool logs): a note goes to every agent tab, or to the sole one
+    // partial: no pid attribution yet (a denied flow names its process only through the kernel sentry, held off by the sandbox guard): a note goes to every agent tab, or to the sole one
     // @port ACAppDelegate.deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) h=3cc12d2d4fe6b0ec @a32a5505
     @MainActor @discardableResult
     func deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) async -> Bool {

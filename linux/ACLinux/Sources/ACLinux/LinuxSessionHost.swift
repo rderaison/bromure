@@ -83,7 +83,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// attached machines, a row always) and its tab entries (the running
     /// workspaces', and a connected machine's roster). An entry keeps its
     /// object while its roster does.
-    // partial: a workspace runs or it doesn't (no booting or suspended: both read as asleep); no compromised, squelch or notes; no window
+    // partial: a workspace runs or it doesn't (no booting or suspended: both read as asleep); no window
     // @port ACAppDelegate.refreshSidebar() h=9e7c2076375bb24a @f127f8ab
     func refreshSidebar(workspaces: [SessionListModel.VMEntry], profiles: [Profile], machines: [AttachedMachine]? = nil) {
         let running = Self.running.withLockedValue { $0 }
@@ -92,7 +92,10 @@ final class LinuxSessionHost: AgentSessionHost {
         let rows = profiles.map { p in
             SessionListModel.ProfileRow(id: p.id, name: p.name, accentHex: p.color.hexInUI,
                                         state: running.contains(p.id) ? .running : .off,
-                                        compromised: Daemon.isCompromised(p, store: ProfileStore()))
+                                        compromised: Daemon.isCompromised(p, store: ProfileStore()),
+                                        squelch: p.squelch.enabled,
+                                        squelchSummary: SquelchLedger.shared.summary(p.id),
+                                        notes: p.comments)
         } + sorted.map { m in
             SessionListModel.ProfileRow(id: m.id, name: m.name, accentHex: m.accentHex,
                                         state: m.connected ? .running : .off, compromised: false)
