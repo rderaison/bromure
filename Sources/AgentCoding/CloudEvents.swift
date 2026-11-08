@@ -200,13 +200,12 @@ public final class BACEventEmitter: @unchecked Sendable {
         // Local Security Timeline — ALWAYS, before either gate below. It's an
         // on-device view of what the engines did on the user's own machine,
         // independent of the enrolled-only, cloud-bound telemetry.
-        #if os(macOS)
         // Tell the agent its action was refused by policy (on by default
         // under an OpenShell policy), so it asks instead of routing around.
         // FIRST: the note races the agent's own PostToolUse hook, so it
-        // mustn't wait behind the timeline's main-actor record.
+        // mustn't wait behind the timeline's main-actor record. On every
+        // platform: the Linux server's agents are told the same way.
         PolicySteering.shared.observe(profileID: profileID, eventType: eventType, eventData: eventData)
-        #endif
         await SecurityTimeline.shared.record(profileID: profileID,
                                              eventType: eventType, eventData: eventData)
         // OpenShell policy advisor: every firewall denial is evidence for the
