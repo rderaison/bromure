@@ -129,7 +129,7 @@ extension Daemon {
 
     /// The folders inside `path` ("~", "~/proj", an absolute guest path) on
     /// a workspace, for the new-session folder browser: asked of the guest
-    /// while it runs, read from its ext4 home image (debugfs) when it's off.
+    /// while it runs, read from its ext4 home image (HomeImageReader) when it's off.
     /// Dotfolders are left out; nil when it can't be read now.
     // partial: no shared host folders on Linux workspaces
     // @port ACAppDelegate.listGuestFolders(profileID: UUID, path: String) h=64115e569c42caf3 @b10aa434
@@ -149,25 +149,7 @@ extension Daemon {
         let rel = guestPath == home ? "/" : String(guestPath.dropFirst(home.count))
         let img = vmDir(profile.id.uuidString.lowercased()) + "/home.img"
         guard FileManager.default.fileExists(atPath: img) else { return nil }
-        return await Task.detached(priority: .userInitiated) { Self.ext4Folders(imagePath: img, path: rel) }.value
+        return await Task.detached(priority: .userInitiated) { HomeImageReader.folders(imagePath: img, path: rel) }.value
     }
 
-    /// The directories in `path` of an ext4 image, read-only (debugfs `ls
-    /// -p`: /inode/mode/uid/gid/name/size/), dotfolders left out.
-    // @port-skip linux-only: debugfs over the ext4 home image (macOS reads it with its own ext4 walker)
-    nonisolated static func ext4Folders(imagePath: String, path: String) -> [String]? {
-        let debugfs = ["/usr/sbin/debugfs", "/sbin/debugfs"].first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let debugfs,
-              let out = try? ChildProcess.capture(debugfs, ["-R", "ls -p \"\(path.replacingOccurrences(of: "\"", with: ""))\"", imagePath],
-                                                  input: nil) else { return nil }
-        let names = String(decoding: out, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { line -> String? in
-            let f = line.split(separator: "/", omittingEmptySubsequences: false)
-            // ["", inode, mode, uid, gid, name, size, ""]
-            // A directory's mode is 040xxx (leading zero kept).
-            guard f.count >= 7, f[2].drop { $0 == "0" }.hasPrefix("40") else { return nil }
-            let name = String(f[5])
-            return name.hasPrefix(".") || name.isEmpty ? nil : name
-        }
-        return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
 }

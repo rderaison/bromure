@@ -7,8 +7,8 @@ import Foundation
 extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     // MARK: The guest
 
-    /// A task's transcript: its archived copy, else the guest's.
-    // partial: no offline read of a stopped workspace's home image (macOS's ext4 walker)
+    /// A task's transcript: its archived copy, else the guest's, else (a
+    /// Claude task's, the workspace off) read from its home image.
     // @port ACAppDelegate.fetchTaskTranscriptRaw(_: CodingTask) h=b4e71a368ec3c7eb @9936e30c
     func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
@@ -33,7 +33,18 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
            let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 30), !out.isEmpty {
             return out
         }
-        return nil
+        // Offline: read the image directly (read-only; safe even if a VM
+        // has the disk attached, as macOS). Claude only: the ext4 walker
+        // knows ~/.claude/projects; other tools' stores are reachable while
+        // the workspace runs (above).
+        guard task.tool == .claude, let daemon else { return nil }
+        let img = await daemon.vmDir(task.profileID.uuidString.lowercased()) + "/home.img"
+        guard FileManager.default.fileExists(atPath: img) else { return nil }
+        let slug = String(branch.dropFirst(3))
+        let guestCwd = ScheduledAutomationEngine.guestPath(task.repoPath)
+        return await Task.detached(priority: .userInitiated) {
+            HomeImageReader.claudeTranscript(imagePath: img, slug: slug, guestCwd: guestCwd)
+        }.value
     }
 
     /// Claude's trust dialog, accepted ahead for `dir` in the guest's
