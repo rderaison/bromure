@@ -6,6 +6,27 @@ import Foundation
 // the Linux server's.
 
 enum TraceEmitter {
+    /// Audit trail for credential.token_swap: every fake → real substitution
+    /// that just left the VM, one event per swap (the Security window's
+    /// credential brokering, the admin UI's "AI authenticated as <token>
+    /// against <host>"). Previews only — real values stay in memory. Sent
+    /// whatever the trace level: the timeline is always on.
+    static func emitSwapEvents(_ swaps: [SwapRecord], host: String, path: String, profileID: UUID,
+                               emit: (UUID, String, [String: AnyJSON]) -> Void = { pid, type, data in
+                                   BACEventEmitter.shared.emitDetached(profileID: pid, eventType: type, eventData: data)
+                               }) {
+        guard !swaps.isEmpty else { return }
+        BACDebug.log("[mitm/trace]", "swap-events emit count=\(swaps.count) host=\(host)")
+        for s in swaps {
+            emit(profileID, "credential.token_swap", [
+                "host": .string(host),
+                "path": .string(path),
+                "fake_preview": .string(s.fakePreview),
+                "real_preview": .string(s.realPreview),
+            ])
+        }
+    }
+
     /// Build + record the TraceRecord. Body capture decision is made
     /// here so the proxy hot path doesn't pay the cost when traces
     /// are off. Runs on the connection's Task — no main-actor hop

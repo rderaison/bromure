@@ -2368,25 +2368,12 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// response followed (after the standard CRLFCRLF separator) by
     /// the rendered frame transcript, so the inspector's existing
     /// body-display path serves it without any new code path.
-    /// Audit trail for credential.token_swap: every fake → real substitution
-    /// that just left the VM, one event per swap (the Security window's
-    /// credential brokering, the admin UI's "AI authenticated as <token>
-    /// against <host>"). Previews only — real values stay in memory. Sent
-    /// whatever the trace level: the timeline is always on.
+    /// Audit trail for credential.token_swap (TraceEmitter.emitSwapEvents).
     static func emitSwapEvents(_ swaps: [SwapRecord], host: String, path: String, profileID: UUID,
                                emit: (UUID, String, [String: AnyJSON]) -> Void = { pid, type, data in
                                    BACEventEmitter.shared.emitDetached(profileID: pid, eventType: type, eventData: data)
                                }) {
-        guard !swaps.isEmpty else { return }
-        BACDebug.log("[mitm/trace]", "swap-events emit count=\(swaps.count) host=\(host)")
-        for s in swaps {
-            emit(profileID, "credential.token_swap", [
-                "host": .string(host),
-                "path": .string(path),
-                "fake_preview": .string(s.fakePreview),
-                "real_preview": .string(s.realPreview),
-            ])
-        }
+        TraceEmitter.emitSwapEvents(swaps, host: host, path: path, profileID: profileID, emit: emit)
     }
 
     /// Audit trail for a client certificate the proxy presented upstream for
