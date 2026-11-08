@@ -61,17 +61,24 @@ extension RequestReader {
     static func depiRoute(_ request: inout Data, proxy: MitmProxy, profileID: UUID, host: String,
                           method: String, path: String) -> DepiRoute {
         let scPolicy = proxy.supplyChainPolicy(for: profileID)
-        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
-           proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil {
-            SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — an OpenShell policy pins every request to its own destination")
-            return .refused(RequestReader.simple(502, "Bad Gateway",
-                body: "Bromure: Depi's re-route is refused under this workspace's OpenShell policy (requests go only to their own destination).\n"))
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host), DepiRegistry.isMalformedPath(path) {
+            // A path an upstream might normalise into another: refused,
+            // neither re-routed nor sent on unscanned.
+            SupplyChainLog.shared.record("[depi] ✗ \(method) \(host)\(path) — malformed registry path, refused")
+            return .refused(RequestReader.simple(400, "Bad Request", body: DepiRegistry.malformedPathDetail + "\n"))
         }
         if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
            !DepiRegistry.isReadOnlyLookup(method: method, path: path) {
             // Not a lookup (a publish, a login, a token…): neither the key
             // nor the re-route — it goes where the guest sent it.
             SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — not a read-only lookup (no Depi key)")
+        } else if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
+                  proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil {
+            // A lookup to re-route, under a policy that pins every request
+            // to its own destination (a non-lookup went there above, as on macOS).
+            SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — an OpenShell policy pins every request to its own destination")
+            return .refused(RequestReader.simple(502, "Bad Gateway",
+                body: "Bromure: Depi's re-route is refused under this workspace's OpenShell policy (requests go only to their own destination).\n"))
         } else if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
             // Depi's name as the Host (macOS's URLSession sends the URL's).
             request = HTTPRequestFraming.replacingHeaders(DepiRegistry.authorize(rawRequest: request, apiKey: p.depiAPIKey),

@@ -402,6 +402,33 @@ struct SupplyChainProxyTests {
         #expect(String(decoding: reply, as: UTF8.self).hasPrefix("HTTP/1.1 502 ") && !String(decoding: again, as: UTF8.self).contains("depi-test-key"))
     }
 
+    /// A malformed registry path on an npm or Depi host is refused (400),
+    /// never re-routed nor sent on unscanned; a publish under an OpenShell
+    /// policy goes to its own destination (as macOS), only a lookup's
+    /// re-route is refused there.
+    @Test func aMalformedPathIsRefusedAndANonLookupKeepsItsDestination() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.setSupplyChainPolicy(SupplyChainPolicy(packageFilter: .depi, depiAPIKey: "depi-test-key"), for: pid)
+        for path in ["/x/../left-pad/-/left-pad-1.3.0.tgz", "/./-/whoami", "//-/npm/v1/tokens", "/%zz/%2e%2e/-/npm/v1/tokens"] {
+            var req = Data("GET \(path) HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n".utf8)
+            guard case .refused(let reply) = RequestReader.depiRoute(&req, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                                     method: "GET", path: path) else { Issue.record("\(path) not refused"); continue }
+            #expect(String(decoding: reply, as: UTF8.self).hasPrefix("HTTP/1.1 400 "), "\(path)")
+            #expect(!String(decoding: req, as: UTF8.self).contains("depi-test-key"))
+        }
+        let yaml = "version: 1\nnetwork_policies:\n  only:\n    endpoints:\n      - host: registry.npmjs.org\n        port: 443\n"
+        proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [],
+                                                   egressPolicy: EgressPolicy(openShell: try OpenShellPolicy.parse(yaml))), for: pid)
+        let raw = Data("PUT /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\nAuthorization: Bearer guest-token\r\n\r\n".utf8)
+        var publish = raw
+        guard case .none = RequestReader.depiRoute(&publish, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                   method: "PUT", path: "/demo") else { Issue.record("a publish refused under OpenShell"); return }
+        #expect(publish == raw)
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()
