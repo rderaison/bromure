@@ -63,13 +63,7 @@ final class TranscriptSearchIndex {
         e.text = a.text.isEmpty ? b.text : b.text.isEmpty ? a.text : a.text + "\n\n" + b.text
         if b.lastReply.isEmpty { e.lastReply = a.lastReply }
         e.turns = a.turns + b.turns
-        let shift = (a.timeline.turns.map { max($0.id, $0.segments.map(\.id).max() ?? 0) }.max() ?? 0)
-        e.timeline = SessionTimeline(turns: a.timeline.turns + b.timeline.turns.map { t in
-            SessionTimeline.Turn(id: t.id + shift, prompt: t.prompt, start: t.start, end: t.end,
-                                 segments: t.segments.map { var g = $0; g = SessionTimeline.Segment(
-                                    id: g.id + shift, kind: g.kind, name: g.name, detail: g.detail,
-                                    start: g.start, end: g.end, lane: g.lane); return g })
-        })
+        e.timeline = SessionTimeline.joined(a.timeline, b.timeline)
         e.firstPrompt = a.firstPrompt ?? b.firstPrompt
         return e
     }
