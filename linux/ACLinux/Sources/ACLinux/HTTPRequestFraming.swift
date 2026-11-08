@@ -59,6 +59,14 @@ enum HTTPRequestFraming {
 
     private enum Chunks { case needMore, invalid, complete(Data, Data) }
 
+    /// A chunked body decoded, or nil when it isn't complete (cut short of
+    /// its last chunk) or its framing is broken.
+    // @port-skip linux-only: proxy response framing
+    static func dechunkedBody(_ body: Data) -> Data? {
+        guard case .complete(let b, _) = dechunk(body[...]) else { return nil }
+        return b
+    }
+
     // @port-skip linux-only: proxy request framing
     private static func dechunk(_ s: Data.SubSequence) -> Chunks {
         var body = Data()

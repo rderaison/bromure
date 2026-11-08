@@ -24,8 +24,9 @@ import X509
 /// workspace's trace level). The workspace's policy chain runs on each
 /// request first (MitmEgress.swift): OpenShell's checks, the middleware,
 /// the guardrails, compromise detection and strict credential mode; then
-/// prompt injection and PII protection (its reply restored by PIIRelay).
-// partial: no supply-chain policy on Linux yet
+/// the supply-chain policy (SupplyChainLinux.swift), prompt injection and PII
+/// protection (its reply restored by PIIRelay).
+// partial: the supply-chain policy has no Depi re-route nor consent broker on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -47,6 +48,15 @@ final class MitmProxy: @unchecked Sendable {
     private let promptInjectionPolicies = NIOLockedValueBox<[UUID: PromptInjectionPolicy]>([:])
     /// Each workspace's PII protection (setPIIPolicy), read per request.
     private let piiPolicies = NIOLockedValueBox<[UUID: PIIPolicy]>([:])
+    /// Each workspace's supply-chain policy (setSupplyChainPolicy).
+    private let supplyChainPolicies = NIOLockedValueBox<[UUID: SupplyChainPolicy]>([:])
+    /// The supply-chain checks' engines (macOS: MitmEngine's).
+    let osvClient = OSVClient()
+    let socketClient = SocketDevClient()
+    let publishTimeCache = PublishTimeCache()
+    /// Who answers the artifact checks' questions (an override, a package
+    /// with no verdict, npm ci's bypass).
+    let supplyChainConsent: any SupplyChainConsenting = NoSupplyChainConsent()
     /// Each workspace's guardrails and egress policy (macOS: MitmEngine's
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).
@@ -257,6 +267,52 @@ final class MitmProxy: @unchecked Sendable {
     // @port-skip linux-only: clearWorkspacePolicies' share (macOS's MitmEngine has no clearPIIPolicy)
     func clearPIIPolicy(for profileID: UUID) {
         piiPolicies.withLockedValue { $0[profileID] = nil }
+    }
+    // @port MitmEngine.setSupplyChainPolicy(_: SupplyChainPolicy, for: UUID) h=61097e8ce0be342c @8e2543eb
+    func setSupplyChainPolicy(_ policy: SupplyChainPolicy, for profileID: UUID) {
+        let prior = supplyChainPolicies.withLockedValue { all -> SupplyChainPolicy? in
+            defer { all[profileID] = policy }
+            return all[profileID]
+        }
+        // A one-line summary of a new or changed policy, as macOS logs it.
+        if prior != policy {
+            var bits: [String] = []
+            if policy.ageGateEnabled { bits.append("age-gate=\(policy.ageGateDays)d") }
+            if policy.osvEnabled { bits.append("osv=\(policy.osvSeverity.rawValue)") }
+            if policy.socketActive {
+                var sk: [String] = []
+                if policy.socketBlockCompromised { sk.append("compromised") }
+                if policy.socketBlockCVE { sk.append("cve=\(policy.socketCVESeverity.rawValue)") }
+                bits.append("socket.dev=\(sk.joined(separator: "+"))")
+            } else if policy.packageFilter == .socketDev, !policy.socketAPIKey.isEmpty {
+                bits.append("socket.dev=key-set-but-no-toggle")
+            }
+            if policy.depiActive {
+                bits.append("depi=npm→\(DepiRegistry.host)")
+            } else if policy.packageFilter == .depi {
+                bits.append("depi=selected-but-no-key")
+            }
+            if policy.stripInstallScripts { bits.append("strip-scripts") }
+            let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")
+            SupplyChainLog.shared.record(
+                "[supply-chain] policy engaged for \(profileID.uuidString.prefix(8)): \(summary)")
+            // Never a silent fail-open: npm traffic Depi was chosen to filter
+            // goes to the registry as it is until the re-route reaches Linux.
+            if policy.depiActive {
+                let why = "Depi's re-route isn't applied on Linux yet: npm installs go to the registry unfiltered by Depi"
+                SupplyChainLog.shared.record("[depi] \(why) (\(profileID.uuidString.prefix(8)))")
+                ProxyPolicy.recordScanSkipped(host: DepiRegistry.host, path: "", engines: ["supply_chain"],
+                                              reason: why, profileID: profileID)
+            }
+        }
+    }
+    // @port MitmEngine.supplyChainPolicy(for: UUID) h=c9f2fe57fc0db459 @8e2543eb
+    func supplyChainPolicy(for profileID: UUID) -> SupplyChainPolicy? {
+        supplyChainPolicies.withLockedValue { $0[profileID] }
+    }
+    // @port MitmEngine.clearSupplyChainPolicy(for: UUID) h=c048d601fe627e5c @8e2543eb
+    func clearSupplyChainPolicy(for profileID: UUID) {
+        supplyChainPolicies.withLockedValue { $0[profileID] = nil }
     }
     // @port MitmEngine.clearPromptInjectionPolicy(for: UUID) h=b926618e76eae15c @8e2543eb
     func clearPromptInjectionPolicy(for profileID: UUID) {
@@ -840,7 +896,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     enum Plan {
         case answer(Data)
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
-                     mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil)
+                     mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
+                     supplyChain: SupplyChainRewrite? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -904,6 +961,17 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let swapped = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID)
         req = swapped.modified
         trace?.swaps = swapped.swaps
+        // The supply-chain policy: a package fetch refused, or its reply read
+        // whole and rewritten (macOS: driveTLS's supply-chain block).
+        var supplyChain: SupplyChainRewrite?
+        switch await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method, path: path) {
+        case .none: break
+        case .answer(let reply): return .answer(reply)
+        case .rewrite(let forward, let rewrite, let done):
+            req = Self.readWhole(forward)
+            upgrade = false
+            supplyChain = SupplyChainRewrite(rewrite: rewrite, done: done)
+        }
         // Prompt injection, ask or block, before the model sees a byte
         // (macOS: driveTLS's enforcement after the swaps; log mode stays in
         // the trace's conversation hook).
@@ -1000,7 +1068,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
             return .answer(response)
         }
-        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault)
+        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
+                        supplyChain: supplyChain)
     }
 
     /// The guest drained: the upstream may be read again (ResponseRelay
@@ -1017,7 +1086,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii):
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain):
             proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, pinned: pinned,
                                   on: channel.eventLoop).whenComplete { r in
                 switch r {
@@ -1031,7 +1100,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
                                               capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
                                               mint: mint.map { (self.proxy.credentialMinter, $0) }, strictSession: session,
-                                              ws: ws, pii: pii,
+                                              ws: ws, pii: pii, supplyChain: supplyChain,
                                               // An HTTP/1.0 guest gets a restored body up to the close, not chunks.
                                               guestHTTP11: !Self.isHTTP10(req))
                     relay.onUpstreamWritable = { self.readGuestIfAllowed(channel) }
@@ -1190,6 +1259,19 @@ final class ResponseRelay: ChannelInboundHandler {
     private var wsServer: WSServerSide?
     /// The reply PII protection restores (its stand-ins put back), if any.
     private let pii: PIIRelay?
+    /// A package fetch's reply the supply-chain policy rewrites, read whole.
+    private let supplyChain: SupplyChainRewrite?
+    /// A rewritten package reply past this is refused, not kept (a full npm
+    /// packument or a tarball is read whole, as macOS's URLSession reads
+    /// it): the request decoder's cap.
+    static let supplyChainCap = 64 << 20
+    /// What all the daemon's package replies being read whole may hold at
+    /// once: past it a reply is refused too, so parallel fetches can't take
+    /// the host's memory.
+    static let supplyChainBudget = 256 << 20
+    static let supplyChainHeld = NIOLockedValueBox(0)
+    /// This reply's share of `supplyChainHeld`.
+    private var supplyChainReserved = 0
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1220,8 +1302,10 @@ final class ResponseRelay: ChannelInboundHandler {
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
          host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0,
-         ws: WSPromptGuard? = nil, pii: PIIVault? = nil, guestHTTP11: Bool = true) {
+         ws: WSPromptGuard? = nil, pii: PIIVault? = nil, supplyChain: SupplyChainRewrite? = nil,
+         guestHTTP11: Bool = true) {
         self.guest = guest
+        self.supplyChain = supplyChain
         self.ws = ws
         self.pii = pii.map { PIIRelay(vault: $0, chunkedOut: guestHTTP11, host: host, profileID: profileID) }
         self.mint = mint
@@ -1251,8 +1335,21 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
-        if capture != nil || mint != nil {
-            if whole.count + b.readableBytes > Self.wholeCap {
+        if capture != nil || mint != nil || supplyChain != nil {
+            if supplyChain != nil {
+                let n = b.readableBytes
+                let fits = Self.supplyChainHeld.withLockedValue { held -> Bool in
+                    guard held + n <= Self.supplyChainBudget else { return false }
+                    held += n
+                    return true
+                }
+                if fits { supplyChainReserved += n }
+                if !fits || whole.count + n > Self.supplyChainCap {
+                    overflowed = true
+                    context.close(promise: nil)
+                    return
+                }
+            } else if whole.count + b.readableBytes > Self.wholeCap {
                 overflowed = true
                 context.close(promise: nil)
                 return
@@ -1461,6 +1558,33 @@ final class ResponseRelay: ChannelInboundHandler {
             guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
             // The trace keeps what the guest got, never the real credentials.
             if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: raw.count, truncated: false) }
+            return
+        }
+        if let supplyChain {
+            // The final response, decoded and rewritten before any byte
+            // reaches the guest (macOS: relayUpstreamBuffered). One past the
+            // cap, or one that can't be decoded, is refused, not passed on
+            // unchecked.
+            let raw = whole
+            noteStatus(raw)
+            let reply: Data
+            if overflowed {
+                reply = RequestReader.simple(502, "Bad Gateway",
+                                             body: "Bromure: the package reply from \(host) is too large to check (over \(Self.supplyChainCap >> 20) MiB, or too many at once); it was not passed on.\n")
+            } else if let final = HTTPRequestFraming.finalResponse(raw),
+                      let plain = RequestReader.supplyChainPlain(final, cleanClose: failure == nil) {
+                reply = supplyChain.rewrite(plain)
+            } else {
+                reply = RequestReader.simple(502, "Bad Gateway",
+                                             body: "Bromure: the package reply from \(host) couldn't be read; it was not passed on.\n")
+            }
+            let guest = self.guest
+            guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
+            if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: raw.count, truncated: false) }
+            whole = Data()
+            let reserved = supplyChainReserved
+            supplyChainReserved = 0
+            Self.supplyChainHeld.withLockedValue { $0 -= reserved }
             return
         }
         if let capture {

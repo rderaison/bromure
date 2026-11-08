@@ -68,6 +68,7 @@ extension MitmProxy {
     func applyWorkspacePolicies(_ profile: Profile) {
         setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
         setPIIPolicy(profile.pii, for: profile.id)
+        setSupplyChainPolicy(profile.supplyChain, for: profile.id)
         setGuardrailsConfig(GuardrailsConfig.make(for: profile), for: profile.id)
         let (broker, piBroker, name, pid) = (guardrailsBroker, promptInjectionBroker, profile.name, profile.id)
         Task.detached {
@@ -81,6 +82,7 @@ extension MitmProxy {
     func clearWorkspacePolicies(_ profileID: UUID) {
         clearPromptInjectionPolicy(for: profileID)
         clearPIIPolicy(for: profileID)
+        clearSupplyChainPolicy(for: profileID)
         clearGuardrailsConfig(for: profileID)
     }
 
