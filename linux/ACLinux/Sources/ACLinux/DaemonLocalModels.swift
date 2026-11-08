@@ -66,16 +66,17 @@ extension Daemon {
         // bearer; without one the host signs each request (SigV4) with the
         // workspace's AWS credentials (ExternalEngine.awsSigner).
         var config = ExternalEngine.Config(base: base, apiKey: apiKey)
-        if config.isBedrock, (apiKey ?? "").isEmpty, let region = Bedrock.region(fromHost: base.host ?? "") {
+        let bedrock = config.isBedrock
+        if bedrock, (apiKey ?? "").isEmpty, let region = Bedrock.region(fromHost: base.host ?? "") {
             config.auth = .sigV4(profileID: pid, region: region)
         }
-        InferenceRepairProxy.shared.setExternalEngine(pid, config)
+        InferenceRepairProxy.shared.setExternalEngine(pid, Self.testEngineRoute(config))
         if let activeID = profile.activeModelID, !activeID.isEmpty {
             InferenceRepairProxy.shared.setActiveModel(pid, repo: activeID)
-            if !config.isBedrock { EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID) }
+            if !bedrock { EngineModelMeta.refresh(base: base, apiKey: apiKey, model: activeID) }
         }
         InferenceRepairProxy.shared.startIfNeeded()
-        if config.isBedrock {
+        if bedrock {
             Self.inferenceLog("'\(profile.name)': Amazon Bedrock engine \(base.absoluteString) registered")
             return
         }
@@ -89,6 +90,30 @@ extension Daemon {
                 Self.inferenceLog("'\(name)': external engine \(base.absoluteString) unreachable: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Debug builds, VM e2e only: a Bedrock engine's calls go to a test
+    /// server (`BROMURE_AC_TEST_ENGINE_ROUTE=ip:port`, plain HTTP, the path
+    /// kept), still signed as for Bedrock: the host's URLSession trusts only
+    /// the system's CAs, so no test CA can stand in for AWS's. A release
+    /// build has none.
+    // @port-skip linux-only: e2e hook of the Linux engine registration
+    static func testEngineRoute(_ config: ExternalEngine.Config) -> ExternalEngine.Config {
+        #if DEBUG
+        guard config.isBedrock, let v = ProcessInfo.processInfo.environment["BROMURE_AC_TEST_ENGINE_ROUTE"],
+              let colon = v.lastIndex(of: ":"), let port = Int(v[v.index(after: colon)...]),
+              var c = URLComponents(url: config.base, resolvingAgainstBaseURL: false) else { return config }
+        c.scheme = "http"
+        c.host = String(v[..<colon])
+        c.port = port
+        guard let url = c.url else { return config }
+        FileHandle.standardError.write(Data("bromure-ac daemon: DEBUG: Bedrock engine calls go to \(v)\n".utf8))
+        var out = config
+        out.base = url
+        return out
+        #else
+        return config
+        #endif
     }
 
     /// The local-model engine's master key (every VM's engine key derives
