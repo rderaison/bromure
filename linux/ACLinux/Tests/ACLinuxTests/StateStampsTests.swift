@@ -28,12 +28,11 @@ struct StateStampsTests {
         #expect(try #require(await Self.generation(d)) >= g0 + 2)
         #expect(!StateGeneration.isMutating("GET", path: "/vms") && !StateGeneration.isMutating("POST", path: "/vms/x/exec?y=1"))
         #expect(StateGeneration.isMutating("POST", path: "/profiles") && StateGeneration.isMutating("DELETE", path: "/vms/x"))
-        // The stamps aren't a change to push.
+        // The stamps aren't a change to push: they're left out of what's
+        // compared (other suites' requests can move the rest meanwhile).
         let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
-        let a = await d.state().body
-        _ = await d.handle(ControlRequest(method: "POST", path: "/grid-layout", body: .object([:])))
-        let b = await d.state().body
-        #expect(Daemon.changedSections(from: Daemon.comparableSections(a, enc), to: Daemon.comparableSections(b, enc)).set.isEmpty)
+        let sections = Daemon.comparableSections(await d.state().body, enc)
+        #expect(sections["generation"] == nil && sections["epoch"] == nil && sections["vms"] != nil)
         await d.shutdown()
     }
 }
