@@ -214,7 +214,10 @@ struct SecurityTimelineView: View {
     /// The row whose lineage is open (double-click a Network row).
     @State private var lineage: SecurityTimeline.Event?
 
-    private var machines: [String] { timeline.remote.keys.sorted() }
+    /// Mirrored hosts' keys (their ids), by what they're called.
+    private var machines: [String] {
+        timeline.remote.keys.sorted { timeline.machineLabel($0).localizedStandardCompare(timeline.machineLabel($1)) == .orderedAscending }
+    }
 
     private var engines: [String] {
         Array(Set(timeline.allEvents.map(\.engine))).sorted()
@@ -258,7 +261,7 @@ struct SecurityTimelineView: View {
                     || $0.condition.lowercased().contains(q)
                     || $0.decision.lowercased().contains(q)
                     || ($0.workspace ?? "").lowercased().contains(q)
-                    || ($0.machine ?? "").lowercased().contains(q)
+                    || ($0.machine.map { timeline.machineLabel($0) } ?? "").lowercased().contains(q)
             }
         }
         return e.reversed()   // newest first
@@ -397,7 +400,7 @@ struct SecurityTimelineView: View {
                 Picker("", selection: $machineFilter) {
                     Text(NSLocalizedString("All machines", comment: "security timeline")).tag(String?.none)
                     Text(NSLocalizedString("This Mac", comment: "security timeline")).tag(String?.some(""))
-                    ForEach(machines, id: \.self) { Text($0).tag(String?.some($0)) }
+                    ForEach(machines, id: \.self) { Text(timeline.machineLabel($0)).tag(String?.some($0)) }
                 }
                 .labelsHidden()
                 .fixedSize()
@@ -478,7 +481,7 @@ struct SecurityTimelineView: View {
                                      rangeHours: SecurityTimeline.defaultRangeHours)
         for e in exported {
             // Never export secret characters, whatever an older row carries.
-            out += [iso.string(from: e.time), e.machine ?? "This Mac", e.workspace ?? "", e.engine,
+            out += [iso.string(from: e.time), e.machine.map { timeline.machineLabel($0) } ?? "This Mac", e.workspace ?? "", e.engine,
                     SecretFingerprint.redactLegacy(e.condition), SecretFingerprint.redactLegacy(e.decision),
                     e.kind.wire].map(field).joined(separator: ",") + "\n"
         }
@@ -498,7 +501,7 @@ struct SecurityTimelineView: View {
 
             TableColumn(NSLocalizedString("Workspace", comment: "security timeline")) { e in
                 Text(machines.isEmpty ? (e.workspace ?? "—")
-                     : "\(e.machine ?? NSLocalizedString("This Mac", comment: "security timeline")) · \(e.workspace ?? "—")")
+                     : "\(timeline.machineLabel(e.machine)) · \(e.workspace ?? "—")")
                     .lineLimit(1).truncationMode(.tail)
                     .foregroundStyle(.secondary)
                     .help(e.workspace ?? "")
