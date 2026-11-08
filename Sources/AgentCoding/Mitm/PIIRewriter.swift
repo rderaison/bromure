@@ -121,7 +121,7 @@ enum PIIRewriter {
         let first = body.first { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }
         guard method.uppercased() == "POST", body.count > 2, first == UInt8(ascii: "{") else { return false }
         let h = host.lowercased()
-        guard TraceLevel.aiHosts.contains(where: { h.contains($0) }),
+        guard TraceLevel.isAIHost(h),
               !h.contains("huggingface.co"),
               localEngineOffMac || h != InferenceService.localMitmHost else { return false }
         // A conversation: Anthropic `messages`, OpenAI `messages`/`input`,

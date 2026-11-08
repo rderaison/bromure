@@ -222,9 +222,7 @@ public final class TraceStore {
             // parsed conversation). Using the host (not just `isConversation`,
             // which needs body capture at a high trace level) keeps the
             // signal working at the default level too.
-            let host = record.host.lowercased()
-            if record.isConversation
-                || TraceLevel.aiHosts.contains(where: { host.contains($0) }) {
+            if record.isConversation || TraceLevel.isAIHost(record.host) {
                 onConversationActivity?(record.profileID)
                 onConversationResult?(record.profileID, record.host, record.statusCode)
             }
