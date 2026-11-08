@@ -4782,11 +4782,34 @@ for n, c in enumerate(calls, 1):
           }
         });
 
-        // Allowed until 5.4.3, which bridges Bromure's helpers through agentd
-        // and restores OpenShell's ban: then this expects EPERM.
-        await test("34.6 strict: Bromure's helpers can reach the host over vsock (until 5.4.3)", async () => {
-          const o = outcomes(await py("t('vsock', lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM))\n"));
-          assertEq(o.vsock, "ok", `AF_VSOCK: ${JSON.stringify(o)}`);
+        // OpenShell's ban: a confined process can't open vsock, so it can't pose
+        // as the guest's own services (the shell pool, the attestor, the
+        // sentry). Bromure's helpers ask agentd's relay, outside the sandbox,
+        // which connects the MCP and plan-stream ports only.
+        await test("34.6 strict: vsock is refused in the sandbox; agentd relays the Bromure MCP ports only", async () => {
+          const o = outcomes(await py(
+            "t('vsock', lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM))\n" +
+            "def relay(port):\n" +
+            "  def g():\n" +
+            "    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(40)\n" +
+            "    c.connect('/tmp/bromure-vsock.sock'); c.sendall(b'bromure-vsock %d\\n' % port)\n" +
+            "    line = c.recv(64); c.close()\n" +
+            "    if line != b'ok\\n': raise OSError(errno.ECONNREFUSED, line.decode().strip())\n" +
+            "  return g\n" +
+            "t('relay_mcp', relay(5835))\n" +
+            "t('relay_shell', relay(5800))\n" +
+            "t('relay_attestor', relay(5840))\n"));
+          assertEq(o.vsock, "EPERM", `AF_VSOCK: ${JSON.stringify(o)}`);
+          assertEq(o.relay_mcp, "ok", `relay to the delegation MCP: ${JSON.stringify(o)}`);
+          assertEq(o.relay_shell, "ECONNREFUSED", `relay to the shell pool: ${JSON.stringify(o)}`);
+          assertEq(o.relay_attestor, "ECONNREFUSED", `relay to the attestor: ${JSON.stringify(o)}`);
+        });
+
+        await test("34.6b strict: a Bromure MCP server answers from inside the sandbox, through the relay", async () => {
+          const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+            params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "ace2e", version: "1" } } });
+          const out = sx(`(echo '${init}'; sleep 8) | timeout 30 python3 /mnt/bromure-meta/bromure-delegation-mcp.py w0 | head -1`, 60000);
+          assert(/"id"\s*:\s*1/.test(out) && /bromure-delegation/.test(out), `initialize: ${out.slice(0, 400)}`);
         });
 
         await test("34.7 the code agentd runs (the meta share) can't be modified from the sandbox", async () => {
