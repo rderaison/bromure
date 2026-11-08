@@ -17055,7 +17055,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard FileManager.default.fileExists(atPath: path) else {
             throw fail(String(format: NSLocalizedString("No agent socket at %@.", comment: ""), path))
         }
-        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+        return HostAgentClient(socketPath: path, timeout: 10, hostAgent: true).identities().compactMap { ident in
             // The blob opens with the key type as an ssh-string.
             guard ident.blob.count > 4 else { return nil }
             let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }

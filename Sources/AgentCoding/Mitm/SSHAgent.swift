@@ -206,7 +206,7 @@ public final class SSHAgentServer: @unchecked Sendable {
         let picked = hostAgentKeys(for: profileID)
         for socket in Set(picked.values) {
             guard let path = HostAgentClient.resolveHostSocket(socket) else { continue }
-            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout)
+            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout, hostAgent: true)
             // Off the cooperative pool. This runs on every guest ssh, and a
             // socket that accepts and then stays silent would pin a thread
             // for hostAgentTimeout.
@@ -314,7 +314,7 @@ public final class SSHAgentServer: @unchecked Sendable {
                     "[ssh-agent] host agent key — SSH_AUTH_SOCK isn't set\n".utf8))
                 return Data([AgentMsg.failure.rawValue])
             }
-            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout)
+            let client = HostAgentClient(socketPath: path, timeout: Self.hostAgentTimeout, hostAgent: true)
             guard let resp = await client.requestDetached(fwd), !resp.isEmpty,
                   resp[0] == AgentMsg.signResponse.rawValue else {
                 FileHandle.standardError.write(Data(

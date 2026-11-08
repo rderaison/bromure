@@ -50,9 +50,25 @@ final class HostAgentClient: @unchecked Sendable {
         byProfile.removeValue(forKey: profileID)
     }
 
-    init(socketPath: String, timeout: TimeInterval? = nil) {
+    /// A host agent's client (an `ImportedSSHKey.hostAgentSocket`), not a
+    /// workspace's own agent: its path must be absolute, and every
+    /// connection is put to `refusesHostAgentPeer` first.
+    let isHostAgent: Bool
+
+    init(socketPath: String, timeout: TimeInterval? = nil, hostAgent: Bool = false) {
         self.socketPath = socketPath
         self.timeout = timeout
+        self.isHostAgent = hostAgent
+    }
+
+    /// Whether a host-agent connection (its connected fd) reaches a peer
+    /// that isn't one: a platform sets it where a workspace's own agent
+    /// could be named as a host agent (a sibling workspace would sign with
+    /// its keys past its gates). nil: no check.
+    private static var peerCheck: (@Sendable (Int32) -> Bool)?
+    static var refusesHostAgentPeer: (@Sendable (Int32) -> Bool)? {
+        get { registryLock.lock(); defer { registryLock.unlock() }; return peerCheck }
+        set { registryLock.lock(); defer { registryLock.unlock() }; peerCheck = newValue }
     }
 
     /// The socket an `ImportedSSHKey.hostAgentSocket` names: "" means this
@@ -190,6 +206,8 @@ final class HostAgentClient: @unchecked Sendable {
     /// With a `timeout`, the socket is non-blocking and one deadline
     /// covers connect, both writes, and the body read.
     func request(_ payload: Data) -> Data? {
+        // A relative path would connect relative to the process's cwd.
+        if isHostAgent, !socketPath.hasPrefix("/") { return nil }
         let fd = socket(AF_UNIX, LibC.sockStream, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -224,6 +242,7 @@ final class HostAgentClient: @unchecked Sendable {
             var len = socklen_t(MemoryLayout<Int32>.size)
             if getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &len) != 0 || soErr != 0 { return nil }
         }
+        if isHostAgent, let refuse = Self.refusesHostAgentPeer, refuse(fd) { return nil }
 
         // Frame: 4-byte big-endian length + payload.
         var lenBE = UInt32(payload.count).bigEndian
