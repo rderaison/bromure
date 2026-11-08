@@ -5712,7 +5712,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // docker-style VM control plane.
         server.onListVMs = { [weak self] in self?.automationVMList() ?? [] }
         server.onStopVM = { [weak self] idOrName, action in
-            guard let self else { return false }
+            guard let self else { return (false, nil) }
             return await self.automationStopVM(idOrName: idOrName, action: action)
         }
         server.onAttachVM = { [weak self] idOrName in
@@ -7369,15 +7369,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    @MainActor private func automationStopVM(idOrName: String, action: String) async -> Bool {
-        guard let id = resolveRunningSessionID(idOrName) else { return false }
+    @MainActor private func automationStopVM(idOrName: String, action: String) async -> (found: Bool, refusal: String?) {
+        guard let id = resolveRunningSessionID(idOrName) else { return (false, nil) }
         let closeAction: Profile.CloseAction
         switch action.lowercased() {
         case "suspend":            closeAction = .suspend
         default:                   closeAction = .shutdown   // shutdown / kill / stop
         }
-        await stopSession(id, action: closeAction)
-        return true
+        let refusal = await stopSession(id, action: closeAction)
+        return (true, refusal)
     }
 
     @MainActor private func automationAttachVM(idOrName: String) async -> Bool {
@@ -16686,21 +16686,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// down. This is the *only* path that powers a VM off — window close is a
     /// detach. Invoked by `vm kill`, the ⌘Q drain, the status-item, and the
     /// guest "all shells exited" signal.
-    @MainActor
-    func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+    /// Returns why a suspend was refused (the VM is still running), else nil.
+    @MainActor @discardableResult
+    func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async -> String? {
         // Still booting: no session yet, so nothing to stop — and the VM that
         // registers after would stay up. Stopped when it registers instead.
         if runningSessions[profileID] == nil, bootsInFlight.deferStop(profileID, action: action) {
-            return
+            return nil
         }
         guard let session = runningSessions[profileID], !session.stopping,
-              let vm = session.sandbox.vm else { return }
+              let vm = session.sandbox.vm else { return nil }
         let sandbox = session.sandbox
-        session.stopping = true
         let name = session.profile.name
-        // A suspended/off VM can't serve its ports; tear down any Cloudflare
-        // exposures pointing at it (the SSH front door tunnel is unaffected).
-        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         // `.ask` and `.background` both collapse to `.suspend` — a programmatic
         // stop isn't the moment for a modal, and "background" can't survive the
         // agent exiting, so suspend keeps state and the user decides next launch.
@@ -16710,38 +16707,33 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // never restore that snapshot. Shut down cleanly instead of writing a
         // doomed vm.state.
         if session.homeJustMigrated && resolved == .suspend { resolved = .shutdown }
-        switch resolved {
-        case .suspend:
-            sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
-            // Bound the suspend. vm.pause()/saveMachineStateTo can hang against a
-            // wedged or CPU-pegged guest (e.g. a runaway autorepeat loop), which
-            // would strand quit in `.terminateLater` forever — the dialog is
-            // answered but the app never exits. Race the suspend against a
-            // deadline and force-stop if it doesn't land, exactly like the
-            // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
-            // RAM save on SSD while still guaranteeing quit terminates.
-            // QuitDeadline, not a task-group race: the group would await the
-            // hung suspend child anyway, so the "watchdog" never fired (QH-1).
-            let saved = await QuitDeadline.run(
-                seconds: 20, label: "suspend '\(name)'", timeoutValue: false
-            ) { @MainActor in
-                do { try await sandbox.suspend(); return true }
-                catch { return false }
+        // The RAM snapshot needs room: below the 1 GB free-space floor a
+        // suspend is refused before anything is touched. The VM keeps running
+        // and the user is told why. On quit it can't keep running: it shuts
+        // down cleanly instead (no state is saved, the disk stays consistent).
+        if resolved == .suspend,
+           let stateDir = sandbox.sessionDisk?.savedStateURL.deletingLastPathComponent() {
+            do { try EphemeralDisk.checkDiskSpace(at: stateDir.path) }
+            catch {
+                if quitPhase == .draining {
+                    AppLog.stamp("'\(name)': \(error.localizedDescription) — shutting down instead of suspending")
+                    resolved = .shutdown
+                } else {
+                    reportSuspendRefused(name: name, error.localizedDescription)
+                    return error.localizedDescription
+                }
             }
-            if saved {
-                FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
-            } else {
-                FileHandle.standardError.write(Data(
-                    "[ac] suspend '\(name)' failed or timed out — forcing stop\n".utf8))
-                sandbox.sessionDisk?.clearSavedState()
-                await Self.forceStop(vm)
-            }
-        case .shutdown:
+        }
+        session.stopping = true
+        // A suspended/off VM can't serve its ports; tear down any Cloudflare
+        // exposures pointing at it (the SSH front door tunnel is unaffected).
+        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
+        func shutDown() async {
             sandbox.sessionDisk?.clearSavedState()
             do { try vm.requestStop() }
             catch {
                 await Self.forceStop(vm)
-                break
+                return
             }
             // A cluster node or a registry (containerd, etcd, Longhorn)
             // takes longer to power off than a workspace; cutting it at 15 s
@@ -16756,6 +16748,65 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     "[ac] '\(name)' didn't poweroff in \(Int(grace))s — forcing stop\n".utf8))
                 await Self.forceStop(vm)
             }
+        }
+        switch resolved {
+        case .suspend:
+            sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
+            // Bound the suspend. vm.pause()/saveMachineStateTo can hang against a
+            // wedged or CPU-pegged guest (e.g. a runaway autorepeat loop), which
+            // would strand quit in `.terminateLater` forever — the dialog is
+            // answered but the app never exits. Race the suspend against a
+            // deadline and force-stop if it doesn't land, exactly like the
+            // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
+            // RAM save on SSD while still guaranteeing quit terminates.
+            // QuitDeadline, not a task-group race: the group would await the
+            // hung suspend child anyway, so the "watchdog" never fired (QH-1).
+            let outcome = await QuitDeadline.run(
+                seconds: 20, label: "suspend '\(name)'", timeoutValue: SuspendOutcome.failed
+            ) { @MainActor in
+                do { try await sandbox.suspend(); return SuspendOutcome.saved }
+                catch let error as SandboxError {
+                    if case .diskFull = error { return .diskFull(error.localizedDescription) }
+                    return .failed
+                }
+                catch { return .failed }
+            }
+            switch outcome {
+            case .saved:
+                FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
+            case .diskFull(let why):
+                // The snapshot ran out of room partway (it passed the floor,
+                // the guest's memory didn't fit). suspend() dropped the partial
+                // file and left the VM paused; it is resumed here, within the
+                // deadline, so no abandoned resume can land after a forced
+                // stop. Then, as for a refusal up front: keep it running and
+                // say why, or on quit shut it down cleanly.
+                let running = await QuitDeadline.run(
+                    seconds: 10, label: "resume '\(name)'", timeoutValue: false
+                ) { @MainActor in await sandbox.resumeAfterFailedSuspend() }
+                if running && quitPhase != .draining {
+                    sandbox.restartOutboxPollAfterFailedSuspend()
+                    session.stopping = false
+                    reportSuspendRefused(name: name, why)
+                    return why
+                }
+                if running {
+                    AppLog.stamp("'\(name)': \(why) — shutting down instead of suspending")
+                    await shutDown()
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] suspend '\(name)' failed (\(why)) and the VM didn't resume — forcing stop\n".utf8))
+                    sandbox.sessionDisk?.clearSavedState()
+                    await Self.forceStop(vm)
+                }
+            case .failed:
+                FileHandle.standardError.write(Data(
+                    "[ac] suspend '\(name)' failed or timed out — forcing stop\n".utf8))
+                sandbox.sessionDisk?.clearSavedState()
+                await Self.forceStop(vm)
+            }
+        case .shutdown:
+            await shutDown()
         case .ask, .background:
             break   // unreachable: both collapse to .suspend above
         }
@@ -16763,6 +16814,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // suspend and a forced vm.stop() do NOT — so finish teardown here too.
         // Idempotent: a no-op if onStopped already ran.
         handleSessionStopped(profileID: profileID)
+        return nil
+    }
+
+    /// How a bounded suspend ended: the disk-full case is told apart, because
+    /// the VM is left running then rather than force-stopped.
+    private enum SuspendOutcome: Sendable {
+        case saved
+        case diskFull(String)
+        case failed
+    }
+
+    /// A suspend refused for lack of disk space: the VM is still running. Logged,
+    /// and shown once the stop path has returned (a modal inside it would hold
+    /// whoever awaits the stop). `showError` logs instead of alerting where no
+    /// one here could dismiss it.
+    @MainActor
+    private func reportSuspendRefused(name: String, _ why: String) {
+        AppLog.stamp("'\(name)': suspend refused — \(why) The VM keeps running.")
+        let detail = why + " " + NSLocalizedString(
+            "The workspace is still running.", comment: "Suspend refused: the VM was left running")
+        Task { @MainActor in
+            self.showError(SuspendRefused(detail: detail), message: String(format: NSLocalizedString(
+                "Couldn't suspend “%@”: the disk is almost full.", comment: "Suspend refused for lack of disk space"),
+                name))
+        }
+    }
+
+    private struct SuspendRefused: LocalizedError {
+        let detail: String
+        var errorDescription: String? { detail }
     }
 
     /// Fire-and-forget `stopSession` for non-async callers (the guest

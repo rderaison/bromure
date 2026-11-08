@@ -4391,3 +4391,7 @@
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "It may be out of memory. What's shown here may be out of date.";
 "Show this session's terminal (⌥⌘U)" = "Show this session's terminal (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "Couldn't suspend “%@”: the disk is almost full.";
+"The workspace is still running." = "The workspace is still running.";

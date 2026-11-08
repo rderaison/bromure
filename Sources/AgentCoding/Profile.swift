@@ -4221,6 +4221,12 @@ public final class ProfileStore {
         // list, which is confusing.
         fresh.createdAt = Date()
 
+        // The clones cost nothing at first but grow as either copy is
+        // written, like any new VM's disks: keep the same 1 GB floor.
+        // Before anything is written, so a refusal leaves no half-made
+        // profile behind.
+        try EphemeralDisk.checkDiskSpace(at: rootDir.path)
+
         // First, write the new profile.json + encrypted secrets blob to
         // the new dir. Doing this before the data clones means a clone
         // failure mid-way leaves us with a directory that at least has

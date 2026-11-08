@@ -393,8 +393,8 @@ final class KubeClusterEngine {
         FileHandle.standardError.write(Data("[k8s] \(line)\n".utf8))
         let url = clusterDirectory(id).appendingPathComponent("setup.log")
         if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile()
-            h.write(Data("\(line)\n".utf8))
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: Data("\(line)\n".utf8))
             try? h.close()
         } else {
             try? FileManager.default.createDirectory(at: clusterDirectory(id), withIntermediateDirectories: true)

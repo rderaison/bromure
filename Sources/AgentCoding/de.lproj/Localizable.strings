@@ -4357,3 +4357,7 @@
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "Möglicherweise ist der Speicher voll. Die Anzeige ist eventuell nicht aktuell.";
 "Show this session's terminal (⌥⌘U)" = "Das Terminal dieser Sitzung zeigen (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "„%@“ konnte nicht angehalten werden: Das Volume ist fast voll.";
+"The workspace is still running." = "Der Arbeitsbereich läuft weiter.";

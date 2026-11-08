@@ -4357,3 +4357,7 @@
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "メモリ不足の可能性があります。表示内容は最新でない場合があります。";
 "Show this session's terminal (⌥⌘U)" = "このセッションのターミナルを表示 (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "「%@」を一時停止できませんでした：ディスクの空き容量がほとんどありません。";
+"The workspace is still running." = "ワークスペースは引き続き実行中です。";

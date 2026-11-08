@@ -364,7 +364,7 @@ final class FileBrowserModel {
                   let data = Data(base64Encoded: b64) else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            handle.write(data)
+            try handle.write(contentsOf: data)
             offset += Int64(data.count)
             transferText = String(
                 format: NSLocalizedString("Copying %@ out… %@", comment: ""),
