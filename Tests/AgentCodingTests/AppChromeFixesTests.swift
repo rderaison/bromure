@@ -78,10 +78,13 @@ struct AppChromeFixesTests {
         #expect(!NewSessionView.RecentStart.isSynthesizedFolder("~/src/shell-command-1003-1204"))
     }
 
-    @Test("a new workspace reaches no other workspace until the user picks some")
+    @Test("a new workspace reaches every workspace until the user narrows it, whatever the template holds")
     func reachDefault() throws {
         let store = ProfileStore(rootDir: try tempDir())
-        let p = store.newProfileFromTemplate(name: "x")
-        #expect(p.agentReach == [])
+        #expect(store.newProfileFromTemplate(name: "x").agentReach == nil)
+        var template = store.loadTemplate()
+        template.agentReach = [UUID()]
+        try store.saveTemplate(template)
+        #expect(store.newProfileFromTemplate(name: "y").agentReach == nil)
     }
 }

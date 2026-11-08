@@ -3960,7 +3960,7 @@
 "access token renews on next use" = "アクセストークンは次回使用時に更新されます";
 "(exit code %d)" = "(終了コード %d)";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "未配信 — エージェントが受け取りませんでした。編集するか、もう一度送信してください。";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "デフォルトはオフ：下でチェックを入れる（または「すべてのワークスペース」をオンにする）まで、ここのエージェントは他のワークスペースに届きません。";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "下でチェックを入れる（または「すべてのワークスペース」をオンにする）まで、ここのエージェントは他のワークスペースに届きません。";
 "Closes the editor without saving changes" = "変更を保存せずにエディタを閉じます";
 
 /* prompt: Grok data-retention banner */

@@ -3994,7 +3994,7 @@
 "access token renews on next use" = "access token renews on next use";
 "(exit code %d)" = "(exit code %d)";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "Not delivered — the agent didn't take it in. Edit it or send it again.";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Agents here reach no other workspace until you tick one below (or turn on Every workspace).";
 "Closes the editor without saving changes" = "Closes the editor without saving changes";
 
 /* prompt: Grok data-retention banner */

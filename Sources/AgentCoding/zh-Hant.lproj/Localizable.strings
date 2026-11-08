@@ -3963,7 +3963,7 @@
 "access token renews on next use" = "存取權杖將在下次使用時續期";
 "(exit code %d)" = "（結束代碼 %d）";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "未送達 — 代理沒有接收。請編輯或再次傳送。";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "預設關閉：在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
 "Closes the editor without saving changes" = "關閉編輯器，不儲存變更";
 
 /* prompt: Grok data-retention banner */

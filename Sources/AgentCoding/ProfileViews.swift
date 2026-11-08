@@ -1695,10 +1695,10 @@ struct ProfileEditorView: View {
         }
     }
 
-    /// Which workspaces the agents here may reach: only the ones ticked —
-    /// none by default (a new workspace reaches nobody until the user ticks
-    /// some) — or every one. Directional — the other workspace's own
-    /// setting says whether its agents can reach back.
+    /// Which workspaces the agents here may reach: every one (a new
+    /// workspace's default), or, with that off, only the ones ticked.
+    /// Directional — the other workspace's own setting says whether its
+    /// agents can reach back.
     @ViewBuilder
     private var agentReachSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1716,7 +1716,7 @@ struct ProfileEditorView: View {
             .toggleStyle(.switch)
             if draft.agentReach != nil {
                 if draft.agentReach?.isEmpty == true, !siblingWorkspaces.isEmpty {
-                    Text("Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).")
+                    Text("Agents here reach no other workspace until you tick one below (or turn on Every workspace).")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -3960,7 +3960,7 @@
 "access token renews on next use" = "le jeton d’accès sera renouvelé à la prochaine utilisation";
 "(exit code %d)" = "(code de sortie %d)";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "Non remis — l’agent ne l’a pas pris en compte. Modifiez-le ou renvoyez-le.";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Désactivé par défaut : les agents d’ici n’atteignent aucun autre espace de travail tant que vous n’en cochez pas un ci-dessous (ou activez « Tous les espaces de travail »).";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Les agents d’ici n’atteignent aucun autre espace de travail tant que vous n’en cochez pas un ci-dessous (ou activez « Tous les espaces de travail »).";
 "Closes the editor without saving changes" = "Ferme l’éditeur sans enregistrer les modifications";
 
 /* prompt: Grok data-retention banner */

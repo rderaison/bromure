@@ -418,7 +418,7 @@ struct BromureAC: ParsableCommand {
                 // checks nothing is clipped at the window's minimum size.
                 var p = Profile(name: which == "prefs" ? "Defaults" : "Workspace 2", tool: .claude,
                                 authMode: .subscription)
-                if which == "prefs" { p.id = ProfileStore.templateID } else { p.agentReach = [] }
+                if which == "prefs" { p.id = ProfileStore.templateID }
                 // BROMURE_SHOT_OPENSHELL=1: the Firewall pane on its OpenShell side.
                 if ProcessInfo.processInfo.environment["BROMURE_SHOT_OPENSHELL"] == "1" {
                     p.networkPolicy = OpenShellPolicyEditor.starterPolicy

@@ -2022,12 +2022,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// passed — so the next boot after it, whichever comes last.
     public var baseImageUpgradeRemindAfter: Date?
     /// Which workspaces agents here may reach — delegate work into, ask a
-    /// session of by @nickname. A list names the only ones (empty = none
-    /// but this one) — what a new workspace starts with
-    /// (`newProfileFromTemplate`): reach is opened by the user, workspace
-    /// by workspace, in General › Reach. nil = every workspace (and remote
-    /// hosts): only for workspaces that stored it before, or once the user
-    /// turns "Every workspace" on.
+    /// session of by @nickname. nil = every workspace (and remote hosts):
+    /// what a new workspace starts with (`newProfileFromTemplate`). A list
+    /// names the only ones (empty = none but this one), once the user turns
+    /// "Every workspace" off in General › Reach.
     public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
@@ -3841,10 +3839,10 @@ public final class ProfileStore {
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
-        // Reach is explicit for new workspaces: agents here reach no other
-        // workspace until the user ticks some (nil = "every workspace" stays
-        // only for workspaces that already stored it).
-        p.agentReach = []
+        // A new workspace's agents reach every workspace (and the remote
+        // hosts this Mac mirrors) until the user narrows it in General ›
+        // Reach — whatever the template holds.
+        p.agentReach = nil
         // The template's finish choice is the APP default, not a
         // per-workspace override: a new workspace follows it live.
         p.taskFinish = nil

@@ -3960,7 +3960,7 @@
 "access token renews on next use" = "访问令牌将在下次使用时续期";
 "(exit code %d)" = "（退出代码 %d）";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "未送达 — 代理没有接收。请编辑或再次发送。";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "默认关闭：在下方勾选某个工作区（或打开“每个工作区”）之前，这里的代理无法访问其他工作区。";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "在下方勾选某个工作区（或打开“每个工作区”）之前，这里的代理无法访问其他工作区。";
 "Closes the editor without saving changes" = "关闭编辑器，不保存更改";
 
 /* prompt: Grok data-retention banner */
