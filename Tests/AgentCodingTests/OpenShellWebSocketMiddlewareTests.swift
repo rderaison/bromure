@@ -76,6 +76,43 @@ struct OpenShellWebSocketMiddlewareTests {
         #expect(run(OpenShellWebSocket.ClientStream(compression: false) { _ in .allow }, f).1)
     }
 
+    /// A masked frame of any size, RSV1 as given.
+    private func bigFrame(opcode: UInt8, _ p: Data, fin: Bool, rsv1: Bool = false) -> Data {
+        var f: [UInt8] = [(fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | opcode]
+        if p.count < 126 { f.append(0x80 | UInt8(p.count)) }
+        else if p.count <= 0xFFFF { f += [0x80 | 126, UInt8(p.count >> 8), UInt8(p.count & 0xFF)] }
+        else { f.append(0x80 | 127); for k in (0..<8).reversed() { f.append(UInt8((UInt64(p.count) >> (8 * UInt64(k))) & 0xFF)) } }
+        let mask: [UInt8] = [5, 6, 7, 8]
+        f += mask
+        var body = [UInt8](p)
+        for i in body.indices { body[i] ^= mask[i & 3] }
+        return Data(f) + Data(body)
+    }
+
+    @Test("A compressed fragmented message is bounded while it's assembled (1009)")
+    func compressedAccumulationIsCapped() {
+        var judged = false
+        let i = OpenShellWebSocket.ClientStream(compression: true) { _ in judged = true; return .allow }
+        let piece = Data(repeating: 0x41, count: OpenShellWebSocket.maxTextMessageBytes)
+        var stopped = false
+        var frames = 0
+        // A compressed start, then continuations, none final.
+        var (fwd, stop) = i.feed(bigFrame(opcode: 0x1, piece, fin: false, rsv1: true))
+        frames += 1
+        while !stop, frames < 10 {
+            (fwd, stop) = i.feed(bigFrame(opcode: 0x0, piece, fin: false))
+            frames += 1
+        }
+        stopped = stop
+        #expect(stopped, "refused before the 10th frame")
+        #expect(frames * piece.count > OpenShellWebSocket.maxRawFramePayloadBytes)
+        #expect(frames * piece.count <= OpenShellWebSocket.maxRawFramePayloadBytes + piece.count, "at the cap, not later")
+        #expect(fwd.isEmpty && !judged, "nothing of it went on")
+        #expect(i.closeCode == 1009 && i.closeReason?.contains("compressed text message exceeds") == true)
+        let close = OpenShellWebSocket.policyCloseFrame(reason: i.closeReason ?? "", code: i.closeCode)
+        #expect(close[close.startIndex + 2] == 0x03 && close[close.startIndex + 3] == 0xF1, "1009 on the wire")
+    }
+
     @Test("A middleware rewrite is re-judged and forwarded as a fresh uncompressed frame")
     func middlewareRewrite() {
         let msg = frame(opcode: 0x1, #"{"k":"sk-abcdefghijklmnop1234"}"#)
