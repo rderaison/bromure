@@ -1176,6 +1176,71 @@ struct DelegationTests {
         func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID? { nil }
     }
 
+    /// A machine that records its commands and file writes, and can run
+    /// something on the first write (a cancel arriving mid-copy).
+    private final class RecordingMachine: AgentHostLink {
+        let agentHostID: UUID? = UUID()
+        let hostName = "recorder"
+        let hostSessions = AgentSessionStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("machine-sessions-\(UUID().uuidString).json"))
+        let hostHome: String? = nil
+        var commands: [String] = []
+        var writes: [String] = []
+        var onFirstWrite: (() -> Void)?
+        func hostExec(_ command: String, timeout: Int) async throws -> String { commands.append(command); return "" }
+        func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any] {
+            if op["op"] as? String == "write", let path = op["path"] as? String {
+                writes.append(path)
+                if let f = onFirstWrite { onFirstWrite = nil; f() }
+            }
+            return ["exit_code": 0]
+        }
+        func hostTabStatus(window: Int) -> AgentStatus? { .done }
+        func hostSessionCommand(_ id: UUID, _ action: String, _ body: [String: Any]) {}
+        func hostControl(_ method: String, _ path: String, _ body: [String: Any]?) async -> (status: Int, json: [String: Any])? { nil }
+        func hostStartSession(tool: Profile.Tool, cwd: String, message: String) async -> UUID? { nil }
+    }
+
+    /// Finding (CWE-772): an answer's attachments were copied into the asker's
+    /// inbox before `post` checked the delegation was still open; recalled
+    /// during a slow copy, the answer was refused and the copies stayed --
+    /// another set with every retry.
+    @Test("an answer refused after its files landed takes them back out of the inbox")
+    func cancelledAnswerCleansUp() async throws {
+        let f = fixture()
+        let machine = RecordingMachine()
+        let mid = try #require(machine.agentHostID)
+        f.engine.agentHostLinks = { [machine] }
+        var agent = AgentSession(profileID: mid, tool: .claude, title: "Agent", cwd: "/home/ubuntu/w", windowIndex: 2)
+        agent.agentAlive = true
+        machine.hostSessions.upsert(agent)
+        let d = try await f.engine.requestFromBoard(to: agent.id, title: "Fix the build", text: "Fix the build.")
+        let ask = try await f.engine.post(d.id, from: .child, kind: .ask, text: "Can you send me the build log?")
+        let log = DroppedFile(name: "build.log", data: Data("ld: 1 error\n".utf8), isImage: false)
+
+        // Recalled while the file is being written.
+        machine.onFirstWrite = { f.store.mutate(d.id) { $0.status = .cancelled } }
+        await #expect(throws: DelegationRefusal.self) {
+            _ = try await f.engine.answer(from: DelegationEngine.boardSessionID, askKey: ask.id.uuidString,
+                                          text: "Here it is.", by: .user, attachments: [log])
+        }
+        let written = try #require(machine.writes.first)
+        let folder = (written as NSString).deletingLastPathComponent
+        #expect(folder.hasPrefix(DelegationEngine.inboxBase + "/" + DelegationNotice.shortID(d.id) + "/answer-"))
+        #expect(machine.commands.contains { $0.hasPrefix("rm -rf -- ") && $0.contains(folder) },
+                "the answer's folder is removed: \(machine.commands)")
+        #expect(f.store.delegation(d.id)?.messages.contains { $0.kind == .answer } == false)
+
+        // Open, the same answer lands and stays.
+        f.store.mutate(d.id) { $0.status = .waitingForParent }
+        machine.commands.removeAll()
+        let ask2 = try await f.engine.post(d.id, from: .child, kind: .ask, text: "And the test log?")
+        let m = try await f.engine.answer(from: DelegationEngine.boardSessionID, askKey: ask2.id.uuidString,
+                                          text: "Here.", by: .user, attachments: [log])
+        #expect(m.files?.count == 1 && m.files?.first?.hasSuffix("/build.log") == true)
+        #expect(!machine.commands.contains { $0.hasPrefix("rm -rf") })
+    }
+
     @Test("a board task queued for a native machine's session reaches it, and its delivery comes back")
     func boardRequestToMachine() async throws {
         let f = fixture()
