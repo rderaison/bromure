@@ -142,6 +142,8 @@ final class MitmProxy: @unchecked Sendable {
     var identityLookup: @Sendable (UUID, UInt16, String, UInt16) async -> OpenShellPolicy.BinaryIdentity? = {
         await BinaryIdentityService.shared.identity(profileID: $0, sport: $1, dst: $2, dport: $3)
     }
+    /// Attestor questions in flight per workspace (MitmTransparent.swift).
+    let identityLookupsInFlight = NIOLockedValueBox<[UUID: Int]>([:])
     /// A multi-user server: the host's own addresses are refused too
     /// (ProxyDestination.swift), as the switch refuses them.
     var blocksHostAddresses = false

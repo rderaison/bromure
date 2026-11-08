@@ -49,7 +49,8 @@ struct TransparentIdentityTests {
         #expect(out.hasSuffix("upstream ok"), "\(out)")
         #expect(rig.upstream.requests.withLockedValue { $0 }.count == 1)
         let c = asked.calls.withLockedValue { $0 }
-        #expect(c.count == 1 && c[0].0 == 40123 && c[0].1 == rig.ip && c[0].2 == 80, "asked by the flow's source port")
+        #expect(c.count == 2 && c.allSatisfy { $0.0 == 40123 && $0.1 == rig.ip && $0.2 == 80 },
+                "asked by the flow's source port, on arrival and once it wrote")
     }
 
     @Test(arguments: ["/usr/bin/python3", nil] as [String?])
@@ -68,6 +69,56 @@ struct TransparentIdentityTests {
             if !seen { try await Task.sleep(for: .milliseconds(20)) }
         }
         #expect(seen, "the deny names the program")
+    }
+
+    /// The attestor is asked as the flow arrives, before the guest has
+    /// written anything (macOS's order), and again once it has: a socket
+    /// that changed hands in between (a refused program connects, an allowed
+    /// one it passed the descriptor to writes) is refused.
+    @Test func theProgramIsAskedBeforeAnyDataAndMustNotChangeHands() throws {
+        let rig = try TransparentInterceptionTests.Rig(); defer { rig.stop() }
+        let yaml = """
+        version: 1
+        network_policies:
+          web:
+            endpoints: [{ host: "\(rig.ip)", port: 80, allowed_ips: ["\(rig.ip)/32"] }]
+            binaries: [{ path: /usr/bin/curl }]
+        """
+        var policy = EgressPolicy(openShell: try OpenShellPolicy.parse(yaml))
+        policy.enforceBinaries = true
+        rig.proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [], egressPolicy: policy), for: rig.pid)
+        let asked = Asked()
+        // The connecting program, then the one that writes.
+        rig.proxy.identityLookup = { _, sport, dst, dport in
+            let n = asked.calls.withLockedValue { $0.append((sport, dst, dport)); return $0.count }
+            let exe = n == 1 ? "/usr/bin/python3" : "/usr/bin/curl"
+            return .init(exe: exe, sha256: "h-" + exe, ancestors: [])
+        }
+        let (guest, app) = try GuestEnd.pair(); defer { close(guest) }
+        rig.proxy.acceptTransparentFlow(appFD: app, profileID: rig.pid, destIP: rig.ip, destPort: 80, srcPort: 40200)
+        var first = 0
+        for _ in 0..<200 where first == 0 {
+            first = asked.calls.withLockedValue { $0.count }
+            if first == 0 { usleep(10_000) }
+        }
+        #expect(first == 1, "asked before the guest wrote anything")
+        GuestEnd.send(guest, "GET /x HTTP/1.1\r\nHost: \(rig.ip)\r\n\r\n")
+        #expect(GuestEnd.readAll(guest) == "", "refused: another program wrote")
+        #expect(asked.calls.withLockedValue { $0.count } == 2)
+        #expect(rig.upstream.requests.withLockedValue { $0 }.isEmpty)
+    }
+
+    /// At most maxIdentityLookups questions in flight per workspace: past
+    /// it a flow is refused without asking (a stuck attestor can't pile up
+    /// waiting flows).
+    @Test func pastTheCapAFlowIsRefusedWithoutAsking() throws {
+        let (rig, asked) = try Self.rig(answer: "/usr/bin/curl"); defer { rig.stop() }
+        rig.proxy.identityLookupsInFlight.withLockedValue { $0[rig.pid] = MitmProxy.maxIdentityLookups }
+        let out = try flow(rig, srcPort: 40201)
+        #expect(out == "", "\(out)")
+        #expect(asked.calls.withLockedValue { $0 }.isEmpty)
+        rig.proxy.identityLookupsInFlight.withLockedValue { $0[rig.pid] = nil }
+        #expect(try flow(rig, srcPort: 40202).hasSuffix("upstream ok"), "a slot again: asked and through")
     }
 
     /// No `binaries` enforcement: the attestor isn't asked.

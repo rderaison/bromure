@@ -34,20 +34,39 @@ extension MitmProxy {
                     "[firewall] ✗ deny tcp \(destIP):\(destPort) — \(reason) (\(profileID.uuidString.prefix(8)))")
                 close(appFD); return
             }
+            let guardrails = guardrailsConfig(for: profileID)
+            // Strict sandbox: ask the guest's root attestor which executable
+            // opened this connection (by its source port), at once, as macOS
+            // does: before any read, so the guest doesn't pick the moment.
+            // No answer = no identity: a rule scoped to `binaries` doesn't
+            // match it (fail closed), only provider rules apply.
+            var identity: OpenShellPolicy.BinaryIdentity?
+            let attests = guardrails?.egressPolicy?.enforceBinaries == true && srcPort > 0
+            let sport = UInt16(truncatingIfNeeded: srcPort), dport = UInt16(truncatingIfNeeded: destPort)
+            if attests {
+                guard case .answered(let id) = attestedIdentity(profileID, sport, destIP, dport) else {
+                    Self.refuseUnattested(profileID: profileID, destIP: destIP, destPort: destPort,
+                                          reason: "too many connections waiting for the attestor")
+                    close(appFD); return
+                }
+                identity = id
+            }
             // Nothing from the guest within 5 s (or it closed first): no
             // decision to make and nothing to splice, so no host connect.
             guard Self.waitForData(appFD, timeoutMs: Self.firstByteTimeoutMs) else {
                 close(appFD); return
             }
-            let guardrails = guardrailsConfig(for: profileID)
-            // Strict sandbox: ask the guest's root attestor which executable
-            // opened this connection (by its source port), before any policy
-            // decision. No answer = no identity: a rule scoped to `binaries`
-            // doesn't match it (fail closed), only provider rules apply.
-            var identity: OpenShellPolicy.BinaryIdentity?
-            if guardrails?.egressPolicy?.enforceBinaries == true, srcPort > 0 {
-                identity = attestedIdentity(profileID, UInt16(truncatingIfNeeded: srcPort),
-                                            destIP, UInt16(truncatingIfNeeded: destPort))
+            // And again once the guest has written: the socket mustn't have
+            // changed hands meanwhile (a refused program connecting, then
+            // passing the descriptor to an allowed one that writes). Another
+            // answer, or none now, refuses the flow.
+            if attests {
+                guard case .answered(let again) = attestedIdentity(profileID, sport, destIP, dport), again == identity else {
+                    Self.refuseUnattested(profileID: profileID, destIP: destIP, destPort: destPort,
+                                          reason: "the connection's program changed before it sent anything",
+                                          exe: identity?.exe)
+                    close(appFD); return
+                }
             }
 
             // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
@@ -159,7 +178,21 @@ extension MitmProxy {
     /// waited for briefly, then none). Called on the flow's own thread,
     /// which waits for it as macOS's flow task awaits it.
     // @port-skip linux-only: the transparent flow's thread waiting on BinaryIdentityService.identity (macOS awaits it in a task)
-    func attestedIdentity(_ profileID: UUID, _ sport: UInt16, _ dst: String, _ dport: UInt16) -> OpenShellPolicy.BinaryIdentity? {
+    func attestedIdentity(_ profileID: UUID, _ sport: UInt16, _ dst: String, _ dport: UInt16) -> Attested {
+        // At most maxIdentityLookups questions in flight per workspace (the
+        // gate's maxGateQueries): a stuck attestor can't pile up waiting
+        // flows; one past the cap is refused, and the guest retries.
+        let admitted = identityLookupsInFlight.withLockedValue { n -> Bool in
+            guard n[profileID, default: 0] < Self.maxIdentityLookups else { return false }
+            n[profileID, default: 0] += 1
+            return true
+        }
+        guard admitted else { return .busy }
+        defer {
+            identityLookupsInFlight.withLockedValue { n in
+                n[profileID] = (n[profileID] ?? 1) > 1 ? n[profileID]! - 1 : nil
+            }
+        }
         let lookup = identityLookup
         let answer = NIOLockedValueBox<OpenShellPolicy.BinaryIdentity?>(nil)
         let done = DispatchSemaphore(value: 0)
@@ -169,7 +202,24 @@ extension MitmProxy {
             done.signal()
         }
         done.wait()
-        return answer.withLockedValue { $0 }
+        return .answered(answer.withLockedValue { $0 })
+    }
+
+    /// An attestor question's outcome: its answer (nil: no identity), or not
+    /// asked (the workspace's questions in flight are at the cap).
+    enum Attested { case answered(OpenShellPolicy.BinaryIdentity?), busy }
+    static let maxIdentityLookups = BinaryIdentityService.maxGateQueries
+
+    /// A transparent flow refused on its identity's account before any
+    /// policy step: the log line and the Timeline row.
+    // @port-skip linux-only: the Linux transparent flow's identity refusals (busy, or changed hands)
+    static func refuseUnattested(profileID: UUID, destIP: String, destPort: Int, reason: String, exe: String? = nil) {
+        SupplyChainLog.shared.record(
+            "[firewall] ✗ deny tcp \(destIP):\(destPort) — \(reason) (\(profileID.uuidString.prefix(8)))")
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+            "action": .string("deny"), "layer": .string("identity"), "proto": .string("tcp"),
+            "host": .string(destIP), "port": .int(destPort), "dst_ip": .string(destIP),
+            "exe": .of(exe), "reason": .string(reason)])
     }
 
     /// The Timeline row for a transparent flow the egress policy refused
