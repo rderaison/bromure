@@ -25,6 +25,24 @@ struct DepiTests {
         #expect(!DepiRegistry.shouldRoute(host: "landh.tech"))
     }
 
+    @Test("Only the registry's reads and audit scans are Depi lookups (#23)")
+    func readOnlyLookups() {
+        for (m, p) in [("GET", "/left-pad"), ("HEAD", "/left-pad"), ("GET", "/@scope%2fpkg"), ("GET", "/@scope/pkg/1.2.3"),
+                       ("GET", "/left-pad/-/left-pad-1.3.0.tgz"), ("GET", "/-/v1/search?text=x"),
+                       ("GET", "/-/package/left-pad/dist-tags"), ("POST", "/-/npm/v1/security/advisories/bulk"),
+                       ("POST", "/-/npm/v1/security/audits/quick"), ("get", "/left-pad")] {
+            #expect(DepiRegistry.isReadOnlyLookup(method: m, path: p), "\(m) \(p)")
+        }
+        for (m, p) in [("PUT", "/left-pad"), ("DELETE", "/left-pad/-rev/3-abc"), ("GET", "/-/whoami"),
+                       ("PUT", "/-/user/org.couchdb.user:me"), ("POST", "/-/v1/login"), ("GET", "/-/npm/v1/tokens"),
+                       ("POST", "/-/npm/v1/tokens"), ("PUT", "/-/package/left-pad/dist-tags/latest"),
+                       ("GET", "/-/package/left-pad/collaborators"), ("GET", "/-/org/acme/user"),
+                       ("GET", "/%2D/whoami"), ("GET", "/x/../-/whoami"), ("POST", "/left-pad"), ("PATCH", "/left-pad"),
+                       ("GET", "left-pad")] {
+            #expect(!DepiRegistry.isReadOnlyLookup(method: m, path: p), "\(m) \(p)")
+        }
+    }
+
     @Test("Depi host classifies as npm — metadata")
     func depiHostMetadata() {
         guard case let .metadata(eco, pkg)? = SupplyChainRegistry.classify(

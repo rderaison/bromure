@@ -1391,7 +1391,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // layers (age gate, OSV, script-strip) still apply on top —
         // Depi replaces socket.dev, not the local policy.
         var depiRouted = false
-        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
+           !DepiRegistry.isReadOnlyLookup(method: reqMethod, path: reqPath) {
+            // Not a lookup (a publish, a login, a token…): neither the key
+            // nor the re-route — it goes where the guest sent it.
+            SupplyChainLog.shared.record(
+                "[depi] \(reqMethod) \(host)\(reqPath) NOT re-routed — not a read-only lookup (no Depi key)")
+        } else if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
             depiRouted = true
             upstreamHost = DepiRegistry.host
             upstreamPort = DepiRegistry.port

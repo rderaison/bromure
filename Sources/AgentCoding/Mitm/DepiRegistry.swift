@@ -9,14 +9,18 @@ import Foundation
 /// user's API key as `Authorization: Bearer`.
 ///
 /// Two request shapes reach the proxy:
-///   - registry.npmjs.org/… — npm's default registry. Re-routed
-///     wholesale (metadata, tarballs, audit, everything), same paths:
-///     Depi mirrors the npm registry API at its root.
+///   - registry.npmjs.org/… — npm's default registry. Its reads
+///     (metadata, tarballs, search, audit scans: `isReadOnlyLookup`) are
+///     re-routed, same paths: Depi mirrors the npm registry API at its
+///     root. Anything else (a publish, a login, a token…) goes where the
+///     guest sent it, as without Depi: the key only ever vouches for
+///     lookups.
 ///   - depi-npm-proxy.landh.tech/… — Depi rewrites `dist.tarball`
 ///     URLs in the packuments it serves to point at itself, so the
 ///     guest's tarball fetches arrive addressed to Depi directly.
 ///     Those get the Bearer key injected too (the key never enters
-///     the VM, so the guest can't send it itself).
+///     the VM, so the guest can't send it itself) — lookups only, here
+///     too.
 ///
 /// The key is held host-side only — same rule as the socket.dev key.
 enum DepiRegistry {
@@ -36,6 +40,33 @@ enum DepiRegistry {
     /// (key only — it's already the destination).
     static func shouldRoute(host h: String) -> Bool {
         isNpmRegistryHost(h) || h.lowercased() == host
+    }
+
+    /// The requests the Depi key goes with (and that are re-routed): the
+    /// registry's reads — package documents, versions and tarballs
+    /// (GET/HEAD outside npm's `/-/` API), the search, a package's
+    /// dist-tags — and npm's audit scans (POST). Anything else — a
+    /// publish, unpublish, login, token, whoami, owner, team, org or
+    /// dist-tag change — gets neither: a guest can't act on the workspace
+    /// owner's Depi account with its key. The path is judged decoded (as
+    /// the registry reads it), its query aside; a `..` segment is no
+    /// lookup.
+    static func isReadOnlyLookup(method: String, path rawPath: String) -> Bool {
+        let path = String(rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        let decoded = path.removingPercentEncoding ?? path
+        guard decoded.hasPrefix("/"), !decoded.contains("\0"),
+              !decoded.split(separator: "/", omittingEmptySubsequences: false).contains("..") else { return false }
+        let lower = decoded.lowercased()
+        switch method.uppercased() {
+        case "GET", "HEAD":
+            if !lower.hasPrefix("/-/") { return true }
+            return lower == "/-/v1/search" || (lower.hasPrefix("/-/package/") && lower.hasSuffix("/dist-tags"))
+        case "POST":
+            return ["/-/npm/v1/security/advisories/bulk", "/-/npm/v1/security/audits/quick",
+                    "/-/npm/v1/security/audits"].contains(lower)
+        default:
+            return false
+        }
     }
 
     /// Attach the Depi key as `Authorization: Bearer`, replacing any
