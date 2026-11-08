@@ -407,6 +407,76 @@ public final class SentryModuleStore: @unchecked Sendable {
         }
     }
 
+    // MARK: Staging for a workspace
+
+    /// Before a boot: copy the cached module of every kernel `profileID` is
+    /// known to have into its meta share's `sentry/` (`sentryDest`).
+    public func stageKnown(for profileID: UUID, setupDir: URL, into sentryDest: URL) {
+        guard let hash = Self.shippedSourceHash(setupDir: setupDir) else { return }
+        let known = knownKernels(for: profileID)
+        let staged = stage(kernels: known, hash: hash, into: sentryDest)
+        if staged.count < known.count {
+            Self.log("\(profileID.uuidString.prefix(8)): staged \(staged) of known \(known); the guest will wait for the rest")
+        }
+    }
+
+    /// A running workspace reported `kernels` (`waiting`: its guest waits at
+    /// boot for a module it doesn't have): cache each one's module and stage
+    /// it into the running VM's `sentry/` (`sentryDir`; nil or absent when
+    /// the workspace's spec isn't active), or tell a waiting guest why none
+    /// will come.
+    public func settle(profileID pid: UUID, kernels: [String], waiting: Bool, hash: String, sentryDir dir: URL?) async {
+        let store = self
+        // A waiting guest gives up after ~45 s; a transient failure
+        // (offline, a failed download) is retried within that,
+        // and each success is staged at once.
+        let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
+        let short = String(pid.uuidString.prefix(8))
+        // Each kernel on its own, in parallel, staged (or marked
+        // unavailable) the moment ITS answer is in: the guest
+        // reports the running kernel first and then every
+        // installed one, and a slow download for another kernel
+        // must not hold back the one it's waiting for.
+        @Sendable func settle(_ kernel: String, attempt: Int) async -> Bool {
+            let f = await store.ensureOutcome(kernel: kernel, hash: hash)
+            if let f, attempt == 0, waiting || kernel == kernels.first {
+                SentryModuleStore.log("\(short): \(kernel): \(f.reason)")
+            }
+            if let dir, FileManager.default.fileExists(atPath: dir.path) {
+                if let f, f.definitive {
+                    // A guest waiting for a module none will come
+                    // for stops at once, with the host's reason —
+                    // only then: a transient failure leaves it waiting.
+                    store.markUnavailable([kernel: f.reason], in: dir)
+                } else if f == nil, !store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
+                    SentryModuleStore.log("\(short): staged \(kernel) into the running VM\(waiting ? " (the guest is waiting)" : "")")
+                }
+            }
+            return f.map { !$0.definitive } ?? false     // retry?
+        }
+        var pending = kernels
+        var attempt = 0
+        while !pending.isEmpty {
+            let round = attempt
+            pending = await withTaskGroup(of: (String, Bool).self) { group in
+                for kernel in pending { group.addTask { (kernel, await settle(kernel, attempt: round)) } }
+                var retry: [String] = []
+                for await (kernel, again) in group where again { retry.append(kernel) }
+                return retry
+            }
+            attempt += 1
+            guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
+            try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
+        }
+    }
+
+    /// At launch: the current catalog, and the module of every kernel the
+    /// sentry workspaces are known to have, so a normal boot never waits.
+    public func prefetch(_ kernels: [String], hash: String) async {
+        await refreshCatalog(hash)
+        for kernel in Set(kernels) { _ = await ensure(kernel: kernel, hash: hash) }
+    }
+
     // MARK: Kernels per workspace
 
     private var kernelsFile: URL { root.appendingPathComponent("kernels.json") }

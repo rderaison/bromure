@@ -621,14 +621,8 @@ public final class SessionDisk {
                 // verified CDN cache.
                 try Self.writeSandboxFiles(into: tmp, profile: profile, setupDir: adURL.deletingLastPathComponent(),
                                            workdirs: sharedFolders.map { "/home/ubuntu/\($0.mountName)" }) { sentryDest in
-                    let setupDir = adURL.deletingLastPathComponent()
-                    if let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) {
-                        let known = SentryModuleStore.shared.knownKernels(for: profile.id)
-                        let staged = SentryModuleStore.shared.stage(kernels: known, hash: hash, into: sentryDest)
-                        if staged.count < known.count {
-                            SentryModuleStore.log("\(profile.id.uuidString.prefix(8)): staged \(staged) of known \(known); the guest will wait for the rest")
-                        }
-                    }
+                    SentryModuleStore.shared.stageKnown(for: profile.id, setupDir: adURL.deletingLastPathComponent(),
+                                                        into: sentryDest)
                 }
             }
 

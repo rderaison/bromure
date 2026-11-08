@@ -15321,56 +15321,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 Task.detached {
                     // Only a workspace whose spec is active has a sentry dir.
                     let dir = meta?.appendingPathComponent("sentry", isDirectory: true)
-                    // A waiting guest gives up after ~45 s; a transient failure
-                    // (offline, a failed download) is retried within that,
-                    // and each success is staged at once.
-                    let deadline = Date().addingTimeInterval(waiting ? SentryModuleStore.guestWait : 0)
-                    let short = String(pid.uuidString.prefix(8))
-                    // Each kernel on its own, in parallel, staged (or marked
-                    // unavailable) the moment ITS answer is in: the guest
-                    // reports the running kernel first and then every
-                    // installed one, and a slow download for another kernel
-                    // must not hold back the one it's waiting for.
-                    @Sendable func settle(_ kernel: String, attempt: Int) async -> Bool {
-                        let f = await store.ensureOutcome(kernel: kernel, hash: hash)
-                        if let f, attempt == 0, waiting || kernel == kernels.first {
-                            SentryModuleStore.log("\(short): \(kernel): \(f.reason)")
-                        }
-                        if let dir, FileManager.default.fileExists(atPath: dir.path) {
-                            if let f, f.definitive {
-                                // A guest waiting for a module none will come
-                                // for stops at once, with the host's reason —
-                                // only then: a transient failure leaves it waiting.
-                                store.markUnavailable([kernel: f.reason], in: dir)
-                            } else if f == nil, !store.stage(kernels: [kernel], hash: hash, into: dir).isEmpty {
-                                SentryModuleStore.log("\(short): staged \(kernel) into the running VM\(waiting ? " (the guest is waiting)" : "")")
-                            }
-                        }
-                        return f.map { !$0.definitive } ?? false     // retry?
-                    }
-                    var pending = kernels
-                    var attempt = 0
-                    while !pending.isEmpty {
-                        let round = attempt
-                        pending = await withTaskGroup(of: (String, Bool).self) { group in
-                            for kernel in pending { group.addTask { (kernel, await settle(kernel, attempt: round)) } }
-                            var retry: [String] = []
-                            for await (kernel, again) in group where again { retry.append(kernel) }
-                            return retry
-                        }
-                        attempt += 1
-                        guard !pending.isEmpty, Date().addingTimeInterval(SentryModuleStore.retryInterval) < deadline else { break }
-                        try? await Task.sleep(nanoseconds: UInt64(SentryModuleStore.retryInterval * 1e9))
-                    }
+                    await store.settle(profileID: pid, kernels: kernels, waiting: waiting, hash: hash, sentryDir: dir)
                 }
             }
         }
         let prefetch = profiles.filter { $0.effectiveKernelSentry != .off }
             .map { store.knownKernels(for: $0.id) }.flatMap { $0 }
-        Task.detached {
-            await store.refreshCatalog(hash)
-            for kernel in Set(prefetch) { _ = await store.ensure(kernel: kernel, hash: hash) }
-        }
+        Task.detached { await store.prefetch(prefetch, hash: hash) }
     }
 
     @MainActor
