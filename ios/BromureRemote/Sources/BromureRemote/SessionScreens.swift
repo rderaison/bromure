@@ -135,6 +135,11 @@ struct MobileSessionScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let s = session {
+                // The title and its status line share the navigation bar: a
+                // strip of its own under it cost a row of the conversation.
+                ToolbarItem(placement: .principal) {
+                    MobileSessionTitle(controller: controller, session: s)
+                }
                 ToolbarItem(placement: .primaryAction) { menu(s) }
             }
         }
@@ -211,7 +216,6 @@ struct MobileSessionScreen: View {
                               accent: accent, actions: actions)
         } else if !s.hasEnded, !SessionHome.isGone(s, in: model), SessionHome.liveTab(for: s, in: model) != nil {
             VStack(spacing: 0) {
-                MobileSessionHeader(controller: controller, session: s, actions: actions)
                 // The workspace screen opens on the session's tmux window; an
                 // agent window defaults to its rich transcript reader — the
                 // mobile chat — with the raw terminal one toggle away.
@@ -222,7 +226,6 @@ struct MobileSessionScreen: View {
             }
         } else {
             VStack(spacing: 0) {
-                MobileSessionHeader(controller: controller, session: s, actions: actions)
                 SessionRestView(
                     store: controller.sessionStore, model: model, sessionID: s.id,
                     accent: accent, actions: actions,
@@ -306,8 +309,53 @@ struct MobileSessionScreen: View {
     }
 }
 
-/// One quiet strip under the navigation bar: status · agent · machine, then
-/// the folder. The title itself is the navigation bar's.
+/// The session's title with its status line under it -- status · agent ·
+/// machine (the folder too on a regular width) -- in the navigation bar's
+/// middle, so the conversation starts right below the bar.
+struct MobileSessionTitle: View {
+    let controller: RemoteHostController
+    let session: AgentSession
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    var body: some View {
+        let model = controller.listModel
+        let s = session
+        let bucket = SessionHome.bucket(for: s, in: model)
+        VStack(spacing: 1) {
+            Text(s.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+            HStack(spacing: 4) {
+                if let st = SessionHome.dot(for: s, in: model) {
+                    AgentStatusDot(status: st)
+                } else {
+                    Circle().fill(bucket.tint).frame(width: 6, height: 6)
+                }
+                Text(SessionHome.goneReason(s, in: model)
+                     ?? MobileSessionHeader.statusText(s, bucket: bucket))
+                    .foregroundStyle(bucket.tint)
+                    .fixedSize()
+                Text("·").foregroundStyle(.tertiary)
+                AgentAvatar(tool: s.tool, size: 11)
+                Text(s.tool.displayName).fixedSize()
+                if !MobileSessions.workspaceName(model, s).isEmpty {
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(MobileSessions.workspaceName(model, s))
+                }
+                if hSize == .regular {
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(prettyGuestPath(s.cwd)).font(.caption2.monospaced()).truncationMode(.middle)
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .opacity(SessionHome.isGone(s, in: model) ? 0.6 : 1)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// One quiet strip: status · agent · machine, then the folder. (A session's
+/// screen puts these in its navigation bar now -- `MobileSessionTitle`.)
 struct MobileSessionHeader: View {
     let controller: RemoteHostController
     let session: AgentSession
@@ -328,7 +376,7 @@ struct MobileSessionHeader: View {
                         } else {
                             Circle().fill(bucket.tint).frame(width: 7, height: 7)
                         }
-                        Text(SessionHome.goneReason(s, in: model) ?? statusText(s, bucket: bucket))
+                        Text(SessionHome.goneReason(s, in: model) ?? Self.statusText(s, bucket: bucket))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(bucket.tint)
                     }
@@ -391,7 +439,7 @@ struct MobileSessionHeader: View {
         .opacity(gone ? 0.6 : 1)
     }
 
-    private func statusText(_ s: AgentSession, bucket: SessionBucket) -> String {
+    static func statusText(_ s: AgentSession, bucket: SessionBucket) -> String {
         let detail: String?
         switch bucket {
         case .working: detail = s.isLaunching ? NSLocalizedString("starting", comment: "pill") : nil

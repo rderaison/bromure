@@ -371,6 +371,11 @@ struct MobileRoomScreen: View {
             }
         }
         .navigationTitle(room?.name ?? "")
+        .toolbar {
+            // The room's name with what's on screen under it -- the focused
+            // session's status, which a 1×1 cell no longer shows in a bar.
+            ToolbarItem(placement: .principal) { roomTitle }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
@@ -551,6 +556,15 @@ struct MobileRoomScreen: View {
             .foregroundStyle(on ? Color.primary : Color.secondary)
         }
         .buttonStyle(.plain)
+        // One session to a tab: its cell has no bar, so its menu is here.
+        .contextMenu {
+            if single, let s = p.first {
+                Button { onOpenSession(s.id) } label: { Label("Open as Session", systemImage: "arrow.up.forward.app") }
+                Button { MobileRooms.move(controller, s.id, to: nil) } label: {
+                    Label("Remove from Room", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+            }
+        }
     }
 
     /// The session whose files the toolbar offers: one that fills the
@@ -604,12 +618,32 @@ struct MobileRoomScreen: View {
                                 setZoom(zoomedID == s.id ? nil : s.id)
                             },
                             onOpen: { onOpenSession(s.id) },
-                            onRemove: { MobileRooms.move(controller, s.id, to: nil) })
+                            onRemove: { MobileRooms.move(controller, s.id, to: nil) },
+                            showsHeader: layout.size > 1)
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(isFocused ? accent.opacity(addressed ? 1 : 0.4) : Color.primary.opacity(0.08),
                               lineWidth: isFocused ? 2 : 1))
             .shadow(color: .black.opacity(addressed ? 0.12 : 0.04), radius: addressed ? 8 : 2, y: 2)
             .simultaneousGesture(TapGesture().onEnded { focus(s.id) })
+    }
+
+    private var roomTitle: some View {
+        VStack(spacing: 1) {
+            Text(room?.name ?? "").font(.subheadline.weight(.semibold)).lineLimit(1)
+            if !toSwitchboard, let f = focused {
+                HStack(spacing: 4) {
+                    AgentAvatar(tool: f.tool, size: 11, status: SessionHome.dot(for: f, in: model))
+                    Text(f.title).lineLimit(1)
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(SessionHome.statusLine(for: f, in: model)).lineLimit(1)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            } else if toSwitchboard {
+                Text("Switchboard").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Switchboard tab
@@ -618,16 +652,19 @@ struct MobileRoomScreen: View {
     /// session's cell — or what it takes to get one going.
     private var switchboardPane: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                SwitchboardMark(accent: accent, size: 20)
-                Text("Switchboard").font(.subheadline.weight(.semibold))
-                Text("keeps track of this room's sessions")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer(minLength: 0)
+            // Its tab says "Switchboard" already; the bar only in a grid.
+            if layout.size > 1 {
+                HStack(spacing: 8) {
+                    SwitchboardMark(accent: accent, size: 20)
+                    Text("Switchboard").font(.subheadline.weight(.semibold))
+                    Text("keeps track of this room's sessions")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            Divider()
             Group {
                 if let sb = switchboard, MobileRooms.isLive(sb, controller) {
                     RoomTranscriptView(controller: controller, session: sb)
@@ -1039,41 +1076,47 @@ struct RoomCellView: View {
     let onZoom: () -> Void
     let onOpen: () -> Void
     let onRemove: () -> Void
+    /// The identity bar. Off when the cell has the screen to itself (a 1×1
+    /// room, the phone): the tab above names it, the navigation bar shows
+    /// its status, and the tab's long-press has its menu.
+    var showsHeader = true
 
     var body: some View {
         let model = controller.listModel
         let s = session
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                AgentAvatar(tool: s.tool, size: 20, status: SessionHome.dot(for: s, in: model))
-                Text(s.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                if let nick = s.nickname {
-                    Text("@" + nick).font(.caption.monospaced()).foregroundStyle(.tint)
-                }
-                Text(SessionHome.statusLine(for: s, in: model))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Spacer(minLength: 4)
-                Menu {
-                    Button { onOpen() } label: { Label("Open as Session", systemImage: "arrow.up.forward.app") }
-                    Button { onRemove() } label: {
-                        Label("Remove from Room", systemImage: "rectangle.portrait.and.arrow.right")
+            if showsHeader {
+                HStack(spacing: 8) {
+                    AgentAvatar(tool: s.tool, size: 20, status: SessionHome.dot(for: s, in: model))
+                    Text(s.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    if let nick = s.nickname {
+                        Text("@" + nick).font(.caption.monospaced()).foregroundStyle(.tint)
                     }
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 28, height: 24).contentShape(Rectangle())
+                    Text(SessionHome.statusLine(for: s, in: model))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Menu {
+                        Button { onOpen() } label: { Label("Open as Session", systemImage: "arrow.up.forward.app") }
+                        Button { onRemove() } label: {
+                            Label("Remove from Room", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 28, height: 24).contentShape(Rectangle())
+                    }
+                    Button(action: onZoom) {
+                        Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left"
+                                                 : "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 28, height: 24).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(zoomed ? "Back to the whole room" : "Zoom in")
                 }
-                Button(action: onZoom) {
-                    Image(systemName: zoomed ? "arrow.down.right.and.arrow.up.left"
-                                             : "arrow.up.left.and.arrow.down.right")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 28, height: 24).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel(zoomed ? "Back to the whole room" : "Zoom in")
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            Divider()
             if moving {
                 AgentAvatar(tool: s.tool, size: 30).opacity(0.25)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1133,22 +1176,18 @@ struct RoomTranscriptView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            TranscriptRowsView(items: items)
-                                // A picture the agent shows (display MCP) is read off its machine.
-                                .environment(\.displayFileReader, DisplayFileReader.chunked { op in
-                                    try? await controller.guestFileOp(session.profileID, op: op)
-                                })
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                // Stays on the latest message through row measuring, until
+                // you scroll up to read (see TailFollowingScroll).
+                TailFollowingScroll(changeKey: items.count) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        TranscriptRowsView(items: items)
+                            // A picture the agent shows (display MCP) is read off its machine.
+                            .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                                try? await controller.guestFileOp(session.profileID, op: op)
+                            })
                     }
-                    .defaultScrollAnchor(.bottom)
-                    .onChange(of: items.count) { _, _ in
-                        if let last = items.last?.id { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
-                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

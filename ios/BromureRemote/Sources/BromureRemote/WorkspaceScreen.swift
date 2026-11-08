@@ -67,7 +67,8 @@ struct WorkspaceScreen: View {
     /// The repo file pane beside the terminals (iPad, regular width) — the
     /// same `FileExplorerPane` + IDE-style auto-open the macOS window uses.
     /// Open state lives on the shared listModel (`filePaneOpen`), which the
-    /// pane itself flips on repo enter/leave via `onAutoSetOpen`.
+    /// pane would flip on repo enter/leave via `onAutoSetOpen` -- ignored on
+    /// iOS, where only the toolbar button opens it.
     @State private var fileExplorer = FileExplorerModel()
     /// Compact height = the phone is on its side. A terminal is the one pane
     /// that wants every one of those few hundred points, so landscape drops the
@@ -258,11 +259,10 @@ struct WorkspaceScreen: View {
                         FileExplorerPane(
                             model: fileExplorer,
                             listModel: controller.listModel,
-                            onAutoSetOpen: { open in
-                                withAnimation(.snappy(duration: 0.25)) {
-                                    controller.listModel.filePaneOpen = open
-                                }
-                            },
+                            // Never by itself on iOS: the pane takes a third
+                            // of the screen, so only the toolbar button opens
+                            // (or closes) it.
+                            onAutoSetOpen: { _ in },
                             // A session's stage browses the session's folder.
                             pinnedContext: sessionCwd.map { (profileID, $0) })
                             .frame(width: controller.listModel.filePaneOpen ? 320 : 0)
@@ -998,47 +998,39 @@ private struct TranscriptReaderView: View {
             unavailable("No transcript",
                         "No agent session was found for this terminal yet — send a message to get started.")
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        TranscriptRowsView(items: answeredItems)
-                            // A picture the agent shows (display MCP) is read off its machine.
-                            .environment(\.displayFileReader, DisplayFileReader.chunked { op in
-                                try? await controller.guestFileOp(profileID, op: op)
+            TailFollowingScroll(changeKey: items.count) {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    TranscriptRowsView(items: answeredItems)
+                        // A picture the agent shows (display MCP) is read off its machine.
+                        .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                            try? await controller.guestFileOp(profileID, op: op)
+                        })
+                    // The question the agent is asking RIGHT NOW gets the
+                    // interactive card — pick the options here and Submit
+                    // sends the picker's key sequence into the session, the
+                    // same path the desktop plan window uses. Without it the
+                    // phone could see a multiple-choice question but had no
+                    // way to answer one.
+                    if !openQuestions.isEmpty {
+                        TranscriptQuestionBatchCard(
+                            questions: openQuestions,
+                            onSubmit: { keys in
+                                let ok = await submitAnswerKeys(keys)
+                                if ok { await refreshNow() }   // clear the card promptly
+                                return ok
                             })
-                        // The question the agent is asking RIGHT NOW gets the
-                        // interactive card — pick the options here and Submit
-                        // sends the picker's key sequence into the session, the
-                        // same path the desktop plan window uses. Without it the
-                        // phone could see a multiple-choice question but had no
-                        // way to answer one.
-                        if !openQuestions.isEmpty {
-                            TranscriptQuestionBatchCard(
-                                questions: openQuestions,
-                                onSubmit: { keys in
-                                    let ok = await submitAnswerKeys(keys)
-                                    if ok { await refreshNow() }   // clear the card promptly
-                                    return ok
-                                })
-                                // Keyed by the question TEXTS: consecutive
-                                // rounds land at the same item indices (both
-                                // live only in the pq dump), and an index-based
-                                // id would keep the previous round's picks.
-                                .id(openQuestions.map(\.question).joined(separator: "\u{1f}"))
-                        }
+                            // Keyed by the question TEXTS: consecutive
+                            // rounds land at the same item indices (both
+                            // live only in the pq dump), and an index-based
+                            // id would keep the previous round's picks.
+                            .id(openQuestions.map(\.question).joined(separator: "\u{1f}"))
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                // Jump to the newest turn when the reader opens…
-                .onAppear { scrollToBottom(proxy, animated: false) }
-                // …and follow the live tail as new turns arrive.
-                .onChange(of: items.count) { _, _ in scrollToBottom(proxy, animated: true) }
-                // …and when the keyboard shows/hides: the transcript area shrinks
-                // by the keyboard height (bottomInset), which would otherwise clip
-                // the last line behind the composer — re-anchor to the tail.
-                .onChange(of: bottomInset) { _, _ in scrollToBottom(proxy, animated: true) }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Opens on the newest turn and follows the live tail -- through
+            // the keyboard's resize too -- until you scroll up to read.
             .background(Color.platformWindowBackground)
         }
     }
@@ -1098,16 +1090,6 @@ private struct TranscriptReaderView: View {
             timeout: 60)) != nil
     }
 
-    /// Scroll to the last item. The short defer lets the lazy stack realize
-    /// freshly-appended rows first, so the target actually exists.
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard let last = items.last?.id else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            if animated { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
-            else { proxy.scrollTo(last, anchor: .bottom) }
-        }
-    }
-
     private var sendable: Bool {
         !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -1122,16 +1104,23 @@ private struct TranscriptReaderView: View {
             // Held too: a menu or approval dialog is up in the tab, and a
             // digit or Return would answer it — the draft stays, as it does
             // when typing didn't go through.
+            var execError: String?
             let out = await PaneTypeGuard.runType(target: .index(window), text: text) {
-                try? await controller.guestExec(profileID, command: $0, timeout: 20)
-            } ?? ""
-            let held = PaneTypeGuard.held(in: out)
-            let refused = !PaneTypeGuard.typed(in: out)
+                do { return try await controller.guestExec(profileID, command: $0, timeout: 20) }
+                catch { execError = "\(error)"; return nil }
+            }
+            // Every outcome says what happened: the draft used to stay put
+            // with no word for anything but a dialog, which read as "Send
+            // does nothing" (a refusal, a timeout, an Enter the agent
+            // didn't take).
+            let outcome = ComposerOutcome.of(out)
+            FatClientLog.log("composer win=\(window): \(outcome) chars=\(text.count)"
+                + (execError.map { " execError=\($0)" } ?? "")
+                + " out=\(String((out ?? "").suffix(160)).replacingOccurrences(of: "\n", with: "⏎"))")
             await MainActor.run {
-                if !refused { draft = "" }
-                uploadError = held ? NSLocalizedString(
-                    "Not sent — the agent is asking you something. Answer it first, then send again.",
-                    comment: "iOS composer: held while the agent shows a dialog") : nil
+                // Typed — or typed into the agent's box, where it now sits.
+                if outcome == .typed || outcome == .unconfirmed { draft = "" }
+                uploadError = outcome.message
                 sending = false
             }
             await refreshNow()   // reflect the sent message immediately
@@ -1336,5 +1325,159 @@ struct SessionFilesButton: View {
                 }
                 .presentationDetents([.medium, .large])
             }
+    }
+}
+
+// MARK: - What a composer send did
+
+/// A guarded type's verdict (`PaneTypeGuard.runType`), as the composer
+/// reports it. Only `typed` is sent; `unconfirmed` sits in the agent's
+/// input box. Same reading as the desktop chat's (`ChatQueueStore.Outcome`).
+enum ComposerOutcome: Equatable, CustomStringConvertible {
+    case typed, unconfirmed, held, dropped, unreachable, failed
+    case refused(PaneRefusal)
+
+    static func of(_ out: String?) -> ComposerOutcome {
+        guard let out else { return .unreachable }
+        if let r = PaneTypeGuard.refusal(in: out) { return .refused(r) }
+        if PaneTypeGuard.held(in: out) { return .held }
+        if PaneTypeGuard.typed(in: out) { return .typed }
+        if PaneTypeGuard.dropped(in: out) { return .dropped }
+        return PaneTypeGuard.unconfirmed(in: out) ? .unconfirmed : .failed
+    }
+
+    var description: String {
+        switch self {
+        case .typed: "typed"
+        case .unconfirmed: "unconfirmed"
+        case .held: "held"
+        case .dropped: "dropped"
+        case .unreachable: "unreachable"
+        case .failed: "failed"
+        case .refused(let r): "refused(\(r.rawValue))"
+        }
+    }
+
+    /// The line under the composer; nil when it went through.
+    var message: String? {
+        switch self {
+        case .typed:
+            return nil
+        case .unconfirmed:
+            return NSLocalizedString("Not delivered — it's in the agent's input box but its Return didn't take. Show the terminal and press Return there.",
+                                     comment: "iOS composer: typed, but the agent never took the Enter")
+        case .held:
+            return NSLocalizedString("Not sent — the agent is asking you something. Answer it first, then send again.",
+                                     comment: "iOS composer: held while the agent shows a dialog")
+        case .dropped:
+            return NSLocalizedString("Not delivered — the agent didn't take it. Send it again.",
+                                     comment: "iOS composer: the agent dropped the text")
+        case .unreachable:
+            return NSLocalizedString("Couldn't reach the machine — check the session before sending again.",
+                                     comment: "iOS composer: the exec failed or timed out")
+        case .failed:
+            return NSLocalizedString("Not sent — typing it into the session failed. Send it again.",
+                                     comment: "iOS composer: the typing command failed")
+        case .refused(.shell):
+            return NSLocalizedString("Not sent — the agent isn't in front in its terminal right now (it may have exited, or be running a command). Try again in a moment.",
+                                     comment: "iOS composer: no agent holds the tab")
+        case .refused:
+            return NSLocalizedString("Not sent — this session's terminal window is gone or changed.",
+                                     comment: "iOS composer: the window is gone or someone else's")
+        }
+    }
+}
+
+// MARK: - A transcript that follows its tail
+
+/// A chat's scroll view that stays on the latest message -- the iOS twin of
+/// the desktop's `TailFollow` (BeautifiedSessionView). Jumping to the last
+/// row lands on ESTIMATED row heights; as the lazy rows get measured the
+/// end moves, short of the view (stuck mid-chat) or past it (a blank
+/// screen until you scroll). So once sent to the tail it keeps following
+/// it through that drift -- re-snapping whenever the end-of-content marker
+/// isn't at the bottom edge -- until the user drags it away; scrolling
+/// back down to the end picks the tail up again. New turns only pull the
+/// view down while it follows, never while you read above.
+struct TailFollowingScroll<Content: View>: View {
+    /// Changes when rows arrive (the item count).
+    let changeKey: Int
+    @ViewBuilder let content: () -> Content
+
+    /// A reference: flipping it must not re-render the transcript.
+    private final class Follow {
+        var sticky = true
+        var lastUserScroll = Date.distantPast
+        var tailY: CGFloat?
+        /// A snap budget: layout drift can report many times a second, and
+        /// each snap is a layout pass -- the watchdog catches what's skipped.
+        var lastSnap = Date.distantPast
+        var userRecent: Bool { Date().timeIntervalSince(lastUserScroll) < 0.6 }
+    }
+    @State private var follow = Follow()
+    @State private var viewport: CGFloat = 0
+    private static var space: String { "tail-follow-scroll" }
+    private static var tailID: String { "tail-follow-end" }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                // Not lazy: the end marker must always be realized, or its
+                // position stops reporting exactly when it matters (the
+                // view scrolled past the end).
+                VStack(spacing: 0) {
+                    content()
+                    Color.clear.frame(height: 1).id(Self.tailID)
+                        .onGeometryChange(for: CGFloat.self, of: { $0.frame(in: .named(Self.space)).minY }) { y in
+                            tailMoved(y, proxy)
+                        }
+                }
+            }
+            .coordinateSpace(name: Self.space)
+            .defaultScrollAnchor(.bottom)
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
+                viewport = h
+                if let y = follow.tailY { tailMoved(y, proxy) }   // the keyboard, a rotation
+            }
+            // The user's own drag decides: toward older turns lets go.
+            .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { v in
+                follow.lastUserScroll = Date()
+                if v.translation.height > 2 { follow.sticky = false }
+            })
+            .onAppear { snap(proxy) }
+            .onChange(of: changeKey) { _, _ in if follow.sticky { snap(proxy) } }
+            // The watchdog: a layout pass that reported nothing new still
+            // gets corrected (the desktop's "stuck blank" fix).
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if follow.sticky, !follow.userRecent, !atBottom(follow.tailY) { snap(proxy) }
+                }
+            }
+        }
+    }
+
+    /// The end marker sits at the bottom edge (within the content's padding).
+    private func atBottom(_ y: CGFloat?) -> Bool {
+        guard let y, viewport > 0 else { return false }
+        return y <= viewport + 2 && y >= viewport - 40
+    }
+
+    private func tailMoved(_ y: CGFloat, _ proxy: ScrollViewProxy) {
+        follow.tailY = y
+        guard viewport > 0 else { return }
+        if follow.sticky {
+            // Not the user: the end moved because rows were measured.
+            if !follow.userRecent, !atBottom(y) { snap(proxy) }
+        } else if y <= viewport + 2, !follow.userRecent {
+            // Scrolled (or flung) back down to the end: follow again.
+            follow.sticky = true
+        }
+    }
+
+    private func snap(_ proxy: ScrollViewProxy) {
+        guard Date().timeIntervalSince(follow.lastSnap) > 0.15 else { return }
+        follow.lastSnap = Date()
+        DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
     }
 }
