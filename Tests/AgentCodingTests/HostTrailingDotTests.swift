@@ -35,6 +35,9 @@ struct HostTrailingDotTests {
         let list = PassthroughList(extra: ["corp.example"])
         #expect(list.matches("git.corp.example.") && list.matches("CORP.EXAMPLE."))
         #expect(!list.matches("corp.example.evil."))
+        // An operator's entry with the dot still matches (proxy.noMitmDomains).
+        let dotted = PassthroughList(extra: [" Example.COM. "])
+        #expect(dotted.matches("api.example.com") && dotted.matches("example.com."))
     }
 
     @Test func theOpenShellHostMatch() throws {

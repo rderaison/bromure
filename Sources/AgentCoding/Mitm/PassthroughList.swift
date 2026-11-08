@@ -21,7 +21,9 @@ struct PassthroughList {
     init(extra: [String]) {
         var all = PassthroughList.builtins
         all.append(contentsOf: extra
-            .map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+            // An operator's `example.com.` is example.com, as the hosts it's
+            // matched against are.
+            .map { EgressPolicy.normalizedHost($0.trimmingCharacters(in: .whitespaces)) }
             .filter { !$0.isEmpty })
         self.entries = all
     }
