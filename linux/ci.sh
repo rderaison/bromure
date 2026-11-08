@@ -21,17 +21,16 @@ step "ACLinux: build";          swift build --package-path "$ROOT/linux/ACLinux"
 step "ACLinux: unit tests";     swift test  --package-path "$ROOT/linux/ACLinux" --skip ACLinuxIntegrationTests
 # The integration and stall suites run the release build (`swift test -c release`
 # builds it, with testing enabled): routing is ~3x faster than debug.
-step "spike: TLS interception (linux/spike/mitm)"
-swift build --package-path "$ROOT/linux/spike/mitm" -c release
-# The KVM integration step drives it from a guest behind passt (needs Internet).
-export BROMURE_MITM_PROXY="$ROOT/linux/spike/mitm/.build/release/mitm-proxy"
+# The TLS interception spike (linux/spike/mitm) is no longer run: it reached
+# real hosts, and the real proxy has its own tests. Without BROMURE_MITM_PROXY
+# its KVM suite stays disabled.
 step "ACLinux: KVM integration"
 # Until the kvm udev rule makes /dev/kvm this user's, it is kvm-group only:
 # run as this user with the kvm group added (not as root).
 if [ -w /dev/kvm ] || ! sudo -n -g kvm true 2>/dev/null; then
   swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 else
-  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" BROMURE_MITM_PROXY="$BROMURE_MITM_PROXY" swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
+  sudo -n -g kvm env PATH="$PATH" HOME="$HOME" swift test -c release --no-parallel --package-path "$ROOT/linux/ACLinux" --filter ACLinuxIntegrationTests
 fi
 step "systemd: the daemon as a transient user unit (Type=notify, KillMode=process, as installed)"
 # The binary exactly as install-user-service.sh builds it (no testing flags).

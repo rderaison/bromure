@@ -1,5 +1,7 @@
 # TLS interception spike (Phase 4 prep): swift-nio-ssl + swift-certificates
 
+> **Kept for reference only.** The daemon's real proxy (linux/ACLinux, MitmProxy) replaced it, and CI no longer runs it: its guest test reached real hosts (example.com, pypi.org, github.com, echo.websocket.org). Don't build on it.
+
 `MitmCore` contains:
 - **CA:** ECDSA P-256, `BasicConstraints` CA (pathlen 0), `keyCertSign` + `cRLSign`.
 - **Leaves:** one per host, minted on demand, each with its own P-256 key. They are valid 7 days, carry `serverAuth`, take their SAN from the SNI (a DNS name, or an IP SAN for an IP), and include the CA's AKI.
