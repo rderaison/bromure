@@ -180,12 +180,13 @@ extension Daemon {
         // The guest sandbox (the strict marker and root attestor, the
         // package shims, the OpenShell spec with its root launcher and
         // supervisor, the advisor's address), as macOS stages it; it removes
-        // what this staging doesn't ask for. A workspace has no shared
-        // folders on a server: no workdirs. Its kernel modules from the
+        // what this staging doesn't ask for. Its shared folders are its
+        // workdirs (~/<basename>), as macOS's. Its kernel modules from the
         // verified catalog cache (none without a catalog: a sentry workspace
         // isn't started then, DaemonSandboxGuard).
         if let setupDir {
-            try SessionDisk.writeSandboxFiles(into: meta, profile: profile, setupDir: setupDir, workdirs: []) { sentryDest in
+            let workdirs = SessionDisk.sharedFolders(profile.folderPaths).map { "/home/ubuntu/\($0.mountName)" }
+            try SessionDisk.writeSandboxFiles(into: meta, profile: profile, setupDir: setupDir, workdirs: workdirs) { sentryDest in
                 sentryModules?.stageKnown(for: profile.id, setupDir: setupDir, into: sentryDest)
             }
         }

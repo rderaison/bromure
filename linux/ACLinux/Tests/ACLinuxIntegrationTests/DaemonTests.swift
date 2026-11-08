@@ -385,6 +385,53 @@ struct DaemonTests {
         #expect(try await api.request("POST", "/prompts/\(UUID().uuidString)/answer", ["choice": 1]).status == 404)
     }
 
+    @Test("vm run -v: the host folder is ~/<basename> in the guest, both ways; --rm deletes the workspace when it stops; a workspace runs again by name")
+    func runMountsAndRm() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let proj = w.root + "/host/proj"
+        try FileManager.default.createDirectory(atPath: proj, withIntermediateDirectories: true)
+        try "from-host\n".write(toFile: proj + "/host.txt", atomically: true, encoding: .utf8)
+
+        let (rc, _, err) = try w.cli("vm", "run", "--name", "mnt1", "--tool", "claude", "-v", proj, "--rm")
+        #expect(rc == 0, "run: \(err)")
+        // agentd links the share in once the session is up.
+        var seen = ""
+        for _ in 0..<60 {
+            seen = (try? w.cli("vm", "exec", "mnt1", "--", "sh", "-c", "cat ~/proj/host.txt 2>/dev/null").1) ?? ""
+            if seen.contains("from-host") { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(seen.contains("from-host"), "the host folder at ~/proj: \(seen)")
+        #expect(try w.cli("vm", "exec", "mnt1", "--", "sh", "-c", "echo from-guest > ~/proj/guest.txt").0 == 0)
+        #expect((try? String(contentsOfFile: proj + "/guest.txt", encoding: .utf8)) == "from-guest\n", "written back to the host")
+        #expect(try w.cli("vm", "kill", "mnt1").0 == 0)
+        var gone = false
+        for _ in 0..<40 where !gone {
+            gone = try w.vm("mnt1") == nil
+            if !gone { try await Task.sleep(for: .milliseconds(250)) }
+        }
+        #expect(gone, "--rm: its VM went with it")
+        let profiles = (try? FileManager.default.contentsOfDirectory(atPath: w.root + "/state/bromure-ac/profiles")) ?? []
+        #expect(!profiles.contains { (try? String(contentsOfFile: w.root + "/state/bromure-ac/profiles/\($0)/profile.json", encoding: .utf8))?.contains("\"mnt1\"") == true },
+                "--rm: its workspace went too")
+        #expect(FileManager.default.fileExists(atPath: proj + "/host.txt"), "the host folder is the user's: kept")
+
+        // A kept workspace runs again by name (its own VM, not a new one).
+        #expect(try w.cli("vm", "run", "--name", "keep1").0 == 0)
+        let id = try w.vm("keep1")?["id"]?.stringValue
+        #expect(try w.cli("vm", "kill", "keep1").0 == 0)
+        for _ in 0..<40 where try w.state(of: "keep1") != "stopped" { try await Task.sleep(for: .milliseconds(250)) }
+        let (rc2, again, err2) = try w.cli("vm", "run", "keep1")
+        #expect(rc2 == 0, "run by name: \(err2)")
+        #expect(again.trimmingCharacters(in: .whitespacesAndNewlines) == id, "the same workspace")
+        #expect(try w.state(of: "keep1") == "running")
+        #expect(try w.cli("vm", "run").0 != 0, "neither a workspace nor --name/--tool")
+        _ = try w.cli("vm", "kill", "--force", "keep1")
+    }
+
     @Test("POST /sessions/<workspace>/tab: agentd opens and closes the tab (tmux windows, read back from tabs.txt)")
     func tabs() async throws {
         let w = try World()

@@ -146,6 +146,9 @@ public actor Daemon {
     /// Tests: called at the top of each launch (after the starting mark), so
     /// a start can be held at an await; throwing aborts that launch.
     static let launchHookForTesting = NIOLockedValueBox<(@Sendable (String) async throws -> Void)?>(nil)
+    /// Workspaces between a reboot's stop and its boot: a `--rm` one isn't
+    /// deleted by that stop (macOS: rebootingProfiles).
+    var rebooting: Set<String> = []
     /// VMs being resumed from a snapshot: a failure leaves them suspended.
     private var restoring: Set<String> = []
     /// The sign-in VMs' Profiles (never saved), by VM id.
@@ -290,6 +293,8 @@ public actor Daemon {
         }
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }
         await d.adoptRunning(storedNet: storedNet)
+        // `--rm` workspaces a previous daemon left stopped.
+        await d.sweepStoppedEphemeral()
         await d.startSessionEngine()
         // Taken-back workspaces: their credentials were set up as adoption
         // took them (before their proxy listeners served); their kubeconfigs
@@ -458,7 +463,7 @@ public actor Daemon {
         case ("GET", "/profiles"): return listProfiles()
         case ("POST", "/profiles"): return await createProfile(req.body)
         case ("GET", "/vms"): return listVMs()
-        case ("POST", "/vms"): return await createVM(req.body)
+        case ("POST", "/vms"): return await createVMRoute(req.body)
         case (let m, let p) where p.hasPrefix("/vms/"): return await vmRoute(m, p, req.body)
         case ("GET", "/remote"): return await remoteStatus()
         case ("POST", "/remote"): return await remoteApply(req.body)
@@ -835,12 +840,12 @@ public actor Daemon {
         String(format: "52:54:00:%02x:%02x:%02x", cid >> 16 & 0xFF, cid >> 8 & 0xFF, cid & 0xFF)
     }
 
-    /// `POST /vms`: create and start a VM, detached. Body: `name?`,
-    /// `machine?` (q35|microvm), `memoryGB?`, `cpus?`. 201 `{id, shortId, name, detached}`.
-    // partial: no profile, tool, auth, apiKey, mounts or rm; takes name/machine/memoryGB/cpus; always detached
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @f127f8ab
-    /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
-    /// false only registers it (stopped).
+    /// A VM record made, and started, detached. Body: `name?`,
+    /// `machine?` (firecracker), `memoryGB?`, `cpus?`, `homeGB?`. 201
+    /// `{id, shortId, name, detached}`. `id`: a workspace Profile's (POST
+    /// /profiles, POST /vms), else a new one; `boot` false only registers
+    /// it (stopped).
+    // @port-skip linux-only: a Linux VM record (macOS: the workspace's launch makes its VM)
     func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true,
                   registration: Bool = false, kube: String? = nil, dataDiskGB: Int? = nil,
                   folders: [String]? = nil, rescueFor: String? = nil) async -> ControlResponse {
@@ -1320,9 +1325,10 @@ public actor Daemon {
         try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
-        for tag in ["bromure-meta", "bromure-outbox"] + (rec.folders ?? []).prefix(8).indices.map({ "share-\($0 + 1)" }) {
+        for tag in ["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }) {
             _ = fm.createFile(atPath: dir + "/meta/virtiofs-tags/" + tag, contents: nil)
         }
+        try writeSharesFile(rec, meta: dir + "/meta")
         // The guest MTU rule (PasstUplink.Config.mtu): 65520 behind passt;
         // VPN profiles keep the macOS 1280/1400 (no profiles on Linux yet).
         try "\(passt.mtu)\n".write(toFile: dir + "/meta/mtu", atomically: true, encoding: .utf8)
@@ -1527,8 +1533,9 @@ public actor Daemon {
         qc.memoryMiB = rec.memoryMiB
         qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
                      .init(tag: "bromure-outbox", hostPath: dir + "/outbox")]
-        // A managed machine's host folders: the fstab's share-<N> slots.
-        for (i, folder) in (rec.folders ?? []).prefix(8).enumerated() {
+        // Host folders (a managed machine's, a workspace's shared folders):
+        // the fstab's share-<N> slots.
+        for (i, folder) in shareFolders(rec).enumerated() {
             qc.shares.append(.init(tag: "share-\(i + 1)", hostPath: folder))
         }
         qc.macAddress = rec.mac
@@ -1952,6 +1959,9 @@ public actor Daemon {
         rec.pidStart = nil
         CIDAllocator.shared.release(rec.cid)
         try? registry.upsert(rec)
+        // `vm run --rm`: the workspace goes now it stopped -- not when it is
+        // only rebooting, nor suspended.
+        if rec.state == .stopped, let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
     }
 
     /// The VM's proxy listener (`stored`: a restarted daemon's); nil without

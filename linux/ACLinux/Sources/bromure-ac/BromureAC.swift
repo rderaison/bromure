@@ -96,24 +96,70 @@ func check(_ r: ControlClient.Response, _ what: String) throws {
 }
 
 extension VM {
-    // @port-skip linux-only: detached run (macOS's VMRun also attaches a terminal; no terminals on Linux yet)
+    // @port-skip linux-only: the command's options (macOS: VMRun's, plus the Linux VM knobs --machine, --cpus, --home-gb)
     struct Run: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Create and start a VM (detached).")
-        @Option(help: "VM name.") var name: String?
+        static let configuration = CommandConfiguration(
+            abstract: "Start a workspace's VM — or create a throwaway one (docker-style) with --name/--tool (detached).")
+
+        @Argument(help: "Workspace to start — id or name (see `vm ls`). Omit only to create a throwaway VM with --name/--tool.")
+        var workspace: String?
+        @Option(name: [.customShort("v"), .long],
+                help: "Mount a host folder into the VM at ~/<basename>. Repeatable (max 8). e.g. -v ~/project")
+        var volume: [String] = []
+        @Option(help: "Name for an on-the-fly workspace (default: cli-XXXX).") var name: String?
+        @Option(help: "Tool for an on-the-fly workspace: claude | codex | grok | kimi | omp.") var tool: String?
+        @Option(help: "Auth mode for an on-the-fly workspace: token | subscription | bedrock | local.") var auth: String?
+        @Option(name: .customLong("api-key"), help: "API key (for --auth token).") var apiKey: String?
+        @Flag(help: "Delete the workspace + disk when the VM stops (ephemeral).") var rm = false
         @Option(help: "firecracker (the only backend; linux/firecracker/build.sh).") var machine = "firecracker"
-        @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB = 2.0
+        @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB: Double?
         @Option(help: "vCPUs.") var cpus = 2
         @Option(name: .customLong("home-gb"), help: "Home image size in GiB (8-1024; default: the daemon's).") var homeGB: Int?
 
-        // @port-skip linux-only: detached run
+        // partial: always detached (no terminal handed over); --memory-gb may be fractional
+        // @port VMRun.run() h=b33df8507728b8d7 @f127f8ab
         func run() async throws {
-            var body: [String: JSONValue] = ["machine": .string(machine), "memoryGB": .number(memoryGB),
-                                             "cpus": .number(Double(cpus)), "detach": true]
-            if let name { body["name"] = .string(name) }
+            var body: [String: JSONValue] = ["machine": .string(machine), "cpus": .number(Double(cpus)),
+                                             "detach": true, "rm": .bool(rm)]
+            if let workspace {
+                body["profile"] = .string(workspace)                  // start an existing workspace
+            } else if name != nil || tool != nil || auth != nil {    // create a throwaway on-the-fly
+                if let name { body["name"] = .string(name) }
+                if let tool = try Self.choice(tool, Profile.Tool.self, option: "--tool") { body["tool"] = .string(tool) }
+                if let auth = try Self.choice(auth, Profile.AuthMode.self, option: "--auth") { body["auth"] = .string(auth) }
+                if let apiKey { body["apiKey"] = .string(apiKey) }
+            } else {
+                throw ValidationError("Specify a workspace to start (e.g. `vm run iptest2` — see `vm ls`), "
+                                      + "or pass --name/--tool to create a throwaway one.")
+            }
+            if let memoryGB { body["memoryGB"] = .number(memoryGB) }
             if let homeGB { body["homeGB"] = .number(Double(homeGB)) }
+            if !volume.isEmpty { body["mounts"] = .array(volume.map { .string(Self.absoluteHostPath($0)) }) }
             let r = try client().request("POST", "/vms", body: .object(body))
             try check(r, "run")
             print(r.json["id"]?.stringValue ?? "")
+        }
+
+        /// An option's value checked against the enum's raw values.
+        // @port validatedCLIChoice(_: String?, _: E.Type, option: String) h=29846ce46367174f @f127f8ab
+        static func choice<E: RawRepresentable & CaseIterable>(_ raw: String?, _ type: E.Type, option: String) throws -> String?
+            where E.RawValue == String {
+            guard let raw else { return nil }
+            guard E(rawValue: raw) != nil else {
+                let valid = E.allCases.map(\.rawValue).joined(separator: " | ")
+                throw ValidationError("Invalid \(option) “\(raw)” — expected one of: \(valid).")
+            }
+            return raw
+        }
+
+        /// A host path as the daemon takes it: `~` expanded, relative to the cwd, standardized.
+        // @port absoluteHostPath(_: String) h=a1469f3e4a0ba7df @f127f8ab
+        static func absoluteHostPath(_ raw: String) -> String {
+            let expanded = (raw as NSString).expandingTildeInPath
+            let absolute = expanded.hasPrefix("/")
+                ? expanded
+                : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
+            return (absolute as NSString).standardizingPath
         }
     }
 

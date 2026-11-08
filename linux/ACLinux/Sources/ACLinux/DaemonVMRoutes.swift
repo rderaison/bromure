@@ -29,6 +29,9 @@ extension Daemon {
             return ControlResponse(409, ["ok": false, "error": .string("VM not running: \(rec.name)")])
         }
         let name = existingProfile(for: rec)?.name ?? rec.name
+        // A `--rm` workspace survives this stop: it boots again.
+        rebooting.insert(rec.id)
+        defer { rebooting.remove(rec.id) }
         let stopped = await deleteVM(rec, action: hard ? "kill" : "shutdown")
         guard stopped.status < 300 else { return ControlResponse(409, ["ok": false, "error": stopped.body["error"] ?? "couldn't stop it"]) }
         // The old session out of the way first: the next boot shares its
@@ -41,7 +44,10 @@ extension Daemon {
         guard var now = registry.find(rec.id) else { return ControlResponse(409, ["ok": false, "error": "the VM is gone"]) }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
         let started = await start(now)
+        rebooting.remove(rec.id)
         let up = started.status < 300
+        // A `--rm` workspace whose reboot didn't boot is over.
+        if !up, let pid = UUID(uuidString: rec.id) { await dropAbandonedEphemeral(pid) }
         var reply: [String: JSONValue] = ["ok": .bool(up), "workspace": .string(name), "mode": .string(hard ? "hard" : "soft")]
         if !up { reply["error"] = started.body["error"] ?? "the boot failed" }
         return ControlResponse(up ? 200 : 409, .object(reply))
