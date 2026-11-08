@@ -5,6 +5,8 @@
     "Sources/BrowserBridges"
   ],
   "linuxBuild": [
+    "Sources/AgentCoding/AWSConfigParser.swift",
+    "Sources/AgentCoding/AWSSSOResolver.swift",
     "Sources/AgentCoding/ActivitySummary.swift",
     "Sources/AgentCoding/AgentDelegation.swift",
     "Sources/AgentCoding/AgentLabels.swift",

@@ -1,5 +1,12 @@
-import CommonCrypto
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 public struct ResolvedAWSCredentials: Sendable {
     public let accessKeyID: String
@@ -27,6 +34,19 @@ public enum AWSSSOResolver {
         }
     }
 
+    /// The home whose ~/.aws/config and SSO cache are read: nil, the
+    /// account's (the app); the Linux daemon sets $HOME's, where the AWS CLI
+    /// it runs beside keeps them (Foundation's account home ignores $HOME
+    /// there); tests a fake one.
+    nonisolated(unsafe) static var homeOverride: URL?
+    /// Tests: the portal asked for role credentials (scheme, host and port)
+    /// instead of AWS's. nil in the app.
+    nonisolated(unsafe) static var portalOverride: URL?
+
+    private static var homeDirectory: URL {
+        homeOverride ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
     // MARK: - Public
 
     public static func resolve(
@@ -34,7 +54,7 @@ public enum AWSSSOResolver {
         triggerLoginIfNeeded: Bool = true,
         progress: ((String) -> Void)? = nil
     ) async throws -> ResolvedAWSCredentials {
-        let profiles = AWSConfigParser.discover()
+        let profiles = AWSConfigParser.discover(configPath: homeOverride.map { $0.appendingPathComponent(".aws/config").path })
         guard let profile = profiles.first(where: { $0.name == profileName }) else {
             throw Error.noProfile(profileName)
         }
@@ -115,8 +135,7 @@ public enum AWSSSOResolver {
     // MARK: - SSO Token Cache
 
     private static func readCachedToken(startURL: String, ssoRegion: String, sessionName: String?) -> String? {
-        let cacheDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".aws/sso/cache", isDirectory: true)
+        let cacheDir = homeDirectory.appendingPathComponent(".aws/sso/cache", isDirectory: true)
 
         // Try direct hash lookup: SHA1("startUrl|region")
         let sessionKey = "\(startURL)|\(ssoRegion)"
@@ -189,13 +208,8 @@ public enum AWSSSOResolver {
         return accessToken
     }
 
-    private static func sha1Hex(_ string: String) -> String {
-        let data = Data(string.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-        data.withUnsafeBytes { ptr in
-            _ = CC_SHA1(ptr.baseAddress, CC_LONG(data.count), &digest)
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+    static func sha1Hex(_ string: String) -> String {
+        Insecure.SHA1.hash(data: Data(string.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - SSO Login
@@ -244,8 +258,9 @@ public enum AWSSSOResolver {
         ssoRegion: String
     ) async throws -> RoleCredentials {
         var components = URLComponents()
-        components.scheme = "https"
-        components.host = "portal.sso.\(ssoRegion).amazonaws.com"
+        components.scheme = portalOverride?.scheme ?? "https"
+        components.host = portalOverride?.host ?? "portal.sso.\(ssoRegion).amazonaws.com"
+        components.port = portalOverride?.port
         components.path = "/federation/credentials"
         components.queryItems = [
             URLQueryItem(name: "role_name", value: roleName),
