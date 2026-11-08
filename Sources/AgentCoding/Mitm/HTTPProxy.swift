@@ -1648,6 +1648,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     OpenAI's Realtime API and any other agent transport
         //     that rides on WS instead of plain HTTP/SSE.
         if isWebSocketUpgrade(rawRequest: swap.modified) {
+            // A package registry speaks no WebSocket: an upgrade to one
+            // would skip the supply-chain checks below (OSV, the age hold,
+            // the install-script strip) and relay its reply as it is.
+            let (upgradeMethod, upgradePath) = Self.parseRequestLine(swap.modified)
+            if SupplyChainRegistry.isRegistryRequest(host: host, path: upgradePath) {
+                SupplyChainLog.shared.record("[supply-chain] ✗ WebSocket upgrade to \(host)\(upgradePath) refused (a package registry)")
+                rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request",
+                                   detail: "Bromure: a WebSocket upgrade to a package registry is refused (its requests go through the supply-chain checks).",
+                                   host: host, port: port, method: upgradeMethod, path: upgradePath)
+                return
+            }
             FileHandle.standardError.write(Data(
                 "[mitm] WebSocket upgrade → \(host):\(port)\n".utf8))
             // Decide body capture *before* the pump so we don't pay
