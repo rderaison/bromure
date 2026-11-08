@@ -6149,6 +6149,23 @@ def _heal_stuck_mouse(tty, cmd, mouse_any):
         pass
 
 
+_ROSTER_FAILING = set()
+
+
+def _roster_note(step, ok, why):
+    """Say when the roster stops reaching the host, and when it's back --
+    once per streak, not every 0.7s tick. Both failures were silent: the host
+    just kept the last tab list (a sandboxed workspace whose new tab was never
+    listed left nothing in this log to say why)."""
+    if ok:
+        if step in _ROSTER_FAILING:
+            _ROSTER_FAILING.discard(step)
+            log("roster", "%s: working again" % step)
+    elif step not in _ROSTER_FAILING:
+        _ROSTER_FAILING.add(step)
+        log("roster", why)
+
+
 def publish_roster():
     """Build and atomically publish the window list to tabs.txt. Safe to call
     from both the roster loop (periodic) and the command loop (immediately
@@ -6157,6 +6174,7 @@ def publish_roster():
     with _ROSTER_LOCK:
         p = _tmux("list-windows", "-t", TMUX_S, "-F", _ROSTER_FMT)
         if p.returncode == 0:
+            _roster_note("list", True, "")
             out_lines = []
             seen_ttys = set()
             for raw in p.stdout.splitlines():
@@ -6191,8 +6209,12 @@ def publish_roster():
             for gone in [t for t in _stuck_mouse if t not in seen_ttys]:
                 _stuck_mouse.pop(gone, None)
             content = "".join(line + "\n" for line in out_lines)
-            _atomic_publish(".tabs.tmp", "tabs.txt", content)
-        elif not _has_session():
+            _roster_note("publish", _atomic_publish(".tabs.tmp", "tabs.txt", content),
+                         "couldn't write tabs.txt to the outbox: the host keeps the last tab list")
+        elif _has_session():
+            _roster_note("list", False, "tmux list-windows failed (%d): %s"
+                         % (p.returncode, (p.stderr or "").strip()[:200]))
+        else:
             # list-windows failed AND the session is genuinely gone — the user
             # closed the last window. Mark a pending reboot FIRST (host drains it
             # on its fast tick), then publish an EMPTY roster so the host's

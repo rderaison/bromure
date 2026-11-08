@@ -4870,7 +4870,25 @@ for n, c in enumerate(calls, 1):
           try {
             let listed = false;
             for (let i = 0; i < 40 && !listed; i++) { listed = !!(await tab()); if (!listed) await sleep(500); }
-            assert(listed, `the host never listed tab ${win}`);
+            if (!listed) {
+              // Seen on Jenkins with nothing to go on: say where the roster
+              // stopped. agentd publishes tmux's window list to tabs.txt in
+              // the outbox every 0.7s; the host lists what that file says.
+              const outbox = `${process.env.CFFIXED_USER_HOME || os.homedir()}` +
+                `/Library/Application Support/BromureAC/profiles/${id}/outbox`;
+              const read = (f, n) => {
+                try { return readFileSync(`${outbox}/${f}`, "utf8").trim().split("\n").slice(-n).join("\n"); }
+                catch (e) { return `(${e.code || e.message})`; }
+              };
+              const st = await api("GET", "/state").catch(() => ({}));
+              const vm = (st.vms || []).find((v) => v.name === NAME);
+              throw new Error(
+                `the host never listed tab ${win}\n` +
+                `  host tabs: ${JSON.stringify(((vm && vm.tabs) || []).map((t) => t.index))}\n` +
+                `  tmux in the sandbox: ${sx(`${T} list-windows -t bromure: -F '#{window_index} #{pane_current_command}'`).trim().replace(/\n/g, " | ")}\n` +
+                `  outbox tabs.txt: ${read("tabs.txt", 10).replace(/\n/g, " | ")}\n` +
+                `  agentd.log (last 25 lines):\n    ${read("agentd.log", 25).replace(/\n/g, "\n    ")}`);
+            }
             for (const want of ["working", "done"]) {
               sx(`${T} respawn-window -k -t bromure:${win} 'sh ~/.bromure/agent-status.sh ${want} </dev/null; sleep 300'`);
               let got;
