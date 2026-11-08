@@ -798,7 +798,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// from cert-minting onward is the shared `driveTLS` body. Closes the FD on
     /// exit, like `run()`.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
-    func runTransparentTLS(host: String, port: Int) async {
+    func runTransparentTLS(host rawHost: String, port: Int) async {
+        let host = EgressPolicy.normalizedHost(rawHost)   // the SNI as every decision sees it
         defer { closeFD() }
         do {
             try await trackedForFirewall(host: host, port: port, route: "transparent") {
@@ -814,7 +815,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// for HTTPS, forwarding upstream over `http`. `host` comes from the peeked
     /// `Host` header (the switch has no SNI for cleartext). Closes the FD on exit.
     @available(macOS, deprecated: 10.15, message: "shares driveTLS, which drives SecureTransport for the HTTPS path")
-    func runTransparentHTTP(host: String, port: Int) async {
+    func runTransparentHTTP(host rawHost: String, port: Int) async {
+        let host = EgressPolicy.normalizedHost(rawHost)   // the Host header as every decision sees it
         defer { closeFD() }
         do {
             try await trackedForFirewall(host: host, port: port, route: "transparent") {
@@ -4505,11 +4507,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
 /// Parse "host:port" → (host, port). Defaults to 443 if missing.
 private func parseHostPort(_ s: String) -> (String, Int) {
+    // The host every decision then sees: lowercased, a fully qualified
+    // name's trailing dots gone (`registry.npmjs.org.` is npm's registry).
     if let colon = s.lastIndex(of: ":"),
        let port = Int(s[s.index(after: colon)...]) {
-        return (String(s[..<colon]), port)
+        return (EgressPolicy.normalizedHost(String(s[..<colon])), port)
     }
-    return (s, 443)
+    return (EgressPolicy.normalizedHost(s), 443)
 }
 
 /// Parse the authority of an `http://` forward-proxy target → (host, port).
@@ -4517,9 +4521,9 @@ private func parseHostPort(_ s: String) -> (String, Int) {
 private func parseHTTPHostPort(_ s: String) -> (String, Int) {
     if let colon = s.lastIndex(of: ":"),
        let port = Int(s[s.index(after: colon)...]) {
-        return (String(s[..<colon]), port)
+        return (EgressPolicy.normalizedHost(String(s[..<colon])), port)
     }
-    return (s, 80)
+    return (EgressPolicy.normalizedHost(s), 80)
 }
 
 /// Lowercase, strip IPv6 brackets and trailing root dots so a host

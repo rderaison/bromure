@@ -687,8 +687,9 @@ public final class TokenSwapper: @unchecked Sendable {
     static func hostMatchesScope(host: String, scope: String) -> Bool {
         // An IPv6 literal compares unbracketed: CONNECT's authority gives
         // `[2001:db8::1]`, a URL's host and a peer address `2001:db8::1`.
-        let h = HostAuthority.bare(host)
-        let s = HostAuthority.bare(scope)
+        // A fully qualified name (`api.github.com.`) is the same host.
+        let h = EgressPolicy.withoutTrailingDots(HostAuthority.bare(host))
+        let s = EgressPolicy.withoutTrailingDots(HostAuthority.bare(scope))
         return h == s || h.hasSuffix("." + s)
     }
 

@@ -65,7 +65,11 @@ public struct EgressPolicy: Sendable, Equatable, Codable {
     }
 
     /// `name` without the trailing dots of a fully qualified spelling.
-    static func withoutTrailingDots(_ name: String) -> String {
+    /// A host name as every policy decision compares it: lowercased, its
+    /// trailing dots (a fully qualified `registry.npmjs.org.`) gone.
+    public static func normalizedHost(_ host: String) -> String { withoutTrailingDots(host.lowercased()) }
+
+    public static func withoutTrailingDots(_ name: String) -> String {
         var n = Substring(name)
         while n.hasSuffix(".") { n = n.dropLast() }
         return String(n)
