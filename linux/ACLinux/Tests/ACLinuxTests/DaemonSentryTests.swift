@@ -98,6 +98,51 @@ extension DaemonGlobalSuites {
             #expect(!Daemon.sentryOn(UUID(), in: [on, off]), "an unknown workspace")
         }
 
+        /// The guard's allow branch, signatures on: a signed amd64 catalog
+        /// lets a sentry workspace start only when it has a module for the
+        /// kernel the image boots; another kernel, an unknown one (no
+        /// kernel-release), or a catalog the pinned key didn't sign refuse.
+        @Test func aSignedCatalogAllowsOnlyTheImagesKernel() async throws {
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let hash = SentryModuleStoreTests.hash
+            let host = "signed-\(UUID().uuidString.prefix(8)).test"
+            SentryStubProtocol.serve(host, "/sentry/\(hash)/amd64/catalog.json", 200, Data(SentryModuleStoreTests.nodeSignedAmd64.utf8))
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [SentryStubProtocol.self]
+            func store(_ key: String, _ sub: String) -> SentryModuleStore {
+                SentryModuleStore(root: URL(fileURLWithPath: dir + "/" + sub, isDirectory: true),
+                                  base: URL(string: "https://\(host)/")!, requireSignature: true,
+                                  publicKeyBase64: key, session: URLSession(configuration: config), arch: .amd64)
+            }
+            func image(_ release: String?) throws -> String {
+                let img = dir + "/image-\(UUID().uuidString.prefix(6))"
+                try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true)
+                if let release { try (release + "\n").write(toFile: img + "/kernel-release", atomically: true, encoding: .utf8) }
+                return img
+            }
+            let signed = store(SentryModuleStoreTests.amd64PublicKey, "cache")
+            let catalog = await signed.refreshCatalog(hash)
+            #expect(catalog?.modules.count == 1, "the signed catalog is accepted")
+            #expect(Daemon.sentryCatalogCovers(catalog, kernels: Daemon.bootKernels(imageDir: try image("6.8.0-147-generic"))))
+            #expect(!Daemon.sentryCatalogCovers(catalog, kernels: Daemon.bootKernels(imageDir: try image("6.8.0-999-generic"))),
+                    "no module for the image's kernel")
+            #expect(Daemon.bootKernels(imageDir: try image(nil)).isEmpty)
+            #expect(!Daemon.sentryCatalogCovers(catalog, kernels: []), "an unknown kernel")
+            #expect(!Daemon.sentryCatalogCovers(catalog, kernels: ["6.8.0-147-generic", "6.8.0-999-generic"]),
+                    "every kernel the image lists")
+            // The cache a VM taken back is judged by: the same answer.
+            #expect(Daemon.sentryCatalogCovers(signed.cachedCatalog(hash), kernels: ["6.8.0-147-generic"]))
+            // Signed with another key than the pinned one: no catalog at all.
+            let other = await store(SentryModuleStoreTests.testPublicKey, "other").refreshCatalog(hash)
+            #expect(other == nil)
+            #expect(!Daemon.sentryCatalogCovers(other, kernels: ["6.8.0-147-generic"]))
+            // And the guard takes the answer: allowed, or the sentry listed.
+            var p = Profile(name: "hard", tool: .claude, authMode: .token)
+            p.kernelSentry = .hard
+            #expect(Daemon.unenforceableProtections(p, sentryCatalog: true).isEmpty)
+            #expect(Daemon.unenforceableProtections(p, sentryCatalog: false) == ["the kernel sentry (hard)"])
+        }
+
         /// A launch's staging (writeCredentialFiles) puts the cached module of
         /// each kernel the workspace is known to have into its meta share's
         /// sentry/, beside the source; a workspace without the sentry gets no

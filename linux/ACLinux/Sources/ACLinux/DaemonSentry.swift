@@ -48,18 +48,37 @@ extension Daemon {
     }
 
     /// Whether a verified module catalog for the shipped sentry source and
-    /// this host's architecture is to be had now (fetched, else cached).
+    /// this host's architecture is to be had now (fetched, else cached), with
+    /// a module for the kernel the VM boots: a catalog without one would let
+    /// the guest boot with its sentry "unavailable", unprotected.
     // @port-skip linux-only: the Linux guard's question (macOS boots and lets a guest without a module go on)
     func sentryCatalogReady() async -> Bool {
         guard let store = sentryModules, let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return false }
-        return await store.refreshCatalog(hash).map { !$0.modules.isEmpty } ?? false
+        return Self.sentryCatalogCovers(await store.refreshCatalog(hash), kernels: Self.bootKernels(imageDir: config.imageDir))
     }
 
-    /// The same from what's cached only (no fetch), for a VM taken back.
+    /// The same from what's cached only (no fetch), for a VM taken back
+    /// (it booted this image's kernel).
     // @port-skip linux-only: see sentryCatalogReady
     nonisolated func sentryCatalogCached() -> Bool {
         guard let store = sentryModules, let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return false }
-        return store.cachedCatalog(hash).map { !$0.modules.isEmpty } ?? false
+        return Self.sentryCatalogCovers(store.cachedCatalog(hash), kernels: Self.bootKernels(imageDir: config.imageDir))
+    }
+
+    /// The kernel releases the baked image boots (its `kernel-release`,
+    /// InterimBake's: one per line); empty when unknown.
+    // @port-skip linux-only: the Linux image's kernel, for the sentry guard
+    nonisolated static func bootKernels(imageDir: String) -> [String] {
+        ((try? String(contentsOfFile: imageDir + "/kernel-release", encoding: .utf8)) ?? "")
+            .split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// `catalog` has a module for every kernel in `kernels`; an unknown
+    /// kernel (none listed) or a missing module is a no: fail closed.
+    // @port-skip linux-only: see sentryCatalogReady
+    nonisolated static func sentryCatalogCovers(_ catalog: SentryModuleCatalog?, kernels: [String]) -> Bool {
+        guard let catalog, !kernels.isEmpty else { return false }
+        return kernels.allSatisfy { catalog.module(for: $0) != nil }
     }
 
     /// The guest scripts' directory (beside agentd), where the sentry's
