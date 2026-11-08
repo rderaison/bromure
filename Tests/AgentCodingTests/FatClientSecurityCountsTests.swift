@@ -377,9 +377,9 @@ struct FatClientSecurityCountsTests {
 
 
     /// The two fixes together: history fetched before the host restarted
-    /// (another run: its numbers say nothing now) and a repeat of one of
-    /// its rows since, under another id -- counted once, by the window.
-    @Test("after a host restart, a repeat under a new id replaces the copy fetched before")
+    /// (another run: its numbers say nothing now) and a repeat of one of its
+    /// rows since -- under the row's own id, stable across runs: counted once.
+    @Test("after a host restart, a repeat of a row replaces the copy fetched before")
     func restartRepeatAcrossRuns() {
         let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         func row(_ minutesAgo: Double, ck: String?, rid: UUID, sq: Int, n: Int = 1) -> [String: Any] {
@@ -390,12 +390,46 @@ struct FatClientSecurityCountsTests {
             return r
         }
         let client = SecurityTimeline(directory: nil)
-        client.applyHistory([row(60, ck: nil, rid: UUID(), sq: 0), row(3, ck: "swap|a", rid: UUID(), sq: 1, n: 2)],
+        let swap = UUID()
+        client.applyHistory([row(60, ck: nil, rid: UUID(), sq: 0), row(3, ck: "swap|a", rid: swap, sq: 1, n: 2)],
                             host: "h", epoch: "before")
-        // The restarted host: the swap repeated, under the id this run gave it.
-        client.applyMirror([row(0, ck: "swap|a", rid: UUID(), sq: 7, n: 3)], host: "h", oldestSeq: 0, epoch: "after")
+        // The restarted host: the swap repeated; the row kept its id, not its number.
+        client.applyMirror([row(0, ck: "swap|a", rid: swap, sq: 7, n: 3)], host: "h", oldestSeq: 0, epoch: "after")
         let rows = client.remote["h"] ?? []
         #expect(rows.filter { $0.coalesceKey == "swap|a" }.count == 1)
+        #expect(rows.first { $0.coalesceKey == "swap|a" }?.count == 3)
         #expect(rows.count == 2)
+    }
+
+    /// Finding: "New coalesced timeline row can erase an earlier distinct
+    /// decision". The host starts a new row for a key when the old one is
+    /// past its 500-row look-back (and out of the 750-row mirror): the
+    /// client inferred from the key and the time that the new row was the
+    /// old one again, and dropped the earlier decision the host still held.
+    /// A fetched row with an id is now only ever replaced by that id.
+    @Test("a new row for the same key never erases a fetched row with its own id")
+    func newRowKeepsEarlierDecision() {
+        let pid = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        var earlier = ev(4, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 2)
+        earlier.rowID = UUID()
+        var newRow = ev(0, engine: "Credential brokering", ck: "swap|a", pid: pid, count: 1)
+        newRow.rowID = UUID()                                   // a different row, within the window
+        let merged = SecurityTimeline.merged(history: [ev(100), earlier], mirror: [newRow])
+        #expect(Set(merged.map(\.stableID)) == [merged[0].stableID, earlier.stableID, newRow.stableID])
+        #expect(merged.count == 3)
+        // The same through the numbered path, and across a restart (unknown run).
+        func wire(_ e: SecurityTimeline.Event, sq: Int) -> [String: Any] {
+            var r: [String: Any] = ["engine": e.engine, "condition": e.condition, "decision": e.decision, "kind": "info",
+                                    "t": e.time.timeIntervalSince1970, "profileID": pid.uuidString,
+                                    "rid": e.stableID.uuidString, "sq": sq]
+            if let ck = e.coalesceKey { r["ck"] = ck }
+            return r
+        }
+        for epoch in ["run", "next run"] {
+            let client = SecurityTimeline(directory: nil)
+            client.applyHistory([wire(earlier, sq: 1)], host: "h", epoch: "run")
+            client.applyMirror([wire(newRow, sq: 900)], host: "h", oldestSeq: 0, epoch: epoch)
+            #expect(client.remote["h"]?.count == 2, "\(epoch)")
+        }
     }
 }

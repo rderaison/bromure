@@ -616,9 +616,9 @@ public final class SecurityTimeline {
             }
             return (kept + mirror).sorted { ($0.seq ?? -1, $0.time) < ($1.seq ?? -1, $1.time) }.suffix(cap).map { $0 }
         case .unknown:
-            // History from another run of the host (it restarted): a repeat
-            // since may carry another id than the copy fetched before.
-            let kept = notCarriedAgain(history, history: history, mirror: mirror, mirroredRows: mirroredRows)
+            // History from another run of the host (it restarted): its
+            // numbers can't be compared, its rows' ids can (stable across runs).
+            let kept = notCarriedAgain(history, mirror: mirror, mirroredRows: mirroredRows)
             return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
         }
     }
@@ -635,36 +635,40 @@ public final class SecurityTimeline {
         // that sends no ids: only a copy within the window of a mirrored
         // repeat is the same row.
         //
-        // A mirrored repeat whose id the history doesn't hold may be a row it
-        // holds under another id, or none: fetched from an older host (no
-        // ids), or before the host restarted (rows logged without ids got a
-        // new one each launch). Then the window decides, as with no ids -- the
-        // host folds a repeat into exactly such a row. A repeat whose id the
-        // history does hold is that row, so it never takes a distinct one
-        // with it (Finding: "Legacy timeline rows duplicate after a host
-        // restart and repeat").
+        // A fetched row with an id is the mirror's row only by that id: ids
+        // are stable across the host's restarts (a row logged without one gets
+        // one derived from it; Finding: "Legacy timeline rows duplicate after
+        // a host restart and repeat"). The window inferred it from a key and
+        // a time, and a new row the host started for the same key -- the old
+        // one past its 500-row look-back and out of the 750-row mirror --
+        // erased the earlier, distinct decision it still held (Finding: "New
+        // coalesced timeline row can erase an earlier distinct decision").
+        // Only a fetched row without an id (an older host) is matched by the
+        // window.
         // Older than the mirror, still held by the host (its cap prunes the
         // oldest), and not the row the mirror carries again.
         let candidates = history.filter { e in
             e.time < oldest && (oldestRetained.map { e.time >= $0 } ?? true)
         }
-        let kept = notCarriedAgain(candidates, history: history, mirror: mirror, mirroredRows: mirroredRows)
+        let kept = notCarriedAgain(candidates, mirror: mirror, mirroredRows: mirroredRows)
         return (kept + mirror).sorted { $0.time < $1.time }.suffix(cap).map { $0 }
     }
 
-    /// The `candidates` (from `history`) the mirror doesn't carry again: not
-    /// by id, nor -- for a mirrored repeat whose id the history doesn't
-    /// hold (no ids, or ids from another run of the host) -- by being within
-    /// the coalescing window before it.
-    private nonisolated static func notCarriedAgain(_ candidates: [Event], history: [Event], mirror: [Event],
+    /// The fetched `candidates` the mirror doesn't carry again: a row with an
+    /// id unless the mirror has that id; a row without one (an older host)
+    /// unless a mirrored repeat with its key follows it within the
+    /// coalescing window.
+    private nonisolated static func notCarriedAgain(_ candidates: [Event], mirror: [Event],
                                                     mirroredRows: Set<UUID>) -> [Event] {
-        let historyRows = Set(history.compactMap(\.rowID))
         var repeatTimes: [String: [Date]] = [:]
-        for e in mirror where e.rowID.map({ !historyRows.contains($0) }) ?? true {
+        for e in mirror {
             if let ck = e.coalesceKey { repeatTimes["\(e.profileID)|\(ck)", default: []].append(e.time) }
         }
         return candidates.filter { e in
-            if let rid = e.rowID, mirroredRows.contains(rid) { return false }
+            // Its own id: the same row only when the mirror carries that id.
+            if let rid = e.rowID { return !mirroredRows.contains(rid) }
+            // No id (an older host): a copy within the window of a mirrored
+            // repeat is that row.
             guard let ck = e.coalesceKey, let times = repeatTimes["\(e.profileID)|\(ck)"] else { return true }
             return !times.contains { $0 >= e.time && $0.timeIntervalSince(e.time) <= coalesceWindow }
         }
