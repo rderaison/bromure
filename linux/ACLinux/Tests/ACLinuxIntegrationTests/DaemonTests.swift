@@ -21,6 +21,8 @@ struct DaemonTests {
     /// A private XDG world for one daemon.
     struct World {
         let root: String
+        /// Set for one test's daemon and CLI (e.g. BROMURE_AC_HOME_GB).
+        var extraEnv: [String: String] = [:]
         var env: [String: String] {
             var e = ProcessInfo.processInfo.environment
             e["XDG_RUNTIME_DIR"] = root + "/run"
@@ -31,6 +33,7 @@ struct DaemonTests {
             e["BROMURE_AC_IMAGE"] = Env.image
             e["BROMURE_AGENTD"] = Env.agentd
             e.removeValue(forKey: "NOTIFY_SOCKET")
+            e.merge(extraEnv) { _, new in new }
             return e
         }
         var socket: String { root + "/run/bromure-ac/control.sock" }
@@ -217,7 +220,11 @@ struct DaemonTests {
 
     @Test("the home image: ext4 on vdb at /home/ubuntu; kept across kill/start; grows; gone with rm")
     func homeImage() async throws {
-        let w = try World()
+        // The daemon's setting pins a new home's size: without it, a new
+        // home is scaled to the free space where the VMs live (8/12/16 GB,
+        // HomeSizingTests), which depends on this host.
+        var w = try World()
+        w.extraEnv["BROMURE_AC_HOME_GB"] = "16"
         defer { try? FileManager.default.removeItem(atPath: w.root) }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
