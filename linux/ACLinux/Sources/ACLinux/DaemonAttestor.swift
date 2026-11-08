@@ -37,7 +37,7 @@ extension Daemon {
             let l = try VsockFDListener(udsPath: udsPath, port: BinaryIdentityService.vsockPort,
                                         fdStoreName: "attest-" + rec.shortId, stored: stored) { [weak bridge] fd in
                 guard let bridge else { close(fd); return }
-                bridge.admitHandshake(fd)
+                guard bridge.admitHandshake(fd) else { close(fd); return }
                 Thread.detachNewThread { bridge.handshakeAndServe(fd, connection: nil) }
             }
             bridge.listener = l
