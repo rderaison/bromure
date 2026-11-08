@@ -3,6 +3,7 @@ import CACLinuxShims
 import NIOCore
 import NIOConcurrencyHelpers
 import NIOSSL
+import SandboxEngine
 
 /// Where the daemon keeps things.
 // @port-skip linux-only: Linux daemon configuration (XDG layout)
@@ -235,6 +236,10 @@ public actor Daemon {
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
         await d.wireWatchdog()
+        // The shared code's secrets (the enrollment's token and leaf key)
+        // in this daemon's vault.
+        if BACSecretStore.backend == nil { BACSecretStore.backend = VaultSecretBackend() }
+        await d.wireCloudEnrollment()
         await d.installLiveModelRefresh()
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
@@ -425,6 +430,9 @@ public actor Daemon {
         case ("POST", "/account/sign-in"): return await accountSignIn(req.body)
         case ("POST", "/account/sign-out"): return await accountSignOut()
         case ("POST", "/account/sync"): return await accountSync()
+        case ("GET", "/cloud"): return cloudStatus()
+        case ("POST", "/cloud/enroll"): return await cloudEnroll(req.body)
+        case ("POST", "/cloud/unenroll"): return await cloudUnenroll()
         case ("POST", "/fatclient/forward"): return await fatclientForward(req.body)
         case ("POST", let p) where p.hasPrefix("/models/"): return modelAction(p, req.body)
         case ("POST", "/fatclient/browser-mcp"): return await fatclientBrowserMCP(req.body)

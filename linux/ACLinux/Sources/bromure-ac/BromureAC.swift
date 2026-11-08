@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Cloud.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -508,6 +508,91 @@ struct Account: AsyncParsableCommand {
         }
         defer { if quiet { tcsetattr(STDIN_FILENO, TCSANOW, &orig) } }
         return readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// `bromure-ac cloud`: this install's enrollment in a bromure.io workspace
+/// (the events and traces it uploads, over its mTLS leaf).
+// @port-skip linux-only: macOS has the same verbs as `bromure-ac enroll`, `unenroll`, `enrollment-status`
+struct Cloud: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "This install's enrollment in a bromure.io workspace (uploads over mTLS).",
+        subcommands: [Status.self, Enroll.self, Unenroll.self],
+        defaultSubcommand: Status.self)
+
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Print the enrollment state.")
+        @Flag(help: "JSON output.") var json = false
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let r = try client().request("GET", "/cloud")
+            try check(r, "status")
+            if json { print(r.json); return }
+            guard r.json["enrolled"] == .bool(true) else { print("not enrolled"); return }
+            let f = { (k: String) in r.json[k]?.stringValue ?? "?" }
+            print("""
+            Enrolled
+              workspace:  \(f("workspace"))
+              user:       \(f("user"))
+              install id: \(f("installId"))
+              device:     \(f("device"))
+              server:     \(f("server"))
+              enrolled:   \(f("enrolledAt"))
+              bearer:     \(f("bearer"))
+              leaf cert:  \(f("leafCert"))
+            """)
+        }
+    }
+
+    struct Enroll: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Enroll this install with a bromure.io workspace using an admin's 6-word code.",
+            discussion: "The code is read from the terminal without echo (or from stdin), so it stays out of your shell history.")
+        @Option(name: .long, help: "bromure.io API base URL. Defaults to BROMURE_MANAGED_URL or https://bromure.io/api.")
+        var serverURL: String?
+        @Option(name: .long, help: "Device name shown to admins. Defaults to the host name.")
+        var deviceName: String?
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let tty = isatty(STDIN_FILENO) == 1
+            if tty { FileHandle.standardError.write(Data("Enrollment code (6 dashed words): ".utf8)) }
+            guard let code = Account.readSecretLine(echo: !tty), !code.isEmpty else { throw ValidationError("No code given.") }
+            if tty { FileHandle.standardError.write(Data("\n".utf8)) }
+            var body: [String: JSONValue] = ["code": .string(code)]
+            if let serverURL { body["serverURL"] = .string(serverURL) }
+            if let deviceName { body["deviceName"] = .string(deviceName) }
+            let r = try client().request("POST", "/cloud/enroll", body: .object(body))
+            try check(r, "enroll")
+            let f = { (k: String) in r.json[k]?.stringValue ?? "?" }
+            print("""
+            Enrolled \(f("user")) at \(f("workspace"))
+            Install ID: \(f("installId"))
+            Server:     \(f("server"))
+            Device:     \(f("device"))
+            Leaf cert:  \(f("leafCert"))
+            """)
+        }
+    }
+
+    struct Unenroll: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Sign this install out of its bromure.io workspace.")
+        @Flag(name: .long, help: "Skip the confirmation prompt.") var force = false
+        // @port-skip linux-only: CLI
+        func run() async throws {
+            let c = try client()
+            let st = try c.request("GET", "/cloud")
+            guard st.json["enrolled"] == .bool(true) else {
+                FileHandle.standardError.write(Data("not enrolled — nothing to do\n".utf8)); return
+            }
+            if !force {
+                print("Sign out of \(st.json["workspace"]?.stringValue ?? "?") (\(st.json["user"]?.stringValue ?? "?"))? [y/N]: ", terminator: "")
+                let line = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                guard line == "y" || line == "yes" else { throw ValidationError("aborted") }
+            }
+            let r = try c.request("POST", "/cloud/unenroll")
+            try check(r, "unenroll")
+            print("signed out")
+        }
     }
 }
 
