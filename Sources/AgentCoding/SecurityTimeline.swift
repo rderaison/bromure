@@ -569,11 +569,12 @@ public final class SecurityTimeline {
         mirror.reserveCapacity(rows.count)
         for r in rows {
             let key = r as NSDictionary
-            if let e = known[key] ?? decoded[key] {
+            // A row seen twice in one mirror is two events: one id each.
+            if decoded[key] == nil, let e = known[key] {
                 decoded[key] = e
                 mirror.append(e)
             } else if let e = Self.events([r], host: host).first {
-                decoded[key] = e
+                if decoded[key] == nil { decoded[key] = e }
                 mirror.append(e)
             }
         }

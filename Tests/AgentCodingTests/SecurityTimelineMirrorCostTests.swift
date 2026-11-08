@@ -75,4 +75,15 @@ struct SecurityTimelineMirrorCostTests {
         #expect(client.remote["ark"]?.count == 3, "a clear doesn't keep the next mirror out")
         host.clear()
     }
+
+    @Test("two identical rows in one mirror are two events, each its own id")
+    func duplicateRows() {
+        let host = SecurityTimeline(directory: nil)
+        let r = rows(1, from: host)
+        let client = SecurityTimeline(directory: nil)
+        client.applyMirror(r + r, host: "ark")
+        let ids = client.remote["ark"]?.map(\.id) ?? []
+        #expect(Set(ids).count == ids.count)
+        host.clear()
+    }
 }
