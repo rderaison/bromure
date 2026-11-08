@@ -112,7 +112,7 @@ extension DaemonGlobalSuites {
                 var trace: RequestReader.Trace?
                 let p = await RequestReader.rewrite(Data(raw.utf8), proxy: proxy, profileID: pid, host: "api.openai.com", port: 443,
                                                     tls: true, session: proxy.strictSession(of: pid), trace: &trace)
-                guard case .forward(let out, _, _, _, _, _, _, _, _, let local, _) = p else { return nil }
+                guard case .forward(let out, _, _, _, _, _, _, _, _, let local, _, _) = p else { return nil }
                 return (local, String(decoding: out, as: UTF8.self))
             }
             let post = try #require(await plan("POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer cloud-standin\r\nContent-Length: 2\r\n\r\n{}"))

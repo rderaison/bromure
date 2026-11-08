@@ -3,8 +3,8 @@ import NIOConcurrencyHelpers
 import NIOCore
 import SandboxEngine
 
-/// Prompt injection and PII protection on a model provider's WebSocket
-/// (macOS: WSContentGuard, without Squelch, which Linux doesn't have yet).
+/// Squelch, prompt injection and PII protection on a model provider's
+/// WebSocket (macOS: WSContentGuard).
 /// Codex 0.157+ sends every turn as a `response.create` message on one
 /// socket: each client message is read like a Responses POST body and
 /// scanned as the HTTP path scans one. Log mode records; block refuses; ask
@@ -12,7 +12,6 @@ import SandboxEngine
 /// the block event instead (`response.failed` / `invalid_prompt` for a
 /// Responses turn). Then its personal data is swapped for stand-ins; the
 /// server side (WSServerSide) puts the real values back.
-// partial: no Squelch on Linux yet
 // @port-skip linux-only: WSContentGuard on the Linux proxy (its providers are the proxy's own)
 final class WSPromptGuard: @unchecked Sendable {
     enum Verdict {
@@ -25,13 +24,16 @@ final class WSPromptGuard: @unchecked Sendable {
     let proxy: MitmProxy
     let profileID: UUID
     let host: String
+    /// The agent's conversation (the upgrade's session key), for Squelch's ledger.
+    let conversation: String?
     private let vaultBox = NIOLockedValueBox<PIIVault?>(nil)
 
     // @port-skip linux-only: see WSPromptGuard
-    init(proxy: MitmProxy, profileID: UUID, host: String) {
+    init(proxy: MitmProxy, profileID: UUID, host: String, conversation: String? = nil) {
         self.proxy = proxy
         self.profileID = profileID
         self.host = host
+        self.conversation = conversation
     }
 
     /// The workspace's PII vault, opened at its first use: a socket PII
@@ -48,9 +50,11 @@ final class WSPromptGuard: @unchecked Sendable {
 
     /// The guard for an upgrade, or nil when the socket stays an opaque
     /// (compressed) pipe: not a model provider's (WSContentGuard
-    /// .isModelSocket), or neither prompt injection nor PII protection on.
-    // @port-skip linux-only: WSContentGuard.make, without Squelch
-    static func make(proxy: MitmProxy, profileID: UUID, host: String, local: Bool) -> WSPromptGuard? {
+    /// .isModelSocket), or none of Squelch, prompt injection or PII
+    /// protection on.
+    // @port-skip linux-only: WSContentGuard.make
+    static func make(proxy: MitmProxy, profileID: UUID, host: String, local: Bool,
+                     conversation: String? = nil) -> WSPromptGuard? {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this
         // machine (a custom server elsewhere): the conversation leaves it then.
@@ -59,9 +63,15 @@ final class WSPromptGuard: @unchecked Sendable {
         else { return nil }
         let piOn = proxy.promptInjectionPolicy(for: profileID)?.isActive ?? false
         let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false
-        guard piOn || piiOn else { return nil }
-        return WSPromptGuard(proxy: proxy, profileID: profileID, host: host)
+        let squelchOn = SquelchSettings.policy(for: profileID)?.enabled ?? false
+        guard piOn || piiOn || squelchOn else { return nil }
+        return WSPromptGuard(proxy: proxy, profileID: profileID, host: host, conversation: conversation)
     }
+
+    /// The model's messages teach Squelch the calls it makes (what a chained
+    /// turn's bare results are matched with), while Squelch is on.
+    // @port-skip linux-only: WSContentGuard.server's Squelch half
+    var squelchLearns: Bool { SquelchSettings.policy(for: profileID)?.enabled ?? false }
 
     /// Whether the model's messages are read to restore PII (macOS reads
     /// them whenever its guard exists, and restores once the vault holds
@@ -76,15 +86,24 @@ final class WSPromptGuard: @unchecked Sendable {
          restoresReplies ? "pii" : nil].compactMap { $0 }
     }
 
-    // @port-skip linux-only: WSContentGuard.client, without Squelch
+    // @port-skip linux-only: WSContentGuard.client
     func client(_ payload: Data) async -> Verdict {
         guard payload.first(where: { !WSMessages.isSpace($0) }) == UInt8(ascii: "{") else { return .forward(nil) }
         let pi = proxy.promptInjectionPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
         let pii = proxy.piiPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
-        guard pi != nil || pii != nil else { return .forward(nil) }
+        let squelchOn = SquelchSettings.policy(for: profileID)?.enabled ?? false
+        guard pi != nil || pii != nil || squelchOn else { return .forward(nil) }
         let type = WSMessages.messageType(payload)
         var payload = payload
         var redacted = false
+        // Squelch, before the scans: they read what the model will.
+        if squelchOn, SquelchRewriter.mayCarryToolOutput(payload) {
+            let pid = profileID
+            let o = SquelchRewriter.rewrite(payload, priorCall: { SquelchCallRegistry.shared.call(pid, $0) })
+            SquelchLedger.shared.record(o, profileID: profileID, conversation: conversation ?? o.conversation)
+            if o.body != payload { payload = o.body; redacted = true }
+        }
+        guard pi != nil || pii != nil else { return .forward(redacted ? payload : nil) }
         // Tool output the user already blocked goes out as a placeholder (the
         // conversation is resent every turn), so the session goes on.
         if let pi, pi.onDetection != .log,
@@ -293,6 +312,11 @@ final class WSServerSide: @unchecked Sendable {
     private let loop: EventLoop
     private let write: (Data) -> Void
     private let restorer: WSServerRestorer?
+    /// Each whole text message the model sends, for Squelch's call registry.
+    private let learn: ((Data) -> Void)?
+    /// Messages read whole (to restore PII, or to learn from them).
+    // @port-skip linux-only: see WSServerSide
+    private var wholeMessages: Bool { restorer != nil || learn != nil }
     private let reader = WSFrameReader()
     private var assembler = WSMessageAssembler()
     /// The header of the frame being read, while it's incomplete.
@@ -304,7 +328,7 @@ final class WSServerSide: @unchecked Sendable {
     /// Between two messages: an injected event may go out.
     // @port-skip linux-only: see WSServerSide
     private var atBoundary: Bool {
-        restorer != nil ? !passingThrough : !midMessage && payloadLeft == 0 && header.isEmpty
+        wholeMessages ? !passingThrough : !midMessage && payloadLeft == 0 && header.isEmpty
     }
     /// Restoring: a message too large to hold is going through fragment by
     /// fragment (no event may go inside it).
@@ -312,10 +336,12 @@ final class WSServerSide: @unchecked Sendable {
     private let pending = NIOLockedValueBox<[Data]>([])
 
     // @port-skip linux-only: see WSServerSide
-    init(loop: EventLoop, write: @escaping (Data) -> Void, restorer: WSServerRestorer? = nil) {
+    init(loop: EventLoop, write: @escaping (Data) -> Void, restorer: WSServerRestorer? = nil,
+         learn: ((Data) -> Void)? = nil) {
         self.loop = loop
         self.write = write
         self.restorer = restorer
+        self.learn = learn
     }
 
     /// The upstream's bytes in; what goes to the client out (the same bytes,
@@ -323,7 +349,7 @@ final class WSServerSide: @unchecked Sendable {
     /// continuation with no message under way, a new message inside one).
     // @port-skip linux-only: see WSServerSide
     func feed(_ bytes: Data) -> Data? {
-        if let restorer { return feedRestoring(bytes, restorer) }
+        if wholeMessages { return feedRestoring(bytes, restorer) }
         var out = Data()
         var i = bytes.startIndex
         while i < bytes.endIndex {
@@ -359,12 +385,12 @@ final class WSServerSide: @unchecked Sendable {
     /// one is held until its last fragment), so an injected event may go
     /// between any two of them.
     // @port-skip linux-only: see WSServerSide
-    private func feedRestoring(_ bytes: Data, _ restorer: WSServerRestorer) -> Data? {
+    private func feedRestoring(_ bytes: Data, _ restorer: WSServerRestorer?) -> Data? {
         reader.feed(bytes)
         var out = Data()
         while let f = reader.next() {
             if f.isControl {
-                if f.opcode == WSFrame.close, !passingThrough {
+                if f.opcode == WSFrame.close, !passingThrough, let restorer {
                     for p in restorer.finish() { out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false)) }
                 }
                 out.append(f.raw)
@@ -376,7 +402,8 @@ final class WSServerSide: @unchecked Sendable {
                 out.append(raw)
                 passingThrough = !f.fin
             case .complete(let op, let payload, let raw):
-                if f.rsv == 0, let restored = restorer.restore(payload) {
+                if op == WSFrame.text, f.rsv == 0 { learn?(payload) }
+                if f.rsv == 0, let restored = restorer?.restore(payload) {
                     for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
                 } else {
                     out.append(raw)

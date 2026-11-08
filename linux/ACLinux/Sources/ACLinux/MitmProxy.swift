@@ -939,7 +939,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
                      mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
                      supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil,
-                     local: Bool = false, wsPolicy: ProxyPolicy.WebSocketPolicy? = nil)
+                     local: Bool = false, wsPolicy: ProxyPolicy.WebSocketPolicy? = nil, squelchLearn: Bool = false)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -1139,7 +1139,20 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // and both legs carry plain frames (macOS: WSHandshake, then
         // WSTransformRelay). Otherwise the socket stays an opaque pipe.
         var ws: WSPromptGuard?
-        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local) {
+        let wsConversation = upgrade ? SquelchRewriter.sessionKey(
+            headers: String(decoding: req.prefix(16 << 10), as: UTF8.self)) : nil
+        // Squelch on the policy pump too: client text trimmed ahead of the
+        // OpenShell rewrites, the model's messages read for the calls a
+        // chained turn's bare results are matched with (macOS: squelchOnPump).
+        var squelchLearnOnPump = false
+        if wsPolicy != nil, squelchApplies(host: host, profileID: profileID, local: local) {
+            let then = wsPolicy?.messageTransform
+            wsPolicy?.messageTransform = squelchingTransform(then: then, profileID: profileID,
+                                                             conversation: wsConversation)
+            squelchLearnOnPump = true
+        }
+        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local,
+                                                                 conversation: wsConversation) {
             ws = g
             req = WSHandshake.strippingExtensions(req).request
         }
@@ -1161,7 +1174,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             out = MitmProxy.engineAuth(out, profileID: profileID)
         }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
-                        supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy)
+                        supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy,
+                        squelchLearn: squelchLearnOnPump)
 
     }
 
@@ -1180,7 +1194,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
         case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial, let local,
-                      let wsPolicy):
+                      let wsPolicy, let squelchLearn):
             // Where it's dialed: the guest's destination, or Depi (TLS, its
             // own name: nothing the guest pinned) for a re-routed request.
             proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
@@ -1198,6 +1212,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                               capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
                                               mint: mint.map { (self.proxy.credentialMinter, $0) }, strictSession: session,
                                               ws: ws, pii: pii, supplyChain: supplyChain,
+                                              squelchLearnFor: squelchLearn ? self.profileID : nil,
                                               // An HTTP/1.0 guest gets a restored body up to the close, not chunks.
                                               guestHTTP11: !Self.isHTTP10(req))
                     relay.onUpstreamWritable = { [weak self] in self?.readGuestIfAllowed(channel) }
@@ -1409,6 +1424,9 @@ final class ResponseRelay: ChannelInboundHandler {
     /// The upgrade's prompt-injection guard (nil: an opaque pipe).
     private let ws: WSPromptGuard?
     private var wsServer: WSServerSide?
+    /// A socket on the OpenShell policy pump with Squelch on: the model's
+    /// messages read for its call registry (macOS: squelchLearnFor).
+    private let squelchLearnFor: UUID?
     /// The reply PII protection restores (its stand-ins put back), if any.
     private let pii: PIIRelay?
     /// A package fetch's reply the supply-chain policy rewrites, read whole.
@@ -1567,7 +1585,9 @@ final class ResponseRelay: ChannelInboundHandler {
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
          host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0,
          ws: WSPromptGuard? = nil, pii: PIIVault? = nil, supplyChain: SupplyChainRewrite? = nil,
+         squelchLearnFor: UUID? = nil,
          guestHTTP11: Bool = true, budget: SupplyChainBudget? = nil) {
+        self.squelchLearnFor = squelchLearnFor
         self.guest = guest
         self.budget = budget ?? proxy?.supplyChainBudget ?? Self.supplyChainBudget
         self.supplyChain = supplyChain
@@ -1693,13 +1713,24 @@ final class ResponseRelay: ChannelInboundHandler {
                                                   reason: "WebSocket extension \(ext) in use", profileID: ws.profileID)
                 } else {
                     let guest = self.guest
+                    let pid = ws.profileID
                     let server = WSServerSide(loop: context.eventLoop,
                                               write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
-                                              restorer: ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil)
+                                              restorer: ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil,
+                                              learn: ws.squelchLearns ? { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) } : nil)
                     wsServer = server
                     guard let read = server.feed(rest) else { context.close(promise: nil); return }
                     early = read
                 }
+            }
+            if ws == nil, let pid = squelchLearnFor, WSHandshake.extensions(inResponse: head0) == nil {
+                let guest = self.guest
+                let server = WSServerSide(loop: context.eventLoop,
+                                          write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
+                                          learn: { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) })
+                wsServer = server
+                guard let read = server.feed(rest) else { context.close(promise: nil); return }
+                early = read
             }
             onSwitched?(true, wsServer)
             out = head0 + early

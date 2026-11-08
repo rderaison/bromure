@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 
 // Squelch on a Linux server (macOS: the profiles' didSet, wireSquelch's
 // ledger refresh, quit's flush): command-output noise cut from what the
@@ -30,6 +31,42 @@ extension Daemon {
 }
 
 extension RequestReader {
+    /// Squelch is on for this socket: a model provider's (as WSPromptGuard
+    /// reads them), with the workspace's Squelch on (macOS:
+    /// WSContentGuard.squelchApplies).
+    // @port-skip linux-only: WSContentGuard.squelchApplies over the Linux proxy's model-socket rule
+    static func squelchApplies(host: String, profileID: UUID, local: Bool) -> Bool {
+        let h = host.lowercased()
+        return TraceLevel.isAIHost(h) && !h.contains("huggingface.co")
+            && (!local || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil)
+            && SquelchSettings.policy(for: profileID)?.enabled == true
+    }
+
+    /// Squelch as an OpenShell message transform, for a socket on the
+    /// per-message pump (a policy or rewrite is installed, so there is no
+    /// guard): client text is trimmed first, then `then` runs on it (macOS:
+    /// WSContentGuard.squelchingTransform).
+    // @port-skip linux-only: WSContentGuard.squelchingTransform, over SquelchSettings
+    static func squelchingTransform(then: ((String) -> OpenShellWebSocket.MessageTransform)?, profileID: UUID,
+                                    conversation: String?) -> (String) -> OpenShellWebSocket.MessageTransform {
+        { text in
+            var current = text
+            var changed = false
+            let data = Data(text.utf8)
+            if SquelchSettings.policy(for: profileID)?.enabled == true, SquelchRewriter.mayCarryToolOutput(data) {
+                let o = SquelchRewriter.rewrite(data, priorCall: { SquelchCallRegistry.shared.call(profileID, $0) })
+                SquelchLedger.shared.record(o, profileID: profileID, conversation: conversation ?? o.conversation)
+                if o.body != data { current = String(decoding: o.body, as: UTF8.self); changed = true }
+            }
+            switch then?(current) ?? .unchanged {
+            case .unchanged: break
+            case .replaced(let t): current = t; changed = true
+            case .failed(let why, let failOpen): return .failed(why, failOpen: failOpen)
+            }
+            return changed ? .replaced(current) : .unchanged
+        }
+    }
+
     /// Squelch on an AI host's request (macOS: driveTLS's Squelch step,
     /// after prompt injection's decoding and before PII): the noise in the
     /// command output the conversation carries is cut before the model
