@@ -837,6 +837,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     private var upgraded = false
     /// A guarded WebSocket's client → model direction (WebSocketGuardLinux.swift).
     private var wsFilter: WSClientFilter?
+    /// An OpenShell WebSocket route's gate on the guest's frames, once
+    /// switched (ProxyPolicy.webSocketPlan): what it lets through goes
+    /// upstream; a denied message ends the session with a 1008 close.
+    private var wsGate: OpenShellWebSocket.ClientStream?
     /// The filter's say on reading the guest: false while it holds too much.
     private var filterWantsGuest = true
     static let maxHeld = 1 << 20
@@ -858,6 +862,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var b = unwrapInboundIn(data)
         if started {
             if upgraded, let upstream {
+                if wsGate != nil {
+                    gateToUpstream(Data(b.readableBytesView), guest: context.channel, upstream: upstream)
+                    return
+                }
                 if let wsFilter {
                     wsFilter.feed(Data(b.readableBytesView))
                     if !upstream.isWritable { _ = context.channel.setOption(ChannelOptions.autoRead, value: false) }
@@ -924,7 +932,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
                      mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
                      supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil,
-                     local: Bool = false)
+                     local: Bool = false, wsPolicy: ProxyPolicy.WebSocketPolicy? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -1095,12 +1103,33 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if capture == nil, tracedBodies || pii.vault != nil || UnmanagedCredentialGuard.shared.isEnabled(for: profileID) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
+        // An OpenShell `protocol: websocket` route (macOS: driveTLS's
+        // upgrade path, ProxyPolicy.webSocketPlan): each client text message
+        // is judged (for the flow's program) and rewritten before it's
+        // forwarded, and permessage-deflate is offered upstream only without
+        // client context takeover. Its per-message gate takes precedence
+        // over the content scan below: policy enforcement is never traded
+        // for scanning.
+        var wsPolicy: ProxyPolicy.WebSocketPolicy?
+        if upgrade {
+            switch ProxyPolicy.webSocketPlan(req, policy: proxy.guardrailsConfig(for: profileID)?.egressPolicy,
+                                             entries: proxy.swapper.entries(for: profileID), host: host, port: port,
+                                             reqPath: path, identity: identity) {
+            case .reject(let status, let error, let detail):
+                return .answer(ProxyPolicy.beforePolicyAnswer(status: status, error: error, detail: detail,
+                                                              host: host, port: port, profileID: profileID,
+                                                              scheme: tls ? "https" : "http"))
+            case .go(let plan):
+                req = plan.request
+                if plan.messagePolicy != nil || plan.messageTransform != nil { wsPolicy = plan }
+            }
+        }
         // A model provider's WebSocket with prompt injection on: its frames are
         // read (WSClientFilter), so the upgrade declines permessage-deflate
         // and both legs carry plain frames (macOS: WSHandshake, then
         // WSTransformRelay). Otherwise the socket stays an opaque pipe.
         var ws: WSPromptGuard?
-        if upgrade, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local) {
+        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local) {
             ws = g
             req = WSHandshake.strippingExtensions(req).request
         }
@@ -1122,7 +1151,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             out = MitmProxy.engineAuth(out, profileID: profileID)
         }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
-                        supplyChain: supplyChain, dial: dial, local: local && dial == nil)
+                        supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy)
 
     }
 
@@ -1140,7 +1169,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial, let local):
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial, let local,
+                      let wsPolicy):
             // Where it's dialed: the guest's destination, or Depi (TLS, its
             // own name: nothing the guest pinned) for a re-routed request.
             proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
@@ -1162,13 +1192,31 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                               guestHTTP11: !Self.isHTTP10(req))
                     relay.onUpstreamWritable = { [weak self] in self?.readGuestIfAllowed(channel) }
                     // The upgrade's held bytes follow the 101; anything else's are dropped.
-                    relay.onSwitched = { [weak self] switched, server in
+                    relay.onSwitched = { [weak self, weak relay] switched, server in
+                        let responseHead = relay?.upgradeResponseHead ?? Data()
                         channel.eventLoop.execute {
                             guard let self else { return }
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
-                                if let ws, let server {
+                                if let wsPolicy, let messagePolicy = wsPolicy.messagePolicy {
+                                    // OpenShell's per-message gate on the
+                                    // guest's frames (macOS: the pump's
+                                    // ClientStream gate); the upstream's pass.
+                                    let onViolation = ProxyPolicy.webSocketViolation(
+                                        profileID: self.profileID, host: host, port: port, path: Self.requestTarget(req),
+                                        scheme: tls ? "wss" : "ws")
+                                    let compression = OpenShellWebSocket.negotiatedCompression(
+                                        responseHeader: String(decoding: responseHead, as: UTF8.self))
+                                    self.wsGate = OpenShellWebSocket.ClientStream(compression: compression, decide: { text in
+                                        let v = messagePolicy(text)
+                                        if case .deny(let why) = v { onViolation(why, true) }
+                                        return v
+                                    }, onAudit: { onViolation($0, false) }, transform: wsPolicy.messageTransform)
+                                    var held = Data()
+                                    for p in self.pending { held.append(contentsOf: p.readableBytesView) }
+                                    if !held.isEmpty { self.gateToUpstream(held, guest: channel, upstream: up) }
+                                } else if let ws, let server {
                                     // The guest's frames go through the scan;
                                     // its reads pause while too much is held.
                                     self.wsFilter = WSClientFilter(
@@ -1206,6 +1254,32 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 }
             }
         }
+    }
+
+    /// The guest's bytes on a gated WebSocket (macOS: pumpDirection's gate):
+    /// forwarded as far as the gate allows; a stop tells the guest why
+    /// (1008), then ends the session both ways.
+    // @port-skip linux-only: the client → upstream half of macOS's WebSocket pump, on NIO
+    private func gateToUpstream(_ bytes: Data, guest: Channel, upstream: Channel) {
+        guard let gate = wsGate else { return }
+        let (forward, stop) = gate.feed(bytes)
+        if !forward.isEmpty { upstream.write(upstream.allocator.buffer(bytes: forward), promise: nil) }
+        upstream.flush()
+        if stop {
+            let close = OpenShellWebSocket.policyCloseFrame(
+                reason: gate.closeReason ?? "Bromure: client message not permitted by policy")
+            guest.writeAndFlush(guest.allocator.buffer(bytes: close)).whenComplete { _ in guest.close(promise: nil) }
+            upstream.close(promise: nil)
+            return
+        }
+        if !upstream.isWritable { _ = guest.setOption(ChannelOptions.autoRead, value: false) }
+    }
+
+    /// The request-target of a request's first line ("/" when it has none).
+    // @port-skip linux-only: the Linux proxy's request-line read
+    static func requestTarget(_ req: Data) -> String {
+        let line = req.prefix { $0 != 13 && $0 != 10 }.split(separator: 32)
+        return line.count > 1 ? String(decoding: line[1], as: UTF8.self) : "/"
     }
 
     /// The upstream of an upgraded stream, for tests (on the loop).
@@ -1313,6 +1387,9 @@ final class ResponseRelay: ChannelInboundHandler {
     /// An upgrade's reply: whether it switched protocols (a 101), and the
     /// server side of a guarded WebSocket when its frames are read.
     var onSwitched: ((Bool, WSServerSide?) -> Void)?
+    /// A switched upgrade's response head (its negotiated extensions), set
+    /// before onSwitched.
+    private(set) var upgradeResponseHead: Data?
     /// The upstream drained: the guest may be read again, if nothing else
     /// holds it (RequestReader.readGuestIfAllowed).
     var onUpstreamWritable: (() -> Void)?
@@ -1592,6 +1669,7 @@ final class ResponseRelay: ChannelInboundHandler {
         if upgrade, Self.status(head0) == 101 {
             // Switched: the head as it is, then the stream both ways.
             noteStatus(head0)
+            upgradeResponseHead = head0
             var early = rest
             if let ws {
                 if let ext = WSHandshake.extensions(inResponse: head0) {
