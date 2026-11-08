@@ -53,10 +53,15 @@ struct StrictSandboxVsockTests {
             m._vsock_connect = fake_connect
             RELAY = tempfile.mktemp(prefix="bvr", dir="/tmp")
             threading.Thread(target=m.vsock_relay_service, args=(RELAY,), daemon=True).start()
-            for _ in range(100):
-                if os.path.exists(RELAY):
+            # Listening, not just bound: under a loaded parallel run the relay's
+            # thread can take seconds to get there.
+            for _ in range(1000):
+                try:
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    probe.connect(RELAY); probe.close()
                     break
-                time.sleep(0.02)
+                except OSError:
+                    probe.close(); time.sleep(0.02)
             def ask(header, payload=b""):
                 c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(10)
                 c.connect(RELAY); c.sendall(header + payload)
