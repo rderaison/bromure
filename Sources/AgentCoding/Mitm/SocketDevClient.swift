@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Thin client for socket.dev's REST API. Looks up package issues
 /// keyed by (ecosystem, package, version) and reports two distinct

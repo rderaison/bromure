@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Thin client for `api.osv.dev/v1/query`. One POST per
 /// (ecosystem, package, version); results cached in-memory keyed by

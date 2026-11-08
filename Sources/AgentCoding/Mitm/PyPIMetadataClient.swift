@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// On-demand lookup of a PyPI release's publish time, used as the
 /// artifact-fetch age-gate backstop for pip.
