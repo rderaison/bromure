@@ -185,6 +185,16 @@ final class DelegationEngine {
         pendingRemoteDir[delegationID] = nil
         return pendingRemoteFiles.removeValue(forKey: delegationID) ?? []
     }
+
+    /// A batch no message will carry (the request was cancelled, the answer
+    /// refused before it was posted): its folder goes.
+    private func dropRemoteBatch(_ delegationID: UUID) async {
+        let dir = pendingRemoteDir[delegationID]
+        _ = takeRemoteBatch(delegationID)
+        guard let dir, let d = store.delegation(delegationID),
+              let peer = sessions.session(d.childSessionID) else { return }
+        await discardCopies([(peer.profileID, [dir])])
+    }
     /// Files a remote peer attached, once copied onto the local parent's
     /// machine: message id → local paths (the record's paths are the far
     /// host's).
@@ -827,11 +837,12 @@ final class DelegationEngine {
             guard let ask = body["ask_id"] as? String, let text = body["text"] as? String else {
                 throw DelegationRefusal("ask_id and text are required")
             }
-            let landed = takeRemoteBatch(d.id)
             let mine = store.delegations(parent: parentID)
             guard let (dd, askMsg) = store.message(matching: ask, in: mine), askMsg.kind == .ask, dd.id == d.id else {
+                await dropRemoteBatch(d.id)
                 throw DelegationRefusal("No question “\(ask)” waiting for you.")
             }
+            let landed = takeRemoteBatch(d.id)
             try await post(d.id, from: .parent, kind: .answer, text: text, answering: askMsg.id, landed: landed)
         case "steer":
             guard let text = body["text"] as? String else { throw DelegationRefusal("text is required") }
@@ -842,7 +853,7 @@ final class DelegationEngine {
                             verdict: body["verdict"] as? String ?? "accepted", note: body["note"] as? String)
         case "cancel":
             try await cancel(from: parentID, delegationKey: key, reason: body["reason"] as? String ?? "")
-            _ = takeRemoteBatch(d.id)
+            await dropRemoteBatch(d.id)
         case "read":
             let ids = ((body["ids"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
                 .filter { id in d.messages.contains { $0.id == id && $0.to == .parent } }
