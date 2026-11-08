@@ -762,24 +762,43 @@ final class LinuxKubeHost: KubeEngineHost {
     }
 
     /// The cluster's Bromure load balancer: on a single-user server
-    /// KubeLoadBalancer as macOS's (host listeners on 0.0.0.0); on a shared
-    /// one no host ports at all (the user's decision): every LoadBalancer
-    /// Service stays pending, saying it needs a LAN address pool.
-    // partial: no LAN address pools yet (no announcer on Linux): pool Services stay pending
+    /// KubeLoadBalancer as macOS's (host listeners on 0.0.0.0), its LAN
+    /// pool answered by the LAN helper (bromure-lan.service, macOS: the
+    /// announcer) inside the admin's grant to this user; on a shared one no
+    /// host ports at all (the user's decision): every LoadBalancer Service
+    /// without a granted LAN address stays pending, saying so.
     // @port-skip linux-only: ACAppDelegate.makeKubeLoadBalancer's Linux counterpart
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
                               serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? {
-        if daemon?.config.multiUser == true {
-            // Only the admin's grant for this user; the cluster's lanPool,
-            // when set, narrows it. No grant: pending, saying so.
-            let grant = (try? LANPoolsFile.load())?.addresses(ofUID: getuid()) ?? []
-            let mine = pool.isEmpty ? grant.sorted() : pool.filter { grant.contains($0) }
-            guard !mine.isEmpty else { return SharedServerLoadBalancer() }
+        let multiUser = daemon?.config.multiUser == true
+        let grant = (try? LANPoolsFile.load())?.addresses(ofUID: getuid()) ?? []
+        let lanPool = Self.lanPool(cluster: pool, grant: grant, multiUser: multiUser,
+                                   helperRunning: FileManager.default.fileExists(atPath: LANHelper.defaultSocket))
+        if multiUser {
+            guard let lanPool else { return SharedServerLoadBalancer() }
             return KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
-                                    serverIP: serverIP, hostIP: nil, pool: mine, lan: lanClient)
+                                    serverIP: serverIP, hostIP: nil, pool: lanPool, lan: lanClient)
         }
         return KubeLoadBalancer(engine: engine, clusterID: clusterID, serverNodeID: serverNodeID,
-                                serverIP: serverIP, hostIP: hostIP, pool: pool, lan: nil)
+                                serverIP: serverIP, hostIP: hostIP, pool: lanPool ?? pool, lan: lanPool == nil ? nil : lanClient)
+    }
+
+    /// The LAN addresses the cluster's Services may take through the LAN
+    /// helper, or nil (none: no helper, or no grant). Shared server: the
+    /// admin's grant to this user, which the cluster's lanPool, when set,
+    /// narrows. Single-user server: the cluster's lanPool, within the
+    /// grant, once the helper runs (it publishes only inside a grant);
+    /// without one the pool's Services stay pending, as macOS's without an
+    /// announcer.
+    // @port-skip linux-only: the LAN helper's share of makeKubeLoadBalancer
+    nonisolated static func lanPool(cluster pool: [UInt32], grant: Set<UInt32>, multiUser: Bool, helperRunning: Bool) -> [UInt32]? {
+        if multiUser {
+            let mine = pool.isEmpty ? grant.sorted() : pool.filter { grant.contains($0) }
+            return mine.isEmpty ? nil : mine
+        }
+        guard helperRunning, !pool.isEmpty else { return nil }
+        let mine = pool.filter { grant.contains($0) }
+        return mine.isEmpty ? nil : mine
     }
 
     // @port-skip linux-only: the resource bundle's script (macOS: ACAppDelegate's lazy kubeNodeScriptURL)

@@ -852,10 +852,19 @@ struct Admin: AsyncParsableCommand {
         @Argument(help: "Account name.") var user: String
         @Argument(help: "The range.") var range: String
         @Option(help: "The LAN interface for every pool (default: the default route's).") var interface: String?
+        @Flag(name: .customLong("single-user"),
+              help: "The account runs its own single-user daemon (not a Bromure user of this server): its clusters' LAN pools go through the same helper.")
+        var singleUser = false
         // @port-skip linux-only: admin CLI
         func run() async throws {
             guard geteuid() == 0 else { throw ValidationError("admin pool needs root") }
-            guard MultiUserAdmin.users().contains(user) else { throw ValidationError("\(user) isn't a Bromure user (bromure-ac admin add)") }
+            if singleUser {
+                guard getpwnam(user) != nil else { throw ValidationError("there's no account \(user)") }
+            } else {
+                guard MultiUserAdmin.users().contains(user) else {
+                    throw ValidationError("\(user) isn't a Bromure user (bromure-ac admin add; --single-user for an account running its own daemon)")
+                }
+            }
             var file = try LANPoolsFile.load(requireInterface: interface == nil)
             if let interface {
                 guard LANRoute.validInterfaceName(interface) else { throw ValidationError("'\(interface)' isn't an interface name") }
