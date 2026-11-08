@@ -33,3 +33,13 @@ public enum GuestMetaPaths {
     /// The Switchboard's MCP config, for Claude's --mcp-config.
     public static let switchboardMCPConfigGuestPath = "/mnt/bromure-meta/bromure-switchboard-mcp.json"
 }
+
+/// Folders of the outbox share (/mnt/bromure-outbox) the host makes for
+/// what may write there under an OpenShell sandbox; SessionDisk carries the
+/// same names (its comments say more).
+public enum GuestOutboxPaths {
+    /// The URL relay's requests (`urls/url-*.txt`).
+    public static let urlRelayFolder = "urls"
+    /// The agents' hooks' reports (tab status, tool calls).
+    public static let agentFolder = "agent"
+}

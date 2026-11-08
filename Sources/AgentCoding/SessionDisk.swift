@@ -460,13 +460,13 @@ public final class SessionDisk {
     /// the host polls + relays to NSWorkspace.
     public private(set) var outboxDirectory: URL?
     /// The outbox's folder for URL relay requests (`urls/url-*.txt`).
-    public static let outboxURLRelayFolder = "urls"
+    public static let outboxURLRelayFolder = GuestOutboxPaths.urlRelayFolder
     /// The outbox's folder for the agents' hooks (agent-status.sh): tab
     /// status (`agent-status-<win>.txt`), tool-call lineage
     /// (`agent-tool-<win>.jsonl`) and its own owed-note marks. The hooks run
     /// inside the OpenShell sandbox when one is on, which may write here
     /// (bromure-sandboxd) and nowhere else in the outbox.
-    public static let outboxAgentFolder = "agent"
+    public static let outboxAgentFolder = GuestOutboxPaths.agentFolder
 
     /// True if `ensureDiskExists()` had to clonefile() a fresh disk on the
     /// most recent call. Caller uses this to stamp the profile with the
