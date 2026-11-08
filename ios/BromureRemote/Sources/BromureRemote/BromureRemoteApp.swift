@@ -67,6 +67,10 @@ struct RootView: View {
     @State private var directory: RemoteConnectModel
     /// The host currently being mirrored (saved OR a resolved peer).
     @State private var activeHost: RemoteHost?
+    /// What's open on the active server — a session, room, machine or board —
+    /// shared by the iPhone stack and the iPad split view so an iPhone Duo
+    /// folding or unfolding (which swaps one for the other) keeps your place.
+    @State private var hostFocus: PadSelection?
     /// One RemoteHostController per host, reused while the host is open (across
     /// pushes into its terminals/grid) and torn down the instant the host is
     /// left. Held in a reference type so get-or-create can run during view body
@@ -192,6 +196,7 @@ struct RootView: View {
         // stale cached one (the "stalls until I kill the app" bug, plus the flaky
         // tab commands that a degraded reused connection intermittently dropped).
         .onChange(of: activeHost) { old, new in
+            if old?.id != new?.id { hostFocus = nil }
             if let old, old.id != new?.id { controllers.leave(old) }
         }
         // A tapped notification asks to open the server that's waiting; connect
@@ -255,7 +260,8 @@ struct RootView: View {
                 bootList
                     .navigationDestination(item: $activeHost) { host in
                         HostMirrorScreen(controller: controllers.controller(for: host),
-                                         host: host, openWorkspace: pendingWorkspace).id(host.id)
+                                         host: host, openWorkspace: pendingWorkspace,
+                                         focus: $hostFocus).id(host.id)
                     }
             }
         } else if let host = activeHost {
@@ -266,7 +272,8 @@ struct RootView: View {
             PadHostMirror(controller: controllers.controller(for: host),
                           host: host,
                           openWorkspace: pendingWorkspace,
-                          onClose: { activeHost = nil })
+                          onClose: { activeHost = nil },
+                          selection: $hostFocus)
                 .id(host.id)
         } else {
             // iPad, nothing open: the boot screen (hero or server picker) owns

@@ -30,8 +30,10 @@ struct PadHostMirror: View {
     let openWorkspace: WorkspaceDeepLink?
     /// Back to the server list (the sidebar's "Servers" button).
     let onClose: () -> Void
-
-    @State private var selection: PadSelection?
+    /// What the detail column shows. Owned by RootView and shared with the
+    /// iPhone layout, so an iPhone Duo unfolding (compact → regular) opens
+    /// on what the folded phone was showing, and folding goes back to it.
+    @Binding var selection: PadSelection?
     @State private var workspaceEdit: WorkspaceEdit?
     @State private var didDeepLink = false
     /// The tmux window a deep-linked workspace should open on (cleared after

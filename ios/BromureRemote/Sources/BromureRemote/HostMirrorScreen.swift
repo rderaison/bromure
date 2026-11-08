@@ -40,15 +40,43 @@ struct HostMirrorScreen: View {
     @State private var newSessionRoom: UUID?
     @State private var newSession = false
     @State private var pendingSessionID: UUID?
+    /// What's open on this server, shared with the iPad layout (RootView
+    /// owns it): an iPhone Duo folding or unfolding swaps this screen for
+    /// PadHostMirror and back, and the session, room or machine on screen
+    /// must survive the swap.
+    @Binding private var focus: PadSelection?
+    @State private var didRestoreFocus = false
     #if DEBUG
     @State private var didDebugRoute = false
     #endif
 
     init(controller: RemoteHostController, host: RemoteHost,
-         openWorkspace: WorkspaceDeepLink? = nil) {
+         openWorkspace: WorkspaceDeepLink? = nil,
+         focus: Binding<PadSelection?> = .constant(nil)) {
         self.controller = controller
         self.host = host
+        self._focus = focus
         self.openWorkspace = openWorkspace
+    }
+
+    /// Coming from the iPad layout (an unfolded iPhone Duo just folded):
+    /// reopen what it showed. Once — afterwards this stack is the truth.
+    private func restoreFocus() {
+        guard !didRestoreFocus else { return }
+        didRestoreFocus = true
+        switch focus {
+        case .session(let id): openSessionID = id
+        case .room(let id): openRoomID = id
+        case .workspace(let pid): deepWorkspace = WorkspaceDeepLink(profileID: pid, window: nil)
+        default: break
+        }
+    }
+
+    /// What was just opened. Going back home doesn't clear it: an unfold
+    /// then shows the last thing open, much as the iPad opens on a session.
+    private func publishFocus(_ f: PadSelection) {
+        guard didRestoreFocus else { return }
+        focus = f
     }
 
     /// Push the deep-linked workspace the moment the mirror knows it exists
@@ -131,7 +159,19 @@ struct HostMirrorScreen: View {
             // when the mirror is finally popped.
             controller.start()
             AppBadge.set(waitingAgents.count)
+            restoreFocus()
             tryDeepLink()
+        }
+        // Keep the shared focus in step with what this stack opens. Only
+        // openings: a fold to the iPad layout tears this stack down, popping
+        // its destinations to nil one by one, and publishing those pops would
+        // walk the focus back to nothing before the iPad reads it.
+        .onChange(of: openSessionID) { _, id in if let id { publishFocus(.session(id)) } }
+        .onChange(of: openRoomID) { _, id in
+            if let id, openSessionID == nil { publishFocus(.room(id)) }
+        }
+        .onChange(of: deepWorkspace) { _, link in
+            if let link, openSessionID == nil, openRoomID == nil { publishFocus(.workspace(link.profileID)) }
         }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { _, count in AppBadge.set(count) }
