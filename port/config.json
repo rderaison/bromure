@@ -198,6 +198,7 @@
     "Sources/AgentCoding/PlanStreamProtocol.swift",
     "Sources/AgentCoding/PlatformCompat.swift",
     "Sources/AgentCoding/PolicyHistory.swift",
+    "Sources/AgentCoding/PolicyNotes.swift",
     "Sources/AgentCoding/PolicySteering.swift",
     "Sources/AgentCoding/Profile.swift",
     "Sources/AgentCoding/ProfileDocument.swift",
