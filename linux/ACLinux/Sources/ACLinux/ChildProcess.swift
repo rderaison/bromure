@@ -202,8 +202,17 @@ final class ChildProcess: Sendable {
         }
         return await withCheckedContinuation { cont in
             pending.withLockedValue { $0 = cont }
-            Task { let st = await self.waitForExit(); take()?.resume(returning: st) }
-            Task { try? await Task.sleep(for: timeout); take()?.resume(returning: self.exitStatus) }
+            // The timer holds the process weakly and is cancelled when the
+            // exit wins: it never keeps it alive to its deadline.
+            let timer = Task { [weak self] in
+                try? await Task.sleep(for: timeout)
+                take()?.resume(returning: self?.exitStatus)
+            }
+            Task {
+                let st = await self.waitForExit()
+                take()?.resume(returning: st)
+                timer.cancel()
+            }
         }
     }
 
@@ -269,9 +278,10 @@ final class ChildProcess: Sendable {
             if n > 0 { out.append(contentsOf: buf[0..<n]) } else if n < 0 && errno == EINTR { continue } else { break }
         }
         close(outP[0])
-        if timedOut { p.signal(SIGKILL) }
+        var killed = false
+        if timedOut { p.signal(SIGKILL); killed = true }
         while p.exitStatus == nil {
-            if Date() >= deadline { p.signal(SIGKILL) }
+            if !killed, Date() >= deadline { p.signal(SIGKILL); killed = true }   // once
             usleep(1000)
         }
         if timedOut { throw MachineError.toolFailed(p.name, -1, "no end of output within \(Int(timeout)) s: killed") }
