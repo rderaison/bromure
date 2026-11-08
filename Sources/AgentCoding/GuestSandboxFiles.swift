@@ -9,6 +9,16 @@ import SandboxEngine
 // files; each brings its own kernel modules (`stageSentryModules`).
 
 extension SessionDisk {
+    /// The strict sandbox's root attestor and (runtime-only) privilege
+    /// revocation, shipped beside agentd.
+    static let strictGuestFiles = ["bromure-attestd.py", "bromure-strict.py"]
+    /// attestd's `sandbox_status` module, beside agentd.
+    static let sandboxStatusModule = "bromure_sandbox_status.py"
+    /// An active spec's guest side, beside agentd: the root launcher +
+    /// supervisor, the kernel sentry loader and their Python modules.
+    static let specGuestFiles = ["bromure-sandboxd", "bromure-sentryd", "bromure_openshell.py",
+                                 "bromure_idmap.py", sandboxStatusModule]
+
     /// Resolved set of (host folder URL, guest mount basename) pairs for
     /// every folder this profile shares into the VM. Capped at 8 to match
     /// the base image's pre-allocated fstab slots.
@@ -49,7 +59,7 @@ extension SessionDisk {
         // Strict sandbox: the root attestor and the (runtime-only)
         // privilege revocation ship beside agentd, and the marker
         // tells agentd to start the one and apply the other.
-        for name in ["bromure-attestd.py", "bromure-strict.py"] {
+        for name in Self.strictGuestFiles {
             let src = setupDir.appendingPathComponent(name)
             let dest = tmp.appendingPathComponent(name)
             if let data = try? Data(contentsOf: src), (try? Data(contentsOf: dest)) != data {
@@ -66,7 +76,7 @@ extension SessionDisk {
         // attestd builds `sandbox_status` with this module: a strict
         // workspace without a sandbox spec needs it too, or its state
         // never reaches the host.
-        let statusModule = "bromure_sandbox_status.py"
+        let statusModule = Self.sandboxStatusModule
         // Package installs under the OpenShell engine (no root):
         // `home-packages` makes pip default to the home folder;
         // `pkg-bin/` puts the apt / apt-get / sudo shims ahead of the
@@ -116,8 +126,7 @@ extension SessionDisk {
         // sentry loader, their Python modules, and the prebuilt sentry
         // module (+ its source for an on-guest rebuild when the guest
         // kernel differs). Staged only with an active spec.
-        let guestFiles = ["bromure-sandboxd", "bromure-sentryd", "bromure_openshell.py",
-                          "bromure_idmap.py", statusModule]
+        let guestFiles = Self.specGuestFiles
         let sentryDest = tmp.appendingPathComponent("sentry")
         if spec.isActive {
             for name in guestFiles {
