@@ -62,4 +62,26 @@ struct KubeLANPoolChoiceTests {
         Thread.sleep(forTimeInterval: 3.1)
         #expect(!pools.containsOther(ip), "ours after the grace")
     }
+
+    /// The same move in two writes (taken from root, then granted to us
+    /// a moment later): the grace of the first carries over.
+    @Test func aMoveInTwoWritesKeepsTheGrace() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        let ip = UInt32(10) << 24 | 250 << 16 | 50
+        try LANPoolsAdmin.write(LANPoolsFile(grants: ["root": ["10.250.0.50"]]), to: p)
+        let pools = LANPools(path: p)
+        #expect(pools.containsOther(ip))
+        try LANPoolsAdmin.write(LANPoolsFile(grants: [:]), to: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.containsOther(ip), "taken back: the grace")
+        try LANPoolsAdmin.write(LANPoolsFile(grants: [me: ["10.250.0.50"]]), to: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.containsOther(ip), "granted to us within the grace: still refused")
+        // The grace runs from the reload that saw it taken back (~0.6 s in).
+        Thread.sleep(forTimeInterval: 3.0)
+        #expect(!pools.containsOther(ip), "ours once the first write's grace is over")
+    }
 }

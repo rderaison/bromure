@@ -155,7 +155,12 @@ public final class LANPools: Sendable {
                             // account's publication may outlive the change by
                             // ~0.5 s, so it stays refused `grace` longer.
                             let own = file.addresses(ofUID: uid)
-                            for ip in own.subtracting(s.own) where s.set.contains(ip) { s.becameOwn[ip] = now }
+                            for ip in own.subtracting(s.own) {
+                                if s.set.contains(ip) { s.becameOwn[ip] = now }
+                                // Moved in two writes (taken back, then granted
+                                // to us): the leaving grace still running carries over.
+                                else if let since = s.leaving[ip], now - since < Self.grace { s.becameOwn[ip] = since }
+                            }
                             s.set = next
                             s.own = own
                             s.loaded = true
