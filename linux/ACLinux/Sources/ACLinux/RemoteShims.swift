@@ -5,20 +5,12 @@ import NIOConcurrencyHelpers
 // (_shared/RemoteAccessServer.swift, _shared/RemoteSSHHandlers.swift) reach
 // for, as Sources/AgentHost/Shims.swift provides them for the agent host.
 
-/// The terminal half of RemoteConsent (macOS: a numbered menu in the
-/// attached tmux, through the automation server's pump). bromure-ac has no
-/// such pump yet: no terminal counts as attached, so consent goes to the
-/// fat client, or is denied when none is connected.
-// partial: no terminal consent pump on Linux
-// @port-skip linux-only: stand-in for ACAutomationServer's consent pump statics
+/// ACAutomationServer's statics shared code reaches for. The terminal
+/// consent gate is the shared one (_shared/PumpConsentGate.swift, an
+/// extension of this type); the daemon's interactive exec registers it
+/// (Daemon.interactiveExec).
+// @port-skip linux-only: stand-in for ACAutomationServer (the automation server is the daemon here)
 enum ACAutomationServer {
-    // @port-skip linux-only: stand-in
-    static func isInteractivelyAttached(_ profileID: String) -> Bool { false }
-    // @port-skip linux-only: stand-in
-    static func presentConsentViaPump(profileID: String, prompt: String, choices: [String],
-                                      timeoutSeconds: TimeInterval, token: UUID) -> Int? { nil }
-    // @port-skip linux-only: stand-in
-    static func withdrawConsentViaPump(token: UUID) {}
     /// Something /state shows changed (MachineLinks): the daemon's push
     /// compares each snapshot with the last itself, so there's nothing to
     /// note.

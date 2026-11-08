@@ -5,10 +5,11 @@ import NIOConcurrencyHelpers
 /// bypass, prompt injection) is asked on a Linux server (macOS:
 /// Mitm/ConsentPrompt.swift, which also has a local panel). A server has no
 /// screen: the question goes to the fat client (PendingPromptBroker, what
-/// its mirror shows). RemoteConsent's terminal route never applies here
-/// (nothing marks a workspace interactively attached on Linux); with no fat
-/// client nobody can answer, and no answer means no, as when a macOS panel
-/// times out. Returns the chosen index, or nil for deny / timeout.
+/// its mirror shows), or else to the user's terminal when a CLI/SSH session
+/// is attached to the workspace (RemoteConsent's terminal route: the
+/// daemon's interactive exec, ConsentPump). With neither nobody can answer,
+/// and no answer means no, as when a macOS panel times out. Returns the
+/// chosen index, or nil for deny / timeout.
 // @port-skip linux-only: ConsentPrompt.swift is AppKit (its local panel); the routing below is the same
 enum ConsentPrompt {
     /// macOS's NSAlert.Style, for the callers' `style:`; nothing is drawn here.

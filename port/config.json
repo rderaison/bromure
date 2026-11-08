@@ -199,6 +199,7 @@
     "Sources/AgentCoding/Profile.swift",
     "Sources/AgentCoding/ProfileDocument.swift",
     "Sources/AgentCoding/ProfileEdits.swift",
+    "Sources/AgentCoding/PumpConsentGate.swift",
     "Sources/AgentCoding/Registration.swift",
     "Sources/AgentCoding/RegistrationLaunch.swift",
     "Sources/AgentCoding/RemoteAccessServer.swift",

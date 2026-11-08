@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Review of the consent-overtake fix: the terminal gate held ONE prompt,
 /// answer and semaphore per workspace. A fresh prompt after an overtaken one

@@ -1071,7 +1071,7 @@ public actor Daemon {
     /// `POST /vms/{id}/exec` `{command, argv?, timeout?}` →
     /// `{stdout, stderr, exitCode}`; 409 when the VM isn't running, 502 when
     /// its shell agent doesn't come up within 10 s.
-    // partial: no interactive (-it) PTY streaming; no dead-pool flush-and-retry beyond GuestShell's pre-write skip
+    // partial: no dead-pool flush-and-retry beyond GuestShell's pre-write skip
     // @port ACAutomationServer.handleExec(fd: Int32, profileID: String, bodyJSON: [String:Any]) h=009a8b0b81d659a5 @7dd92fdf
     func exec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         if body["interactive"] == .bool(true) { return await interactiveExec(rec, body) }
@@ -1100,8 +1100,8 @@ public actor Daemon {
     /// pooled shell connection gets `[u32be len][{"cmd", "interactive", "cols",
     /// "rows"}]`, the client gets a 200 octet-stream header, and from then on
     /// the bytes are pumped both ways unchanged (the frames are between the
-    /// CLI and agentd's pty) until either side closes.
-    // partial: a plain pump: no consent gate (no MITM consent on Linux yet; guiConsent is moot)
+    /// CLI and agentd's pty) until either side closes, but for the consent
+    /// prompts a terminal gate shows the user in between (ConsentPump).
     // @port ACAutomationServer.handleInteractiveExec(clientFD: Int32, profileID: String, bodyJSON: [String:Any]) h=2d264f1f134ea9eb @7dd92fdf
     func interactiveExec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         guard let l = live[rec.id], rec.state == .running else {
@@ -1127,18 +1127,32 @@ public actor Daemon {
         guard let conn else {
             return .error(502, "No shell connection for '\(rec.name)' after 10s — its shell agent hasn't come up yet.")
         }
+        // A GUI-fronted attach (a fat client's terminal) gets its consent
+        // prompts from the fat client, never in this terminal: no gate, so
+        // RemoteConsent.route doesn't see it attached. A plain CLI/SSH attach
+        // registers one for its life, keyed by the workspace's UUID as the
+        // consent brokers ask for it.
+        let guiConsent = body["guiConsent"] == .bool(true)
+        let attachKey = UUID(uuidString: rec.id)?.uuidString ?? rec.id
+        FileHandle.standardError.write(Data(
+            "[consent] interactive attach pid=\(attachKey.prefix(8)) guiConsent=\(guiConsent) → \(guiConsent ? "no terminal gate (fat client)" : "terminal consent gate")\n".utf8))
+        let shell = l.shell
         return .streaming { client in
+            let gate = guiConsent ? nil : ACAutomationServer.PumpConsentGate()
+            if let gate { ACAutomationServer.registerGate(gate, for: attachKey) }
+            defer { if let gate { ACAutomationServer.unregisterGate(gate, for: attachKey) } }
             _ = try? await conn.withStreams { inbound, outbound in
                 var head = ByteBuffer()
                 head.writeInteger(UInt32(reqData.count))
                 head.writeBytes(reqData)
                 try await outbound.write(head)
-                await withTaskGroup(of: Void.self) { g in
-                    g.addTask { for await b in client.inbound { do { try await outbound.write(b) } catch { return } } }
-                    g.addTask { do { for try await b in inbound { try await client.write(b) } } catch {} }
-                    await g.next()
-                    g.cancelAll()
-                }
+                await ConsentPump.run(client: client.inbound, toClient: { try await client.write($0) },
+                                      guest: inbound, toGuest: { try await outbound.write($0) },
+                                      gate: gate, afterConsent: {
+                    // Repaint the guest's tmux over where the prompt was: a
+                    // tmux command, not pane input (no keystrokes into the agent).
+                    _ = try? await shell.exec("tmux refresh-client 2>/dev/null || true", timeout: 5, wait: .seconds(5))
+                })
             }
         }
     }
