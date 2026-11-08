@@ -18,8 +18,11 @@ while [ $# -gt 0 ]; do case $1 in --bind) BIND=$2; shift 2;; --port) PORT=$2; sh
 for f in "$BIN" "$FC" "$IMAGE/base.img" "$IMAGE/vmlinuz"; do [ -e "$f" ] || { echo "install.sh: missing $f" >&2; exit 1; }; done
 # Host libraries the daemon links (linux/RELEASE_NOTES.md, Host requirements):
 # library:package. Missing ones stop the install, named.
+# The cache read once: `ldconfig -p | grep -q` fails under pipefail when grep
+# stops early and ldconfig gets SIGPIPE (a present library read as missing).
+LDCACHE=$(ldconfig -p)
 for req in libz.so.1:zlib1g libbrotlidec.so.1:libbrotli1; do
-  ldconfig -p | grep -q "${req%%:*} " || { echo "$(basename "$0"): missing ${req%%:*}: install the ${req##*:} package" >&2; exit 1; }
+  grep -q "${req%%:*} " <<<"$LDCACHE" || { echo "$(basename "$0"): missing ${req%%:*}: install the ${req##*:} package" >&2; exit 1; }
 done
 
 L=/usr/local/lib/bromure-ac
