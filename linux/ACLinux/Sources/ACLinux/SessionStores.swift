@@ -28,6 +28,8 @@ final class SessionStores {
     var codingTaskEngine: CodingTaskEngine?
     var automationEngine: ScheduledAutomationEngine?
     var delegationEngine: DelegationEngine?
+    /// encodedRows' memo, per list.
+    let encodedRowMemo = EncodedRowMemo()
     var taskDispatcher: TaskDispatcher?
     var switchboardEngine: SwitchboardEngine?
     /// The watch engine and its host (DaemonWatches.swift).
@@ -58,19 +60,18 @@ final class SessionStores {
     }
 
     /// The /state keys macOS adds on a server with the sessions-first home.
-    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentSessions h=98721b804428bec6 @b41d9876
     func stateEntries() -> [String: JSONValue] {
         [
             // What Squelch saved in each conversation rides along: a client
             // has no ledger of the host's (macOS: the same).
-            "agentSessions": .array(sessions.sessions.map { s -> AgentSession in
+            "agentSessions": .array(encodedRows(sessions.sessions.map { s -> AgentSession in
                 var s = s
                 if let tid = s.agentTranscriptID { s.squelch = SquelchLedger.shared.conversation(s.profileID, tid) }
                 return s
-            }.compactMap(JSONValue.encoding)),
-            "delegations": .array(delegations.delegations.compactMap(JSONValue.encoding)),
-            "agentRooms": .array(rooms.rooms.compactMap(JSONValue.encoding)),
+            }, "agentSessions")),
+            "delegations": .array(encodedRows(delegations.delegations, "delegations")),
+            "agentRooms": .array(encodedRows(rooms.rooms, "agentRooms")),
         ].merging(registrationEntries()) { a, _ in a }.merging(instructionPresetEntries()) { a, _ in a }
     }
 
@@ -108,5 +109,22 @@ extension JSONValue {
         enc.dateEncodingStrategy = .iso8601
         guard let data = try? enc.encode(value) else { return nil }
         return try? JSONDecoder().decode(JSONValue.self, from: data)
+    }
+}
+
+extension SessionStores {
+    /// The /state lists' rows, each reused while its item stays the same
+    /// (EncodedRowMemo: /state is rebuilt for every poll and push, and
+    /// almost every row is unchanged from one to the next).
+    // @port ACAppDelegate.encodedRows(_: [T], _: String) h=901726a3ed0f8aa0 @641863f2
+    func encodedRows<T: Encodable & Equatable & Identifiable>(_ items: [T], _ key: String) -> [JSONValue] {
+        encodedRowMemo.rows(items, key, encode: JSONValue.encoding)
+    }
+
+    /// The same, as JSONSerialization's objects (the board's lists). Its
+    /// keys are its own: one key keeps one kind of row.
+    // @port-skip linux-only: encodedRows for the routes that answer in Foundation objects
+    func encodedDicts<T: Encodable & Equatable & Identifiable>(_ items: [T], _ key: String) -> [[String: Any]] {
+        encodedRowMemo.rows(items, "dict:" + key) { JSONValue.encoding($0)?.foundationObject as? [String: Any] }
     }
 }

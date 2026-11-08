@@ -124,11 +124,9 @@ extension Daemon {
 extension SessionStores {
     // MARK: The coding board
 
-    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
-
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTasks h=14bbb26eb97daa18 @b41d9876
     func taskList() -> [String: Any] {
-        ["tasks": codingTasks.tasks.compactMap(Self.dict)]
+        ["tasks": encodedDicts(codingTasks.tasks, "tasks")]
     }
 
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpsertTask h=92a11244437cb76e @9936e30c
@@ -256,17 +254,16 @@ extension SessionStores {
 
     /// Automations, their runs and next fires, with the repository watches
     /// and their findings riding along for the fat client.
-    // partial: no encoded-row memo (EncodedRowMemo): each request encodes the rows
     // @port ACAppDelegate.automationScheduledList() h=7100e2d62c0f78c0 @b41d9876
     func automationList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         return [
-            "automations": automations.automations.compactMap(Self.dict),
-            "runs": automations.runs.compactMap(Self.dict),
+            "automations": encodedDicts(automations.automations, "automations"),
+            "runs": encodedDicts(automations.runs, "automationRuns"),
             "nextFires": automations.allNextFires().mapValues { iso.string(from: $0) },
             "timeZone": TimeZone.current.identifier,
-            "watches": findings.watches.compactMap(Self.dict),
-            "findings": findings.findings.compactMap(Self.dict),
+            "watches": encodedDicts(findings.watches, "watches"),
+            "findings": encodedDicts(findings.findings, "findings"),
         ]
     }
 
@@ -312,11 +309,6 @@ extension SessionStores {
             "automations": JSONValue(foundation: automationList()) ?? .object([:]),
             "tasks": JSONValue(foundation: taskList()) ?? .object([:]),
         ]
-    }
-
-    // @port-skip linux-only: ACAppDelegate.codableToDict
-    private static func dict<T: Encodable>(_ value: T) -> [String: Any]? {
-        JSONValue.encoding(value)?.foundationObject as? [String: Any]
     }
 
     // @port-skip linux-only: the JSON decoding macOS's callbacks do inline
