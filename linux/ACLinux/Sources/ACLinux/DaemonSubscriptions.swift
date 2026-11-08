@@ -99,8 +99,9 @@ extension Daemon {
     }
 
     /// `/state`'s `securityTimeline`: the rows the timeline holds, as macOS
-    /// mirrors them to a client.
-    // partial: the Linux proxy doesn't yet record its egress/guardrail/PII events into the timeline
+    /// mirrors them to a client. The proxy's egress, guardrail and PII events
+    /// reach it as on macOS (ProxyPolicy emits them through BACEventEmitter,
+    /// which records them here).
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityTimeline h=b7ea08f0aaba6afa @b10aa434
     @MainActor
     static func securityTimelineRows() -> [Any] { SecurityTimeline.shared.mirrorRows() }

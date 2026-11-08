@@ -69,6 +69,21 @@ struct PIIProxyTests {
         #expect(proxy.piiPolicy(for: p.id)?.isActive == false)
     }
 
+    /// The proxy's events reach the Security Timeline on Linux too (the
+    /// shared BACEventEmitter records them), the PII swap's among them.
+    @Test func aSwapReachesTheSecurityTimeline() async throws {
+        let pid = UUID()
+        var o = PIIRewriter.Outcome(body: Data())
+        o.newSwaps[.email] = 1
+        ProxyPolicy.recordPIISwaps(o, host: "api.anthropic.com", profileID: pid, ms: 3)
+        var seen = false
+        for _ in 0..<300 where !seen {
+            seen = await MainActor.run { SecurityTimeline.shared.allEvents.contains { $0.profileID == pid } }
+            if !seen { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(seen, "the swap's row reached the timeline")
+    }
+
     /// Not swapped: policy off, a turn the on-machine sentinel serves, a
     /// body still content-coded, a GET.
     @Test(arguments: ["off", "sentinel", "coded", "get"])
