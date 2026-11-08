@@ -150,6 +150,11 @@ public final class SSHAgentServer: @unchecked Sendable {
             }
             let msgType = payload[0]
             let body = payload.subdata(in: 1..<payload.count)
+            // A quarantined workspace lists and signs nothing.
+            if WorkspaceQuarantine.shared.contains(profileID) {
+                try writeFrame(fd: fd, payload: Data([AgentMsg.failure.rawValue]))
+                continue
+            }
 
             switch msgType {
             case AgentMsg.requestIdentities.rawValue:

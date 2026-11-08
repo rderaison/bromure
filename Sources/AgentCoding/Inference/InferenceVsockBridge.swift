@@ -10,17 +10,30 @@ import Virtualization
 /// anything but 127.0.0.1, and no other VM on the subnet can reach it.
 /// Same raw-TCP-pump shape as the python bridge's other forwards.
 final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    /// The workspace, whose quarantine refuses the bridge and cuts it open.
+    let profileID: UUID?
+
+    init(profileID: UUID? = nil) {
+        self.profileID = profileID
+        super.init()
+    }
+
     @available(macOS, deprecated: 10.15)
     func listener(_ listener: VZVirtioSocketListener,
                   shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
+        if let profileID, WorkspaceQuarantine.shared.contains(profileID) { return false }
         let fd = dup(connection.fileDescriptor)
+        let pid = profileID
+        let cut = pid.map { p in WorkspaceQuarantine.shared.onQuarantine(p) { _ = shutdown(fd, SHUT_RDWR) } }
         // Splice to the tool-call repair proxy (which forwards to the engine),
         // not the engine directly, so leaked-as-text tool calls get rescued.
         // Read its dynamic port at connect time — the proxy is up by now.
         let port = InferenceRepairProxy.shared.listenPort
         Thread.detachNewThread {
-            InferenceVsockBridge.pump(vsockFD: fd, host: "127.0.0.1", port: port)
+            InferenceVsockBridge.pump(vsockFD: fd, host: "127.0.0.1", port: port, beforeClose: {
+                if let cut, let pid { WorkspaceQuarantine.shared.remove(cut, for: pid) }
+            })
         }
         return true
     }
@@ -30,9 +43,11 @@ enum InferenceVsockBridge {
     /// Connect a loopback TCP socket to the engine and pump both
     /// directions until either side closes. Blocking; runs on its own
     /// thread per connection.
-    static func pump(vsockFD: Int32, host: String, port: Int) {
+    /// `beforeClose`: run before the fds close (a quarantine cut's token
+    /// removed first, so it can never reach a reused descriptor).
+    static func pump(vsockFD: Int32, host: String, port: Int, beforeClose: () -> Void = {}) {
         let tcp = socket(AF_INET, SOCK_STREAM, 0)
-        if tcp < 0 { close(vsockFD); return }
+        if tcp < 0 { beforeClose(); close(vsockFD); return }
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
@@ -43,12 +58,13 @@ enum InferenceVsockBridge {
                 connect(tcp, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        if connected != 0 { close(tcp); close(vsockFD); return }
+        if connected != 0 { beforeClose(); close(tcp); close(vsockFD); return }
 
         let group = DispatchGroup()
         oneWay(from: vsockFD, to: tcp, group: group)
         oneWay(from: tcp, to: vsockFD, group: group)
         group.wait()
+        beforeClose()
         close(tcp)
         close(vsockFD)
     }

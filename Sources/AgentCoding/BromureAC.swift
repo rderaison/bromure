@@ -12877,11 +12877,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
-                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer, profileID: pid)
                 // Coding-board MCP listener (vsock 5831): typed task tools
                 // for board runs (plan, subtasks, hand-to-review).
                 self.taskMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: TaskBoardMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
@@ -12891,7 +12891,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // workspace's OWN automations — the bridge is per machine,
                 // so the scope is the VM the call came from, not an argument.
                 self.automationMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: AutomationMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.scheduledAutomationStore },
@@ -12908,7 +12908,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // clusters and container registries this workspace may use,
                 // with the docs to use them; agents can create new ones.
                 self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: KubeMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.kubeClusterStore },
@@ -12918,7 +12918,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // to another agent's session and hears back; the caller is
                 // the session bound to the tmux window the shim announces.
                 self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: DelegationMCPServer(
                         profileID: pid,
                         sessions: { [weak self] in self?.agentSessionStore },
@@ -12927,7 +12927,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Switchboard MCP listener (vsock 5836): only the Switchboard's
                 // tab is launched with its shim, and only it is answered.
                 self.switchboardMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: SwitchboardMCPServer(
                         profileID: pid,
                         engine: { [weak self] in self?.switchboardEngine }),
@@ -15371,6 +15371,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard mode == .quarantine, let session = runningSessions[pid] else { return }
         let sandbox = session.sandbox
         sandbox.setNetworkQuarantined(true)
+        // Every other host channel that reaches the network too: the proxy
+        // (its open connections cut), the SSH agent, the MCP servers, the
+        // browser, the model bridge, the AWS credentials.
+        WorkspaceQuarantine.shared.set(true, for: pid)
         FileHandle.standardError.write(Data("[watchdog] quarantined \(session.profile.name)\n".utf8))
         Task { @MainActor in
             if let vm = sandbox.vm, vm.canPause { try? await vm.pause() }
@@ -15406,6 +15410,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             switch choice {
             case 2:
                 sandbox.setNetworkQuarantined(false)
+                WorkspaceQuarantine.shared.set(false, for: pid)
                 AgentWatchdog.shared.release(profileID: pid)
                 if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
             case 1:
@@ -15897,6 +15902,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func handleSessionStopped(profileID: Profile.ID) {
         guard let session = runningSessions[profileID] else { return }   // already handled
+        // A quarantine ends with its session.
+        WorkspaceQuarantine.shared.set(false, for: profileID)
         // The boot-failure cycle (if any) dies with the session. A queued
         // remedy only survives on the reboot-relaunch path, which never
         // reaches here.
@@ -16719,11 +16726,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
                     ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
                 self.browserMCPBridges[pid] =
-                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
+                    BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer, profileID: pid)
                 // Coding-board MCP listener (vsock 5831): typed task tools
                 // for board runs (plan, subtasks, hand-to-review).
                 self.taskMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: TaskBoardMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.codingTaskStore },
@@ -16733,7 +16740,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // workspace's OWN automations — the bridge is per machine,
                 // so the scope is the VM the call came from, not an argument.
                 self.automationMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: AutomationMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.scheduledAutomationStore },
@@ -16750,7 +16757,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // clusters and container registries this workspace may use,
                 // with the docs to use them; agents can create new ones.
                 self.kubeMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: KubeMCPServer(
                         profileID: pid,
                         store: { [weak self] in self?.kubeClusterStore },
@@ -16759,7 +16766,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Delegation MCP listener (vsock 5835) — see the matching
                 // block on the warm-boot path.
                 self.delegationMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: DelegationMCPServer(
                         profileID: pid,
                         sessions: { [weak self] in self?.agentSessionStore },
@@ -16767,7 +16774,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     port: SessionDisk.delegationMCPVsockPort)
                 // Switchboard MCP listener (vsock 5836) — see the warm-boot path.
                 self.switchboardMCPBridges[pid] = TaskMCPVsockBridge(
-                    socketDevice: dev,
+                    socketDevice: dev, profileID: pid,
                     server: SwitchboardMCPServer(
                         profileID: pid,
                         engine: { [weak self] in self?.switchboardEngine }),

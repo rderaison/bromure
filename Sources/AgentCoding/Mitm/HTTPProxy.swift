@@ -447,6 +447,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// otherwise miss this connection.
     private func trackedForFirewall(host: String, port: Int, route: String,
                                     _ body: () async throws -> Void) async throws {
+        // A quarantined workspace's connections go nowhere (every route
+        // comes through here; an open one is cut by the quarantine).
+        if WorkspaceQuarantine.shared.contains(profileID) { return }
         let rule = ProxyPolicy.trackedRule(policy: guardrailsProvider()?.egressPolicy, host: host, port: port)
         let token = EgressConnectionRegistry.shared.register(
             profileID: profileID, host: host, port: port, route: route, rule: rule,

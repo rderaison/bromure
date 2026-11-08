@@ -164,6 +164,16 @@ final class EgressConnectionRegistry: @unchecked Sendable {
         return id
     }
 
+    /// Cut every open connection of `profileID` (its quarantine), without
+    /// a firewall report: the quarantine is the event.
+    func cutAll(profileID: UUID) {
+        lock.lock()
+        let victims = entries.filter { $0.value.profileID == profileID }
+        for id in victims.keys { entries.removeValue(forKey: id) }
+        lock.unlock()
+        for e in victims.values.sorted(by: { $0.id < $1.id }) { e.cut() }
+    }
+
     func unregister(_ id: UInt64) {
         lock.lock(); entries.removeValue(forKey: id); lock.unlock()
     }

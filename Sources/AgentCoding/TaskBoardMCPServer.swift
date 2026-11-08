@@ -448,10 +448,12 @@ final class TaskMCPVsockBridge: NSObject {
     private let port: UInt32
     private var connections: [ObjectIdentifier: Connection] = [:]
 
-    init(socketDevice: VZVirtioSocketDevice, server: any MCPLineHandler,
+    /// `profileID`: the workspace whose quarantine refuses every request
+    /// (QuarantineGatedMCP).
+    init(socketDevice: VZVirtioSocketDevice, profileID: UUID? = nil, server: any MCPLineHandler,
          port: UInt32 = TaskMCPVsockBridge.vsockPort) {
         self.socketDevice = socketDevice
-        self.server = server
+        self.server = profileID.map { QuarantineGatedMCP(server, profileID: $0) } ?? server
         self.port = port
         super.init()
         let delegate = TaskMCPListenerDelegate { [weak self] conn in self?.adopt(conn) }

@@ -23,10 +23,20 @@ final class BrowserMCPVsockBridge: NSObject {
     /// of the workspace: `RelayMux` interleaves them by rewriting ids.
     private var relay: RelayMux?
 
-    init(socketDevice: VZVirtioSocketDevice, server: BrowserMCPServer) {
+    /// The workspace, whose quarantine drops every agent and refuses new ones.
+    private let profileID: UUID?
+    private var quarantineCut: UUID?
+
+    init(socketDevice: VZVirtioSocketDevice, server: BrowserMCPServer, profileID: UUID? = nil) {
         self.socketDevice = socketDevice
         self.server = server
+        self.profileID = profileID
         super.init()
+        if let profileID {
+            quarantineCut = WorkspaceQuarantine.shared.onQuarantine(profileID) { [weak self] in
+                Task { @MainActor in self?.dropForQuarantine() }
+            }
+        }
         let delegate = MCPListenerDelegate { [weak self] conn in self?.adopt(conn) }
         listenerDelegate = delegate
         let listener = VZVirtioSocketListener()
@@ -34,7 +44,16 @@ final class BrowserMCPVsockBridge: NSObject {
         socketDevice.setSocketListener(listener, forPort: Self.vsockPort)
     }
 
+    /// A quarantine: every agent connection and the fat-client relay go (a
+    /// later agent is refused at adopt while it lasts).
+    func dropForQuarantine() {
+        for (_, c) in connections { c.cancel() }
+        connections.removeAll()
+        detachRemote()
+    }
+
     func stop() {
+        if let quarantineCut, let profileID { WorkspaceQuarantine.shared.remove(quarantineCut, for: profileID) }
         socketDevice?.removeSocketListener(forPort: Self.vsockPort)
         for (_, c) in connections { c.cancel() }
         connections.removeAll()
@@ -92,6 +111,10 @@ final class BrowserMCPVsockBridge: NSObject {
     }
 
     private func adopt(_ conn: VZVirtioSocketConnection) {
+        if let profileID, WorkspaceQuarantine.shared.contains(profileID) {
+            conn.close()
+            return
+        }
         if let relay, ConsolePresence.shared.remotePreferred {
             if relay.isAlive {
                 // Every agent of the workspace rides the one channel — the

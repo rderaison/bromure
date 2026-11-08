@@ -185,7 +185,9 @@ public final class AWSCredentialServer: @unchecked Sendable {
     /// permission to ask about.
     public func serve(fd: Int32, profileID: UUID) async {
         defer { close(fd) }
-        let payload = jsonPayload(for: profileID)
+        // A quarantined workspace gets nothing.
+        let payload = WorkspaceQuarantine.shared.contains(profileID)
+            ? errorPayload(WorkspaceQuarantine.refusal) : jsonPayload(for: profileID)
         writePayload(fd: fd, data: payload)
     }
 

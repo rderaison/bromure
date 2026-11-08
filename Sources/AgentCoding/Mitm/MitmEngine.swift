@@ -885,7 +885,7 @@ private final class ListenerHolder {
             profileID: profileID, sshAgent: sshAgent)
         self.awsDelegate = AWSCredsListenerDelegate(
             profileID: profileID, awsCreds: awsCreds)
-        self.inferenceDelegate = InferenceListenerDelegate()
+        self.inferenceDelegate = InferenceListenerDelegate(profileID: profileID)
 
         self.httpListener = VZVirtioSocketListener()
         self.httpListener.delegate = httpDelegate
