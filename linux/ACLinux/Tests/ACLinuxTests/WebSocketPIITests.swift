@@ -114,6 +114,23 @@ struct WebSocketPIITests {
         #expect(b == last + event, "right after its last fragment")
     }
 
+    /// The server's close inside a message too large to hold (a control
+    /// frame may come between its fragments) doesn't release what's held
+    /// into it.
+    @Test func aCloseInsideAPassingMessageReleasesNothing() throws {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let vault = PIIVault(secret: Data(repeating: 9, count: 32))
+        let s = vault.learn(Self.email, label: .email).surrogate
+        let server = WSServerSide(loop: loop, write: { _ in }, restorer: WSServerRestorer(vault: vault))
+        let d = Self.deltas("bye \(s)")
+        _ = try loop.submit { server.feed(d[0] + d[1]) }.wait()            // the tail held
+        var first = WSFrame.encode(opcode: WSFrame.text, payload: Data(repeating: 0x61, count: WSMessageAssembler.maxMessage + 1), masked: false)
+        first[first.startIndex] &= 0x7F
+        _ = try loop.submit { server.feed(first) }.wait()
+        let close = WSFrame.encode(opcode: WSFrame.close, payload: Data([0x03, 0xE8]), masked: false)
+        #expect(try loop.submit { server.feed(close) }.wait() == close)
+    }
+
     /// A socket that ends without a close frame still gets what's held.
     @Test func aHeldTailGoesWhenTheSocketJustEnds() throws {
         let loop = MultiThreadedEventLoopGroup.singleton.next()

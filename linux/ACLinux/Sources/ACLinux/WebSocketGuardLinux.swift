@@ -364,7 +364,7 @@ final class WSServerSide: @unchecked Sendable {
         var out = Data()
         while let f = reader.next() {
             if f.isControl {
-                if f.opcode == WSFrame.close {
+                if f.opcode == WSFrame.close, !passingThrough {
                     for p in restorer.finish() { out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false)) }
                 }
                 out.append(f.raw)

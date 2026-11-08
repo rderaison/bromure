@@ -231,7 +231,7 @@ struct PIIProxyTests {
     }
 
     /// An HTTP/1.0 guest's JSON reply goes whole with its exact length; cut,
-    /// it never goes (it would read as complete).
+    /// it never goes (it would read as complete): a 502 instead.
     @Test(arguments: ["whole", "cut", "reset"])
     func anHTTP10GuestsJSONReplyHasItsLength(kind: String) throws {
         let (vault, s) = Self.vaultWithEmail()
@@ -250,17 +250,31 @@ struct PIIProxyTests {
             let text = String(decoding: out, as: UTF8.self)
             #expect(text.contains("Content-Length: \(restored.count)\r\n") && Self.body(out) == restored, "\(text)")
         } else {
-            #expect(out.isEmpty && relay.failed)
+            // Nothing of it was sent: a 502, never a bare close.
+            #expect(String(decoding: out, as: UTF8.self).hasPrefix("HTTP/1.1 502 ") && relay.failed, "\(String(decoding: out, as: UTF8.self))")
         }
     }
 
     /// A head line that can't be read with certainty is refused.
-    @Test(arguments: ["X-A: 1\nContent-Length: 3", "X-A: 1\r\n folded"])
-    func anUnreadableHeadLineIsRefused(line: String) {
+    @Test(arguments: ["HTTP/1.1 200 OK\r\nX-A: 1\nContent-Length: 3", "HTTP/1.1 200 OK\r\nX-A: 1\r\n folded",
+                      "HTTP/1.1 200 OK\nContent-Length: 3", "HTTP/1.1 200\rOK\r\nX-A: 1"])
+    func anUnreadableHeadLineIsRefused(head: String) {
         let (vault, _) = Self.vaultWithEmail()
-        guard case .refused = PIIRelay(vault: vault).head(Data("HTTP/1.1 200 OK\r\n\(line)\r\n\r\n".utf8)) else {
-            Issue.record("not refused"); return
+        guard case .refused = PIIRelay(vault: vault).head(Data("\(head)\r\n\r\n".utf8)) else {
+            Issue.record("not refused: \(head.debugDescription)"); return
         }
+    }
+
+    /// BROMURE_PII_MODEL_DIR is taken only when it holds a model: a stray
+    /// value never drops PII to the pattern rules.
+    @Test func aModelDirWithoutAModelIsPassedOver() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let env = ["BROMURE_PII_MODEL_DIR": dir]
+        #expect(PIIDetector.modelDirectory(environment: env).path != dir)
+        _ = FileManager.default.createFile(atPath: dir + "/model.onnx", contents: Data())
+        #expect(PIIDetector.modelDirectory(environment: env).path == dir)
+        #expect(PIIDetector.modelDirectory(environment: [:]).path != dir)
     }
 
     /// An HTTP/1.0 guest gets the restored body up to the close, unchunked;

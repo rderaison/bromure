@@ -57,10 +57,11 @@ install -m 0644 "$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py"
 BROMURE_PII_CACHE=${BROMURE_PII_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/bromure-ac/pii-rampart} \
   "$ROOT/scripts/fetch-pii-model.sh" "$PIIMODEL" >/dev/null \
   || { echo "$(basename "$0"): the PII model couldn't be fetched (PII protection needs it): check the network, or put the pinned files in \$BROMURE_PII_CACHE, and run this again" >&2; exit 1; }
-# The model folder as a quoted systemd value: % doubled (specifiers), \ and "
-# escaped; then escaped again for sed's replacement (\, &, |).
-PIIMODEL_UNIT=$(printf '%s' "$PIIMODEL" | sed -e 's/%/%%/g' -e 's/[\\"]/\\&/g' -e 's/[\\&|]/\\&/g')
-sed -e "s|@BIN@|$BIN|" -e "s|@IMAGE@|$IMAGE|" -e "s|@AGENTD@|$AGENTD|" -e "s|@PIIMODEL@|$PIIMODEL_UNIT|" \
+# A path as a quoted systemd value: % doubled (specifiers), \ and " escaped;
+# then escaped again for sed's replacement (\, &, |).
+unit_value() { printf '%s' "$1" | sed -e 's/%/%%/g' -e 's/[\\"]/\\&/g' -e 's/[\\&|]/\\&/g'; }
+sed -e "s|@BIN@|$(unit_value "$BIN")|" -e "s|@IMAGE@|$(unit_value "$IMAGE")|" \
+    -e "s|@AGENTD@|$(unit_value "$AGENTD")|" -e "s|@PIIMODEL@|$(unit_value "$PIIMODEL")|" \
   "$ROOT/linux/systemd/bromure-ac.service" > "$UNIT_DIR/bromure-ac.service"
 systemctl --user daemon-reload
 if [ $START = 1 ]; then systemctl --user enable --now bromure-ac.service; else systemctl --user enable bromure-ac.service; fi

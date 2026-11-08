@@ -81,7 +81,8 @@ final class PIIRelay {
         let lines = text.components(separatedBy: "\r\n").filter { !$0.isEmpty }
         // A line this can't read with certainty (a bare LF, an obs-fold
         // continuation) could hide a length or a coding, as on the request side.
-        if lines.dropFirst().contains(where: { $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" }) {
+        if lines.first.map({ $0.contains("\n") || $0.contains("\r") }) == true
+            || lines.dropFirst().contains(where: { $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" }) {
             return .refused("an unreadable header line")
         }
         let status = lines.first.flatMap { Int($0.split(separator: " ").dropFirst().first ?? "") } ?? 0
@@ -211,8 +212,13 @@ final class PIIRelay {
         guard let restorer, !ended, !failed else { return Data() }
         if clean, case .untilClose = body { return end() }
         failed = true
-        // An HTTP/1.0 guest's held JSON reply never goes: it would read as whole.
-        guard heldHead == nil else { return Data() }
+        // An HTTP/1.0 guest's held JSON reply never goes (it would read as
+        // whole): nothing of it was sent, so the guest gets a 502 instead.
+        guard heldHead == nil else {
+            heldHead = nil
+            return RequestReader.simple(502, "Bad Gateway",
+                                        body: "Bromure: the reply from \(host) was cut short; it was not passed on.\n")
+        }
         return frame(restorer.finish())
     }
 
