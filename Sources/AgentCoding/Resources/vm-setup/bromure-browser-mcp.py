@@ -156,6 +156,49 @@ CONSOLE_HOOK = """
 """
 
 
+VSOCK_RELAY = os.environ.get("BROMURE_VSOCK_RELAY") or "/tmp/bromure-vsock.sock"
+
+
+def vsock_connect(port):
+    # The host's `port` over vsock. Under an OpenShell sandbox the seccomp
+    # filter refuses AF_VSOCK (EPERM): then through agentd's relay, which
+    # runs outside it (bromure-agentd.py §4b). The bytes are the same.
+    try:
+        s = socket.socket(getattr(socket, "AF_VSOCK", 40), socket.SOCK_STREAM)
+    except OSError as e:
+        if e.errno not in (errno.EPERM, errno.EACCES, errno.EAFNOSUPPORT):
+            raise
+        return vsock_relay_connect(port)
+    try:
+        s.connect((HOST_CID, port))
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def vsock_relay_connect(port):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(60)
+        s.connect(VSOCK_RELAY)
+        s.sendall(("bromure-vsock %d\n" % port).encode())
+        line = b""
+        while not line.endswith(b"\n") and len(line) < 256:
+            b = s.recv(1)
+            if not b:
+                break
+            line += b
+        if line != b"ok\n":
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "vsock relay: %s"
+                                         % (line.decode("utf-8", "replace").strip() or "closed"))
+        s.settimeout(None)
+        return s
+    except BaseException:
+        s.close()
+        raise
+
+
 # --------------------------------------------------------------------------
 # Host channel — vsock 5830 to the host BrowserMCPServer. Sequential request/
 # response keyed by id; MCP clients drive one call at a time.
@@ -170,8 +213,7 @@ class HostChannel:
         delay = 0.2
         while True:
             try:
-                s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                s.connect((HOST_CID, HOST_MCP_PORT))
+                s = vsock_connect(HOST_MCP_PORT)
                 self.sock = s
                 self.buf = b""
                 return

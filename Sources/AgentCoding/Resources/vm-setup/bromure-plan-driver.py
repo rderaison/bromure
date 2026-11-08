@@ -28,6 +28,7 @@ questions surface to the host. Stdlib only — no pip packages in the guest.
 """
 
 import base64
+import errno
 import json
 import os
 import shutil
@@ -41,6 +42,49 @@ import traceback
 HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
 PLAN_STREAM_PORT = 5832           # SessionDisk.planStreamVsockPort
 MAX_LINE = 1024 * 1024            # protocol: one JSON object per line, <=1 MB
+
+
+VSOCK_RELAY = os.environ.get("BROMURE_VSOCK_RELAY") or "/tmp/bromure-vsock.sock"
+
+
+def vsock_connect(port):
+    # The host's `port` over vsock. Under an OpenShell sandbox the seccomp
+    # filter refuses AF_VSOCK (EPERM): then through agentd's relay, which
+    # runs outside it (bromure-agentd.py §4b). The bytes are the same.
+    try:
+        s = socket.socket(getattr(socket, "AF_VSOCK", 40), socket.SOCK_STREAM)
+    except OSError as e:
+        if e.errno not in (errno.EPERM, errno.EACCES, errno.EAFNOSUPPORT):
+            raise
+        return vsock_relay_connect(port)
+    try:
+        s.connect((HOST_CID, port))
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def vsock_relay_connect(port):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(60)
+        s.connect(VSOCK_RELAY)
+        s.sendall(("bromure-vsock %d\n" % port).encode())
+        line = b""
+        while not line.endswith(b"\n") and len(line) < 256:
+            b = s.recv(1)
+            if not b:
+                break
+            line += b
+        if line != b"ok\n":
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "vsock relay: %s"
+                                         % (line.decode("utf-8", "replace").strip() or "closed"))
+        s.settimeout(None)
+        return s
+    except BaseException:
+        s.close()
+        raise
 
 HOME = os.path.expanduser("~")
 META = "/mnt/bromure-meta"
@@ -139,8 +183,7 @@ class VsockLink:
             delay = 0.2
             while not self._closed:
                 try:
-                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                    s.connect((HOST_CID, PLAN_STREAM_PORT))
+                    s = vsock_connect(PLAN_STREAM_PORT)
                     hello = json.dumps(
                         {"v": 1, "ev": "hello",
                          "branch": self.branch, "tool": self.tool},

@@ -40,6 +40,7 @@ Section index
   §2  Self-hash / hot-upgrade support
   §3  shell-agent   (vsock 5800 guest-initiated pool; exec + pty + views)
   §4  vm-bridge     (127.0.0.1:65534 + unix sockets → host vsock MITM)
+  §4b vsock relay   (/tmp/bromure-vsock.sock → host vsock, for the sandbox)
   §5  claude-token  (vsock 8446, ~/.claude/.credentials.json)
   §6  codex-token   (vsock 8447, ~/.codex/auth.json)
   §7  loopback-relay(vsock 5010, OAuth callback relay)
@@ -2179,6 +2180,119 @@ def bridge_llm_engine_service():
             target=_bridge, args=(conn, LLM_ENGINE_VSOCK_PORT, "llm"),
             daemon=True).start()
 
+
+
+# ─────────────── §4b vsock relay (for what the sandbox confines) ────────────
+# Under an OpenShell sandbox the workload's seccomp filter refuses AF_VSOCK, as
+# OpenShell's own does: with it, a confined process could reach every port the
+# host listens on -- the shell pool (5800) whose connections carry the host's
+# commands, the attestor (5840), the sentry's stream (5841) -- and pose as the
+# guest's own services. A few of the helpers the agent starts still have to
+# reach the host: its Bromure MCP servers and the plan driver. They ask agentd,
+# which runs outside the sandbox, over this socket:
+#
+#     client → "bromure-vsock <port>\n"
+#     agentd → "ok\n", then the bytes both ways, unchanged
+#            → "err <reason>\n", then closes
+#
+# Only the ports in VSOCK_RELAY_PORTS. That adds nothing a confined process
+# couldn't already say on those ports: the host tells MCP callers apart by what
+# is in the stream (the hello line), never by where the connection came from.
+# Outside a sandbox the helpers open AF_VSOCK themselves and never come here.
+#
+# Mode 0666 in /tmp, like the ssh-agent socket next to it: the confined
+# workload may run under a uid of its own. Whoever could replace this socket
+# could only intercept its own helpers' traffic -- every client is a process
+# the workload started.
+VSOCK_RELAY_PATH = "/tmp/bromure-vsock.sock"
+# The browser, task-board, plan-stream, automations, infrastructure, delegation
+# and Switchboard channels (SessionDisk's *VsockPort; a test keeps them equal).
+VSOCK_RELAY_PORTS = frozenset((5830, 5831, 5832, 5833, 5834, 5835, 5836))
+VSOCK_RELAY_HEADER_MAX = 64
+VSOCK_RELAY_HEADER_TIMEOUT = 5.0
+
+
+def _vsock_relay_port(conn):
+    """The port a relay client asks for, or None for a malformed request."""
+    conn.settimeout(VSOCK_RELAY_HEADER_TIMEOUT)
+    line = b""
+    while not line.endswith(b"\n"):
+        if len(line) >= VSOCK_RELAY_HEADER_MAX:
+            return None
+        b = conn.recv(1)   # one at a time: nothing past the line is ours
+        if not b:
+            return None
+        line += b
+    conn.settimeout(None)
+    parts = line.decode("ascii", "replace").split()
+    if len(parts) != 2 or parts[0] != "bromure-vsock" or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+def _vsock_relay_handle(conn, connect=None):
+    """Serve one relay client: check its port, connect, then splice."""
+    if connect is None:
+        def connect(port):
+            return _vsock_connect(port, "relay:%d" % port)
+    host = None
+    try:
+        try:
+            port = _vsock_relay_port(conn)
+        except OSError:
+            port = None
+        if port is None:
+            _bridge_log("[relay] malformed request")
+            _vsock_relay_reply(conn, b"err malformed request\n")
+            return
+        if port not in VSOCK_RELAY_PORTS:
+            _bridge_log("[relay] refused host port %d" % port)
+            _vsock_relay_reply(conn, b"err port not relayed\n")
+            return
+        try:
+            host = connect(port)
+        except Exception as e:
+            _bridge_log("[relay] vsock connect to host:%d failed: %s" % (port, e))
+            _vsock_relay_reply(conn, b"err host unreachable\n")
+            return
+        try:
+            conn.sendall(b"ok\n")
+        except OSError:
+            return
+        t = threading.Thread(target=_bridge_pump, args=(conn, host), daemon=True)
+        t.start()
+        _bridge_pump(host, conn)
+        t.join()
+    finally:
+        for sock in (host, conn):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+
+def _vsock_relay_reply(conn, line):
+    try:
+        conn.sendall(line)
+    except OSError:
+        pass
+
+
+def vsock_relay_service(path=None):
+    path = path or VSOCK_RELAY_PATH
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(path)
+    os.chmod(path, 0o666)
+    s.listen(16)
+    _bridge_log("[relay] listening on %s" % path)
+    while True:
+        conn, _addr = s.accept()
+        threading.Thread(target=_vsock_relay_handle, args=(conn,), daemon=True).start()
 
 # ─────────────────── §5 claude-token (vsock 8446, credentials) ──────────────
 # Connects to the host over vsock and answers read/write RPCs against
@@ -8526,6 +8640,7 @@ def main():
         ("ssh-agent", bridge_ssh_agent_service),
         ("aws-creds", bridge_aws_creds_service),
         ("llm-engine", bridge_llm_engine_service),
+        ("vsock-relay", vsock_relay_service),
         ("claude-token", claude_token_service),
         ("codex-token", codex_token_service),
         ("loopback-relay", loopback_relay_service),

@@ -27,14 +27,12 @@ Deliberate differences from OpenShell, each argued in DESIGN.md:
   * `allow_inet` is pinned true. OpenShell derives it from `network_policies`,
     which is not one of the three sections this work covers, and Bromure's
     egress control is the host MITM proxy plus attestd, not a socket-domain ban.
-  * `allow_vsock` is pinned true by bromure-sandboxd (for now): the main
-    filter it installs doesn't ban AF_VSOCK. Bromure's in-guest helpers the agent starts (its MCP servers,
-    the Claude/Codex token agents, the plan driver, the VM bridge) reach the
-    host over vsock, and with the ban none of them worked under the strict
-    sandbox. Temporary: the plan (5.4.3) is to bridge them through agentd,
-    outside the sandbox, and restore the ban.
 
-Nothing else diverges. Where OpenShell is surprising (an absent
+Nothing else diverges. AF_VSOCK is banned as in OpenShell (bromure-sandboxd
+passes `allow_vsock=False`): the in-guest helpers the agent starts that must
+reach the host -- its Bromure MCP servers, the plan driver -- ask agentd's
+relay, outside the sandbox, which connects them to those ports only
+(bromure-agentd.py §4b). Where OpenShell is surprising (an absent
 `filesystem_policy` still enables Landlock, because `include_workdir` defaults
 to true) this code is surprising in exactly the same way, and says so in the
 status it reports to the host.
