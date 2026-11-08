@@ -166,23 +166,27 @@ extension MitmProxy {
     /// runTransparentHTTP, route "transparent").
     // @port-skip linux-only: makeConnection + runTransparentTLS / runTransparentHTTP on NIO
     func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool) {
+        // The leaf first: until withConnectedSocket takes `appFD`, a failure
+        // is ours to close.
+        let context: NIOSSLContext?
+        do { context = tls ? try serverContext(host: host) : nil } catch { close(appFD); return }
         let bootstrap = ClientBootstrap(group: group).channelInitializer { [self] ch in
             do {
                 let ops = ch.pipeline.syncOperations
-                if tls { try ops.addHandler(NIOSSLServerHandler(context: try serverContext(host: host))) }
+                if let context { try ops.addHandler(NIOSSLServerHandler(context: context)) }
                 try ops.addHandler(RequestReader(proxy: self, profileID: profileID, host: host, port: port, tls: tls))
                 return ch.eventLoop.makeSucceededVoidFuture()
             } catch {
                 return ch.eventLoop.makeFailedFuture(error)
             }
         }
-        do {
-            let ch = try bootstrap.withConnectedSocket(appFD).wait()
-            if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent") {
-                ch.close(promise: nil)
-            }
-        } catch {
-            close(appFD)
+        // Not closed on a failure: NIO took `appFD` over as it made the
+        // channel and closes it on any failure after that; a close here
+        // would hit whoever has the number by then. (The one failure before
+        // it, BaseSocket's ignoreSIGPIPE, can't happen on Linux.)
+        guard let ch = try? bootstrap.withConnectedSocket(appFD).wait() else { return }
+        if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent") {
+            ch.close(promise: nil)
         }
     }
 
@@ -196,10 +200,9 @@ extension MitmProxy {
         // bytes the peeks left in the socket (a ClientHello) are held, not lost.
         let glue = ByteGlue(peer: nil)
         let bootstrap = ClientBootstrap(group: group).channelInitializer { ch in ch.pipeline.addHandler(glue) }
-        guard let ip = OpenShellPolicy.IPAddress(destIP),
-              let ch = try? bootstrap.withConnectedSocket(appFD).wait() else {
-            close(appFD); return
-        }
+        guard let ip = OpenShellPolicy.IPAddress(destIP) else { close(appFD); return }
+        // Past here NIO owns `appFD` (serveTransparent): never closed here.
+        guard let ch = try? bootstrap.withConnectedSocket(appFD).wait() else { return }
         ch.eventLoop.execute { [self] in splice(ch, to: [ip], port: destPort, pending: ByteBuffer(), glue: glue) }
     }
 

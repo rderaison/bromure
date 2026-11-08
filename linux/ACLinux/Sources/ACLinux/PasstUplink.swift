@@ -232,8 +232,9 @@ public final class PasstUplink: Uplink {
                     }
                 }
         } catch {
+            // fds[0] is NIO's from the channel's making (it closes it on a
+            // failure after that); only our dup is ours to close.
             Glibc.close(readFD)
-            Glibc.close(fds[0])
             p.signal(SIGKILL)
             throw error
         }

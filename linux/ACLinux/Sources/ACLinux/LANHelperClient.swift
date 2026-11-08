@@ -121,10 +121,12 @@ final class LANHelperClient: KubeLANPublishing, @unchecked Sendable {
 
     // @port-skip linux-only: KubeLANAnnouncer.closeRelays
     func closeRelays(nodeID: UUID) {
+        // Shut under the lock the splice untracks its relay under before
+        // releasing it: a number shut here is still that relay's, never one
+        // released and handed to someone else meanwhile.
         lock.lock()
-        let fds = relays.removeValue(forKey: nodeID) ?? []
-        lock.unlock()
-        for fd in fds { shutdown(fd, Int32(SHUT_RDWR)) }
+        defer { lock.unlock() }
+        for fd in relays.removeValue(forKey: nodeID) ?? [] { shutdown(fd, Int32(SHUT_RDWR)) }
     }
 
     // MARK: The helper connection

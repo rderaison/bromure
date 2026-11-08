@@ -248,8 +248,12 @@ public final class LANHelper: @unchecked Sendable {
         }
         // Gone: everything it published goes too, at once.
         withdraw(conn: id) { _, _ in true }
-        lock.lock(); conns[id] = nil; lock.unlock()
+        // Removed, then closed under its write lock: a send that got the
+        // connection before it went finishes first, and one after sees it gone.
+        lock.lock(); let gone = conns.removeValue(forKey: id); lock.unlock()
+        gone?.writeLock.lock()
         close(fd)
+        gone?.writeLock.unlock()
         log("\(label) disconnected; its addresses withdrawn")
     }
 
@@ -373,11 +377,21 @@ public final class LANHelper: @unchecked Sendable {
     private func acceptLoop(_ key: Key, fd: Int32) {
         while true {
             let c = accept(fd, nil, nil)
-            if c < 0 { if errno == EINTR { continue }; return }   // closed: withdrawn
+            // Shut: withdrawn. The loop owns the listener and closes it (a
+            // close in withdraw could land while this loop is between
+            // accepts, and the next accept would take another socket's
+            // connection under the reused number).
+            if c < 0 {
+                switch errno {
+                case EINVAL, EBADF: close(fd); return          // shut by withdraw
+                case EMFILE, ENFILE, ENOBUFS, ENOMEM: usleep(100_000); continue
+                default: continue                              // EINTR, a connection aborted while queued
+                }
+            }
             lock.lock()
             let l = listeners[key]
             lock.unlock()
-            guard let l, l.fd == fd else { close(c); return }
+            guard let l, l.fd == fd else { close(c); close(fd); return }
             send(conn: l.conn, ["conn": true, "ip": VMNetSwitchText.ip(key.ip), "port": Int(key.port), "service": l.service], fd: c)
             close(c)   // the daemon has its own copy now
         }
@@ -401,7 +415,9 @@ public final class LANHelper: @unchecked Sendable {
         for (k, _) in gone { listeners[k] = nil }
         let stillUsed = Set(listeners.keys.map(\.ip))
         lock.unlock()
-        for (_, l) in gone { shutdown(l.fd, Int32(SHUT_RDWR)); close(l.fd) }
+        // A TCP listener is shut, which ends its acceptLoop; the loop closes
+        // it. A UDP socket has no loop here: closed now.
+        for (k, l) in gone { shutdown(l.fd, Int32(SHUT_RDWR)); if k.udp { close(l.fd) } }
         for ip in Set(gone.keys.map(\.ip)) where !stillUsed.contains(ip) {
             if let iface = added[ip] {
                 _ = Self.ip(["-4", "addr", "del", "\(VMNetSwitchText.ip(ip))/32", "dev", iface])
@@ -424,6 +440,9 @@ public final class LANHelper: @unchecked Sendable {
         line.append(0x0A)
         c.writeLock.lock()
         defer { c.writeLock.unlock() }
+        // Still open (serve closes it under this lock once it's removed).
+        lock.lock(); let open = conns[conn] != nil; lock.unlock()
+        guard open else { return }
         if let fd { _ = LANFD.send(c.fd, line, fd: fd) } else { _ = LANFD.send(c.fd, line, fd: nil) }
     }
 
