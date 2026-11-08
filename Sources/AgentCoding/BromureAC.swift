@@ -6441,9 +6441,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onTaskAnswer = { [weak self] id, body in
             guard let self else { return ["ok": false, "error": "no app"] }
-            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            // Files dropped on a remote client's answer sheet, as its new-session
+            // screen sends them ({name, data (base64), isImage, folder?}).
+            let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+            let text = body["text"] as? String ?? ""
+            guard !text.isEmpty || !files.isEmpty else { return ["ok": false, "error": "text required"] }
             let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-            if await self.taskDispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            if await self.taskDispatcher.answer(id, askID: ask, text: text, attachments: files) { return ["ok": true] }
             return ["ok": false, "error": self.codingTaskStore.task(id)?.lastError
                         ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
         }
@@ -6468,9 +6472,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         return ["error": "kind required"]
                     }
                 case "answer":
-                    guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+                    let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+                    let text = body["text"] as? String ?? ""
+                    guard !text.isEmpty || !files.isEmpty else { return ["error": "text required"] }
                     let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text) }
+                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text, attachments: files) }
                 case "recall":
                     self.taskDispatcher.recall(id)
                 case "plan", "plan-start":   // plan-start: legacy alias

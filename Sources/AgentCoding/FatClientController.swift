@@ -2766,6 +2766,31 @@ final class RemoteHostController {
         reply?["ok"] as? Bool == true
     }
 
+    /// Most bytes of files a task answer carries to the server: the server
+    /// reads a request body up to 16 MB, and base64 grows them by a third.
+    static let answerAttachmentLimit = 11 * 1024 * 1024
+
+    /// An answer's files as the server reads them (`DroppedFile(wire:)`, a
+    /// folder packed, as a remote new session's); nil when one can't be read
+    /// or they add up to more than `answerAttachmentLimit`.
+    static func answerAttachmentWire(_ files: [DroppedFile]) async -> [[String: Any]]? {
+        var wire: [[String: Any]] = []
+        var total = 0
+        for f in files {
+            var item = f
+            #if os(macOS)
+            if let folder = f.folder {
+                guard let data = try? await FolderUpload.packed(folder) else { return nil }
+                item = DroppedFile(name: f.name, data: data, isImage: false, packedFolder: true)
+            }
+            #endif
+            total += item.data.count
+            guard total <= answerAttachmentLimit else { return nil }
+            wire.append(item.wireDictionary)
+        }
+        return wire
+    }
+
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
@@ -5487,16 +5512,23 @@ final class RemoteHostWindow: NSWindow {
                             c.taskCommand(id, "assign", body: ["kind": "none"])
                         }
                     },
-                    answer: { id, ask, text in
+                    answer: { id, ask, text, files in
                         // The server's word on it: refused (the agent asked
                         // again), or not answered — the sheet keeps the text.
                         // The server replies once the answer went (its scan
                         // included): wait for it.
-                        let r = await c.taskCommandReply(
-                            id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
-                            recvTimeoutSeconds: 180)
+                        var body: [String: Any] = ["text": text]
+                        if let ask { body["ask"] = ask.uuidString }
+                        // Dropped files go with it, as a remote new session's do;
+                        // the server lands them in the asker's inbox.
+                        if !files.isEmpty {
+                            guard let wire = await RemoteHostController.answerAttachmentWire(files) else { return false }
+                            body["attachments"] = wire
+                        }
+                        let r = await c.taskCommandReply(id, "answer", body: body, recvTimeoutSeconds: 180)
                         return RemoteHostController.answerAccepted(r)
                     },
+                    answerAttachmentLimit: RemoteHostController.answerAttachmentLimit,
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),
                 sessionStore: c.sessionStore)

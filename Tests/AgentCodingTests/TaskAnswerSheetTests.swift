@@ -146,6 +146,90 @@ struct TaskAnswerSheetTests {
         #expect(t.pendingAskID == nil && t.pendingQuestion == nil)
     }
 
+    // Board: a task's question could only be answered in words; the agent
+    // asking for a screenshot or a log got a description of it. Files dropped
+    // on the sheet now go with the answer, into the asker's inbox.
+
+    private func file(_ name: String, bytes: Int = 4) -> DroppedFile {
+        DroppedFile(name: name, data: Data(repeating: 0x41, count: bytes), isImage: name.hasSuffix(".png"))
+    }
+
+    @Test("files dropped on an answer are part of the draft, for its question")
+    func draftCarriesFiles() {
+        let first = UUID(), second = UUID()
+        var draft = TaskAnswerDraft()
+        draft.attach([file("build.log")], for: first)
+        // Files alone are an answer.
+        #expect(draft.canSend(to: first) && draft.files.map(\.name) == ["build.log"])
+        // Asked again: files for the earlier question are stale like words.
+        #expect(draft.isStale(for: second) && !draft.canSend(to: second))
+        draft.attach([file("shot.png")], for: second)
+        #expect(draft.canSend(to: second) && draft.files.count == 2)
+        draft.removeFile(at: 0, for: second)
+        #expect(draft.files.map(\.name) == ["shot.png"])
+        draft.removeFile(at: 5, for: second)            // out of range: nothing
+        #expect(draft.files.count == 1)
+        draft.removeFile(at: 0, for: second)
+        #expect(!draft.canSend(to: second), "nothing left to say")
+        // Sent and taken: the files go with the draft.
+        draft.attach([file("a.txt")], for: second)
+        let sent = draft
+        #expect(draft.afterSend(sent, accepted: true) == TaskAnswerDraft())
+        #expect(draft.afterSend(sent, accepted: false).files.count == 1)
+    }
+
+    @Test("the sheet sends files alone, says how to attach, and holds back what's too large to go")
+    func sheetAttachments() throws {
+        _ = NSApplication.shared
+        var reply = ""
+        let binding = Binding(get: { reply }, set: { reply = $0 })
+        let plain = TaskAnswerSheet(task: task(), reply: binding, onSend: { _ in }, onCancel: {})
+        #expect(!plain.canSend)
+        let withFile = TaskAnswerSheet(task: task(), reply: binding, attachments: [file("log.txt")],
+                                       onAttach: { _ in }, onSend: { _ in }, onCancel: {})
+        #expect(withFile.canSend, "files alone")
+        let tooBig = TaskAnswerSheet(task: task(), reply: binding, attachments: [file("big.bin", bytes: 2048)],
+                                     attachmentLimit: 1024, onAttach: { _ in }, onSend: { _ in }, onCancel: {})
+        #expect(tooBig.overLimit && !tooBig.canSend)
+        let stale = TaskAnswerSheet(task: task(), reply: binding, stale: true, attachments: [file("log.txt")],
+                                    onAttach: { _ in }, onSend: { _ in }, onCancel: {})
+        #expect(!stale.canSend)
+
+        // The hint is shown where files are taken, the chips once dropped.
+        #expect(TaskAnswerSheet(task: task(), reply: binding, onAttach: { _ in }, onSend: { _ in }, onCancel: {}).showsAttachHint)
+        #expect(!plain.showsAttachHint, "no hint where files aren't taken")
+        #expect(!withFile.showsAttachHint)
+        if let out = ProcessInfo.processInfo.environment["TASK_ANSWER_FILES_SHOT"] {
+            let host = NSHostingView(rootView: TaskAnswerSheet(
+                task: task(), reply: binding, attachments: [file("build.log"), file("screenshot.png")],
+                onAttach: { _ in }, onSend: { _ in }, onCancel: {}))
+            host.frame = NSRect(origin: .zero, size: host.fittingSize)
+            host.layoutSubtreeIfNeeded()
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+            }
+        }
+    }
+
+    @Test("attachment names land without paths, never . or .., and two alike are told apart")
+    func attachmentNames() {
+        #expect(DelegationEngine.attachmentNames(["log.txt", "shot.png"]) == ["log.txt", "shot.png"])
+        #expect(DelegationEngine.attachmentNames(["../../etc/passwd", "a/b.txt"]) == ["passwd", "b.txt"])
+        #expect(DelegationEngine.attachmentNames([".", "..", "", " "]) == ["file-1", "file-2", "file-3", "file-4"])
+        #expect(DelegationEngine.attachmentNames(["log.txt", "log.txt", "log.txt"]) == ["log.txt", "2-log.txt", "3-log.txt"])
+    }
+
+    @Test("a fat client sends an answer's files as the server reads them, within its limit")
+    func remoteWire() async throws {
+        let files = [file("log.txt", bytes: 10), file("shot.png", bytes: 20)]
+        let wire = try #require(await RemoteHostController.answerAttachmentWire(files))
+        let back = wire.compactMap(DroppedFile.init(wire:))
+        #expect(back == files)
+        let huge = [file("a.bin", bytes: RemoteHostController.answerAttachmentLimit), file("b.bin", bytes: 1)]
+        #expect(await RemoteHostController.answerAttachmentWire(huge) == nil)
+    }
+
     private func textViews(in view: NSView) -> [NSTextView] {
         ((view as? NSTextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews(in:))
     }
@@ -217,4 +301,5 @@ struct TaskAnswerSendTests {
         #expect(seen.main)
         #expect(seen.error == "refused")
     }
+
 }
