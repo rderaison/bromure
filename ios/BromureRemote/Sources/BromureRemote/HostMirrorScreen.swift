@@ -118,7 +118,9 @@ struct HostMirrorScreen: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
-        .navigationBarTitleDisplayMode(.large)
+        // Inline: the name rides the Back button's row instead of a large
+        // title on a row of its own.
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             // `start()` is idempotent, so re-appearing (popping back from a
             // pushed workspace/grid) is a no-op. Crucially we do NOT stop on

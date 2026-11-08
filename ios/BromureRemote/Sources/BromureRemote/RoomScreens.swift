@@ -5,11 +5,12 @@ import UniformTypeIdentifiers
 // MARK: - Rooms (iPhone · iPad · visionOS)
 //
 // The mobile counterpart of the desktop's room stage (RoomStage.swift): a
-// room groups sessions of the server, with its own Switchboard. The phone
-// pages through them one at a time (a tab per session, swipe between); the
-// pad lays them out in the room's grid (1×1 … 4×4, pages as tabs) like the
-// desktop. One composer at the bottom talks to the room's Switchboard or to
-// the session in focus. Everything reads the mirror (`roomStore`,
+// room groups sessions of the server, with its own Switchboard. The
+// Switchboard has a tab of its own, first; then the phone pages through the
+// sessions one at a time (a tab per session, swipe between) and the pad lays
+// them out in the room's grid (1×1 … 4×4, pages as tabs) like the desktop.
+// One composer at the bottom talks to what the selected tab shows: the
+// Switchboard, or the session in focus. Everything reads the mirror (`roomStore`,
 // `sessionStore`) and drives the server through `/agent-rooms` and the
 // session "send" verb.
 
@@ -283,15 +284,17 @@ struct MobileRoomScreen: View {
     var onGone: () -> Void = {}
 
     @Environment(\.horizontalSizeClass) private var hSize
+    /// The selected tab: a page of sessions, or `switchboardPage`.
     @State private var page = 0
+    /// The first settle picks the opening tab: the Switchboard when the room
+    /// has one, else the first session.
+    @State private var didPickOpeningTab = false
     @State private var focusedID: UUID?
-    @State private var toSwitchboard = true
     @State private var zoomedID: UUID?
     /// The cell a zoom is moving, until the spring settles: it draws a
     /// placeholder meanwhile instead of laying its transcript out on
     /// every frame.
     @State private var zoomMoving: UUID?
-    @State private var dockOpen = true
     @State private var draft = ""
     @State private var sending = false
     @State private var renaming: AgentRoom?
@@ -324,10 +327,14 @@ struct MobileRoomScreen: View {
     }
     private var pages: [[AgentSession]] { layout.pages(members) }
     private var focused: AgentSession? { focusedID.flatMap { id in members.first { $0.id == id } } }
+    /// The Switchboard's tab, ahead of the sessions' pages.
+    static let switchboardPage = -1
+    /// The Switchboard's tab is selected: it's what the composer talks to.
+    private var toSwitchboard: Bool { page == Self.switchboardPage && zoomedID == nil }
     @Environment(\.scenePhase) private var scenePhase
 
-    /// The chats on screen: the zoomed one, else the page -- and the
-    /// Switchboard's, while its dock is open (as `dock` shows it). Only cells
+    /// The chats on screen: the zoomed one, else the page, or the
+    /// Switchboard on its tab. Only cells
     /// that show the conversation: an asleep, unstarted or tab-less member's
     /// cell is a placeholder with no transcript, and reading it cleared the
     /// mark on every client for replies never shown (Finding CWE-670, "iOS
@@ -336,12 +343,12 @@ struct MobileRoomScreen: View {
         var shown: [AgentSession]
         if let z = zoomedID, let s = members.first(where: { $0.id == z }) {
             shown = [s]
+        } else if toSwitchboard {
+            shown = switchboard.map { [$0] } ?? []
         } else {
             shown = pages.indices.contains(page) ? pages[page] : []
         }
-        shown = shown.filter { MobileRooms.isLive($0, controller) && zoomMoving != $0.id }
-        if dockOpen, zoomedID == nil, let sb = switchboard, MobileRooms.isLive(sb, controller) { shown.append(sb) }
-        return shown
+        return shown.filter { MobileRooms.isLive($0, controller) && zoomMoving != $0.id }
     }
 
     /// In the foreground, what's on screen is read -- here and, through the
@@ -376,8 +383,10 @@ struct MobileRoomScreen: View {
         .task { await debugAttach() }
         #endif
         .onChange(of: members.map(\.id)) { _, _ in settleFocus() }
+        .onChange(of: switchboard?.id) { _, _ in settleFocus() }
         .onChange(of: page) { _, p in
             // Swiping to a page brings the focus (and the composer) along.
+            if p == Self.switchboardPage { return }
             if let f = focusedID, pages.indices.contains(p), pages[p].contains(where: { $0.id == f }) { return }
             if pages.indices.contains(p) { focus(pages[p].first?.id) }
         }
@@ -395,9 +404,12 @@ struct MobileRoomScreen: View {
     }
 
     private func settleFocus() {
-        if switchboard == nil { toSwitchboard = false }
         if focusedID == nil || !members.contains(where: { $0.id == focusedID }) { focus(members.first?.id) }
-        page = min(page, max(0, pages.count - 1))
+        if !didPickOpeningTab, room != nil {
+            didPickOpeningTab = true
+            page = switchboard != nil || members.isEmpty ? Self.switchboardPage : 0
+        }
+        if page != Self.switchboardPage { page = min(page, max(0, pages.count - 1)) }
     }
 
     private func focus(_ id: UUID?) {
@@ -430,13 +442,12 @@ struct MobileRoomScreen: View {
                 .padding(.vertical, 8)
                 .background(Color.primary.opacity(0.05))
             }
-            if members.isEmpty {
+            if zoomedID == nil { tabStrip }
+            if members.isEmpty && !toSwitchboard {
                 empty
             } else {
-                if zoomedID == nil, pages.count > 1 || layout.size == 1 { tabStrip }
                 content.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            dock
             composer
         }
         .background(Color(uiColor: .systemGroupedBackground))
@@ -459,12 +470,14 @@ struct MobileRoomScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// A tab per page: at 1×1 (always on the phone) a tab per session.
+    /// The Switchboard's tab, then a tab per page: at 1×1 (always on the
+    /// phone) a tab per session.
     private var tabStrip: some View {
         let single = layout.size == 1
         return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
+                    switchboardTab.id(Self.switchboardPage)
                     ForEach(Array(pages.enumerated()), id: \.offset) { i, p in
                         tab(p, index: i, single: single).id(i)
                     }
@@ -476,6 +489,27 @@ struct MobileRoomScreen: View {
         }
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var switchboardTab: some View {
+        let on = toSwitchboard
+        return Button {
+            withAnimation(.snappy) { page = Self.switchboardPage }
+        } label: {
+            HStack(spacing: 6) {
+                SwitchboardMark(accent: accent, size: 16)
+                Text("Switchboard").lineLimit(1)
+                    .font(.subheadline.weight(on ? .semibold : .regular))
+                if let sb = switchboard, SessionHome.showsUnread(sb, in: model) { UnreadMark(size: 7) }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(on ? accent.opacity(0.16) : Color.primary.opacity(0.05)))
+            .overlay(Capsule().strokeBorder(on ? accent.opacity(0.45) : .clear, lineWidth: 1))
+            .foregroundStyle(on ? Color.primary : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Switchboard")
     }
 
     private func tab(_ p: [AgentSession], index i: Int, single: Bool) -> some View {
@@ -508,13 +542,17 @@ struct MobileRoomScreen: View {
             cell(s, zoomed: true).padding(10)
                 .transition(.scale(scale: 0.96).combined(with: .opacity))
         } else if compact {
-            // One session per page; swipe between them.
+            // The Switchboard, then one session per page; swipe between them.
             TabView(selection: $page) {
+                switchboardPane.padding(10).tag(Self.switchboardPage)
                 ForEach(Array(pages.enumerated()), id: \.offset) { i, p in
                     if let s = p.first { cell(s, zoomed: false).padding(10).tag(i) }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
+        } else if toSwitchboard {
+            switchboardPane.padding(10)
+                .transition(.push(from: .leading))
         } else {
             GeometryReader { geo in
                 let l = layout
@@ -539,7 +577,6 @@ struct MobileRoomScreen: View {
                             moving: zoomMoving == s.id,
                             onZoom: {
                                 focus(s.id)
-                                toSwitchboard = false
                                 setZoom(zoomedID == s.id ? nil : s.id)
                             },
                             onOpen: { onOpenSession(s.id) },
@@ -548,77 +585,60 @@ struct MobileRoomScreen: View {
                 .strokeBorder(isFocused ? accent.opacity(addressed ? 1 : 0.4) : Color.primary.opacity(0.08),
                               lineWidth: isFocused ? 2 : 1))
             .shadow(color: .black.opacity(addressed ? 0.12 : 0.04), radius: addressed ? 8 : 2, y: 2)
-            .simultaneousGesture(TapGesture().onEnded {
-                focus(s.id)
-                toSwitchboard = false
-            })
+            .simultaneousGesture(TapGesture().onEnded { focus(s.id) })
     }
 
-    // MARK: Switchboard dock
+    // MARK: Switchboard tab
 
-    private var dock: some View {
-        let shown = dockOpen && zoomedID == nil
-        return VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { dockOpen.toggle() }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "wand.and.rays").foregroundStyle(accent)
-                    Text("Switchboard").font(.subheadline.weight(.semibold))
-                    Text("keeps track of this room's sessions")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
-                    Image(systemName: shown ? "chevron.down" : "chevron.up")
-                        .font(.caption.weight(.bold)).foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
+    /// The Switchboard's tab: its conversation, full height, carded like a
+    /// session's cell — or what it takes to get one going.
+    private var switchboardPane: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                SwitchboardMark(accent: accent, size: 20)
+                Text("Switchboard").font(.subheadline.weight(.semibold))
+                Text("keeps track of this room's sessions")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .background(.bar)
-            if shown {
-                Group {
-                    if let sb = switchboard, MobileRooms.isLive(sb, controller) {
-                        RoomTranscriptView(controller: controller, session: sb)
-                            .simultaneousGesture(TapGesture().onEnded { toSwitchboard = true })
-                    } else if let sb = switchboard, sb.isLaunching {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("The room's Switchboard is starting…").foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if let sb = switchboard {
-                        // Asleep or ended (its machine went down): wake it.
-                        VStack(spacing: 10) {
-                            Image(systemName: "moon.zzz").font(.system(size: 26, weight: .light))
-                                .foregroundStyle(.tertiary)
-                            Button("Resume") { controller.sessionCommand(sb.id, "resume") }
-                                .buttonStyle(.bordered)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        VStack(spacing: 10) {
-                            Text("Ask about everything in this room at once — what's stuck, what's done — or have it answer and start sessions for you.")
-                                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                            Button("Start the Room's Switchboard") {
-                                Task {
-                                    await controller.roomCommand(roomID, "switchboard")
-                                    toSwitchboard = true
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                        .padding(16)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            Group {
+                if let sb = switchboard, MobileRooms.isLive(sb, controller) {
+                    RoomTranscriptView(controller: controller, session: sb)
+                } else if let sb = switchboard, sb.isLaunching {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("The room's Switchboard is starting…").foregroundStyle(.secondary)
                     }
+                } else if let sb = switchboard {
+                    // Asleep or ended (its machine went down): wake it.
+                    VStack(spacing: 10) {
+                        Image(systemName: "moon.zzz").font(.system(size: 26, weight: .light))
+                            .foregroundStyle(.tertiary)
+                        Button("Resume") { controller.sessionCommand(sb.id, "resume") }
+                            .buttonStyle(.bordered)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        Text("Ask about everything in this room at once — what's stuck, what's done — or have it answer and start sessions for you.")
+                            .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        Button("Start the Room's Switchboard") {
+                            Task { await controller.roomCommand(roomID, "switchboard") }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding(16)
                 }
-                .frame(height: compact ? 170 : 220)
-                .background(Color.platformWindowBackground)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .overlay(alignment: .top) { Divider() }
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
     }
 
     // MARK: The one composer
@@ -738,7 +758,8 @@ struct MobileRoomScreen: View {
     private var targetMenu: some View {
         Menu {
             Button {
-                toSwitchboard = true
+                setZoom(nil)
+                withAnimation(.snappy) { page = Self.switchboardPage }
             } label: {
                 Label("Switchboard", systemImage: toSwitchboard ? "checkmark" : "wand.and.rays")
             }
@@ -747,7 +768,6 @@ struct MobileRoomScreen: View {
                 ForEach(members) { m in
                     Button {
                         focus(m.id)
-                        toSwitchboard = false
                         reveal(m.id)
                     } label: {
                         Label(m.title, systemImage: !toSwitchboard && focusedID == m.id ? "checkmark" : "bubble.left")
@@ -757,10 +777,7 @@ struct MobileRoomScreen: View {
         } label: {
             HStack(spacing: 6) {
                 if toSwitchboard {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(accent.gradient)
-                        .frame(width: 18, height: 18)
-                        .overlay(Image(systemName: "wand.and.rays").font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white))
+                    SwitchboardMark(accent: accent, size: 18)
                 } else if let f = focused {
                     AgentAvatar(tool: f.tool, size: 18, status: SessionHome.dot(for: f, in: model))
                 }
@@ -954,6 +971,19 @@ struct MobileRoomScreen: View {
         case 4: return "square.grid.2x2"
         default: return "square.grid.3x3"
         }
+    }
+}
+
+/// The Switchboard's mark: the room's tint with the wand.
+struct SwitchboardMark: View {
+    let accent: Color
+    var size: CGFloat = 18
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous).fill(accent.gradient)
+            .frame(width: size, height: size)
+            .overlay(Image(systemName: "wand.and.rays").font(.system(size: size * 0.5, weight: .bold))
+                .foregroundStyle(.white))
     }
 }
 
