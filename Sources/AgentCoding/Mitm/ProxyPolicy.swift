@@ -531,6 +531,16 @@ extension ProxyPolicy {
 
     static let detectorWarmingRetryAfter = 2
 
+    /// One Security Timeline row per request that swapped personal data the
+    /// provider hadn't seen yet (history resent every turn isn't recounted).
+    static func recordPIISwaps(_ o: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double) {
+        var data: [String: AnyJSON] = ["host": .string(host), "count": .int(o.total),
+                                       "latency_ms": .int(Int(ms.rounded()))]
+        for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
+        if o.partial { data["partial"] = .bool(true) }
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
+    }
+
     /// Why a request body couldn't be decoded, for the Security Timeline:
     /// `encoding` is a coding's name (a content-coding is a token, no spaces)
     /// or the decoder's own reason ("an unreadable header line").

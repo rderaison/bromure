@@ -2922,14 +2922,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// 451 response the guest sees when a prompt-injection detection blocks the
     /// request (block mode, or ask → denied). The agent gets a hard HTTP error
     /// instead of the model reply; no byte reaches the AI host.
-    /// One Security Timeline row per request that swapped personal data the
-    /// provider hadn't seen yet (history resent every turn isn't recounted).
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func recordPIISwaps(_ o: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double) {
-        var data: [String: AnyJSON] = ["host": .string(host), "count": .int(o.total),
-                                       "latency_ms": .int(Int(ms.rounded()))]
-        for (kind, n) in o.newSwaps { data[kind.rawValue] = .int(n) }
-        if o.partial { data["partial"] = .bool(true) }
-        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "privacy.pii_swap", eventData: data)
+        ProxyPolicy.recordPIISwaps(o, host: host, profileID: profileID, ms: ms)
     }
 
     /// An AI provider host (the hosts the conversation scans apply to).
