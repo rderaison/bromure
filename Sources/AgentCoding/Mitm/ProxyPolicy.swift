@@ -481,6 +481,8 @@ enum ProxyPolicy {
         var request: Data
         var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
         var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+        /// Each client binary message's verdict (an OpenShell websocket route's).
+        var binaryPolicy: (() -> OpenShellWebSocket.MessageVerdict)?
     }
 
     enum WebSocketPlan {
@@ -493,7 +495,8 @@ enum ProxyPolicy {
     /// An upgrade `request` to `host:port` `reqPath` under `policy`: every
     /// client text message on an OpenShell `protocol: websocket` route is
     /// judged before it's forwarded (`WEBSOCKET_TEXT` rules, or GraphQL
-    /// operation policy), for `identity` when the policy enforces
+    /// operation policy), and every binary one (`WEBSOCKET_BINARY` rules),
+    /// for `identity` when the policy enforces
     /// `binaries`; the route's middleware and credential placeholders
     /// (`entries`: the workspace's swap map) rewrite them; and
     /// permessage-deflate is only offered upstream without client context
@@ -504,6 +507,7 @@ enum ProxyPolicy {
         var upgradeRequest = request
         var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
         var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+        var binaryPolicy: (() -> OpenShellWebSocket.MessageVerdict)?
         let wsChain = policy?.openShell?.middlewares(for: host) ?? []
         if let mw = wsChain.first(where: { !$0.isBuiltinRegex && !$0.failOpen }) {
             // An external middleware can't be reached, and this one fails
@@ -563,26 +567,50 @@ enum ProxyPolicy {
                 return .reject(status: 400, error: "invalid_http_request", detail: rejection.reason)
             }
             let enforce = policy?.enforceBinaries ?? false
-            if let openShell = policy?.openShell, routesWS { messagePolicy = { text in
-                openShell.websocketMessageDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
-                                                   text: text, identity: identity, enforceBinaries: enforce)
-            } }
+            if let openShell = policy?.openShell, routesWS {
+                messagePolicy = { text in
+                    openShell.websocketMessageDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
+                                                       text: text, identity: identity, enforceBinaries: enforce)
+                }
+                binaryPolicy = {
+                    openShell.websocketBinaryDecision(host: host, port: UInt16(truncatingIfNeeded: port), target: reqPath,
+                                                      identity: identity, enforceBinaries: enforce)
+                }
+            }
             if messagePolicy == nil { messagePolicy = { _ in .allow } }
         }
-        return .go(WebSocketPolicy(request: upgradeRequest, messagePolicy: messagePolicy, messageTransform: messageTransform))
+        return .go(WebSocketPolicy(request: upgradeRequest, messagePolicy: messagePolicy, messageTransform: messageTransform,
+                                   binaryPolicy: binaryPolicy))
     }
 
-    /// The log line and Timeline row for a client text message an OpenShell
-    /// WebSocket route denied (`enforced`) or audited.
+    /// A binary message verdict that reports its denial or audit through
+    /// `onViolation` (webSocketViolation's, method WEBSOCKET_BINARY), as
+    /// the text gate's caller reports text ones.
+    static func reportingBinary(_ judge: @escaping () -> OpenShellWebSocket.MessageVerdict,
+                                _ onViolation: @escaping @Sendable (String, Bool) -> Void) -> () -> OpenShellWebSocket.MessageVerdict {
+        {
+            let v = judge()
+            switch v {
+            case .allow: break
+            case .audit(let why): onViolation(why, false)
+            case .deny(let why): onViolation(why, true)
+            }
+            return v
+        }
+    }
+
+    /// The log line and Timeline row for a client message (`method`: text,
+    /// or WEBSOCKET_BINARY) an OpenShell WebSocket route denied
+    /// (`enforced`) or audited.
     static func webSocketViolation(profileID pid: UUID, host: String, port: Int, path wsPath: String,
-                                   scheme wsScheme: String) -> @Sendable (String, Bool) -> Void {
+                                   scheme wsScheme: String, method: String = "WEBSOCKET_TEXT") -> @Sendable (String, Bool) -> Void {
         { reason, enforced in
             SupplyChainLog.shared.record(
-                "[firewall] \(enforced ? "✗ deny" : "⚠ audit") WEBSOCKET_TEXT \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
+                "[firewall] \(enforced ? "✗ deny" : "⚠ audit") \(method) \(host)\(wsPath) — \(reason) (\(pid.uuidString.prefix(8)))")
             BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: [
                 "action": .string(enforced ? "deny" : "audit"), "layer": .string("l7"),
                 "proto": .string("tcp"), "host": .string(host), "port": .int(port),
-                "method": .string("WEBSOCKET_TEXT"), "path": .string(wsPath), "reason": .string(reason),
+                "method": .string(method), "path": .string(wsPath), "reason": .string(reason),
                 "scheme": .string(wsScheme),
             ])
         }

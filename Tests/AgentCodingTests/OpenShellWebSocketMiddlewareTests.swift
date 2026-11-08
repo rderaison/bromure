@@ -33,7 +33,7 @@ struct OpenShellWebSocketMiddlewareTests {
         return (forwarded, stopped)
     }
 
-    @Test("The inspector forwards binary / control frames, judges each text message, cuts at a denied one")
+    @Test("The inspector forwards binary (no verdict asked) / control frames, judges each text message, cuts at a denied one")
     func inspector() {
         let ping = frame(opcode: 0x9, "hi")
         let bin = frame(opcode: 0x2, String(repeating: "b", count: 300))
@@ -46,6 +46,90 @@ struct OpenShellWebSocketMiddlewareTests {
         #expect(i.closeReason == "nope")
         #expect(forwarded.starts(with: ping + bin + ok))
         #expect(forwarded.range(of: frame(opcode: 0x1, "sec", fin: false)) == nil)   // held, never forwarded
+    }
+
+    @Test("A binary message is judged once, at its first frame: a denial cuts before any of it goes, an allowed or audited one streams")
+    func binaryJudged() {
+        let ok = frame(opcode: 0x1, "hello")
+        let bin = frame(opcode: 0x2, String(repeating: "b", count: 300))
+        // A fragmented binary message with a ping between its fragments.
+        let fragBin = frame(opcode: 0x2, "ab", fin: false) + frame(opcode: 0x9, "p") + frame(opcode: 0x0, "cd")
+        var asked = 0
+        let allow = OpenShellWebSocket.ClientStream(compression: false, decide: { _ in .allow },
+                                                    decideBinary: { asked += 1; return .allow })
+        let (fwd, stop) = run(allow, ok + bin + fragBin)
+        #expect(!stop && fwd == ok + bin + fragBin)
+        #expect(asked == 2, "once per message, not per frame")
+
+        let audit = OpenShellWebSocket.ClientStream(compression: false, decide: { _ in .allow },
+                                                    decideBinary: { .audit("logged") })
+        let (afwd, astop) = run(audit, bin)
+        #expect(!astop && afwd == bin, "an audit forwards")
+
+        let deny = OpenShellWebSocket.ClientStream(compression: false, decide: { _ in .allow },
+                                                   decideBinary: { .deny("binary_denied") })
+        let (dfwd, dstop) = run(deny, ok + bin + ok)
+        #expect(dstop && deny.closeReason == "binary_denied" && deny.closeCode == 1008)
+        #expect(dfwd == ok, "nothing of the binary message, nor after it, went")
+
+        // A gate without a binary verdict passes them (no OpenShell route).
+        let plain = OpenShellWebSocket.ClientStream(compression: false) { _ in .allow }
+        #expect(run(plain, bin + fragBin) == (bin + fragBin, false))
+    }
+
+    static func wsPolicy(_ endpoint: String, host: String = "ws.example") throws -> OpenShellPolicy {
+        try OpenShellPolicy.parse("""
+        version: 1
+        network_policies:
+          ws:
+            endpoints:
+              - host: \(host)
+                port: 443
+                protocol: websocket
+        """ + endpoint.split(separator: "\n").map { "\n        " + $0 }.joined())
+    }
+
+    @Test("WEBSOCKET_BINARY: the read-write preset takes it, read-only and a text-only rule don't, a GraphQL route never, audit audits")
+    func binaryPolicy() throws {
+        func binary(_ p: OpenShellPolicy, host: String = "ws.example") -> OpenShellWebSocket.MessageVerdict {
+            p.websocketBinaryDecision(host: host, port: 443, target: "/socket")
+        }
+        let rw = try Self.wsPolicy("enforcement: enforce\naccess: read-write")
+        #expect(binary(rw) == .allow)
+        guard case .deny = binary(try Self.wsPolicy("enforcement: enforce\naccess: read-only")) else {
+            Issue.record("read-only took a binary message"); return
+        }
+        let textOnly = try Self.wsPolicy("""
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/socket" }
+          - allow: { method: WEBSOCKET_TEXT, path: "/socket" }
+        """)
+        guard case .deny(let why) = binary(textOnly) else { Issue.record("a text-only route took a binary message"); return }
+        #expect(why.contains("WEBSOCKET_BINARY"), "\(why)")
+        #expect(textOnly.websocketMessageDecision(host: "ws.example", port: 443, target: "/socket", text: "hi") == .allow)
+        let both = try Self.wsPolicy("""
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/socket" }
+          - allow: { method: WEBSOCKET_BINARY, path: "/socket" }
+        """)
+        #expect(binary(both) == .allow)
+        let audited = try Self.wsPolicy("""
+        enforcement: audit
+        rules:
+          - allow: { method: GET, path: "/socket" }
+        """)
+        guard case .audit = binary(audited) else { Issue.record("audit enforcement didn't audit"); return }
+        let gql = try Self.wsPolicy("""
+        enforcement: audit
+        rules:
+          - allow: { method: GET, path: "/socket" }
+          - allow: { operation_type: query }
+        """)
+        guard case .deny(let gwhy) = binary(gql) else { Issue.record("a GraphQL route took a binary message"); return }
+        #expect(gwhy.contains("graphql_ws"), "even under audit: \(gwhy)")
+        #expect(binary(textOnly, host: "elsewhere.example") == .allow, "no route: not judged")
     }
 
     @Test("Protocol violations end the session: unmasked frames, fragmented control, stray continuation")

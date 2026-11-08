@@ -147,9 +147,10 @@ public struct OpenShellPolicy: Sendable, Equatable {
         public var allowMatchers: [RequestMatcher] {
             if let access {
                 // l7/mod.rs `access_preset_rules`: WebSocket read-only = the
-                // upgrade only, read-write adds client text; `full` is `*`.
+                // upgrade only, read-write adds client messages (text, and
+                // binary, which are judged too); `full` is `*`.
                 let methods = access == .full ? ["*"]
-                    : l7 == .websocket ? (access == .readOnly ? ["GET"] : ["GET", "WEBSOCKET_TEXT"])
+                    : l7 == .websocket ? (access == .readOnly ? ["GET"] : ["GET", "WEBSOCKET_TEXT", "WEBSOCKET_BINARY"])
                     : access.restMethods
                 return methods.map { RequestMatcher(method: $0, path: "**", query: [:]) }
             }

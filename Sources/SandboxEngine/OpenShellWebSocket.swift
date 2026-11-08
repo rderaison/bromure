@@ -7,8 +7,11 @@ import Foundation
 // message is judged before it's forwarded: as a `WEBSOCKET_TEXT` request
 // against the route's endpoints, or — when the endpoint carries GraphQL
 // operation policy — as a GraphQL-over-WebSocket operation. Frames are
-// forwarded unchanged once their message is allowed; binary and control
-// frames pass. Compression stays possible only as permessage-deflate with
+// forwarded unchanged once their message is allowed. Each client binary
+// message is judged too, as a `WEBSOCKET_BINARY` request (its verdict
+// doesn't depend on its bytes, so it's decided at its first frame and
+// streamed after); a GraphQL route takes none. Control frames pass.
+// Compression stays possible only as permessage-deflate with
 // `client_no_context_takeover`, so each client message inflates on its own.
 
 public enum OpenShellWebSocket {
@@ -151,6 +154,7 @@ public enum OpenShellWebSocket {
         private let decide: (String) -> MessageVerdict
         private let onAudit: (String) -> Void
         private let transform: ((String) -> MessageTransform)?
+        private let decideBinary: (() -> MessageVerdict)?
         private var buffer = Data()
         /// Raw frames of the text message being assembled (held back).
         private var heldFrames = Data()
@@ -166,13 +170,18 @@ public enum OpenShellWebSocket {
         /// hold while it's assembled.
         public private(set) var closeCode: UInt16 = 1008
 
+        /// `decideBinary`: each client binary message's verdict, asked at
+        /// its first frame (a denial ends the session before any of it is
+        /// forwarded; an audit is the closure's to report); nil passes them.
         public init(compression: Bool, decide: @escaping (String) -> MessageVerdict,
                     onAudit: @escaping (String) -> Void = { _ in },
-                    transform: ((String) -> MessageTransform)? = nil) {
+                    transform: ((String) -> MessageTransform)? = nil,
+                    decideBinary: (() -> MessageVerdict)? = nil) {
             self.compression = compression
             self.decide = decide
             self.onAudit = onAudit
             self.transform = transform
+            self.decideBinary = decideBinary
         }
 
         public func feed(_ chunk: Data) -> (forward: Data, stop: Bool) {
@@ -193,7 +202,9 @@ public enum OpenShellWebSocket {
                 let isData = h.opcode == 0x1 || h.opcode == 0x2 || h.opcode == 0x0
                 let binary = h.opcode == 0x2 || (h.opcode == 0x0 && fragment == .binary)
                 if binary {
-                    // Stream binary frames through without buffering them.
+                    // A binary message is judged once, at its first frame;
+                    // then its frames stream through without buffering.
+                    if h.opcode == 0x2, case .deny(let why)? = decideBinary?() { return fail(why, out) }
                     out.append(buffer.prefix(h.headerLength))
                     buffer.removeFirst(h.headerLength)
                     passthroughRemaining = h.payloadLength
@@ -383,6 +394,28 @@ extension OpenShellPolicy {
     /// (`endpoint_has_graphql_policy`).
     static func hasGraphQLPolicy(_ ep: Endpoint) -> Bool {
         !ep.gqlRules.isEmpty || !ep.gqlDenyRules.isEmpty || !ep.graphqlRegistry.isEmpty || ep.persistedQueriesAllowRegistered
+    }
+
+    /// Decide one client binary message on a WebSocket upgraded at `target`:
+    /// a `WEBSOCKET_BINARY` request against the route's endpoints. A route
+    /// with GraphQL operation policy takes no binary message (GraphQL over
+    /// WebSocket is text), even under audit.
+    public func websocketBinaryDecision(host: String, port: UInt16, target: String,
+                                        identity: BinaryIdentity? = nil,
+                                        enforceBinaries: Bool = false) -> OpenShellWebSocket.MessageVerdict {
+        var scoped = self
+        if enforceBinaries { scoped.networkPolicies = networkPolicies.filter { $0.applies(to: identity, enforce: true) } }
+        guard let route = scoped.routedEndpoint(host: host, port: port, target: target), route.primary.l7 == .websocket else {
+            return .allow
+        }
+        if Self.hasGraphQLPolicy(route.primary) {
+            return .deny("graphql_ws binary message rejected: GraphQL over WebSocket messages are text")
+        }
+        guard case .violation(let why, _, let enforced) = scoped.evaluateRequest(host: host, port: port,
+                                                                                method: "WEBSOCKET_BINARY", target: target) else {
+            return .allow
+        }
+        return enforced ? .deny(why) : .audit(why)
     }
 
     /// Decide one client text message on a WebSocket upgraded at `target`

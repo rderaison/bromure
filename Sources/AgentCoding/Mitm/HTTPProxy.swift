@@ -1150,6 +1150,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             var upgradeRequest: Data
             var messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)?
             var messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)?
+            var binaryPolicy: (() -> OpenShellWebSocket.MessageVerdict)?
             switch ProxyPolicy.webSocketPlan(swap.modified, policy: guardrailsProvider()?.egressPolicy,
                                              entries: swapper.entries(for: profileID), host: host, port: port,
                                              reqPath: reqPath, identity: binaryIdentity) {
@@ -1160,9 +1161,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 upgradeRequest = ws.request
                 messagePolicy = ws.messagePolicy
                 messageTransform = ws.messageTransform
+                binaryPolicy = ws.binaryPolicy
             }
             let onViolation = ProxyPolicy.webSocketViolation(profileID: profileID, host: host, port: port, path: reqPath,
                                                              scheme: flowScheme == "http" ? "ws" : "wss")
+            let onBinaryViolation = ProxyPolicy.webSocketViolation(profileID: profileID, host: host, port: port, path: reqPath,
+                                                                   scheme: flowScheme == "http" ? "ws" : "wss",
+                                                                   method: "WEBSOCKET_BINARY")
             // PII protection / prompt-injection detection on a model
             // provider's socket (Codex's Responses WebSocket): frame-level
             // relay instead of the opaque pump. nil → opaque pump.
@@ -1192,6 +1197,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 messagePolicy: messagePolicy,
                 messageTransform: messageTransform,
                 onViolation: onViolation,
+                binaryPolicy: binaryPolicy.map { ProxyPolicy.reportingBinary($0, onBinaryViolation) },
                 contentGuard: contentGuard,
                 squelchLearnFor: squelchOnPump ? profileID : nil,
                 onUpstreamMessage: realtimeTap.map { tap in
@@ -1981,6 +1987,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                         messagePolicy: ((String) -> OpenShellWebSocket.MessageVerdict)? = nil,
                                         messageTransform: ((String) -> OpenShellWebSocket.MessageTransform)? = nil,
                                         onViolation: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
+                                        binaryPolicy: (() -> OpenShellWebSocket.MessageVerdict)? = nil,
                                         contentGuard: WSContentGuard? = nil,
                                         squelchLearnFor: UUID? = nil,
                                         onUpstreamMessage: (@Sendable (WSMessage) -> Void)? = nil) async throws -> WebSocketResult {
@@ -2184,7 +2191,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let v = decide(text)
                 if case .deny(let why) = v { onViolation(why, true) }
                 return v
-            }, onAudit: { onViolation($0, false) }, transform: messageTransform)
+            }, onAudit: { onViolation($0, false) }, transform: messageTransform, decideBinary: binaryPolicy)
         }
 
         // Switch both streams to non-blocking pump mode. The sequential

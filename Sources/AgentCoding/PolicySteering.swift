@@ -215,7 +215,8 @@ public final class PolicySteering: @unchecked Sendable {
                          rule: s("rule"), reason: s("reason"))
         let what: String
         if let method = s("method") {
-            let verb = method == "WEBSOCKET_TEXT" ? "a WebSocket message to" : (Self.methodWord(method) ?? "a request to")
+            let verb = method == "WEBSOCKET_TEXT" || method == "WEBSOCKET_BINARY" ? "a WebSocket message to"
+                : (Self.methodWord(method) ?? "a request to")
             what = "\(verb) \(Self.quoted(target + (s("path").map(Self.shortPath) ?? "")))"
         } else if s("proto") == "udp" || s("proto") == "quic" {
             what = "UDP to \(Self.quoted("\(target):\(port)"))"
