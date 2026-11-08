@@ -4028,7 +4028,7 @@ struct ProfileEditorView: View {
 
     private static var defaultHomeGB: Int {
         #if os(macOS)
-        SessionDisk.resolvedHomeImageGB()
+        SessionDisk.resolvedHomeImageGB(freeBytes: SessionDisk.freeBytes(near: ProfileStore().profilesDirectory))
         #else
         16
         #endif

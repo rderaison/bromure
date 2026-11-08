@@ -43,13 +43,14 @@ struct HomeSizeBoundsTests {
         #expect(disk.homeImageTargetBytes == 8 << 30)
     }
 
-    @Test("a new home is 16 GB by default; a legacy home's migration still gets 64 GB")
+    @Test("a new home is at most 16 GB by default, scaled to free space; a legacy home's migration still gets 64 GB")
     func defaultSize() {
         #expect(SessionDisk.defaultHomeImageGB == 16)
         let store = ProfileStore(rootDir: FileManager.default.temporaryDirectory.appendingPathComponent("hs-\(UUID().uuidString)"))
         var p = Profile(name: "h", tool: .claude, authMode: .token)
         var disk = SessionDisk(profile: p, store: store, baseDiskURL: URL(fileURLWithPath: "/dev/null"))
-        #expect(disk.homeImageTargetBytes == UInt64(SessionDisk.resolvedHomeImageGB()) << 30)
+        let free = SessionDisk.freeBytes(near: disk.homeImageURL.deletingLastPathComponent())
+        #expect(disk.homeImageTargetBytes == UInt64(SessionDisk.resolvedHomeImageGB(freeBytes: free)) << 30)
         disk.migrateHomeThisBoot = true
         #expect(disk.homeImageTargetBytes >= 64 << 30)
         p.homeImageGB = 24                                   // its own size wins, migrating or not

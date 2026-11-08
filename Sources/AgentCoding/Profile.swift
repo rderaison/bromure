@@ -2049,11 +2049,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Sensible default RAM for a new profile, scaled to host memory.
     /// Same tier idea as the browser, bumped one notch since agent
     /// loads (npm, rust, model context windows) eat more than Chromium:
+    ///   <16 GB host → 2 GB VM (an 8 GB Mac: room left for macOS and a second VM)
     ///   <18 GB host → 4 GB VM
     ///   <36 GB host → 6 GB VM
     ///   ≥36 GB host → 8 GB VM
-    public static func defaultMemoryGB() -> Int {
-        let hostGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+    public static func defaultMemoryGB(hostBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let hostGB = hostBytes / (1024 * 1024 * 1024)
+        if hostGB < 16 { return 2 }
         if hostGB < 18 { return 4 }
         if hostGB < 36 { return 6 }
         return 8
@@ -2215,7 +2217,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
     /// Size of the ext4 home image, GiB; nil = the app-wide default
-    /// (`SessionDisk.resolvedHomeImageGB`). Grow-only: a larger value takes
+    /// (`SessionDisk.resolvedHomeImageGB`, scaled to free disk space when the
+    /// home is created, and not grown by it afterwards). Grow-only: a larger value takes
     /// effect at the next cold boot (the host grows home.img, the guest
     /// agent grows the filesystem) — a running VM can't see its disk grow.
     public var homeImageGB: Int? = nil
