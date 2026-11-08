@@ -16,6 +16,11 @@ IMAGE=${BROMURE_AC_IMAGE:-$SRCHOME/.local/share/bromure-ac/image-amd64}
 BIND=0.0.0.0; PORT=2222
 while [ $# -gt 0 ]; do case $1 in --bind) BIND=$2; shift 2;; --port) PORT=$2; shift 2;; *) echo "unknown $1" >&2; exit 2;; esac; done
 for f in "$BIN" "$FC" "$IMAGE/base.img" "$IMAGE/vmlinuz"; do [ -e "$f" ] || { echo "install.sh: missing $f" >&2; exit 1; }; done
+# Host libraries the daemon links (linux/RELEASE_NOTES.md, Host requirements):
+# library:package. Missing ones stop the install, named.
+for req in libz.so.1:zlib1g libbrotlidec.so.1:libbrotli1; do
+  ldconfig -p | grep -q "${req%%:*} " || { echo "$(basename "$0"): missing ${req%%:*}: install the ${req##*:} package" >&2; exit 1; }
+done
 
 L=/usr/local/lib/bromure-ac
 install -d -m 755 $L/bin $L/lib $L/vm-setup

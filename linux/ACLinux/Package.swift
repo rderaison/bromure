@@ -31,7 +31,9 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", "1.2.0" ..< "1.3.0"),
     ],
     targets: [
-        .target(name: "CACLinuxShims"),
+        // The content-coding decoders link the system's zlib and libbrotlidec
+        // (macOS: Compression.framework).
+        .target(name: "CACLinuxShims", linkerSettings: [.linkedLibrary("z"), .linkedLibrary("brotlidec")]),
         // onnxruntime's C API, loaded at run time (dlopen), over its vendored
         // headers (Sources/COrtShim/ort/README.md): nothing links against it.
         .target(name: "COrtShim", exclude: ["ort/LICENSE", "ort/README.md"], linkerSettings: [.linkedLibrary("dl")]),

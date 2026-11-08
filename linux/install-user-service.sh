@@ -18,6 +18,11 @@
 #
 # Usage: install-user-service.sh [--image DIR] [--no-start] [--uninstall]
 set -euo pipefail
+# Host libraries the daemon links (linux/RELEASE_NOTES.md, Host requirements):
+# library:package. Missing ones stop the install, named.
+for req in libz.so.1:zlib1g libbrotlidec.so.1:libbrotli1; do
+  ldconfig -p | grep -q "${req%%:*} " || { echo "$(basename "$0"): missing ${req%%:*}: install the ${req##*:} package" >&2; exit 1; }
+done
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DATA=${XDG_DATA_HOME:-$HOME/.local/share}
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user

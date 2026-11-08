@@ -24,7 +24,7 @@ import X509
 /// workspace's trace level). The workspace's policy chain runs on each
 /// request first (MitmEgress.swift): OpenShell's checks, the middleware,
 /// the guardrails, compromise detection and strict credential mode.
-// partial: no PII or supply-chain policy on Linux yet; prompt injection logs only
+// partial: no PII or supply-chain policy on Linux yet; prompt injection: WebSocket turns not scanned
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -60,6 +60,9 @@ final class MitmProxy: @unchecked Sendable {
     /// `.promptOnWrite` guardrails' consent (macOS: MitmEngine.guardrailsBroker):
     /// asked of the connected client (ConsentPrompt).
     let guardrailsBroker = GuardrailsConsentBroker()
+    /// Prompt injection's "ask" (macOS: HTTPMitmConnection.promptInjectionBroker):
+    /// asked of the connected client (ConsentPrompt).
+    let promptInjectionBroker = PromptInjectionConsentBroker()
     /// The workspaces' SSH agent (macOS: MitmEngine.sshAgent): their keys
     /// stay on the host; guests sign through vsock 8444.
     let sshAgent: SSHAgentServer
@@ -808,8 +811,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let host: String
         let port: Int
         let start: Date
-        /// The request as the guest sent it (before any swap).
-        let request: Data
+        /// The request as the guest sent it (before any swap; its body decoded
+        /// when a content scan decoded it).
+        var request: Data
         var swaps: [SwapRecord] = []
         var leaks: [LeakEntry] = []
     }
@@ -861,6 +865,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let swapped = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID)
         req = swapped.modified
         trace?.swaps = swapped.swaps
+        // Prompt injection, ask or block, before the model sees a byte
+        // (macOS: driveTLS's enforcement after the swaps; log mode stays in
+        // the trace's conversation hook).
+        if let answer = await promptInjectionAnswer(&req, proxy: proxy, profileID: profileID, host: host, path: path,
+                                                    trace: &trace) {
+            return .answer(answer)
+        }
         // An imported kubeconfig's client certificate flagged for approval:
         // asked before it's presented (macOS asks at the server's challenge,
         // and before an upgrade); refused with a real reply, not a close.

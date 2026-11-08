@@ -1,6 +1,26 @@
 # Bromure Agentic Coding on Linux: release notes
 
+## Host requirements
+
+Besides KVM, Firecracker and the Swift runtime the install scripts copy, the
+daemon links these system libraries (Ubuntu/Debian packages):
+
+- zlib (`zlib1g`) and libbrotlidec (`libbrotli1`): the proxy decodes
+  gzip, deflate and br request bodies for its content scans (zstd is
+  decoded in Swift). To build: `zlib1g-dev` and `libbrotli-dev`; the build
+  stops with the package to install if a header is missing.
+
+The install scripts check the libraries and stop with the package to
+install if one is missing.
+
 ## Upgrading
+
+### New host libraries: zlib and libbrotlidec (prompt injection's decoding)
+
+The daemon now links zlib and libbrotlidec (see Host requirements): install
+`zlib1g` and `libbrotli1` before upgrading. With the prompt-injection policy
+on, a content-coded request body to an AI host is decoded, scanned and
+forwarded decoded, as on macOS; one that can't be decoded is refused (415).
 
 ### VMs without a workspace profile aren't taken back (egress firewall, linux-port cd55e0e4)
 

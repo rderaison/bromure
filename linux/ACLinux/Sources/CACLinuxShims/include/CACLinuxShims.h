@@ -89,3 +89,8 @@ int acl_pidfd_send_signal(int pidfd, int sig);
 /// libpam is dlopen'ed (libpam.so.0), so nothing links it. Returns 0 when
 /// authenticated, a PAM error code (> 0) when not, -1 when PAM can't be loaded.
 int acl_pam_check(const char *service, const char *user, const char *password);
+
+// Content-coding decoders (decode.c): 0 and a malloc'd buffer the caller
+// frees; -1 corrupt or truncated; -2 past `cap`.
+int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_t **out, size_t *out_len);
+int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);

@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import NIOConcurrencyHelpers
 import NIOPosix
 import SandboxEngine
 
@@ -66,8 +67,11 @@ extension MitmProxy {
     func applyWorkspacePolicies(_ profile: Profile) {
         setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
         setGuardrailsConfig(GuardrailsConfig.make(for: profile), for: profile.id)
-        let (broker, name, pid) = (guardrailsBroker, profile.name, profile.id)
-        Task.detached { await broker.setProfileName(name, for: pid) }
+        let (broker, piBroker, name, pid) = (guardrailsBroker, promptInjectionBroker, profile.name, profile.id)
+        Task.detached {
+            await broker.setProfileName(name, for: pid)
+            await piBroker.setProfileName(name, for: pid)
+        }
     }
 
     /// A stopped workspace's policies, gone (macOS: cleanupSessionRegistrations).
@@ -292,6 +296,81 @@ extension RequestReader {
         let body = "Bromure: outbound request blocked — it carries a credential Bromure did not issue for \(host) (strict credential mode).\n"
         return Data(("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: text/plain; charset=utf-8\r\n"
                      + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body).utf8)
+    }
+
+    /// Prompt injection on an AI host's request, before it's forwarded
+    /// (macOS: driveTLS's enforcement). With the policy on, in any mode, a
+    /// content-coded body is decoded and forwarded decoded (the trace's copy
+    /// too, for log mode's scan); one that can't be decoded is refused with a
+    /// 415 and recorded. In ask and block modes: tool output the user already
+    /// blocked goes out as the placeholder; a detector model still loading
+    /// answers "retry" (503); a finding is refused (451) in block mode, or
+    /// asked of the client in ask mode. The answer, or nil to go on with
+    /// `request`.
+    /// Tests: the detectors' readiness (nil: the classifiers').
+    static let detectorReadinessForTesting = NIOLockedValueBox<(source: ModelReadiness, rules: ModelReadiness)?>(nil)
+
+    // @port-skip linux-only: HTTPMitmConnection.driveTLS's prompt-injection step, on the Linux request chain
+    static func promptInjectionAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
+                                      host: String, path: String, trace: inout Trace?) async -> Data? {
+        guard let pi = proxy.promptInjectionPolicy(for: profileID), pi.isActive,
+              TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) else { return nil }
+        switch decodeRequestContentEncoding(request) {
+        case .identity:
+            break
+        case .decoded(let plain):
+            request = plain
+            if let t = trace, case .decoded(let plainTrace) = decodeRequestContentEncoding(t.request) {
+                trace?.request = plainTrace
+            }
+        case .undecodable(let encoding):
+            ProxyPolicy.recordScanSkipped(host: host, path: path, engines: ["prompt_injection"],
+                                          reason: "\(encoding)-compressed request body could not be decoded",
+                                          profileID: profileID, blocked: true)
+            return ProxyPolicy.undecodableBodyResponse(encoding: encoding, engines: ["prompt_injection"])
+        }
+        guard pi.onDetection != .log, let split = request.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        // Already blocked: resent with every turn, it goes as a placeholder
+        // instead of failing each later request (the session goes on).
+        if PromptInjectionRedactions.shared.hasAny(profileID),
+           let r = PromptInjectionRedactions.shared.redact(Data(request[split.upperBound...]), profileID: profileID) {
+            request = ProxyPolicy.replacingBody(of: request, with: r.body)
+            ProxyPolicy.recordInjectionRedacted(count: r.count, host: host, profileID: profileID)
+        }
+        guard let conv = ConversationParser.parse(host: host, requestBody: request, responseBody: nil) else { return nil }
+        var source = ModelReadiness.absent, rules = ModelReadiness.absent
+        if let forced = detectorReadinessForTesting.withLockedValue({ $0 }) {
+            (source, rules) = forced
+        } else {
+            if pi.detectSourceInjection { source = await PromptInjectionClassifier.shared.readiness() }
+            if pi.detectRulesInjection { rules = await PromptInjectionClassifier.claudeMd.readiness() }
+        }
+        let warming = ProxyPolicy.warmingDetectors(injection: pi, source: pi.detectSourceInjection ? source : .absent,
+                                                   rules: pi.detectRulesInjection ? rules : .absent)
+        if !warming.isEmpty {
+            FileHandle.standardError.write(Data("[mitm] \(host): \(warming.joined(separator: " + ")) model still loading — answered 503\n".utf8))
+            return ProxyPolicy.detectorWarmingResponse(warming)
+        }
+        guard let f = await ProxyPolicy.detectPromptInjection(in: conv, policy: pi) else { return nil }
+        let blocked = ProxyPolicy.injectionBlockResponse(detector: f.detector, source: f.source,
+                                                         instructionsWithheld: !f.ruleSpans.isEmpty)
+        switch pi.onDetection {
+        case .block:
+            ProxyPolicy.recordPromptInjection(f, outcome: "blocked", host: host, profileID: profileID)
+            PromptInjectionRedactions.shared.block(f, profileID: profileID)
+            return blocked
+        case .ask:
+            let allow = await proxy.promptInjectionBroker.consent(profileID: profileID, detectorName: f.detector,
+                                                                  source: f.source, flaggedText: f.preview)
+            ProxyPolicy.recordPromptInjection(f, outcome: allow ? "allowed" : "blocked", host: host, profileID: profileID)
+            guard allow else {
+                PromptInjectionRedactions.shared.block(f, profileID: profileID)
+                return blocked
+            }
+            return nil
+        case .log:
+            return nil
+        }
     }
 
     /// The workspace's policy chain for one request, before any credential is

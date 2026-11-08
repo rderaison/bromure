@@ -202,8 +202,7 @@ final class ChildProcess: Sendable {
         }
         return await withCheckedContinuation { cont in
             pending.withLockedValue { $0 = cont }
-            // The timer holds the process weakly and is cancelled when the
-            // exit wins: it never keeps it alive to its deadline.
+            // Cancelled when the exit wins.
             let timer = Task { [weak self] in
                 try? await Task.sleep(for: timeout)
                 take()?.resume(returning: self?.exitStatus)
