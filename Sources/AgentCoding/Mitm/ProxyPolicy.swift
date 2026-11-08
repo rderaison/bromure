@@ -531,6 +531,14 @@ extension ProxyPolicy {
 
     static let detectorWarmingRetryAfter = 2
 
+    /// Why a request body couldn't be decoded, for the Security Timeline:
+    /// `encoding` is a coding's name (a content-coding is a token, no spaces)
+    /// or the decoder's own reason ("an unreadable header line").
+    static func undecodableReason(_ encoding: String) -> String {
+        encoding.contains(" ") ? "request body could not be decoded (\(encoding))"
+            : "\(encoding)-compressed request body could not be decoded"
+    }
+
     /// 415 the guest sees when a request body's Content-Encoding can't be
     /// decoded while a content scan is on for the host: the request is not
     /// forwarded (it would leave unscanned). 415 is the status RFC 9110
@@ -539,8 +547,9 @@ extension ProxyPolicy {
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")
-        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
-            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
+        let what = encoding.contains(" ") ? "its body could not be decoded (\(encoding))"
+            : "its body is \(encoding)-compressed in a way Bromure could not decode"
+        let body = "Bromure blocked this request: \(what), so \(names) could not check it. It was not sent. "
             + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
         var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
         r += "Content-Type: text/plain; charset=utf-8\r\n"
