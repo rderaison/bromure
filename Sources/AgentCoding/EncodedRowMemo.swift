@@ -11,12 +11,14 @@ import Foundation
 final class EncodedRowMemo {
     private var memos: [String: Any] = [:]
 
-    func rows<T: Equatable & Identifiable>(_ items: [T], _ key: String,
-                                          encode: (T) -> [String: Any]?) -> [[String: Any]] {
-        let old = memos[key] as? [T.ID: (value: T, row: [String: Any])] ?? [:]
-        var next: [T.ID: (value: T, row: [String: Any])] = [:]
+    /// `Row`: what an item encodes to (the app's `[String: Any]`, or
+    /// another JSON model's value); one key keeps one kind of row.
+    func rows<T: Equatable & Identifiable, Row>(_ items: [T], _ key: String,
+                                               encode: (T) -> Row?) -> [Row] {
+        let old = memos[key] as? [T.ID: (value: T, row: Row)] ?? [:]
+        var next: [T.ID: (value: T, row: Row)] = [:]
         next.reserveCapacity(items.count)
-        var out: [[String: Any]] = []
+        var out: [Row] = []
         out.reserveCapacity(items.count)
         for item in items {
             if let hit = old[item.id], hit.value == item {
