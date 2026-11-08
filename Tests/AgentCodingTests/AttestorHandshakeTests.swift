@@ -21,6 +21,9 @@ struct AttestorHandshakeTests {
     }
 
     static func pair() -> (guest: Int32, host: Int32) {
+        // A write to a side the test already closed mustn't kill the run
+        // (the daemon ignores SIGPIPE too).
+        signal(SIGPIPE, SIG_IGN)
         var fds: [Int32] = [0, 0]
         _ = fds.withUnsafeMutableBufferPointer { socketpair(AF_UNIX, streamSocketType, 0, $0.baseAddress!) }
         return (fds[0], fds[1])
@@ -84,9 +87,14 @@ struct AttestorHandshakeTests {
             b.admitHandshake(h)
             _ = Self.serve(b, h)
         }
-        // The real attestor arrives: admitted, and the oldest silent one goes.
+        // A newcomer while they're all younger than minPendingAge: refused.
+        let (yg, yh) = Self.pair(); guests.append(yg)
+        #expect(!b.admitHandshake(yh), "nobody cut off before they had a chance to say hello")
+        close(yh)
+        // The real attestor arrives later: admitted, and the oldest silent one goes.
+        usleep(150_000)
         let (g, h) = Self.pair(); guests.append(g)
-        b.admitHandshake(h)
+        #expect(b.admitHandshake(h))
         _ = Self.serve(b, h)
         Self.send(g, Self.hello)
         var tv = timeval(tv_sec: 0, tv_usec: 500_000)
@@ -176,5 +184,76 @@ struct AttestorHandshakeTests {
         GuestSandboxStatusStore.shared.update(profileID: pid, report: ["event": "sandbox_status", "filesystem": "off", "strict_applied": true],
                                               onlyIfAbsent: true)
         #expect(GuestSandboxStatusStore.shared.status(for: pid)?.strictApplied == false)
+    }
+
+    /// A strict VM with no channel past the grace isn't held forever: no
+    /// identity (so the deny, event and RST happen), the overdue said once.
+    /// A status without `strict_applied` is no proof: not yet, while connected.
+    @Test func aStrictVMWithoutAChannelIsDecidedAfterTheGrace() async throws {
+        let (b, dir) = Self.bridge(strict: true); defer { try? FileManager.default.removeItem(at: dir) }
+        let svc = BinaryIdentityService()
+        svc.adoptBridge(b, for: b.profileID)
+        defer { GuestSandboxStatusStore.shared.reset(profileID: b.profileID) }
+        GuestSandboxStatusStore.shared.reset(profileID: b.profileID)
+        b.attachedAt = Date().addingTimeInterval(-AttestorBridge.statusGrace - 1)
+        guard case .identity(nil) = await svc.attest(profileID: b.profileID, sport: 1, dst: "1.2.3.4", dport: 443) else {
+            Issue.record("held with no channel"); return
+        }
+        #expect(!b.noteStatusOverdue(), "the overdue event was said, once")
+    }
+
+    @Test func aStatusWithoutStrictAppliedIsNotYet() async throws {
+        let (b, dir) = Self.bridge(strict: true); defer { try? FileManager.default.removeItem(at: dir) }
+        let svc = BinaryIdentityService()
+        svc.adoptBridge(b, for: b.profileID)
+        defer { GuestSandboxStatusStore.shared.reset(profileID: b.profileID); b.stop() }
+        GuestSandboxStatusStore.shared.reset(profileID: b.profileID)
+        GuestSandboxStatusStore.shared.update(profileID: b.profileID, report: ["event": "sandbox_status", "filesystem": "off"])
+        let (g, h) = Self.pair(); defer { close(g) }
+        b.admitHandshake(h)
+        _ = Self.serve(b, h)
+        Self.send(g, Self.hello)
+        Self.fakeAttestd(g, status: nil, asked: NIOLockedCounter())
+        for _ in 0..<50 where !b.isConnected { try await Task.sleep(nanoseconds: 20_000_000) }
+        guard case .notYet = await svc.attest(profileID: b.profileID, sport: 1, dst: "1.2.3.4", dport: 443) else {
+            Issue.record("trusted without strict_applied"); return
+        }
+    }
+
+    /// A close meant for an older channel leaves the current one alone.
+    @Test func aStaleCloseLeavesTheNewChannel() async throws {
+        let (b, dir) = Self.bridge(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (g1, h1) = Self.pair(); defer { close(g1) }
+        b.admitHandshake(h1)
+        _ = Self.serve(b, h1)
+        Self.send(g1, Self.hello)
+        for _ in 0..<50 where !b.isConnected { try await Task.sleep(nanoseconds: 20_000_000) }
+        let first = b.generation
+        b.stop()
+        let (g2, h2) = Self.pair(); defer { close(g2) }
+        b.admitHandshake(h2)
+        _ = Self.serve(b, h2)
+        Self.send(g2, Self.hello)
+        for _ in 0..<50 where !b.isConnected || b.generation == first { try await Task.sleep(nanoseconds: 20_000_000) }
+        b.closeChannel(generation: first)
+        #expect(b.isConnected, "the new channel stays")
+        b.stop()
+    }
+
+    /// Concurrent status asks share one question.
+    @Test func statusAsksAreCoalesced() async throws {
+        let (b, dir) = Self.bridge(strict: true); defer { try? FileManager.default.removeItem(at: dir) }
+        defer { GuestSandboxStatusStore.shared.reset(profileID: b.profileID); b.stop() }
+        let (g, h) = Self.pair(); defer { close(g) }
+        b.admitHandshake(h)
+        _ = Self.serve(b, h)
+        Self.send(g, Self.hello)
+        let asked = NIOLockedCounter()
+        Self.fakeAttestd(g, status: nil, asked: asked)
+        for _ in 0..<50 where !b.isConnected { try await Task.sleep(nanoseconds: 20_000_000) }
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 { group.addTask { await b.askSandboxStatus() } }
+        }
+        #expect(asked.value <= 2, "\(asked.value) asks for 8 callers")
     }
 }

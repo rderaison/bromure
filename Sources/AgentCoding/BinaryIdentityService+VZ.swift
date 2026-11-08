@@ -48,7 +48,7 @@ final class AttestorVsockListener: NSObject, VZVirtioSocketListenerDelegate, @un
         guard let bridge else { return false }
         let cfd = dup(connection.fileDescriptor)
         guard cfd >= 0 else { return false }
-        bridge.admitHandshake(cfd)
+        guard bridge.admitHandshake(cfd) else { close(cfd); return false }
         Thread.detachNewThread { [weak bridge] in bridge?.handshakeAndServe(cfd, connection: connection) }
         return true
     }

@@ -74,6 +74,10 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+
+    /// Serialises update(): a report applies whole.
+
+    private let updating = NSLock()
     private var statuses: [UUID: Status] = [:]
     /// Fired on every change (UI refresh).
     public var onChange: (@Sendable (UUID) -> Void)?
@@ -110,6 +114,9 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     /// `onlyIfAbsent`: an answer the host asked for, not stored over a status
     /// the guest pushed meanwhile.
     func update(profileID: UUID, report r: [String: Any], now: Date = Date(), onlyIfAbsent: Bool = false) {
+        // One report at a time, whole: an asked-for one checks and applies
+        // (its kernels, sentry state and status) with no pushed one between.
+        updating.lock(); defer { updating.unlock() }
         if onlyIfAbsent, status(for: profileID) != nil { return }
         // Kernels first, even while the sandbox is still `pending`: the sentry
         // loads before the sandbox is assembled, and may be waiting for the
@@ -142,7 +149,6 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
             filesystemRequested: (r["requested"] as? [String: Any])?["filesystem"] as? Bool)
         lock.lock()
         let previous = statuses[profileID]
-        if onlyIfAbsent, previous != nil { lock.unlock(); return }   // a push won the race
         statuses[profileID] = st
         lock.unlock()
         KernelSentryService.shared.crossCheck(profileID: profileID, guestSentry: st.sentry,
