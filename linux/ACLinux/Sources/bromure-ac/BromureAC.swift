@@ -616,6 +616,8 @@ struct Remote: AsyncParsableCommand {
         print("password auth: \(s("passwordAuth")) (account password: \(s("allowAccountPassword")), else one-time codes)   public-key auth: \(s("pubkeyAuth"))")
         print("host key: \(s("fingerprint"))")
         print("connect: \(s("connect"))")
+        // authorized_keys couldn't be read (macOS's CLI: the same warning).
+        if let problem = j["authorizedKeysProblem"]?.stringValue, !problem.isEmpty { print("warning: \(problem)") }
         if case .array(let keys)? = j["authorizedKeys"], !keys.isEmpty {
             print("authorized keys:")
             for k in keys { print("  \(k["fingerprint"]?.stringValue ?? "?")  \(k["comment"]?.stringValue ?? "")") }

@@ -227,12 +227,12 @@ extension Daemon {
     }
 
     /// `GET /remote`: what macOS's remoteAccessStatus returns.
-    // @port ACAppDelegate.remoteAccessStatus() h=23a3ec7424b209b3 @7dd92fdf
+    // @port ACAppDelegate.remoteAccessStatus() h=b15b5034f2d2161f @f127f8ab
     func remoteStatus() async -> ControlResponse {
         let s = RemoteSettings.load(remoteSettingsPath)
-        let (running, fp, keys) = await MainActor.run {
+        let (running, fp, keys, keysProblem) = await MainActor.run {
             (RemoteAccessServer.shared.isRunning, RemoteAccessServer.shared.hostKeyFingerprint(),
-             RemoteAccessServer.shared.listAuthorizedKeys())
+             RemoteAccessServer.shared.listAuthorizedKeys(), RemoteAccessServer.shared.authorizedKeysProblem)
         }
         let user = NSUserName()
         let host = s.bindAddress == "0.0.0.0" ? (Self.primaryIPv4() ?? "<this-host-ip>") : s.bindAddress
@@ -244,6 +244,8 @@ extension Daemon {
             "connect": .string("ssh -p \(s.port) \(user)@\(host)"),
             "authorizedKeys": .array(keys.map { ["type": .string($0.type), "comment": .string($0.comment),
                                                  "fingerprint": .string($0.fingerprint)] }),
+            // Why the list may be empty when it isn't: authorized_keys unreadable.
+            "authorizedKeysProblem": .string(keysProblem ?? ""),
         ])
     }
 
