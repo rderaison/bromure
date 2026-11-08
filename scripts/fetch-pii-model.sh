@@ -58,6 +58,9 @@ while IFS='|' read -r name remote sha; do
             rm -rf "$tmp"
             exit 1
         fi
+        # A link planted at the name (to a directory, mv would move into it)
+        # goes first.
+        rm -f "$cached"
         mv -f "$tmp/$name" "$cached"
         rmdir "$tmp"
     fi
@@ -77,6 +80,7 @@ if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
             rm -rf "$tmp"
             exit 1
         fi
+        rm -f "$1/$name"
         mv -f "$tmp/$name" "$1/$name"
         rmdir "$tmp"
     done <<< "$FILES"

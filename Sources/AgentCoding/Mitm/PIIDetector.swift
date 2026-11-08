@@ -35,15 +35,20 @@ actor PIIDetector {
         return FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.onnx").path) ? dir : nil
     }
 
-    /// BROMURE_PII_MODEL_DIR when set (where an install without an app
-    /// bundle put the model: the Linux user service), else the bundled
-    /// model, else a downloaded one in Application Support (dev builds run
-    /// outside an app bundle).
-    var modelDirectory: URL {
-        if let dir = ProcessInfo.processInfo.environment["BROMURE_PII_MODEL_DIR"], !dir.isEmpty {
+    /// BROMURE_PII_MODEL_DIR when it holds a model (where an install
+    /// without an app bundle put it: the Linux user service), else the
+    /// bundled model, else a downloaded one in Application Support (dev
+    /// builds run outside an app bundle). A folder without model.onnx is
+    /// passed over, never taken: PII mustn't fall to the pattern rules
+    /// because of a stray variable.
+    var modelDirectory: URL { Self.modelDirectory(environment: ProcessInfo.processInfo.environment) }
+
+    static func modelDirectory(environment: [String: String]) -> URL {
+        if let dir = environment["BROMURE_PII_MODEL_DIR"], !dir.isEmpty,
+           FileManager.default.fileExists(atPath: URL(fileURLWithPath: dir).appendingPathComponent("model.onnx").path) {
             return URL(fileURLWithPath: dir, isDirectory: true)
         }
-        return Self.bundledDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return bundledDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BromureAC/Models/\(Self.dirName)", isDirectory: true)
     }
 
