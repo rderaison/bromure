@@ -1,11 +1,12 @@
 import Foundation
 
-/// TEMPORARY (remove when the kernel sentry's modules are staged on
-/// Linux): the guest's sandbox is staged (writeSandboxFiles), but not the
-/// sentry's kernel modules (no module catalog on Linux yet), and a guest
-/// whose sentry can't load runs without it. So a workspace that asks for
-/// the sentry isn't started at all, rather than booted without the
-/// protection it expects: fail closed.
+/// TEMPORARY (remove when Linux takes the published sentry module
+/// catalog): the guest's sandbox is staged (writeSandboxFiles), and the
+/// sentry's channel and module staging are wired (DaemonSentry.swift), but
+/// its modules come only from a configured catalog
+/// (BROMURE_SENTRY_CATALOG_BASE), and a guest whose sentry can't load runs
+/// without it. So a workspace that asks for the sentry isn't started at
+/// all, rather than booted without the protection it expects: fail closed.
 struct SandboxUnavailable: Error, CustomStringConvertible {
     let workspace: String
     let missing: [String]
@@ -22,7 +23,8 @@ extension Daemon {
     // @port-skip linux-only: a temporary Linux refusal (macOS stages the guest sandbox)
     static func unenforceableProtections(_ profile: Profile) -> [String] {
         // The strict sandbox and the OpenShell spec are staged
-        // (writeSandboxFiles); the sentry's modules aren't yet.
+        // (writeSandboxFiles); the sentry's modules not from the published
+        // catalog yet.
         guard profile.effectiveKernelSentry != .off else { return [] }
         return ["the kernel sentry (\(profile.effectiveKernelSentry.rawValue))"]
     }

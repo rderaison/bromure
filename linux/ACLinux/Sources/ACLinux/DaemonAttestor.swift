@@ -9,7 +9,6 @@ extension Daemon {
     /// The pinned secret is host-side, in the workspace's directory: a
     /// fresh boot starts without it (the attestor's first hello pins a new
     /// one), a VM taken back keeps it (its attestor reconnects with it).
-    // partial: no kernel sentry listener (5841) yet: a sentry workspace isn't started on Linux (DaemonSandboxGuard)
     // @port ACAppDelegate.attachIdentityBridge(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) h=1f4dd907b7e6b4e0 @e074ca01
     func serveAttestor(_ rec: VMRecord, profile: Profile?, udsPath: String, stored: Int32?, restoring: Bool) async -> VsockFDListener? {
         guard let profile, !rec.managed, rec.registration != true else {

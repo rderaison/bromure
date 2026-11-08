@@ -144,7 +144,7 @@ extension Daemon {
                               meta: URL, kubeYAML: String?) throws {
         try Self.writeCredentialFiles(profile, plan: plan, registration: registration, meta: meta, kubeYAML: kubeYAML,
                                       store: profileStore,
-                                      setupDir: URL(fileURLWithPath: config.agentdPath).deletingLastPathComponent()) { profile, files in
+                                      setupDir: setupDir, sentryModules: sentryModules) { profile, files in
             seedCodexAuthFile(for: profile, homeRoot: files)
             seedGrokAuthFile(for: profile, homeRoot: files)
             seedKimiAuthFile(for: profile, homeRoot: files)
@@ -163,6 +163,7 @@ extension Daemon {
     // @port-skip linux-only: writeCredentialFiles' body
     static func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
                                      meta: URL, kubeYAML: String?, store: ProfileStore, setupDir: URL? = nil,
+                                     sentryModules: SentryModuleStore? = nil,
                                      seedStandIns: (Profile, URL) -> Void) throws {
         let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
         try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
@@ -180,10 +181,13 @@ extension Daemon {
         // package shims, the OpenShell spec with its root launcher and
         // supervisor, the advisor's address), as macOS stages it; it removes
         // what this staging doesn't ask for. A workspace has no shared
-        // folders on a server: no workdirs. No kernel modules yet (a sentry
-        // workspace isn't started: DaemonSandboxGuard).
+        // folders on a server: no workdirs. Its kernel modules from the
+        // verified catalog cache (none without a catalog: a sentry workspace
+        // isn't started then, DaemonSandboxGuard).
         if let setupDir {
-            try SessionDisk.writeSandboxFiles(into: meta, profile: profile, setupDir: setupDir, workdirs: []) { _ in }
+            try SessionDisk.writeSandboxFiles(into: meta, profile: profile, setupDir: setupDir, workdirs: []) { sentryDest in
+                sentryModules?.stageKnown(for: profile.id, setupDir: setupDir, into: sentryDest)
+            }
         }
         if !registration {
             seedStandIns(profile, seed.appendingPathComponent("files", isDirectory: true))

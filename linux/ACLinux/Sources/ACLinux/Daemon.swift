@@ -105,6 +105,8 @@ public actor Daemon {
         var ssh: VsockFDListener?
         /// The guest attestor's channel (vsock 5840), for a sandboxed workspace.
         var attest: VsockFDListener?
+        /// The guest kernel sentry's channel (vsock 5841), for a sentry workspace.
+        var sentry: VsockFDListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -114,13 +116,18 @@ public actor Daemon {
     // @port-skip linux-only: the daemon's running VMs
     var live: [String: Live] = [:] {
         // The session host reads which workspaces are up without a hop here.
-        didSet { LinuxSessionHost.running.withLockedValue { $0 = Set(live.keys.compactMap { UUID(uuidString: $0) }) } }
+        didSet {
+            LinuxSessionHost.running.withLockedValue { $0 = Set(live.keys.compactMap { UUID(uuidString: $0) }) }
+            publishSentryRunState()
+        }
     }
     private let passt: PasstUplink
     let sw: InterimSwitch
     /// The workspaces' intercepting proxy (its CA in `<state>/mitm`); nil
     /// when it couldn't start, and the guests then go out directly.
     let mitm: MitmProxy?
+    /// The kernel sentry's module cache (DaemonSentry.swift); nil without a catalog.
+    nonisolated let sentryModules: SentryModuleStore?
     /// VMs whose stop is being recorded (vmStopped).
     private(set) var stopping: [String: Task<Void, Never>] = [:]
     /// Cluster machines whose disks the host is repairing (never started meanwhile).
@@ -150,8 +157,10 @@ public actor Daemon {
     var compromiseAsking: Set<String> = []
     /// The agent watchdog's 5 s egress sampler (DaemonWatchdog.swift).
     var watchdogSampler: Task<Void, Never>?
-    /// Questions holding each VM paused (DaemonWatchdog.swift), by VM id.
-    var pauseHolds: [String: Int] = [:]
+    /// Questions holding each VM paused (DaemonWatchdog.swift), by VM id; a
+    /// VM held paused sends nothing, which the sentry mustn't take for silence.
+    // @port-skip linux-only: the Linux daemon's pause bookkeeping (DaemonWatchdog.swift)
+    var pauseHolds: [String: Int] = [:] { didSet { publishSentryRunState() } }
     /// VMs whose watchdog Release waits for the other questions holding them.
     var releaseWhenFree: Set<String> = []
     /// VMs whose watchdog question is up.
@@ -176,7 +185,7 @@ public actor Daemon {
     /// removes them; one list, so a new listener can't be left out of one.
     // @port-skip linux-only: systemd fd store layout
     static let perVMStorePrefixes = ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-",
-                                     "plan-", "llm-", "aws-", "ssh-", "attest-"]
+                                     "plan-", "llm-", "aws-", "ssh-", "attest-", "sentry-"]
 
     /// The soft open-file limit up to the hard one: systemd starts services at
     /// 1024, and every VM, SSH session and forward holds several.
@@ -236,6 +245,7 @@ public actor Daemon {
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
         await d.wireWatchdog()
+        await d.wireSentryModules()
         // The shared code's secrets (the enrollment's token and leaf key)
         // in this daemon's vault.
         if BACSecretStore.backend == nil { BACSecretStore.backend = VaultSecretBackend() }
@@ -276,6 +286,7 @@ public actor Daemon {
     private init(config: DaemonConfig, passt: PasstUplink) {
         self.config = config
         self.passt = passt
+        self.sentryModules = Self.makeSentryModuleStore(stateDir: config.stateDir)
         self.sw = InterimSwitch(uplink: passt)
         if config.multiUser {
             // The host's own addresses and every user's LAN pool, granted
@@ -1177,6 +1188,8 @@ public actor Daemon {
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
         // The attestor's channel goes with the session (macOS: detach at teardown).
         BinaryIdentityService.shared.dropBridge(pid)?.stop()
+        // The kernel sentry's too (macOS: KernelSentryService.detach at teardown).
+        KernelSentryService.shared.dropBridge(pid)?.closeChannel()
         // The watchdog's window and baseline start over with the next session,
         // and no question holds the VM any more.
         AgentWatchdog.shared.reset(profileID: pid)
@@ -1337,6 +1350,8 @@ public actor Daemon {
         l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.attest = await serveAttestor(rec, profile: staged, udsPath: qc.firecrackerVsockPath, stored: nil,
                                        restoring: restoreFrom != nil)
+        l.sentry = await serveSentry(rec, profile: staged, udsPath: qc.firecrackerVsockPath, stored: nil,
+                                     restoring: restoreFrom != nil)
         if let staged, rec.registration != true {
             applyRouting(staged: staged)
             startLocalEngineIfNeeded(for: staged)
@@ -1521,6 +1536,9 @@ public actor Daemon {
                 l.attest = await serveAttestor(rec, profile: adoptedProfile, udsPath: qc.firecrackerVsockPath,
                                                stored: storedNet.removeValue(forKey: "attest-" + rec.shortId),
                                                restoring: true)
+                l.sentry = await serveSentry(rec, profile: adoptedProfile, udsPath: qc.firecrackerVsockPath,
+                                             stored: storedNet.removeValue(forKey: "sentry-" + rec.shortId),
+                                             restoring: true)
                 if let staged = adoptedProfile {
                     applyRouting(staged: staged)
                     startLocalEngineIfNeeded(for: staged)
@@ -1833,6 +1851,7 @@ public actor Daemon {
         l.aws?.stop()
         l.ssh?.stop()
         l.attest?.stop()
+        l.sentry?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
         if let pid = l.plan { await MainActor.run { SessionStores.shared?.detachPlanBridge(pid: pid) } }
         for name in Self.perVMStorePrefixes { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
