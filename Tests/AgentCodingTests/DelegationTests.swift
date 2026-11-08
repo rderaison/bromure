@@ -1187,7 +1187,9 @@ struct DelegationTests {
         var commands: [String] = []
         var writes: [String] = []
         var onFirstWrite: (() -> Void)?
-        func hostExec(_ command: String, timeout: Int) async throws -> String { commands.append(command); return "" }
+        /// What a command prints (default: nothing).
+        var reply: (String) -> String = { _ in "" }
+        func hostExec(_ command: String, timeout: Int) async throws -> String { commands.append(command); return reply(command) }
         func hostFileOp(_ op: [String: Any], timeout: Int) async throws -> [String: Any] {
             if op["op"] as? String == "write", let path = op["path"] as? String {
                 writes.append(path)
@@ -1239,6 +1241,45 @@ struct DelegationTests {
                                           text: "Here.", by: .user, attachments: [log])
         #expect(m.files?.count == 1 && m.files?.first?.hasSuffix("/build.log") == true)
         #expect(!machine.commands.contains { $0.hasPrefix("rm -rf") })
+    }
+
+    /// Finding: "Failed transfer deletes an earlier inbox file with the same
+    /// name". Every message's files went to ~/.bromure/inbox/<id>/<name>, and
+    /// a send that failed (a file missing on the sender) removed the target
+    /// path -- an earlier message's build.log, which this send never wrote.
+    @Test("each send lands in a folder of its own; a failed one removes only that folder")
+    func failedTransferKeepsEarlierFiles() async throws {
+        let f = fixture()
+        let machine = RecordingMachine()
+        let mid = try #require(machine.agentHostID)
+        f.engine.agentHostLinks = { [machine] }
+        var lead = AgentSession(profileID: mid, tool: .claude, title: "Lead", cwd: "/home/ubuntu/w", windowIndex: 2)
+        lead.agentAlive = true
+        var helper = AgentSession(profileID: mid, tool: .codex, title: "Helper", cwd: "/home/ubuntu/w", windowIndex: 3)
+        helper.agentAlive = true
+        machine.hostSessions.upsert(lead)
+        machine.hostSessions.upsert(helper)
+        var d = Delegation(profileID: mid, parentSessionID: lead.id, childSessionID: helper.id,
+                           title: "Fix the build", brief: "Fix the build.", kind: .delegate)
+        d.status = .working
+        f.store.upsert(d)
+        // build.log is on the sender's machine; missing.log isn't.
+        machine.reply = { c in c.contains("missing.log") ? "missing" : (c.hasPrefix("if [ -d") ? "12" : "") }
+
+        let first = try await f.engine.post(d.id, from: .parent, kind: .steer, text: "Here's the log.", files: ["build.log"])
+        let landed = try #require(first.files?.first)
+        let firstFolder = (landed as NSString).deletingLastPathComponent
+        #expect(firstFolder.hasPrefix(DelegationEngine.inboxBase + "/" + DelegationNotice.shortID(d.id) + "/"))
+        #expect(firstFolder != DelegationEngine.inboxBase + "/" + DelegationNotice.shortID(d.id), "a folder of its own")
+
+        machine.commands.removeAll()
+        await #expect(throws: DelegationRefusal.self) {
+            _ = try await f.engine.post(d.id, from: .parent, kind: .steer, text: "And this one.", files: ["missing.log"])
+        }
+        let removals = machine.commands.filter { $0.hasPrefix("rm -rf") }
+        #expect(!removals.isEmpty, "the failed send's own folder goes")
+        #expect(!removals.contains { $0.contains(landed) || $0.contains("'\(firstFolder)'") },
+                "the earlier message's file stays: \(removals)")
     }
 
     @Test("a board task queued for a native machine's session reaches it, and its delivery comes back")
