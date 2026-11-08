@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Glibc
 import NIOConcurrencyHelpers
@@ -137,6 +138,38 @@ extension SSHKeysTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir).sorted() == ["askpass-notes.txt", "control.sock"])
     }
 
+    /// The public key is always the private key's own (ssh-keygen -y): a
+    /// mismatched one sent, or beside the file, is refused, as is a key it
+    /// can't read with the passphrase given.
+    @Test func thePublicKeyIsThePrivateKeysOwn() async throws {
+        try await Self.withVault { _ in
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let (a, _) = try Self.makeKey(dir, passphrase: "", keepPub: false)
+            let (_, otherPub) = try Self.makeKey(dir, passphrase: "", keepPub: true)
+            let p = Profile(name: "pk", tool: .claude, authMode: .token)
+            let pdir = URL(fileURLWithPath: dir + "/profile", isDirectory: true)
+            func importing(_ path: String, pass: String? = nil, pub: String? = nil, bytes: Data? = nil) throws -> ImportedSSHKey {
+                try Daemon.importSSHKey(at: URL(fileURLWithPath: path), passphrase: pass, label: "", for: p, profileDirectory: pdir,
+                                        askpassDir: dir, keyBytes: bytes, publicKey: pub)
+            }
+            #expect(throws: Daemon.SSHKeyImportError.self, "a public key that isn't this one's") {
+                try importing(a, pub: otherPub, bytes: FileManager.default.contents(atPath: a))
+            }
+            // The .pub beside the file is checked too.
+            try otherPub.write(toFile: a + ".pub", atomically: true, encoding: .utf8)
+            #expect(throws: Daemon.SSHKeyImportError.self) { try importing(a) }
+            try FileManager.default.removeItem(atPath: a + ".pub")
+            let ok = try importing(a)
+            #expect(Daemon.sshPublicKeyBlob(fromOpenSSHText: ok.publicKeyText) != nil, "derived when none is given")
+            // A passphrased key with a wrong passphrase, or none.
+            let (enc, _) = try Self.makeKey(dir, passphrase: "fixture-pass")
+            #expect(throws: Daemon.SSHKeyImportError.self) { try importing(enc, pass: "not-it") }
+            #expect(throws: Daemon.SSHKeyImportError.self) { try importing(enc) }
+            let imported = try FileManager.default.contentsOfDirectory(atPath: pdir.path + "/agent/imported")
+            #expect(imported.filter { !$0.hasSuffix(".pub") }.count == 1, "the refused ones left nothing behind")
+        }
+    }
+
     @Test func aHostAgentSocketIsNeverOneOfOurs() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         let own = [dir + "/run", dir + "/run/ssh-agents"]
@@ -152,6 +185,9 @@ extension SSHKeysTests {
         #expect(hidden?.contains("can't see") == true)
         #expect(Daemon.hostAgentSocketRefusal(path: "/run/user/1000/gnupg/S.gpg-agent.ssh", ownDirectories: own, multiUser: false) == nil)
         #expect(Daemon.hostAgentSocketRefusal(path: "/srv/agent.sock", ownDirectories: own, multiUser: true) == nil)
+        #expect(Daemon.hostAgentSocketRefusal(path: "agent.sock", ownDirectories: own, multiUser: false)?.contains("absolute") == true)
+        // At connect too: a relative path is never dialled.
+        #expect(HostAgentClient(socketPath: "agent.sock", timeout: 1, hostAgent: true).request(Data([11])) == nil)
     }
 }
 
@@ -186,6 +222,34 @@ extension DaemonGlobalSuites {
                     #expect(HostAgentClient(socketPath: socket, timeout: 5).identities().map(\.blob)
                                 .contains(try #require(Daemon.sshPublicKeyBlob(fromOpenSSHText: pub))), "and then loaded")
                 }
+            }
+        }
+
+        /// Every host-agent connection is checked at connect: one reaching a
+        /// workspace's own agent (directly, or through a symlink made after
+        /// the import) is refused; another agent isn't.
+        @Test func aHostAgentConnectionNeverReachesOurOwnAgents() async throws {
+            try await VMRunTests.withStore { d, dir in
+                let mitm = try #require(await d.mitm)
+                let prior = HostAgentClient.refusesHostAgentPeer
+                HostAgentClient.refusesHostAgentPeer = { [weak mitm] fd in mitm?.refusesHostAgentPeer(fd) ?? true }
+                defer { HostAgentClient.refusesHostAgentPeer = prior }
+                let pid = UUID()
+                let socket = try #require(mitm.sshAgentSocket(for: pid))
+                defer { mitm.terminateSSHAgent(for: pid) }
+                let key = Curve25519.Signing.PrivateKey()
+                Daemon.addKeyToHostAgent(seed: key.rawRepresentation, publicKey: key.publicKey.rawRepresentation,
+                                         comment: "own", agentSocket: socket)
+                #expect(HostAgentClient(socketPath: socket, timeout: 5).identities().count == 1, "its own client reaches it")
+                #expect(HostAgentClient(socketPath: socket, timeout: 5, hostAgent: true).identities().isEmpty, "as a host agent: refused")
+                try FileManager.default.createSymbolicLink(atPath: dir + "/repointed.sock", withDestinationPath: socket)
+                #expect(HostAgentClient(socketPath: dir + "/repointed.sock", timeout: 5, hostAgent: true).identities().isEmpty)
+                // An agent that isn't one of ours is a host agent.
+                let other = try WorkspaceSSHAgent(directory: dir + "/other", label: "other123")
+                defer { other.terminate() }
+                Daemon.addKeyToHostAgent(seed: key.rawRepresentation, publicKey: key.publicKey.rawRepresentation,
+                                         comment: "host", agentSocket: other.socketPath)
+                #expect(HostAgentClient(socketPath: other.socketPath, timeout: 5, hostAgent: true).identities().count == 1)
             }
         }
 

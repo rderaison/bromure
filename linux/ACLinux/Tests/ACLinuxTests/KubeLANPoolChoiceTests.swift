@@ -44,4 +44,22 @@ struct KubeLANPoolChoiceTests {
         #expect(!proxy.blocksHostAddresses)
         #expect(!proxy.refusedDestination(.v4(UInt32(10) << 24 | 250 << 16 | 30)))
     }
+
+    /// An address moved from another account's grant to ours stays refused
+    /// the grace (that account's publication may outlive the change).
+    @Test func aReassignedAddressStaysRefusedTheGrace() throws {
+        let d = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let p = d + "/lan-pools.json"
+        let me = try #require(getpwuid(getuid()).map { String(cString: $0.pointee.pw_name) })
+        let ip = UInt32(10) << 24 | 250 << 16 | 40
+        try LANPoolsAdmin.write(LANPoolsFile(grants: ["root": ["10.250.0.40"]]), to: p)
+        let pools = LANPools(path: p)
+        #expect(pools.containsOther(ip))
+        try LANPoolsAdmin.write(LANPoolsFile(grants: [me: ["10.250.0.40"]]), to: p)
+        Thread.sleep(forTimeInterval: 0.6)
+        #expect(pools.containsOther(ip), "just moved to us: still refused")
+        Thread.sleep(forTimeInterval: 3.1)
+        #expect(!pools.containsOther(ip), "ours after the grace")
+    }
 }

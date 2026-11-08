@@ -122,8 +122,9 @@ public final class LANPools: Sendable {
     private let path: String
     private let uid: uid_t
     private let state = NIOLockedValueBox<(set: Set<UInt32>, mtime: timespec?, checked: ContinuousClock.Instant, loaded: Bool,
-                                            leaving: [UInt32: ContinuousClock.Instant], own: Set<UInt32>)>(
-        ([], nil, .now - .seconds(60), false, [:], []))
+                                            leaving: [UInt32: ContinuousClock.Instant], own: Set<UInt32>,
+                                            becameOwn: [UInt32: ContinuousClock.Instant])>(
+        ([], nil, .now - .seconds(60), false, [:], [], [:]))
     static let grace: Duration = .seconds(3)
 
     // @port-skip linux-only: multi-user LAN pools
@@ -150,8 +151,13 @@ public final class LANPools: Sendable {
                             let next = file.allAddresses
                             let now = ContinuousClock.now
                             for ip in s.set.subtracting(next) { s.leaving[ip] = now }
+                            // Moved from another account's grant to ours: that
+                            // account's publication may outlive the change by
+                            // ~0.5 s, so it stays refused `grace` longer.
+                            let own = file.addresses(ofUID: uid)
+                            for ip in own.subtracting(s.own) where s.set.contains(ip) { s.becameOwn[ip] = now }
                             s.set = next
-                            s.own = file.addresses(ofUID: uid)
+                            s.own = own
                             s.loaded = true
                         } catch {
                             log("\(path) doesn't read (\(error)); keeping the last LAN pools (\(s.set.count) addresses blocked)")
@@ -172,7 +178,14 @@ public final class LANPools: Sendable {
     /// published addresses), its own cluster's addresses aside.
     // @port-skip linux-only: multi-user LAN pools
     public func containsOther(_ ip: UInt32) -> Bool {
-        contains(ip) && !state.withLockedValue { $0.own.contains(ip) }
+        guard contains(ip) else { return false }
+        return state.withLockedValue { s in
+            guard s.own.contains(ip) else { return true }
+            guard let since = s.becameOwn[ip] else { return false }
+            if ContinuousClock.now - since < Self.grace { return true }
+            s.becameOwn[ip] = nil
+            return false
+        }
     }
 
     // @port-skip linux-only: multi-user LAN pools

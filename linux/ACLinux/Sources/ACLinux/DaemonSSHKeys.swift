@@ -79,6 +79,10 @@ final class WorkspaceSSHAgent: Sendable {
     // @port-skip linux-only: tests
     var exitStatus: Int32? { process.exitStatus }
 
+    /// Its process id (what a host-agent connection's peer is checked against).
+    // @port-skip linux-only: see WorkspaceSSHAgent
+    var pid: Int32 { process.pid }
+
     /// The workspace agents a gone daemon left (one that crashed, or was
     /// restarted): an `ssh-agent -a …/bromure-ac-agent-<pid>-<label>.sock`
     /// whose <pid> isn't us and no longer runs, with its socket. Another
@@ -159,6 +163,23 @@ extension MitmProxy {
         agent?.terminate()
     }
 
+    /// The pids of the workspaces' agents this proxy runs.
+    // @port-skip linux-only: the host-agent peer check
+    var sshAgentPIDs: Set<Int32> { sshAgents.withLockedValue { Set($0.values.map(\.pid)) } }
+
+    /// A host-agent connection reaching one of this proxy's own workspace
+    /// agents (its peer's pid, SO_PEERCRED), or a peer it can't tell: refused
+    /// (HostAgentClient.refusesHostAgentPeer), at every connect — a symlink
+    /// repointed after the import, or a profile saved before the check,
+    /// would otherwise let a workspace sign with a sibling's keys.
+    // @port-skip linux-only: the host-agent peer check
+    func refusesHostAgentPeer(_ fd: Int32) -> Bool {
+        var cred = LANPeerCred()
+        var len = socklen_t(MemoryLayout<LANPeerCred>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 else { return true }
+        return sshAgentPIDs.contains(cred.pid)
+    }
+
     /// The daemon's stop: every workspace's agent at once.
     // @port MitmEngine.terminateAllSSHAgents() h=0ecfdb04a0e7ce28 @79b2d8c0
     func terminateAllSSHAgents() {
@@ -230,6 +251,8 @@ extension Daemon {
 
     // @port-skip linux-only: see hostAgentSocketRefusal
     nonisolated static func hostAgentSocketRefusal(path: String, ownDirectories: [String], multiUser: Bool) -> String? {
+        // A relative path would connect relative to the daemon's cwd.
+        guard path.hasPrefix("/") else { return "\(path) isn't an absolute path" }
         let real = ((path as NSString).resolvingSymlinksInPath as NSString).standardizingPath
         let own = ownDirectories.map { (($0 as NSString).resolvingSymlinksInPath as NSString).standardizingPath }
         for dir in own where real == dir || real.hasPrefix(dir + "/") {
@@ -364,7 +387,7 @@ extension Daemon {
     /// Copy a private key file into the workspace's host-only
     /// `agent/imported/` (renamed: a UUID prefix), its `.pub` beside it
     /// (copied, or derived with ssh-keygen), the passphrase into the vault.
-    // partial: the passphrase goes to the vault (macOS: the Keychain); ssh-keygen gets it on stdin through SSH_ASKPASS, not argv
+    // partial: the passphrase goes to the vault (macOS: the Keychain); ssh-keygen gets it through SSH_ASKPASS, not argv; the public key is always derived (a given or sibling one only checked against it), and a key it can't read is refused
     // @port ACAppDelegate.importSSHKey(at: URL, passphrase: String?, label: String, for: Profile) h=f6470b0a6c91eaec @2134fc7a
     /// `savePassphrase` false: the caller saves it (on its own task, whose
     /// vault it is).
@@ -387,23 +410,27 @@ extension Daemon {
                                              attributes: [.posixPermissions: NSNumber(value: 0o600)]) else {
             throw SSHKeyImportError("can't write \(dst.path)")
         }
-        var pubText = publicKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !pubText.isEmpty {
-            try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
-        }
+        // What the client says the public key is (sent, or the .pub beside
+        // the file), only ever checked: the gates key on the blob, so it's
+        // always the one the private key itself gives (ssh-keygen -y).
+        var claimed = publicKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         for pubURL in [URL(fileURLWithPath: sourceURL.path + ".pub"), sourceURL.deletingPathExtension().appendingPathExtension("pub")]
-            where keyBytes == nil && pubText.isEmpty {
-            if let s = try? String(contentsOf: pubURL, encoding: .utf8) {
-                pubText = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
-                break
-            }
+            where keyBytes == nil && claimed.isEmpty {
+            if let s = try? String(contentsOf: pubURL, encoding: .utf8) { claimed = s.trimmingCharacters(in: .whitespacesAndNewlines); break }
         }
         let trimmed = passphrase ?? ""
-        if pubText.isEmpty, let derived = derivePublicKey(dst.path, passphrase: trimmed, askpassDir: askpassDir) {
-            pubText = derived
-            try? derived.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
+        func refuse(_ why: String) -> SSHKeyImportError {
+            try? FileManager.default.removeItem(at: dst)
+            return SSHKeyImportError(why)
         }
+        guard let pubText = derivePublicKey(dst.path, passphrase: trimmed, askpassDir: askpassDir),
+              let derivedBlob = sshPublicKeyBlob(fromOpenSSHText: pubText) else {
+            throw refuse("not a private key ssh-keygen can read\(trimmed.isEmpty ? " (does it need a passphrase?)" : " with that passphrase")")
+        }
+        if !claimed.isEmpty, sshPublicKeyBlob(fromOpenSSHText: claimed) != derivedBlob {
+            throw refuse("the public key given isn't this private key's")
+        }
+        try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
         if !trimmed.isEmpty, savePassphrase {
             do { try PassphraseKeychain.set(passphrase: trimmed, profileID: profile.id, filename: basename) } catch {
                 try? FileManager.default.removeItem(at: dst)
@@ -442,13 +469,13 @@ extension Daemon {
 
     /// The keys a host ssh-agent holds, as ImportedSSHKeys ready to add:
     /// nothing copied, `hostAgentSocket` points signing back at the agent.
-    // @port ACAppDelegate.static listHostAgentKeys(socket: String) h=cc9283a4111ed8e5 @2134fc7a
+    // @port ACAppDelegate.static listHostAgentKeys(socket: String) h=ae5fe98fb47024e3 @e5645631
     nonisolated static func listHostAgentKeys(socket: String) throws -> [ImportedSSHKey] {
         guard let path = HostAgentClient.resolveHostSocket(socket) else {
             throw SSHKeyImportError("SSH_AUTH_SOCK isn't set for the daemon: name the agent's socket")
         }
         guard FileManager.default.fileExists(atPath: path) else { throw SSHKeyImportError("No agent socket at \(path).") }
-        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+        return HostAgentClient(socketPath: path, timeout: 10, hostAgent: true).identities().compactMap { ident in
             guard ident.blob.count > 4 else { return nil }
             let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }
             guard n > 0, 4 + n <= ident.blob.count,

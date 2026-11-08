@@ -339,6 +339,8 @@ public actor Daemon {
             mitm?.sshAgentDirectory.withLockedValue { $0 = config.runtimeDir + "/ssh-agents" }
             // A crashed ssh-add's askpass (a passphrase in it) goes first.
             Self.sweepAskpassScripts(in: config.runtimeDir)
+            // No host-agent connection reaches a workspace's own agent.
+            if let mitm { HostAgentClient.refusesHostAgentPeer = { [weak mitm] fd in mitm?.refusesHostAgentPeer(fd) ?? true } }
             mitm?.routeAllTo = Self.testUpstream()
             Self.applyTestSSOPortal()
             // AWS SSO reads ~/.aws where the AWS CLI writes it: $HOME (Foundation's
