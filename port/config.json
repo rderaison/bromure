@@ -40,6 +40,7 @@
     "Sources/AgentCoding/DelegationMCPServer.swift",
     "Sources/AgentCoding/DelegationRelayClient.swift",
     "Sources/AgentCoding/DisplayRequest.swift",
+    "Sources/AgentCoding/DockerGuestVerbs.swift",
     "Sources/AgentCoding/Enrollment.swift",
     "Sources/AgentCoding/Ext4/Crc32c.swift",
     "Sources/AgentCoding/Ext4/Ext4Fsck.swift",

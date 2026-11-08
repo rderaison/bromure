@@ -14357,15 +14357,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("docker-attach \(containerID) \(safe)", in: pane)
     }
 
-    /// Conservative charset for ids/names interpolated into a guest shell line.
-    private static let dockerIDAllowed = CharacterSet(charactersIn:
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.:@")
-
-    private func sanitizedDockerID(_ raw: String) -> String? {
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, t.unicodeScalars.allSatisfy(Self.dockerIDAllowed.contains) else { return nil }
-        return t
-    }
+    private func sanitizedDockerID(_ raw: String) -> String? { DockerGuestVerbs.sanitizedID(raw) }
 
     func requestDockerStart(containerID: String, in pane: SessionPane) {
         guard let id = sanitizedDockerID(containerID) else { return }
@@ -14386,19 +14378,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("docker-logs \(id)", in: pane)
     }
 
-    /// docker's volume-name rule: [a-zA-Z0-9][a-zA-Z0-9_.-]* — stricter than
-    /// `dockerIDAllowed` because create takes a user-typed name.
-    private static let volumeNameFirst = CharacterSet(charactersIn:
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-    private static let volumeNameRest = volumeNameFirst.union(.init(charactersIn: "_.-"))
-
-    static func sanitizedVolumeName(_ raw: String) -> String? {
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let first = t.unicodeScalars.first, Self.volumeNameFirst.contains(first),
-              t.unicodeScalars.allSatisfy(Self.volumeNameRest.contains)
-        else { return nil }
-        return t
-    }
+    static func sanitizedVolumeName(_ raw: String) -> String? { DockerGuestVerbs.sanitizedVolumeName(raw) }
 
     func requestDockerVolumeCreate(name: String, in pane: SessionPane) {
         guard let n = Self.sanitizedVolumeName(name) else { return }
@@ -14419,20 +14399,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand("docker-binfmt-off", in: pane)
     }
 
-    /// User-supplied fields for the "new container" dialog.
-    struct DockerRunSpec {
-        var image: String
-        var name: String = ""
-        var ports: [String] = []     // "8080:80"
-        var env: [String] = []       // "KEY=val"
-        var volumes: [String] = []   // "/host:/container"
-        /// Pass the workspace's whole environment (API tokens, etc.) through.
-        var inheritEnv: Bool = false
-        /// Pass just the HTTP(S) proxy vars (covered by inheritEnv when set).
-        var inheritProxy: Bool = false
-        /// Run with a TTY (-it) in a fresh tmux tab instead of detached (-d).
-        var interactive: Bool = false
-    }
+    typealias DockerRunSpec = DockerGuestVerbs.RunSpec
 
     /// Launch a new container. The whole `docker run -d …` command is assembled
     /// HERE with POSIX single-quoting of every user field, then run on the guest
@@ -14443,50 +14410,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sendCommand(verb, in: pane)
     }
 
-    /// Assemble the `docker-run …` outbox verb for a run spec (shared by the
-    /// local dashboard and the fat-client `/vms/{id}/docker` route). nil when
-    /// the image is missing.
-    static func dockerRunVerb(spec: DockerRunSpec) -> String? {
-        let image = spec.image.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !image.isEmpty else { return nil }
-        func q(_ s: String) -> String {
-            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
-        var cmd = spec.interactive ? "docker run -it" : "docker run -d"
-        // For interactive runs we need a known container name so the guest can
-        // tag the tmux tab and the sidebar can nest it under its container —
-        // generate one when the user didn't supply it.
-        var name = spec.name.trimmingCharacters(in: .whitespaces)
-        if spec.interactive && name.isEmpty {
-            name = "bromure-" + UUID().uuidString.prefix(6).lowercased()
-        }
-        if !name.isEmpty {
-            cmd += " --name \(q(name))"
-        }
-        for p in spec.ports where !p.trimmingCharacters(in: .whitespaces).isEmpty {
-            cmd += " -p \(q(p.trimmingCharacters(in: .whitespaces)))"
-        }
-        for e in spec.env where !e.trimmingCharacters(in: .whitespaces).isEmpty {
-            cmd += " -e \(q(e.trimmingCharacters(in: .whitespaces)))"
-        }
-        for v in spec.volumes where !v.trimmingCharacters(in: .whitespaces).isEmpty {
-            cmd += " -v \(q(v.trimmingCharacters(in: .whitespaces)))"
-        }
-        cmd += " \(q(image))"
-        cmd = cmd.replacingOccurrences(of: "\n", with: " ")
-        // The guest builds the --env-file by sourcing ONLY the host-injected env
-        // files on the metadata share (tokens from api_key.env, proxy from
-        // proxy.env) — not the whole shell environment — then runs this command
-        // backgrounded so it can't wedge the command loop.
-        let mode = spec.inheritEnv
-            ? (spec.inheritProxy ? "both" : "env")
-            : (spec.inheritProxy ? "proxy" : "none")
-        // <mode> <interactive 0|1> <tag> <image> <command>. <tag> is the
-        // container name interactive tabs nest under ("-" otherwise); <image> is
-        // the bare ref the guest pre-pulls (with progress) for detached runs.
-        let tag = (spec.interactive && !name.isEmpty) ? name : "-"
-        return "docker-run \(mode) \(spec.interactive ? "1" : "0") \(tag) \(image) \(cmd)"
-    }
+    static func dockerRunVerb(spec: DockerRunSpec) -> String? { DockerGuestVerbs.runVerb(spec: spec) }
 
     /// Toggle the guest's expensive dashboard polling (CPU/mem + images) by
     /// creating/removing the `.docker-watch` marker in the outbox. Called when a
@@ -14542,48 +14466,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let id = resolveRunningSessionID(idOrName), runningSessions[id] != nil else {
             return ["ok": false, "error": "VM not running: \(idOrName)"]
         }
-        let action = (doc["action"] as? String) ?? ""
-        switch action {
-        case "start", "stop", "remove", "logs":
-            guard let cid = sanitizedDockerID(doc["container"] as? String ?? "") else {
-                return ["ok": false, "error": "bad container id"]
-            }
-            sendGuestCommand("docker-\(action) \(cid)", profileID: id)
-        case "attach":
-            guard let cid = sanitizedDockerID(doc["container"] as? String ?? "") else {
-                return ["ok": false, "error": "bad container id"]
-            }
-            let allowed = CharacterSet(charactersIn:
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.")
-            let shell = (doc["shell"] as? String ?? "sh").trimmingCharacters(in: .whitespaces)
-            let safe = !shell.isEmpty && shell.unicodeScalars.allSatisfy(allowed.contains) ? shell : "sh"
-            sendGuestCommand("docker-attach \(cid) \(safe)", profileID: id)
-        case "binfmt":
-            sendGuestCommand("docker-binfmt", profileID: id)
-        case "binfmt-off":
-            sendGuestCommand("docker-binfmt-off", profileID: id)
-        case "volume-create", "volume-remove":
-            guard let name = Self.sanitizedVolumeName(doc["volume"] as? String ?? "") else {
-                return ["ok": false, "error": "bad volume name"]
-            }
-            sendGuestCommand("docker-\(action) \(name)", profileID: id)
-        case "run":
-            var spec = DockerRunSpec(image: doc["image"] as? String ?? "")
-            spec.name = doc["name"] as? String ?? ""
-            spec.ports = doc["ports"] as? [String] ?? []
-            spec.env = doc["env"] as? [String] ?? []
-            spec.volumes = doc["volumes"] as? [String] ?? []
-            spec.inheritEnv = doc["inheritEnv"] as? Bool ?? false
-            spec.inheritProxy = doc["inheritProxy"] as? Bool ?? false
-            spec.interactive = doc["interactive"] as? Bool ?? false
-            guard let verb = Self.dockerRunVerb(spec: spec) else {
-                return ["ok": false, "error": "missing image"]
-            }
-            sendGuestCommand(verb, profileID: id)
-        case "watch":
-            setDockerWatch((doc["on"] as? Bool) ?? false, profileID: id)
-        default:
-            return ["ok": false, "error": "unknown docker action: \(action)"]
+        switch DockerGuestVerbs.automationAction(doc) {
+        case .send(let verb): sendGuestCommand(verb, profileID: id)
+        case .watch(let on): setDockerWatch(on, profileID: id)
+        case .refused(let error): return ["ok": false, "error": error]
         }
         return ["ok": true]
     }
