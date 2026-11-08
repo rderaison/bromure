@@ -353,9 +353,33 @@ struct SupplyChainProxyTests {
         defer { server.stop(); try? FileManager.default.removeItem(atPath: dir) }
         let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
         defer { g.close() }
-        g.send("GET /-/whoami HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
+        g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
         let reply = String(decoding: g.readAll(), as: UTF8.self)
         #expect(reply.contains("X-Bromure-Block: depi-auth"), "\(reply.prefix(400))")
+    }
+
+    /// Only lookups go to Depi with its key: a publish, a whoami, a token
+    /// request go where the guest sent them, its own Authorization kept
+    /// and no Depi key added; a lookup addressed to Depi itself gets it.
+    @Test func onlyLookupsGetTheDepiKey() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.setSupplyChainPolicy(SupplyChainPolicy(packageFilter: .depi, depiAPIKey: "depi-test-key"), for: pid)
+        for (method, path, host) in [("PUT", "/demo", "registry.npmjs.org"), ("GET", "/-/whoami", "registry.npmjs.org"),
+                                     ("POST", "/-/npm/v1/tokens", "registry.npmjs.org"), ("DELETE", "/demo/-rev/1", DepiRegistry.host)] {
+            let raw = Data("\(method) \(path) HTTP/1.1\r\nHost: \(host)\r\nAuthorization: Bearer guest-token\r\n\r\n".utf8)
+            var req = raw
+            guard case .none = RequestReader.depiRoute(&req, proxy: proxy, profileID: pid, host: host, method: method, path: path) else {
+                Issue.record("\(method) \(path) was routed"); continue
+            }
+            #expect(req == raw, "\(method) \(path): untouched, no key")
+        }
+        var lookup = Data("GET /demo/-/demo-1.0.0.tgz HTTP/1.1\r\nHost: \(DepiRegistry.host)\r\n\r\n".utf8)
+        guard case .routed = RequestReader.depiRoute(&lookup, proxy: proxy, profileID: pid, host: DepiRegistry.host,
+                                                     method: "GET", path: "/demo/-/demo-1.0.0.tgz") else { Issue.record("not routed"); return }
+        #expect(String(decoding: lookup, as: UTF8.self).contains("Authorization: Bearer depi-test-key"))
     }
 
     /// Under an OpenShell policy a request goes only to its own destination:
