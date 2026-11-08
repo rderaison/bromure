@@ -1171,7 +1171,7 @@ struct VsockFDListenerTests {
         AWSSSORefusals.set(true, for: pid)
         let refused = try #require(Self.readAll(path))
         let r = try #require(try JSONSerialization.jsonObject(with: refused) as? [String: Any])
-        #expect(r["Error"] as? String == "SSO isn't supported on this server yet")
+        #expect(r["Error"] as? String == AWSSSORefusals.message)
         #expect(r["AccessKeyId"] == nil)
 
         AWSSSORefusals.set(false, for: pid)

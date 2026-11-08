@@ -159,6 +159,8 @@ public actor Daemon {
     /// gone silent.
     var guestLiveness: [String: GuestLiveness] = [:]
     var guestSilent: Set<String> = []
+    /// Each SSO workspace's credential resolution and refresh loop (pushAWSCredentials).
+    var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
     /// VMs that took this boot's checkpoint (observeCheckpoints).
     var checkpointedBoots: Set<String> = []
     /// Whether the VM directory makes reflinks: "" yes, else why not (unprobed: nil).
@@ -289,6 +291,12 @@ public actor Daemon {
                                  extraRoots: Self.testUpstreamRoots())
             mitm?.blocksHostAddresses = config.multiUser
             mitm?.routeAllTo = Self.testUpstream()
+            Self.applyTestSSOPortal()
+            // AWS SSO reads ~/.aws where the AWS CLI writes it: $HOME (Foundation's
+            // account home ignores $HOME on Linux).
+            if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+                AWSSSOResolver.homeOverride = URL(fileURLWithPath: home, isDirectory: true)
+            }
             // An e2e run marks itself: it reaches its test upstream or no
             // host at all (any build: a release build has no test route).
             if ProcessInfo.processInfo.environment["BROMURE_AC_E2E"] == "1" {
@@ -1147,6 +1155,7 @@ public actor Daemon {
         mitm?.sshAgent.clearKeys(for: pid)
         mitm?.awsCreds.clearCredentials(for: pid)
         AWSSSORefusals.set(false, for: pid)
+        ssoRefreshTasks.removeValue(forKey: pid)?.cancel()
         mitm?.clearWorkspacePolicies(pid)
         if let mitm { await MainActor.run { mitm.clearKube(for: pid) } }
         // Its swap map, and the destinations a compromise alert's "Allow"

@@ -146,7 +146,7 @@ final class VsockFDListener: @unchecked Sendable {
                          server: AWSCredentialServer) throws -> VsockFDListener {
         try VsockFDListener(udsPath: udsPath, port: 8445, fdStoreName: fdStoreName, stored: stored) {
             if AWSSSORefusals.contains(profileID) {
-                AWSSSORefusals.refuse(fd: $0)
+                AWSSSORefusals.refuse(fd: $0, profileID: profileID)
                 return
             }
             await server.serve(fd: $0, profileID: profileID)
@@ -195,24 +195,80 @@ extension Daemon {
     }
 
     /// The workspace's AWS credentials, handed to the host-side credential
-    /// server (static keys as they are), and the helper ~/.aws/config names
-    /// staged in its meta share.
-    // partial: no SSO resolution or refresh loop (AWSSSOResolver isn't shared yet): an SSO profile's helper gets an error payload
+    /// server (static keys as they are; an SSO profile resolved from the AWS
+    /// CLI's SSO cache, with a refresh loop that keeps them current), and
+    /// the helper ~/.aws/config names staged in its meta share. A server
+    /// opens no browser: an SSO session that isn't there (or ends) is the
+    /// user's `aws sso login` on this server to run, and the guest's helper
+    /// says so until it's resolved.
     // @port ACAppDelegate.pushAWSCredentials(for: Profile, engine: MitmEngine) h=08b3dd4f6296a0b4 @d2db8346
     func pushAWSCredentials(for profile: Profile, meta: String) {
         guard let mitm else { return }
-        if profile.awsCredentials.authMode == .ssoProfile {
-            // No keys to vend (an SSO profile's are resolved on the host):
-            // the helper is told why, rather than signing with empty keys.
-            FileHandle.standardError.write(Data(
-                "[sso] SSO profile '\(profile.awsCredentials.ssoProfileName)': not resolved on this Linux server yet; the guest's AWS helper is refused\n".utf8))
-            AWSSSORefusals.set(true, for: profile.id)
-            mitm.awsCreds.setCredentials(AWSCredentials(), for: profile.id)
-        } else {
-            AWSSSORefusals.set(false, for: profile.id)
-            mitm.awsCreds.setCredentials(profile.awsCredentials, for: profile.id)
-        }
         Self.stageAWSCredsHelper(meta: meta)
+        let pid = profile.id
+        ssoRefreshTasks.removeValue(forKey: pid)?.cancel()
+        guard profile.awsCredentials.authMode == .ssoProfile else {
+            // Static keys (Bedrock on them too, or no AWS credentials at all):
+            // nothing to resolve.
+            AWSSSORefusals.set(false, for: pid)
+            mitm.awsCreds.setCredentials(profile.awsCredentials, for: pid)
+            return
+        }
+        let name = profile.awsCredentials.ssoProfileName
+        let awsCreds = profile.awsCredentials
+        let login = "run `aws sso login --profile \(name)` on this server (as the user the daemon runs as)"
+        AWSSSORefusals.set(true, for: pid, reason: "SSO profile '\(name)': credentials not resolved yet")
+        FileHandle.standardError.write(Data("[sso] resolving credentials for SSO profile '\(name)'\n".utf8))
+        ssoRefreshTasks[pid] = Task.detached {
+            do {
+                let resolved = try await AWSSSOResolver.resolve(
+                    profileName: name, triggerLoginIfNeeded: false,
+                    progress: { FileHandle.standardError.write(Data("[sso] \($0)\n".utf8)) })
+                guard !Task.isCancelled else { return }
+                var creds = awsCreds
+                creds.accessKeyID = resolved.accessKeyID
+                creds.secretAccessKey = resolved.secretAccessKey
+                creds.sessionToken = resolved.sessionToken
+                if creds.region.isEmpty { creds.region = resolved.region }
+                mitm.awsCreds.setCredentials(creds, for: pid)
+                AWSSSORefusals.set(false, for: pid)
+                FileHandle.standardError.write(Data("[sso] resolved credentials for '\(name)'\n".utf8))
+                let loop = AWSSSOResolver.startRefreshLoop(
+                    profileName: name, initialExpiration: resolved.expiration,
+                    onRefresh: { fresh in
+                        var updated = creds
+                        updated.accessKeyID = fresh.accessKeyID
+                        updated.secretAccessKey = fresh.secretAccessKey
+                        updated.sessionToken = fresh.sessionToken
+                        mitm.awsCreds.setCredentials(updated, for: pid)
+                        FileHandle.standardError.write(Data("[sso] refreshed credentials for '\(name)'\n".utf8))
+                    },
+                    onError: { error in
+                        FileHandle.standardError.write(Data("[sso] refresh failed: \(error.localizedDescription)\n".utf8))
+                        AWSSSORefusals.set(true, for: pid, reason: "SSO session for '\(name)' ended: \(login)")
+                    })
+                // The loop lives as long as this task: cancelling it (the
+                // next push, the session's end) stops the loop.
+                await withTaskCancellationHandler { await loop.value } onCancel: { loop.cancel() }
+            } catch {
+                FileHandle.standardError.write(Data("[sso] credential resolution failed: \(error.localizedDescription)\n".utf8))
+                mitm.awsCreds.setCredentials(awsCreds, for: pid)
+                AWSSSORefusals.set(true, for: pid, reason: "\(error.localizedDescription): \(login)")
+            }
+        }
+    }
+
+    /// Debug builds, VM e2e only: the SSO portal asked for role credentials
+    /// is a test server (`BROMURE_AC_TEST_SSO_PORTAL=http://ip:port`): the
+    /// host asks it directly, not through the proxy, so the proxy's test
+    /// route doesn't cover it. A release build has none.
+    // @port-skip linux-only: e2e hook of the Linux SSO resolution
+    static func applyTestSSOPortal() {
+        #if DEBUG
+        guard let v = ProcessInfo.processInfo.environment["BROMURE_AC_TEST_SSO_PORTAL"], let url = URL(string: v) else { return }
+        AWSSSOResolver.portalOverride = url
+        FileHandle.standardError.write(Data("bromure-ac daemon: DEBUG: the SSO portal is \(v)\n".utf8))
+        #endif
     }
 
     /// A workspace VM's SSH agent listener (none for a cluster or sign-in
@@ -307,36 +363,38 @@ final class ConnectionThread: TaskExecutor, @unchecked Sendable {
     }
 }
 
-/// The workspaces whose AWS helper is refused (an SSO profile, which this
-/// server can't resolve yet), and the refusal it gets: the helper's
-/// `{"Version":1,"Error":…}`, as AWSCredentialServer reports its errors.
-// @port-skip linux-only: stands in for macOS's AWSSSOResolver until it's shared
+/// The workspaces whose AWS helper is refused for now (an SSO profile
+/// whose credentials aren't resolved: not yet, or the user's SSO session
+/// ended), each with the reason the helper gets: `{"Version":1,"Error":…}`,
+/// as AWSCredentialServer reports its errors.
+// @port-skip linux-only: the helper's answer while an SSO profile isn't resolved (macOS vends nothing then)
 enum AWSSSORefusals {
-    static let message = "SSO isn't supported on this server yet"
+    static let message = "the workspace's AWS SSO credentials aren't resolved yet"
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var ids: Set<UUID> = []
+    nonisolated(unsafe) private static var reasons: [UUID: String] = [:]
 
-    // @port-skip linux-only: the SSO stand-in
-    static func set(_ refused: Bool, for id: UUID) {
+    // @port-skip linux-only: the SSO refusal
+    static func set(_ refused: Bool, for id: UUID, reason: String = message) {
         lock.lock(); defer { lock.unlock() }
-        if refused { ids.insert(id) } else { ids.remove(id) }
+        reasons[id] = refused ? reason : nil
     }
 
-    // @port-skip linux-only: the SSO stand-in
+    // @port-skip linux-only: the SSO refusal
     static func contains(_ id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return ids.contains(id)
+        return reasons[id] != nil
     }
 
-    // @port-skip linux-only: the SSO stand-in
-    static var payload: Data {
-        (try? JSONSerialization.data(withJSONObject: ["Version": 1, "Error": message] as [String: Any],
-                                     options: [.sortedKeys])) ?? Data()
+    // @port-skip linux-only: the SSO refusal
+    static func payload(for id: UUID) -> Data {
+        lock.lock(); let reason = reasons[id] ?? message; lock.unlock()
+        return (try? JSONSerialization.data(withJSONObject: ["Version": 1, "Error": reason] as [String: Any],
+                                            options: [.sortedKeys])) ?? Data()
     }
 
-    // @port-skip linux-only: the SSO stand-in
-    static func refuse(fd: Int32) {
-        let data = payload
+    // @port-skip linux-only: the SSO refusal
+    static func refuse(fd: Int32, profileID: UUID) {
+        let data = payload(for: profileID)
         data.withUnsafeBytes { raw in
             var off = 0
             while off < raw.count {
