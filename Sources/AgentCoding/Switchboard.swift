@@ -44,6 +44,9 @@ struct SwitchboardEvent {
 @MainActor
 protocol SwitchboardHost: TaskDispatchHost, CodingTaskHost {
     func machine(forSession id: UUID) -> AttachedMachine?
+    /// The Macs attached to this one, by workspace id (a session's inbox
+    /// on an attached Mac is under the home it reports).
+    var attachedMachines: [UUID: AttachedMachine] { get }
 }
 
 @MainActor

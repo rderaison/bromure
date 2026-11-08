@@ -254,4 +254,7 @@ extension LinuxSessionHost: TaskDispatchHost {
 extension LinuxSessionHost: SwitchboardHost {
     // @port-skip linux-only: LinuxMachines answers it (DaemonMachines)
     func machine(forSession id: UUID) -> AttachedMachine? { LinuxMachines.shared?.machine(forSession: id) }
+    /// The Macs attached to this server (macOS: ACAppDelegate.attachedMachines).
+    // @port-skip linux-only: LinuxMachines' roster (DaemonMachines)
+    var attachedMachines: [UUID: AttachedMachine] { LinuxMachines.shared?.attached ?? [:] }
 }
