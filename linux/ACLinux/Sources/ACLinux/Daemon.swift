@@ -159,6 +159,10 @@ public actor Daemon {
     /// gone silent.
     var guestLiveness: [String: GuestLiveness] = [:]
     var guestSilent: Set<String> = []
+    /// VMs that took this boot's checkpoint (observeCheckpoints).
+    var checkpointedBoots: Set<String> = []
+    /// Whether the VM directory makes reflinks: "" yes, else why not (unprobed: nil).
+    var checkpointProbe: String?
     /// What each running workspace's agents were last staged with
     /// (DaemonModelRefresh.swift), by VM id.
     var lastStagedProfiles: [String: Profile] = [:]
@@ -792,7 +796,7 @@ public actor Daemon {
         }
     }
 
-    // partial: no attach (a server has no pane), fusion, routing, checkpoints or revert yet
+    // partial: no attach (a server has no pane), fusion or routing yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
@@ -817,6 +821,8 @@ public actor Daemon {
         case ("POST", "model"): return await setModelRoute(rec, body)
         case ("POST", "docker"): return dockerRoute(rec, body)
         case ("POST", "type"): return await typeRoute(rec, body)
+        case ("GET", "checkpoints"): return checkpointsRoute(rec)
+        case ("POST", "revert"): return revertRoute(rec, body)
         default: return .error(405, "Method not allowed")
         }
     }

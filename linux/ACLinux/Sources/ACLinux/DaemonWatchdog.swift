@@ -26,8 +26,10 @@ extension Daemon {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self else { return }
                 await self.sampleWatchdogBytes(interval: 5)
-                // The same 5 s tick reads the guests' heartbeats.
+                // The same 5 s tick reads the guests' heartbeats, and takes
+                // a booted VM's session checkpoint.
                 await self.observeGuestLiveness()
+                await self.observeCheckpoints()
             }
         }
     }
