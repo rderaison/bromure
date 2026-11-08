@@ -1,5 +1,9 @@
-import CryptoKit
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 /// One workspace's table of personal data ↔ stand-ins.
 ///
@@ -34,9 +38,7 @@ final class PIIVault: @unchecked Sendable {
             .appendingPathComponent("BromureAC/pii", isDirectory: true)
         let file = dir.appendingPathComponent("\(id.uuidString).key")
         if let d = try? Data(contentsOf: file), d.count == 32 { return d }
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        let d = Data(bytes)
+        let d = Data(secureRandomBytes(32))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         FileManager.default.createFile(atPath: file.path, contents: d, attributes: [.posixPermissions: 0o600])
@@ -176,7 +178,7 @@ final class PIIVault: @unchecked Sendable {
         guard !hits.isEmpty else { return (text, 0) }
         hits.sort { $0.range.location != $1.range.location
             ? $0.range.location < $1.range.location : $0.range.length > $1.range.length }
-        let out = NSMutableString()
+        let out = NSMutableString(string: "")
         var cursor = 0
         var n = 0
         for h in hits where h.range.location >= cursor {
@@ -234,7 +236,7 @@ final class PIIVault: @unchecked Sendable {
         }
         guard !hits.isEmpty else { return text }
         hits.sort { $0.0.location < $1.0.location }
-        let out = NSMutableString()
+        let out = NSMutableString(string: "")
         var cursor = 0
         for (r, real) in hits where r.location >= cursor {
             out.append(ns.substring(with: NSRange(location: cursor, length: r.location - cursor)))

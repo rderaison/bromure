@@ -172,3 +172,16 @@ func secureRandomBytes(_ n: Int) -> [UInt8] {
     return (0..<n).map { _ in UInt8.random(in: 0...255, using: &g) }
 #endif
 }
+
+/// The performance cores (all of them where there's no such distinction):
+/// how many threads a dense model pass may use.
+func performanceCoreCount() -> Int32 {
+#if canImport(Darwin)
+    var perf: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    sysctlbyname("hw.perflevel0.physicalcpu", &perf, &size, nil, 0)
+    return perf
+#else
+    return Int32(ProcessInfo.processInfo.activeProcessorCount)
+#endif
+}

@@ -12,8 +12,13 @@ final class ORTInjectionSession: InjectionSession {
     private let env: ORTEnv
     private let session: ORTSession
     let inputNames: Set<String>
+    /// The output read (nil: every output asked for, the first one kept).
+    private let output: String?
 
-    init(modelPath: String) throws {
+    /// `threads`: onnxruntime's intra-op thread count (nil: its default).
+    /// `output`: the output to read, when the model has it (else its first).
+    /// `coreML`: whether BROMURE_INJECTION_COREML may put it on CoreML.
+    init(modelPath: String, threads: Int32? = nil, output: String? = nil, coreML: Bool = true) throws {
         // ONNX session on the CPU execution provider by default. The CoreML
         // EP balloons resident memory ~5x (a 288 MB model → ~5 GB; both
         // detectors → ~9 GB): it partitions a transformer into ~160 subgraphs
@@ -26,7 +31,8 @@ final class ORTInjectionSession: InjectionSession {
         let env = try ORTEnv(loggingLevel: .warning)
         let opts = try ORTSessionOptions()
         try opts.setGraphOptimizationLevel(.all)
-        let useCoreML = ORTIsCoreMLExecutionProviderAvailable()
+        if let threads { try opts.setIntraOpNumThreads(threads) }
+        let useCoreML = coreML && ORTIsCoreMLExecutionProviderAvailable()
             && ProcessInfo.processInfo.environment["BROMURE_INJECTION_COREML"] == "1"
             && ProcessInfo.processInfo.environment["BROMURE_NO_COREML"] == nil
         if useCoreML {
@@ -38,6 +44,12 @@ final class ORTInjectionSession: InjectionSession {
         self.env = env
         self.session = session
         self.inputNames = Set(try session.inputNames())
+        if let output {
+            let outs = try session.outputNames()
+            self.output = outs.first(where: { $0 == output }) ?? outs.first ?? output
+        } else {
+            self.output = nil
+        }
     }
 
     func run(_ inputs: [String: [Int64]], shape: [Int]) throws -> [Float] {
@@ -49,9 +61,9 @@ final class ORTInjectionSession: InjectionSession {
         }
         let outputs = try session.run(
             withInputs: values,
-            outputNames: Set(try session.outputNames()),
+            outputNames: output.map { [$0] } ?? Set(try session.outputNames()),
             runOptions: nil)
-        guard let logitsValue = outputs.values.first else { return [] }
+        guard let logitsValue = output.flatMap({ outputs[$0] }) ?? outputs.values.first else { return [] }
         let data = try logitsValue.tensorData() as Data
         let count = data.count / MemoryLayout<Float>.size
         var logits = [Float](repeating: 0, count: count)
@@ -66,6 +78,12 @@ enum InjectionRuntime {
     /// The detector session for the model at `modelPath`.
     static func session(modelPath: String) throws -> any InjectionSession {
         try ORTInjectionSession(modelPath: modelPath)
+    }
+
+    /// A token classifier's session (PIIDetector's): on the CPU with
+    /// `threads` intra-op threads, reading `output` when the model has it.
+    static func tokenSession(modelPath: String, threads: Int32, output: String) throws -> any InjectionSession {
+        try ORTInjectionSession(modelPath: modelPath, threads: threads, output: output, coreML: false)
     }
 }
 

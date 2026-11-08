@@ -1,5 +1,4 @@
 import Foundation
-import OnnxRuntimeBindings
 
 /// Finds personal data in text: Rampart's validator-backed recognizers plus
 /// its 18M-parameter token classifier (MiniLM-L6, 4-bit ONNX, ~15 MB), run on
@@ -44,10 +43,7 @@ actor PIIDetector {
     }
 
     private struct Loaded {
-        let env: ORTEnv
-        let session: ORTSession
-        let inputNames: [String]
-        let outputName: String
+        let session: any InjectionSession
         let wordPiece: PIIText.WordPiece
         /// id → (label, begins) for every non-O class.
         let labels: [Int: (PIILabel, Bool)]
@@ -226,45 +222,35 @@ actor PIIDetector {
             }
             ids[base + 1 + w.count] = Int64(loaded.wordPiece.sep); mask[base + 1 + w.count] = 1
         }
-        let shape: [NSNumber] = [b as NSNumber, seqLen as NSNumber]
         do {
-            func tensor(_ a: [Int64]) throws -> ORTValue {
-                try ORTValue(tensorData: NSMutableData(bytes: a, length: a.count * 8),
-                             elementType: .int64, shape: shape)
-            }
-            var inputs: [String: ORTValue] = [:]
-            for name in loaded.inputNames {
+            var inputs: [String: [Int64]] = [:]
+            for name in loaded.session.inputNames {
                 switch name {
-                case "input_ids": inputs[name] = try tensor(ids)
-                case "attention_mask": inputs[name] = try tensor(mask)
-                case "token_type_ids": inputs[name] = try tensor([Int64](repeating: 0, count: b * seqLen))
+                case "input_ids": inputs[name] = ids
+                case "attention_mask": inputs[name] = mask
+                case "token_type_ids": inputs[name] = [Int64](repeating: 0, count: b * seqLen)
                 default: break
                 }
             }
-            let out = try loaded.session.run(withInputs: inputs, outputNames: [loaded.outputName], runOptions: nil)
-            guard let v = out[loaded.outputName] else { return [] }
-            let data = try v.tensorData() as Data
+            let logits = try loaded.session.run(inputs, shape: [b, seqLen])
             let n = loaded.numLabels
             var spans: [PIISpan] = []
-            data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
-                let logits = buf.bindMemory(to: Float.self)
-                guard logits.count >= b * seqLen * n else { return }
-                for (row, w) in batch.enumerated() {
-                    var tagged: [PIIText.Tagged] = []
-                    for (k, t) in w.enumerated() {
-                        let base = (row * seqLen + 1 + k) * n
-                        var best = 0
-                        var maxL = logits[base]
-                        for c in 1..<n where logits[base + c] > maxL { maxL = logits[base + c]; best = c }
-                        guard best != 0, let (label, begins) = loaded.labels[best] else { continue }
-                        var sum: Float = 0
-                        for c in 0..<n { sum += expf(logits[base + c] - maxL) }
-                        let tok = tokens[t]
-                        tagged.append(.init(index: t, label: label, begins: begins, score: Double(1 / sum),
-                                            start: tok.start, end: tok.end, isSubword: tok.isSubword))
-                    }
-                    spans += PIIText.mergeBIO(tagged).filter { $0.score >= PIIText.extendScore && $0.end > $0.start }
+            guard logits.count >= b * seqLen * n else { return [] }
+            for (row, w) in batch.enumerated() {
+                var tagged: [PIIText.Tagged] = []
+                for (k, t) in w.enumerated() {
+                    let base = (row * seqLen + 1 + k) * n
+                    var best = 0
+                    var maxL = logits[base]
+                    for c in 1..<n where logits[base + c] > maxL { maxL = logits[base + c]; best = c }
+                    guard best != 0, let (label, begins) = loaded.labels[best] else { continue }
+                    var sum: Float = 0
+                    for c in 0..<n { sum += expf(logits[base + c] - maxL) }
+                    let tok = tokens[t]
+                    tagged.append(.init(index: t, label: label, begins: begins, score: Double(1 / sum),
+                                        start: tok.start, end: tok.end, isSubword: tok.isSubword))
                 }
+                spans += PIIText.mergeBIO(tagged).filter { $0.score >= PIIText.extendScore && $0.end > $0.start }
             }
             return spans
         } catch {
@@ -330,20 +316,10 @@ actor PIIDetector {
         }
         guard numLabels > 1 else { throw LoadError(errorDescription: "config.json has no id2label") }
 
-        let env = try ORTEnv(loggingLevel: .warning)
-        let opts = try ORTSessionOptions()
-        try opts.setGraphOptimizationLevel(.all)
         // The performance cores, up to 8: a window is a few ms of dense math.
-        var perf: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        sysctlbyname("hw.perflevel0.physicalcpu", &perf, &size, nil, 0)
         let threads = Int32(ProcessInfo.processInfo.environment["BROMURE_PII_THREADS"] ?? "")
-            ?? min(8, max(2, perf))
-        try opts.setIntraOpNumThreads(threads)
-        let session = try ORTSession(env: env, modelPath: model.path, sessionOptions: opts)
-        let outs = try session.outputNames()
-        return Loaded(env: env, session: session, inputNames: try session.inputNames(),
-                      outputName: outs.first(where: { $0 == "logits" }) ?? outs.first ?? "logits",
-                      wordPiece: wp, labels: labels, numLabels: numLabels)
+            ?? min(8, max(2, performanceCoreCount()))
+        let session = try InjectionRuntime.tokenSession(modelPath: model.path, threads: threads, output: "logits")
+        return Loaded(session: session, wordPiece: wp, labels: labels, numLabels: numLabels)
     }
 }
