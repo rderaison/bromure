@@ -274,8 +274,8 @@ public actor Daemon {
         // Binary identity: a new connection under a policy's `binaries` is
         // decided for the program the guest's attestor names (macOS: the
         // app sets VMNetSwitch.identityGate the same way).
-        sw.egress.identityGate = { pid, sport, dst, dport, hosts, policy in
-            BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport,
+        sw.egress.identityGate = { pid, sport, dst, dport, isn, hosts, policy in
+            BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport, isn: isn,
                                               hostnames: hosts, policy: policy)
         }
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)

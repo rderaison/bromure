@@ -57,12 +57,13 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// the verdict for a new TCP connection given the executable the guest's
     /// attestor names for it, or nil while that answer is coming (macOS:
     /// VMNetSwitch.identityGate; the daemon sets BinaryIdentityService's).
+    /// `isn`: the SYN's initial sequence number (nil re-deciding an open flow).
     var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32, _ dport: UInt16,
-                                  _ hostnames: [String], _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
+                                  _ isn: UInt32?, _ hostnames: [String], _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
     private struct AttestedFlow: Hashable { let port: MAC; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
     /// Flows allowed for their executable: when, and under which policy
     /// generation of their port.
-    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64)] = [:]
+    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64, isn: UInt32?)] = [:]
     /// Bumped per port on every policy change.
     private var policyGeneration: [MAC: UInt64] = [:]
     /// The guests' DNS answers, IP → names (macOS: VMNetSwitch.dnsCache).
@@ -225,7 +226,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         return nil
     }
 
-    // @port VMNetSwitch.handleEgress(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=c790fa1982cff6dc @ac3ea65d
+    // @port VMNetSwitch.handleEgress(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=a53c6ddd46a9b4fa @62ecb8fd
     private func decide(_ buf: UnsafeMutablePointer<UInt8>, _ n: Int, _ src: MAC) -> Action {
         guard n >= 14 else { return .pass }
         let ethertype = VMNetSwitch.u16(buf, 12)
@@ -324,6 +325,9 @@ final class SwitchEgressFirewall: @unchecked Sendable {
             let key = AttestedFlow(port: src, sport: sport, dstIP: dstIP, dport: dport)
             // A new connection, or one allowed under a policy that has since
             // changed, asks the attestor.
+            // A new SYN on the tuple is another connection: the allow
+            // remembered for an earlier one there doesn't carry over.
+            if Self.isSyn(buf, n) { forgetAttested(key) }
             let standing = Self.isSyn(buf, n) ? Attestation.unknown : attestation(key)
             if Self.isSyn(buf, n) || standing == .stale {
                 guard let gate = identityGate else {
@@ -332,11 +336,14 @@ final class SwitchEgressFirewall: @unchecked Sendable {
                     if Self.isSyn(buf, n) { inject(src, VMNetSwitch.buildTCPReset(buf, n)) }
                     return .consumed
                 }
-                switch gate(pid, sport, dstIP, dport, hostnames, policy) {
+                // The SYN's ISN; a re-decision asks under the one the flow
+                // was allowed with (no other connection's answer).
+                let isn = Self.isSyn(buf, n) ? VMNetSwitch.u32(buf, 14 + ihl + 4) : attestedISN(key)
+                switch gate(pid, sport, dstIP, dport, isn, hostnames, policy) {
                 case nil:      return .consumed                  // attestation in flight
                 case let d? where d.verdict == .deny:
                     verdict = .deny; deniedExe = d.exe
-                default:       verdict = .allow; rememberAttested(key)
+                default:       verdict = .allow; rememberAttested(key, isn: isn)
                 }
             } else if standing == .current {
                 verdict = .allow
@@ -471,10 +478,10 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         observer(event)
     }
 
-    // @port VMNetSwitch.rememberAttested(_: AttestedFlow) h=f367ec7852e5d5ec @ac3ea65d
-    private func rememberAttested(_ k: AttestedFlow) {
+    // @port VMNetSwitch.rememberAttested(_: AttestedFlow, isn: UInt32?) h=e9782951d72feab3 @62ecb8fd
+    private func rememberAttested(_ k: AttestedFlow, isn: UInt32?) {
         lock.withLock {
-            attestedFlows[k] = (Date(), policyGeneration[k.port] ?? 0)
+            attestedFlows[k] = (Date(), policyGeneration[k.port] ?? 0, isn)
             if attestedFlows.count > 8192 {                 // drop the stalest half
                 let cut = attestedFlows.values.map(\.at).sorted()[attestedFlows.count / 2]
                 attestedFlows = attestedFlows.filter { $0.value.at > cut }
@@ -482,16 +489,26 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         }
     }
 
+    // @port VMNetSwitch.forgetAttested(_: AttestedFlow) h=75a292fb86ad792d @4b9686a5
+    private func forgetAttested(_ k: AttestedFlow) {
+        lock.withLock { attestedFlows[k] = nil }
+    }
+
+    // @port VMNetSwitch.attestedISN(_: AttestedFlow) h=1375644c640a762a @62ecb8fd
+    private func attestedISN(_ k: AttestedFlow) -> UInt32? {
+        lock.withLock { attestedFlows[k]?.isn }
+    }
+
     /// A flow's standing: allowed under the current policy, allowed under an
     /// older one (must be re-attested before another packet passes), or unknown.
     private enum Attestation { case current, stale, unknown }
 
-    // @port VMNetSwitch.attestation(_: AttestedFlow) h=8c11a83abf790a68 @ac3ea65d
+    // @port VMNetSwitch.attestation(_: AttestedFlow) h=fcdc617eb32c2586 @62ecb8fd
     private func attestation(_ k: AttestedFlow) -> Attestation {
         lock.withLock {
             guard let entry = attestedFlows[k] else { return .unknown }
             guard entry.generation == (policyGeneration[k.port] ?? 0) else { return .stale }
-            attestedFlows[k] = (Date(), entry.generation)
+            attestedFlows[k] = (Date(), entry.generation, entry.isn)
             return .current
         }
     }

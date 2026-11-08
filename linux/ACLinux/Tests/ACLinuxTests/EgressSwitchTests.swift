@@ -322,7 +322,7 @@ struct SwitchEgressFirewallTests {
         #expect(rig.fw.handle(syn, from: rig.a) == .consumed, "no gate: refused")
         let answer = NIOLockedValueBox<(verdict: EgressPolicy.Verdict, exe: String?)?>(nil)
         let asked = NIOLockedValueBox(0)
-        rig.fw.identityGate = { _, _, _, _, _, _ in asked.withLockedValue { $0 += 1 }; return answer.withLockedValue { $0 } }
+        rig.fw.identityGate = { _, _, _, _, _, _, _ in asked.withLockedValue { $0 += 1 }; return answer.withLockedValue { $0 } }
         #expect(rig.fw.handle(syn, from: rig.a) == .consumed, "held while the attestor answers")
         let before = rig.injected.withLockedValue { $0.count }
         answer.withLockedValue { $0 = (.deny, "/usr/bin/curl") }
@@ -335,6 +335,41 @@ struct SwitchEgressFirewallTests {
         #expect(rig.fw.handle(ack, from: rig.a) == .pass && asked.withLockedValue { $0 } == n, "later segments pass on the remembered decision")
         rig.fw.update(.init(profileID: rig.pid, policy: policy, interceptDisabled: true))
         #expect(rig.fw.handle(ack, from: rig.a) == .pass && asked.withLockedValue { $0 } == n + 1, "a policy change asks again")
+    }
+
+    /// A new SYN on a tuple is another connection: the allow remembered
+    /// for the earlier one there is dropped before the gate is asked
+    /// (macOS: handleEgress's forgetAttested).
+    @Test func aNewSYNDropsTheRememberedAllow() throws {
+        let rig = FirewallRig()
+        var policy = try EgressPolicy.parse("default deny")
+        policy.enforceBinaries = true
+        rig.fw.govern(rig.a, .init(profileID: rig.pid, policy: policy, interceptDisabled: true))
+        let syn = TestFrames.tcp(to: good, port: 22, flags: 0x02), ack = TestFrames.tcp(to: good, port: 22, flags: 0x10)
+        let answer = NIOLockedValueBox<(verdict: EgressPolicy.Verdict, exe: String?)?>((.allow, "/usr/bin/gh"))
+        rig.fw.identityGate = { _, _, _, _, _, _, _ in answer.withLockedValue { $0 } }
+        #expect(rig.fw.handle(syn, from: rig.a) == .pass)
+        #expect(rig.fw.handle(ack, from: rig.a) == .pass, "remembered")
+        answer.withLockedValue { $0 = nil }
+        #expect(rig.fw.handle(syn, from: rig.a) == .consumed, "the new SYN is held")
+        #expect(rig.fw.handle(ack, from: rig.a) == .consumed, "and the old allow no longer carries its segments")
+    }
+
+    /// A policy change re-decides an open flow under the ISN it was allowed
+    /// with, never under a key every re-decision of the tuple would share.
+    @Test func aReDecisionAsksUnderTheFlowsISN() throws {
+        let rig = FirewallRig()
+        var policy = try EgressPolicy.parse("default deny")
+        policy.enforceBinaries = true
+        rig.fw.govern(rig.a, .init(profileID: rig.pid, policy: policy, interceptDisabled: true))
+        let syn = TestFrames.tcp(to: good, port: 22, flags: 0x02), ack = TestFrames.tcp(to: good, port: 22, flags: 0x10)
+        let isns = NIOLockedValueBox<[UInt32?]>([])
+        rig.fw.identityGate = { _, _, _, _, isn, _, _ in isns.withLockedValue { $0.append(isn) }; return (.allow, "/usr/bin/gh") }
+        #expect(rig.fw.handle(syn, from: rig.a) == .pass)
+        rig.fw.update(.init(profileID: rig.pid, policy: policy, interceptDisabled: true))
+        #expect(rig.fw.handle(ack, from: rig.a) == .pass)
+        let seen = isns.withLockedValue { $0 }
+        #expect(seen.count == 2 && seen[0] != nil && seen[1] == seen[0], "\(seen)")
     }
 
     @Test func aDetachedPortIsNoLongerGoverned() throws {
