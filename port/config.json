@@ -57,6 +57,7 @@
     "Sources/AgentCoding/GuestMCPShims.swift",
     "Sources/AgentCoding/GuestOutboxReports.swift",
     "Sources/AgentCoding/GuestPorts.swift",
+    "Sources/AgentCoding/GuestSandboxFiles.swift",
     "Sources/AgentCoding/GuestSandboxStatus.swift",
     "Sources/AgentCoding/GuestURLGate.swift",
     "Sources/AgentCoding/Inference/AskArgsNormalizer.swift",

@@ -92,6 +92,43 @@ extension DaemonGlobalSuites {
             #expect(!FileManager.default.fileExists(atPath: codex.path), "not local any more: gone")
         }
 
+        /// The guest sandbox is staged as macOS stages it: the strict marker
+        /// with the root attestor and revocation scripts; an OpenShell spec
+        /// with its root launcher and supervisor for a policy that confines
+        /// the guest; the advisor's address for any OpenShell policy; and a
+        /// restage to a plain workspace takes them away.
+        @Test func theGuestSandboxIsStagedAndRestaged() throws {
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let meta = URL(fileURLWithPath: dir + "/meta", isDirectory: true)
+            try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+            let store = ProfileStore(rootDir: URL(fileURLWithPath: dir + "/profiles", isDirectory: true))
+            let setup = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../../../../Sources/AgentCoding/Resources/vm-setup").standardized
+            func stage(_ p: Profile) throws {
+                try Daemon.writeCredentialFiles(p, plan: nil, registration: false, meta: meta, kubeYAML: nil, store: store,
+                                                setupDir: setup, seedStandIns: { _, _ in })
+            }
+            func has(_ name: String) -> Bool { FileManager.default.fileExists(atPath: meta.appendingPathComponent(name).path) }
+            var p = Profile(name: "sb", tool: .claude, authMode: .token)
+            p.strictSandbox = true
+            p.networkPolicy = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n"
+            try stage(p)
+            #expect(has("strict-sandbox") && has("bromure-attestd.py") && has("bromure-strict.py"), "strict")
+            #expect(has("openshell-sandbox.json") && has("bromure-sandboxd") && has("bromure_openshell.py"), "the spec and its launcher")
+            #expect(has("advisor.json"), "the advisor's address")
+            let spec = try String(contentsOf: meta.appendingPathComponent("openshell-sandbox.json"), encoding: .utf8)
+            #expect(spec.contains("filesystem_policy") && spec.contains("/usr"), "\(spec)")
+            // Network rules alone: the advisor, no spec or launcher.
+            p.strictSandbox = false
+            p.networkPolicy = "version: 1\nnetwork_policies: {}\n"
+            try stage(p)
+            #expect(has("advisor.json") && !has("strict-sandbox") && !has("openshell-sandbox.json") && !has("bromure-sandboxd"))
+            // Nothing asked: nothing staged.
+            p.networkPolicy = ""
+            try stage(p)
+            #expect(!has("advisor.json") && !has("strict-sandbox") && !has("openshell-sandbox.json"))
+        }
+
         /// Every file under `dir`, as text.
         static func tree(_ dir: URL) -> String {
             let fm = FileManager.default

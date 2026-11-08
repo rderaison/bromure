@@ -139,7 +139,8 @@ extension Daemon {
     func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
                               meta: URL, kubeYAML: String?) throws {
         try Self.writeCredentialFiles(profile, plan: plan, registration: registration, meta: meta, kubeYAML: kubeYAML,
-                                      store: profileStore) { profile, files in
+                                      store: profileStore,
+                                      setupDir: URL(fileURLWithPath: config.agentdPath).deletingLastPathComponent()) { profile, files in
             seedCodexAuthFile(for: profile, homeRoot: files)
             seedGrokAuthFile(for: profile, homeRoot: files)
             seedKimiAuthFile(for: profile, homeRoot: files)
@@ -152,10 +153,12 @@ extension Daemon {
                                    "omp-config.yml", SessionDisk.ompEnvUnsetMetaFile, SessionDisk.kimiApprovalsMetaFile]
 
     /// writeCredentialFiles over a given store (testable); `seedStandIns`
-    /// adds the subscription CLIs' stand-in files to the seed's files/.
+    /// adds the subscription CLIs' stand-in files to the seed's files/;
+    /// `setupDir`, the guest scripts beside agentd, stages the guest
+    /// sandbox (nil: none, a test's).
     // @port-skip linux-only: writeCredentialFiles' body
     static func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
-                                     meta: URL, kubeYAML: String?, store: ProfileStore,
+                                     meta: URL, kubeYAML: String?, store: ProfileStore, setupDir: URL? = nil,
                                      seedStandIns: (Profile, URL) -> Void) throws {
         let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
         try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
@@ -169,6 +172,15 @@ extension Daemon {
         // what a previous staging wrote and this one doesn't goes first.
         for name in Self.agentConfigFiles { try? FileManager.default.removeItem(at: meta.appendingPathComponent(name)) }
         try SessionDisk.writeAgentConfigs(into: meta, profile: profile, tokenPlan: plan)
+        // The guest sandbox (the strict marker and root attestor, the
+        // package shims, the OpenShell spec with its root launcher and
+        // supervisor, the advisor's address), as macOS stages it; it removes
+        // what this staging doesn't ask for. A workspace has no shared
+        // folders on a server: no workdirs. No kernel modules yet (a sentry
+        // workspace isn't started: DaemonSandboxGuard).
+        if let setupDir {
+            try SessionDisk.writeSandboxFiles(into: meta, profile: profile, setupDir: setupDir, workdirs: []) { _ in }
+        }
         if !registration {
             seedStandIns(profile, seed.appendingPathComponent("files", isDirectory: true))
         }
