@@ -1513,6 +1513,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
             firewallProfilesChanged(from: oldValue)
+            // The shield follows what restricts each workspace now.
+            refreshShieldState()
             // An open VM dashboard shows the stored notes, whoever stored
             // them (settings, AppleScript, the CLI): a card left on older
             // ones had its next Save write them back over the newer.
@@ -2108,8 +2110,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                         state: m.connected ? .running : .off, compromised: false)
         }
         if w.listModel.profileRows != rows { w.listModel.profileRows = rows }
-        let unsandboxed = Set(profiles.filter { !$0.restrictsEgress }.map(\.id))
-        if w.listModel.unsandboxedProfileIDs != unsandboxed { w.listModel.unsandboxedProfileIDs = unsandboxed }
+        refreshShieldState()
         // Attached machines: a row always, a tab entry while connected (its
         // roster, like a VM's). Kept out of every local reconcile/probe.
         let former = w.listModel.machineIDs
@@ -11528,9 +11529,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Which workspaces have the Sandbox drawer (the shield): whatever
+    /// restricts their traffic now. Recomputed whenever that can change --
+    /// any profile save (`profiles`' didSet), a new or cleared organization
+    /// boundary -- not only on a sidebar refresh: a boundary set from the
+    /// editor started blocking a workspace whose shield stayed hidden, and a
+    /// cleared one left a shield for a policy no longer in force (Finding:
+    /// "Changing the organization boundary leaves the local Sandbox shield
+    /// stale").
+    @MainActor
+    func refreshShieldState() {
+        guard let w = unifiedWindow else { return }
+        let unsandboxed = Self.unsandboxedIDs(profiles)
+        if w.listModel.unsandboxedProfileIDs != unsandboxed { w.listModel.unsandboxedProfileIDs = unsandboxed }
+    }
+
+    nonisolated static func unsandboxedIDs(_ profiles: [Profile]) -> Set<Profile.ID> {
+        Set(profiles.filter { !$0.restrictsEgress }.map(\.id))
+    }
+
     @MainActor
     func reapplyOpenShellGovernance() {
         OpenShellAdvisorModeCache.shared.refresh(profiles)
+        refreshShieldState()
         for (id, session) in runningSessions {
             let profile = profiles.first { $0.id == id } ?? session.profile
             mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: id)

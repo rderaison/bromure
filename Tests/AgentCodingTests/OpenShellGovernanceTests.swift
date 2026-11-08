@@ -86,6 +86,36 @@ struct OpenShellGovernanceTests {
         renamed.name = "renamed"
         #expect(g.refusal(saving: renamed, editing: outside) == nil)
     }
+
+    /// Finding: "Changing the organization boundary leaves the local Sandbox
+    /// shield stale". The shield set was only rebuilt by a sidebar refresh;
+    /// a boundary set or cleared reapplied the policy but left it. It's
+    /// recomputed on a governance change and on any profile change.
+    @Test("a boundary set or cleared changes which workspaces have the shield")
+    func boundaryMovesTheShield() throws {
+        let saved = UserDefaults.standard.string(forKey: OpenShellGovernance.localBoundaryKey)
+        let savedManaged = UserDefaults.standard.data(forKey: OpenShellGovernance.managedKey)
+        defer {
+            UserDefaults.standard.set(saved, forKey: OpenShellGovernance.localBoundaryKey)
+            UserDefaults.standard.set(savedManaged, forKey: OpenShellGovernance.managedKey)
+        }
+        let g = OpenShellGovernance.shared
+        g.setManaged(nil)
+        g.setLocalBoundary(nil)
+        let plain = Profile(name: "plain", tool: .claude, authMode: .token)
+        #expect(ACAppDelegate.unsandboxedIDs([plain]) == [plain.id])
+        g.setLocalBoundary("version: 1\nnetwork_policies: {}\n")
+        #expect(ACAppDelegate.unsandboxedIDs([plain]).isEmpty, "a boundary restricts every workspace")
+        g.setLocalBoundary(nil)
+        #expect(ACAppDelegate.unsandboxedIDs([plain]) == [plain.id])
+
+        // Recomputed where it can change, not only on a sidebar refresh.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("OpenShellAdvisorModeCache.shared.refresh(profiles)\n        refreshShieldState()"))
+        #expect(ac.contains("firewallProfilesChanged(from: oldValue)\n            // The shield follows what restricts each workspace now.\n            refreshShieldState()"))
+        #expect(ac.components(separatedBy: "refreshShieldState()").count - 1 >= 4)   // the func, sidebar, didSet, governance
+    }
 }
 
 /// Finding (CWE-670): "Turning the sentry off on the firewall ignores the
