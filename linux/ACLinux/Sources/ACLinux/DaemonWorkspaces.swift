@@ -5,9 +5,11 @@ import Foundation
 /// describe / export / folder listing behind them).
 extension Daemon {
     /// `GET /profiles/<id>` (`?full=1`: the whole Profile, secrets blanked;
-    /// `?storage=1`: its disk sizes; else the compact describe), and `POST
+    /// `?storage=1`: its disk sizes; else the compact describe), a workspace's
+    /// firewall (`POST …/firewall`, `…/firewall-edit`), and `POST
     /// /agent-sessions/folders`; nil for any other path.
-    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=0153ac41445571d4 @7dd92fdf
+    // partial: no squelch, proposals, policy revisions, OpenShell/sandbox-path decisions or DELETE sub-routes yet
+    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=59e55ae73cdc6185 @f127f8ab
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = parts[0], query = parts.count > 1 ? parts[1] : ""
@@ -27,6 +29,12 @@ extension Daemon {
                 ? Self.profileExport(prof) : describe(prof)
             guard let d, let v = JSONValue(foundation: d) else { return .error(404, "Profile not found") }
             return ControlResponse(200, v)
+        case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/firewall-edit"):
+            let raw = String(p.dropFirst("/profiles/".count).dropLast("/firewall-edit".count))
+            return firewallEditRoute(raw.removingPercentEncoding ?? raw, body)
+        case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/firewall"):
+            let raw = String(p.dropFirst("/profiles/".count).dropLast("/firewall".count))
+            return firewallRoute(raw.removingPercentEncoding ?? raw, body)
         case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/compromised"):
             let raw = String(p.dropFirst("/profiles/".count).dropLast("/compromised".count))
             return await resolveCompromise(raw.removingPercentEncoding ?? raw, action: body["action"]?.stringValue ?? "")
