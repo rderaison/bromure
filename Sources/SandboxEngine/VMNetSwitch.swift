@@ -1042,17 +1042,6 @@ public final class VMNetSwitch: @unchecked Sendable {
     }
 
     /// Firewall + interception for one off-subnet frame from a session VM.
-    /// Whether an L4 denial is handed to the MiTM instead, which decides again
-    /// from the TLS SNI / Host header (the switch may not know the hostname).
-    /// Never for an always-blocked address -- loopback, link-local with the
-    /// metadata address, unspecified: no hostname makes it allowed, and handed
-    /// over, the guest's connect() succeeded before the MiTM dropped the flow,
-    /// where OpenShell refuses the connect itself.
-    public static func defersDenialToInterception(proto: UInt8, dport: UInt16, dstIP: UInt32,
-                                                  policyDefers: Bool, intercepted: Bool) -> Bool {
-        proto == 6 && policyDefers && intercepted && !OpenShellPolicy.isAlwaysBlocked(.v4(dstIP))
-    }
-
     /// Returns true when the frame was consumed (dropped by policy, or diverted
     /// into the MiTM); false to let the native switch forward it.
     ///
