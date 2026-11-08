@@ -97,12 +97,15 @@ struct ChildProcessTests {
         ChildProcess.reapPauseForTesting.withLockedValue { $0 = 0.05 }
         defer { ChildProcess.reapPauseForTesting.withLockedValue { $0 = nil } }
         for _ in 0..<20 {
-            let p = try ChildProcess(name: "true", executable: "/bin/true", arguments: [], logPath: nil)
+            // Alive for 50 ms: the hammer's first signal always lands while it
+            // runs, however late its task starts (with /bin/true, a loaded
+            // machine could start it after the exit: `sent` stayed 0).
+            let p = try ChildProcess(name: "sleep", executable: "/bin/sleep", arguments: ["0.05"], logPath: nil)
             try p.start()
             let hammer = Task.detached { () -> (sent: Int, missed: Int) in
                 var sent = 0, missed = 0
                 while p.exitStatus == nil {
-                    // SIGCONT is harmless to /bin/true, a zombie, or anyone else.
+                    // SIGCONT is harmless to sleep, a zombie, or anyone else.
                     let attempted = p.isRunning
                     if p.signal(SIGCONT) { sent += 1 } else if attempted && p.exitStatus == nil { missed += 1 }
                 }
