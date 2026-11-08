@@ -896,13 +896,13 @@ final class FileExplorerModel {
                 detail = .error("File was deleted — switch to Diff to see what was removed.")
             } else if DisplayMediaKind(path: path) != nil, let reader = mediaReader() {
                 // An image or a video: shown, not called binary (or too large
-                // at 512 KB). Its size and time are in the cache key, so a
+                // at 512 KB). The file's version is in the cache key, so a
                 // file the agent rewrites isn't shown as it was.
-                let stamp = (try? await exec("stat -c '%s %Y' \(qroot)/\(qpath) 2>/dev/null"))?
+                let stamp = (try? await exec(Self.mediaStampCommand("\(qroot)/\(qpath)")))?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard generation == detailGeneration else { return }
                 var scoped = reader
-                scoped.scope = "files\u{1}\(profileID?.uuidString ?? "")\u{1}\(stamp)"
+                scoped.scope = Self.mediaScope(profileID: profileID, stamp: stamp)
                 detail = .media(path: (root as NSString).appendingPathComponent(path), reader: scoped)
             } else {
                 let out = try await exec(
@@ -927,6 +927,26 @@ final class FileExplorerModel {
             guard generation == detailGeneration else { return }
             detail = .error(error.localizedDescription)
         }
+    }
+
+    /// The version of the file a media preview reads, as `stat` sees it on
+    /// the machine: of the file a symlink leads to (-L: the file service
+    /// follows links, so a link pointed elsewhere is another picture), its
+    /// device and inode (an editor's atomic rename is a new file), its size,
+    /// and its modification and change times to the nanosecond (`%y`/`%z`:
+    /// a same-size rewrite within the second is still a new version, and the
+    /// change time can't be set back with `touch -d`). `quotedPath`: already
+    /// shell-quoted.
+    nonisolated static func mediaStampCommand(_ quotedPath: String) -> String {
+        "stat -L -c '%d %i %s %y %z' \(quotedPath) 2>/dev/null"
+    }
+
+    /// The media cache scope for one read of a file at `stamp`. No stamp (the
+    /// stat failed): a scope of its own each time, so nothing cached is
+    /// taken for the file as it is now -- an empty stamp was one key forever.
+    nonisolated static func mediaScope(profileID: UUID?, stamp: String) -> String {
+        let version = stamp.isEmpty ? "unversioned-" + UUID().uuidString : stamp
+        return "files\u{1}\(profileID?.uuidString ?? "")\u{1}\(version)"
     }
 
     /// highlight.js language name by file extension; nil → plain text.
