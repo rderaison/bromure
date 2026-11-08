@@ -105,6 +105,9 @@ final class MitmProxy: @unchecked Sendable {
     let grokRefresher: GrokSubscriptionRefresher
     let kimiStore: KimiSubscriptionStore
     let kimiRefresher: KimiSubscriptionRefresher
+    /// Fills in a Kimi record's managed config from /models (macOS:
+    /// MitmEngine.kimiProvisioner).
+    let kimiProvisioner: KimiProvisioner
     let captures = SignInCaptureRegistry()
     /// The trace inspector's records (macOS: MitmEngine.traceStore), made
     /// on the main actor once the daemon is up (setUpTraceStore).
@@ -173,6 +176,7 @@ final class MitmProxy: @unchecked Sendable {
         grokRefresher = GrokSubscriptionRefresher(store: grokStore)
         kimiStore = KimiSubscriptionStore(fileURL: stores?.appendingPathComponent("kimi-subscription.enc"))
         kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
+        kimiProvisioner = KimiProvisioner(store: kimiStore, refresher: kimiRefresher)
         self.group = group
         credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
         var cfg = TLSConfiguration.makeClientConfiguration()

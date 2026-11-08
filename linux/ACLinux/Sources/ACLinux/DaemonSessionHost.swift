@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 /// What the shared agent-session engine asks of its host (macOS: the app
 /// delegate), done the daemon's way: a workspace is a VM record, its shell
@@ -161,12 +162,42 @@ extension Daemon {
     /// Kimi subscription mode: the stand-in credentials (and the managed
     /// config.toml, if captured) in the home seed's `files/`
     /// (SubscriptionStandInFiles.seedKimi).
-    // partial: a Kimi record without its managed config isn't provisioned on Linux (macOS's KimiProvisioner at launch): the guest gets the credentials, no default_model
     // @port ACAppDelegate.seedKimiAuthFile(for: Profile, homeRoot: URL?) h=3793d09178fcc611 @645bad15
     func seedKimiAuthFile(for profile: Profile, homeRoot: URL) {
         guard let mitm, profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
               mitm.kimiStore.record(for: profile.id) != nil else { return }
         SubscriptionStandInFiles.seedKimi(store: mitm.kimiStore, profileID: profile.id, homeRoot: homeRoot)
+    }
+
+    /// A Kimi subscription workspace whose record carries no managed config:
+    /// the seed would leave the guest without a `default_model`.
+    // @port ACAppDelegate.kimiNeedsProvisioning(_: Profile) h=7c098e19f617b8fc @9ece43f6
+    func kimiNeedsProvisioning(_ profile: Profile) -> Bool {
+        guard let mitm, profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
+              let real = mitm.kimiStore.record(for: profile.id) else { return false }
+        return !KimiProvisioner.isProvisioned(real.configTOML)
+    }
+
+    /// Tests: provisioning instead of the network (/models with the real token).
+    static let kimiProvisionForTesting = NIOLockedValueBox<(@Sendable (UUID) async -> Void)?>(nil)
+
+    /// Before a launch's seed: a Kimi record without its managed config is
+    /// provisioned from /models with the real credential (a second or two,
+    /// once per credential; the result is stored on the record), as macOS's
+    /// launch does before it boots. A failure is logged and the guest boots
+    /// without a default model, to be retried on the next boot. An e2e
+    /// daemon skips it.
+    // @port-skip linux-only: launch's kimiNeedsProvisioning gate, on the daemon's launch
+    func provisionKimiIfNeeded(_ profile: Profile) async {
+        guard kimiNeedsProvisioning(profile), let mitm else { return }
+        if let hook = Self.kimiProvisionForTesting.withLockedValue({ $0 }) { return await hook(profile.id) }
+        // An e2e daemon reaches no real host (the provisioner's /models call
+        // isn't the proxy's, which refuses them).
+        guard !mitm.refusesRealUpstreams else {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(profile.name)': e2e: Kimi provisioning skipped (no real hosts)\n".utf8))
+            return
+        }
+        await mitm.kimiProvisioner.ensureProvisioned(for: profile.id)
     }
 
     /// Pull `chatgpt_account_id` out of a Codex id-token JWT (best effort).

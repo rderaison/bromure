@@ -1196,6 +1196,9 @@ public actor Daemon {
             }
             // A new session: no swap map or "Allow"ed destination from the last.
             if rec.registration != true, let pid = UUID(uuidString: rec.id) { mitm?.swapper.clearMap(for: pid) }
+            // A Kimi record without its managed config is provisioned first
+            // (macOS: launch's kimiNeedsProvisioning gate).
+            if rec.registration != true { await provisionKimiIfNeeded(profile) }
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
             try writeCredentialFiles(profile, plan: plan, registration: rec.registration == true,
                                      meta: meta, kubeYAML: kubeYAML)
