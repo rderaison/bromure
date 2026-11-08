@@ -48,7 +48,7 @@ extension Daemon {
     /// probe it, for a launch whose agents use a local model. A workspace
     /// on the built-in engine is told it's macOS-only (the daemon log; its
     /// agents' calls get the proxy's wire-shaped "no engine" error).
-    // partial: external engines only (the built-in MLX engine is macOS-only); Bedrock without a pasted key (SigV4 with the workspace's AWS credentials) not yet; status to the daemon log (no pane)
+    // partial: external engines only (the built-in MLX engine is macOS-only); status to the daemon log (no pane)
     // @port ACAppDelegate.startLocalEngineIfNeeded(for: Profile) h=f08c2a0c5693ee85 @7057d502
     func startLocalEngineIfNeeded(for profile: Profile) {
         let pid = profile.id
@@ -62,11 +62,12 @@ extension Daemon {
             return
         }
         let apiKey = profile.localEngineAPIKey
-        let config = ExternalEngine.Config(base: base, apiKey: apiKey)
-        if config.isBedrock, (apiKey ?? "").isEmpty {
-            InferenceRepairProxy.shared.setExternalEngine(pid, nil)
-            Self.inferenceLog("'\(profile.name)': Amazon Bedrock needs an API key on this server (signing with the workspace's AWS credentials isn't available yet)")
-            return
+        // Amazon Bedrock as the engine: a pasted Bedrock API key is a plain
+        // bearer; without one the host signs each request (SigV4) with the
+        // workspace's AWS credentials (ExternalEngine.awsSigner).
+        var config = ExternalEngine.Config(base: base, apiKey: apiKey)
+        if config.isBedrock, (apiKey ?? "").isEmpty, let region = Bedrock.region(fromHost: base.host ?? "") {
+            config.auth = .sigV4(profileID: pid, region: region)
         }
         InferenceRepairProxy.shared.setExternalEngine(pid, config)
         if let activeID = profile.activeModelID, !activeID.isEmpty {

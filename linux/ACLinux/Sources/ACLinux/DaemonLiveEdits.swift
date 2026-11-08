@@ -98,6 +98,7 @@ extension Daemon {
     func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {
         guard let mitm else { return false }
         let profile = await stagedProfile(raw)
+        lastStagedProfiles[rec.id] = profile
         await MainActor.run {
             mitm.applyWorkspacePolicies(raw)
             sw.egress.update(.init(raw))

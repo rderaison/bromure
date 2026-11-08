@@ -23,6 +23,9 @@ extension Daemon {
             return ControlResponse(200, v)
         case ("PUT", "/models/settings"), ("PATCH", "/models/settings"):
             let r = await MainActor.run { Self.updateModelSettings(doc) }
+            // The running workspaces follow (macOS: the settings publisher's
+            // refreshModelsForRunningWorkspaces).
+            if r["ok"] as? Bool == true { Task { await self.refreshModelsForRunningWorkspaces() } }
             return Self.okResponse(r)
         default:
             return nil

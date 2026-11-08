@@ -198,7 +198,6 @@ extension Daemon {
     /// server (static keys as they are), and the helper ~/.aws/config names
     /// staged in its meta share.
     // partial: no SSO resolution or refresh loop (AWSSSOResolver isn't shared yet): an SSO profile's helper gets an error payload
-    // partial: no re-push when a running workspace moves onto Bedrock (macOS: LiveModelRefresh); its keys are pushed at launch and adoption
     // @port ACAppDelegate.pushAWSCredentials(for: Profile, engine: MitmEngine) h=08b3dd4f6296a0b4 @d2db8346
     func pushAWSCredentials(for profile: Profile, meta: String) {
         guard let mitm else { return }

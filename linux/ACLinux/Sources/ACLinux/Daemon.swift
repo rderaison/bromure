@@ -157,6 +157,10 @@ public actor Daemon {
     /// gone silent.
     var guestLiveness: [String: GuestLiveness] = [:]
     var guestSilent: Set<String> = []
+    /// What each running workspace's agents were last staged with
+    /// (DaemonModelRefresh.swift), by VM id.
+    var lastStagedProfiles: [String: Profile] = [:]
+    var modelRefreshObserver: NSObjectProtocol?
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -223,12 +227,18 @@ public actor Daemon {
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
         await d.wireWatchdog()
+        await d.installLiveModelRefresh()
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
             // What a VM mints is saved with its workspace: the next boot's
             // swap map has it (macOS: credentialMinter.sink).
+            // A Bedrock engine without a pasted key: the repair proxy signs its
+            // upstream calls with the workspace's AWS credentials, through the
+            // same consent-gated credential server every AWS call uses
+            // (macOS: the engine's wiring at launch).
+            Self.installBedrockSigner(mitm.awsCreds)
             mitm.credentialMinter.sink = { pid, minted in
                 Task { @MainActor in Self.saveMintedCredential(minted, profileID: pid, store: ProfileStore()) }
             }
@@ -1125,6 +1135,7 @@ public actor Daemon {
         // and no question holds the VM any more.
         AgentWatchdog.shared.reset(profileID: pid)
         clearPauseHolds(pid.uuidString.lowercased())
+        lastStagedProfiles[pid.uuidString.lowercased()] = nil
         watchdogAsking.remove(pid.uuidString.lowercased())
         Self.clearQuarantineMark(vmDir(pid.uuidString.lowercased()))
         if let mitm {
@@ -1275,7 +1286,10 @@ public actor Daemon {
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
-        if let staged, rec.registration != true { startLocalEngineIfNeeded(for: staged) }
+        if let staged, rec.registration != true {
+            startLocalEngineIfNeeded(for: staged)
+            lastStagedProfiles[rec.id] = staged
+        }
         // The address it had last, if still free (macOS's lease store), leased
         // before the switch sees it; recorded, so a restarted daemon hands the
         // same one back (the guest keeps it) and so does its next boot.
@@ -1452,7 +1466,10 @@ public actor Daemon {
                                       stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
                 l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
-                if let staged = adoptedProfile { startLocalEngineIfNeeded(for: staged) }
+                if let staged = adoptedProfile {
+                    startLocalEngineIfNeeded(for: staged)
+                    lastStagedProfiles[rec.id] = staged
+                }
                 // Quarantined before the restart: cut again before it's attached.
                 let reask = readoptQuarantine(rec)
                 sw.attach(l.port, mac: rec.mac)
