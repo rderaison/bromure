@@ -99,29 +99,31 @@ enum ConversationParser {
             return conv
         }
 
-        let h = host.lowercased()
-        if h.contains("anthropic.com") {
+        // A provider's domain or a subdomain of it, never a name that only
+        // contains it (TraceLevel.host(_:isUnder:), as the scans match hosts).
+        let under = { TraceLevel.host(host, isUnder: $0) }
+        if under("anthropic.com") {
             return parseAnthropic(req: req, res: res)
         }
-        if h.contains("openai.com")
-            || h.contains("chatgpt.com")   // Codex subscription backend
-            || h.contains("mistral.ai")
-            || h.contains("x.ai")
-            || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
-            || h.contains("groq.com")
-            || h.contains("moonshot.ai")   // Kimi open platform
-            || h.contains("kimi.ai")       // Kimi Code subscription (international)
-            || h.contains("kimi.com")      // Kimi Code subscription (legacy China)
-            || h.contains("perplexity.ai") {
+        if under("openai.com")
+            || under("chatgpt.com")   // Codex subscription backend
+            || under("mistral.ai")
+            || under("x.ai")
+            || under("grok.com")      // Grok subscription (cli-chat-proxy)
+            || under("groq.com")
+            || under("moonshot.ai")   // Kimi open platform
+            || under("kimi.ai")       // Kimi Code subscription (international)
+            || under("kimi.com")      // Kimi Code subscription (legacy China)
+            || under("perplexity.ai") {
             // openai.com vendor + OpenAI-compatible providers all
             // share the same wire shape (chat/completions or, for
             // Codex / newer SDKs, /v1/responses).
             return parseOpenAI(req: req, res: res)
         }
-        if h.contains("googleapis.com") || h.contains("google.com") {
+        if under("googleapis.com") || under("google.com") {
             return parseGemini(req: req, res: res)
         }
-        if h.contains("cohere.com") {
+        if under("cohere.com") {
             return parseCohere(req: req, res: res)
         }
         // Unrecognized host — notably the local engine ("local-engine"), which
@@ -184,17 +186,17 @@ enum ConversationParser {
         }
         // Only honour the OpenAI-Responses path for now. Other
         // providers fall through and use synthesize-and-route.
-        let h = host.lowercased()
-        guard h.contains("openai.com")
-            || h.contains("chatgpt.com")   // Codex subscription backend
-            || h.contains("mistral.ai")
-            || h.contains("x.ai")
-            || h.contains("grok.com")      // Grok subscription (cli-chat-proxy)
-            || h.contains("groq.com")
-            || h.contains("moonshot.ai")   // Kimi open platform
-            || h.contains("kimi.ai")       // Kimi Code subscription (international)
-            || h.contains("kimi.com")      // Kimi Code subscription (legacy China)
-            || h.contains("perplexity.ai") else {
+        let under = { TraceLevel.host(host, isUnder: $0) }
+        guard under("openai.com")
+            || under("chatgpt.com")   // Codex subscription backend
+            || under("mistral.ai")
+            || under("x.ai")
+            || under("grok.com")      // Grok subscription (cli-chat-proxy)
+            || under("groq.com")
+            || under("moonshot.ai")   // Kimi open platform
+            || under("kimi.ai")       // Kimi Code subscription (international)
+            || under("kimi.com")      // Kimi Code subscription (legacy China)
+            || under("perplexity.ai") else {
             return nil
         }
 

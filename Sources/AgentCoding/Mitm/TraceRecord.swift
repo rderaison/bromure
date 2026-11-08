@@ -55,12 +55,18 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
     /// `google.com.evil.net`, which a substring match took). Case, a
     /// trailing dot and a port are ignored.
     public static func isAIHost(_ host: String) -> Bool {
+        aiHosts.contains { self.host(host, isUnder: $0) }
+    }
+
+    /// Whether `host` is `domain` or a subdomain of it (a suffix on a label
+    /// boundary). Case, a trailing dot and a port are ignored.
+    public static func host(_ host: String, isUnder domain: String) -> Bool {
         var h = host.lowercased()
         if !h.hasPrefix("["), h.filter({ $0 == ":" }).count == 1, let colon = h.firstIndex(of: ":") {
             h = String(h[..<colon])
         }
         while h.hasSuffix(".") { h.removeLast() }
-        return !h.isEmpty && aiHosts.contains { h == $0 || h.hasSuffix("." + $0) }
+        return !h.isEmpty && (h == domain || h.hasSuffix("." + domain))
     }
 
     /// True if a request to `host` should have its body captured at
