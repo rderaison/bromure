@@ -4,12 +4,13 @@ import FoundationNetworking
 #endif
 
 /// A managed profile's mTLS client for the cloud trace ingest (macOS: a
-/// URLSession whose delegate presents the profile's org-CA leaf). Linux's
-/// URLSession can't present a client certificate, and the NIOSSL client
-/// that will isn't written yet: until then every request fails with
-/// `CloudTraceMTLSUnavailable`, and nothing leaves the host.
-// partial: no mTLS on Linux yet (to come: AsyncHTTPClient + NIOSSL with the leaf from BACSecretStore)
-// @port-skip linux-only: the Linux side of the CloudTraceMTLS seam (CloudTraceUploader.swift has the Apple one)
+/// URLSession whose delegate presents the profile's org-CA leaf). Only
+/// Bromure Web's managed browser profiles use it (CloudTraceUploader, fed
+/// by ManagedProfileSync, which isn't in this build): nothing in Agentic
+/// Coding uploads through it, on macOS or here, so it stays a stub that
+/// refuses, and nothing leaves the host. The install's own uploads go over
+/// BACMTLS (NIOMTLSHTTPClient), the one a port would reuse.
+// @port-skip linux-only: the Linux side of the CloudTraceMTLS seam (CloudTraceUploader.swift has the Apple one; unused by Agentic Coding)
 public enum CloudTraceMTLS {
     // @port-skip linux-only: CloudTraceMTLS seam
     public static func makeClient(profileId: UUID, timeout: TimeInterval) -> CloudTraceMTLSClient {
