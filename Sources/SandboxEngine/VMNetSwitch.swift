@@ -1146,14 +1146,20 @@ public final class VMNetSwitch: @unchecked Sendable {
             // A new connection, or one allowed under a policy that has since
             // changed (a live update re-decides open streams too, as
             // OpenShell's reload does), asks the attestor.
+            // A new SYN on the tuple is another connection: the allow
+            // remembered for an earlier one there doesn't carry over.
+            if Self.isTCPSyn(buf, n) { forgetAttested(key) }
             let standing = Self.isTCPSyn(buf, n) ? Attestation.unknown : attestation(key)
             if Self.isTCPSyn(buf, n) || standing == .stale {
                 guard let gate = identityGate else { verdict = .deny; return dropDenied() }
-                switch gate(pid, sport, dstIP, dport, hostnames, policy) {
+                // The SYN's ISN; a re-decision asks under the one the flow
+                // was allowed with (no other connection's answer).
+                let isn = Self.isTCPSyn(buf, n) ? Self.u32(buf, 14 + ihl + 4) : attestedISN(key)
+                switch gate(pid, sport, dstIP, dport, isn, hostnames, policy) {
                 case nil:      return true                       // attestation in flight
                 case let d? where d.verdict == .deny:
                     verdict = .deny; deniedExe = d.exe
-                default:       verdict = .allow; rememberAttested(key)
+                default:       verdict = .allow; rememberAttested(key, isn: isn)
                 }
             } else if standing == .current {
                 verdict = .allow
@@ -1291,25 +1297,35 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// Hook for binary-identity enforcement (set by the app): the verdict for
     /// a new TCP connection from `srcPort` given the executable the guest's
     /// attestor names for it, or nil while that answer is still coming.
-    /// `exe` is the program it was decided for (reported with a deny).
+    /// `exe` is the program it was decided for (reported with a deny);
+    /// `isn` the SYN's initial sequence number (nil re-deciding an open flow).
     public var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32,
-                                         _ dport: UInt16, _ hostnames: [String],
+                                         _ dport: UInt16, _ isn: UInt32?, _ hostnames: [String],
                                          _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
 
     private struct AttestedFlow: Hashable { let portID: Int; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
-    /// Flows allowed for their executable: when, and under which policy
-    /// generation of their port.
-    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64)] = [:]
+    /// Flows allowed for their executable: when, under which policy
+    /// generation of their port, and the SYN's ISN they were allowed with.
+    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64, isn: UInt32?)] = [:]
     /// Bumped per port on every live policy change.
     private var policyGeneration: [Int: UInt64] = [:]
 
-    private func rememberAttested(_ k: AttestedFlow) {
+    private func rememberAttested(_ k: AttestedFlow, isn: UInt32?) {
         lock.lock(); defer { lock.unlock() }
-        attestedFlows[k] = (Date(), policyGeneration[k.portID] ?? 0)
+        attestedFlows[k] = (Date(), policyGeneration[k.portID] ?? 0, isn)
         if attestedFlows.count > 8192 {                 // drop the stalest half
             let cut = attestedFlows.values.map(\.at).sorted()[attestedFlows.count / 2]
             attestedFlows = attestedFlows.filter { $0.value.at > cut }
         }
+    }
+
+    private func forgetAttested(_ k: AttestedFlow) {
+        lock.lock(); attestedFlows[k] = nil; lock.unlock()
+    }
+
+    private func attestedISN(_ k: AttestedFlow) -> UInt32? {
+        lock.lock(); defer { lock.unlock() }
+        return attestedFlows[k]?.isn
     }
 
     /// A flow's standing: allowed under the current policy, allowed under an
@@ -1320,7 +1336,7 @@ public final class VMNetSwitch: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let entry = attestedFlows[k] else { return .unknown }
         guard entry.generation == (policyGeneration[k.portID] ?? 0) else { return .stale }
-        attestedFlows[k] = (Date(), entry.generation)
+        attestedFlows[k] = (Date(), entry.generation, entry.isn)
         return .current
     }
 

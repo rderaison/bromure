@@ -9,8 +9,10 @@ extension BinaryIdentityService {
     /// Start listening for a VM's attestor. `secretFile` is host-side storage
     /// for the pinned secret (survives a suspend / restore of the VM).
     @MainActor
-    public func attach(profileID: UUID, socketDevice: VZVirtioSocketDevice, secretFile: URL) {
-        let bridge = AttestorBridge(profileID: profileID, secretFile: secretFile)
+    /// `restoring`: a VM taken back, whose attestor must present the
+    /// secret pinned on disk (none: refused).
+    public func attach(profileID: UUID, socketDevice: VZVirtioSocketDevice, secretFile: URL, restoring: Bool) {
+        let bridge = AttestorBridge(profileID: profileID, secretFile: secretFile, mayPin: !restoring)
         let l = AttestorVsockListener(bridge: bridge)
         l.listen(on: socketDevice)
         bridge.listener = l

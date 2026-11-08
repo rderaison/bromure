@@ -103,7 +103,7 @@ struct BinaryIdentityTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let secretFile = dir.appendingPathComponent("attestor.secret")
-        let bridge = AttestorBridge(profileID: UUID(), secretFile: secretFile)
+        let bridge = AttestorBridge(profileID: UUID(), secretFile: secretFile, mayPin: true)
         let secret = String(repeating: "ab", count: 32)
 
         func connect(_ s: String) -> (Int32, Thread) {

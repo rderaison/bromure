@@ -4182,8 +4182,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     }
                 }
             }
-            VMNetSwitch.shared.identityGate = { pid, sport, dst, dport, hosts, policy in
-                BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport,
+            VMNetSwitch.shared.identityGate = { pid, sport, dst, dport, isn, hosts, policy in
+                BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport, isn: isn,
                                                   hostnames: hosts, policy: policy)
             }
             // Warm the trace ring from disk so `bromure-ac trace` shows recent
@@ -11199,7 +11199,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard profile.effectiveStrictSandbox || spec.isActive else { return }
         let secret = store.profileDirectory(for: profile).appendingPathComponent("attestor.secret")
         if !restoring { try? FileManager.default.removeItem(at: secret) }
-        BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret)
+        BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret,
+                                            restoring: restoring)
     }
 
     /// Connect the OpenShell policy advisor to the live workspaces: mode and

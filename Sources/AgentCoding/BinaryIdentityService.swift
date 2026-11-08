@@ -24,10 +24,45 @@ public final class BinaryIdentityService: @unchecked Sendable {
     private var bridges: [UUID: AttestorBridge] = [:]
     /// Per profile: exe path → first-seen sha256 (OpenShell's TOFU rules).
     private var pinnedHashes: [UUID: OpenShellPolicy.BinaryPinStore] = [:]
-    /// L4 decisions in flight / made, keyed by flow, for the switch gate.
-    private var gateResults: [GateKey: (verdict: EgressPolicy.Verdict?, exe: String?, at: Date)] = [:]
+    /// L4 attestations queued / in flight / made, per profile, keyed by
+    /// flow, for the switch gate. Bounded: `maxGateEntries` per profile, and
+    /// at most `maxGateQueries` attestor questions in flight for one; the
+    /// flows waiting for a slot are asked in arrival order.
+    private var gateResults: [UUID: [GateKey: GateEntry]] = [:]
+    private var gateQueries: [UUID: Int] = [:]
+    private var gateQueue: [UUID: [GateKey]] = [:]
 
-    struct GateKey: Hashable { let pid: UUID; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
+    /// A flow: its 4-tuple and the SYN's initial sequence number, so a
+    /// decision can't be inherited by another socket that later binds the
+    /// same source port (nil: a policy change re-deciding an open flow).
+    struct GateKey: Hashable { let sport: UInt16; let dstIP: UInt32; let dport: UInt16; let isn: UInt32? }
+    struct GateEntry {
+        enum State { case queued, asking, answered }
+        var state: State
+        /// The attested identity once answered (nil: none); the verdict is
+        /// computed from it against the policy at use.
+        var identity: OpenShellPolicy.BinaryIdentity?
+        var at: Date
+        /// The DNS names cached for the address (a guess at what it's for),
+        /// at most `maxGateHostnames`, kept only until the flow is asked.
+        var hostnames: [String]
+        /// Last handed to the switch.
+        var lastUse: Date
+        /// Handed to the switch as an allow: the switch remembers the flow
+        /// itself, so this is the first answer to give way when full.
+        var allowed = false
+    }
+    /// How long an answer stands for its SYN: the guest's whole SYN retry
+    /// horizon (Linux: +1, 2, 4, 8, 16, 32 s, ~127 s in all), so a lost
+    /// SYN-ACK or a slow answer never times an allowed connection out.
+    static let gateDecidedTTL: TimeInterval = 130
+    /// A question unanswered this long is asked again.
+    static let gateAskWindow: TimeInterval = 15
+    static let maxGateEntries = 1024
+    static let maxGateHostnames = 16
+    static let maxGateQueries = 32
+    /// The gate's clock (tests move it).
+    var clock: @Sendable () -> Date = { Date() }
 
     /// Tests: answer attestor queries without a VM.
     var queryOverride: ((UUID, [String: Any]) async -> [String: Any]?)?
@@ -43,7 +78,8 @@ public final class BinaryIdentityService: @unchecked Sendable {
         lock.lock()
         let b = bridges.removeValue(forKey: profileID)
         pinnedHashes[profileID] = nil
-        gateResults = gateResults.filter { $0.key.pid != profileID }
+        gateResults[profileID] = nil
+        gateQueue[profileID] = nil
         lock.unlock()
         return b
     }
@@ -169,34 +205,108 @@ public final class BinaryIdentityService: @unchecked Sendable {
 
     /// `VMNetSwitch.identityGate`: decide a non-intercepted TCP connection for
     /// its attested binary. Returns nil (hold the SYN) while the attestor is
-    /// being asked; the retransmitted SYN picks up the decision.
-    public func gate(profileID: UUID, sport: UInt16, dstIP: UInt32, dport: UInt16,
+    /// being asked; a retransmitted SYN picks up the answer, decided against
+    /// the policy it's checked under then. `isn`: the SYN's initial sequence
+    /// number (nil for an open flow re-decided after a policy change). A
+    /// profile whose table is full of flows still being decided holds more.
+    public func gate(profileID: UUID, sport: UInt16, dstIP: UInt32, dport: UInt16, isn: UInt32?,
                      hostnames: [String], policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)? {
-        let key = GateKey(pid: profileID, sport: sport, dstIP: dstIP, dport: dport)
+        let key = GateKey(sport: sport, dstIP: dstIP, dport: dport, isn: isn)
+        let now = clock()
         lock.lock()
-        if let (v, exe, at) = gateResults[key] {
-            if let v { gateResults[key] = nil; lock.unlock(); return (v, exe) }
-            if Date().timeIntervalSince(at) < 5 { lock.unlock(); return nil }   // still asking
+        if let held = gateResults[profileID]?[key] {
+            let age = now.timeIntervalSince(held.at)
+            switch held.state {
+            case .answered where age <= Self.gateDecidedTTL:
+                // Reusable by this SYN's retransmits until it expires.
+                lock.unlock()
+                let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: held.identity)
+                lock.lock()
+                gateResults[profileID]?[key]?.lastUse = now
+                if v != .deny { gateResults[profileID]?[key]?.allowed = true }
+                lock.unlock()
+                // The deny reports the program on its own event (the switch's
+                // `EgressEvent.exe`): that event is the drawer row Allow acts on.
+                return (v == .deny ? .deny : .allow, held.identity?.exe)
+            case .queued:
+                lock.unlock(); return nil                         // waiting its turn
+            case .asking where age < Self.gateAskWindow:
+                lock.unlock(); return nil                         // still asking
+            default:
+                gateResults[profileID]?[key] = nil                // expired: asked again
+            }
         }
-        gateResults[key] = (nil, nil, Date())
-        if gateResults.count > 4096 {
-            let cutoff = Date().addingTimeInterval(-30)
-            gateResults = gateResults.filter { $0.value.at > cutoff }
+        var table = gateResults[profileID] ?? [:]
+        if table.count >= Self.maxGateEntries {
+            // Expired answers and abandoned questions go; then, only as far
+            // as needed, the least recently used answer, one the switch
+            // already remembers first.
+            table = table.filter {
+                let age = now.timeIntervalSince($0.value.at)
+                switch $0.value.state {
+                case .answered: return age <= Self.gateDecidedTTL
+                case .asking: return age < Self.gateAskWindow
+                case .queued: return true
+                }
+            }
+            if table.count >= Self.maxGateEntries,
+               let victim = table.filter({ $0.value.state == .answered }).min(by: {
+                   $0.value.allowed != $1.value.allowed ? $0.value.allowed : $0.value.lastUse < $1.value.lastUse
+               }) {
+                table[victim.key] = nil
+            }
+            // Full of flows still being decided: hold it (fail closed, no RST).
+            guard table.count < Self.maxGateEntries else {
+                gateResults[profileID] = table; lock.unlock(); return nil
+            }
         }
+        let ask = gateQueries[profileID, default: 0] < Self.maxGateQueries
+        let names = Array(hostnames.prefix(Self.maxGateHostnames))
+        table[key] = GateEntry(state: ask ? .asking : .queued, identity: nil, at: now,
+                               hostnames: ask ? [] : names, lastUse: now)
+        gateResults[profileID] = table
+        if ask { gateQueries[profileID, default: 0] += 1 } else { gateQueue[profileID, default: []].append(key) }
         lock.unlock()
-        let dst = EgressPolicy.ipv4String(dstIP)
+        if ask { startQuery(profileID, key, hostnames: names) }
+        return nil
+    }
+
+    /// Ask the attestor about `key`'s flow; when it answers, the next flow
+    /// waiting for a slot is asked.
+    private func startQuery(_ profileID: UUID, _ key: GateKey, hostnames: [String]) {
         Task {
-            let id = await self.identity(profileID: profileID, sport: sport, dst: dst, dport: dport)
+            let id = await self.identity(profileID: profileID, sport: key.sport,
+                                         dst: EgressPolicy.ipv4String(key.dstIP), dport: key.dport)
             // The names are every one cached for this IP — a guess at what
             // the connection was for (a shared CDN address has many): they
             // don't replace the program attested for any of them.
-            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(dport), replace: false) }
-            let v = policy.verdict(ip: dstIP, hostnames: hostnames, proto: .tcp, port: dport, identity: id)
-            // The deny reports the program on its own event (the switch's
-            // `EgressEvent.exe`): that event is the drawer row Allow acts on.
-            self.lock.lock(); self.gateResults[key] = (v == .deny ? .deny : .allow, id?.exe, Date()); self.lock.unlock()
+            if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(key.dport), replace: false) }
+            self.lock.lock()
+            // Only into a question still pending (not pruned, nor the VM gone).
+            if self.gateResults[profileID]?[key]?.state == .asking {
+                self.gateResults[profileID]?[key]?.state = .answered
+                self.gateResults[profileID]?[key]?.identity = id
+                self.gateResults[profileID]?[key]?.at = self.clock()
+            }
+            // The slot passes to the oldest flow still waiting, if any.
+            var next: (GateKey, [String])?
+            while next == nil, var queue = self.gateQueue[profileID], !queue.isEmpty {
+                let k = queue.removeFirst()
+                self.gateQueue[profileID] = queue.isEmpty ? nil : queue
+                if self.gateResults[profileID]?[k]?.state == .queued {
+                    self.gateResults[profileID]?[k]?.state = .asking
+                    self.gateResults[profileID]?[k]?.at = self.clock()
+                    next = (k, self.gateResults[profileID]?[k]?.hostnames ?? [])
+                    self.gateResults[profileID]?[k]?.hostnames = []
+                }
+            }
+            if next == nil {
+                let left = self.gateQueries[profileID, default: 1] - 1
+                self.gateQueries[profileID] = left > 0 ? left : nil
+            }
+            self.lock.unlock()
+            if let (k, names) = next { self.startQuery(profileID, k, hostnames: names) }
         }
-        return nil
     }
 }
 
@@ -219,13 +329,25 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
     /// When this bridge started listening (the VM's boot, for a fresh start).
     let attachedAt = Date()
 
-    init(profileID: UUID, secretFile: URL) {
+    /// `mayPin`: a fresh boot, whose attestor says hello before any agent
+    /// code runs, pins the first secret it hears. A VM taken back (or
+    /// restored) has its agent running already: without a valid pin on
+    /// disk it refuses every hello, rather than let whoever connects first
+    /// be trusted.
+    init(profileID: UUID, secretFile: URL, mayPin: Bool) {
         self.profileID = profileID
         self.secretFile = secretFile
-        self.pinnedSecret = (try? String(contentsOf: secretFile, encoding: .utf8))?
+        // An empty file (a write cut short by a power loss) is no pin.
+        let saved = (try? String(contentsOf: secretFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.pinnedSecret = saved?.isEmpty == false ? saved : nil
+        self.mayPin = mayPin
         super.init()
+        Self.removeTempLeftovers(of: secretFile)
     }
+
+    private let mayPin: Bool
+    private var saidUnpinnable = false
 
     /// The channel closed (the VM went).
     func stop() { closeChannel() }
@@ -246,20 +368,36 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
         lock.lock()
         let pinned = pinnedSecret
         let busy = fd >= 0
-        let accept = !busy && (pinned == nil || pinned == secret)
+        let unpinnable = pinned == nil && !mayPin
+        // attestd retries every second: said once, not every time.
+        let quiet = unpinnable && saidUnpinnable
+        if unpinnable { saidUnpinnable = true }
+        let accept = !busy && !unpinnable && (pinned == nil || pinned == secret)
         if accept {
             fd = cfd
             self.connection = connection
             if pinned == nil {
+                // Pinned for this run either way; only a saved pin survives
+                // a restart of the host, so a failed save is said.
                 pinnedSecret = secret
-                try? secret.write(to: secretFile, atomically: true, encoding: .utf8)
-                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secretFile.path)
+                if !Self.writeSecret(secret, to: secretFile) {
+                    FileHandle.standardError.write(Data("[identity] couldn't save the attestor's pinned secret for \(profileID) (\(String(cString: strerror(errno)))); pinned until the host restarts\n".utf8))
+                }
             }
         }
         lock.unlock()
         guard accept else {
             close(cfd)
-            FileHandle.standardError.write(Data("[identity] refused an attestor connection for \(profileID) (\(busy ? "channel taken" : "wrong secret"))\n".utf8))
+            if quiet { return }
+            if unpinnable {
+                FileHandle.standardError.write(Data("[identity] refused an attestor connection for \(profileID) (no pinned secret for a VM taken back); every later one is refused too\n".utf8))
+                BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                    "action": .string("deny"), "layer": .string("identity"), "host": .string("attestor"), "port": .int(Int(BinaryIdentityService.vsockPort)),
+                    "reason": .string("the VM was taken back without its attestor's pinned secret: binary identity stays off (binary rules fail closed) until it restarts")])
+                return
+            }
+            let why = busy ? "channel taken" : unpinnable ? "no pinned secret for a VM taken back" : "wrong secret"
+            FileHandle.standardError.write(Data("[identity] refused an attestor connection for \(profileID) (\(why))\n".utf8))
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
                 "action": .string("deny"), "layer": .string("identity"), "host": .string("attestor"), "port": .int(Int(BinaryIdentityService.vsockPort)),
                 "reason": .string("refused an attestor connection that isn't the pinned one — possible impersonation attempt")])
@@ -281,6 +419,34 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
         closeChannel()
     }
 
+    /// The pinned secret, created 0600 (never readable in between), on
+    /// disk before it's renamed into place.
+    static func writeSecret(_ secret: String, to url: URL) -> Bool {
+        let tmp = url.path + tempMarker + UUID().uuidString
+        let f = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode_t(0o600))
+        guard f >= 0 else { return false }
+        let bytes = Array(secret.utf8)
+        let ok = bytes.withUnsafeBytes { write(f, $0.baseAddress, $0.count) } == bytes.count && fsync(f) == 0
+        close(f)
+        guard ok, rename(tmp, url.path) == 0 else { unlink(tmp); return false }
+        // The rename itself on disk too.
+        let dir = open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard dir >= 0 else { return false }
+        defer { close(dir) }
+        return fsync(dir) == 0
+    }
+
+    static let tempMarker = ".tmp-"
+
+    /// Temp files a save cut short left beside the secret.
+    static func removeTempLeftovers(of url: URL) {
+        let dir = url.deletingLastPathComponent()
+        let prefix = url.lastPathComponent + tempMarker
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
+    }
+
     /// Hand each JSON line to `handle` until EOF. One pool per line: this
     /// runs on a raw Thread for the VM's lifetime, whose pool never drains,
     /// and every line's objects would stay alive until the VM stopped.
@@ -300,7 +466,9 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
         let pending = waiters
         waiters.removeAll()
         lock.unlock()
-        if f >= 0 { close(f) }
+        // shutdown first: it wakes the serving thread's blocked read, which
+        // a bare close from this thread doesn't reliably do.
+        if f >= 0 { shutdown(f, Int32(SHUT_RDWR)); close(f) }
         for (_, w) in pending { w.resume(returning: nil) }
     }
 
