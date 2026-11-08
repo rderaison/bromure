@@ -750,7 +750,7 @@ struct CodingKanbanView: View {
             }
             if !choices.sessions.isEmpty {
                 Section(NSLocalizedString("A session", comment: "auto assign")) {
-                    ForEach(choices.sessions) { s in
+                    ForEach(choices.byName.sessions) { s in
                         Button {
                             setAutoAssign(TaskAssignment(kind: .session, id: s.id, label: s.label))
                         } label: {
@@ -763,7 +763,7 @@ struct CodingKanbanView: View {
             }
             if !choices.rooms.isEmpty {
                 Section(NSLocalizedString("A room", comment: "auto assign")) {
-                    ForEach(choices.rooms) { r in
+                    ForEach(choices.byName.rooms) { r in
                         Button {
                             setAutoAssign(TaskAssignment(kind: .room, id: r.id, label: "#" + r.name))
                         } label: {
@@ -1812,15 +1812,17 @@ struct AssignTaskSheet: View {
     }
 
     private var sessions: [TaskAssigneeChoices.Session] {
-        guard !q.isEmpty else { return choices.sessions }
-        return choices.sessions.filter {
+        let all = choices.byName.sessions
+        guard !q.isEmpty else { return all }
+        return all.filter {
             $0.label.lowercased().contains(q) || $0.workspace.lowercased().contains(q)
         }
     }
 
     private var rooms: [TaskAssigneeChoices.Room] {
-        guard !q.isEmpty else { return choices.rooms }
-        return choices.rooms.filter { $0.name.lowercased().contains(q) }
+        let all = choices.byName.rooms
+        guard !q.isEmpty else { return all }
+        return all.filter { $0.name.lowercased().contains(q) }
     }
 
     var body: some View {
@@ -3150,7 +3152,7 @@ struct TaskEditorSheet: View {
                              systemImage: "switch.2") }
             if !assignees.sessions.isEmpty {
                 Section(NSLocalizedString("Sessions", comment: "assign sheet")) {
-                    ForEach(assignees.sessions) { s in
+                    ForEach(assignees.byName.sessions) { s in
                         Button {
                             task.assignment = TaskAssignment(kind: .session, id: s.id, label: s.label)
                             // Its work happens in its workspace: the card shows that one.
@@ -3164,7 +3166,7 @@ struct TaskEditorSheet: View {
             }
             if !assignees.rooms.isEmpty {
                 Section(NSLocalizedString("Rooms", comment: "assign sheet")) {
-                    ForEach(assignees.rooms) { r in
+                    ForEach(assignees.byName.rooms) { r in
                         Button {
                             task.assignment = TaskAssignment(kind: .room, id: r.id, label: "#" + r.name)
                         } label: { Label("#" + r.name, systemImage: "square.grid.2x2") }

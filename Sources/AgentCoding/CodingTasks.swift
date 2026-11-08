@@ -704,8 +704,38 @@ struct TaskAssigneeChoices: Equatable, Sendable {
         let name: String
         var machine: String? = nil
     }
+    /// Most recently active first (the "@" suggestions show the top few).
     var sessions: [Session] = []
     var rooms: [Room] = []
+
+    /// As the pickers list them: by name, the way Finder sorts ("agent-2"
+    /// before "agent-10", case aside) — a long list read in recency order
+    /// looked random. Equal names keep a steady order: workspace, machine.
+    var byName: TaskAssigneeChoices {
+        func order(_ a: [String], _ b: [String]) -> Bool {
+            for (x, y) in zip(a, b) {
+                let c = x.localizedStandardCompare(y)
+                if c != .orderedSame { return c == .orderedAscending }
+            }
+            return false
+        }
+        var out = self
+        out.sessions = sessions.enumerated().sorted { l, r in
+            let (a, b) = (l.element, r.element)
+            let ka = [a.label.trimmingCharacters(in: CharacterSet(charactersIn: "@")), a.workspace, a.machine ?? ""]
+            let kb = [b.label.trimmingCharacters(in: CharacterSet(charactersIn: "@")), b.workspace, b.machine ?? ""]
+            if order(ka, kb) { return true }
+            if order(kb, ka) { return false }
+            return l.offset < r.offset
+        }.map(\.element)
+        out.rooms = rooms.enumerated().sorted { l, r in
+            let (a, b) = (l.element, r.element)
+            if order([a.name, a.machine ?? ""], [b.name, b.machine ?? ""]) { return true }
+            if order([b.name, b.machine ?? ""], [a.name, a.machine ?? ""]) { return false }
+            return l.offset < r.offset
+        }.map(\.element)
+        return out
+    }
 
     /// The workspace a task queued this way belongs to: the session's, when
     /// it goes to one (nil: a room, the Switchboard, a new agent — keep the

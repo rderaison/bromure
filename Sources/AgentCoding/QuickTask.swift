@@ -703,7 +703,7 @@ struct QuickTaskView: View {
             }
             if !choices.sessions.isEmpty {
                 Divider()
-                ForEach(choices.sessions) { s in
+                ForEach(choices.byName.sessions) { s in
                     Button(s.label + (s.workspace.isEmpty ? "" : "  ·  " + s.workspace)) {
                         assignment = TaskAssignment(kind: .session, id: s.id, label: s.label)
                     }
@@ -711,7 +711,7 @@ struct QuickTaskView: View {
             }
             if !choices.rooms.isEmpty {
                 Divider()
-                ForEach(choices.rooms) { r in
+                ForEach(choices.byName.rooms) { r in
                     Button("#" + r.name) {
                         assignment = TaskAssignment(kind: .room, id: r.id, label: "#" + r.name)
                     }
