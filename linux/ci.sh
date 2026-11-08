@@ -14,6 +14,21 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 step() { printf '\n== %s\n' "$*"; }
 
 step "toolchain"; swift --version 2>&1 | head -1
+# The KVM e2e scripts each make a ~/.cache/acl-<tag>.XXXXXX workdir (a few
+# GB with its VM disks) and remove it on exit unless a failed run kept it
+# (KEEP=1). A warning, not a failure, when what's left grows past 20 GB.
+step "e2e workdirs (~/.cache/acl-*)"
+if compgen -G "$HOME/.cache/acl-*" >/dev/null; then
+  kb=$(du -sck "$HOME"/.cache/acl-* 2>/dev/null | tail -1 | cut -f1 || echo 0)
+  n=$(compgen -G "$HOME/.cache/acl-*" | wc -l)
+  if [ "${kb:-0}" -gt $((20 << 20)) ]; then
+    echo "WARNING: $n e2e workdir(s) in ~/.cache/acl-* hold $((kb >> 20)) GB (over 20 GB): delete the ones you don't need, by literal path"
+  else
+    echo "$n e2e workdir(s), $((kb >> 20)) GB"
+  fi
+else
+  echo "none"
+fi
 step "portmap: build (release)"; swift build --package-path "$ROOT/tools/portmap" -c release
 step "portmap: test";            swift test  --package-path "$ROOT/tools/portmap"
 step "portmap: check";           "$ROOT/tools/portmap/.build/release/portmap" check --root "$ROOT" --allow-unclaimed
