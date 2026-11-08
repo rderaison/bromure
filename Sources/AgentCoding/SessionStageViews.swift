@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// A file dragged onto a composer (host bytes + name + whether it's an
 /// image, so the drop can show a thumbnail). Shared by the chat's composer
 /// and the new-session screen, on every platform.
-struct DroppedFile {
+struct DroppedFile: Equatable {
     let name: String
     let data: Data
     let isImage: Bool

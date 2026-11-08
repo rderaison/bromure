@@ -563,7 +563,10 @@ final class TaskDispatcher {
     /// `askID`: the ask the answer was written for — refused when the
     /// agent has asked again since (nil: whatever is asked now, for callers
     /// that don't say).
-    func answer(_ taskID: UUID, askID: UUID? = nil, text: String) async -> Bool {
+    /// `attachments`: files dropped on the answer sheet, landed in the
+    /// asker's inbox with it. An answer can be files alone.
+    func answer(_ taskID: UUID, askID: UUID? = nil, text: String,
+                attachments: [DroppedFile] = []) async -> Bool {
         guard let delegate, let task = delegate.codingTaskStore.task(taskID),
               task.pendingAskID != nil else { return false }
         guard let ask = Self.answerTarget(task, writtenFor: askID) else {
@@ -584,8 +587,11 @@ final class TaskDispatcher {
         // try's to clear once it succeeds.
         let seen = delegate.codingTaskStore.task(taskID).map(AnswerErrorSnapshot.init)
         do {
+            let words = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !attachments.isEmpty
+                ? Self.filesOnlyAnswer : text
             try await delegate.delegationEngine.answer(
-                from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: text, by: .user)
+                from: DelegationEngine.boardSessionID, askKey: ask.uuidString, text: words, by: .user,
+                attachments: attachments)
         } catch {
             let why = (error as? DelegationRefusal)?.why ?? error.localizedDescription
             delegate.codingTaskStore.mutate(taskID) {
@@ -609,6 +615,9 @@ final class TaskDispatcher {
         var refusal: String?
         init(_ t: CodingTask) { lastError = t.lastError; refusal = t.answerRefusal }
     }
+
+    /// What an answer of files alone says (the notice lists the files).
+    static let filesOnlyAnswer = "See the attached files."
 
     static let staleAnswerText = NSLocalizedString(
         "The agent asked a new question before your answer went. Read it and answer again.",

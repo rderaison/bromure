@@ -1102,16 +1102,24 @@ final class DelegationEngine {
 
     /// The parent (or the user, for it) answers a child's question.
     @discardableResult
+    /// `attachments`: files the user dropped on the answer (the board's
+    /// sheet), landed in the asker's inbox and named in the answer's notice.
     func answer(from parentID: UUID, askKey: String, text: String,
-                by party: DelegationMessage.Party = .parent) async throws -> DelegationMessage {
+                by party: DelegationMessage.Party = .parent,
+                attachments: [DroppedFile] = []) async throws -> DelegationMessage {
         let mine = store.delegations(parent: parentID)
         if let (d, ask) = store.message(matching: askKey, in: mine), ask.kind == .ask {
-            return try await post(d.id, from: party, kind: .answer, text: text, answering: ask.id)
+            let landed = try await landAttachments(attachments, for: d)
+            return try await post(d.id, from: party, kind: .answer, text: text, answering: ask.id,
+                                  landed: landed)
         }
         // A question from a peer on another host: answered there.
         for link in remoteLinks() {
             let theirs = link.remoteDelegations.delegations(parent: parentID)
             if let (d, ask) = link.remoteDelegations.message(matching: askKey, in: theirs), ask.kind == .ask {
+                guard attachments.isEmpty else {
+                    throw DelegationRefusal("Files can't go with an answer to an agent on another host yet — answer in words, or remove the attachments.")
+                }
                 try await remoteAct(link, d, action: "answer", body: ["ask_id": ask.id.uuidString, "text": text])
                 var m = DelegationMessage(kind: .answer, from: party, to: .child, text: text, answers: ask.id)
                 m.readAt = m.at
@@ -1372,6 +1380,71 @@ final class DelegationEngine {
     /// relative to the sender's folder are resolved there; "~" is its home.
     /// Returns the paths as the recipient sees them. On one machine it is a
     /// plain copy. The recipient's workspace is started if it's off.
+    /// Files the user attached to an answer, written straight into the
+    /// asker's inbox (where `transfer` lands a sender's files), in a folder of
+    /// this answer's own so an earlier file of the same name stays as it was:
+    /// their paths there, for the message's `files`.
+    func landAttachments(_ files: [DroppedFile], for d: Delegation) async throws -> [String] {
+        guard !files.isEmpty else { return [] }
+        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
+        guard files.count <= Self.transferMaxFiles else {
+            throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
+        }
+        guard let recipient = sessions.session(d.childSessionID) else {
+            throw DelegationRefusal("The agent's session isn't on this Mac.")
+        }
+        guard await ensureUp(recipient.profileID, quietly: true) else {
+            throw DelegationRefusal("The agent's workspace didn't start in time.")
+        }
+        let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))/answer-\(DelegationNotice.shortID(UUID()))"
+        _ = try await guestExec(profileID: recipient.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+        let op: FolderUpload.FileOp = { [weak self] dict in
+            guard let self else { throw DelegationRefusal("Files can't travel without the machines.") }
+            return try await self.guestFileOp(profileID: recipient.profileID, op: dict, timeout: 600)
+        }
+        var out: [String] = []
+        for (f, name) in zip(files, Self.attachmentNames(files.map(\.name))) {
+            let target = dest + "/" + name
+            do {
+                #if os(macOS)
+                if let folder = f.folder {
+                    try await FolderUpload.upload(folder, into: target, op: op)
+                    out.append(target)
+                    continue
+                }
+                #endif
+                if f.packedFolder {
+                    try await FolderUpload.unpack(f.data, into: target, op: op)
+                } else {
+                    for w in GuestDrop.writeOps(guestPath: target, data: f.data) { _ = try await op(w) }
+                }
+            } catch let r as DelegationRefusal {
+                throw r
+            } catch {
+                throw DelegationRefusal("Couldn't copy “\(f.name)” to the agent's machine: \(error.localizedDescription)")
+            }
+            out.append(target)
+        }
+        return out
+    }
+
+    /// File names as they land: no path in them, never "." or "..", and two
+    /// of the same name told apart ("2-log.txt").
+    static func attachmentNames(_ names: [String]) -> [String] {
+        var used = Set<String>()
+        return names.enumerated().map { i, raw in
+            var name = (raw as NSString).lastPathComponent
+                .replacingOccurrences(of: "/", with: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty || name == "." || name == ".." { name = "file-\(i + 1)" }
+            var candidate = name
+            var n = 2
+            while used.contains(candidate) { candidate = "\(n)-\(name)"; n += 1 }
+            used.insert(candidate)
+            return candidate
+        }
+    }
+
     func transfer(_ paths: [String], from: AgentSession, toProfile: UUID, inbox: String) async throws -> [String] {
         guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
         guard paths.count <= Self.transferMaxFiles else {

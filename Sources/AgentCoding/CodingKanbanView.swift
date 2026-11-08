@@ -423,7 +423,10 @@ struct CodingKanbanView: View {
         /// to the agent; false when it was refused (the agent asked again,
         /// the question is gone) or couldn't be sent — the sheet then keeps
         /// the text.
-        var answer: (UUID, UUID?, String) async -> Bool = { _, _, _ in false }
+        var answer: (UUID, UUID?, String, [DroppedFile]) async -> Bool = { _, _, _, _ in false }
+        /// Most bytes of files an answer can carry from here (nil: no limit
+        /// of the board's own). A fat client's request has a size cap.
+        var answerAttachmentLimit: Int? = nil
         /// Take a handed-off task back to the backlog.
         var recall: (UUID) -> Void = { _ in }
         /// Show the session (or room) working on a handed-off task.
@@ -1023,7 +1026,8 @@ struct CodingKanbanView: View {
                         accentHex: accentHex(for: task.profileID),
                         workspaceName: workspaceName(for: task.profileID),
                         onOpen: { actions.openAssignee(task) },
-                        onAnswer: { await actions.answer(task.id, $0, $1) },
+                        onAnswer: { await actions.answer(task.id, $0, $1, $2) },
+                        attachmentLimit: actions.answerAttachmentLimit,
                         onRecall: { actions.recall(task.id) })
                 } else {
                 InProgressTaskCard(
@@ -1967,7 +1971,8 @@ private struct AssignedTaskCard: View {
     let accentHex: String
     var workspaceName: String = ""
     var onOpen: () -> Void
-    var onAnswer: (UUID?, String) async -> Bool
+    var onAnswer: (UUID?, String, [DroppedFile]) async -> Bool
+    var attachmentLimit: Int? = nil
     var onRecall: () -> Void
     @State private var answering = false
     @State private var draft = TaskAnswerDraft()
@@ -2066,13 +2071,17 @@ private struct AssignedTaskCard: View {
                             sending: sending,
                             error: sendFailed ? (task.lastError ?? NSLocalizedString(
                                 "The answer couldn't be sent.", comment: "coding task: answer refused")) : nil,
+                            attachments: draft.files,
+                            attachmentLimit: attachmentLimit,
+                            onAttach: { draft.attach($0, for: task.pendingAskID) },
+                            onRemoveAttachment: { draft.removeFile(at: $0, for: task.pendingAskID) },
                             onSend: { text in
                                 guard !sending, draft.canSend(to: task.pendingAskID) else { return }
                                 sending = true
                                 sendFailed = false
                                 let sent = draft
                                 Task { @MainActor in
-                                    let ok = await onAnswer(sent.askID, text)
+                                    let ok = await onAnswer(sent.askID, text, sent.files)
                                     sending = false
                                     // Gone only once the board took it: a
                                     // refused answer stays, with why.
@@ -2097,6 +2106,8 @@ private struct AssignedTaskCard: View {
 struct TaskAnswerDraft: Equatable {
     private(set) var text = ""
     private(set) var askID: UUID?
+    /// Files dropped on the answer, sent with it (an answer can be files alone).
+    private(set) var files: [DroppedFile] = []
 
     /// Every edit is made with `ask` on screen.
     mutating func edit(_ text: String, for ask: UUID?) {
@@ -2104,13 +2115,30 @@ struct TaskAnswerDraft: Equatable {
         askID = ask
     }
 
+    /// A drop is an edit too: made with `ask` on screen.
+    mutating func attach(_ new: [DroppedFile], for ask: UUID?) {
+        guard !new.isEmpty else { return }
+        files += new
+        askID = ask
+    }
+
+    mutating func removeFile(at index: Int, for ask: UUID?) {
+        guard files.indices.contains(index) else { return }
+        files.remove(at: index)
+        askID = ask
+    }
+
+    private var hasContent: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty
+    }
+
     /// Written for another question than the one asked now.
     func isStale(for ask: UUID?) -> Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && askID != ask
+        hasContent && askID != ask
     }
 
     func canSend(to ask: UUID?) -> Bool {
-        ask != nil && askID == ask && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ask != nil && askID == ask && hasContent
     }
 
     /// The draft once a Send of `sent` came back: gone only when the board
@@ -2132,12 +2160,34 @@ struct TaskAnswerSheet: View {
     var sending = false
     /// Why the last Send didn't go (the text is still here).
     var error: String? = nil
+    /// Files dropped on the sheet, sent with the answer.
+    var attachments: [DroppedFile] = []
+    /// Most bytes they may add up to from here (nil: no limit).
+    var attachmentLimit: Int? = nil
+    /// nil: this sheet takes no files.
+    var onAttach: (([DroppedFile]) -> Void)? = nil
+    var onRemoveAttachment: (Int) -> Void = { _ in }
     var onSend: (String) -> Void
     var onCancel: () -> Void
     @FocusState private var editorFocused: Bool
+    @State private var dropTargeted = false
     @Environment(\.horizontalSizeClass) private var hSize
 
     private var trimmed: String { reply.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The attachments are more than can go from here.
+    var overLimit: Bool {
+        guard let attachmentLimit else { return false }
+        return attachments.reduce(0) { $0 + $1.data.count } > attachmentLimit
+    }
+
+    /// "Drop files here": where files are taken and none are yet.
+    var showsAttachHint: Bool { onAttach != nil && attachments.isEmpty }
+
+    /// Send can go: something to say (words or files), and nothing in the way.
+    var canSend: Bool {
+        (!trimmed.isEmpty || !attachments.isEmpty) && !stale && !sending && !overLimit
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -2174,6 +2224,23 @@ struct TaskAnswerSheet: View {
                     .overlay(RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(editorFocused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.5))
                     .focused($editorFocused)
+                if onAttach != nil {
+                    if showsAttachHint {
+                        Label(NSLocalizedString("Drop files here to send them with your answer", comment: "task answer sheet: attachment hint"),
+                              systemImage: "paperclip")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        PendingAttachmentChips(files: attachments, onRemove: onRemoveAttachment)
+                    }
+                    if overLimit, let attachmentLimit {
+                        Label(String(format: NSLocalizedString("Too large to send from here: up to %@ of files.", comment: "task answer sheet: attachments over the remote limit"),
+                                     ByteCountFormatter.string(fromByteCount: Int64(attachmentLimit), countStyle: .file)),
+                              systemImage: "exclamationmark.circle.fill")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.red)
+                    }
+                }
                 if stale {
                     Label(NSLocalizedString("The agent asked a new question since you wrote this. Change your answer to send it.", comment: "task answer sheet: the draft was for an earlier question"),
                           systemImage: "exclamationmark.triangle.fill")
@@ -2198,12 +2265,29 @@ struct TaskAnswerSheet: View {
                 Button(NSLocalizedString("Send", comment: "")) { onSend(trimmed) }
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(trimmed.isEmpty || stale || sending)
+                    .disabled(!canSend)
             }
         }
         .padding(20)
         .frame(minWidth: hSize == .compact ? nil : 560, idealWidth: 640,
                minHeight: hSize == .compact ? nil : 480, idealHeight: 560)
+        // Files dropped anywhere on the sheet go with the answer.
+        .onDrop(of: onAttach == nil ? [] : [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+            guard let onAttach else { return false }
+            Task { @MainActor in
+                let files = await DroppedFile.load(providers)
+                if !files.isEmpty { onAttach(files) }
+            }
+            return true
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .background(Color.accentColor.opacity(0.06))
+                    .allowsHitTesting(false)
+            }
+        }
         .onAppear { editorFocused = true }
     }
 }
