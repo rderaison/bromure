@@ -7098,6 +7098,13 @@ def _seed_claude_settings():
     # and persists it, and its copy-on-select double-copies against the
     # terminal's own selection copy (host Profile.swift does the same).
     settings["copyOnSelect"] = False
+    # Claude Code's built-in /diff plugin opens its own multi-window diff,
+    # which fights Bromure's session view: forced off, the user's other
+    # plugins kept (host Profile.swift does the same).
+    plugins = settings.get("enabledPlugins")
+    plugins = plugins if isinstance(plugins, dict) else {}
+    plugins["cc-plugin-diff@builtin"] = False
+    settings["enabledPlugins"] = plugins
     hook = "/home/ubuntu/.bromure/agent-status.sh"
 
     def _hook_cmd(arg):

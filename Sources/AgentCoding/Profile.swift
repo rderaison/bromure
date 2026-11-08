@@ -4907,6 +4907,8 @@ public final class ProfileStore {
     /// `permissions.additionalDirectories` merged in too: Claude's built-in
     /// read-only commands (ls, cat, grep…) then run there unprompted.
     static let claudeInboxDirectory = "~/.bromure/inbox"
+    /// Claude Code's built-in /diff plugin (kept off: see writeHomeSeedFiles).
+    static let claudeDiffPlugin = "cc-plugin-diff@builtin"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
     /// (`StopCancelled`, fired instead of `Stop`) reports the tab idle --
@@ -5367,6 +5369,13 @@ public final class ProfileStore {
             // settings.json, so seed-only-if-unset never wins. Flipping it
             // back mid-session (/config) works but resets next session.
             settings["copyOnSelect"] = false
+            // Claude Code's built-in /diff plugin opens its own multi-window
+            // diff, which fights Bromure's session view and Files pane. Forced
+            // off at every session start (bromure-agentd's twin does the
+            // same); the user's other plugins are kept.
+            var plugins = settings["enabledPlugins"] as? [String: Any] ?? [:]
+            plugins[Self.claudeDiffPlugin] = false
+            settings["enabledPlugins"] = plugins
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot.
             let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
