@@ -13,19 +13,32 @@ import Foundation
 struct SandboxUnavailable: Error, CustomStringConvertible {
     let workspace: String
     let missing: [String]
-    // @port-skip linux-only: a temporary Linux refusal (macOS stages the guest sandbox)
+    /// How a missing-scripts entry starts (unenforceableProtections).
+    static let scriptsPrefix = "the guest sandbox's scripts "
+    // @port-skip linux-only: a Linux refusal (macOS stages the guest sandbox)
     var description: String {
-        "'\(workspace)' asks for \(missing.joined(separator: ", ")), which this server can't enforce yet; "
-            + "it isn't started rather than run without it"
+        let scripts = missing.filter { $0.hasPrefix(Self.scriptsPrefix) }
+        let rest = missing.filter { !$0.hasPrefix(Self.scriptsPrefix) }
+        var parts: [String] = []
+        // Not a protection Linux lacks: an install that left them out.
+        if !scripts.isEmpty {
+            parts.append("'\(workspace)' isn't started: this server's install is incomplete (\(scripts.joined(separator: "; "))). "
+                + "Re-run the installer: linux/install-user-service.sh, or linux/multiuser/install.sh on a multi-user server")
+        }
+        if !rest.isEmpty {
+            parts.append("'\(workspace)' asks for \(rest.joined(separator: ", ")), which this server can't enforce yet; "
+                + "it isn't started rather than run without it")
+        }
+        return parts.joined(separator: ". ")
     }
 }
 
 extension Daemon {
-    /// What `profile` asks for that a Linux guest can't enforce yet (empty:
-    /// nothing). TEMPORARY, with SandboxUnavailable.
-    // @port-skip linux-only: a temporary Linux refusal (macOS stages the guest sandbox)
-    /// `setupDir`: where the guest scripts ship (beside agentd); a sandbox
-    /// whose scripts aren't there can't be enforced either.
+    /// What `profile` asks for that a Linux guest can't enforce (empty:
+    /// nothing): the sentry (TEMPORARY, with SandboxUnavailable), and, with
+    /// `setupDir` (where the guest scripts ship, beside agentd), a sandbox
+    /// whose scripts the install left out.
+    // @port-skip linux-only: a Linux refusal (macOS stages the guest sandbox)
     static func unenforceableProtections(_ profile: Profile, setupDir: URL? = nil) -> [String] {
         var missing: [String] = []
         // The strict sandbox and the OpenShell spec are staged
@@ -33,7 +46,8 @@ extension Daemon {
         if let setupDir {
             let files = SessionDisk.missingGuestSandboxScripts(profile, setupDir: setupDir)
             if !files.isEmpty {
-                missing.append("the guest sandbox (\(files.joined(separator: ", ")) missing from \(setupDir.path))")
+                missing.append(SandboxUnavailable.scriptsPrefix
+                               + "\(files.joined(separator: ", ")) are missing from \(setupDir.path)")
             }
         }
         // The sentry's modules not from the published catalog yet.
@@ -47,14 +61,17 @@ extension Daemon {
     /// this server can't enforce yet keeps running (stopping it isn't the
     /// daemon's call), but it's said loudly: a warning in the daemon log and
     /// a degraded `sandbox.status` on the Security Timeline (what a guest
-    /// whose sandbox failed reports on macOS). TEMPORARY, with
-    /// SandboxUnavailable.
-    // @port-skip linux-only: a temporary Linux warning (macOS stages the guest sandbox)
-    static func warnUnenforceableAdopted(_ rec: VMRecord, profile: Profile, setupDir: URL? = nil) {
+    /// whose sandbox failed reports on macOS). `staged`: the VM's meta
+    /// share, where its sandbox's scripts were staged when it booted (one
+    /// booted on an incomplete install has none). The sentry part is
+    /// TEMPORARY, with SandboxUnavailable.
+    // @port-skip linux-only: a Linux warning (macOS stages the guest sandbox)
+    static func warnUnenforceableAdopted(_ rec: VMRecord, profile: Profile, staged: URL? = nil) {
         guard !rec.managed, rec.registration != true else { return }
-        let missing = unenforceableProtections(profile, setupDir: setupDir)
+        let missing = unenforceableProtections(profile, setupDir: staged)
         guard !missing.isEmpty else { return }
-        let reason = "\(missing.joined(separator: ", ")) not staged on this server: the guest runs without it"
+        let said = missing.map { $0.hasPrefix(SandboxUnavailable.scriptsPrefix) ? $0 : $0 + " not staged on this server" }
+        let reason = "\(said.joined(separator: ", ")): the guest runs without it"
         FileHandle.standardError.write(Data("bromure-ac daemon: WARNING: '\(profile.name)' was taken back running UNPROTECTED: \(reason)\n".utf8))
         var data: [String: AnyJSON] = ["filesystem": .string("failed"), "action": .string("degraded"), "reason": .string(reason)]
         if profile.effectiveKernelSentry != .off {

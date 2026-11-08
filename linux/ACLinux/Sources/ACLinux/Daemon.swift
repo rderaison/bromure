@@ -1554,7 +1554,7 @@ public actor Daemon {
                 live[id] = l
                 // TEMPORARY, with the launch refusal (DaemonSandboxGuard.swift):
                 // a VM taken back isn't stopped, but said to be unprotected.
-                if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile, setupDir: setupDir) }
+                if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile, staged: URL(fileURLWithPath: vmDir(rec.id) + "/meta")) }
                 if reask, let pid = UUID(uuidString: id) {
                     Task { await self.quarantineAndAsk(pid, signals: []) }
                 } else {

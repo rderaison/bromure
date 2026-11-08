@@ -42,8 +42,12 @@ extension DaemonGlobalSuites {
                         "bromure-sandboxd", "bromure-sentryd", "bromure_openshell.py", "bromure_idmap.py"])
             #expect(SessionDisk.missingGuestSandboxScripts(p, setupDir: setup).isEmpty)
             let refused = Daemon.unenforceableProtections(p, setupDir: bare)
-            #expect(refused.count == 1 && refused[0].hasPrefix("the guest sandbox (bromure-attestd.py, "), "\(refused)")
-            #expect(refused[0].hasSuffix(" missing from \(bare.path))"))
+            #expect(refused.count == 1 && refused[0].hasPrefix("the guest sandbox's scripts bromure-attestd.py, "), "\(refused)")
+            #expect(refused[0].hasSuffix(" are missing from \(bare.path)"))
+            // Said as an incomplete install, with the fix; not as something Linux lacks.
+            let message = SandboxUnavailable(workspace: "w", missing: refused).description
+            #expect(message.contains("'w' isn't started: this server's install is incomplete")
+                    && message.contains("Re-run the installer") && !message.contains("yet"), "\(message)")
             #expect(Daemon.unenforceableProtections(p, setupDir: setup).isEmpty)
         }
 
@@ -62,8 +66,10 @@ extension DaemonGlobalSuites {
             try await d.registerForTesting(rec)
             let r = await d.start(rec)
             #expect(r.status == 409, "\(r.body)")
-            #expect("\(r.body)".contains("bromure-attestd.py, bromure-strict.py, bromure_sandbox_status.py missing from \(dir)"),
-                    "\(r.body)")
+            let error = r.body["error"]?.stringValue ?? ""
+            #expect(error.contains("this server's install is incomplete (the guest sandbox's scripts bromure-attestd.py, "
+                                   + "bromure-strict.py, bromure_sandbox_status.py are missing from \(dir))"), "\(error)")
+            #expect(error.contains("Re-run the installer") && !error.contains("yet"), "\(error)")
             #expect(await d.registry.find(rec.id)?.state == .stopped, "still stopped")
             await d.shutdown()
         }
@@ -97,6 +103,32 @@ extension DaemonGlobalSuites {
         /// A VM taken back running isn't stopped, but its workspace's
         /// unstaged protection is said: on the Security Timeline as a
         /// degraded sandbox (and loudly in the daemon log).
+        /// A strict VM taken back that booted on an incomplete install (its
+        /// meta share has no attestor) is said to run unprotected; one whose
+        /// scripts were staged isn't.
+        @Test func anAdoptedVMStagedWithoutItsScriptsIsReported() async throws {
+            let meta = URL(fileURLWithPath: try shortTempDir(), isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: meta) }
+            var p = Profile(name: "adopted-strict", tool: .claude, authMode: .token)
+            p.strictSandbox = true
+            Daemon.warnUnenforceableAdopted(RepairMarksTests.stopped(p.id.uuidString.lowercased()), profile: p, staged: meta)
+            var seen: [SecurityTimeline.Event] = []
+            for _ in 0..<100 {
+                seen = await MainActor.run { SecurityTimeline.shared.allEvents.filter { $0.profileID == p.id } }
+                if !seen.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(seen.contains { "\($0)".contains("bromure-attestd.py") }, "\(seen)")
+            for name in SessionDisk.strictGuestFiles + [SessionDisk.sandboxStatusModule] {
+                try Data("#\n".utf8).write(to: meta.appendingPathComponent(name))
+            }
+            var q = Profile(name: "adopted-staged", tool: .claude, authMode: .token)
+            q.strictSandbox = true
+            Daemon.warnUnenforceableAdopted(RepairMarksTests.stopped(q.id.uuidString.lowercased()), profile: q, staged: meta)
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await MainActor.run { SecurityTimeline.shared.allEvents.filter { $0.profileID == q.id }.isEmpty })
+        }
+
         @Test func anAdoptedVMIsReportedUnprotected() async throws {
             var p = Profile(name: "adopted-sentry", tool: .claude, authMode: .token)
             p.strictSandbox = true
