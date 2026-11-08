@@ -471,3 +471,206 @@ enum ProxyPolicy {
         return nil
     }
 }
+
+// MARK: - Prompt-injection enforcement and content-scan records
+// (HTTPProxy's, shared with the Linux proxy; HTTPMitmConnection forwards here.)
+
+extension ProxyPolicy {
+    /// Record that a request to an AI host could not go through the content
+    /// scans (prompt injection / PII) — never skip them silently. `blocked`:
+    /// the request was refused instead of forwarded (fail closed).
+    ///
+    /// Every occurrence is emitted — no host-side de-duplication, so the
+    /// audit log and the enrolled-install event stream see each request.
+    /// The Security Timeline folds repeats into one row with a count
+    /// (`coalesceKey`), so a client that hits this on every call shows
+    /// "×N" instead of one row that hides how often it happened.
+    static func recordScanSkipped(host: String, path: String, engines: [String],
+                                  reason: String, profileID: UUID, blocked: Bool = false) {
+        let verdict = blocked ? "BLOCKED, not forwarded" : "not scanned"
+        FileHandle.standardError.write(Data(
+            "[mitm] \(host) \(path): \(reason) — \(verdict) (\(engines.joined(separator: ", ")))\n".utf8))
+        SupplyChainLog.shared.record("[content-scan] \(verdict): \(reason) → \(host)")
+        var data: [String: AnyJSON] = [
+            "host": .string(host),
+            "path": .string(path),
+            "reason": .string(reason),
+            "engines": .array(engines.map { .string($0) }),
+        ]
+        if blocked { data["action"] = .string("blocked") }
+        BACEventEmitter.shared.emitDetached(
+            profileID: profileID, eventType: "content_scan.skipped", eventData: data)
+    }
+
+    /// The detectors an enforcing prompt-injection policy waits on whose
+    /// model is still loading.
+    static func warmingDetectors(injection pi: PromptInjectionPolicy,
+                                 source: ModelReadiness, rules: ModelReadiness) -> [String] {
+        guard pi.isActive, pi.onDetection != .log else { return [] }
+        var out: [String] = []
+        if pi.detectSourceInjection, source == .loading { out.append("prompt-injection detection") }
+        if pi.detectRulesInjection, rules == .loading { out.append("instruction-file detection") }
+        return out
+    }
+
+    /// 503 while a detector's model loads (seconds, at first use or after an
+    /// idle release). Every agent retries a 503 on its own, by then against
+    /// a loaded model; nothing was sent.
+    static func detectorWarmingResponse(_ detectors: [String]) -> Data {
+        let body = "Bromure is loading its \(detectors.joined(separator: " and ")) model. "
+            + "This request was not sent; retry in a few seconds.\n"
+        var r = "HTTP/1.1 503 Service Unavailable\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Retry-After: \(detectorWarmingRetryAfter)\r\n"
+        r += "X-Bromure-Blocked: detector-model-loading\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+
+    static let detectorWarmingRetryAfter = 2
+
+    /// 415 the guest sees when a request body's Content-Encoding can't be
+    /// decoded while a content scan is on for the host: the request is not
+    /// forwarded (it would leave unscanned). 415 is the status RFC 9110
+    /// §15.5.16 assigns to an unsupported content coding; the plain-text body
+    /// tells the user why their agent's call failed and what to change.
+    static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
+        let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
+            .joined(separator: " and ")
+        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
+            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
+            + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
+        var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "X-Bromure-Blocked: undecodable-content-encoding\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+
+    /// A request went out with tool output the user had blocked replaced by
+    /// the placeholder (`PromptInjectionRedactions`): the security log only —
+    /// it happens on every later turn, the Timeline already has the block.
+    static func recordInjectionRedacted(count: Int, host: String, profileID: UUID) {
+        SupplyChainLog.shared.record(
+            "[prompt-injection] redacted: \(count) blocked tool output(s) or instruction file(s) replaced by a placeholder → \(host)")
+        FileHandle.standardError.write(Data(
+            "[prompt-injection] \(host): \(count) blocked tool output(s) or instruction file(s) sent as a placeholder (workspace \(profileID.uuidString.prefix(8)))\n".utf8))
+    }
+
+    /// "Unavailable For Legal Reasons - Bromure blocked: possible prompt
+    /// injection" — the standard words first, then the block (letters,
+    /// spaces and punctuation only: a valid reason phrase).
+    static func injectionReasonPhrase(detector: String) -> String {
+        let d = detector.filter { $0.isLetter || $0 == " " || $0 == "-" }
+        return "Unavailable For Legal Reasons - Bromure blocked: possible \(d)"
+    }
+
+    static func injectionBlockResponse(detector: String, source: String,
+                                       instructionsWithheld: Bool = false) -> Data {
+        // The agent shows this text: say what happens next. Tool output that
+        // was blocked is taken out of later requests (the session goes on);
+        // rewinding or a new session clears it for good.
+        // The next step goes on its own line: agents that print one line of
+        // the error (omp's TUI wraps it; the chat card shows the line) still
+        // show a whole sentence instead of "…Bromure will replace that content".
+        let next = injectionNextStep(detector: detector, instructionsWithheld: instructionsWithheld)
+        let body = "Bromure blocked this request: possible \(detector) detected in \(source).\(next)\n"
+        // The reason phrase names the block too: an agent that reports only
+        // the status line (Grok: "API error (status 451 …): Request failed")
+        // still says which engine blocked it (`BromureBlock.of`).
+        var r = "HTTP/1.1 451 \(injectionReasonPhrase(detector: detector))\r\n"
+        r += "Content-Type: text/plain; charset=utf-8\r\n"
+        r += "Content-Length: \(body.utf8.count)\r\n"
+        r += "Connection: close\r\n\r\n"
+        r += body
+        return Data(r.utf8)
+    }
+
+    /// The enforcement scan (ask / block): fresh tool output through the
+    /// source model, then the instructions through the rules scanner + model.
+    static func detectPromptInjection(in conv: Conversation,
+                                      policy pi: PromptInjectionPolicy) async -> PromptInjectionFlag? {
+        if pi.detectSourceInjection {
+            // A blocked output already went out as the placeholder: scan what's
+            // left, never the placeholder itself.
+            let spans = ToolResultSpans.newest(in: conv)
+            if let preview = await PromptInjectionClassifier.shared.detect(
+                spans: PromptInjectionRedactions.scannable(spans)) {
+                return PromptInjectionFlag(detector: "prompt injection", method: "model",
+                                           source: "tool output", preview: preview,
+                                           spans: spans.map(\.content))
+            }
+        }
+        if pi.detectRulesInjection {
+            // Heuristic scanner first (catches obfuscation the model can't
+            // read); then the ModernBERT semantic pass over the spans.
+            // Repo instruction files pasted into the conversation (Codex's
+            // AGENTS.md user message, Claude's CLAUDE.md reminder) count too.
+            let extra = RulesFileScanner.scannable(RulesFileScanner.conversationInstructionSpans(conv))
+            if let hit = RulesFileScanner.shared.detect(systemPrompt: conv.systemPrompt,
+                                                        extraSpans: extra) {
+                let all = extra + (conv.systemPrompt.map(RulesFileScanner.extractInstructionSpans) ?? [])
+                let flagged = all.filter { $0.source == hit.source && RulesFileScanner.isHighRisk($0.content) }
+                return PromptInjectionFlag(detector: "rogue instructions", method: "heuristic",
+                                           source: hit.source, preview: hit.preview,
+                                           ruleSpans: flagged.map(\.content))
+            }
+            let ruleSpans = RulesFileScanner.classifierSpans(conv.systemPrompt, extraSpans: extra)
+            if let preview = await PromptInjectionClassifier.claudeMd.detect(spans: ruleSpans) {
+                // Which file(s) tripped it (each verdict is cached: cheap).
+                var flagged: [(id: String?, content: String)] = []
+                for s in ruleSpans where await PromptInjectionClassifier.claudeMd.detect(spans: [s]) != nil {
+                    flagged.append(s)
+                }
+                let named = flagged.compactMap(\.id)
+                let source = named.count == 1 ? named[0]
+                    : extra.isEmpty ? "CLAUDE.md"
+                    : extra.count == 1 ? extra[0].source : "instruction files"
+                return PromptInjectionFlag(detector: "rogue instructions", method: "model",
+                                           source: source, preview: preview,
+                                           ruleSpans: flagged.map(\.content))
+            }
+        }
+        return nil
+    }
+
+    /// What the agent is told happens next, on its own line (agents that
+    /// print one line of the error still show a whole sentence).
+    ///  - tool output: later requests carry a placeholder instead.
+    ///  - instructions: the conversation itself carries the file's text —
+    ///    resent every turn, so removing CLAUDE.md alone never unblocked the
+    ///    session. When the flagged bodies are known they're withheld from
+    ///    later requests too; otherwise the way out is a new session / clear.
+    static func injectionNextStep(detector: String, instructionsWithheld: Bool) -> String {
+        if detector == "prompt injection" {
+            return "\nLater requests carry a placeholder instead of that output, so the next message can go through."
+                + " If it keeps failing, rewind the conversation past that step or start a new session."
+        }
+        if instructionsWithheld {
+            return "\nThis conversation still carries those instructions, so later requests carry a placeholder instead of them and the next message can go through."
+                + " Fix or remove the flagged file too; to drop them from the conversation entirely, start a new session (or /clear)."
+        }
+        return "\nThis conversation still carries those instructions: removing the file isn't enough for this session."
+            + " Fix or remove the flagged file, then start a new session (or /clear)."
+    }
+
+    /// Security log + cloud event for a resolved detection ("blocked" /
+    /// "allowed").
+    static func recordPromptInjection(_ f: PromptInjectionFlag, outcome: String,
+                                      host: String, profileID: UUID) {
+        if outcome == "blocked" {
+            BromureBlockLog.shared.record(f.detectorCode == "rules" ? .rulesInjection : .promptInjection,
+                                          profileID: profileID)
+        }
+        SupplyChainLog.shared.record(
+            "[prompt-injection] \(outcome): \(f.detector) in \(f.source) → \(host)")
+        PromptInjectionCloudEvent.emit(
+            profileID: profileID, detector: f.detectorCode, method: f.method,
+            action: outcome, host: host, source: f.source, score: nil,
+            signals: [], toolUseId: nil, snippet: f.preview)
+    }
+}

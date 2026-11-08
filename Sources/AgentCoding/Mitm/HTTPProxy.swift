@@ -2985,117 +2985,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
         return .decoded(out)
     }
 
-    /// Record that a request to an AI host could not go through the content
-    /// scans (prompt injection / PII) — never skip them silently. `blocked`:
-    /// the request was refused instead of forwarded (fail closed).
-    ///
-    /// Every occurrence is emitted — no host-side de-duplication, so the
-    /// audit log and the enrolled-install event stream see each request.
-    /// The Security Timeline folds repeats into one row with a count
-    /// (`coalesceKey`), so a client that hits this on every call shows
-    /// "×N" instead of one row that hides how often it happened.
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func recordScanSkipped(host: String, path: String, engines: [String],
                                   reason: String, profileID: UUID, blocked: Bool = false) {
-        let verdict = blocked ? "BLOCKED, not forwarded" : "not scanned"
-        FileHandle.standardError.write(Data(
-            "[mitm] \(host) \(path): \(reason) — \(verdict) (\(engines.joined(separator: ", ")))\n".utf8))
-        SupplyChainLog.shared.record("[content-scan] \(verdict): \(reason) → \(host)")
-        var data: [String: AnyJSON] = [
-            "host": .string(host),
-            "path": .string(path),
-            "reason": .string(reason),
-            "engines": .array(engines.map { .string($0) }),
-        ]
-        if blocked { data["action"] = .string("blocked") }
-        BACEventEmitter.shared.emitDetached(
-            profileID: profileID, eventType: "content_scan.skipped", eventData: data)
+        ProxyPolicy.recordScanSkipped(host: host, path: path, engines: engines, reason: reason, profileID: profileID, blocked: blocked)
     }
 
-    /// 415 the guest sees when a request body's Content-Encoding can't be
-    /// decoded while a content scan is on for the host: the request is not
-    /// forwarded (it would leave unscanned). 415 is the status RFC 9110
-    /// §15.5.16 assigns to an unsupported content coding; the plain-text body
-    /// tells the user why their agent's call failed and what to change.
-    /// The detectors an enforcing prompt-injection policy waits on whose
-    /// model is still loading.
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func warmingDetectors(injection pi: PromptInjectionPolicy,
                                  source: ModelReadiness, rules: ModelReadiness) -> [String] {
-        guard pi.isActive, pi.onDetection != .log else { return [] }
-        var out: [String] = []
-        if pi.detectSourceInjection, source == .loading { out.append("prompt-injection detection") }
-        if pi.detectRulesInjection, rules == .loading { out.append("instruction-file detection") }
-        return out
+        ProxyPolicy.warmingDetectors(injection: pi, source: source, rules: rules)
     }
 
-    /// 503 while a detector's model loads (seconds, at first use or after an
-    /// idle release). Every agent retries a 503 on its own, by then against
-    /// a loaded model; nothing was sent.
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func detectorWarmingResponse(_ detectors: [String]) -> Data {
-        let body = "Bromure is loading its \(detectors.joined(separator: " and ")) model. "
-            + "This request was not sent; retry in a few seconds.\n"
-        var r = "HTTP/1.1 503 Service Unavailable\r\n"
-        r += "Content-Type: text/plain; charset=utf-8\r\n"
-        r += "Content-Length: \(body.utf8.count)\r\n"
-        r += "Retry-After: \(detectorWarmingRetryAfter)\r\n"
-        r += "X-Bromure-Blocked: detector-model-loading\r\n"
-        r += "Connection: close\r\n\r\n"
-        r += body
-        return Data(r.utf8)
+        ProxyPolicy.detectorWarmingResponse(detectors)
     }
-    static let detectorWarmingRetryAfter = 2
+    static var detectorWarmingRetryAfter: Int { ProxyPolicy.detectorWarmingRetryAfter }
 
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
-        let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
-            .joined(separator: " and ")
-        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
-            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
-            + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
-        var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
-        r += "Content-Type: text/plain; charset=utf-8\r\n"
-        r += "Content-Length: \(body.utf8.count)\r\n"
-        r += "X-Bromure-Blocked: undecodable-content-encoding\r\n"
-        r += "Connection: close\r\n\r\n"
-        r += body
-        return Data(r.utf8)
+        ProxyPolicy.undecodableBodyResponse(encoding: encoding, engines: engines)
     }
 
-    /// A request went out with tool output the user had blocked replaced by
-    /// the placeholder (`PromptInjectionRedactions`): the security log only —
-    /// it happens on every later turn, the Timeline already has the block.
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func recordInjectionRedacted(count: Int, host: String, profileID: UUID) {
-        SupplyChainLog.shared.record(
-            "[prompt-injection] redacted: \(count) blocked tool output(s) or instruction file(s) replaced by a placeholder → \(host)")
-        FileHandle.standardError.write(Data(
-            "[prompt-injection] \(host): \(count) blocked tool output(s) or instruction file(s) sent as a placeholder (workspace \(profileID.uuidString.prefix(8)))\n".utf8))
+        ProxyPolicy.recordInjectionRedacted(count: count, host: host, profileID: profileID)
     }
 
-    /// "Unavailable For Legal Reasons - Bromure blocked: possible prompt
-    /// injection" — the standard words first, then the block (letters,
-    /// spaces and punctuation only: a valid reason phrase).
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func injectionReasonPhrase(detector: String) -> String {
-        let d = detector.filter { $0.isLetter || $0 == " " || $0 == "-" }
-        return "Unavailable For Legal Reasons - Bromure blocked: possible \(d)"
+        ProxyPolicy.injectionReasonPhrase(detector: detector)
     }
 
+    /// ProxyPolicy's (shared with the Linux proxy).
     static func injectionBlockResponse(detector: String, source: String,
                                        instructionsWithheld: Bool = false) -> Data {
-        // The agent shows this text: say what happens next. Tool output that
-        // was blocked is taken out of later requests (the session goes on);
-        // rewinding or a new session clears it for good.
-        // The next step goes on its own line: agents that print one line of
-        // the error (omp's TUI wraps it; the chat card shows the line) still
-        // show a whole sentence instead of "…Bromure will replace that content".
-        let next = injectionNextStep(detector: detector, instructionsWithheld: instructionsWithheld)
-        let body = "Bromure blocked this request: possible \(detector) detected in \(source).\(next)\n"
-        // The reason phrase names the block too: an agent that reports only
-        // the status line (Grok: "API error (status 451 …): Request failed")
-        // still says which engine blocked it (`BromureBlock.of`).
-        var r = "HTTP/1.1 451 \(injectionReasonPhrase(detector: detector))\r\n"
-        r += "Content-Type: text/plain; charset=utf-8\r\n"
-        r += "Content-Length: \(body.utf8.count)\r\n"
-        r += "Connection: close\r\n\r\n"
-        r += body
-        return Data(r.utf8)
+        ProxyPolicy.injectionBlockResponse(detector: detector, source: source, instructionsWithheld: instructionsWithheld)
     }
 
 

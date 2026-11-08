@@ -1,5 +1,3 @@
-import AppKit
-import CryptoKit
 import Foundation
 
 /// "Ask me what to do" handler for prompt-injection detections. Shows the
