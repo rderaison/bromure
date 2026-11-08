@@ -38,8 +38,15 @@ extension Daemon {
     /// engine.swapper.setCompromiseHandler at launch).
     // @port-skip linux-only: the daemon's share of ACAppDelegate's compromise handler wiring
     func wireCompromiseHandler() {
-        mitm?.swapper.setCompromiseHandler { [weak self] event in
-            Task { await self?.handleCompromise(event) }
+        // The event's session is its request's (taken when the request was
+        // read, carried to here): a leak from a session that ended, even one
+        // held at a consent meanwhile, pauses and asks nothing. Raised
+        // outside a request: the current session. The proxy is held weakly
+        // (the swapper it owns keeps this closure).
+        let proxy = mitm
+        mitm?.swapper.setCompromiseHandler { [weak self, weak proxy] event in
+            let session = MitmProxy.raisingSession ?? proxy?.strictSession(of: event.profileID) ?? 0
+            Task { await self?.handleCompromise(event, session: session) }
         }
     }
 
@@ -57,15 +64,25 @@ extension Daemon {
     /// the session, to any host (macOS's semantics).
     // partial: Save for Investigation needs a local folder picker (macOS-only, as on a headless Mac)
     // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=e4f537275a5a956e @a0266d0e
-    func handleCompromise(_ event: CompromiseEvent) async {
+    func handleCompromise(_ event: CompromiseEvent, session raised: UInt64? = nil) async {
         let pid = event.profileID
+        // The workspace's session (a stop starts the next): the event's, or
+        // the current one when the caller has none.
+        let session = raised ?? mitm?.strictSession(of: pid) ?? 0
+        func current() -> Bool { (mitm?.strictSession(of: pid) ?? 0) == session }
+        guard current() else {
+            FileHandle.standardError.write(Data("bromure-ac daemon: compromise: raised in a session that ended; dropped\n".utf8))
+            return
+        }
         guard let profile = profileStore.loadAll().first(where: { $0.id == pid }) else { return }
         // The workspace's opt-out: the proxy refused the request and recorded
         // it; no question, no pause.
         if profile.disableExfiltrationAlerts { return }
-        // One question at a time per workspace (a retried leak fires again).
-        guard compromiseAsking.insert(pid).inserted else { return }
-        defer { compromiseAsking.remove(pid) }
+        // One question at a time per session (a retried leak fires again);
+        // the next session's VM is asked on its own.
+        let asking = "\(pid)#\(session)"
+        guard compromiseAsking.insert(asking).inserted else { return }
+        defer { compromiseAsking.remove(asking) }
         guard let (id, machine) = compromiseVM(pid) else { return }
         do { try await machine.pause() } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(profile.name)': compromise: pause failed (\(error))\n".utf8))
@@ -85,7 +102,7 @@ extension Daemon {
         // session) while the question was up gets none of it. An "Allow"
         // after the stop's clear would carry into the next session, and a
         // late "Shut down" would kill the new one.
-        guard let now = compromiseVM(pid), now.vm === machine, now.id == id else {
+        guard current(), let now = compromiseVM(pid), now.vm === machine, now.id == id else {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(profile.name)': compromise: the VM it was about is gone; answer \(choice) dropped\n".utf8))
             return
         }

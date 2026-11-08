@@ -103,7 +103,7 @@ extension DaemonGlobalSuites {
                             timestamp: Date())
         }
 
-        static func setUp(alertsOff: Bool = false) async throws -> (Daemon, String, Profile) {
+        static func setUp(alertsOff: Bool = false, wired: Bool = false) async throws -> (Daemon, String, Profile) {
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()
             ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
             var p = Profile(name: "h", tool: .claude, authMode: .token)
@@ -113,7 +113,8 @@ extension DaemonGlobalSuites {
             // The tests call handleCompromise themselves: the checks they make
             // through the proxy raise nothing behind their back (a raised event
             // would run the handler again, past the test's hooks).
-            await d.mitm?.swapper.setCompromiseHandler { _ in }
+            // `wired`: the daemon's own handler, as a started daemon has it.
+            if wired { await d.wireCompromiseHandler() } else { await d.mitm?.swapper.setCompromiseHandler { _ in } }
             return (d, dir, p)
         }
 
@@ -271,6 +272,125 @@ extension DaemonGlobalSuites {
             #expect(RequestReader.compromiseAnswer(Data("GET / HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8),
                                                    proxy: proxy, profileID: p.id, host: "evil.example") != nil, "nor its hosts")
             #expect(second.calls.withLockedValue { $0 }.isEmpty, "the new VM untouched")
+            await d.shutdown()
+        }
+
+        /// An event raised in a session that ended before the handler ran
+        /// (the VM stopped) pauses and asks nothing.
+        @Test func anEventFromASessionThatEndedIsDropped() async throws {
+            let prior = ProfileStore.defaultRootDir
+            defer {
+                ProfileStore.defaultRootDir = prior
+                Daemon.compromiseVMForTesting.withLockedValue { $0 = nil }
+                Daemon.compromiseAnswerForTesting.withLockedValue { $0 = nil }
+            }
+            let vm = FakeCompromiseVM()
+            Daemon.compromiseVMForTesting.withLockedValue { $0 = { _ in ("vm-2", vm) } }
+            let asked = NIOLockedValueBox(0)
+            Daemon.compromiseAnswerForTesting.withLockedValue { $0 = { _ in asked.withLockedValue { $0 += 1 }; return 0 } }
+            let (d, dir, p) = try await Self.setUp()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let proxy = try #require(await d.mitm)
+            let old = proxy.strictSession(of: p.id)
+            proxy.clearGuardrailsConfig(for: p.id)       // the stop; the new VM runs
+            await d.handleCompromise(Self.event(p.id), session: old)
+            #expect(vm.calls.withLockedValue { $0 }.isEmpty && asked.withLockedValue { $0 } == 0)
+            #expect(!Daemon.isCompromised(p, store: ProfileStore()), "the new session isn't marked")
+            await d.shutdown()
+        }
+
+        /// One question at a time per session: the next session's VM is asked
+        /// while the old question is still up.
+        @Test func theNextSessionIsAskedOnItsOwn() async throws {
+            let prior = ProfileStore.defaultRootDir
+            defer {
+                ProfileStore.defaultRootDir = prior
+                Daemon.compromiseVMForTesting.withLockedValue { $0 = nil }
+                Daemon.compromiseAnswerForTesting.withLockedValue { $0 = nil }
+            }
+            let vm = FakeCompromiseVM()
+            Daemon.compromiseVMForTesting.withLockedValue { $0 = { _ in ("vm-1", vm) } }
+            let asked = NIOLockedValueBox(0)
+            let gate = AsyncStream<Void>.makeStream()
+            Daemon.compromiseAnswerForTesting.withLockedValue { $0 = { _ in
+                if asked.withLockedValue({ $0 += 1; return $0 }) == 1 {
+                    var it = gate.stream.makeAsyncIterator(); _ = await it.next()   // the first question stays up
+                }
+                return 1
+            } }
+            let (d, dir, p) = try await Self.setUp()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let proxy = try #require(await d.mitm)
+            let first = Task { await d.handleCompromise(Self.event(p.id)) }
+            for _ in 0..<500 where asked.withLockedValue({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            await d.handleCompromise(Self.event(p.id))
+            #expect(asked.withLockedValue { $0 } == 1, "the same session: not asked twice")
+            proxy.clearGuardrailsConfig(for: p.id)       // a stop and a new session
+            await d.handleCompromise(Self.event(p.id))
+            #expect(asked.withLockedValue { $0 } == 2, "the new session is asked on its own")
+            gate.continuation.finish()
+            await first.value
+            await d.shutdown()
+        }
+
+        /// A leak's event carries its request's session, taken when the request
+        /// was read. Held at a guardrails consent while the workspace stopped
+        /// and started again, it reaches the daemon's own handler (through the
+        /// swapper, as in a started daemon) stale: the new VM isn't paused,
+        /// asked or marked. Without the restart, the same request is acted on.
+        @Test(arguments: [false, true])
+        func aLeakHeldAtAConsentAcrossARestartReachesNoNewSession(restarted: Bool) async throws {
+            let prior = ProfileStore.defaultRootDir
+            defer {
+                ProfileStore.defaultRootDir = prior
+                Daemon.compromiseVMForTesting.withLockedValue { $0 = nil }
+                Daemon.compromiseAnswerForTesting.withLockedValue { $0 = nil }
+                ConsentPrompt.chooseForTesting.withLockedValue { $0 = nil }
+            }
+            let vm = FakeCompromiseVM()
+            let looked = NIOLockedValueBox(0)
+            Daemon.compromiseVMForTesting.withLockedValue { $0 = { _ in looked.withLockedValue { $0 += 1 }; return ("vm-1", vm) } }
+            Daemon.compromiseAnswerForTesting.withLockedValue { $0 = { _ in 1 } }    // Block: no mark either way
+            let (d, dir, p) = try await Self.setUp(wired: true)
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let proxy = try #require(await d.mitm)
+            // A GitHub write asks first (promptOnWrite); the consent is held.
+            let cfg = GuardrailsConfig(kubernetes: .off, kubeHosts: [], github: .promptOnWrite)
+            proxy.setGuardrailsConfig(cfg, for: p.id)
+            defer { proxy.clearGuardrailsConfig(for: p.id) }
+            let asked = NIOLockedValueBox(false)
+            let gate = AsyncStream<Void>.makeStream()
+            ConsentPrompt.chooseForTesting.withLockedValue { $0 = { _ in
+                asked.withLockedValue { $0 = true }
+                var it = gate.stream.makeAsyncIterator(); _ = await it.next()
+                return 1                                                            // Allow once
+            } }
+            let fake = "sk_" + "live_FAKEstandin0123456789abcdef"
+            proxy.swapper.setMap(TokenMap(entries: [TokenMap.Entry(fake: fake, real: "sk_" + "live_REAL-x", host: "api.stripe.com")]), for: p.id)
+            defer { proxy.swapper.clearMap(for: p.id) }
+            let session = proxy.strictSession(of: p.id)                             // as RequestReader takes it at .complete
+            let pid = p.id
+            let request = Task {
+                var req = Data("POST /repos/o/r/issues HTTP/1.1\r\nHost: api.github.com\r\nAuthorization: Bearer \(fake)\r\nContent-Length: 0\r\n\r\n".utf8)
+                return await RequestReader.policyAnswer(&req, proxy: proxy, profileID: pid, host: "api.github.com",
+                                                        port: 443, tls: true, session: session)
+            }
+            for _ in 0..<250 where !asked.withLockedValue({ $0 }) { try await Task.sleep(for: .milliseconds(20)) }
+            #expect(asked.withLockedValue { $0 }, "held at the consent")
+            if restarted {
+                proxy.clearGuardrailsConfig(for: p.id)                               // the stop
+                proxy.setGuardrailsConfig(cfg, for: p.id)                            // the next session
+            }
+            gate.continuation.finish()
+            let answer = await request.value
+            #expect(answer.map { String(decoding: $0, as: UTF8.self) }?.hasPrefix("HTTP/1.1 451") == true, "the leak is refused either way")
+            // The handler runs on its own task: given time to act.
+            for _ in 0..<100 where vm.calls.withLockedValue({ $0 }).count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+            if restarted {
+                #expect(vm.calls.withLockedValue { $0 }.isEmpty && looked.withLockedValue { $0 } == 0, "the new session's VM untouched")
+            } else {
+                #expect(vm.calls.withLockedValue { $0 } == ["pause", "resume"], "the same session: paused and asked")
+            }
             await d.shutdown()
         }
 

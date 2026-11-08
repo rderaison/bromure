@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 /// Where a MITM consent prompt (credential use, guardrail write, supply-chain
 /// bypass, prompt injection) is asked on a Linux server (macOS:
@@ -22,6 +23,7 @@ enum ConsentPrompt {
                        detailText: String? = nil,
                        timeout: TimeInterval = ConsentPrompt.defaultTimeout,
                        token: UUID = UUID()) async -> Int? {
+        if let hook = chooseForTesting.withLockedValue({ $0 }) { return await hook(profileID) }
         let deadline = Date().addingTimeInterval(max(1, timeout))
         let body = detailText.map { message + "\n\n" + String($0.prefix(1500)) } ?? message
         let idx: Int?
@@ -44,6 +46,9 @@ enum ConsentPrompt {
         }
         return idx == nil || idx == denyIndex ? nil : idx
     }
+
+    /// Tests: the answer, by workspace (nil: asked as above).
+    static let chooseForTesting = NIOLockedValueBox<(@Sendable (UUID) async -> Int?)?>(nil)
 
     /// There is no local panel to take back.
     // @port-skip linux-only: ConsentPrompt.withdrawLocal (no local panel)

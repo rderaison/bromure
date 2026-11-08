@@ -129,27 +129,41 @@ struct StrictCredentialsTests {
         #expect(try Self.goesThrough(rig, ip, tok))
     }
 
-    /// Only a final 2xx is learned from (a refusal's body, an upgrade's
-    /// stream aren't tokens issued to the guest), and only its first 256 KiB.
-    @Test func onlyA2xxsFirst256KiBIsLearned() throws {
+    /// Every final response is learned from, as macOS learns (a login
+    /// redirect sets its cookie on a 302), past any 100 Continue; an encoded
+    /// body isn't (nothing here decodes it) but its head is; and only the
+    /// first 256 KiB.
+    @Test func theFinalResponseIsLearnedWithinItsFirst256KiB() throws {
         let rig = try ProxyEgressPolicyTests.Rig(); defer { rig.stop() }
         let ip = try #require(Daemon.primaryIPv4())
         defer { rig.proxy.clearGuardrailsConfig(for: rig.pid) }
         Self.strict(rig, true)
-        func form(_ body: String, status: String = "200 OK") -> String {
-            "HTTP/1.1 \(status)\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        func form(_ body: String, status: String = "200 OK", extra: String = "") -> String {
+            "HTTP/1.1 \(status)\r\nContent-Type: application/x-www-form-urlencoded\r\n\(extra)Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         }
-        let refused = Self.token("D3n1d")
-        let r = try Self.issue(rig, ip, reply: form("access_token=\(refused)", status: "401 Unauthorized"))
-        defer { r.stop() }
+        var ups: [RawUpstream] = []
+        defer { ups.forEach { $0.stop() } }
+        let redirect = Self.token("R3dir"), refused = Self.token("D3n1d"), continued = Self.token("C0ntd")
+        ups.append(try Self.issue(rig, ip, reply: "HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: s=\(redirect); Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+        ups.append(try Self.issue(rig, ip, reply: form("access_token=\(refused)", status: "401 Unauthorized")))
+        ups.append(try Self.issue(rig, ip, reply: "HTTP/1.1 100 Continue\r\n\r\n" + form("access_token=\(continued)")))
+        let encoded = Self.token("Enc0d"), encodedCookie = Self.token("EncCk")
+        ups.append(try Self.issue(rig, ip, reply: form("access_token=\(encoded)", extra: "Content-Encoding: gzip\r\nSet-Cookie: e=\(encodedCookie)\r\n")))
         let pad = String(repeating: "x", count: 300 << 10)
         let early = Self.token("E4rly"), late = Self.token("L4te0")
-        let e = try Self.issue(rig, ip, reply: form("access_token=\(early)&pad=\(pad)"))
-        defer { e.stop() }
+        ups.append(try Self.issue(rig, ip, reply: form("access_token=\(early)&pad=\(pad)")))
         let l = try Self.issue(rig, ip, reply: form("pad=\(pad)&access_token=\(late)"))
-        defer { l.stop() }
+        ups.append(l)
+        #expect(try Self.goesThrough(rig, ip, redirect), "a 302's cookie")
+        #expect(try Self.goesThrough(rig, ip, refused), "a 401's token, as macOS learns it")
+        #expect(try Self.goesThrough(rig, ip, continued), "past a 100 Continue")
+        #expect(try Self.goesThrough(rig, ip, encodedCookie), "an encoded reply's head")
         #expect(try Self.goesThrough(rig, ip, early), "within the first 256 KiB")
-        #expect(try !Self.goesThrough(rig, ip, refused, wait: false), "a 401 issues nothing")
+        #expect(try !Self.goesThrough(rig, ip, encoded, wait: false), "not from an encoded body")
+        // Learned (or not) once the late connection ended: waited for, then
+        // a moment for the proxy's side of the close.
+        for _ in 0..<250 where l.closed.withLockedValue({ $0 }) == 0 { Thread.sleep(forTimeInterval: 0.02) }
+        Thread.sleep(forTimeInterval: 0.2)
         #expect(try !Self.goesThrough(rig, ip, late, wait: false), "past the cap")
     }
 

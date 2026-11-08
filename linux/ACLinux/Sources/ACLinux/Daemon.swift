@@ -142,8 +142,9 @@ public actor Daemon {
     var liveApplied: [String: Profile] = [:]
     /// Each workspace's last queued live refresh (they run one at a time).
     var liveRefreshTail: [String: Task<Void, Never>] = [:]
-    /// Workspaces whose compromise question is up (DaemonCompromise.swift).
-    var compromiseAsking: Set<UUID> = []
+    /// The sessions (`<workspace>#<session>`) whose compromise question is
+    /// up (DaemonCompromise.swift).
+    var compromiseAsking: Set<String> = []
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop

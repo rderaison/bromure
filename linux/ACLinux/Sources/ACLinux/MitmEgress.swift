@@ -40,7 +40,8 @@ extension MitmProxy {
         EgressConnectionRegistry.shared.forget(profileID: profileID)
     }
 
-    /// Workspace `profileID`'s current strict-credential session.
+    /// Workspace `profileID`'s current session (a stop starts the next):
+    /// strict mode's learning and the compromise handler key on it.
     // @port-skip linux-only: the session tag macOS's per-VM proxy doesn't need
     func strictSession(of profileID: UUID) -> UInt64 {
         strictSessions.withLockedValue { $0[profileID] ?? 0 }
@@ -226,8 +227,12 @@ extension RequestReader {
     /// recorded, and the swapper's compromise handler raised (the daemon
     /// pauses the VM and asks). macOS: HTTPProxy's detectCompromise step.
     // @port-skip linux-only: HTTPProxy's detectCompromise step on the Linux request chain
-    static func compromiseAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String) -> Data? {
-        let leaks = proxy.swapper.detectCompromise(rawRequest: request, host: host, profileID: profileID)
+    static func compromiseAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
+                                 session: UInt64? = nil) -> Data? {
+        // Raised with its request's session (the handler drops a stale one).
+        let leaks = MitmProxy.$raisingSession.withValue(session) {
+            proxy.swapper.detectCompromise(rawRequest: request, host: host, profileID: profileID)
+        }
         guard !leaks.isEmpty else { return nil }
         let alertsOff = proxy.guardrailsConfig(for: profileID)?.exfiltrationAlertsDisabled ?? false
         for c in leaks {
@@ -254,7 +259,8 @@ extension RequestReader {
     /// asks; "Allow" approves exactly these credentials for the session).
     /// macOS: HTTPProxy's UnmanagedCredentialGuard step.
     // @port-skip linux-only: HTTPProxy's strict-credential step on the Linux request chain
-    static func unmanagedAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String) -> Data? {
+    static func unmanagedAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
+                                session: UInt64? = nil) -> Data? {
         guard host.lowercased() != InferenceService.localMitmHost else { return nil }
         let unmanaged = UnmanagedCredentialGuard.shared.check(
             rawRequest: request, host: host, profileID: profileID,
@@ -281,7 +287,7 @@ extension RequestReader {
                 },
                 timestamp: Date())
             event.unmanagedFingerprints = unmanaged.map(\.fingerprint)
-            proxy.swapper.raiseCompromise(event)
+            MitmProxy.$raisingSession.withValue(session) { proxy.swapper.raiseCompromise(event) }
         }
         let body = "Bromure: outbound request blocked — it carries a credential Bromure did not issue for \(host) (strict credential mode).\n"
         return Data(("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Type: text/plain; charset=utf-8\r\n"
@@ -298,7 +304,7 @@ extension RequestReader {
     // partial: OpenShell's strict framing limits (chunk-line, header and trailer sizes) aren't applied; the Linux framer re-frames every body with a Content-Length
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
-                             host: String, port: Int, tls: Bool) async -> Data? {
+                             host: String, port: Int, tls: Bool, session: UInt64? = nil) async -> Data? {
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"
@@ -331,8 +337,10 @@ extension RequestReader {
             return answer
         }
         // A stand-in bound elsewhere, then a credential Bromure didn't issue.
-        if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
-        if let refused = unmanagedAnswer(request, proxy: proxy, profileID: profileID, host: host) { return refused }
+        // `session` is the request's, taken when it was read: a consent above
+        // may have held it while the workspace stopped and started again.
+        if let refused = compromiseAnswer(request, proxy: proxy, profileID: profileID, host: host, session: session) { return refused }
+        if let refused = unmanagedAnswer(request, proxy: proxy, profileID: profileID, host: host, session: session) { return refused }
         return nil
     }
 }

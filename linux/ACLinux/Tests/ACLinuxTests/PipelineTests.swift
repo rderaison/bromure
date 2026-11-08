@@ -11,14 +11,16 @@ import Testing
 /// sends after the first request shows up).
 final class RawUpstream: @unchecked Sendable {
     let received = NIOLockedValueBox<String>("")
+    /// Connections that have ended (the proxy closed its side).
+    let closed = NIOLockedValueBox(0)
     let channel: Channel
     var port: Int { channel.localAddress!.port! }
 
     init(host: String, reply: String) throws {
-        let received = self.received
+        let (received, closed) = (self.received, self.closed)
         channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
-            .childChannelInitializer { $0.pipeline.addHandler(Handler(received, reply)) }
+            .childChannelInitializer { $0.pipeline.addHandler(Handler(received, reply, closed: closed)) }
             .bind(host: host, port: 0).wait()
     }
     func stop() { channel.close(promise: nil) }
@@ -28,8 +30,15 @@ final class RawUpstream: @unchecked Sendable {
         typealias OutboundOut = ByteBuffer
         let received: NIOLockedValueBox<String>
         let reply: String
+        let closed: NIOLockedValueBox<Int>?
         var answered = false
-        init(_ r: NIOLockedValueBox<String>, _ reply: String) { received = r; self.reply = reply }
+        init(_ r: NIOLockedValueBox<String>, _ reply: String, closed: NIOLockedValueBox<Int>? = nil) {
+            received = r; self.reply = reply; self.closed = closed
+        }
+        func channelInactive(context: ChannelHandlerContext) {
+            closed?.withLockedValue { $0 += 1 }
+            context.fireChannelInactive()
+        }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             var b = unwrapInboundIn(data)
             let s = b.readString(length: b.readableBytes) ?? ""
@@ -69,6 +78,22 @@ struct PipelineTests {
         var got = read()
         if let more { GuestEnd.send(fd, more); got += read() }
         return got
+    }
+
+    /// A 100 Continue on a plain request reaches the guest once, ahead of
+    /// the final head, which alone carries the Connection: close.
+    @Test func aContinueGoesAheadOfTheFinalHeadOnce() throws {
+        let (rig, ip) = try Self.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        let out = try Self.talk(rig.path(), "POST http://\(h)/x HTTP/1.1\r\nHost: \(h)\r\nContent-Length: 0\r\n\r\n")
+        #expect(out.components(separatedBy: "HTTP/1.1 100 Continue").count == 2, "once: \(out)")
+        let heads = out.components(separatedBy: "\r\n\r\n")
+        #expect(heads.count >= 2 && heads[0] == "HTTP/1.1 100 Continue", "first: \(out)")
+        let final = heads.count >= 2 ? heads[1] : ""
+        #expect(final.hasPrefix("HTTP/1.1 200 OK") && final.contains("Connection: close") && !final.contains("keep-alive"), "\(final)")
+        #expect(!heads[0].contains("Connection"), "the interim head as it came")
     }
 
     @Test func aRequestPipelinedBehindAnotherNeverLeaves() throws {
