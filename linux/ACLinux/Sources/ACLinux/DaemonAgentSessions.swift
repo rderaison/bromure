@@ -109,6 +109,7 @@ extension Daemon {
                 while true {
                     try? await Task.sleep(for: .milliseconds(500))
                     LinuxSessionHost.shared?.readAgentStatus()
+                    LinuxSessionHost.shared?.readAgentToolCalls()
                     LinuxSessionHost.shared?.readGuestURLs()
                 }
             }

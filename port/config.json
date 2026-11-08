@@ -15,6 +15,7 @@
     "Sources/AgentCoding/AgentSessionEngine.swift",
     "Sources/AgentCoding/AgentSessionHost.swift",
     "Sources/AgentCoding/AgentSessions.swift",
+    "Sources/AgentCoding/AgentToolLog.swift",
     "Sources/AgentCoding/AgentTranscripts.swift",
     "Sources/AgentCoding/AgentWatchdog.swift",
     "Sources/AgentCoding/AutomationBoard.swift",

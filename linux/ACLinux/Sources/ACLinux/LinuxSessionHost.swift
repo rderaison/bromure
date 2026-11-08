@@ -152,6 +152,9 @@ final class LinuxSessionHost: AgentSessionHost {
     /// What the guest's hooks last said per workspace and window (macOS:
     /// RunningSession.agentStatus).
     private var agentStatus: [UUID: [Int: AgentStatus]] = [:]
+    /// Each running workspace's tool-call logs, by file (the outbox's and
+    /// agent/'s same-named logs keep their own offsets).
+    private var toolLogs: [UUID: [String: AgentToolLog]] = [:]
 
     /// The guest's hook reports, `agent-status-<window>.txt` in the outbox or
     /// its hooks' folder (one-shot: read, then removed): line 1 the signal, line 2 the hook's
@@ -178,6 +181,53 @@ final class LinuxSessionHost: AgentSessionHost {
                 setTabAgentStatus(id, index: w, status, turnEnded: AgentStatus.endsTurn(signal: raw))
             }
         }
+    }
+
+    /// The agents' PreToolUse hooks' reports, `agent-tool-<window>.jsonl` in
+    /// the outbox or its hooks' folder: each tool call before it runs, with
+    /// its provider id and the agent's pid, read a bounded window at a time
+    /// (AgentToolLog). macOS: UbuntuSandboxVM's outbox poll + onAgentToolCall.
+    // @port-skip linux-only: the agent-tool half of UbuntuSandboxVM.startOutboxPolling, on the host
+    func readAgentToolCalls() {
+        let fm = FileManager.default
+        let running = Self.running.withLockedValue { $0 }
+        for id in toolLogs.keys where !running.contains(id) { toolLogs[id] = nil }
+        for id in running {
+            let outbox = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/"
+            var logs = toolLogs[id] ?? [:]
+            for dir in HomeSeed.outboxFolders(outbox, SessionDisk.outboxAgentFolder) {
+                let inAgent = dir != outbox
+                for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+                where name.hasPrefix("agent-tool-") && name.hasSuffix(".jsonl") {
+                    let window = Int(name.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    let key = inAgent ? SessionDisk.outboxAgentFolder + "/" + name : name
+                    var log = logs[key] ?? AgentToolLog()
+                    for line in log.read(URL(fileURLWithPath: dir + name)) {
+                        Self.agentToolCall(line, window: window, profileID: id,
+                                           hostWindows: SessionStores.shared?.sessions.hostLaunchedWindows(profileID: id) ?? [])
+                    }
+                    logs[key] = log
+                }
+            }
+            toolLogs[id] = logs
+        }
+    }
+
+    /// One tool call an agent's hook reported: which tab the agent is (a
+    /// policy note about a process in its tree goes to it; the host's own
+    /// agent tabs come first when guest-written lines have filled every
+    /// slot), and the call itself for the network lineage.
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onAgentToolCall h=df04b662320b9001 @2134fc7a
+    nonisolated static func agentToolCall(_ line: Data, window: Int?, profileID pid: UUID, hostWindows: Set<Int>) {
+        guard let o = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let id = o["tool_use_id"] as? String, !id.isEmpty else { return }
+        if let window, let agentPid = o["pid"] as? Int {
+            PolicySteering.shared.noteAgent(profileID: pid, pid: agentPid, window: window, hostWindows: hostWindows)
+        }
+        NetworkLineage.shared.noteToolCall(
+            profileID: pid, id: String(id.prefix(128)), tool: o["tool"] as? String ?? "tool",
+            command: (o["command"] as? String).map { String($0.prefix(4000)) }, reasoning: "",
+            agentPid: o["pid"] as? Int, agent: o["agent"] as? String)
     }
 
     /// A tab's hook status, with what the macOS app delegate does around it:
