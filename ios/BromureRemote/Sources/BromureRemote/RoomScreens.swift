@@ -409,6 +409,8 @@ struct MobileRoomScreen: View {
             didPickOpeningTab = true
             page = switchboard != nil || members.isEmpty ? Self.switchboardPage : 0
         }
+        // The last session left: the Switchboard's tab is what's left to show.
+        if members.isEmpty { page = Self.switchboardPage }
         if page != Self.switchboardPage { page = min(page, max(0, pages.count - 1)) }
     }
 
@@ -768,6 +770,9 @@ struct MobileRoomScreen: View {
                 ForEach(members) { m in
                     Button {
                         focus(m.id)
+                        // Zoomed: the chosen session takes the zoom, so what's
+                        // on screen is what the composer talks to.
+                        if zoomedID != nil { setZoom(m.id) }
                         reveal(m.id)
                     } label: {
                         Label(m.title, systemImage: !toSwitchboard && focusedID == m.id ? "checkmark" : "bubble.left")
