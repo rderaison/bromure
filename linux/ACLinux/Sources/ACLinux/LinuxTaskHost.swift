@@ -136,16 +136,26 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     // @port ACAppDelegate.workspaceOpenElsewhere(_: Profile.ID) h=da71c9e10f9c8655 @9936e30c
     func workspaceOpenElsewhere(_ id: Profile.ID) -> Bool { false }
 
-    /// Clone-first runs need a workspace copy (macOS: an APFS CoW duplicate
-    /// of the profile and its home), which the daemon can't make yet: the
-    /// run fails with the engine's own "couldn't clone" reason.
-    // partial: no workspace duplicate on Linux yet
-    // @port-skip linux-only: no workspace clones on Linux yet (ACAppDelegate.cloneWorkspaceForAutomation)
-    func cloneWorkspaceForAutomation(_ baseID: Profile.ID, runSlug: String) async -> Profile? { nil }
+    /// Duplicate a workspace for a clone-first automation run: the profile
+    /// and its VM's images as reflinks (Daemon.cloneWorkspace; none on a
+    /// filesystem without them, and the run fails with the engine's
+    /// "couldn't clone"). A running source is cloned live, crash-consistent,
+    /// after a guest `sync`, as on macOS.
+    // @port ACAppDelegate.cloneWorkspaceForAutomation(_: Profile.ID, runSlug: String) h=257b4270865422a3 @641863f2
+    func cloneWorkspaceForAutomation(_ baseID: Profile.ID, runSlug: String) async -> Profile? {
+        guard let daemon else { return nil }
+        if LinuxSessionHost.running.withLockedValue({ $0.contains(baseID) }) {
+            _ = try? await guestExec(profileID: baseID, command: "sync", timeout: 60)
+        }
+        return await daemon.cloneWorkspace(baseID, runSlug: runSlug)
+    }
 
-    // partial: no workspace duplicate on Linux yet
-    // @port-skip linux-only: no workspace clones on Linux yet (ACAppDelegate.destroyAutomationClone)
-    func destroyAutomationClone(_ id: Profile.ID) {}
+    /// The run's clone goes once it's stopped (Daemon.destroyClone).
+    // @port ACAppDelegate.destroyAutomationClone(_: Profile.ID) h=dc6672c36db37645 @641863f2
+    func destroyAutomationClone(_ id: Profile.ID) {
+        guard let daemon else { return }
+        Task { await daemon.destroyClone(id) }
+    }
 
     /// Every worktree branch with an open tab in a running workspace.
     // @port ACAppDelegate.openWorktreeBranches(profileID: UUID) h=a83ea7fd66826ea4 @9936e30c
