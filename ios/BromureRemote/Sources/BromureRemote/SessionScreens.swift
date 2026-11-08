@@ -203,7 +203,8 @@ struct MobileSessionScreen: View {
                 // agent window defaults to its rich transcript reader — the
                 // mobile chat — with the raw terminal one toggle away.
                 WorkspaceScreen(controller: controller, profileID: s.profileID,
-                                initialWindow: s.windowIndex)
+                                initialWindow: s.windowIndex,
+                                sessionTool: s.tool.rawValue, sessionCwd: s.cwd)
                     .id("\(s.id.uuidString)#\(s.windowIndex ?? -1)")
             }
         } else {

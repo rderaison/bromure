@@ -16,16 +16,29 @@ struct WorkspaceScreen: View {
     /// When set, open straight to this tmux window's terminal (used by the
     /// "At a Glance" agents-waiting list and the grid).
     var initialWindow: Int? = nil
+    /// Set when this screen is a SESSION's stage (MobileSessionScreen), not the
+    /// machine: the agent the session runs ("claude", "codex", …). The screen
+    /// then shows that one window only, opening on the beautified reader — no
+    /// pane picker, no tabs for the machine's other windows — the same thing
+    /// the desktop's sessions-first stage shows. "Terminal" in the session's
+    /// menu still opens the whole machine.
+    var sessionTool: String? = nil
+    /// The session's folder, for a tab whose cwd the roster hasn't reported.
+    var sessionCwd: String? = nil
+    private var isSessionStage: Bool { sessionTool != nil }
 
     /// Bridges the workspace's browser MCP (an agent's `browser_navigate`) and
     /// the manual port browser to one shared WKWebView + loopback tunnel. Its
     /// relay runs for the life of this screen (started in `.onAppear`).
     @StateObject private var browserBridge: MobileBrowserBridge
 
-    init(controller: RemoteHostController, profileID: Profile.ID, initialWindow: Int? = nil) {
+    init(controller: RemoteHostController, profileID: Profile.ID, initialWindow: Int? = nil,
+         sessionTool: String? = nil, sessionCwd: String? = nil) {
         self.controller = controller
         self.profileID = profileID
         self.initialWindow = initialWindow
+        self.sessionTool = sessionTool
+        self.sessionCwd = sessionCwd
         _browserBridge = StateObject(
             wrappedValue: MobileBrowserBridge(controller: controller, profileID: profileID))
     }
@@ -75,7 +88,7 @@ struct WorkspaceScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !terminalFullBleed {
+            if !terminalFullBleed && !isSessionStage {
                 panePicker
                 Divider()
             }
@@ -94,8 +107,7 @@ struct WorkspaceScreen: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationTitle(profileName)
-        .navigationBarTitleDisplayMode(.inline)
+        .modifier(MachineTitle(title: profileName, enabled: !isSessionStage))
         .onChange(of: isRunning) { _, running in
             FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) isRunning=\(running) "
                 + "state=\(runState) connected=\(controller.connected) "
@@ -113,7 +125,9 @@ struct WorkspaceScreen: View {
             stopFallback?.cancel()
             stopFallback = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard !Task.isCancelled, !isRunning, pane != .dashboard else { return }
+                // A session's stage has no pane picker to come back with; the
+                // session screen itself moves on once the window is gone.
+                guard !Task.isCancelled, !isRunning, pane != .dashboard, !isSessionStage else { return }
                 FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) "
                     + "stayed not-running 3s — falling back to Info")
                 pane = .dashboard
@@ -156,7 +170,7 @@ struct WorkspaceScreen: View {
         }
         // An agent opened a page (browser_navigate) — bring the Web pane forward.
         .onChange(of: browserBridge.showTick) { _, _ in
-            if isRunning { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
+            if isRunning, !isSessionStage { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
         }
     }
 
@@ -229,7 +243,9 @@ struct WorkspaceScreen: View {
                 HStack(spacing: 0) {
                     TerminalsPane(controller: controller, profileID: profileID,
                                   initialWindow: initialWindow,
-                                  hidesTabStrip: terminalFullBleed,
+                                  sessionTool: sessionTool,
+                                  sessionCwd: sessionCwd,
+                                  hidesTabStrip: terminalFullBleed || isSessionStage,
                                   isVisible: pane == .terminals)
                     // Regular width only: the repo file pane rides beside the
                     // terminal, macOS-style. It stays mounted at width 0 while
@@ -335,6 +351,11 @@ private struct TerminalsPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     var initialWindow: Int? = nil
+    /// A session's stage (see WorkspaceScreen.sessionTool): the window is the
+    /// session's agent, so it opens on the reader straight away and stays
+    /// pinned to `initialWindow`.
+    var sessionTool: String? = nil
+    var sessionCwd: String? = nil
     #if os(visionOS)
     /// Pops a terminal tab out into its own pinnable window (VisionScenes).
     @Environment(\.openWindow) private var openWindow
@@ -408,7 +429,8 @@ private struct TerminalsPane: View {
     /// The guest working directory backing a window's Claude transcript.
     private func guestCwd(for window: Int) -> String? {
         let tab = tabs.first { $0.index == window }
-        let cwd = tab?.cwd ?? tab?.repoRoot
+        var cwd = tab?.cwd ?? tab?.repoRoot
+        if cwd?.isEmpty ?? true, window == initialWindow, let s = sessionCwd, s != "~" { cwd = s }
         return (cwd?.isEmpty ?? true) ? nil : cwd
     }
 
@@ -428,6 +450,7 @@ private struct TerminalsPane: View {
     /// desktop sidebar, so both clients agree on what counts as an agent.
     @MainActor private func isAgentic(_ tab: TabsModel.Tab?) -> Bool {
         guard let tab else { return false }
+        if sessionTool != nil, tab.index == initialWindow { return true }
         if tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree {
             return true
         }
@@ -440,6 +463,7 @@ private struct TerminalsPane: View {
     /// store and the parser sniff the format, so the reader still works.
     @MainActor private func agentKind(_ tab: TabsModel.Tab?) -> String? {
         tab.flatMap { BromureIcons.agentKind(forLabel: $0.shownLabel) }
+            ?? (tab?.index == initialWindow ? sessionTool : nil)
     }
 
     /// Non-agent tabs are always the raw terminal (and get no toggle). An agent
@@ -451,6 +475,8 @@ private struct TerminalsPane: View {
     @MainActor private var readerMode: Bool {
         guard isAgentic(currentTab) else { return false }
         if let readerOverride { return readerOverride }
+        // A session's stage opens on the reader, like the desktop's.
+        if sessionTool != nil, effectiveWindow == initialWindow { return true }
         return effectiveWindow.map { transcriptPresent.contains($0) } ?? false
     }
 
@@ -602,6 +628,7 @@ private struct TerminalsPane: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
+                if sessionTool == nil {
                 Button {
                     controller.newTab(profileID)
                     // Drop the pinned window so the pane follows the roster's
@@ -615,6 +642,7 @@ private struct TerminalsPane: View {
                     Image(systemName: "plus.rectangle.on.rectangle")
                 }
                 .accessibilityLabel("New terminal")
+                }
             }
         }
         .onAppear {
@@ -665,6 +693,11 @@ private struct TerminalsPane: View {
     }
 
     private var effectiveWindow: Int? {
+        // A session's stage shows its own window only — never another
+        // session's that happens to be the machine's active tab.
+        if sessionTool != nil, let initialWindow {
+            return tabs.contains(where: { $0.index == initialWindow }) ? initialWindow : nil
+        }
         if let selectedWindow, tabs.contains(where: { $0.index == selectedWindow }) {
             return selectedWindow
         }
@@ -1235,5 +1268,19 @@ private struct FilesPane: View {
             locations: locations,
             cacheKey: profileID.uuidString,
             guestOp: { op in try await controller.guestFileOp(profileID, op: op) })
+    }
+}
+
+/// The machine's name as the navigation title — only on the machine's own
+/// screen: on a session's stage the session screen owns the title.
+private struct MachineTitle: ViewModifier {
+    let title: String
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        if enabled {
+            content.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        } else {
+            content
+        }
     }
 }
