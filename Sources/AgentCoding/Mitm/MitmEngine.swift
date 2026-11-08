@@ -293,16 +293,12 @@ public final class MitmEngine {
                                        modelLabel: String,
                                        localCloudHosts: Set<String> = [],
                                        for profileID: UUID) {
+        // A new snapshot, never the old one changed in place: the proxy's
+        // hot path holds contexts outside the lock.
+        let context = LLMRoutingContext(routing: routing, localModelLabel: modelLabel,
+                                        localCloudHosts: localCloudHosts)
         fusionLock.lock()
-        if let existing = routingContexts[profileID] {
-            existing.routing = routing
-            existing.localModelLabel = modelLabel
-            existing.localCloudHosts = localCloudHosts
-        } else {
-            routingContexts[profileID] = LLMRoutingContext(
-                routing: routing, localModelLabel: modelLabel,
-                localCloudHosts: localCloudHosts)
-        }
+        routingContexts[profileID] = context
         fusionLock.unlock()
         SupplyChainLog.shared.record(
             "[routing] \(routing.rawValue) for \(profileID.uuidString.prefix(8))")
