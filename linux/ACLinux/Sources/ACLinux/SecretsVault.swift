@@ -2,6 +2,7 @@ import CACLinuxShims
 import Crypto
 import Foundation
 import NIOConcurrencyHelpers
+import SandboxEngine
 
 /// Per-install master key + symmetric encryption for at-rest secrets: the
 /// Linux side of `SecretsVault` (Mitm/SecretsVault.swift). Same contract:
@@ -520,5 +521,26 @@ public enum VaultError: Error, CustomStringConvertible, Equatable {
         case .io(let what): return "vault I/O failed: \(what)"
         case .exists(let path): return "\(path) exists already"
         }
+    }
+}
+
+/// The shared code's Keychain stand-in (BACSecretStore: the enrollment's
+/// install token and leaf key, InstallIdentity's items) kept in this
+/// daemon's encrypted vault. Plugged in when the daemon starts.
+// @port-skip linux-only: plugs the vault into the shared BACSecretStore seam
+struct VaultSecretBackend: BACSecretStore.Backend {
+    // @port-skip linux-only: BACSecretStore seam
+    func store(service: String, account: String, data: Data) throws {
+        try VaultItems.set(data, service: service, account: account)
+    }
+
+    // @port-skip linux-only: BACSecretStore seam
+    func read(service: String, account: String) -> Data? {
+        try? VaultItems.get(service: service, account: account)
+    }
+
+    // @port-skip linux-only: BACSecretStore seam
+    func delete(service: String, account: String) {
+        VaultItems.delete(service: service, account: account)
     }
 }
