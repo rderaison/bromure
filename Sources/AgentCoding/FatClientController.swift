@@ -8864,6 +8864,7 @@ extension RemoteHostController: RemoteDelegationLink {
                                                         requestedHours: self.securityHistoryHours,
                                                         applied: self.securityHistoryApplied) else { return }
                     self.securityHistoryApplied = generation
+                    SecurityTimeline.shared.noteMachine(key, host: host)   // named before the first snapshot too
                     SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
                 }
             }
