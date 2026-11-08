@@ -92,6 +92,7 @@ extension Daemon {
         let released = releaseWhenFree.remove(id) != nil
         if released, let rec = registry.find(id) {
             sw.egress.setQuarantined(false, for: MAC(InterimSwitch.mac(rec.mac)))
+            if let pid = UUID(uuidString: id) { WorkspaceQuarantine.shared.set(false, for: pid) }
             Self.clearQuarantineMark(vmDir(id))
         }
         // Resumed unless it's known to be running (an API that didn't
@@ -134,6 +135,7 @@ extension Daemon {
         }
         AgentWatchdog.shared.markTripped(profileID: pid)
         sw.egress.setQuarantined(true, for: MAC(InterimSwitch.mac(rec.mac)))
+        WorkspaceQuarantine.shared.set(true, for: pid)
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': watchdog: still quarantined after the restart; asking again\n".utf8))
         return true
     }
@@ -162,7 +164,7 @@ extension Daemon {
     /// Keep quarantined (resumed, network still cut), or Release (network
     /// back, resumed, then a fresh window). No answer in 180 s keeps it
     /// quarantined. Alert mode only records (the watchdog's own event).
-    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=3eb8b5650bd7464b @a0266d0e
+    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=4c03e5e37ebfb6c3 @b91fddfb
     func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) async {
         guard mode == .quarantine else { return }
         await quarantineAndAsk(pid, signals: signals)
@@ -179,6 +181,9 @@ extension Daemon {
         let port = MAC(InterimSwitch.mac(rec.mac))
         let name = existingProfile(for: rec)?.name ?? rec.name
         sw.egress.setQuarantined(true, for: port)
+        // Every other host channel that reaches the network too: the proxy,
+        // the SSH agent, the MCP servers, the browser, the model bridge.
+        WorkspaceQuarantine.shared.set(true, for: pid)
         try? Data().write(to: URL(fileURLWithPath: Self.quarantineMark(vmDir(id))), options: .atomic)
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(name)': watchdog: quarantined\n".utf8))
         do { try await holdPause(id, machine) } catch {

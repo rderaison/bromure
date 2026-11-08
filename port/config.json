@@ -186,6 +186,7 @@
     "Sources/AgentCoding/Mitm/UnmanagedCredentialGuard.swift",
     "Sources/AgentCoding/Mitm/WebSocketFrames.swift",
     "Sources/AgentCoding/Mitm/WebSocketPII.swift",
+    "Sources/AgentCoding/Mitm/WorkspaceQuarantine.swift",
     "Sources/AgentCoding/Mitm/Zstd.swift",
     "Sources/AgentCoding/NetworkLineage.swift",
     "Sources/AgentCoding/OpenShellAdvisor.swift",

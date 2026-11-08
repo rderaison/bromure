@@ -359,7 +359,7 @@ extension Daemon {
                                            ("dmcp-", GuestPorts.delegationMCPVsockPort, delegation as any MCPLineHandler),
                                            ("sbmcp-", GuestPorts.switchboardMCPVsockPort, switchboard as any MCPLineHandler)] {
                 do {
-                    out.append(try MCPLineListener(udsPath: udsPath, port: port, server: server,
+                    out.append(try MCPLineListener(udsPath: udsPath, port: port, server: QuarantineGatedMCP(server, profileID: pid),
                                                    fdStoreName: prefix + short, stored: stored[prefix]))
                 } catch {
                     FileHandle.standardError.write(Data("bromure-ac daemon: '\(name)': no MCP listener on \(port): \(error)\n".utf8))

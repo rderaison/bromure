@@ -59,6 +59,7 @@ extension DaemonGlobalSuites {
             Daemon.watchdogAnswerForTesting.withLockedValue {
                 $0 = { _ in
                     let action = await d.sw.egress.handle(Self.frame, from: port)
+                    #expect(WorkspaceQuarantine.shared.contains(p.id), "every other host channel cut too")
                     seen.withLockedValue { $0 = (action, vm.calls.withLockedValue { $0 }) }
                     return 2
                 }
@@ -69,6 +70,7 @@ extension DaemonGlobalSuites {
             let asked = seen.withLockedValue { $0 }
             #expect(asked?.0 == .consumed && asked?.1 == ["pause"], "asked with the port cut and the VM paused")
             #expect(await d.sw.egress.handle(Self.frame, from: port) != .consumed, "released")
+            #expect(!WorkspaceQuarantine.shared.contains(p.id), "and the other channels with it")
             #expect(AgentWatchdog.shared.score(profileID: p.id) == 0, "a fresh window")
             await Self.tearDown(d, dir, prior)
         }
@@ -80,8 +82,10 @@ extension DaemonGlobalSuites {
             Self.trip(p.id)
             #expect(await Self.calls(vm, 2) == ["pause", "resume"])
             #expect(await d.sw.egress.handle(Self.frame, from: port) == .consumed, "still cut")
+            #expect(WorkspaceQuarantine.shared.contains(p.id), "kept: the other channels stay cut")
             // The session's end starts the watchdog over.
             await d.clearWorkspaceProxyState(p.id)
+            #expect(!WorkspaceQuarantine.shared.contains(p.id), "the quarantine ends with the session")
             #expect(AgentWatchdog.shared.score(profileID: p.id) == 0)
             await Self.tearDown(d, dir, prior)
         }

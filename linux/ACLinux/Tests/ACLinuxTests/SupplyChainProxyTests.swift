@@ -444,6 +444,27 @@ struct SupplyChainProxyTests {
         #expect(registry.requests.withLockedValue { $0 }.isEmpty, "nothing went up")
     }
 
+    /// A quarantined workspace's proxy: a request is refused (403) and never
+    /// goes up; a connection open when the quarantine starts is closed.
+    @Test func aQuarantinedWorkspacesProxyRefusesAndCuts() async throws {
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: false)) { _ in
+            Self.response(Data("{}".utf8), type: "application/json")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        // Open before the quarantine: cut when it starts.
+        let open = try await Guest(proxy: proxy, pid: pid, host: "example.com")
+        defer { open.close() }
+        WorkspaceQuarantine.shared.set(true, for: pid)
+        defer { WorkspaceQuarantine.shared.set(false, for: pid) }
+        #expect(open.readAll().isEmpty, "closed by the quarantine, nothing sent")
+        let g = try await Guest(proxy: proxy, pid: pid, host: "example.com")
+        defer { g.close() }
+        g.send("GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        let reply = String(decoding: g.readAll(), as: UTF8.self)
+        #expect(reply.hasPrefix("HTTP/1.1 403 ") && reply.contains("quarantined"), "\(reply.prefix(200))")
+        #expect(registry.requests.withLockedValue { $0 }.isEmpty, "nothing went up")
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()

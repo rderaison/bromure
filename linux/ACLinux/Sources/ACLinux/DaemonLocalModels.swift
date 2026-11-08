@@ -148,7 +148,8 @@ extension Daemon {
     func serveInference(_ rec: VMRecord, udsPath: String, stored: Int32?) -> InferenceBridgeListener? {
         guard mitm != nil, !rec.managed else { if let stored { close(stored) }; return nil }
         do {
-            return try InferenceBridgeListener(udsPath: udsPath, fdStoreName: "llm-" + rec.shortId, stored: stored)
+            return try InferenceBridgeListener(udsPath: udsPath, fdStoreName: "llm-" + rec.shortId, stored: stored,
+                                               profileID: UUID(uuidString: rec.id))
         } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no inference listener: \(error)\n".utf8))
             return nil
@@ -191,8 +192,8 @@ final class InferenceBridgeListener: @unchecked Sendable {
     let fdStoreName: String
     private let channel: Channel
 
-    // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=3d8ba10919c7dc7d @20aad0d2
-    init(udsPath: String, fdStoreName: String, stored: Int32?) throws {
+    // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=9e4a1c3a6305393e @b91fddfb
+    init(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.vsockPort)
         self.fdStoreName = fdStoreName
         let fd: Int32
@@ -203,8 +204,21 @@ final class InferenceBridgeListener: @unchecked Sendable {
         channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelInitializer { guest in
+                // A quarantined workspace reaches no model (a local engine's
+                // or a provider's); a quarantine closes a connection open.
+                if let profileID {
+                    // Refused: a failed initializer (NIO closes the child; a
+                    // close inside the initializer trips its assertion).
+                    if WorkspaceQuarantine.shared.contains(profileID) {
+                        return guest.eventLoop.makeFailedFuture(ChannelError.inputClosed)
+                    }
+                    let cut = WorkspaceQuarantine.shared.onQuarantine(profileID, runNow: false) { [weak guest] in
+                        guest?.close(promise: nil)
+                    }
+                    guest.closeFuture.whenComplete { _ in WorkspaceQuarantine.shared.remove(cut, for: profileID) }
+                }
                 // Paused until the proxy side is connected.
-                guest.setOption(ChannelOptions.autoRead, value: false).flatMap {
+                return guest.setOption(ChannelOptions.autoRead, value: false).flatMap {
                     ClientBootstrap(group: guest.eventLoop)
                         .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
                         .connect(host: "127.0.0.1", port: InferenceRepairProxy.shared.listenPort)

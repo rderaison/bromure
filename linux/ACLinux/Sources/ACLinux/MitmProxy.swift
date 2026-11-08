@@ -861,6 +861,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// The filter's say on reading the guest: false while it holds too much.
     private var filterWantsGuest = true
     static let maxHeld = 1 << 20
+    /// This connection's cut at its workspace's quarantine (WorkspaceQuarantine).
+    private var quarantineCut: UUID?
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
@@ -872,6 +874,17 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         self.tls = tls
         self.pinned = pinned
         self.identity = identity
+    }
+
+    /// A quarantine's start closes the connection, whatever it carries (an
+    /// upgraded tunnel included); one opened during a quarantine has its
+    /// request refused (rewrite), not closed under the initializer.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func handlerAdded(context: ChannelHandlerContext) {
+        let channel = context.channel
+        quarantineCut = WorkspaceQuarantine.shared.onQuarantine(profileID, runNow: false) { [weak channel] in
+            channel?.close(promise: nil)
+        }
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -941,6 +954,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
+        if let quarantineCut { WorkspaceQuarantine.shared.remove(quarantineCut, for: profileID) }
         wsFilter?.cancel()           // a scan, and an ask it's waiting on, dropped
         upstream?.close(promise: nil)
         relay = nil
@@ -982,6 +996,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                         session: UInt64, trace: inout Trace?,
                         identity: OpenShellPolicy.BinaryIdentity? = nil) async -> Plan {
         var req = origin(raw)
+        // A quarantined workspace's requests go nowhere.
+        if WorkspaceQuarantine.shared.contains(profileID) {
+            return .answer(RequestReader.simple(403, "Forbidden", body: WorkspaceQuarantine.refusal + "\n"))
+        }
         if let answer = await policyAnswer(&req, proxy: proxy, profileID: profileID, host: host, port: port, tls: tls,
                                            session: session, identity: identity) {
             return .answer(answer)

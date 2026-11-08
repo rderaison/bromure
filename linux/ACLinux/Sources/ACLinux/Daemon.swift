@@ -1304,6 +1304,9 @@ public actor Daemon {
         // "Allow for the rest of the session" ends with the session, for every
         // consent broker, and the imported-key approvals and host-agent keys
         // with it (macOS: MitmEngine.unregister).
+        // A quarantine ends with its session (the next one starts unquarantined
+        // unless the restart's re-ask quarantines it again).
+        WorkspaceQuarantine.shared.set(false, for: pid)
         mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
         // Its ssh-agent: the imported keys exist only in that process
@@ -1454,7 +1457,8 @@ public actor Daemon {
         do {
             if rec.kube == nil {
                 browser = try await MainActor.run { [qc] in
-                    try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId)
+                    try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
+                                         profileID: UUID(uuidString: rec.id))
                 }
             }
         } catch {
@@ -1614,7 +1618,7 @@ public actor Daemon {
                     if rec.kube == nil {
                         browser = try await MainActor.run { [qc] in
                             try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
-                                                 stored: storedBrowser)
+                                                 stored: storedBrowser, profileID: UUID(uuidString: rec.id))
                         }
                     } else if let storedBrowser {
                         close(storedBrowser)

@@ -23,6 +23,8 @@ extension MitmProxy {
         // socket, and a pool would let a few hundred idle guest connections
         // starve every other VM's.
         Thread.detachNewThread { [self] in
+            // A quarantined workspace's flows go nowhere.
+            if WorkspaceQuarantine.shared.contains(profileID) { close(appFD); return }
             // A frame the guest addressed to loopback / link-local reaches
             // the switch only if it was forged; never dial the host's own.
             // A multi-user server's own addresses are refused too, as the

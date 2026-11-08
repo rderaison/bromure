@@ -19,12 +19,16 @@ final class BrowserMCPBridge {
     private var acceptSource: DispatchSourceRead?
     private var relay: RelayMux?
     private var waiting: [Int32] = []
+    /// The workspace, whose quarantine drops every agent and refuses new ones.
+    private let profileID: UUID?
+    private var quarantineCut: UUID?
 
     /// Listens on `<udsPath>_5830`, or on `stored` (a restarted daemon's,
     /// from the fd store), and keeps the listener in the store as `fdStoreName`.
     // @port-skip linux-only: Linux browser MCP bridge
-    init(udsPath: String, fdStoreName: String, stored: Int32? = nil) throws {
+    init(udsPath: String, fdStoreName: String, stored: Int32? = nil, profileID: UUID? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.port)
+        self.profileID = profileID
         if let stored {
             listenFD = stored
         } else {
@@ -37,6 +41,21 @@ final class BrowserMCPBridge {
         src.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.acceptAll() } }
         acceptSource = src
         src.activate()
+        if let profileID {
+            quarantineCut = WorkspaceQuarantine.shared.onQuarantine(profileID) { [weak self] in
+                Task { @MainActor in self?.dropAgents() }
+            }
+        }
+    }
+
+    /// A quarantine: the client's channel and every agent, waiting or
+    /// relayed, go (a later agent is refused at accept while it lasts).
+    // @port-skip linux-only: Linux browser MCP bridge
+    func dropAgents() {
+        relay?.close()
+        relay = nil
+        for w in waiting { Glibc.close(w) }
+        waiting.removeAll()
     }
 
     /// Accepts until the backlog is empty (one event may stand for several).
@@ -55,6 +74,10 @@ final class BrowserMCPBridge {
 
     // @port-skip linux-only: Linux browser MCP bridge
     private func adopt(_ fd: Int32) {
+        if let profileID, WorkspaceQuarantine.shared.contains(profileID) {
+            Glibc.close(fd)
+            return
+        }
         if let relay, relay.isAlive {
             relay.add(fd: fd, close: { Glibc.close(fd) })
             FatClientLog.log("browser-mcp: agent joined the fat-client relay (\(relay.agentCount) on it)")
@@ -85,6 +108,7 @@ final class BrowserMCPBridge {
     /// agents closed, the socket file removed.
     // @port-skip linux-only: BrowserMCPVsockBridge.stop
     func stop() {
+        if let quarantineCut, let profileID { WorkspaceQuarantine.shared.remove(quarantineCut, for: profileID) }
         acceptSource?.cancel()
         acceptSource = nil
         Glibc.close(listenFD)
