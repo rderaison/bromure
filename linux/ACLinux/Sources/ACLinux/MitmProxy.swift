@@ -24,7 +24,7 @@ import X509
 /// workspace's trace level). The workspace's policy chain runs on each
 /// request first (MitmEgress.swift): OpenShell's checks, the middleware,
 /// the guardrails, compromise detection and strict credential mode.
-// partial: no PII or supply-chain policy on Linux yet; prompt injection: WebSocket turns not scanned
+// partial: no PII or supply-chain policy on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -726,6 +726,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// (the guest gets its reply and the close, and asks again).
     private var awaitingUpgrade = false
     private var upgraded = false
+    /// A guarded WebSocket's client → model direction (WebSocketGuardLinux.swift).
+    private var wsFilter: WSClientFilter?
+    /// The filter's say on reading the guest: false while it holds too much.
+    private var filterWantsGuest = true
     static let maxHeld = 1 << 20
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -744,6 +748,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var b = unwrapInboundIn(data)
         if started {
             if upgraded, let upstream {
+                if let wsFilter {
+                    wsFilter.feed(Data(b.readableBytesView))
+                    if !upstream.isWritable { _ = context.channel.setOption(ChannelOptions.autoRead, value: false) }
+                    return
+                }
                 upstream.write(b, promise: nil)
                 // The upstream can't take more: the guest isn't read until it
                 // drains (its ResponseRelay resumes it). Paused before the flush.
@@ -789,6 +798,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
+        wsFilter?.cancel()           // a scan, and an ask it's waiting on, dropped
         upstream?.close(promise: nil)
         context.fireChannelInactive()
     }
@@ -801,7 +811,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     enum Plan {
         case answer(Data)
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
-                     mint: CredentialMint.Kind? = nil)
+                     mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -935,6 +945,15 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if capture == nil, tracedBodies || UnmanagedCredentialGuard.shared.isEnabled(for: profileID) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
+        // A model provider's WebSocket with prompt injection on: its frames are
+        // read (WSClientFilter), so the upgrade declines permessage-deflate
+        // and both legs carry plain frames (macOS: WSHandshake, then
+        // WSTransformRelay). Otherwise the socket stays an opaque pipe.
+        var ws: WSPromptGuard?
+        if upgrade, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host) {
+            ws = g
+            req = WSHandshake.strippingExtensions(req).request
+        }
         var out = upgrade ? req : closing(req)
         // An AWS request (SigV4 with the guest's fake keys) re-signed with the
         // real ones, last, over the headers as they go out; a use the user
@@ -947,7 +966,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
             return .answer(response)
         }
-        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint)
+        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws)
     }
 
     /// The guest drained: the upstream may be read again (ResponseRelay
@@ -964,7 +983,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint):
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws):
             proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, pinned: pinned,
                                   on: channel.eventLoop).whenComplete { r in
                 switch r {
@@ -977,15 +996,32 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 case .success(let up):
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
                                               capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
-                                              mint: mint.map { (self.proxy.credentialMinter, $0) }, strictSession: session)
+                                              mint: mint.map { (self.proxy.credentialMinter, $0) }, strictSession: session,
+                                              ws: ws)
+                    relay.onUpstreamWritable = { self.readGuestIfAllowed(channel) }
                     // The upgrade's held bytes follow the 101; anything else's are dropped.
-                    relay.onSwitched = { switched in
+                    relay.onSwitched = { switched, server in
                         channel.eventLoop.execute {
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
-                                for p in self.pending { up.write(p, promise: nil) }
-                                up.flush()
+                                if let ws, let server {
+                                    // The guest's frames go through the scan;
+                                    // its reads pause while too much is held.
+                                    self.wsFilter = WSClientFilter(
+                                        guard: ws, loop: channel.eventLoop,
+                                        toUpstream: { up.writeAndFlush(up.allocator.buffer(bytes: $0), promise: nil) },
+                                        toGuest: { server.inject($0) },
+                                        setReading: { on in
+                                            self.filterWantsGuest = on
+                                            self.readGuestIfAllowed(channel)
+                                        },
+                                        fail: { channel.close(promise: nil) })
+                                    for p in self.pending { self.wsFilter?.feed(Data(p.readableBytesView)) }
+                                } else {
+                                    for p in self.pending { up.write(p, promise: nil) }
+                                    up.flush()
+                                }
                             }
                             self.pending.removeAll()
                             self.pendingBytes = 0
@@ -1003,6 +1039,20 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 }
             }
         }
+    }
+
+    /// The upstream of an upgraded stream, for tests (on the loop).
+    // @port-skip linux-only: a test seam on the NIO proxy
+    var upstreamForTesting: Channel? { upstream }
+
+    /// The one decision on reading the guest again, whichever pause ends
+    /// (the upstream draining, a guarded WebSocket's filter letting go): only
+    /// when the upstream can take more and the filter isn't holding too much.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    private func readGuestIfAllowed(_ channel: Channel) {
+        let on = filterWantsGuest && (upstream?.isWritable ?? true)
+        _ = channel.setOption(ChannelOptions.autoRead, value: on)
+        if on, wsFilter != nil { channel.read() }
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1086,9 +1136,15 @@ final class ResponseRelay: ChannelInboundHandler {
     let trace: RequestReader.Trace?
     private var head = ByteBuffer()
     private var headDone = false
-    /// An upgrade's reply: told whether it switched protocols (a 101),
-    /// once its head is in.
-    var onSwitched: ((Bool) -> Void)?
+    /// An upgrade's reply: whether it switched protocols (a 101), and the
+    /// server side of a guarded WebSocket when its frames are read.
+    var onSwitched: ((Bool, WSServerSide?) -> Void)?
+    /// The upstream drained: the guest may be read again, if nothing else
+    /// holds it (RequestReader.readGuestIfAllowed).
+    var onUpstreamWritable: (() -> Void)?
+    /// The upgrade's prompt-injection guard (nil: an opaque pipe).
+    private let ws: WSPromptGuard?
+    private var wsServer: WSServerSide?
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1118,8 +1174,10 @@ final class ResponseRelay: ChannelInboundHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
-         host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0) {
+         host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0,
+         ws: WSPromptGuard? = nil) {
         self.guest = guest
+        self.ws = ws
         self.mint = mint
         self.host = host
         self.profileID = profileID
@@ -1160,7 +1218,13 @@ final class ResponseRelay: ChannelInboundHandler {
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
             keepForLearning(b.readableBytesView)
             relayed = true
-            guest.write(b, promise: nil)
+            if let wsServer {
+                // As it comes; a refused turn's event between two messages.
+                guard let out = wsServer.feed(Data(b.readableBytesView)) else { context.close(promise: nil); return }
+                if !out.isEmpty { guest.write(guest.allocator.buffer(bytes: out), promise: nil) }
+            } else {
+                guest.write(b, promise: nil)
+            }
             holdIfGuestFull(context)
             return
         }
@@ -1195,13 +1259,30 @@ final class ResponseRelay: ChannelInboundHandler {
         if upgrade, Self.status(head0) == 101 {
             // Switched: the head as it is, then the stream both ways.
             noteStatus(head0)
-            onSwitched?(true)
-            out = head0 + rest
+            var early = rest
+            if let ws {
+                if let ext = WSHandshake.extensions(inResponse: head0) {
+                    // An extension in use anyway (one it wasn't offered): frames
+                    // that can't be read, so the opaque pipe, and said so
+                    // (macOS: driveTLS's fallback to the pump).
+                    ProxyPolicy.recordScanSkipped(host: ws.host, path: "", engines: ["prompt_injection"],
+                                                  reason: "WebSocket extension \(ext) in use", profileID: ws.profileID)
+                } else {
+                    let guest = self.guest
+                    let server = WSServerSide(loop: context.eventLoop,
+                                              write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) })
+                    wsServer = server
+                    guard let read = server.feed(rest) else { context.close(promise: nil); return }
+                    early = read
+                }
+            }
+            onSwitched?(true, wsServer)
+            out = head0 + early
         } else {
             // One response, then the close: an upgrade the upstream refused
             // too (the request side drops what the guest sends after it, so a
             // client reusing the connection must be told it's done).
-            if upgrade { onSwitched?(false) }
+            if upgrade { onSwitched?(false, nil) }
             let h = HTTPRequestFraming.replacingHeaders(head0, drop: ["connection", "keep-alive"], add: "Connection: close")
             noteStatus(h)
             out = h + rest
@@ -1235,7 +1316,7 @@ final class ResponseRelay: ChannelInboundHandler {
     /// The upstream drained: the guest (an upgraded stream's) may be read again.
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable { _ = guest.setOption(ChannelOptions.autoRead, value: true) }
+        if context.channel.isWritable { onUpstreamWritable?() }
         context.fireChannelWritabilityChanged()
     }
 
