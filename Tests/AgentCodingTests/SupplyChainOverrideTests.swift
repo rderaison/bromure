@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// GitHub issue #54: "Override socket.dev decisions per NPM package". A
 /// package a reputation check blocked got a silent 451 and no way to let
@@ -87,6 +91,8 @@ struct SupplyChainOverrideTests {
         #expect(o.kind == .info && o.decision.contains("allowed by you") && o.package == nil)
     }
 
+    // The timeline row's action (SupplyChainRowContext) is the app's UI.
+    #if !canImport(ACLinux)
     @Test("the row's action knows when the package is allowed since")
     @MainActor func rowContext() throws {
         var p = bromure_ac.Profile(name: "ws", tool: .claude, authMode: .token)
@@ -100,4 +106,5 @@ struct SupplyChainOverrideTests {
         e.machine = "ark"
         #expect(try #require(SupplyChainRowContext(e, profiles: [p])).isRemote)
     }
+    #endif
 }

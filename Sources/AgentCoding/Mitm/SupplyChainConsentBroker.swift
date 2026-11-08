@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 
 /// Consent broker for the `lockfilePrompt` supply-chain layer (and
 /// any other ask-the-user paths the policy fires). Same shape as
