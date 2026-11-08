@@ -34,8 +34,11 @@ extension Daemon {
     /// `GET /cloud`: the enrollment state.
     // @port Status.run() h=87d8bf927cca38e9 @8775ec87
     func cloudStatus() -> ControlResponse {
-        guard let install = BACEnrollmentStore.load() else { return ControlResponse(200, ["enrolled": false]) }
+        // Where the enrollment's secrets are kept: the file fallback is weaker.
+        let vault: JSONValue = SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null
+        guard let install = BACEnrollmentStore.load() else { return ControlResponse(200, ["enrolled": false, "vault": vault]) }
         return ControlResponse(200, .object([
+            "vault": vault,
             "enrolled": true,
             "workspace": .string(install.orgSlug),
             "user": .string(install.userEmail),
@@ -56,7 +59,14 @@ extension Daemon {
         guard let code = body["code"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
             return .error(400, "An enrollment code is required")
         }
-        let url = body["serverURL"]?.stringValue.flatMap(URL.init(string:))
+        // A server URL given must be one (never a silent fall back to production).
+        var url: URL?
+        if let raw = body["serverURL"]?.stringValue {
+            guard let u = URL(string: raw), let scheme = u.scheme?.lowercased(), ["http", "https"].contains(scheme), u.host != nil else {
+                return .error(400, "serverURL isn't an http(s) URL: \(raw)")
+            }
+            url = u
+        }
         let device = body["deviceName"]?.stringValue ?? ProcessInfo.processInfo.hostName
         do {
             let install = try await BACEnrollment.shared.enroll(code: code, serverURL: url, deviceName: device)

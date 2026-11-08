@@ -528,6 +528,9 @@ struct Cloud: AsyncParsableCommand {
             let r = try client().request("GET", "/cloud")
             try check(r, "status")
             if json { print(r.json); return }
+            if r.json["vault"]?.stringValue == "file-fallback" {
+                FileHandle.standardError.write(Data("note: secrets are in the vault's file fallback (its key sits beside them; no systemd-creds sealing)\n".utf8))
+            }
             guard r.json["enrolled"] == .bool(true) else { print("not enrolled"); return }
             let f = { (k: String) in r.json[k]?.stringValue ?? "?" }
             print("""

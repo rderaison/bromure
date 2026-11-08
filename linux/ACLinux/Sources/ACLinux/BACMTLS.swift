@@ -130,7 +130,9 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
         let context: NIOSSLContext
         do { context = try NIOSSLContext(configuration: tls) } catch { return finish(nil, nil, error) }
         let port = url.port ?? 443
-        let head = Self.requestBytes(req, url: url, host: host, port: port)
+        guard let head = Self.requestBytes(req, url: url, host: host, port: port) else {
+            return finish(nil, nil, Refused(description: "a header name or value carries CR or LF"))
+        }
         let collector = ResponseCollector()
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let deadline = loop.scheduleTask(in: .milliseconds(Int64(timeout * 1000))) { [weak self] in
@@ -153,6 +155,8 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
                     deadline.cancel()
                     finish(nil, nil, e)
                 case .success(let ch):
+                    // The deadline fired while connecting: answered already, closed now.
+                    if done.withLockedValue({ $0 }) { ch.close(promise: nil); return }
                     self?.open.withLockedValue { $0[ObjectIdentifier(collector)] = ch }
                     collector.onDone = { bytes, error in
                         deadline.cancel()
@@ -184,12 +188,18 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
 
     /// The request as it goes on the wire.
     // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
-    static func requestBytes(_ req: URLRequest, url: URL, host: String, port: Int) -> [UInt8] {
-        var target = url.path.isEmpty ? "/" : url.path
-        if let q = url.query { target += "?" + q }
+    static func requestBytes(_ req: URLRequest, url: URL, host: String, port: Int) -> [UInt8]? {
+        let c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var target = (c?.percentEncodedPath).flatMap { $0.isEmpty ? nil : $0 } ?? "/"
+        if let q = c?.percentEncodedQuery { target += "?" + q }
+        // Nothing that could split the request: no CR or LF anywhere in a header.
+        let fields = req.allHTTPHeaderFields ?? [:]
+        guard !(fields.keys.joined() + fields.values.joined() + target).contains(where: { $0 == "\r" || $0 == "\n" }) else {
+            return nil
+        }
         let body = req.httpBody ?? Data()
         var head = "\(req.httpMethod ?? "GET") \(target) HTTP/1.1\r\nHost: \(port == 443 ? host : "\(host):\(port)")\r\n"
-        for (k, v) in req.allHTTPHeaderFields ?? [:] {
+        for (k, v) in fields {
             switch k.lowercased() {
             case "host", "content-length", "connection", "transfer-encoding": continue
             default: head += "\(k): \(v)\r\n"
@@ -216,33 +226,60 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
     }
 }
 
-/// Reads a response until the server closes (or its Content-Length is in).
+/// Reads a response whole: to its Content-Length, its chunked body's
+/// terminator, or (neither) the server's close. At most `maxBytes`; a close
+/// (or a TLS shutdown without close_notify) before a length-framed or
+/// chunked body is complete is a lost connection, not a short reply.
 // @port-skip linux-only: NIO plumbing of the mTLS client
 final class ResponseCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
+    static let maxBytes = 4 << 20
     var onDone: (([UInt8], Error?) -> Void)?
     private var bytes: [UInt8] = []
     private var finished = false
+    /// How the body ends, once the head is in (parsed once).
+    enum Framing: Equatable { case length(total: Int), chunked(bodyStart: Int), toClose }
+    private var framing: Framing?
+
+    struct TooLarge: Error, CustomStringConvertible {
+        // @port-skip linux-only: the mTLS client's limit
+        var description: String { "the response is over \(ResponseCollector.maxBytes) bytes" }
+    }
 
     // @port-skip linux-only: NIO plumbing of the mTLS client
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buf = unwrapInboundIn(data)
         if let b = buf.readBytes(length: buf.readableBytes) { bytes += b }
-        if let need = Self.completeLength(bytes), bytes.count >= need {
-            done(nil)
-            context.close(promise: nil)
+        guard bytes.count <= Self.maxBytes else {
+            done(TooLarge()); context.close(promise: nil); return
         }
+        if framing == nil { framing = Self.framing(of: bytes) }
+        if isComplete { done(nil); context.close(promise: nil) }
     }
 
     // @port-skip linux-only: NIO plumbing of the mTLS client
-    func channelInactive(context: ChannelHandlerContext) { done(nil) }
+    func channelInactive(context: ChannelHandlerContext) {
+        done(framing == .toClose || isComplete ? nil : URLError(.networkConnectionLost))
+    }
 
     // @port-skip linux-only: NIO plumbing of the mTLS client
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        // A close without close_notify after a whole response is fine.
-        if let e = error as? NIOSSLError, case .uncleanShutdown = e, !bytes.isEmpty { return done(nil) }
-        done(error)
+        // No close_notify: fine only after a body known to be whole.
+        if let e = error as? NIOSSLError, case .uncleanShutdown = e {
+            done(isComplete ? nil : URLError(.networkConnectionLost))
+        } else {
+            done(error)
+        }
         context.close(promise: nil)
+    }
+
+    // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
+    private var isComplete: Bool {
+        switch framing {
+        case .length(let total)?: return bytes.count >= total
+        case .chunked(let start)?: return HTTPRequestFraming.dechunkedBody(Data(bytes[start...])) != nil
+        default: return false
+        }
     }
 
     // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
@@ -252,18 +289,21 @@ final class ResponseCollector: ChannelInboundHandler, @unchecked Sendable {
         onDone?(bytes, error)
     }
 
-    /// The total length once the head and a Content-Length are in; nil
-    /// otherwise (read to the close).
+    /// The response's framing once its head is in; nil before.
     // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
-    static func completeLength(_ b: [UInt8]) -> Int? {
+    static func framing(of b: [UInt8]) -> Framing? {
         let data = Data(b)
         guard let end = data.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let bodyStart = end.upperBound - data.startIndex
         let head = String(decoding: data[data.startIndex..<end.lowerBound], as: UTF8.self).lowercased()
-        for l in head.components(separatedBy: "\r\n") where l.hasPrefix("content-length:") {
-            if let n = Int(l.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) {
-                return end.upperBound - data.startIndex + n
+        var chunked = false
+        for l in head.components(separatedBy: "\r\n") {
+            if l.hasPrefix("content-length:"),
+               let n = Int(l.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)), n >= 0 {
+                return .length(total: bodyStart + n)
             }
+            if l.hasPrefix("transfer-encoding:"), l.contains("chunked") { chunked = true }
         }
-        return nil
+        return chunked ? .chunked(bodyStart: bodyStart) : .toClose
     }
 }

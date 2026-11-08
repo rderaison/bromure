@@ -57,6 +57,13 @@ struct BACMTLSTests {
             class H(http.server.BaseHTTPRequestHandler):
                 protocol_version = "HTTP/1.1"
                 def do_POST(self):
+                    if self.path == "/cut":
+                        self.wfile.write(b"HTTP/1.1 200 OK\\r\\nContent-Length: 100\\r\\n\\r\\n0123456789"); self.wfile.flush()
+                        self.connection.close(); return
+                    if self.path == "/big":
+                        big = b"x" * (5 << 20)
+                        self.send_response(200); self.send_header("Content-Length", str(len(big))); self.end_headers()
+                        self.wfile.write(big); return
                     n = int(self.headers.get("Content-Length") or 0)
                     body = self.rfile.read(n)
                     peer = dict(x[0] for x in self.connection.getpeercert()["subject"])
@@ -145,5 +152,44 @@ struct BACMTLSTests {
             _ = try await client.data(for: URLRequest(url: URL(string: "http://127.0.0.1:9/")!))
         }
     }
-}
 
+    @Test func aReplyCutShortIsALostConnection() async throws {
+        let rig = try Rig()
+        let m = rig.material
+        let client = NIOMTLSHTTPClient(timeout: 10, identity: { m }, extraRoots: rig.ca)
+        do {
+            _ = try await client.data(for: rig.request("/cut"))
+            Issue.record("a cut reply was taken as whole")
+        } catch let e as URLError {
+            #expect(e.code == .networkConnectionLost)
+        }
+    }
+
+    @Test func aReplyOverTheCapIsRefused() async throws {
+        let rig = try Rig()
+        let m = rig.material
+        let client = NIOMTLSHTTPClient(timeout: 20, identity: { m }, extraRoots: rig.ca)
+        await #expect(throws: ResponseCollector.TooLarge.self) { _ = try await client.data(for: rig.request("/big")) }
+    }
+
+    @Test func aHeaderCannotSplitTheRequest() {
+        var r = URLRequest(url: URL(string: "https://127.0.0.1:9/a%20b?x=1%262")!)
+        r.setValue("v\r\nX-Injected: 1", forHTTPHeaderField: "X-Test")
+        // Refused (the client's check), or never set (Foundation drops a
+        // value with CR or LF on Linux): either way no injected line goes out.
+        let bytes = NIOMTLSHTTPClient.requestBytes(r, url: r.url!, host: "127.0.0.1", port: 9)
+        #expect(!String(decoding: bytes ?? [], as: UTF8.self).contains("X-Injected"))
+        var ok = URLRequest(url: URL(string: "https://127.0.0.1:9/a%20b?x=1%262")!)
+        ok.httpMethod = "POST"
+        let line = String(decoding: NIOMTLSHTTPClient.requestBytes(ok, url: ok.url!, host: "127.0.0.1", port: 9) ?? [], as: UTF8.self)
+        #expect(line.hasPrefix("POST /a%20b?x=1%262 HTTP/1.1\r\n"), "the path as encoded: \(line.prefix(40))")
+    }
+
+    @Test func theFramingIsReadFromTheHead() {
+        func f(_ s: String) -> ResponseCollector.Framing? { ResponseCollector.framing(of: Array(s.utf8)) }
+        #expect(f("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n") == nil, "head not in yet")
+        #expect(f("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n") == .length(total: 43))
+        #expect(f("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n") == .chunked(bodyStart: 47))
+        #expect(f("HTTP/1.1 200 OK\r\n\r\n") == .toClose)
+    }
+}
