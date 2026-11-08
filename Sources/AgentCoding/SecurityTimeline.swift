@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 import Observation
 
 /// A live, on-device record of what Bromure's security engines actually did —

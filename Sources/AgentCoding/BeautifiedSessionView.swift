@@ -2196,16 +2196,9 @@ final class BeautifiedSessionModel: ObservableObject {
         queue.contains { $0.sending || ($0.isDelivered && !delivered.contains($0.id)) }
     }
 
-    /// The tmux key that interrupts this agent: what its busy line says, else
-    /// what its kind takes (Grok: Ctrl-C; the others: Esc).
+    /// The tmux key that interrupts this agent (AgentInterrupt.key).
     nonisolated static func interruptKey(screen: String, agent: String?) -> String {
-        for raw in screen.split(whereSeparator: \.isNewline).suffix(14).reversed() {
-            let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
-            if l.contains("ctrl+c to interrupt") || l.contains("ctrl-c to interrupt") { return "C-c" }
-            if l.contains("esc to interrupt") { return "Escape" }
-            if l.hasSuffix("[stop]") || l == "[stop]" { return "C-c" }   // Grok's busy line
-        }
-        return agent == "grok" ? "C-c" : "Escape"
+        AgentInterrupt.key(screen: screen, agent: agent)
     }
 
     /// The last lines of the agent's pane, as on screen ("" if unreadable).

@@ -11,7 +11,7 @@ import SandboxEngine
 enum SwitchEgressReport {
     /// `engine`: the MiTM engine whose guardrails explain an identity-gate
     /// denial (nil: the event goes without its reason).
-    static func record(_ ev: VMNetSwitch.EgressEvent, engine: MitmEngine? = nil) {
+    static func record(_ ev: VMNetSwitch.EgressEvent, engine: (any GuardrailsConfigSource)? = nil) {
         let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
         let host = ev.proto == 41 ? "(no IPv6 rules)"
                  : (ev.hostnames.first ?? UtunPacket.ipString(ev.dstIP))
@@ -67,4 +67,11 @@ enum SwitchEgressReport {
             BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "egress.firewall", eventData: eventData)
         }
     }
+}
+
+/// Each workspace's guardrails, as the engine that enforces them holds
+/// them: what SwitchEgressReport asks why a flow was denied (the macOS
+/// app's MitmEngine; the Linux daemon's proxy).
+protocol GuardrailsConfigSource: AnyObject {
+    func guardrailsConfig(for profileID: UUID) -> GuardrailsConfig?
 }

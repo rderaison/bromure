@@ -1030,3 +1030,5 @@ private final class AWSCredsListenerDelegate: NSObject, VZVirtioSocketListenerDe
         return true
     }
 }
+
+extension MitmEngine: GuardrailsConfigSource {}

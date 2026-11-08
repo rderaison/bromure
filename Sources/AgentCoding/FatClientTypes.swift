@@ -2,7 +2,11 @@ import Foundation
 #if canImport(os)
 import os
 #endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 // MARK: - Fat-client shared types (platform-independent)
 //

@@ -496,7 +496,7 @@ final class SwitchboardEngine {
                 Task {
                     let screen = (try? await delegate.guestExec(profileID: pid,
                         command: "tmux capture-pane -p -t bromure:\(w) 2>/dev/null | tail -n 30", timeout: 10)) ?? ""
-                    let key = BeautifiedSessionModel.interruptKey(screen: screen, agent: tool)
+                    let key = AgentInterrupt.key(screen: screen, agent: tool)
                     _ = try? await delegate.guestExec(profileID: pid,
                                                       command: "tmux send-keys -t bromure:\(w) \(key)", timeout: 10)
                 }
