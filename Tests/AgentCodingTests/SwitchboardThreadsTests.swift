@@ -34,6 +34,44 @@ struct SwitchboardThreadsTests {
         #expect(m("fix-login then add-apple-pay") == ["fix-login", "add-apple-pay"])
     }
 
+    @Test("names next to accented letters, in numbered lists, at text's ends, several times over")
+    func mentionEdges() {
+        let m = { SwitchboardThreading.mentions(in: $0, aliases: self.aliases) }
+        #expect(m("éadd-apple-pay") == [], "an accented letter is part of the word")
+        #expect(m("add-apple-payé") == [])
+        #expect(m("café add-apple-pay") == ["add-apple-pay"])
+        #expect(m("12. infra is done") == ["infra"])
+        #expect(m("done\n  - infra next") == ["infra"])
+        #expect(m("done, infra next") == [], "mid-line, unmarked")
+        #expect(m("“infra” finished") == ["infra"])
+        #expect(m("infra") == ["infra"])
+        #expect(m("fix-login, fix-login and add-apple-pay, fix-login") == ["fix-login", "add-apple-pay"])
+        #expect(m("") == [])
+        #expect(SwitchboardThreading.mentions(in: "fix-login", aliases: []) == [])
+    }
+
+    @Test("a long Switchboard history threads in well under a second")
+    func manyItems() {
+        // Searched name by name, 6,000 items over 40 sessions took ~2 s on the main
+        // thread when the Switchboard first opened; read once per message, ~0.07 s.
+        let sessions = (0..<40).map { n in
+            SwitchboardThreading.Alias(text: "task-\(n)-handle", key: "task-\(n)-handle", name: "task-\(n)-handle", sessionID: UUID())
+        }.sorted { $0.text.count > $1.text.count }
+        let para = String(repeating: "Some ordinary words about the work going on, nothing special. ", count: 8)
+        var items: [TranscriptItem] = []
+        for i in 0..<1_500 {
+            let h = "task-\(i % 40)-handle"
+            items.append(user(items.count, "[Switchboard] “\(h)” finished its turn — call next_events."))
+            items.append(tool(items.count, session: h))
+            items.append(result(items.count))
+            items.append(reply(items.count, "• \(h) is done.\n\n\(para)\n\n- task-\((i + 1) % 40)-handle is working.\n\n\(para)"))
+        }
+        let start = Date()
+        let c = SwitchboardThreading.analyze(items, aliases: sessions)
+        #expect(c.threads.count == 40)
+        #expect(Date().timeIntervalSince(start) < 1.5, "debug build; the old scan took ~2 s optimised")
+    }
+
     @Test("a longer name wins over a shorter one inside it")
     func longestName() {
         let a = ["api", "api-docs"].map { SwitchboardThreading.Alias(text: $0, key: $0, name: $0, sessionID: UUID()) }

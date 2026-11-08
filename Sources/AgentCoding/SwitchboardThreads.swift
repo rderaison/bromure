@@ -99,9 +99,28 @@ enum SwitchboardThreading {
         return out.sorted { $0.text.count > $1.text.count }   // the longest name wins
     }
 
-    private static func isWordChar(_ c: Character?) -> Bool {
-        guard let c else { return false }
-        return c.isLetter || c.isNumber || c == "-" || c == "_"
+    /// The aliases ready to look for: by first character, so a message is read
+    /// once instead of once per name (a busy Switchboard has thousands of
+    /// messages and two names a session; searched name by name, opening it
+    /// froze the window for seconds). In Unicode scalars: comparing and hashing
+    /// `Character`s costs more than the whole rest of the scan.
+    struct AliasIndex {
+        struct Entry {
+            var rank: Int            // in `aliases`' order: the longest first
+            var scalars: [Unicode.Scalar]
+            var key: String
+            var compound: Bool
+        }
+        fileprivate var byFirst: [Unicode.Scalar: [Entry]] = [:]
+
+        init(_ aliases: [Alias]) {
+            for (rank, a) in aliases.enumerated() where a.text.count >= 3 {
+                let scalars = Array(a.text.unicodeScalars)
+                byFirst[scalars[0], default: []].append(Entry(
+                    rank: rank, scalars: scalars, key: a.key,
+                    compound: a.text.contains("-") || a.text.contains(" ")))
+            }
+        }
     }
 
     /// The sessions `text` refers to, in order of mention. A handle of several
@@ -109,29 +128,66 @@ enum SwitchboardThreading {
     /// plain English: it counts only marked as a name (`@infra`, `infra` in code
     /// or quotes or bold) or leading its line.
     static func mentions(in text: String, aliases: [Alias]) -> [String] {
-        let lower = text.lowercased()
-        var found: [(at: String.Index, key: String)] = []
-        var claimed: [Range<String.Index>] = []
-        for a in aliases where a.text.count >= 3 {
-            var from = lower.startIndex
-            while let r = lower.range(of: a.text, range: from..<lower.endIndex) {
-                from = r.upperBound
-                let before = r.lowerBound > lower.startIndex ? lower[lower.index(before: r.lowerBound)] : nil
-                let after = r.upperBound < lower.endIndex ? lower[r.upperBound] : nil
-                guard !isWordChar(before), !isWordChar(after), !claimed.contains(where: { $0.overlaps(r) }) else { continue }
-                let compound = a.text.contains("-") || a.text.contains(" ")
-                let marked = before.map { "@`“\"*'‘".contains($0) } ?? false
-                let lineStart = lower[..<r.lowerBound].last { $0.isNewline } == nil
-                    ? lower[..<r.lowerBound] : lower[lower.index(after: lower[..<r.lowerBound].lastIndex { $0.isNewline }!)..<r.lowerBound]
-                let leads = lineStart.allSatisfy { " \t•-*>".contains($0) || $0.isNumber || $0 == "." }
-                guard compound || marked || leads else { continue }
-                claimed.append(r)
-                found.append((r.lowerBound, a.key))
+        mentions(in: text, index: AliasIndex(aliases))
+    }
+
+    static func mentions(in text: String, index: AliasIndex) -> [String] {
+        guard !index.byFirst.isEmpty else { return [] }
+        let lower = Array(text.lowercased().unicodeScalars)
+        // Every place a name could start: not inside a word.
+        var hits: [(rank: Int, start: Int, end: Int, key: String)] = []
+        for p in lower.indices {
+            guard let entries = index.byFirst[lower[p]] else { continue }
+            let before: Unicode.Scalar? = p > 0 ? lower[p - 1] : nil
+            guard !isWordScalar(before) else { continue }
+            for e in entries {
+                let end = p + e.scalars.count
+                guard end <= lower.count, lower[p..<end].elementsEqual(e.scalars) else { continue }
+                let after: Unicode.Scalar? = end < lower.count ? lower[end] : nil
+                guard !isWordScalar(after) else { continue }
+                let marked = before.map { "@`“\"*'‘".unicodeScalars.contains($0) } ?? false
+                guard e.compound || marked || leadsLine(lower, p) else { continue }
+                hits.append((e.rank, p, end, e.key))
             }
+        }
+        // The longest name wins where two overlap.
+        var claimed: [Range<Int>] = []
+        var found: [(at: Int, key: String)] = []
+        for h in hits.sorted(by: { ($0.rank, $0.start) < ($1.rank, $1.start) }) {
+            let r = h.start..<h.end
+            guard !claimed.contains(where: { $0.overlaps(r) }) else { continue }
+            claimed.append(r)
+            found.append((h.start, h.key))
         }
         var keys: [String] = []
         for f in found.sorted(by: { $0.at < $1.at }) where !keys.contains(f.key) { keys.append(f.key) }
         return keys
+    }
+
+    /// Part of a word: a letter or digit (or a mark on one), `-`, `_`.
+    private static func isWordScalar(_ s: Unicode.Scalar?) -> Bool {
+        guard let s else { return false }
+        if s.isASCII {
+            let v = s.value
+            return (v >= 0x61 && v <= 0x7A) || (v >= 0x41 && v <= 0x5A) || (v >= 0x30 && v <= 0x39) || v == 0x2D || v == 0x5F
+        }
+        let p = s.properties
+        switch p.generalCategory {
+        case .nonspacingMark, .spacingMark, .enclosingMark: return true
+        default: return p.isAlphabetic || p.numericType != nil
+        }
+    }
+
+    /// Only bullets, numbering or blanks between the line's start and `p`.
+    private static func leadsLine(_ scalars: [Unicode.Scalar], _ p: Int) -> Bool {
+        var i = p
+        while i > 0 {
+            i -= 1
+            let c = scalars[i]
+            if "\n\r\u{0B}\u{0C}\u{85}\u{2028}\u{2029}".unicodeScalars.contains(c) { return true }
+            guard " \t•-*>.".unicodeScalars.contains(c) || c.properties.numericType != nil else { return false }
+        }
+        return true
     }
 
     /// The `session` argument of a Switchboard tool call.
@@ -158,6 +214,10 @@ enum SwitchboardThreading {
     /// bullets, whole code blocks staying with what they follow. Lines naming no
     /// session (a blocked session's numbered options) stay with the one before.
     static func sections(_ text: String, aliases: [Alias]) -> [(text: String, keys: [String])] {
+        sections(text, index: AliasIndex(aliases))
+    }
+
+    static func sections(_ text: String, index: AliasIndex) -> [(text: String, keys: [String])] {
         var blocks: [String] = []
         var cur: [String] = []
         var fence = false
@@ -180,7 +240,7 @@ enum SwitchboardThreading {
                 out[last].text += "\n\n" + b
                 continue
             }
-            let keys = mentions(in: b, aliases: aliases)
+            let keys = mentions(in: b, index: index)
             if keys.isEmpty, let last = out.indices.last, !out[last].keys.isEmpty {
                 out[last].text += "\n\n" + b
             } else if let last = out.indices.last, keys == out[last].keys {
@@ -193,6 +253,7 @@ enum SwitchboardThreading {
     }
 
     static func analyze(_ items: [TranscriptItem], aliases: [Alias]) -> ThreadedConversation {
+        let index = AliasIndex(aliases)
         var c = ThreadedConversation()
         var names: [String: (name: String, id: UUID?)] = [:]
         func resolve(_ raw: String) -> String {
@@ -230,17 +291,17 @@ enum SwitchboardThreading {
             case .userText(let text):
                 lastTool = []
                 if let notice = DelegationNotice.stripSwitchboard(text) {
-                    let keys = quotedName(notice).map { [resolve($0)] } ?? known(mentions(in: notice, aliases: aliases))
+                    let keys = quotedName(notice).map { [resolve($0)] } ?? known(mentions(in: notice, index: index))
                     turn = keys
                     emit(item, keys)
                 } else {
-                    turn = known(mentions(in: text, aliases: aliases))
+                    turn = known(mentions(in: text, index: index))
                     emit(item, turn)
                 }
             case .toolUse(_, _, let detail):
                 // Some agents keep a call's input as raw text, not an object: no
                 // `session` to read, so the names in it are the best evidence.
-                let raw = isJSONObject(detail) ? [] : known(mentions(in: detail, aliases: aliases))
+                let raw = isJSONObject(detail) ? [] : known(mentions(in: detail, index: index))
                 if let s = sessionArgument(detail) {
                     lastTool = [resolve(s)]
                     if !turn.contains(lastTool[0]) { turn = turn.isEmpty ? lastTool : turn + lastTool }
@@ -254,7 +315,7 @@ enum SwitchboardThreading {
             case .toolResult:
                 emit(item, lastTool)
             case .assistantText(let text):
-                let parts = sections(text, aliases: aliases)
+                let parts = sections(text, index: index)
                 let named = Set(parts.flatMap(\.keys))
                 if named.count >= 2, parts.count >= 2 {
                     for (k, part) in parts.enumerated() {
