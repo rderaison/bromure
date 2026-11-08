@@ -103,7 +103,7 @@ struct BinaryIdentityTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let secretFile = dir.appendingPathComponent("attestor.secret")
-        let bridge = AttestorBridge(profileID: UUID(), secretFile: secretFile, mayPin: true)
+        let bridge = AttestorBridge(profileID: UUID(), secretFile: secretFile, mayPin: true, strict: false)
         let secret = String(repeating: "ab", count: 32)
 
         func connect(_ s: String) -> (Int32, Thread) {
@@ -111,6 +111,7 @@ struct BinaryIdentityTests {
             _ = fds.withUnsafeMutableBufferPointer { socketpair(AF_UNIX, SOCK_STREAM, 0, $0.baseAddress!) }
             let hello = "{\"hello\":\"attestd\",\"version\":1,\"secret\":\"\(s)\"}\n"
             _ = hello.withCString { write(fds[0], $0, strlen($0)) }
+            bridge.admitHandshake(fds[1])
             let t = Thread { bridge.handshakeAndServe(fds[1], connection: nil) }
             t.start()
             return (fds[0], t)
