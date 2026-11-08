@@ -132,8 +132,13 @@ extension LinuxSessionHost: ProxySignInHost {
     /// A page the guest opened. A server has no browser: the one it acts on
     /// is a sign-in's, published for the client that asked for it, with the
     /// guest port its callback comes back to; any other is logged, dropped.
+    /// Only the running guest's (macOS: eventIsForCurrent, a replaced
+    /// sandbox's callbacks dropped): the poll reads a workspace's outbox only
+    /// while its VM is live, and a launch empties it before that, so nothing
+    /// a previous guest left reaches its replacement (a restore keeps only
+    /// what that same guest wrote before its snapshot).
     // partial: a page that isn't a sign-in's is dropped (a macOS server opens it on its own screen)
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=1e83b10fabd16924 @b10aa434
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=189f593db064bc13 @f127f8ab
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
         // The registration machine's login: its page goes to the client.
         if let reg = registration, reg.scratchProfile.id == pid, !reg.finished {

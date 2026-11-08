@@ -84,7 +84,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// workspaces', and a connected machine's roster). An entry keeps its
     /// object while its roster does.
     // partial: a workspace runs or it doesn't (no booting or suspended: both read as asleep); no compromised, squelch or notes; no window
-    // @port ACAppDelegate.refreshSidebar() h=4d4669ab07510cd1 @b41d9876
+    // @port ACAppDelegate.refreshSidebar() h=9e7c2076375bb24a @f127f8ab
     func refreshSidebar(workspaces: [SessionListModel.VMEntry], profiles: [Profile], machines: [AttachedMachine]? = nil) {
         let running = Self.running.withLockedValue { $0 }
         let machines = machines ?? (LinuxMachines.shared?.attached.values).map(Array.init) ?? []
@@ -98,6 +98,7 @@ final class LinuxSessionHost: AgentSessionHost {
                                         state: m.connected ? .running : .off, compromised: false)
         }
         if listModel.profileRows != rows { listModel.profileRows = rows }
+        refreshShieldState(profiles)
         let ids = Set(sorted.map(\.id))
         if listModel.machineIDs != ids { listModel.machineIDs = ids }
         let old = Dictionary(listModel.entries.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -133,6 +134,19 @@ final class LinuxSessionHost: AgentSessionHost {
         return GuestMemoryReport(unresponsive: Self.unresponsive.withLockedValue { $0.contains(id) }, at: at,
                                  snapshot: GuestMemorySnapshot(availableKB: total - used, totalKB: total,
                                                                pressureSome: some, pressureFull: full))
+    }
+
+    /// Which workspaces run unsandboxed (no egress policy), for the list's
+    /// shield (macOS: refreshShieldState, also on every governance change).
+    // @port ACAppDelegate.refreshShieldState() h=906ffb641e9b8c4e @f127f8ab
+    func refreshShieldState(_ profiles: [Profile]) {
+        let unsandboxed = Self.unsandboxedIDs(profiles)
+        if listModel.unsandboxedProfileIDs != unsandboxed { listModel.unsandboxedProfileIDs = unsandboxed }
+    }
+
+    // @port ACAppDelegate.static unsandboxedIDs(_: [Profile]) h=9612b35dbe87e5fd @f127f8ab
+    nonisolated static func unsandboxedIDs(_ profiles: [Profile]) -> Set<Profile.ID> {
+        Set(profiles.filter { !$0.restrictsEgress }.map(\.id))
     }
 
     /// What the guest's hooks last said per workspace and window (macOS:
