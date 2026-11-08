@@ -24,8 +24,10 @@ extension Daemon {
         // SentryModuleStore.overrideBase's reading of it, from `env`.
         guard let raw = env["BROMURE_SENTRY_CATALOG_BASE"], !raw.isEmpty,
               let base = URL(string: raw.hasSuffix("/") ? raw : raw + "/") else { return nil }
+        // This host's guests' modules (an x86_64 server's are amd64:
+        // sentry/<hash>/amd64/).
         return SentryModuleStore(root: URL(fileURLWithPath: stateDir + "/sentry-modules", isDirectory: true),
-                                 base: base, requireSignature: false)
+                                 base: base, requireSignature: false, arch: .host)
     }
 
     /// The guest scripts' directory (beside agentd), where the sentry's
