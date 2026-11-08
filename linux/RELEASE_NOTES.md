@@ -29,7 +29,8 @@ numbers…) and says so in the daemon's log, as macOS does.
 
 A workspace with PII protection on now has personal data in its model
 requests swapped for stand-ins before they leave the machine, and the real
-values put back in the replies, as on macOS (WebSocket turns: not yet).
+values put back in the replies, as on macOS (a model's WebSocket turns
+too).
 Rerun the install script to fetch the detector's model (see Host
 requirements).
 

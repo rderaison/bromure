@@ -3,14 +3,17 @@ import NIOConcurrencyHelpers
 import NIOCore
 import SandboxEngine
 
-/// Prompt injection on a model provider's WebSocket (macOS: WSContentGuard's
-/// client side, its prompt-injection part; PII isn't on Linux yet). Codex
-/// 0.157+ sends every turn as a `response.create` message on one socket:
-/// each client message is read like a Responses POST body and scanned as the
-/// HTTP path scans one. Log mode records; block refuses; ask asks the client.
-/// A refused message never goes upstream: the client gets the block event
-/// instead (`response.failed` / `invalid_prompt` for a Responses turn).
-// @port-skip linux-only: WSContentGuard.client's prompt-injection part (macOS's also swaps PII and squelches)
+/// Prompt injection and PII protection on a model provider's WebSocket
+/// (macOS: WSContentGuard, without Squelch, which Linux doesn't have yet).
+/// Codex 0.157+ sends every turn as a `response.create` message on one
+/// socket: each client message is read like a Responses POST body and
+/// scanned as the HTTP path scans one. Log mode records; block refuses; ask
+/// asks the client. A refused message never goes upstream: the client gets
+/// the block event instead (`response.failed` / `invalid_prompt` for a
+/// Responses turn). Then its personal data is swapped for stand-ins; the
+/// server side (WSServerSide) puts the real values back.
+// partial: no Squelch on Linux yet
+// @port-skip linux-only: WSContentGuard on the Linux proxy (its providers are the proxy's own)
 final class WSPromptGuard: @unchecked Sendable {
     enum Verdict {
         /// Forward: the rewritten payload, or nil for "unchanged".
@@ -22,6 +25,7 @@ final class WSPromptGuard: @unchecked Sendable {
     let proxy: MitmProxy
     let profileID: UUID
     let host: String
+    private let vaultBox = NIOLockedValueBox<PIIVault?>(nil)
 
     // @port-skip linux-only: see WSPromptGuard
     init(proxy: MitmProxy, profileID: UUID, host: String) {
@@ -30,90 +34,103 @@ final class WSPromptGuard: @unchecked Sendable {
         self.host = host
     }
 
+    /// The workspace's PII vault, opened at its first use: a socket PII
+    /// protection never touches doesn't create the workspace's key.
+    // @port-skip linux-only: see WSPromptGuard
+    var vault: PIIVault {
+        vaultBox.withLockedValue { v in
+            if let v { return v }
+            let opened = PIIVault.forProfile(profileID)
+            v = opened
+            return opened
+        }
+    }
+
     /// The guard for an upgrade, or nil when the socket stays an opaque
-    /// (compressed) pipe: not a model provider's (macOS: isModelSocket), or
-    /// prompt injection off for the workspace.
-    // @port-skip linux-only: WSContentGuard.make, for prompt injection
+    /// (compressed) pipe: not a model provider's (WSContentGuard
+    /// .isModelSocket), or neither prompt injection nor PII protection on.
+    // @port-skip linux-only: WSContentGuard.make, without Squelch
     static func make(proxy: MitmProxy, profileID: UUID, host: String) -> WSPromptGuard? {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this
         // machine (a custom server elsewhere): the conversation leaves it then.
         guard TraceLevel.aiHosts.contains(where: { h.contains($0) }), !h.contains("huggingface.co"),
-              h != InferenceService.localMitmHost || engineIsElsewhere(profileID),
-              proxy.promptInjectionPolicy(for: profileID)?.isActive == true else { return nil }
+              h != InferenceService.localMitmHost || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil
+        else { return nil }
+        let piOn = proxy.promptInjectionPolicy(for: profileID)?.isActive ?? false
+        let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false
+        guard piOn || piiOn else { return nil }
         return WSPromptGuard(proxy: proxy, profileID: profileID, host: host)
     }
 
-    /// The workspace's external inference engine runs on another machine
-    /// (macOS: PIIEngineScope.offMacEngineHost).
-    // @port-skip linux-only: PIIEngineScope.offMacEngineHost's test (the PII rewriter's file isn't on Linux)
-    static func engineIsElsewhere(_ profileID: UUID) -> Bool {
-        guard var h = InferenceRepairProxy.shared.externalEngine(for: profileID)?.base.host?.lowercased(),
-              !h.isEmpty else { return false }
-        if h.hasPrefix("["), h.hasSuffix("]") { h = String(h.dropFirst().dropLast()) }
-        if h == "localhost" || h.hasSuffix(".localhost") || h == "::1" || h == "::" { return false }
-        let me = localHostName
-        if h == me || h == me.split(separator: ".").first.map(String.init) { return false }
-        if let ip = VMNetSwitch.parseIPv4(h), HostAddresses.shared.contains(ip) { return false }
-        return true
+    /// Whether the model's messages are read to restore PII (macOS reads
+    /// them whenever its guard exists, and restores once the vault holds
+    /// anything): PII protection on when the socket opened.
+    // @port-skip linux-only: see WSPromptGuard
+    var restoresReplies: Bool { proxy.piiPolicy(for: profileID)?.isActive ?? false }
+
+    /// The engines on, as a skipped scan records them.
+    // @port-skip linux-only: see WSPromptGuard
+    var engines: [String] {
+        [proxy.promptInjectionPolicy(for: profileID)?.isActive == true ? "prompt_injection" : nil,
+         restoresReplies ? "pii" : nil].compactMap { $0 }
     }
 
-    /// This machine's name, as gethostname(2) has it: read once, never looked
-    /// up (ProcessInfo.hostName can reverse-resolve on corelibs, and this
-    /// runs on the event loop).
-    static let localHostName: String = {
-        var buf = [CChar](repeating: 0, count: 256)
-        guard gethostname(&buf, buf.count - 1) == 0 else { return "" }
-        return String(cString: buf).lowercased()
-    }()
-
-    // @port-skip linux-only: WSContentGuard.client's prompt-injection part
+    // @port-skip linux-only: WSContentGuard.client, without Squelch
     func client(_ payload: Data) async -> Verdict {
-        guard payload.first(where: { !Self.isSpace($0) }) == UInt8(ascii: "{"),
-              let pi = proxy.promptInjectionPolicy(for: profileID), pi.isActive else { return .forward(nil) }
-        let type = Self.messageType(payload)
+        guard payload.first(where: { !WSMessages.isSpace($0) }) == UInt8(ascii: "{") else { return .forward(nil) }
+        let pi = proxy.promptInjectionPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
+        let pii = proxy.piiPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
+        guard pi != nil || pii != nil else { return .forward(nil) }
+        let type = WSMessages.messageType(payload)
         var payload = payload
         var redacted = false
         // Tool output the user already blocked goes out as a placeholder (the
         // conversation is resent every turn), so the session goes on.
-        if pi.onDetection != .log, let r = PromptInjectionRedactions.shared.redact(payload, profileID: profileID) {
+        if let pi, pi.onDetection != .log,
+           let r = PromptInjectionRedactions.shared.redact(payload, profileID: profileID) {
             payload = r.body
             redacted = true
             ProxyPolicy.recordInjectionRedacted(count: r.count, host: host, profileID: profileID)
         }
-        // Read like a Responses POST body; a dummy head keeps the parser's
-        // HTTP-framing strip off the JSON.
-        guard let conv = ConversationParser.parse(
+        // Prompt injection first, over what the agent sent (as the HTTP
+        // path). Read like a Responses POST body; a dummy head keeps the
+        // parser's HTTP-framing strip off the JSON.
+        if let pi, let conv = ConversationParser.parse(
             host: host, requestBody: Data("WS\r\n\r\n".utf8) + WSMessages.conversationBody(payload, type: type),
-            responseBody: nil) else { return .forward(redacted ? payload : nil) }
-        if pi.onDetection == .log {
-            proxy.logPromptInjection(in: conv, host: host, profileID: profileID)
-        } else if let f = await ProxyPolicy.detectPromptInjection(in: conv, policy: pi) {
-            if pi.onDetection == .block {
-                ProxyPolicy.recordPromptInjection(f, outcome: "blocked", host: host, profileID: profileID)
-                PromptInjectionRedactions.shared.block(f, profileID: profileID)
-                return .block(reply: WSMessages.blockEvent(f, requestType: type))
-            }
-            let allow = await proxy.promptInjectionBroker.consent(profileID: profileID, detectorName: f.detector,
-                                                                  source: f.source, flaggedText: f.preview)
-            ProxyPolicy.recordPromptInjection(f, outcome: allow ? "allowed" : "blocked", host: host, profileID: profileID)
-            if !allow {
-                PromptInjectionRedactions.shared.block(f, profileID: profileID)
-                return .block(reply: WSMessages.blockEvent(f, requestType: type))
+            responseBody: nil) {
+            if pi.onDetection == .log {
+                proxy.logPromptInjection(in: conv, host: host, profileID: profileID)
+            } else if let f = await ProxyPolicy.detectPromptInjection(in: conv, policy: pi) {
+                if pi.onDetection == .block {
+                    ProxyPolicy.recordPromptInjection(f, outcome: "blocked", host: host, profileID: profileID)
+                    PromptInjectionRedactions.shared.block(f, profileID: profileID)
+                    return .block(reply: WSMessages.blockEvent(f, requestType: type))
+                }
+                let allow = await proxy.promptInjectionBroker.consent(profileID: profileID, detectorName: f.detector,
+                                                                      source: f.source, flaggedText: f.preview)
+                ProxyPolicy.recordPromptInjection(f, outcome: allow ? "allowed" : "blocked", host: host, profileID: profileID)
+                if !allow {
+                    PromptInjectionRedactions.shared.block(f, profileID: profileID)
+                    return .block(reply: WSMessages.blockEvent(f, requestType: type))
+                }
             }
         }
-        return .forward(redacted ? payload : nil)
+        guard let pii, WSMessages.carriesConversation(payload) else { return .forward(redacted ? payload : nil) }
+        let t = Date()
+        let outcome = await PIIRewriter.rewriteRequest(payload, policy: pii, vault: vault)
+        let ms = Date().timeIntervalSince(t) * 1000
+        if outcome.total > 0 || outcome.partial {
+            ProxyPolicy.recordPIISwaps(outcome, host: host, profileID: profileID, ms: ms)
+        }
+        if outcome.total > 0 || ms > 250 || outcome.partial {
+            FileHandle.standardError.write(Data(String(
+                format: "[pii] %@ (WebSocket %@): %d new value(s) swapped, %d → %d bytes, %.0f ms%@\n",
+                host, type ?? "message", outcome.total, payload.count, outcome.body.count, ms,
+                outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
+        }
+        return .forward(outcome.body == payload && !redacted ? nil : outcome.body)
     }
-
-    /// The top-level `type` of a JSON message (macOS reads it with
-    /// JSONStrings, part of the PII rewriter, not on Linux).
-    // @port-skip linux-only: WSContentGuard.messageType on JSONSerialization
-    static func messageType(_ payload: Data) -> String? {
-        (try? JSONSerialization.jsonObject(with: payload) as? [String: Any])?["type"] as? String
-    }
-
-    // @port-skip linux-only: see WSPromptGuard
-    private static func isSpace(_ b: UInt8) -> Bool { b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D }
 }
 
 /// The client → model direction of a guarded WebSocket (macOS:
@@ -203,7 +220,7 @@ final class WSClientFilter {
         if reader.failed { return broken("a frame past \(WSFrameReader.maxFrame >> 20) MiB") }
         if assembler.oversized > oversizedReported {
             oversizedReported = assembler.oversized
-            ProxyPolicy.recordScanSkipped(host: guard_.host, path: "", engines: ["prompt_injection"],
+            ProxyPolicy.recordScanSkipped(host: guard_.host, path: "", engines: guard_.engines,
                                           reason: "WebSocket message too large to scan", profileID: guard_.profileID)
         }
     }
@@ -261,16 +278,23 @@ final class WSClientFilter {
 }
 
 /// The model → client direction of a guarded WebSocket (macOS:
-/// WSTransformRelay.upstreamToClient, without the PII restore Linux doesn't
-/// have yet), on the upstream channel's loop: the server's bytes go to the
-/// client as they come, read only for where each frame ends and whether a
-/// message is under way, so that a block event the client side injects lands
-/// between two messages, never inside a frame or a fragmented message
-/// (macOS: InjectQueue). No size limit: nothing is held.
+/// WSTransformRelay.upstreamToClient), on the upstream channel's loop. A
+/// block event the client side injects lands between two messages, never
+/// inside a frame or a fragmented message (macOS: InjectQueue).
+///
+/// With a restorer (PII protection on), as macOS: frames are read, messages
+/// reassembled, each one's stand-ins put back (it may become none, held, or
+/// several), and what's held released before the server's close. Without
+/// one, the server's bytes go to the client as they come, read only for
+/// where each frame ends and whether a message is under way: nothing is
+/// held, so no frame is too large.
 // @port-skip linux-only: WSTransformRelay.upstreamToClient and its InjectQueue on NIO
 final class WSServerSide: @unchecked Sendable {
     private let loop: EventLoop
     private let write: (Data) -> Void
+    private let restorer: WSServerRestorer?
+    private let reader = WSFrameReader()
+    private var assembler = WSMessageAssembler()
     /// The header of the frame being read, while it's incomplete.
     private var header = Data()
     /// The payload bytes of the current frame not yet relayed.
@@ -279,13 +303,19 @@ final class WSServerSide: @unchecked Sendable {
     private var midMessage = false
     /// Between two messages: an injected event may go out.
     // @port-skip linux-only: see WSServerSide
-    private var atBoundary: Bool { !midMessage && payloadLeft == 0 && header.isEmpty }
+    private var atBoundary: Bool {
+        restorer != nil ? !passingThrough : !midMessage && payloadLeft == 0 && header.isEmpty
+    }
+    /// Restoring: a message too large to hold is going through fragment by
+    /// fragment (no event may go inside it).
+    private var passingThrough = false
     private let pending = NIOLockedValueBox<[Data]>([])
 
     // @port-skip linux-only: see WSServerSide
-    init(loop: EventLoop, write: @escaping (Data) -> Void) {
+    init(loop: EventLoop, write: @escaping (Data) -> Void, restorer: WSServerRestorer? = nil) {
         self.loop = loop
         self.write = write
+        self.restorer = restorer
     }
 
     /// The upstream's bytes in; what goes to the client out (the same bytes,
@@ -293,6 +323,7 @@ final class WSServerSide: @unchecked Sendable {
     /// continuation with no message under way, a new message inside one).
     // @port-skip linux-only: see WSServerSide
     func feed(_ bytes: Data) -> Data? {
+        if let restorer { return feedRestoring(bytes, restorer) }
         var out = Data()
         var i = bytes.startIndex
         while i < bytes.endIndex {
@@ -322,6 +353,49 @@ final class WSServerSide: @unchecked Sendable {
             if atBoundary { out.append(contentsOf: takeInjects()) }
         }
         return out
+    }
+
+    /// `feed` with PII restored: only whole messages go out (a fragmented
+    /// one is held until its last fragment), so an injected event may go
+    /// between any two of them.
+    // @port-skip linux-only: see WSServerSide
+    private func feedRestoring(_ bytes: Data, _ restorer: WSServerRestorer) -> Data? {
+        reader.feed(bytes)
+        var out = Data()
+        while let f = reader.next() {
+            if f.isControl {
+                if f.opcode == WSFrame.close {
+                    for p in restorer.finish() { out.append(WSFrame.encode(opcode: WSFrame.text, payload: p, masked: false)) }
+                }
+                out.append(f.raw)
+                continue
+            }
+            switch assembler.add(f) {
+            case .incomplete: break
+            case .passthrough(let raw):
+                out.append(raw)
+                passingThrough = !f.fin
+            case .complete(let op, let payload, let raw):
+                if f.rsv == 0, let restored = restorer.restore(payload) {
+                    for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
+                } else {
+                    out.append(raw)
+                }
+            case .protocolError: return nil
+            }
+        }
+        if reader.failed { return nil }
+        if atBoundary { out.append(contentsOf: takeInjects()) }
+        return out
+    }
+
+    /// The upstream closed without a close frame: what the restorer holds
+    /// goes to the client (macOS releases it at the close frame; a socket
+    /// that just ends would drop it).
+    // @port-skip linux-only: see WSServerSide
+    func finishAtClose() -> Data {
+        guard let restorer, !passingThrough else { return Data() }
+        return restorer.finish().reduce(Data()) { $0 + WSFrame.encode(opcode: WSFrame.text, payload: $1, masked: false) }
     }
 
     private enum Header { case needMore, broken, frame(fin: Bool, opcode: UInt8, length: UInt64) }

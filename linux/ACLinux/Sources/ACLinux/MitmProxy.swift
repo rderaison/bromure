@@ -25,7 +25,7 @@ import X509
 /// request first (MitmEgress.swift): OpenShell's checks, the middleware,
 /// the guardrails, compromise detection and strict credential mode; then
 /// prompt injection and PII protection (its reply restored by PIIRelay).
-// partial: no supply-chain policy on Linux yet, nor PII on WebSocket turns
+// partial: no supply-chain policy on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -1318,12 +1318,13 @@ final class ResponseRelay: ChannelInboundHandler {
                     // An extension in use anyway (one it wasn't offered): frames
                     // that can't be read, so the opaque pipe, and said so
                     // (macOS: driveTLS's fallback to the pump).
-                    ProxyPolicy.recordScanSkipped(host: ws.host, path: "", engines: ["prompt_injection"],
+                    ProxyPolicy.recordScanSkipped(host: ws.host, path: "", engines: ws.engines,
                                                   reason: "WebSocket extension \(ext) in use", profileID: ws.profileID)
                 } else {
                     let guest = self.guest
                     let server = WSServerSide(loop: context.eventLoop,
-                                              write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) })
+                                              write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
+                                              restorer: ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil)
                     wsServer = server
                     guard let read = server.feed(rest) else { context.close(promise: nil); return }
                     early = read
@@ -1496,6 +1497,12 @@ final class ResponseRelay: ChannelInboundHandler {
             if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: 0, truncated: false) }
             guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in self.guest.close(promise: nil) }
             return
+        }
+        // A restored WebSocket that ended without a close frame: what its
+        // restorer holds still reaches the client.
+        if let wsServer {
+            let tail = wsServer.finishAtClose()
+            if !tail.isEmpty { guest.write(guest.allocator.buffer(bytes: tail), promise: nil) }
         }
         // A restored body read up to the close: what's held, and the last
         // chunk only when the upstream closed cleanly (a reset or an unclean

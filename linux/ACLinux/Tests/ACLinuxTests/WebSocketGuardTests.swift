@@ -457,13 +457,15 @@ final class WSUpstream: @unchecked Sendable {
     let channel: Channel
     var port: Int { channel.localAddress!.port! }
 
-    init(host: String, extensionHeader: String? = nil, hold: Bool = false) throws {
+    /// `reply`: the frames sent back for each client message's payload.
+    init(host: String, extensionHeader: String? = nil, hold: Bool = false,
+         reply: (@Sendable (Data) -> [Data])? = nil) throws {
         let (head, frames, child) = (head, frames, child)
         channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(.socketOption(.so_rcvbuf), value: hold ? 4096 : 131072)
             .childChannelInitializer { ch in
                 child.withLockedValue { $0 = ch }
-                return ch.pipeline.addHandler(Handler(head, frames, ext: extensionHeader, hold: hold))
+                return ch.pipeline.addHandler(Handler(head, frames, ext: extensionHeader, hold: hold, reply: reply))
             }
             .bind(host: host, port: 0).wait()
     }
@@ -480,14 +482,21 @@ final class WSUpstream: @unchecked Sendable {
         let reader = WSFrameReader()
         let ext: String?
         let hold: Bool
-        init(_ h: NIOLockedValueBox<String>, _ f: NIOLockedValueBox<[Data]>, ext: String?, hold: Bool) {
-            head = h; frames = f; self.ext = ext; self.hold = hold
+        let reply: (@Sendable (Data) -> [Data])?
+        init(_ h: NIOLockedValueBox<String>, _ f: NIOLockedValueBox<[Data]>, ext: String?, hold: Bool,
+             reply: (@Sendable (Data) -> [Data])?) {
+            head = h; frames = f; self.ext = ext; self.hold = hold; self.reply = reply
         }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             let b = unwrapInboundIn(data)
             if switched {
                 reader.feed(Data(b.readableBytesView))
-                while let f = reader.next() { frames.withLockedValue { $0.append(f.raw) } }
+                while let f = reader.next() {
+                    frames.withLockedValue { $0.append(f.raw) }
+                    for d in reply?(f.payload) ?? [] {
+                        context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(bytes: d)), promise: nil)
+                    }
+                }
                 return
             }
             acc.append(contentsOf: b.readableBytesView)
