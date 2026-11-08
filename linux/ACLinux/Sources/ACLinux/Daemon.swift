@@ -102,6 +102,8 @@ public actor Daemon {
         var aws: VsockFDListener?
         /// The guest's SSH agent socket's end (vsock 8444).
         var ssh: VsockFDListener?
+        /// The guest attestor's channel (vsock 5840), for a sandboxed workspace.
+        var attest: VsockFDListener?
         /// The fd store entries holding this VM's network end and listener.
         let storedNet: String
     }
@@ -167,7 +169,7 @@ public actor Daemon {
     /// removes them; one list, so a new listener can't be left out of one.
     // @port-skip linux-only: systemd fd store layout
     static let perVMStorePrefixes = ["net-", "vsock-", "bmcp-", "mitm-", "tbmcp-", "amcp-", "kmcp-", "dmcp-", "sbmcp-",
-                                     "plan-", "llm-", "aws-", "ssh-"]
+                                     "plan-", "llm-", "aws-", "ssh-", "attest-"]
 
     /// The soft open-file limit up to the hard one: systemd starts services at
     /// 1024, and every VM, SSH session and forward holds several.
@@ -268,6 +270,13 @@ public actor Daemon {
             // The host's own addresses and every user's LAN pool, granted
             // or published (LANPools: blocked before a first publish).
             sw.blockedDestination.withLockedValue { $0 = { HostAddresses.shared.contains($0) || LANPools.shared.contains($0) } }
+        }
+        // Binary identity: a new connection under a policy's `binaries` is
+        // decided for the program the guest's attestor names (macOS: the
+        // app sets VMNetSwitch.identityGate the same way).
+        sw.egress.identityGate = { pid, sport, dst, dport, hosts, policy in
+            BinaryIdentityService.shared.gate(profileID: pid, sport: sport, dstIP: dst, dport: dport,
+                                              hostnames: hosts, policy: policy)
         }
         let registry = VMRegistry(path: config.stateDir + "/vms.json", isAlive: Self.isOurVM)
         self.registry = registry
@@ -1134,6 +1143,8 @@ public actor Daemon {
         // with it (macOS: MitmEngine.unregister).
         mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
+        // The attestor's channel goes with the session (macOS: detach at teardown).
+        BinaryIdentityService.shared.dropBridge(pid)?.stop()
         // The watchdog's window and baseline start over with the next session,
         // and no question holds the VM any more.
         AgentWatchdog.shared.reset(profileID: pid)
@@ -1289,6 +1300,8 @@ public actor Daemon {
         l.inference = serveInference(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.aws = serveAWSCreds(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
         l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath, stored: nil)
+        l.attest = await serveAttestor(rec, profile: staged, udsPath: qc.firecrackerVsockPath, stored: nil,
+                                       restoring: restoreFrom != nil)
         if let staged, rec.registration != true {
             startLocalEngineIfNeeded(for: staged)
             lastStagedProfiles[rec.id] = staged
@@ -1469,6 +1482,9 @@ public actor Daemon {
                                       stored: storedNet.removeValue(forKey: "aws-" + rec.shortId))
                 l.ssh = serveSSHAgent(rec, udsPath: qc.firecrackerVsockPath,
                                       stored: storedNet.removeValue(forKey: "ssh-" + rec.shortId))
+                l.attest = await serveAttestor(rec, profile: adoptedProfile, udsPath: qc.firecrackerVsockPath,
+                                               stored: storedNet.removeValue(forKey: "attest-" + rec.shortId),
+                                               restoring: true)
                 if let staged = adoptedProfile {
                     startLocalEngineIfNeeded(for: staged)
                     lastStagedProfiles[rec.id] = staged
@@ -1779,6 +1795,7 @@ public actor Daemon {
         l.inference?.stop()
         l.aws?.stop()
         l.ssh?.stop()
+        l.attest?.stop()
         await MainActor.run { [mcp = l.mcp] in for m in mcp { m.stop() } }
         if let pid = l.plan { await MainActor.run { SessionStores.shared?.detachPlanBridge(pid: pid) } }
         for name in Self.perVMStorePrefixes { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }

@@ -307,6 +307,36 @@ struct SwitchEgressFirewallTests {
         #expect(rig.fw.egressByteCount(for: rig.a) == 0)
     }
 
+    /// Binary identity (macOS: handleEgress's identityGate step): a new
+    /// connection under a policy's `binaries` waits for the attestor's
+    /// answer (its SYN held), is refused for a program the policy doesn't
+    /// name (a RST, the program in the report), or allowed and remembered
+    /// for its later segments, until a policy change has it asked again.
+    /// No gate: refused.
+    @Test func binaryIdentityAsksTheGate() throws {
+        let rig = FirewallRig()
+        var policy = try EgressPolicy.parse("default allow")
+        policy.enforceBinaries = true
+        rig.fw.govern(rig.a, .init(profileID: rig.pid, policy: policy, interceptDisabled: true))
+        let syn = TestFrames.tcp(to: good, port: 22, flags: 0x02), ack = TestFrames.tcp(to: good, port: 22, flags: 0x10)
+        #expect(rig.fw.handle(syn, from: rig.a) == .consumed, "no gate: refused")
+        let answer = NIOLockedValueBox<(verdict: EgressPolicy.Verdict, exe: String?)?>(nil)
+        let asked = NIOLockedValueBox(0)
+        rig.fw.identityGate = { _, _, _, _, _, _ in asked.withLockedValue { $0 += 1 }; return answer.withLockedValue { $0 } }
+        #expect(rig.fw.handle(syn, from: rig.a) == .consumed, "held while the attestor answers")
+        let before = rig.injected.withLockedValue { $0.count }
+        answer.withLockedValue { $0 = (.deny, "/usr/bin/curl") }
+        #expect(rig.fw.handle(syn, from: rig.a) == .consumed)
+        #expect(rig.injected.withLockedValue { $0.count } == before + 1, "a RST for the refused connect")
+        #expect(rig.events.withLockedValue { $0 }.contains { $0.denied && $0.exe == "/usr/bin/curl" }, "the program reported")
+        answer.withLockedValue { $0 = (.allow, "/usr/bin/gh") }
+        #expect(rig.fw.handle(syn, from: rig.a) == .pass, "allowed for its program")
+        let n = asked.withLockedValue { $0 }
+        #expect(rig.fw.handle(ack, from: rig.a) == .pass && asked.withLockedValue { $0 } == n, "later segments pass on the remembered decision")
+        rig.fw.update(.init(profileID: rig.pid, policy: policy, interceptDisabled: true))
+        #expect(rig.fw.handle(ack, from: rig.a) == .pass && asked.withLockedValue { $0 } == n + 1, "a policy change asks again")
+    }
+
     @Test func aDetachedPortIsNoLongerGoverned() throws {
         let rig = FirewallRig()
         try rig.govern("deny tcp 203.0.113.7\ndefault allow")

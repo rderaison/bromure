@@ -53,6 +53,18 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     private var quarantined: Set<MAC> = []
     /// Off-subnet bytes each session port has sent (macOS: egressByteCounts).
     private var egressBytes: [MAC: UInt64] = [:]
+    /// Binary identity (strict sandbox + an OpenShell policy's `binaries`):
+    /// the verdict for a new TCP connection given the executable the guest's
+    /// attestor names for it, or nil while that answer is coming (macOS:
+    /// VMNetSwitch.identityGate; the daemon sets BinaryIdentityService's).
+    var identityGate: (@Sendable (_ profileID: UUID, _ srcPort: UInt16, _ dstIP: UInt32, _ dport: UInt16,
+                                  _ hostnames: [String], _ policy: EgressPolicy) -> (verdict: EgressPolicy.Verdict, exe: String?)?)?
+    private struct AttestedFlow: Hashable { let port: MAC; let sport: UInt16; let dstIP: UInt32; let dport: UInt16 }
+    /// Flows allowed for their executable: when, and under which policy
+    /// generation of their port.
+    private var attestedFlows: [AttestedFlow: (at: Date, generation: UInt64)] = [:]
+    /// Bumped per port on every policy change.
+    private var policyGeneration: [MAC: UInt64] = [:]
     /// The guests' DNS answers, IP → names (macOS: VMNetSwitch.dnsCache).
     let dnsCache = DNSSnoopCache()
     /// Where a decided flow is reported (macOS: the app's egress observer).
@@ -92,6 +104,9 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     func govern(_ mac: MAC, _ g: Governance?) {
         lock.withLock {
             governance[mac] = g
+            // Flows allowed for their executable were decided under the old
+            // policy: each is re-attested on its next packet.
+            policyGeneration[mac, default: 0] &+= 1
             egressSeen = egressSeen.filter { $0.key.port != mac }
         }
     }
@@ -102,7 +117,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     func update(_ g: Governance) {
         lock.withLock {
             let macs = governance.filter { $0.value.profileID == g.profileID }.map(\.key)
-            for m in macs { governance[m] = g }
+            for m in macs { governance[m] = g; policyGeneration[m, default: 0] &+= 1 }
             egressSeen = egressSeen.filter { !macs.contains($0.key.port) }
         }
     }
@@ -144,6 +159,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
             egressSeen = egressSeen.filter { $0.key.port != mac }
             quarantined.remove(mac)
             egressBytes[mac] = nil
+            policyGeneration[mac] = nil
+            attestedFlows = attestedFlows.filter { $0.key.port != mac }
             return interception
         }
         i?.interceptor.portClosed(portID: mac.portID)
@@ -168,7 +185,6 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// to forward it, `.consumed` when it was dropped by policy, answered, or
     /// diverted into the MITM. Only session ports are governed.
     // partial: a name the guest resolves itself (its own resolver, DoH, /etc/hosts) is unseen off the intercepted ports: there the verdict has only the snooped DNS (macOS has the same limit; :80/:443 are re-decided by the SNI / Host)
-    // partial: no binary-identity gate on Linux, so a flow an `enforceBinaries` policy would ask the guest's attestor about is denied (macOS without a gate does the same)
     // @port-skip linux-only: the Data entry to decide (handleEgress's port)
     func handle(_ f: Data, from src: MAC) -> Action {
         f.withUnsafeBytes { raw -> Action in
@@ -295,16 +311,36 @@ final class SwitchEgressFirewall: @unchecked Sendable {
             verdict = .allow
         }
 
-        // Binary identity: a new TCP connection the MiTM won't see is decided
-        // for the program that opened it. Linux has no attestor gate, so a
-        // new one (its SYN) is denied, as macOS denies it without one; later
-        // segments of a flow nothing allowed take the verdict below.
+        // Binary identity (strict sandbox + an OpenShell policy's `binaries`):
+        // a new TCP connection the MiTM won't see is decided for the
+        // executable that opened it. The first SYN is held while the guest's
+        // attestor answers (the guest retransmits it); later packets of an
+        // allowed connection pass on the remembered decision. No gate (or no
+        // attestor): denied.
+        var deniedExe: String? = nil
         if proto == 6, let policy = g.policy, policy.enforceBinaries,
-           !(g.interceptor != nil && g.interceptPorts.contains(dport)), Self.isSyn(buf, n) {
-            fireEgress(port: src, profileID: pid, dstIP: dstIP, hostnames: hostnames,
-                       proto: proto, dport: dport, denied: true, policy: g.policy, ep: ep, now: now)
-            if Self.isSyn(buf, n) { inject(src, VMNetSwitch.buildTCPReset(buf, n)) }
-            return .consumed
+           !(g.interceptor != nil && g.interceptPorts.contains(dport)) {
+            let sport = VMNetSwitch.u16(buf, 14 + ihl)
+            let key = AttestedFlow(port: src, sport: sport, dstIP: dstIP, dport: dport)
+            // A new connection, or one allowed under a policy that has since
+            // changed, asks the attestor.
+            let standing = Self.isSyn(buf, n) ? Attestation.unknown : attestation(key)
+            if Self.isSyn(buf, n) || standing == .stale {
+                guard let gate = identityGate else {
+                    fireEgress(port: src, profileID: pid, dstIP: dstIP, hostnames: hostnames,
+                               proto: proto, dport: dport, denied: true, policy: g.policy, ep: ep, now: now)
+                    if Self.isSyn(buf, n) { inject(src, VMNetSwitch.buildTCPReset(buf, n)) }
+                    return .consumed
+                }
+                switch gate(pid, sport, dstIP, dport, hostnames, policy) {
+                case nil:      return .consumed                  // attestation in flight
+                case let d? where d.verdict == .deny:
+                    verdict = .deny; deniedExe = d.exe
+                default:       verdict = .allow; rememberAttested(key)
+                }
+            } else if standing == .current {
+                verdict = .allow
+            }
         }
 
         let tcpFlags = proto == 6 ? Self.tcpFlags(buf, n) : nil
@@ -313,7 +349,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
             let midFlow = tcpFlags.map { VMNetSwitch.denyReset(tcpFlags: $0) != .syn } ?? false
             fireEgress(port: src, profileID: pid, dstIP: dstIP, hostnames: hostnames,
                        proto: proto, dport: dport, denied: true, policy: g.policy, ep: ep, now: now,
-                       midFlow: midFlow)
+                       midFlow: midFlow, exe: deniedExe)
             if proto == 6 {
                 switch VMNetSwitch.denyReset(tcpFlags: tcpFlags) {
                 case .syn:                                     // fail the connect fast
@@ -398,12 +434,13 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     private func fireEgress(port: MAC, profileID: UUID, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, dport: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
-                            midFlow: Bool = false, newConnection: Bool = false) {
+                            midFlow: Bool = false, newConnection: Bool = false, exe: String? = nil) {
         let name = hostnames.first ?? ""
-        let key = EgressKey(port: port, name: name, dstIP: name.isEmpty ? dstIP : 0,
+        var key = EgressKey(port: port, name: name, dstIP: name.isEmpty ? dstIP : 0,
                             // A dying flow's trailing segments dedupe apart
                             // from fresh connections.
                             dstPort: dport, proto: (denied ? proto | 0x80 : proto) | (midFlow ? 0x40 : 0))
+        key.exe = denied ? exe : nil
         let fresh: Bool = lock.withLock {
             guard now.timeIntervalSince(egressSeen[key] ?? .distantPast) >= Self.egressReportEvery else { return false }
             if egressSeen.count > 8192 {
@@ -425,12 +462,38 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         var event = VMNetSwitch.EgressEvent.of(profileID: profileID, dstIP: dstIP, hostnames: hostnames,
                                                proto: proto, port: dport, denied: denied)
         event.midFlow = midFlow
+        if denied { event.exe = exe }
         if let policy {
             event.rule = policy.firstMatch(ip: dstIP, hostnames: hostnames, proto: ep, port: dport, now: now)?.text
         } else {
             event.byPolicy = false
         }
         observer(event)
+    }
+
+    // @port VMNetSwitch.rememberAttested(_: AttestedFlow) h=f367ec7852e5d5ec @ac3ea65d
+    private func rememberAttested(_ k: AttestedFlow) {
+        lock.withLock {
+            attestedFlows[k] = (Date(), policyGeneration[k.port] ?? 0)
+            if attestedFlows.count > 8192 {                 // drop the stalest half
+                let cut = attestedFlows.values.map(\.at).sorted()[attestedFlows.count / 2]
+                attestedFlows = attestedFlows.filter { $0.value.at > cut }
+            }
+        }
+    }
+
+    /// A flow's standing: allowed under the current policy, allowed under an
+    /// older one (must be re-attested before another packet passes), or unknown.
+    private enum Attestation { case current, stale, unknown }
+
+    // @port VMNetSwitch.attestation(_: AttestedFlow) h=8c11a83abf790a68 @ac3ea65d
+    private func attestation(_ k: AttestedFlow) -> Attestation {
+        lock.withLock {
+            guard let entry = attestedFlows[k] else { return .unknown }
+            guard entry.generation == (policyGeneration[k.port] ?? 0) else { return .stale }
+            attestedFlows[k] = (Date(), entry.generation)
+            return .current
+        }
     }
 
     // @port-skip linux-only: VMNetSwitch.tcpFlags (shared) on this file's pointer

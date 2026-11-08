@@ -19,6 +19,7 @@
     "Sources/AgentCoding/AutomationMCPServer.swift",
     "Sources/AgentCoding/AutomationRunArchive.swift",
     "Sources/AgentCoding/BACDebug.swift",
+    "Sources/AgentCoding/BinaryIdentityService.swift",
     "Sources/AgentCoding/BootBudget.swift",
     "Sources/AgentCoding/BranchMergeCommands.swift",
     "Sources/AgentCoding/BrowserMCPRelay.swift",
