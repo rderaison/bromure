@@ -27,7 +27,7 @@ struct FilePreviewMediaTests {
         let m = FileExplorerModel()
         m.execProvider = { _, command, _ in
             g.commands.append(command)
-            if command.hasPrefix("stat -c") { return g.stamp }
+            if command.hasPrefix("stat ") { return g.stamp }
             if command.hasPrefix("head -c") {
                 // The text preview's read: the first bytes, base64.
                 // The command quotes the folder and the name apart.
@@ -97,5 +97,45 @@ struct FilePreviewMediaTests {
         bare.select("logo.png")
         await until { bare.detailKind == "binary" }
         #expect(bare.detailKind == "binary")
+    }
+
+    /// Finding: the key was `stat -c '%s %Y'` -- size and whole seconds, of
+    /// the symlink itself. A same-size image rewritten within the second, or
+    /// a link pointed at another image, kept its key and the old picture.
+    @Test("the version follows symlinks and carries inode, size and nanosecond times")
+    func stampCommand() {
+        let cmd = FileExplorerModel.mediaStampCommand("'/home/ubuntu'/'shot.png'")
+        #expect(cmd.hasPrefix("stat -L "), "the file a link leads to, as the file service reads it")
+        for field in ["%d", "%i", "%s", "%y", "%z"] { #expect(cmd.contains(field), "\(field)") }
+        #expect(!cmd.contains("%Y"), "whole seconds only")
+        #expect(cmd.contains("'/home/ubuntu'/'shot.png'"))
+    }
+
+    @Test("same version, same key; any other version, or none known, a new one")
+    func scopes() {
+        let id = UUID()
+        let a = "66306 1234 900000 2026-11-08 12:00:00.100000000 -0500 2026-11-08 12:00:00.100000000 -0500"
+        let b = "66306 1234 900000 2026-11-08 12:00:00.700000000 -0500 2026-11-08 12:00:00.700000000 -0500"
+        #expect(FileExplorerModel.mediaScope(profileID: id, stamp: a) == FileExplorerModel.mediaScope(profileID: id, stamp: a))
+        #expect(FileExplorerModel.mediaScope(profileID: id, stamp: a) != FileExplorerModel.mediaScope(profileID: id, stamp: b),
+                "a same-size rewrite within the second")
+        #expect(FileExplorerModel.mediaScope(profileID: id, stamp: "") != FileExplorerModel.mediaScope(profileID: id, stamp: ""),
+                "an unknown version never reuses what was cached")
+        #expect(FileExplorerModel.mediaScope(profileID: UUID(), stamp: a) != FileExplorerModel.mediaScope(profileID: id, stamp: a))
+    }
+
+    @Test("a file whose stat fails is read afresh on every look")
+    func noStampNoReuse() async throws {
+        let g = Guest()
+        g.stamp = ""
+        g.files["/home/ubuntu/shot.png"] = Self.png(64)
+        let m = model(g)
+        m.select("shot.png")
+        await until { m.detailKind == "media" }
+        guard case .media(let path, let first) = m.detail else { Issue.record("not media"); return }
+        m.select("shot.png")
+        await until { if case .media(_, let r) = m.detail { return r.cacheKey(path) != first.cacheKey(path) } else { return false } }
+        guard case .media(_, let again) = m.detail else { Issue.record("not media"); return }
+        #expect(again.cacheKey(path) != first.cacheKey(path))
     }
 }
