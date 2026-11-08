@@ -94,6 +94,12 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// the first to a destination since launch.
     private var egressSeen: [EgressKey: Date] = [:]
     private static let egressReportEvery: TimeInterval = 60
+    /// The most `egressSeen` holds; past it the table starts over.
+    static let egressSeenCap = 32_768
+    /// When `egressSeen` was last pruned of expired entries.
+    private var egressSeenPruned = Date.distantPast
+    /// How many flows `egressSeen` holds (tests).
+    var egressSeenCount: Int { lock.lock(); defer { lock.unlock() }; return egressSeen.count }
     /// port id → firewall rules (nil = allow-all). Guarded by `lock`.
     private var portEgressPolicy: [Int: EgressPolicy] = [:]
     /// port ids that opted out of transparent interception (Profile
@@ -1036,6 +1042,17 @@ public final class VMNetSwitch: @unchecked Sendable {
     }
 
     /// Firewall + interception for one off-subnet frame from a session VM.
+    /// Whether an L4 denial is handed to the MiTM instead, which decides again
+    /// from the TLS SNI / Host header (the switch may not know the hostname).
+    /// Never for an always-blocked address -- loopback, link-local with the
+    /// metadata address, unspecified: no hostname makes it allowed, and handed
+    /// over, the guest's connect() succeeded before the MiTM dropped the flow,
+    /// where OpenShell refuses the connect itself.
+    public static func defersDenialToInterception(proto: UInt8, dport: UInt16, dstIP: UInt32,
+                                                  policyDefers: Bool, intercepted: Bool) -> Bool {
+        proto == 6 && policyDefers && intercepted && !OpenShellPolicy.isAlwaysBlocked(.v4(dstIP))
+    }
+
     /// Returns true when the frame was consumed (dropped by policy, or diverted
     /// into the MiTM); false to let the native switch forward it.
     ///
@@ -1128,8 +1145,10 @@ public final class VMNetSwitch: @unchecked Sendable {
         // On an intercepted port the MiTM re-decides with the TLS SNI / Host
         // header — and fails closed on flows that carry neither — so hand the
         // flow over instead of dropping it here.
-        if verdict == .deny, proto == 6, g.policy?.defersToInterception(port: dport) == true,
-           g.interceptor != nil, g.interceptPorts.contains(dport) {
+        if verdict == .deny, Self.defersDenialToInterception(
+               proto: proto, dport: dport, dstIP: dstIP,
+               policyDefers: g.policy?.defersToInterception(port: dport) == true,
+               intercepted: g.interceptor != nil && g.interceptPorts.contains(dport)) {
             verdict = .allow
         }
 
@@ -1248,7 +1267,7 @@ public final class VMNetSwitch: @unchecked Sendable {
     /// `newConnection` (an allowed TCP SYN): a deduped repeat is still passed
     /// on, flagged `isRepeat`, so the allowed row's ×N counts every
     /// connection rather than one per dedupe window.
-    private func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
+    func fireEgress(portID: Int, profileID: UUID?, dstIP: UInt32, hostnames: [String],
                             proto: UInt8, port: UInt16, denied: Bool,
                             policy: EgressPolicy?, ep: EgressPolicy.Proto = .any, now: Date = Date(),
                             midFlow: Bool = false, newConnection: Bool = false, exe: String? = nil) {
@@ -1275,9 +1294,14 @@ public final class VMNetSwitch: @unchecked Sendable {
             }
             return
         }
-        if egressSeen.count > 8192 {
+        // Pruned at most once a second, and capped: a guest flooding fresh
+        // destinations can't make every report scan the whole table, nor grow
+        // it without bound (a dropped entry only means one more report).
+        if egressSeen.count > 8192, now.timeIntervalSince(egressSeenPruned) >= 1 {
             egressSeen = egressSeen.filter { now.timeIntervalSince($0.value) < Self.egressReportEvery }
+            egressSeenPruned = now
         }
+        if egressSeen.count > Self.egressSeenCap { egressSeen.removeAll(keepingCapacity: true) }
         egressSeen[key] = now
         lock.unlock()
         var event = EgressEvent(profileID: profileID, dstIP: dstIP, hostnames: hostnames,

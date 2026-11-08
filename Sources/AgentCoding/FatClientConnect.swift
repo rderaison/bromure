@@ -443,7 +443,7 @@ final class RemoteConnectModel {
             RemoteHost.isValidSSHUser($0) ? $0 : nil
         }
         let user = published ?? remembered ?? NSUserName()
-        var host = RemoteHost(name: server.displayName, address: "", user: user)
+        var host = RemoteHost(id: RemoteHost.stablePeerID(server.id), name: server.displayName, address: "", user: user)
         host.peerDeviceID = server.id
         host.lastConnected = Date()
         return host

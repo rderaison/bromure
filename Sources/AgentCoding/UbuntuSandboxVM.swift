@@ -243,6 +243,37 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
 
     private var outboxPollTask: Task<Void, Never>?
+    /// The poll's scanner: cancelled with it, so a tick it has queued
+    /// consumes nothing (`OutboxScanner.cancel`).
+    private var outboxScanner: OutboxScanner?
+
+    /// Stop the outbox poll: its task, and its scanner, whose queued tick
+    /// would otherwise still read (and remove) what a relaunched guest
+    /// writes to the same outbox.
+    @MainActor @discardableResult
+    private func cancelOutboxPoll() -> Task<Void, Never>? {
+        let task = outboxPollTask
+        outboxPollTask?.cancel()
+        outboxPollTask = nil
+        outboxScanner?.cancel()
+        outboxScanner = nil
+        return task
+    }
+
+    /// Wait (a little, a disk can stall) for a cancelled poll's last tick:
+    /// the one-shots it removed are applied first — a reboot intent sets the
+    /// flag that tells the stop that follows from a shutdown.
+    nonisolated static func settle(_ task: Task<Void, Never>?, within seconds: Double) async {
+        guard let task else { return }
+        let once = OSAllocatedUnfairLock(initialState: false)
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            @Sendable func finish() {
+                if once.withLock({ was in defer { was = true }; return !was }) { cont.resume() }
+            }
+            Task { await task.value; finish() }
+            Task { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)); finish() }
+        }
+    }
     private var guestLiveness = GuestLiveness()
     private var guestSilent = false
 
@@ -297,6 +328,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard imageManager.hasBaseImage else {
             throw UbuntuImageError.installerStoppedEarly
         }
+
+        // Every boot, cold or restored, keeps a free-space floor (1 GB) on
+        // the volume holding the VM's disks. The system disk is a CoW clone
+        // and the home image is sparse: both grow as the guest writes, so
+        // how much a session will need can't be known up front. Checking
+        // only when a disk is first created let an existing workspace boot
+        // onto a full volume. Throws SandboxError.diskFull, which the launch
+        // site shows.
+        let diskDir = (sessionDisk?.diskURL ?? imageManager.baseDiskURL).deletingLastPathComponent()
+        try EphemeralDisk.checkDiskSpace(
+            at: FileManager.default.fileExists(atPath: diskDir.path)
+                ? diskDir.path : imageManager.storageDir.path)
 
         // Resolve the disk to boot. Profile sessions get their own CoW
         // clone (created on first launch); legacy mode boots base directly.
@@ -447,7 +490,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         serialOut.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            scan.consoleFile?.write(data)
+            try? scan.consoleFile?.write(contentsOf: data)
             scan.logBuffer.append(data)
             while let nl = scan.logBuffer.firstIndex(of: 0x0A) {
                 let line = String(decoding: scan.logBuffer[..<nl], as: UTF8.self)
@@ -610,9 +653,18 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // (never consumed) names a window of the previous boot — read now it
         // flashed "Working" on whatever tab took that index.
         if let outbox = sessionDisk?.outboxDirectory,
-           let names = try? FileManager.default.contentsOfDirectory(atPath: outbox.path) {
+           let names = Self.listing(outbox, max: Self.maxOutboxEntriesPerTick) {
             for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
                 try? FileManager.default.removeItem(at: outbox.appendingPathComponent(n))
+            }
+            // And the hooks' own folder's (a real folder only: never
+            // through a symlink the guest left onto the Mac).
+            let agentDir = outbox.appendingPathComponent(SessionDisk.outboxAgentFolder, isDirectory: true)
+            if (try? FileManager.default.attributesOfItem(atPath: agentDir.path))?[.type] as? FileAttributeType == .typeDirectory,
+               let names = Self.listing(agentDir, max: Self.maxOutboxEntriesPerTick) {
+                for n in names where n.hasPrefix("agent-status-") && n.hasSuffix(".txt") {
+                    try? FileManager.default.removeItem(at: agentDir.appendingPathComponent(n))
+                }
             }
             // The last boot's heartbeat isn't this one's.
             try? FileManager.default.removeItem(at: outbox.appendingPathComponent("liveness.txt"))
@@ -646,8 +698,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// the outbox before we hand the same directory to a fresh sandbox.
     @MainActor
     public func stopPolling() {
-        outboxPollTask?.cancel()
-        outboxPollTask = nil
+        cancelOutboxPoll()
     }
 
     /// Restore the VM from a previously-saved RAM snapshot. The VZ
@@ -714,16 +765,56 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard vm.canPause else {
             throw UbuntuImageError.installerStoppedEarly
         }
-        outboxPollTask?.cancel()
+        // The RAM snapshot needs room (a few hundred MB for a typical guest,
+        // up to its RAM size). Below the 1 GB floor, refuse before touching
+        // the VM: it keeps running and the caller says why.
+        let stateDir = session.savedStateURL.deletingLastPathComponent().path
+        try EphemeralDisk.checkDiskSpace(at: stateDir)
+        cancelOutboxPoll()
         try await vm.pause()
         // VZ refuses to overwrite the destination (Code 11). restore()
         // consumes the snapshot, so normally nothing is here — but clear
         // any leftover (e.g. a suspend that crashed mid-teardown) first.
         try? FileManager.default.removeItem(at: session.savedStateURL)
-        try await vm.saveMachineStateTo(url: session.savedStateURL)
+        do {
+            try await vm.saveMachineStateTo(url: session.savedStateURL)
+        } catch {
+            // Measured before the partial snapshot goes: deleting it frees
+            // the very space whose lack failed the save.
+            let free = EphemeralDisk.freeBytes(at: stateDir)
+            try? FileManager.default.removeItem(at: session.savedStateURL)
+            // Left paused. The caller resumes it (`resumeAfterFailedSuspend`)
+            // only once it knows its deadline didn't abandon this call: a
+            // resume from here could land after it force-stopped the VM.
+            if let free, free < EphemeralDisk.minimumFreeBytes {
+                throw SandboxError.diskFull(availableMB: free / (1024 * 1024), path: stateDir)
+            }
+            throw error
+        }
         Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
         await Self.discardPausedInstance(vm)
         state = .stopped
+    }
+
+    /// Run again a VM whose suspend failed after pausing it (a snapshot that
+    /// ran out of disk). True if it is running. Doesn't restart the outbox
+    /// poll: a caller whose deadline abandoned this call may have stopped
+    /// the VM by the time it returns (`restartOutboxPollAfterFailedSuspend`).
+    @MainActor
+    public func resumeAfterFailedSuspend() async -> Bool {
+        guard let vm else { return false }
+        if vm.state == .paused {
+            do { try await vm.resume() } catch { return false }
+        }
+        return self.vm === vm && vm.state == .running
+    }
+
+    /// The outbox poll a failed suspend cancelled, once the VM is kept
+    /// running. A no-op if it never stopped (the suspend refused before
+    /// pausing).
+    @MainActor
+    public func restartOutboxPollAfterFailedSuspend() {
+        if outboxPollTask == nil { startOutboxPolling() }
     }
 
     /// Stop the paused instance once its state is on disk. A paused
@@ -809,6 +900,74 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     }
     /// One-shot reports surfaced per poll; the rest wait for the next tick.
     nonisolated static let maxOneShotsPerTick = 32
+
+    /// Outbox names looked at per heavy tick, and of its URL relay folder:
+    /// the guest (and in the relay, a sandboxed agent) can fill either with
+    /// files, and listing them whole each tick made the host's work and
+    /// memory grow with the backlog (CWE-400).
+    nonisolated static let maxOutboxEntriesPerTick = 2048
+    nonisolated static let maxRelayNamesPerTick = 4096
+    /// url-*.txt kept from the relay per tick (names that aren't one are
+    /// skipped while reading, so they can't fill this).
+    nonisolated static let maxRelayEntriesPerTick = 256
+    /// What the host takes from the outbox's agent/ folder: a hook's tab
+    /// status or tool-call log, nothing named like the outbox's own signals.
+    nonisolated static func isAgentHookFile(_ name: String) -> Bool {
+        (name.hasPrefix("agent-status-") && name.hasSuffix(".txt"))
+            || (name.hasPrefix("agent-tool-") && name.hasSuffix(".jsonl"))
+    }
+    /// More URL files than this in one tick's listing is a flood: past the
+    /// per-tick cap they're removed unopened, so the backlog drains with
+    /// bounded work instead of delaying a real sign-in URL forever. Fewer
+    /// wait for the next tick, as before.
+    nonisolated static let urlBacklogHighWater = 64
+
+    /// A folder read a bounded slice at a time, each slice where the last
+    /// one stopped: a huge folder is never materialized, and every name in it
+    /// comes up in turn (a listing restarted at the top each tick kept
+    /// returning the same first names, and a flood of them hid the rest).
+    /// At the end it closes, so the next slice reopens: new files, and the
+    /// folder as it is now. Not thread-safe: one owner, one queue.
+    final class DirCursor {
+        private var dir: UnsafeMutablePointer<DIR>?
+        deinit { if let dir { closedir(dir) } }
+
+        /// Up to `keep` names that pass `match`, looking at `examine` names
+        /// at most (no "." or ".."); nil when the folder can't be opened.
+        func next(_ url: URL, examine: Int, keep: Int, match: (String) -> Bool = { _ in true }) -> [String]? {
+            if dir == nil { dir = opendir(url.path) }
+            guard let d = dir else { return nil }
+            var names: [String] = []
+            var seen = 0
+            while seen < examine, names.count < keep {
+                guard let ent = readdir(d) else {
+                    closedir(d)
+                    dir = nil
+                    break
+                }
+                let name = withUnsafePointer(to: ent.pointee.d_name) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+                }
+                if name == "." || name == ".." { continue }
+                seen += 1
+                if match(name) { names.append(name) }
+            }
+            return names
+        }
+
+        /// Close now: the next slice starts over (the folder is gone, or
+        /// isn't one any more).
+        func reset() {
+            if let dir { closedir(dir) }
+            dir = nil
+        }
+    }
+
+    /// At most `max` names of `dir`, read with readdir so the rest of a huge
+    /// directory is never materialized; nil when it can't be opened.
+    nonisolated static func listing(_ dir: URL, max: Int) -> [String]? {
+        DirCursor().next(dir, examine: max, keep: max)
+    }
 
     nonisolated static func boundedText(_ url: URL, max: Int = maxOutboxTextFile) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -901,7 +1060,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard let vm = vm, let session = sessionDisk else {
             throw UbuntuImageError.installerStoppedEarly
         }
-        outboxPollTask?.cancel()
+        cancelOutboxPoll()
         try? FileManager.default.removeItem(at: session.savedStateURL)
         try await vm.saveMachineStateTo(url: session.savedStateURL)
         Self.writeFingerprint(configFingerprint, to: Self.fingerprintURL(for: session.savedStateURL))
@@ -953,9 +1112,9 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         }
         if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
         guard let h = try? FileHandle(forWritingTo: url) else { return nil }
-        h.seekToEndOfFile()
+        _ = try? h.seekToEnd()
         let stamp = ISO8601DateFormatter().string(from: Date())
-        h.write(Data("\n=== \(stamp) boot ===\n".utf8))
+        try? h.write(contentsOf: Data("\n=== \(stamp) boot ===\n".utf8))
         return h
     }
 
@@ -1022,7 +1181,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// `bromure-open` script and forwards each one to `onURLOpen`.
     private func startOutboxPolling() {
         guard let outbox = sessionDisk?.outboxDirectory else { return }
-        outboxPollTask?.cancel()
+        cancelOutboxPoll()
         guestLiveness = GuestLiveness()
         guestSilent = false
         onGuestResponsive?(true)
@@ -1030,13 +1189,23 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // thread, a stalled disk (a panic caught one, two minutes long) froze
         // the app with it. Only what a tick found comes back here.
         let scanner = OutboxScanner(outbox: outbox)
+        outboxScanner = scanner
         outboxPollTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                let events = await scanner.tick()
-                // A finished tick is applied even if cancelled meanwhile, as
-                // the tick run here used to be: it may have consumed a file.
+                let found = await scanner.tick()
                 guard let self else { return }
-                for apply in events { apply(self) }
+                // Cancelled meanwhile (a relaunch, a stop): what it read is
+                // stale (the outbox is the next guest's now, and this
+                // sandbox's callbacks, keyed by the workspace, would tell its
+                // session stale news) — except the one-shots it removed before
+                // the cancel: the old guest's (a reboot intent, its home
+                // migrated), gone from the outbox, so applied, or lost for
+                // good. A tick queued after the cancel removed nothing.
+                guard !Task.isCancelled, !scanner.isCancelled else {
+                    for apply in found.oneShots { apply(self) }
+                    return
+                }
+                for apply in found.all { apply(self) }
                 try? await Task.sleep(nanoseconds: 40_000_000)
             }
         }
@@ -1074,19 +1243,56 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         // relay / titles / roster) is latency-tolerant and stays on the
         // ~480ms cadence via the tick gate below.
         private var ticks = 0
+        // The outbox and its URL relay, read a bounded slice per heavy tick.
+        private let outboxCursor = DirCursor()
+        private let relayCursor = DirCursor()
+        private let agentCursor = DirCursor()
         // agent-tool-<win>.jsonl: bytes already read, per file.
         private var toolLogs: [String: ToolLog] = [:]
 
         init(outbox: URL) { self.outbox = outbox; queue = Self.queue(for: outbox) }
 
-        func tick() async -> [Event] {
+        private let cancelled = OSAllocatedUnfairLock(initialState: false)
+        /// From now on a tick, queued or not, scans nothing: the one-shot
+        /// files it would take (reboot-intent, a URL to open, the home's
+        /// migration mark) may be the next guest's.
+        func cancel() { cancelled.withLock { $0 = true } }
+        var isCancelled: Bool { cancelled.withLock { $0 } }
+
+        /// A tick's findings: everything, in order, and of those the ones
+        /// read from one-shot files it removed.
+        struct Found {
+            var all: [Event] = []
+            var oneShots: [Event] = []
+        }
+
+        func tick() async -> Found {
             await withCheckedContinuation { cont in
-                queue.async { cont.resume(returning: self.scan()) }
+                queue.async {
+                    // Checked on the queue, where the scan runs: a cancel
+                    // before it starts means it never touches the outbox.
+                    cont.resume(returning: self.isCancelled ? Found() : self.scan())
+                }
             }
         }
 
-        private func scan() -> [Event] {
+        /// Remove a one-shot the scan has read, unless the scanner was
+        /// cancelled meanwhile (a scan stalled on the disk while the guest was
+        /// relaunched): then it's left for the next guest's scanner, and the
+        /// scan stops there, keeping what it already took.
+        private func consume(_ url: URL) -> Bool {
+            guard !isCancelled else { return false }
+            try? FileManager.default.removeItem(at: url)
+            return true
+        }
+
+        private func scan() -> Found {
             var events: [Event] = []
+            // What a removed one-shot file said: its file is gone, so it's
+            // owed to this sandbox even if the poll is cancelled meanwhile.
+            var oneShots: [Event] = []
+            func oneShot(_ e: @escaping Event) { events.append(e); oneShots.append(e) }
+            func found() -> Found { Found(all: events, oneShots: oneShots) }
             let fm = FileManager.default
             let outbox = self.outbox
             // FAST PATH — reboot-intent: the guest is going down for a
@@ -1096,8 +1302,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // would otherwise trigger the close-action shutdown.
             let rebootMarker = outbox.appendingPathComponent("reboot-intent")
             if fm.fileExists(atPath: rebootMarker.path) {
-                try? fm.removeItem(at: rebootMarker)
-                events.append { $0.onGuestReboot?() }
+                guard consume(rebootMarker) else { return found() }
+                oneShot { $0.onGuestReboot?() }
             }
 
             // FAST PATH — roster. Tab open/close/switch is felt directly
@@ -1120,7 +1326,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             // titles / url relay keep their original cadence.
             ticks &+= 1
             if ticks % 12 != 0 {
-                return events
+                return found()
             }
 
             // Read the always-present ip.txt without consuming it —
@@ -1163,7 +1369,46 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
             let maxURLFileSize = 8 * 1024
             var urlsProcessedThisTick = 0
             var oneShotsThisTick = 0
-            if let entries = try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+            if var entries = outboxCursor.next(outbox, examine: VM.maxOutboxEntriesPerTick,
+                                               keep: VM.maxOutboxEntriesPerTick)?
+                .map({ outbox.appendingPathComponent($0) }) {
+                // The URL relay's own folder (what a sandboxed agent can
+                // write): its url-*.txt only, never anything else named
+                // like the outbox's own signals.
+                // A real folder only: the guest can replace it with a symlink
+                // to a folder of the Mac's (attributesOfItem doesn't follow one).
+                let relay = outbox.appendingPathComponent(SessionDisk.outboxURLRelayFolder, isDirectory: true)
+                if (try? fm.attributesOfItem(atPath: relay.path))?[.type] as? FileAttributeType == .typeDirectory {
+                    entries += (relayCursor.next(relay, examine: VM.maxRelayNamesPerTick,
+                                                 keep: VM.maxRelayEntriesPerTick) {
+                        $0.hasPrefix("url-") && $0.hasSuffix(".txt")
+                    } ?? []).map { relay.appendingPathComponent($0) }
+                } else {
+                    relayCursor.reset()
+                }
+                // The agents' hooks' folder (what a sandboxed agent's hooks
+                // can write): their status and tool-call files only. Same
+                // real-folder check and bounded slices as the relay.
+                let agentDir = outbox.appendingPathComponent(SessionDisk.outboxAgentFolder, isDirectory: true)
+                if (try? fm.attributesOfItem(atPath: agentDir.path))?[.type] as? FileAttributeType == .typeDirectory {
+                    entries += (agentCursor.next(agentDir, examine: VM.maxRelayNamesPerTick,
+                                                 keep: VM.maxRelayEntriesPerTick) {
+                        VM.isAgentHookFile($0)
+                    } ?? []).map { agentDir.appendingPathComponent($0) }
+                } else {
+                    agentCursor.reset()
+                }
+                let urlBacklog = entries.filter {
+                    $0.lastPathComponent.hasPrefix("url-") && $0.pathExtension == "txt"
+                }.count
+                let shedding = urlBacklog > VM.urlBacklogHighWater
+                var shed = 0
+                defer {
+                    if shed > 0 {
+                        FileHandle.standardError.write(Data(
+                            "[ac] outbox: \(shed) URL request(s) dropped — the guest is flooding the relay\n".utf8))
+                    }
+                }
                 // agent-tool-<win>.jsonl — append-only, one line per tool
                 // call, written by the agents' PreToolUse hooks before the
                 // tool runs (NETWORK_LINEAGE.md). Read new complete lines;
@@ -1171,8 +1416,12 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 // without bound (the hook appends with O_APPEND).
                 for entry in entries where entry.lastPathComponent.hasPrefix("agent-tool-")
                     && entry.pathExtension == "jsonl" {
-                    let key = entry.lastPathComponent
-                    let window = Int(key.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    let name = entry.lastPathComponent
+                    let window = Int(name.dropFirst("agent-tool-".count).dropLast(".jsonl".count))
+                    // Per file: the outbox's and agent/'s same-named logs
+                    // keep their own offsets.
+                    let key = entry.deletingLastPathComponent().lastPathComponent == SessionDisk.outboxAgentFolder
+                        ? SessionDisk.outboxAgentFolder + "/" + name : name
                     // Bounded: a window per tick from the saved offset,
                     // never the whole file (the guest can make it huge).
                     var log = toolLogs[key] ?? ToolLog()
@@ -1187,7 +1436,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         // disk so the next tick can pick it up
                         // (rather than dropping a legitimate URL
                         // that lost a race with a flood).
+                        // A flood (more than the high-water mark listed):
+                        // the excess goes unopened, so it drains.
                         if urlsProcessedThisTick >= maxURLsPerTick {
+                            if shedding {
+                                guard consume(entry) else { return found() }
+                                shed += 1
+                            }
                             continue
                         }
                         urlsProcessedThisTick += 1
@@ -1202,7 +1457,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                             // consume + drop so it can't recur.
                             raw = ""
                         }
-                        try? fm.removeItem(at: entry)
+                        guard consume(entry) else { return found() }
                         // mailto: is intentionally NOT here.
                         // Historically Mail.app / Outlook /
                         // Thunderbird have leaked local file paths
@@ -1216,7 +1471,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                               ["http", "https"].contains(scheme) else {
                             continue
                         }
-                        events.append { $0.onURLOpen?(url) }
+                        oneShot { $0.onURLOpen?(url) }
                         continue
                     }
                     // tabs.txt is read on the fast tick above (mtime-gated),
@@ -1237,8 +1492,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     // copy is verified and the image is mounted over
                     // /home/ubuntu. Consumed; host stamps homeModel=.ext4.
                     if name == "home-migrated.txt" {
-                        try? fm.removeItem(at: entry)
-                        events.append { $0.onHomeMigrated?() }
+                        guard consume(entry) else { return found() }
+                        oneShot { $0.onHomeMigrated?() }
                         continue
                     }
                     // docker.txt — `docker ps -a --format '{{json .}}'`, one
@@ -1346,8 +1601,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
-                        if !raw.isEmpty { events.append { $0.onDockerError?(raw) } }
+                        guard consume(entry) else { return found() }
+                        if !raw.isEmpty { oneShot { $0.onDockerError?(raw) } }
                         continue
                     }
                     // worktree-error-*.txt — one-shot, same pattern: a failed
@@ -1359,8 +1614,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         oneShotsThisTick += 1
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
-                        if !raw.isEmpty { events.append { $0.onWorktreeError?(raw) } }
+                        guard consume(entry) else { return found() }
+                        if !raw.isEmpty { oneShot { $0.onWorktreeError?(raw) } }
                         continue
                     }
                     // agent-status-<windowIndex>.txt — one-shot: a Claude
@@ -1371,8 +1626,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                         let idxStr = name.dropFirst("agent-status-".count).dropLast(".txt".count)
                         let raw = VM.boundedText(entry)?
                             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        try? fm.removeItem(at: entry)
-                        if let idx = Int(idxStr), !raw.isEmpty { events.append { $0.onAgentStatus?(idx, raw) } }
+                        guard consume(entry) else { return found() }
+                        if let idx = Int(idxStr), !raw.isEmpty { oneShot { $0.onAgentStatus?(idx, raw) } }
                         continue
                     }
                     // shortcut-<key>.txt is handled by the fast path at the
@@ -1382,7 +1637,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                     // tab agent. Leave alone.
                 }
             }
-            return events
+            return found()
         }
     }
 
@@ -1424,7 +1679,7 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 return
             }
             self.state = .stopped
-            self.outboxPollTask?.cancel()
+            await Self.settle(self.cancelOutboxPoll(), within: 2)
             self.sessionDisk?.cleanupMetadataShare()
             self.releaseSerialConsole()
             self.releaseMACToPool()

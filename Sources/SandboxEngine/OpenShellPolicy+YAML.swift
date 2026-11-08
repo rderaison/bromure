@@ -146,8 +146,20 @@ extension OpenShellPolicy {
     /// a missing key; a path already listed comes back unchanged. Throws when
     /// the policy has no `filesystem_policy` section or the result wouldn't
     /// parse.
+    /// A path as a YAML scalar: bare when that reads back as the same path,
+    /// double-quoted otherwise. Inserted raw, a comma split it into two
+    /// flow-list items, and `#` started a comment.
+    static func yamlScalar(_ path: String) -> String {
+        let special = CharacterSet(charactersIn: ",[]{}#&*!|>'\"%@`:\\")
+        let plain = !path.isEmpty && path.rangeOfCharacter(from: special) == nil
+            && path.first != " " && path.last != " " && path.first != "-" && path.first != "?"
+        if plain { return path }
+        return "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
     public static func addingFilesystemPath(_ path: String, readWrite: Bool, to source: String) throws -> String {
         let key = readWrite ? "read_write" : "read_only"
+        let item = yamlScalar(path)
         if let fs = try OpenShellPolicy.parse(source).filesystem,
            (readWrite ? fs.readWrite : fs.readOnly).contains(path) { return source }
         var lines = source.components(separatedBy: "\n")
@@ -168,7 +180,7 @@ extension OpenShellPolicy {
                 // Flow list: append inside the brackets.
                 let inner = afterKey[afterKey.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
                 let prefix = lines[k].components(separatedBy: key + ":")[0]
-                lines[k] = prefix + key + ": [" + (inner.isEmpty ? path : inner + ", " + path) + "]"
+                lines[k] = prefix + key + ": [" + (inner.isEmpty ? item : inner + ", " + item) + "]"
                     + afterKey[afterKey.index(after: close)...]
             } else {
                 // Block list: after its last `- item` line.
@@ -181,10 +193,10 @@ extension OpenShellPolicy {
                     last = i
                     itemIndent = String(lines[i].prefix { $0 == " " })
                 }
-                lines.insert(itemIndent + "- " + path, at: last + 1)
+                lines.insert(itemIndent + "- " + item, at: last + 1)
             }
         } else {
-            lines.insert(indent + key + ": [" + path + "]", at: start + 1)
+            lines.insert(indent + key + ": [" + item + "]", at: start + 1)
         }
         let out = lines.joined(separator: "\n")
         _ = try OpenShellPolicy.parse(out)

@@ -80,7 +80,12 @@ struct SettingsKeepsAppEditsTests {
     func iosWired() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/WorkspaceEditor.swift"), encoding: .utf8)
-        #expect(ios.contains("if editing != nil, let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }"))
+        // Editing goes through settingsDocument, which drops notes and Squelch
+        // left as opened (dropUnedited) after sending what was cleared.
+        #expect(ios.contains("built = RemoteHostController.settingsDocument(edited: edited, opened: original)"))
+        let mac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
+        let doc = try #require(mac.range(of: "static func settingsDocument("))
+        #expect(mac[doc.upperBound...].prefix(1800).contains("dropUnedited(&doc, edited: edited, opened: opened)"))
     }
 
     /// The other way round: a dashboard draft left open while settings saved

@@ -358,6 +358,71 @@ struct Ext4FsckTests {
         }
     }
 
+    /// The finding: listDir refused any directory over 64 MiB as a corrupt
+    /// inode, though one with many entries grows past that. The browser
+    /// couldn't open it, and fsck called it damage, so the error flag that
+    /// strands the guest's boot was never cleared.
+    @Test("a directory past 64 MiB is listed and verified, read a block at a time")
+    func bigDirectory() throws {
+        var img = Self.buildImage()
+        let bs = Self.blockSize
+        let fsBlocks = 73_728                               // 72 MiB of 1K blocks: 9 groups
+        let sb = 1024
+        putLE32(&img, sb + 0, 9 * 16)                       // s_inodes_count: 16 a group
+        putLE32(&img, sb + 4, UInt32(fsBlocks))             // s_blocks_count_lo
+        // The root: 65 MiB, its block 0 as before, and logical block 20000
+        // (past the first map window) through the double-indirect pointer.
+        let root = Self.inodeOffset(2)
+        let dirBlocks = (65 << 20) / bs + 1
+        putLE32(&img, root + 4, UInt32(dirBlocks * bs))
+        let dind = 13, ind = 14, late = 15
+        putLE32(&img, root + 40 + 13 * 4, UInt32(dind))     // i_block[13]
+        putLE32(&img, dind * bs + 77 * 4, UInt32(ind))      // 12 + 256 + 77·256 + 20 = 20000
+        putLE32(&img, ind * bs + 20 * 4, UInt32(late))
+        // There: "late.txt", an empty file at inode 13.
+        let o = Self.inodeOffset(13)
+        putLE16(&img, o, 0x81A4)
+        putLE16(&img, o + 26, 1)
+        putLE32(&img, late * bs, 13)
+        putLE16(&img, late * bs + 4, UInt16(bs))
+        img[late * bs + 6] = 8
+        img[late * bs + 7] = 1
+        for (i, c) in Array("late.txt".utf8).enumerated() { img[late * bs + 8 + i] = c }
+        // The error flag up: only a check that finds nothing wrong clears it.
+        putLE16(&img, sb + 58, le16(img, sb + 58) | 0x0002)
+
+        let path = NSTemporaryDirectory() + "ext4fsck-\(UUID().uuidString).img"
+        try Data(img).write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let h = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try h.truncate(atOffset: UInt64(fsBlocks * bs))     // sparse: costs nothing on disk
+        try h.close()
+
+        let vol = try Ext4Volume(path: path)
+        let node = try vol.inode(2)
+        #expect(node.size > 64 << 20)
+        #expect(try vol.listDir(2).map(\.name) == ["hello.txt", "late.txt"])
+        let repair = try Ext4Fsck.check(imagePath: path, autoFix: true)
+        #expect(repair.output.contains("verified 3 reachable inode(s)"), "\(repair.output)")
+        #expect(repair.output.contains("error flag cleared"), "\(repair.output)")
+        #expect(!(try Ext4Volume(path: path)).sb.hasErrors)
+
+        // Past what it reads (2 GiB, or 4 million entries): too large, not
+        // corrupt, and fsck neither calls it damage nor clears the flag.
+        #expect(throws: Ext4Error.self) { try vol.listDir(2, maxBytes: 32 << 20) }
+        do { _ = try vol.listDir(2, maxEntries: 1); Issue.record("read past the entry cap") }
+        catch Ext4Error.tooLarge(let n) { #expect(n == 2) }
+        do { _ = try vol.listDir(2, maxBytes: 32 << 20) }
+        catch Ext4Error.tooLarge(let n) { #expect(n == 2) }
+        #expect(Ext4Volume.maxDirectoryBytes == 2 << 30 && Ext4Volume.maxDirectoryEntries == 4_000_000)
+        let fsck = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Ext4/Ext4Fsck.swift"), encoding: .utf8)
+        let caught = try #require(fsck.range(of: "} catch Ext4Error.tooLarge(let n) {"))
+        #expect(!fsck[caught.upperBound...].prefix(260).contains("bad += 1"))
+        #expect(fsck.contains("let complete = visited.count < cap && tooLarge == 0"))
+    }
+
     @Test("a root claiming a huge size is refused, not read")
     func rootWithHugeSize() throws {
         // i_size is the image's word: ~4 GiB on a one-block root. "." and
@@ -379,7 +444,7 @@ struct Ext4FsckTests {
     func hugeFileSize() throws {
         // A guest makes this with one `truncate -s 1T`: i_size is the image's
         // word. The transcript reader and the browser's preview read a prefix;
-        // a whole read (or Extract) of more than the filesystem is refused.
+        // a whole read is too large, an Extract of more than 8 EiB refused.
         var img = Self.buildImage()
         putLE32(&img, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
         putLE32(&img, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)    // i_size_high
@@ -398,6 +463,146 @@ struct Ext4FsckTests {
             defer { try? handle.close() }
             #expect(throws: Ext4Error.self) { try vol.writeData(node, to: handle) }
         }
+    }
+
+    /// The finding (CWE-404): Extract opened the chosen destination for
+    /// writing before reading the guest's file, so one that failed to read
+    /// left the user's existing file emptied.
+    /// The finding: the temporary file's name wrapped the destination's, so
+    /// a valid name near the 255-byte limit made one too long to create.
+    @Test("Extract saves and replaces a file whose name is at the 255-byte limit")
+    func extractLongName() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("extract-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dst = dir.appendingPathComponent(String(repeating: "n", count: 251) + ".txt")   // 255 bytes
+        #expect(dst.lastPathComponent.utf8.count == 255)
+        try withImage(Self.buildImage()) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) == UInt64(Self.helloContent.count))
+            try Data("old".utf8).write(to: dst)
+            _ = try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst)   // replacing it
+        }
+        #expect(try Data(contentsOf: dst) == Data(Self.helloContent))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [dst.lastPathComponent])
+        #expect(Ext4BrowserModel.extractTempName().utf8.count < 40)
+    }
+
+    @Test("a failed Extract leaves the file it would have replaced as it was")
+    func extractKeepsDestination() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("extract-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dst = dir.appendingPathComponent("notes.txt")
+        try Data("precious".utf8).write(to: dst)
+        func names() throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() }
+
+        // A guest file that can't be read: it claims every byte there is.
+        var bad = Self.buildImage()
+        putLE32(&bad, Self.inodeOffset(12) + 4, 0xFFFF_FFFF)
+        putLE32(&bad, Self.inodeOffset(12) + 108, 0xFFFF_FFFF)
+        try withImage(bad) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(throws: Ext4Error.self) { try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) }
+        }
+        #expect(try String(contentsOf: dst, encoding: .utf8) == "precious")
+        #expect(try names() == ["notes.txt"], "a temporary file was left behind")
+
+        // One that reads: it replaces the file, and lands where there's none.
+        try withImage(Self.buildImage()) { path in
+            let vol = try Ext4Volume(path: path)
+            #expect(try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: dst) == UInt64(Self.helloContent.count))
+            let fresh = dir.appendingPathComponent("hello.txt")
+            _ = try Ext4BrowserModel.extract(try vol.inode(12), from: vol, to: fresh)
+            #expect(try Data(contentsOf: fresh) == Data(Self.helloContent))
+            let mode = try FileManager.default.attributesOfItem(atPath: fresh.path)[.posixPermissions] as? Int
+            #expect(mode == 0o644)
+        }
+        #expect(try Data(contentsOf: dst) == Data(Self.helloContent))
+        #expect(try names() == ["hello.txt", "notes.txt"])
+        let src = try String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Ext4/Ext4Browser.swift"), encoding: .utf8)
+        #expect(src.contains("let written = try Self.extract(node, from: volume, to: url)"))
+        #expect(!src.contains("FileManager.default.createFile(atPath: url.path"))
+    }
+
+    /// The finding: a whole-file read or Extract refused any file whose
+    /// logical size passed the filesystem's as a corrupt inode, though a
+    /// sparse file can (an 8 MiB volume holds a 16 MiB file with holes).
+    @Test("a sparse file larger than the filesystem reads whole, and extracts sparse")
+    func sparseFilePastTheFilesystem() throws {
+        var img = Self.buildImage()                              // a 64 KiB filesystem
+        let size = 16 << 20
+        putLE32(&img, Self.inodeOffset(12) + 4, UInt32(size))    // hello.txt: 16 MiB, one block kept
+        try withImage(img) { path in
+            let vol = try Ext4Volume(path: path)
+            let node = try vol.inode(12)
+            #expect(node.size > vol.byteSize)
+            let whole = try vol.readData(node)
+            #expect(whole.count == size)
+            #expect(Array(whole.prefix(Self.helloContent.count)) == Self.helloContent)
+            #expect(whole[Self.blockSize...].allSatisfy { $0 == 0 })
+
+            let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+            FileManager.default.createFile(atPath: out, contents: nil)
+            defer { try? FileManager.default.removeItem(atPath: out) }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+            #expect(try vol.writeData(node, to: handle) == UInt64(size))
+            try handle.close()
+            let copy = try Data(contentsOf: URL(fileURLWithPath: out))
+            #expect(copy.count == size && Array(copy) == whole)
+            // Its holes stayed holes: far less on disk than its size.
+            let allocated = try URL(fileURLWithPath: out).resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? size
+            #expect(allocated < size / 4, "allocated \(allocated)")
+        }
+        // A whole read past what's held in memory is too large, not corrupt.
+        #expect(Ext4Volume.maxBufferedBytes == 512 << 20)
+    }
+
+    @Test("Extract of a huge sparse file walks its map, not its size; a hostile map stops at the filesystem's blocks")
+    func extractHostile() throws {
+        func extract(_ img: [UInt8]) throws -> (UInt64?, TimeInterval, UInt64) {
+            var result: (UInt64?, TimeInterval, UInt64) = (nil, 0, 0)
+            try withImage(img) { path in
+                let vol = try Ext4Volume(path: path)
+                let out = NSTemporaryDirectory() + "ext4-extract-\(UUID().uuidString)"
+                FileManager.default.createFile(atPath: out, contents: nil)
+                defer { try? FileManager.default.removeItem(atPath: out) }
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: out))
+                let t0 = Date()
+                let n = try? vol.writeData(try vol.inode(12), to: handle)
+                try handle.close()
+                let size = (try FileManager.default.attributesOfItem(atPath: out)[.size] as? NSNumber)?.uint64Value ?? 0
+                result = (n, Date().timeIntervalSince(t0), size)
+            }
+            return result
+        }
+        // 1 TiB, one block kept: in no time, and the copy is sparse.
+        var img = Self.buildImage()
+        putLE32(&img, Self.inodeOffset(12) + 4, 0)
+        putLE32(&img, Self.inodeOffset(12) + 108, 256)            // i_size_high: 256 << 32 = 1 TiB
+        let (n, took, size) = try extract(img)
+        #expect(n == 1 << 40 && size == 1 << 40)
+        #expect(took < 2, "took \(took) s")
+        // Past 2^32 blocks (4 TiB at 1K): no ext4 file is that large.
+        putLE32(&img, Self.inodeOffset(12) + 108, 1025)
+        #expect(try extract(img).0 == nil)
+        // A double-indirect table whose every pointer is the same table, and
+        // that table's every pointer the same block: 65,536 blocks of a
+        // 64-block filesystem. Refused at the budget.
+        var loop = Self.buildImage()
+        let o = Self.inodeOffset(12)
+        putLE32(&loop, o + 4, 0)
+        putLE32(&loop, o + 108, 1)                                // 4 GiB
+        putLE32(&loop, o + 40 + 13 * 4, 13)                       // i_block[13] → table 13
+        for i in 0..<Self.blockSize / 4 {
+            putLE32(&loop, 13 * Self.blockSize + i * 4, 14)       // every entry → table 14
+            putLE32(&loop, 14 * Self.blockSize + i * 4, UInt32(Self.helloBlock))
+        }
+        let (m, tookLoop, _) = try extract(loop)
+        #expect(m == nil)
+        #expect(tookLoop < 2)
     }
 
     @Test("the check survives a file claiming an enormous size")

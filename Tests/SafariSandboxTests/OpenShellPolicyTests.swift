@@ -656,4 +656,26 @@ struct OpenShellPolicyTests {
         """)
         #expect(p.inspectedPorts == [8443])
     }
+
+    /// The OpenShell replay's transparent_destination_denials case: with a
+    /// hostname rule on port 80, the switch handed a denied flow to the MiTM
+    /// to decide by Host header -- the metadata address included, so the
+    /// guest's connect() to 169.254.169.254:80 succeeded before the MiTM
+    /// dropped it. OpenShell refuses the connect.
+    @Test("an always-blocked address is refused at the switch, never handed to the MiTM")
+    func alwaysBlockedNeverDeferred() {
+        func ip(_ a: UInt32, _ b: UInt32, _ c: UInt32, _ d: UInt32) -> UInt32 { a << 24 | b << 16 | c << 8 | d }
+        func defers(_ dst: UInt32) -> Bool {
+            VMNetSwitch.defersDenialToInterception(proto: 6, dport: 80, dstIP: dst, policyDefers: true, intercepted: true)
+        }
+        #expect(defers(ip(203, 0, 113, 10)))            // an ordinary address: the MiTM decides
+        #expect(!defers(ip(169, 254, 169, 254)))        // the metadata address
+        #expect(!defers(ip(169, 254, 1, 1)))            // link-local
+        #expect(!defers(ip(127, 0, 0, 1)))              // loopback
+        #expect(!defers(0))                             // unspecified
+        // The other conditions still hold.
+        #expect(!VMNetSwitch.defersDenialToInterception(proto: 17, dport: 80, dstIP: ip(203, 0, 113, 10), policyDefers: true, intercepted: true))
+        #expect(!VMNetSwitch.defersDenialToInterception(proto: 6, dport: 80, dstIP: ip(203, 0, 113, 10), policyDefers: false, intercepted: true))
+        #expect(!VMNetSwitch.defersDenialToInterception(proto: 6, dport: 80, dstIP: ip(203, 0, 113, 10), policyDefers: true, intercepted: false))
+    }
 }

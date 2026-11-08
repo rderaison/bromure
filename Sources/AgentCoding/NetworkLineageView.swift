@@ -171,7 +171,7 @@ struct NetworkLineageView: View {
                 HStack(spacing: 6) {
                     Text(l.event.time, format: .dateTime.month().day().hour().minute().second())
                     if let w = l.event.workspace { Text("·"); Text(w) }
-                    if let m = l.event.machine { Text("·"); Text(m) }
+                    if let m = l.event.machine { Text("·"); Text(SecurityTimeline.shared.machineLabel(m)) }
                 }
                 .font(.caption).foregroundStyle(.secondary)
             }

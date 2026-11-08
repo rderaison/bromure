@@ -337,7 +337,7 @@ struct BromureAC: ParsableCommand {
                     SecurityPosture(id: osID, name: "Payments API", colorHex: "#22C55E", firewall: true, supplyChain: true,
                                     guardrails: true, promptInjection: false, sandbox: true),
                 ]
-                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { postures },
+                view = AnyView(SecurityTimelineView(timeline: tl, onClose: {}, postures: { _ in postures },
                                                     startOnTimeline: which == "timeline"))
                 size = NSSize(width: 980, height: 720)
             case "lineage", "lineage-allowed":
@@ -418,7 +418,7 @@ struct BromureAC: ParsableCommand {
                 // checks nothing is clipped at the window's minimum size.
                 var p = Profile(name: which == "prefs" ? "Defaults" : "Workspace 2", tool: .claude,
                                 authMode: .subscription)
-                if which == "prefs" { p.id = ProfileStore.templateID } else { p.agentReach = [] }
+                if which == "prefs" { p.id = ProfileStore.templateID }
                 // BROMURE_SHOT_OPENSHELL=1: the Firewall pane on its OpenShell side.
                 if ProcessInfo.processInfo.environment["BROMURE_SHOT_OPENSHELL"] == "1" {
                     p.networkPolicy = OpenShellPolicyEditor.starterPolicy
@@ -1157,7 +1157,7 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
 
     // The Linux machine behind the selected session: its terminal tab — and
     // from that terminal, the session again.
-    let hoodItem = NSMenuItem(title: L("Linux"),
+    let hoodItem = NSMenuItem(title: L("Terminal"),
                               action: #selector(ACAppDelegate.toggleLinuxAction(_:)),
                               keyEquivalent: "u")
     hoodItem.keyEquivalentModifierMask = [.command, .option]
@@ -1513,6 +1513,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // CLI / automation, a timeline action, an expiry): re-arm the
             // expiry timer and refresh what's listening (the timeline).
             firewallProfilesChanged(from: oldValue)
+            // The shield follows what restricts each workspace now.
+            refreshShieldState()
             // An open VM dashboard shows the stored notes, whoever stored
             // them (settings, AppleScript, the CLI): a card left on older
             // ones had its next Save write them back over the newer.
@@ -1557,6 +1559,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// to the right remote workspace over its tunnel.
     @MainActor func remoteController(forHost id: UUID) -> RemoteHostController? {
         remoteHostWindows[id]?.controller
+    }
+    /// The connected remote-host mirrors, by host name.
+    @MainActor func connectedRemoteHostWindows() -> [RemoteHostWindow] {
+        remoteHostWindows.values.filter { $0.controller.connected }
+            .sorted { $0.controller.host.name.localizedStandardCompare($1.controller.host.name) == .orderedAscending }
     }
     /// The "Connect to Remote Bromure" window (auth flow), if open.
     var remoteConnectWindow: NSWindow?
@@ -2103,6 +2110,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                         state: m.connected ? .running : .off, compromised: false)
         }
         if w.listModel.profileRows != rows { w.listModel.profileRows = rows }
+        refreshShieldState()
         // Attached machines: a row always, a tab entry while connected (its
         // roster, like a VM's). Kept out of every local reconcile/probe.
         let former = w.listModel.machineIDs
@@ -3956,7 +3964,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // enterprise-enrolled installs, uploaded to the cloud. The switch
         // (SandboxEngine) can't reach these AgentCoding sinks directly, so it
         // calls out through this observer.
-        VMNetSwitch.shared.setEgressObserver { SwitchEgressReport.record($0) }
+        // Read here, on the main thread: the observer runs on the switch's.
+        let egressEngine = mitmEngine
+        VMNetSwitch.shared.setEgressObserver { SwitchEgressReport.record($0, engine: egressEngine) }
 
         // Refresh the MLX model catalog from the hosted manifest in the
         // background (vLLM.md §5.1). Non-fatal — falls back to the bundled
@@ -4550,6 +4560,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             "user": user,
             "connect": "ssh -p \(cfg.port) \(user)@\(host)",
             "authorizedKeys": keys,
+            "authorizedKeysProblem": server.authorizedKeysProblem ?? "",
         ]
     }
 
@@ -5479,7 +5490,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self else { return ["error": "no app"] }
                 if let action = params["action"] as? String,
                    action.hasPrefix("room-") || action.hasPrefix("branch-") || action.hasPrefix("review-") || ["sidebar-search", "sidebar-folds", "session-surface", "select-session", "undo-toast",
-                                                 "activity-open", "command-held", "appearance"].contains(action) {
+                                                 "activity-open", "command-held", "appearance", "policy-drawer"].contains(action),
+                   (params["host"] as? String) == nil || action != "policy-drawer" {
                     return self.roomDebug(action, params)
                 }
                 let key = (params["host"] as? String) ?? ""
@@ -5552,7 +5564,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // docker-style VM control plane.
         server.onListVMs = { [weak self] in self?.automationVMList() ?? [] }
         server.onStopVM = { [weak self] idOrName, action in
-            guard let self else { return false }
+            guard let self else { return (false, nil) }
             return await self.automationStopVM(idOrName: idOrName, action: action)
         }
         server.onAttachVM = { [weak self] idOrName in
@@ -5585,6 +5597,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             return Self.advisorProposalsRoute(profileID: pid, method: method, sub: sub, body: body)
         }
+        server.onProfileSandboxDecision = { [weak self] key, method, sub, body in
+            guard let pid = DispatchQueue.main.sync(execute: { self?.profileByNameOrID(key)?.id }) else {
+                return (404, ["error": "Profile not found"])
+            }
+            guard method == "POST", sub.count == 1 else { return (405, ["error": "POST only"]) }
+            return Self.sandboxDecisionRoute(profileID: pid, sub[0], body: body,
+                                             allow: { pid, host, port, exe in
+                                                 await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
+                                             },
+                                             addPath: { pid, path, rw in
+                                                 DispatchQueue.main.sync {
+                                                     MainActor.assumeIsolated {
+                                                         self?.addSandboxPath(profileID: pid, path: path, readWrite: rw) ?? "unavailable"
+                                                     }
+                                                 }
+                                             })
+        }
         server.onDescribeStorage = { [weak self] key in
             guard let self, let p = self.profileByNameOrID(key) else { return nil }
             return self.makeStorageContext(for: p)
@@ -5598,7 +5627,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard let self, let uuid = UUID(uuidString: id),
                       self.profiles.contains(where: { $0.id == uuid }),
                       (try? EgressPolicy.parse(rules)) != nil else { return nil }
-                return self.commitFirewallRules(rules, profileID: uuid)
+                return self.commitFirewallRulesResult(rules, profileID: uuid)
+            }
+        }
+        server.onFirewallEdit = { [weak self] id, edit in
+            MainActor.assumeIsolated {
+                guard let self, let uuid = UUID(uuidString: id),
+                      self.profiles.contains(where: { $0.id == uuid }) else { return nil }
+                // Applied to the rules as they are now, on the main thread:
+                // concurrent edits each land, in the order they arrive.
+                return self.applyFirewallEditResult(edit, profileID: uuid)
             }
         }
         server.onSetSquelch = { [weak self] id, on in
@@ -6159,6 +6197,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onSecurityTimeline = {
             MainActor.assumeIsolated { SecurityTimeline.shared.mirrorRows() }
+        }
+        server.onSecurityTimelineOldest = {
+            MainActor.assumeIsolated { SecurityTimeline.shared.oldestRetained?.timeIntervalSince1970 }
+        }
+        server.onSecurityTimelineRetention = {
+            MainActor.assumeIsolated { (SecurityTimeline.shared.oldestRetainedSeq, SecurityTimeline.shared.epoch) }
+        }
+        server.onSecurityHistory = { hours in
+            MainActor.assumeIsolated { SecurityTimeline.shared.historyRows(hours: hours) }
         }
         // Fat-client Local Models: the server owns the engine + the downloads,
         // so it reports its OWN unified memory (the RAM-fit gate), which models
@@ -6762,6 +6809,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///   POST /profiles/{id}/proposals/{proposal}/approve
     ///   POST /profiles/{id}/proposals/{proposal}/reject     {"reason": "…"}
     /// Runs on the automation server's thread.
+    /// The Sandbox drawer's one-click decisions from a fat client, as its own
+    /// window makes them here: `openshell-allow` (OpenShellAdvisor.allow) and
+    /// `sandbox-path` (a filesystem path into the policy, at the next start).
+    /// Runs on the automation server's thread. 200 {"ok": true}, else
+    /// 400/409 {"error"}.
+    nonisolated static func sandboxDecisionRoute(
+        profileID: UUID, _ action: String, body: [String: Any],
+        allow: @escaping @Sendable (UUID, String, Int, String?) async -> String?,
+        addPath: (UUID, String, Bool) -> String?
+    ) -> (status: Int, body: [String: Any]) {
+        switch action {
+        case "openshell-allow":
+            guard let host = body["host"] as? String, !host.isEmpty, host.count <= 253,
+                  let port = body["port"] as? Int, (1...65535).contains(port) else {
+                return (400, ["error": "host and port (1-65535) required"])
+            }
+            let exe = (body["exe"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(4096)) }
+            let box = SendableBox<String?>(nil)
+            let done = DispatchSemaphore(value: 0)
+            Task.detached { box.value = await allow(profileID, host, port, exe); done.signal() }
+            if done.wait(timeout: .now() + 30) == .timedOut { return (504, ["error": "Allowing \(host):\(port) timed out"]) }
+            if let error = box.value { return (409, ["error": error]) }
+            return (200, ["ok": true])
+        case "sandbox-path":
+            guard let path = body["path"] as? String, path.hasPrefix("/"), path.count <= 4096,
+                  !path.contains("\n"), !path.contains("\0") else {
+                return (400, ["error": "an absolute path required"])
+            }
+            if let error = addPath(profileID, path, (body["readWrite"] as? Bool) ?? false) {
+                return (409, ["error": error])
+            }
+            return (200, ["ok": true])
+        default:
+            return (404, ["error": "Unknown sandbox decision"])
+        }
+    }
+
     nonisolated static func advisorProposalsRoute(profileID: UUID, method: String, sub: [String],
                                                   body: [String: Any], advisor: OpenShellAdvisor = .shared)
         -> (status: Int, body: [String: Any]) {
@@ -7042,6 +7126,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     ["tool": $0.tool.rawValue, "authMode": $0.authMode.rawValue]
                 },
                 "squelch": p.squelch.enabled,
+                // Something restricts its traffic (OpenShell, the boundary,
+                // or the Bromure Firewall): a fat client shows the Sandbox
+                // drawer's shield only then.
+                "sandboxed": p.restrictsEgress,
                 // Its notes: the fat client's dashboard card and row tooltip.
                 "comments": p.comments,
             ]
@@ -7133,15 +7221,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return true
     }
 
-    @MainActor private func automationStopVM(idOrName: String, action: String) async -> Bool {
-        guard let id = resolveRunningSessionID(idOrName) else { return false }
+    @MainActor private func automationStopVM(idOrName: String, action: String) async -> (found: Bool, refusal: String?) {
+        guard let id = resolveRunningSessionID(idOrName) else { return (false, nil) }
         let closeAction: Profile.CloseAction
         switch action.lowercased() {
         case "suspend":            closeAction = .suspend
         default:                   closeAction = .shutdown   // shutdown / kill / stop
         }
-        await stopSession(id, action: closeAction)
-        return true
+        let refusal = await stopSession(id, action: closeAction)
+        return (true, refusal)
     }
 
     @MainActor private func automationAttachVM(idOrName: String) async -> Bool {
@@ -8961,6 +9049,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var preferencesWindow: NSWindow?
     private var remoteAccessWindow: NSWindow?
     private var securityTimelineWindow: NSWindow?
+    /// The machine the Security window shows (the window in front at open).
+    private let securityWindowScope = SecurityWindowScope()
     private var inferenceLogWindow: NSWindow?
 
     /// Wired to the "Trace Inspector…" menu item (⇧⌘I).
@@ -9030,6 +9120,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // The tracked window, or one still on screen whose reference was
         // dropped — never a second "Security" window.
         let id = NSUserInterfaceItemIdentifier("io.bromure.security-timeline")
+        // For the window in front: a fat client's host shows that host's
+        // security data, not this Mac's. Asked from the Security window
+        // itself, it stays on what it shows.
+        let front = NSApp.keyWindow ?? NSApp.mainWindow
+        if front?.identifier != id {
+            let host = (front as? RemoteHostWindow)?.controller.securityMirrorKey
+            securityWindowScope.focus(SecurityWindowScope.machine(
+                frontHost: host, mirroredHosts: !SecurityTimeline.shared.remote.isEmpty))
+        }
         if let win = securityTimelineWindow
             ?? NSApp.windows.first(where: { $0.identifier == id && $0.isVisible }) {
             securityTimelineWindow = win
@@ -9052,8 +9151,25 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // which let the next open (`ui-shot which=timeline`) make a
             // second window.
             onClose: {},
-            postures: { [weak self] in
-                (self?.profiles ?? []).map { SecurityPosture(profile: $0) }
+            postures: { [weak self] machine in
+                guard let self else { return [] }
+                let local = self.profiles.map { SecurityPosture(profile: $0) }
+                let hosts = self.connectedRemoteHostWindows().map(\.controller)
+                @MainActor func remote(_ c: RemoteHostController) -> [SecurityPosture] {
+                    // Marked with the host, so a cell opens the host's editor.
+                    c.profiles.map { var s = SecurityPosture(profile: $0); s.machine = c.securityMirrorKey; s.hostID = c.host.id; return s }
+                }
+                switch machine {
+                case nil: return local + hosts.flatMap(remote)
+                case ""?: return local
+                case let key?: return hosts.first { $0.securityMirrorKey == key }.map(remote) ?? []
+                }
+            },
+            scope: securityWindowScope,
+            // A fat client's host: its full history for the range, so the
+            // counts are the server's (the live mirror is its last rows).
+            loadHistory: { [weak self] hours in
+                for w in self?.connectedRemoteHostWindows() ?? [] { w.controller.fetchSecurityHistory(hours: hours) }
             },
             // Doc/video captures: open on the event log instead of the Overview.
             startOnTimeline: ProcessInfo.processInfo.environment["BROMURE_DEBUG_TIMELINE_TAB"] == "timeline"))
@@ -9536,6 +9652,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let w = ensureUnifiedWindow()
         func uuid(_ k: String) -> UUID? { (p[k] as? String).flatMap(UUID.init(uuidString:)) }
         switch action {
+        case "policy-drawer":
+            // This Mac's window (no host given): pick the workspace, then the shield.
+            if let id = uuid("workspace") { w.select(profileID: id) }
+            return w.debugPolicyDrawer(p)
         case "room-create":
             let r = roomCreate(name: (p["name"] as? String) ?? "",
                                sessions: ((p["sessions"] as? [String]) ?? []).compactMap(UUID.init(uuidString:)))
@@ -11262,9 +11382,29 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Which workspaces have the Sandbox drawer (the shield): whatever
+    /// restricts their traffic now. Recomputed whenever that can change --
+    /// any profile save (`profiles`' didSet), a new or cleared organization
+    /// boundary -- not only on a sidebar refresh: a boundary set from the
+    /// editor started blocking a workspace whose shield stayed hidden, and a
+    /// cleared one left a shield for a policy no longer in force (Finding:
+    /// "Changing the organization boundary leaves the local Sandbox shield
+    /// stale").
+    @MainActor
+    func refreshShieldState() {
+        guard let w = unifiedWindow else { return }
+        let unsandboxed = Self.unsandboxedIDs(profiles)
+        if w.listModel.unsandboxedProfileIDs != unsandboxed { w.listModel.unsandboxedProfileIDs = unsandboxed }
+    }
+
+    nonisolated static func unsandboxedIDs(_ profiles: [Profile]) -> Set<Profile.ID> {
+        Set(profiles.filter { !$0.restrictsEgress }.map(\.id))
+    }
+
     @MainActor
     func reapplyOpenShellGovernance() {
         OpenShellAdvisorModeCache.shared.refresh(profiles)
+        refreshShieldState()
         for (id, session) in runningSessions {
             let profile = profiles.first { $0.id == id } ?? session.profile
             mitmEngine?.setGuardrailsConfig(Self.makeGuardrailsConfig(for: profile), for: id)
@@ -15429,10 +15569,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
             }
         }
-        sandbox.onGuestReboot = { [weak self] in
+        sandbox.onGuestReboot = { [weak self, weak sandbox] in
             Task { @MainActor in
                 guard let self, let session = self.runningSessions[pid],
                       !session.rebootRequested else { return }   // dedupe repeats
+                // The old guest's intent, read by a poll a relaunch stopped,
+                // isn't the replacement's: it marked the new boot rebooting
+                // (saved state cleared, its shutdown taken for a reboot).
+                guard Self.eventIsForCurrent(sandbox, current: session.sandbox) else { return }
                 // Flag the reboot so the empty rosters the guest publishes on its
                 // way down don't trigger the close-action shutdown
                 // (SessionPane.applyTabList guards on rebootRequested). Then just
@@ -15460,7 +15604,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         sandbox.onURLOpen = { [weak self, weak sandbox] url in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
                 // browser's callback reaches the in-VM CLI before we open it
@@ -15552,22 +15697,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         AppLog.stamp("'\(profile.name)': BROMURE_NO_REAPER=1 — no session-start checkpoint")
                         return
                     }
-                    let store = self.store
-                    Task.detached {
-                        let now = Date()
-                        do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }
-                        catch {
-                            FileHandle.standardError.write(Data(
-                                "[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
-                        }
-                        do { _ = try store.snapshotHomeImage(for: profile, at: now, automatic: true) }
-                        catch {
-                            FileHandle.standardError.write(Data(
-                                "[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
-                        }
-                        // Then what's beyond the ladder, both images at once.
-                        store.pruneCheckpoints(for: profile, now: now)
-                    }
+                    // Off the main actor; after any checkpoint delete under way.
+                    self.store.takeSessionStartCheckpoints(for: profile)
                 }
             }
         }
@@ -15647,14 +15778,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self?.pane(for: pid)?.applyDockerVolumes(volumes)
             }
         }
-        sandbox.onDockerError = { [weak self] message in
+        sandbox.onDockerError = { [weak self, weak sandbox] message in
             Task { @MainActor in
-                self?.pane(for: pid)?.applyDockerError(message)
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
+                self.pane(for: pid)?.applyDockerError(message)
             }
         }
-        sandbox.onWorktreeError = { [weak self] raw in
+        sandbox.onWorktreeError = { [weak self, weak sandbox] raw in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // An automation (or task) run's refusal names its slug on the
                 // first line: that run failed — it isn't left "launched".
                 let (slug, message) = Self.splitWorktreeError(raw)
@@ -15685,9 +15819,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 alert.beginSheetModal(for: win) { _ in }
             }
         }
-        sandbox.onAgentStatus = { [weak self] index, signal in
+        sandbox.onAgentStatus = { [weak self, weak sandbox] index, signal in
             Task { @MainActor in
-                guard let self, let status = AgentStatus(signal: signal) else { return }
+                guard let self, let status = AgentStatus(signal: signal),
+                      Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
                 // Line 2 names the hook's conversation: a report Codex's
                 // shared server filed under another tab goes to its own.
                 let lines = signal.split(whereSeparator: \.isNewline)
@@ -15783,6 +15918,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Whether `stopped` stopping ends the workspace's session: it is the
     /// session's sandbox, or no session has one yet (a boot still on its
     /// way). Pure.
+    /// A one-shot a sandbox reported (a reboot intent, a URL, a status, an
+    /// error) is for the workspace's session only while that session still
+    /// runs on it. A poll a relaunch stopped still applies what it had taken
+    /// from the outbox, and these callbacks are keyed by the workspace:
+    /// without this, the old guest's events reached the replacement
+    /// (CWE-367). No session registered (a relaunch between unregistering
+    /// the old and registering the new) is nobody's either, unlike a stop's
+    /// (`stopEndsSession`): a sandbox's callbacks are wired just before it
+    /// registers, with no wait between, so its own events always find it.
+    nonisolated static func eventIsForCurrent(_ sandbox: AnyObject?, current: AnyObject?) -> Bool {
+        guard let sandbox, let current else { return false }
+        return sandbox === current
+    }
+
     nonisolated static func stopEndsSession(of stopped: AnyObject?, current: AnyObject?) -> Bool {
         guard let current else { return true }
         return stopped === current
@@ -15885,21 +16034,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// down. This is the *only* path that powers a VM off — window close is a
     /// detach. Invoked by `vm kill`, the ⌘Q drain, the status-item, and the
     /// guest "all shells exited" signal.
-    @MainActor
-    func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async {
+    /// Returns why a suspend was refused (the VM is still running), else nil.
+    @MainActor @discardableResult
+    func stopSession(_ profileID: Profile.ID, action: Profile.CloseAction) async -> String? {
         // Still booting: no session yet, so nothing to stop — and the VM that
         // registers after would stay up. Stopped when it registers instead.
         if runningSessions[profileID] == nil, bootsInFlight.deferStop(profileID, action: action) {
-            return
+            return nil
         }
         guard let session = runningSessions[profileID], !session.stopping,
-              let vm = session.sandbox.vm else { return }
+              let vm = session.sandbox.vm else { return nil }
         let sandbox = session.sandbox
-        session.stopping = true
         let name = session.profile.name
-        // A suspended/off VM can't serve its ports; tear down any Cloudflare
-        // exposures pointing at it (the SSH front door tunnel is unaffected).
-        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         // `.ask` and `.background` both collapse to `.suspend` — a programmatic
         // stop isn't the moment for a modal, and "background" can't survive the
         // agent exiting, so suspend keeps state and the user decides next launch.
@@ -15909,38 +16055,30 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // never restore that snapshot. Shut down cleanly instead of writing a
         // doomed vm.state.
         if session.homeJustMigrated && resolved == .suspend { resolved = .shutdown }
-        switch resolved {
-        case .suspend:
-            sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
-            // Bound the suspend. vm.pause()/saveMachineStateTo can hang against a
-            // wedged or CPU-pegged guest (e.g. a runaway autorepeat loop), which
-            // would strand quit in `.terminateLater` forever — the dialog is
-            // answered but the app never exits. Race the suspend against a
-            // deadline and force-stop if it doesn't land, exactly like the
-            // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
-            // RAM save on SSD while still guaranteeing quit terminates.
-            // QuitDeadline, not a task-group race: the group would await the
-            // hung suspend child anyway, so the "watchdog" never fired (QH-1).
-            let saved = await QuitDeadline.run(
-                seconds: 20, label: "suspend '\(name)'", timeoutValue: false
-            ) { @MainActor in
-                do { try await sandbox.suspend(); return true }
-                catch { return false }
+        // The RAM snapshot needs room: below the 1 GB free-space floor a
+        // suspend is refused before anything is touched. The VM keeps running
+        // and the user is told why. On quit it can't keep running: it shuts
+        // down cleanly instead (no state is saved, the disk stays consistent).
+        if resolved == .suspend,
+           let stateDir = sandbox.sessionDisk?.savedStateURL.deletingLastPathComponent() {
+            do { try EphemeralDisk.checkDiskSpace(at: stateDir.path) }
+            catch {
+                if quitPhase == .draining {
+                    AppLog.stamp("'\(name)': \(error.localizedDescription) — shutting down instead of suspending")
+                    resolved = .shutdown
+                } else {
+                    reportSuspendRefused(name: name, error.localizedDescription)
+                    return error.localizedDescription
+                }
             }
-            if saved {
-                FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
-            } else {
-                FileHandle.standardError.write(Data(
-                    "[ac] suspend '\(name)' failed or timed out — forcing stop\n".utf8))
-                sandbox.sessionDisk?.clearSavedState()
-                await Self.forceStop(vm)
-            }
-        case .shutdown:
+        }
+        session.stopping = true
+        func shutDown() async {
             sandbox.sessionDisk?.clearSavedState()
             do { try vm.requestStop() }
             catch {
                 await Self.forceStop(vm)
-                break
+                return
             }
             // A cluster node or a registry (containerd, etcd, Longhorn)
             // takes longer to power off than a workspace; cutting it at 15 s
@@ -15955,13 +16093,109 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     "[ac] '\(name)' didn't poweroff in \(Int(grace))s — forcing stop\n".utf8))
                 await Self.forceStop(vm)
             }
+        }
+        switch resolved {
+        case .suspend:
+            sandbox.sessionDisk?.saveTabs(currentTabsSnapshot(for: profileID))
+            // Bound the suspend. vm.pause()/saveMachineStateTo can hang against a
+            // wedged or CPU-pegged guest (e.g. a runaway autorepeat loop), which
+            // would strand quit in `.terminateLater` forever — the dialog is
+            // answered but the app never exits. Race the suspend against a
+            // deadline and force-stop if it doesn't land, exactly like the
+            // .shutdown watchdog below. 20s comfortably covers a legit multi-GB
+            // RAM save on SSD while still guaranteeing quit terminates.
+            // QuitDeadline, not a task-group race: the group would await the
+            // hung suspend child anyway, so the "watchdog" never fired (QH-1).
+            let outcome = await QuitDeadline.run(
+                seconds: 20, label: "suspend '\(name)'", timeoutValue: SuspendOutcome.failed
+            ) { @MainActor in
+                do { try await sandbox.suspend(); return SuspendOutcome.saved }
+                catch let error as SandboxError {
+                    if case .diskFull = error { return .diskFull(error.localizedDescription) }
+                    return .failed
+                }
+                catch { return .failed }
+            }
+            switch outcome {
+            case .saved:
+                FileHandle.standardError.write(Data("[ac] suspended '\(name)'\n".utf8))
+            case .diskFull(let why):
+                // The snapshot ran out of room partway (it passed the floor,
+                // the guest's memory didn't fit). suspend() dropped the partial
+                // file and left the VM paused; it is resumed here, within the
+                // deadline, so no abandoned resume can land after a forced
+                // stop. Then, as for a refusal up front: keep it running and
+                // say why, or on quit shut it down cleanly.
+                let running = await QuitDeadline.run(
+                    seconds: 10, label: "resume '\(name)'", timeoutValue: false
+                ) { @MainActor in await sandbox.resumeAfterFailedSuspend() }
+                if running && quitPhase != .draining {
+                    sandbox.restartOutboxPollAfterFailedSuspend()
+                    session.stopping = false
+                    reportSuspendRefused(name: name, why)
+                    return why
+                }
+                if running {
+                    AppLog.stamp("'\(name)': \(why) — shutting down instead of suspending")
+                    await shutDown()
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "[ac] suspend '\(name)' failed (\(why)) and the VM didn't resume — forcing stop\n".utf8))
+                    sandbox.sessionDisk?.clearSavedState()
+                    await Self.forceStop(vm)
+                }
+            case .failed:
+                FileHandle.standardError.write(Data(
+                    "[ac] suspend '\(name)' failed or timed out — forcing stop\n".utf8))
+                sandbox.sessionDisk?.clearSavedState()
+                await Self.forceStop(vm)
+            }
+        case .shutdown:
+            await shutDown()
         case .ask, .background:
             break   // unreachable: both collapse to .suspend above
         }
+        // A suspended/off VM can't serve its ports; tear down any Cloudflare
+        // exposures pointing at it (the SSH front door tunnel is unaffected).
+        // Only now, with the VM stopped: a suspend that fails for lack of disk
+        // space returns above with the VM running again, and its tunnels must
+        // still be up. Re-exposing them later would mint new quick-tunnel
+        // URLs and break the published ones.
+        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         // A clean guest poweroff fires onStopped → handleSessionStopped, but
         // suspend and a forced vm.stop() do NOT — so finish teardown here too.
         // Idempotent: a no-op if onStopped already ran.
         handleSessionStopped(profileID: profileID)
+        return nil
+    }
+
+    /// How a bounded suspend ended: the disk-full case is told apart, because
+    /// the VM is left running then rather than force-stopped.
+    private enum SuspendOutcome: Sendable {
+        case saved
+        case diskFull(String)
+        case failed
+    }
+
+    /// A suspend refused for lack of disk space: the VM is still running. Logged,
+    /// and shown once the stop path has returned (a modal inside it would hold
+    /// whoever awaits the stop). `showError` logs instead of alerting where no
+    /// one here could dismiss it.
+    @MainActor
+    private func reportSuspendRefused(name: String, _ why: String) {
+        AppLog.stamp("'\(name)': suspend refused — \(why) The VM keeps running.")
+        let detail = why + " " + NSLocalizedString(
+            "The workspace is still running.", comment: "Suspend refused: the VM was left running")
+        Task { @MainActor in
+            self.showError(SuspendRefused(detail: detail), message: String(format: NSLocalizedString(
+                "Couldn't suspend “%@”: the disk is almost full.", comment: "Suspend refused for lack of disk space"),
+                name))
+        }
+    }
+
+    private struct SuspendRefused: LocalizedError {
+        let detail: String
+        var errorDescription: String? { detail }
     }
 
     /// Fire-and-forget `stopSession` for non-async callers (the guest

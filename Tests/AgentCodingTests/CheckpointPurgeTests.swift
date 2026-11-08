@@ -94,10 +94,8 @@ struct CheckpointPurgeTests {
         try await Task.sleep(nanoseconds: 50_000_000)   // `done` hops to main
     }
 
-    @Test("a save that grows the home past its image deletes the home's checkpoints; one that doesn't keeps them")
-    @MainActor func resizeDeletes() async throws {
+    private func growFixture() throws -> (ProfileStore, URL, Profile, [URL], URL) {
         let (store, root) = HomeSizeAfterImageTests.tempStore()
-        defer { try? FileManager.default.removeItem(at: root) }
         var p = Profile(name: "grow", tool: .claude, authMode: .token)
         p.homeModel = .ext4
         p.homeImageGB = 16
@@ -109,17 +107,50 @@ struct CheckpointPurgeTests {
         cps.forEach(touch)
         let disk = store.checkpointsDirectory(for: p).appendingPathComponent("1700000200.img")
         touch(disk)
+        return (store, root, p, cps, disk)
+    }
 
-        try store.save(p)                       // same size: nothing goes
-        try await waitForPurge(p.id)
-        #expect(cps.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
-
+    /// The finding (CWE-754): a save deleted them at once, while the grow
+    /// waited for a cold boot that a saved state defers, or never came.
+    @Test("saving a larger home keeps its checkpoints: the image hasn't grown yet")
+    @MainActor func saveKeeps() async throws {
+        var (store, root, p, cps, disk) = try growFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
         p.homeImageGB = 32
-        try store.save(p)                       // grows past the 16 GB image
+        try store.save(p)
+        try await waitForPurge(p.id)
+        #expect(!ProfileStore.isPurgingCheckpoints(p.id))
+        #expect(cps.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(FileManager.default.fileExists(atPath: disk.path))
+        let src = try source("Sources/AgentCoding/Profile.swift")
+        let save = try #require(src.range(of: "try writeSecretsBlob(secrets, dir: dir)\n        return profile"))
+        #expect(!src[..<save.lowerBound].suffix(1500).contains("purgeCheckpointsInBackground"))
+    }
+
+    @Test("the grow at a cold boot deletes the smaller home's checkpoints, once grown; the disk's stay")
+    func growDeletes() async throws {
+        var (store, root, p, cps, disk) = try growFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        p.homeImageGB = 32
+        try store.save(p)
+        let session = SessionDisk(profile: p, store: store, baseDiskURL: root.appendingPathComponent("base.img"))
+        let note = try session.growHomeImageIfNeeded()
+        #expect(note.contains("grown"))
         try await waitForPurge(p.id)
         #expect(cps.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
-        #expect(FileManager.default.fileExists(atPath: disk.path))   // the system disk's stay
-        #expect(FileManager.default.fileExists(atPath: store.homeImageURL(for: p).path))
+        #expect(FileManager.default.fileExists(atPath: disk.path))
+        let size = (try FileManager.default.attributesOfItem(atPath: store.homeImageURL(for: p).path)[.size] as? NSNumber)?.uint64Value
+        #expect(size == 32 << 30)
+    }
+
+    @Test("a saved state defers the grow, and so the delete")
+    func savedStateKeeps() throws {
+        let vm = try source("Sources/AgentCoding/UbuntuSandboxVM.swift")
+        #expect(vm.contains("""
+                    let homeNote = session.hasSavedState
+                        ? "saved state present — home image kept at its size until a cold boot"
+                        : try session.growHomeImageIfNeeded()
+        """))
     }
 
     @Test("the grow at boot deletes what's left of the smaller home's checkpoints")

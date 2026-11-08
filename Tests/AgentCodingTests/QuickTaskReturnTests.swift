@@ -26,6 +26,41 @@ struct QuickTaskReturnTests {
         await spin(0.1)
     }
 
+    /// Summoned from another app, the list spans machines (QuickTaskMachinesTests):
+    /// a machine's name narrows it to that machine's sessions. Here, as its
+    /// keys mustn't race this suite's.
+    @Test("typing a machine's name narrows the @ list to its sessions; ↩ picks one there")
+    func pickOnHost() async {
+        _ = NSApplication.shared
+        func session(_ label: String, _ ws: String) -> TaskAssigneeChoices.Session {
+            .init(id: UUID(), label: label, workspace: ws, busy: false, profileID: UUID())
+        }
+        func target(_ key: String, _ machine: String, _ s: [TaskAssigneeChoices.Session]) -> QuickTaskPanel.Target {
+            QuickTaskPanel.Target(key: key, machine: machine, profiles: [],
+                                  choices: TaskAssigneeChoices(sessions: s, rooms: []), current: nil,
+                                  label: { $0.title }, save: { _ in }, assign: { _, _ in }, plan: { _ in })
+        }
+        let lux = session("@lux", "Storefront"), mine = session("@notes", "Personal")
+        let all = QuickTaskPanel.merged([target("local", "This Mac", [mine]), target("host-1", "Mac Studio", [lux])])
+        var added: [(String, TaskAssignment?)] = []
+        let view = QuickTaskView(choices: all, here: nil, folder: "~", workspaceName: "Personal",
+                                 initialAssignment: nil,
+                                 onAdd: { t, _, a, _ in added.append((t, a)) }, onClose: {})
+        let p = Panel(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                      styleMask: [.borderless, .fullSizeContentView], backing: .buffered, defer: false)
+        p.contentView = NSHostingView(rootView: view.padding(.top, 16)
+            .frame(width: 800, height: 700, alignment: .top))
+        p.makeKeyAndOrderFront(nil)
+        await spin(0.5)
+        for c in "ship it @studio" { await key(p, String(c), code: c == " " ? 49 : 0) }
+        await key(p, "\r", code: 36)    // picks the highlighted row: the host's only session
+        await key(p, "\r", code: 36)    // adds
+        #expect(added.count == 1)
+        #expect(added.first?.0 == "ship it")
+        #expect(added.first?.1?.id == lux.id)
+        p.orderOut(nil)
+    }
+
     @Test("typed title + ↩ reaches onAdd")
     func returnAdds() async {
         _ = NSApplication.shared

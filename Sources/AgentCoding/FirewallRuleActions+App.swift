@@ -152,23 +152,44 @@ extension ACAppDelegate {
     }
 
     /// Apply a quick edit to a workspace's rules: save, push live to the
-    /// running VM, tell an open editor. False when nothing changed.
+    /// running VM, tell an open editor. Whether the edit holds now: made, or
+    /// already so (an Allow whose rule is there); false when it couldn't be
+    /// made or saved.
     @MainActor @discardableResult
     func applyFirewallEdit(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> Bool {
-        guard let p = profiles.first(where: { $0.id == profileID }),
-              let text = FirewallRuleActions.apply(edit, to: p.egressRules) else { return false }
-        return commitFirewallRules(text, profileID: profileID)
+        applyFirewallEditResult(edit, profileID: profileID).succeeded
     }
 
-    /// Persist `text` as a workspace's rules and apply it live.
+    /// The edit applied to the workspace's rules as they are now, and saved.
+    /// A failure says why: a fat client's drawer must not show an Allow that
+    /// installed nothing (Finding: "Remote firewall drawer reports failed
+    /// edits as successful").
+    @MainActor
+    func applyFirewallEditResult(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> FirewallCommitResult {
+        guard let p = profiles.first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
+        switch FirewallRuleActions.outcome(edit, to: p.egressRules) {
+        case .changed(let text): return commitFirewallRulesResult(text, profileID: profileID)
+        case .unchanged:         return .unchanged
+        case .failed(let why):   return .failed(why)
+        }
+    }
+
+    /// Persist `text` as a workspace's rules and apply it live. True when
+    /// they changed.
     @MainActor @discardableResult
     func commitFirewallRules(_ text: String, profileID: UUID) -> Bool {
-        guard var p = profiles.first(where: { $0.id == profileID }), p.egressRules != text else { return false }
+        commitFirewallRulesResult(text, profileID: profileID) == .changed
+    }
+
+    @MainActor @discardableResult
+    func commitFirewallRulesResult(_ text: String, profileID: UUID) -> FirewallCommitResult {
+        guard var p = profiles.first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
+        guard p.egressRules != text else { return .unchanged }
         let previous = p.egressRules
         p.egressRules = text
         do { try store.update(p) } catch {
             NSLog("[bromure-ac] firewall: couldn't save rules for \(p.name): \(error)")
-            return false
+            return .failed("couldn't save the workspace's firewall rules")
         }
         if let i = profiles.firstIndex(where: { $0.id == profileID }) { profiles[i] = p }
         // Running: switch port + MiTM now. Only the rules are patched into the
@@ -187,7 +208,7 @@ extension ACAppDelegate {
         NotificationCenter.default.post(name: .bromureFirewallRulesChanged, object: profileID,
                                         userInfo: ["rules": text, "previous": previous])
         scheduleNextFirewallExpiry()
-        return true
+        return .changed
     }
 
     /// (Re)arm the one-shot timer for the soonest timed-rule expiry across

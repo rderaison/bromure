@@ -31,6 +31,10 @@ final class TranscriptSearchIndex {
         /// The agent's own name for the conversation: Claude's `/rename`
         /// (custom-title), else the title it generated (ai-title).
         var agentTitle: String? = nil
+        /// `agentTitle` is the user's `/rename`, not one the agent generated:
+        /// it wins over a generated one from any other part of the file.
+        /// Optional, so a record saved before it decodes (as generated).
+        var agentTitleIsCustom: Bool? = nil
         /// The user's first real request (no notices, no host asides).
         var firstPrompt: String? = nil
         var modified: Date
@@ -51,7 +55,7 @@ final class TranscriptSearchIndex {
         // wins, or the first.
         e.tokens = b.tokens.total == 0 ? a.tokens : b.tokens
         e.model = b.model ?? a.model
-        e.agentTitle = b.agentTitle ?? a.agentTitle
+        (e.agentTitle, e.agentTitleIsCustom) = mergedTitle(a, b)
         e.conversationID = a.conversationID ?? b.conversationID
         e.startsOver = a.startsOver || b.startsOver
         // What the conversation said: none of `a` if it started over in `b`.
@@ -59,13 +63,7 @@ final class TranscriptSearchIndex {
         e.text = a.text.isEmpty ? b.text : b.text.isEmpty ? a.text : a.text + "\n\n" + b.text
         if b.lastReply.isEmpty { e.lastReply = a.lastReply }
         e.turns = a.turns + b.turns
-        let shift = (a.timeline.turns.map { max($0.id, $0.segments.map(\.id).max() ?? 0) }.max() ?? 0)
-        e.timeline = SessionTimeline(turns: a.timeline.turns + b.timeline.turns.map { t in
-            SessionTimeline.Turn(id: t.id + shift, prompt: t.prompt, start: t.start, end: t.end,
-                                 segments: t.segments.map { var g = $0; g = SessionTimeline.Segment(
-                                    id: g.id + shift, kind: g.kind, name: g.name, detail: g.detail,
-                                    start: g.start, end: g.end, lane: g.lane); return g })
-        })
+        e.timeline = SessionTimeline.joined(a.timeline, b.timeline)
         e.firstPrompt = a.firstPrompt ?? b.firstPrompt
         return e
     }
@@ -92,10 +90,35 @@ final class TranscriptSearchIndex {
     @ObservationIgnored private let dir: URL
     @ObservationIgnored private let storeDir: URL
 
-    private init() {
+    /// Sessions removed since a pass last saw their transcript gone: a pass
+    /// already under way when one was removed read it, and mustn't put it back.
+    @ObservationIgnored private var forgotten: Set<UUID> = []
+
+    private convenience init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dir = support.appendingPathComponent("BromureAC/transcripts", isDirectory: true)
-        storeDir = support.appendingPathComponent("BromureAC/transcript-index", isDirectory: true)
+        self.init(dir: support.appendingPathComponent("BromureAC/transcripts", isDirectory: true),
+                  storeDir: support.appendingPathComponent("BromureAC/transcript-index", isDirectory: true))
+    }
+
+    init(dir: URL, storeDir: URL) {
+        self.dir = dir
+        self.storeDir = storeDir
+    }
+
+    nonisolated static func recordURL(_ id: UUID, in storeDir: URL) -> URL {
+        storeDir.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
+    /// A session was removed: what the index kept of its conversation (your
+    /// messages and the agent's replies, saved to disk for the next launch)
+    /// goes now, not at that launch.
+    func forget(_ id: UUID) {
+        forgotten.insert(id)
+        entries[id] = nil
+        records[id] = nil
+        liveModels[id] = nil
+        let url = Self.recordURL(id, in: storeDir)
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
     }
 
     /// Start keeping up (idempotent).
@@ -138,22 +161,30 @@ final class TranscriptSearchIndex {
                     Self.save(r, id: id, in: storeDir)
                 }
             }
-            if firstPass {
-                // Records of transcripts that are gone.
-                for (id, _) in known where !present.contains(id) {
-                    try? fm.removeItem(at: storeDir.appendingPathComponent("\(id.uuidString).json"))
-                }
+            // Records of transcripts that are gone, on every pass: what a
+            // session said stays on disk no longer than its transcript.
+            for (id, _) in known where !present.contains(id) {
+                try? fm.removeItem(at: Self.recordURL(id, in: storeDir))
             }
             let found = updates, seen = present
             await MainActor.run {
-                for (id, r) in found { self.records[id] = r; self.entries[id] = r.entry }
+                // Removed while this pass read it: not back in, and its record
+                // (saved just now) goes again.
+                let back = Set(found.keys).intersection(self.forgotten)
+                for id in back {
+                    let url = Self.recordURL(id, in: storeDir)
+                    DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
+                }
+                self.forgotten.formIntersection(seen)   // its transcript gone from disk: done
+                for (id, r) in found where !back.contains(id) { self.records[id] = r; self.entries[id] = r.entry }
                 for id in self.entries.keys where !seen.contains(id) { self.entries[id] = nil; self.records[id] = nil }
                 if firstPass {
                     for id in self.records.keys where !seen.contains(id) { self.records[id] = nil }
                     self.loaded = true
                 }
                 self.refreshing = false
-                if !found.isEmpty { self.onUpdate?(Array(found.keys)) }
+                let updated = Set(found.keys).subtracting(back)
+                if !updated.isEmpty { self.onUpdate?(Array(updated)) }
             }
         }
     }
@@ -227,22 +258,14 @@ final class TranscriptSearchIndex {
                               settled: AgentTranscript.sniffIsSettled(data),
                               size: size, modified: modified, head: fileHead, handle: h)
             }
-            guard var start = bytes(at: 0, head) else { return nil }
-            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
-            let tailAt = size - UInt64(cap - head)
-            guard var end = bytes(at: tailAt, Int(size - tailAt)) else { return nil }
-            var endAt = tailAt
-            if let nl = end.firstIndex(of: 0x0A) {
-                endAt += UInt64(nl - end.startIndex + 1)
-                end = Data(end[(nl + 1)...])
-            } else {
-                endAt = size
-                end = Data()
-            }
+            guard let s = samples(size: size, cap: cap, head: head, read: bytes) else { return nil }
+            let start = s.start, end = s.end
             // The format comes from the start: the end of a file can look like
             // another agent's lines.
             let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
-            return record(prefix: entry(start, modified: modified, agent: agent), offset: endAt, bytes: end,
+            let front = start.isEmpty && end.isEmpty
+                ? salvagedEntry(s.rawHead, modified: modified) : entry(start, modified: modified, agent: agent)
+            return record(prefix: front, offset: s.endAt, bytes: end,
                           agent: agent, settled: AgentTranscript.sniffIsSettled(start.isEmpty ? end : start),
                           size: size, modified: modified, head: fileHead, handle: h)
         }
@@ -284,7 +307,7 @@ final class TranscriptSearchIndex {
     nonisolated static func save(_ r: Record, id: UUID, in dir: URL) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(r) else { return }
-        try? data.write(to: dir.appendingPathComponent("\(id.uuidString).json"), options: .atomic)
+        try? data.write(to: recordURL(id, in: dir), options: .atomic)
     }
 
     nonisolated static func loadRecords(from dir: URL) -> [UUID: Record] {
@@ -318,11 +341,12 @@ final class TranscriptSearchIndex {
                 return entry(data, modified: modified)
             }
             // Its start, for what only the start says, and its end.
-            guard var start = try? h.read(upToCount: head) else { return nil }
-            start = start.lastIndex(of: 0x0A).map { Data(start[...$0]) } ?? Data()
-            guard (try? h.seek(toOffset: size - UInt64(cap - head))) != nil,
-                  var end = try? h.readToEnd() else { return nil }
-            end = end.firstIndex(of: 0x0A).map { Data(end[($0 + 1)...]) } ?? Data()
+            guard let s = samples(size: size, cap: cap, head: head, read: { at, count in
+                guard (try? h.seek(toOffset: at)) != nil else { return nil }
+                return (try? h.read(upToCount: count)) ?? Data()
+            }) else { return nil }
+            let start = s.start, end = s.end
+            if start.isEmpty && end.isEmpty { return salvagedEntry(s.rawHead, modified: modified) }
             // The format comes from the start: the end of a file can look like
             // another agent's lines.
             let agent = AgentTranscript.sniff(start.isEmpty ? end : start)
@@ -331,10 +355,77 @@ final class TranscriptSearchIndex {
             e.text = first.text + "\n\n" + e.text
             e.firstPrompt = first.firstPrompt ?? e.firstPrompt
             e.conversationID = first.conversationID ?? e.conversationID
-            e.agentTitle = e.agentTitle ?? first.agentTitle
+            (e.agentTitle, e.agentTitleIsCustom) = mergedTitle(first, e)
             e.model = e.model ?? first.model
             return e
         }
+    }
+
+    /// A file past the cap, sampled: `start` its first `head` bytes cut back to
+    /// the last whole line, `end` the rest of the cap from its end after the
+    /// first line break (`endAt` where that is). A first record longer than
+    /// `head` is read whole when it fits in half the cap (the end then gets
+    /// what's left, so the two stay within the cap): it left the start empty,
+    /// and a file of one long record (a pasted prompt, a tool's output) had
+    /// nothing indexed at all. `rawHead`: the first `head` bytes, for
+    /// `salvagedEntry` when neither sample holds a whole line.
+    nonisolated static func samples(size: UInt64, cap: Int, head: Int,
+                                    read: (UInt64, Int) -> Data?) -> (start: Data, end: Data, endAt: UInt64, rawHead: Data)? {
+        guard let raw = read(0, head) else { return nil }
+        var start = Data(), took = head
+        if let nl = raw.lastIndex(of: 0x0A) {
+            start = Data(raw[...nl])
+        } else if cap / 2 > head, let longer = read(0, cap / 2), let nl = longer.firstIndex(of: 0x0A) {
+            start = Data(longer[...nl])
+            took = start.count
+        }
+        let tailAt = size - UInt64(cap - took)
+        guard var end = read(tailAt, Int(size - tailAt)) else { return nil }
+        var endAt = tailAt
+        if let nl = end.firstIndex(of: 0x0A) {
+            endAt += UInt64(nl - end.startIndex + 1)
+            end = Data(end[(nl + 1)...])
+        } else {
+            endAt = size
+            end = Data()
+        }
+        return (start, end, endAt, raw)
+    }
+
+    /// What one record too long to parse says, from its first bytes: the words
+    /// of its `text` and `content` strings, in order (the last one cut where
+    /// the bytes end), as a user's prompt or the agent's reply.
+    nonisolated static func salvagedEntry(_ data: Data, modified: Date) -> Entry {
+        let s = String(decoding: data, as: UTF8.self)
+        var found: [(String.Index, String)] = []
+        for key in ["\"text\":\"", "\"content\":\""] {
+            var from = s.startIndex
+            while let r = s.range(of: key, range: from..<s.endIndex) {
+                var i = r.upperBound, raw = "", escaped = false, closed = false
+                while i < s.endIndex {
+                    let c = s[i]
+                    if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { closed = true; break }
+                    raw.append(c)
+                    i = s.index(after: i)
+                }
+                // Cut mid-escape (a lone "\" or a short "\u12"): drop it.
+                var value: String?
+                for drop in 0...6 where value == nil && raw.count >= drop {
+                    value = try? JSONSerialization.jsonObject(with: Data(("\"" + raw.dropLast(drop) + "\"").utf8),
+                                                              options: .fragmentsAllowed) as? String
+                }
+                if let v = value?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty { found.append((r.lowerBound, v)) }
+                from = closed ? s.index(after: i) : s.endIndex
+            }
+        }
+        let texts = found.sorted { $0.0 < $1.0 }.map(\.1)
+        let text = texts.joined(separator: "\n\n")
+        let lead = s.prefix(4096)
+        let isUser = lead.contains("\"type\":\"user\"") || lead.contains("\"role\":\"user\"")
+        let first = texts.first ?? ""
+        let line = first.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        return Entry(text: text, lastReply: isUser ? "" : String(line.prefix(160)), tokens: TokenUsage(),
+                     firstPrompt: isUser && isOwnWords(first) ? first : nil, modified: modified)
     }
 
     /// Past this, a transcript is read for its first `indexHead` bytes and the
@@ -373,7 +464,21 @@ final class TranscriptSearchIndex {
 
     /// Claude's own title for the conversation, the latest one it logged:
     /// a `/rename` (custom-title) wins over the generated ai-title.
-    nonisolated static func agentTitle(in data: Data) -> String? {
+    /// The title of `earlier` then `later` parts of one file, as `agentTitle`
+    /// picks it in one: the last rename, else the last generated title. A part
+    /// was read on its own, so a generated title in the later one mustn't hide
+    /// a rename in the earlier.
+    nonisolated static func mergedTitle(_ earlier: Entry, _ later: Entry) -> (String?, Bool?) {
+        if later.agentTitleIsCustom == true { return (later.agentTitle, true) }
+        if earlier.agentTitleIsCustom == true { return (earlier.agentTitle, true) }
+        if let t = later.agentTitle { return (t, later.agentTitleIsCustom) }
+        return (earlier.agentTitle, earlier.agentTitleIsCustom)
+    }
+
+    nonisolated static func agentTitle(in data: Data) -> String? { agentTitleRecord(in: data)?.title }
+
+    /// The title and whether it's a rename (`custom-title`) or generated.
+    nonisolated static func agentTitleRecord(in data: Data) -> (title: String, custom: Bool)? {
         // In the bytes: the title is one line, and a string of the whole file
         // to find it cost more than parsing the transcript did.
         func last(_ type: String, _ key: String) -> String? {
@@ -385,7 +490,8 @@ final class TranscriptSearchIndex {
             else { return nil }
             return String(t.prefix(60))
         }
-        return last("custom-title", "customTitle") ?? last("ai-title", "aiTitle")
+        if let t = last("custom-title", "customTitle") { return (t, true) }
+        return last("ai-title", "aiTitle").map { ($0, false) }
     }
 
     /// A user message that is the user's own words — not a notice typed in
@@ -419,11 +525,13 @@ final class TranscriptSearchIndex {
         if let o = open, o.end > o.start { turns.append(o) }
         let oneLine = last.split(whereSeparator: \.isNewline).map(String.init)
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+        let title = agentTitleRecord(in: data)
         var e = Entry(text: parts.joined(separator: "\n\n"),
                      lastReply: String(oneLine.prefix(160)),
                      tokens: tokens(in: data), model: codexModel(data) ?? model(in: data),
                      turns: turns, timeline: SessionTimeline.build(items),
-                     agentTitle: agentTitle(in: data), firstPrompt: firstPrompt, modified: modified,
+                     agentTitle: title?.title, agentTitleIsCustom: title?.custom,
+                     firstPrompt: firstPrompt, modified: modified,
                      conversationID: conversationID(in: data))
         e.startsOver = cleared
         return e

@@ -161,19 +161,120 @@ struct CheckpointGuardrailTests {
         #expect(keep == [now, dayBefore])
     }
 
+    /// The finding: a delete renames each checkpoint out of the list first, so
+    /// one a quit interrupted was hidden and kept its space until that
+    /// workspace's next session start pruned it. Once the ladder had settled,
+    /// launch looked no more.
+    @Test("every launch unlinks what a quit left half deleted, and nothing else")
+    func launchSweeps() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "quit", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        let disk = store.checkpointsDirectory(for: p), home = store.homeCheckpointsDirectory(for: p)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = disk.appendingPathComponent("\(Int(Date().timeIntervalSince1970)).img")
+        let left = [disk.appendingPathComponent("1700000000.img.deleting"), home.appendingPathComponent("1700000100.img.deleting")]
+        for u in [kept] + left { try Data("x".utf8).write(to: u) }
+        try Data(ProfileStore.ladderGeneration.utf8).write(to: store.checkpointLadderMark)   // settled long ago
+        #expect(store.settleCheckpointBacklog([p]) == 1)
+        try await waitForPurge(p.id)
+        #expect(left.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(FileManager.default.fileExists(atPath: kept.path))
+        #expect(FileManager.default.fileExists(atPath: store.diskURL(for: p).path))
+        #expect(try String(contentsOf: store.checkpointLadderMark, encoding: .utf8) == ProfileStore.ladderGeneration)
+        #expect(store.settleCheckpointBacklog([p]) == 0)   // nothing left
+    }
+
+    /// The finding: a delete under way (the launch clearing a backlog) made
+    /// the session start's checkpoints return nil, and the session start
+    /// doesn't come again, so that boot had no rollback point.
+    @Test("a session start's checkpoints wait for a delete under way, then are taken")
+    func sessionStartWaits() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "waits", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        try Data("home".utf8).write(to: store.homeImageURL(for: p))
+        let gate = DispatchSemaphore(value: 0)
+        ProfileStore.purgeQueue.async { gate.wait() }
+        #expect(ProfileStore.purgeCheckpointsInBackground([root.appendingPathComponent("none.img")], of: p.id, name: p.name, why: "test"))
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var done = false
+            func set() { lock.lock(); done = true; lock.unlock() }
+            var value: Bool { lock.lock(); defer { lock.unlock() }; return done } }
+        let finished = Flag()
+        store.takeSessionStartCheckpoints(for: p) { finished.set() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(!finished.value && store.listCheckpoints(for: p).isEmpty)   // held while the delete runs
+        gate.signal()
+        for _ in 0..<250 where !finished.value { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(finished.value)
+        #expect(store.listCheckpoints(for: p).count == 1)
+        #expect(store.listHomeCheckpoints(for: p).count == 1)
+    }
+
+    @Test("with no delete under way, a session start's checkpoints are taken at once")
+    func sessionStartNow() async throws {
+        let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "now", tool: .claude, authMode: .token)
+        try makeDisk(store, p)
+        try Data("home".utf8).write(to: store.homeImageURL(for: p))
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var done = false
+            func set() { lock.lock(); done = true; lock.unlock() }
+            var value: Bool { lock.lock(); defer { lock.unlock() }; return done } }
+        let finished = Flag()
+        store.takeSessionStartCheckpoints(for: p) { finished.set() }
+        for _ in 0..<250 where !finished.value { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(store.listCheckpoints(for: p).count == 1 && store.listHomeCheckpoints(for: p).count == 1)
+    }
+
+    /// The finding: the cut-off kept the time of day, so at 18:00 on July 10
+    /// the 09:00 checkpoint of July 8 was dropped, July 8's only one.
+    @Test("at 18:00 on July 10, July 8's 09:00 checkpoint stays; July 7's goes")
+    func dayCutIsMidnight() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        func at(_ d: Int, _ h: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 7, day: d, hour: h))! }
+        let now = at(10, 18)
+        let dates = [at(10, 8), at(9, 23), at(8, 9), at(8, 0), at(7, 23)]
+        let keep = ProfileStore.checkpointRetention(dates, now: now, calendar: cal)
+        #expect(keep == [at(10, 8), at(9, 23), at(8, 9)])
+        // Midnight itself is that day's.
+        #expect(ProfileStore.checkpointRetention([at(10, 8), at(8, 0)], now: now, calendar: cal) == [at(10, 8), at(8, 0)])
+    }
+
+    @Test("the weekly tier counts whole weeks too")
+    func weekCutIsWeekStart() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        cal.firstWeekday = 2   // Monday
+        func at(_ d: Int, _ h: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 7, day: d, hour: h))! }
+        // Friday July 10, 18:00. One week back starts Monday June 29.
+        let now = at(10, 18)
+        let june29 = cal.date(from: DateComponents(year: 2026, month: 6, day: 29, hour: 9))!
+        let june28 = cal.date(from: DateComponents(year: 2026, month: 6, day: 28, hour: 23))!
+        let keep = ProfileStore.checkpointRetention([now, june29, june28], now: now,
+                                                    boots: 1, days: 0, weeks: 1, calendar: cal)
+        #expect(keep == [now, june29])
+    }
+
     @Test("launch settles the backlog; a session start takes its checkpoints as automatic")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
         #expect(ac.contains("store.settleCheckpointBacklog(profiles)"))
-        #expect(ac.contains("store.snapshotDisk(for: profile, at: now, automatic: true)"))
-        #expect(ac.contains("store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
+        #expect(ac.contains("self.store.takeSessionStartCheckpoints(for: profile)"))
         let store = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/Profile.swift"), encoding: .utf8)
         // No checkpoint is shrunk by the reaper any more: every delete is a
         // plain unlink on the purge queue.
         #expect(!store.contains("reaper.retire(") && !store.contains("reaper.sweep("))
-        let start = try #require(ac.range(of: "store.snapshotHomeImage(for: profile, at: now, automatic: true)"))
-        #expect(ac[start.upperBound...].prefix(500).contains("store.pruneCheckpoints(for: profile, now: now)"))
+        let take = try #require(store.range(of: "func takeSessionStartCheckpoints("))
+        let body = store[take.upperBound...].prefix(1800)
+        let disk = try #require(body.range(of: "snapshotDisk(for: profile, at: now, automatic: true)"))
+        let home = try #require(body.range(of: "snapshotHomeImage(for: profile, at: now, automatic: true)"))
+        let prune = try #require(body.range(of: "pruneCheckpoints(for: profile, now: now)"))
+        #expect(disk.lowerBound < home.lowerBound && home.lowerBound < prune.lowerBound)
         #expect(store.contains("precondition(!Thread.isMainThread"))
     }
 }

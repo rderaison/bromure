@@ -28,7 +28,11 @@ Deliberate differences from OpenShell, each argued in DESIGN.md:
     which is not one of the three sections this work covers, and Bromure's
     egress control is the host MITM proxy plus attestd, not a socket-domain ban.
 
-Nothing else diverges. Where OpenShell is surprising (an absent
+Nothing else diverges. AF_VSOCK is banned as in OpenShell (bromure-sandboxd
+passes `allow_vsock=False`): the in-guest helpers the agent starts that must
+reach the host -- its Bromure MCP servers, the plan driver -- ask agentd's
+relay, outside the sandbox, which connects them to those ports only
+(bromure-agentd.py §4b). Where OpenShell is surprising (an absent
 `filesystem_policy` still enables Landlock, because `include_workdir` defaults
 to true) this code is surprising in exactly the same way, and says so in the
 status it reports to the host.
@@ -917,12 +921,15 @@ NETLINK_ROUTE = 0
 # The three filters — seccomp.rs and child_seccomp.rs
 # ---------------------------------------------------------------------------
 
-def build_main_filter_rules(allow_inet=True):
+def build_main_filter_rules(allow_inet=True, allow_vsock=False):
     """seccomp.rs::build_filter_rules.
 
     Default-allow with targeted blocks. `allow_inet` is pinned true by
     `apply_seccomp` (see module docstring); the parameter exists so the
-    differential harness can exercise both arms.
+    differential harness can exercise both arms. `allow_vsock` defaults to
+    OpenShell's ban here and in `apply_seccomp`/`enforce`, which is what the
+    harness and the guest tests compare against; only bromure-sandboxd passes
+    it true (see module docstring).
     """
     rules = {}
 
@@ -930,7 +937,9 @@ def build_main_filter_rules(allow_inet=True):
         return rules.setdefault(nr, [])
 
     # --- Socket domain blocks ---
-    blocked_domains = [AF_PACKET, AF_BLUETOOTH, AF_VSOCK]
+    blocked_domains = [AF_PACKET, AF_BLUETOOTH]
+    if not allow_vsock:
+        blocked_domains.append(AF_VSOCK)
     if not allow_inet:
         blocked_domains += [AF_INET, AF_INET6]
     for domain in blocked_domains:
@@ -1078,7 +1087,7 @@ ENOSYS_ACTION = SECCOMP_RET_ERRNO | errno.ENOSYS
 
 
 def apply_seccomp(supervisor_tgid=None, supervisor_pgid=None, allow_inet=True,
-                  child_hardening=True):
+                  child_hardening=True, allow_vsock=False):
     """sandbox-linux/mod.rs::enforce_capability_free, filter half.
 
     Order is mandatory and is OpenShell's:
@@ -1097,7 +1106,7 @@ def apply_seccomp(supervisor_tgid=None, supervisor_pgid=None, allow_inet=True,
         install_filter(compile_filter(child_compat, ENOSYS_ACTION))
         install_filter(compile_filter(child_rules, EPERM_ACTION))
     install_filter(compile_filter(build_compatibility_filter_rules(), ENOSYS_ACTION))
-    install_filter(compile_filter(build_main_filter_rules(allow_inet), EPERM_ACTION))
+    install_filter(compile_filter(build_main_filter_rules(allow_inet, allow_vsock), EPERM_ACTION))
 
 
 # ---------------------------------------------------------------------------
@@ -1387,7 +1396,7 @@ def drop_to_user(uid, gid, groups):
 
 
 def enforce(prepared, outcome, supervisor_tgid, supervisor_pgid=None,
-            child_hardening=True, allow_inet=True):
+            child_hardening=True, allow_inet=True, allow_vsock=False):
     """sandbox-linux/mod.rs::enforce_capability_free, with nnp made explicit.
 
     OpenShell reaches `restrict_self` with `no_new_privs` already set, because
@@ -1405,5 +1414,6 @@ def enforce(prepared, outcome, supervisor_tgid, supervisor_pgid=None,
     apply_seccomp(supervisor_tgid=supervisor_tgid,
                   supervisor_pgid=supervisor_pgid,
                   allow_inet=allow_inet,
-                  child_hardening=child_hardening)
+                  child_hardening=child_hardening,
+                  allow_vsock=allow_vsock)
     return outcome

@@ -48,6 +48,9 @@ struct WorkspaceEditorSheet: View {
         var credentialRefs: [CredentialRef]?
         /// Baseline for the restart-requiring diff (edit flavour only).
         var original: Profile?
+        /// A new workspace's home is sized on the host: its default (nil: an
+        /// older host that can't say).
+        var newHomeDefaultGB: Int? = nil
     }
 
     var body: some View {
@@ -130,7 +133,8 @@ struct WorkspaceEditorSheet: View {
             storageContext: nil,
             remoteCredentialRefs: state.credentialRefs,
             onSave: { edited, generateSSH in save(edited, generateSSH: generateSSH) },
-            onCancel: onClose)
+            onCancel: onClose,
+            newHomeDefaultGB: state.newHomeDefaultGB)
             .disabled(saving)
             .overlay {
                 if saving { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -148,9 +152,10 @@ struct WorkspaceEditorSheet: View {
             var n = controller.profiles.count + 1
             var name = "Workspace \(n)"
             while taken.contains(name) { n += 1; name = "Workspace \(n)" }
+            let homeGB = await controller.fetchNewHomeDefaultGB()
             loaded = LoadedEditor(
                 profile: Profile(name: name, tool: .claude, authMode: .subscription),
-                isNew: true, credentialRefs: nil, original: nil)
+                isNew: true, credentialRefs: nil, original: nil, newHomeDefaultGB: homeGB)
             return
         }
         do {
@@ -173,15 +178,25 @@ struct WorkspaceEditorSheet: View {
     // MARK: Save
 
     private func save(_ edited: Profile, generateSSH: Bool) {
-        guard var doc = ACAppDelegate.codableToDict(edited), !saving else { return }
-        // The Profile encoder omits an empty kubeconfigs array; send it
-        // explicitly so removing the last kube context is honored server-side.
-        if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
+        guard !saving else { return }
+        let original = loaded?.original
+        // Editing: what the user cleared is sent as cleared, notes and
+        // Squelch left as opened stay the host's (`settingsDocument`). A new
+        // workspace: as typed, the host's defaults for the rest.
+        let built: [String: Any]?
+        if editing != nil {
+            built = RemoteHostController.settingsDocument(edited: edited, opened: original)
+        } else {
+            built = ACAppDelegate.codableToDict(edited).map { d in
+                var d = d
+                // The Profile encoder omits an empty kubeconfigs array.
+                if edited.kubeconfigs.isEmpty { d["kubeconfigs"] = [[String: Any]]() }
+                return d
+            }
+        }
+        guard var doc = built else { return }
         if generateSSH { doc["generateSSH"] = true }
         saving = true
-        let original = loaded?.original
-        // Notes and Squelch left as the sheet opened them: the host's stay.
-        if editing != nil, let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
         Task { @MainActor in
             defer { saving = false }
             do {

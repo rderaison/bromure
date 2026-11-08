@@ -1601,6 +1601,7 @@
 "Upstream TLS" = "上游 TLS";
 "Prompt injection" = "提示注入";
 "swapped in %@" = "已替換為 %@";
+"presented client certificate" = "已出示用戶端憑證";
 "signed" = "已簽署";
 "blocked — exfiltration attempt, VM paused" = "已封鎖 — 憑證外洩嘗試,虛擬機器已暫停";
 
@@ -1827,8 +1828,7 @@
 "Let's set up a machine first." = "先來設定一台機器吧。";
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "在一台專屬的隔離機器裡執行。你 Mac 上的任何東西都不會被碰到。";
 "Ask for anything — or just press Return to open %@." = "想要什麼都可以問 — 或者直接按 Return 打開 %@。";
-"Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "打開 Linux (⌥⌘U) 在終端機中回答。";
+"Open the terminal (⌥⌘U) to answer there." = "打開終端機 (⌥⌘U) 在那裡回答。";
 "Waking up…" = "正在喚醒…";
 "Almost there…" = "快好了…";
 "Asleep. Your next message wakes it up and carries on from here." = "睡眠中。你的下一則訊息會喚醒它並從這裡繼續。";
@@ -2373,8 +2373,7 @@
 /* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
 "Session" = "工作階段";
 "Back to the session this terminal hosts (⌥⌘U)" = "返回此終端機承載的工作階段 (⌥⌘U)";
-"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "此工作階段背後的 Linux 機器：它在機器列表中的終端機分頁 (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "或打開 Linux (⌥⌘U) 在終端機中回答。";
+"Or open the terminal (⌥⌘U) to answer there." = "或打開終端機 (⌥⌘U) 在那裡回答。";
 "New machine…" = "新增機器…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -3964,7 +3963,7 @@
 "access token renews on next use" = "存取權杖將在下次使用時續期";
 "(exit code %d)" = "（結束代碼 %d）";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "未送達 — 代理沒有接收。請編輯或再次傳送。";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "預設關閉：在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "在下方勾選某個工作區（或開啟「每個工作區」）之前，這裡的代理無法存取其他工作區。";
 "Closes the editor without saving changes" = "關閉編輯器，不儲存變更";
 
 /* prompt: Grok data-retention banner */
@@ -4360,3 +4359,8 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "可能記憶體不足。此處顯示的內容可能已過時。";
+"Show this session's terminal (⌥⌘U)" = "顯示此工作階段的終端機 (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "無法暫停「%@」：磁碟幾乎已滿。";
+"The workspace is still running." = "工作區仍在執行中。";

@@ -253,11 +253,49 @@ async function test(name, fn) {
   }
 }
 
+// Every test's name, by section ("34." → ["34.0 …", "34.1 …"]), read from
+// this file: a section gate has to know what its tests are called.
+const SECTION_TESTS = (() => {
+  const bySection = new Map();
+  try {
+    const src = readFileSync(new URL(import.meta.url), "utf-8");
+    for (const m of src.matchAll(/\btest\(\s*["`](\d+)\.([^"`\n]*)["`]/g)) {
+      const key = m[1] + ".";
+      if (!bySection.has(key)) bySection.set(key, []);
+      // A part built at run time (`, ${ROUNDS} times`) is indexed as "…",
+      // never as made-up values: digits put in for it named tests that don't
+      // exist (`32.9`), so a mistyped filter booted a section and ran nothing
+      // (Finding: "Generated filter names let nonexistent tests pass the E2E
+      // suite"). A test's number is always literal.
+      bySection.get(key).push(`${m[1]}.${m[2]}`.replace(/\$\{[^}]*\}/g, "…"));
+    }
+  } catch {}
+  return bySection;
+})();
+
 // A section's bring-up/teardown can be expensive or stateful (VM boots,
 // remote-access toggles, hosts.json rewrites). When --filter can't match any
 // of the section's test names, skip the whole block — running `--filter
-// "^26\\."` must not fire section 25's teardown on a developer machine.
-const sectionActive = (prefix) => !FILTER || new RegExp(FILTER, "i").test(prefix);
+// "^26\\."` must not fire section 25's teardown on a developer machine. It
+// matches the section's number OR its tests' names: matched against the
+// number alone, `--filter Landlock` skipped section 34 whole, and the run
+// passed having tested nothing.
+const sectionActive = (prefix) => {
+  if (!FILTER) return true;
+  const re = new RegExp(FILTER, "i");
+  return re.test(prefix) || (SECTION_TESTS.get(prefix) || []).some((name) => re.test(name));
+};
+
+// A filter that names no test at all (a typo) fails at once, rather than a
+// run that "passes" having run nothing.
+if (FILTER) {
+  const re = new RegExp(FILTER, "i");
+  const any = [...SECTION_TESTS.values()].some((names) => names.some((n) => re.test(n)));
+  if (SECTION_TESTS.size > 0 && !any) {
+    console.error(`--filter ${JSON.stringify(FILTER)} matches no test name — nothing would run.`);
+    process.exit(1);
+  }
+}
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg || "Assertion failed");
@@ -777,7 +815,7 @@ async function main() {
   // ======================================================================
   // 6. Session control (host-side only — VM verification deferred)
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("6.")) {
     console.log("\n--- 6. Session control ---");
 
     await test("6.1 list ac sessions returns an array (possibly empty)", async () => {
@@ -866,7 +904,7 @@ async function main() {
         }
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 6. Session control --- (skipped via --no-sessions)");
   }
 
@@ -903,7 +941,7 @@ async function main() {
   // ======================================================================
   // 8. VM-side verification via /exec (requires base image + debug shell)
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("8.")) {
     console.log("\n--- 8. VM-side verification ---");
 
     // The debug shell is required here — CI exports BROMURE_DEBUG_CLAUDE=1
@@ -1048,7 +1086,7 @@ async function main() {
         );
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 8. VM-side verification --- (skipped via --no-sessions)");
   }
 
@@ -1277,7 +1315,7 @@ async function main() {
   // Ubuntu session VM and exercise the proxy from the guest's
   // perspective.
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("10.")) {
     console.log("\n--- 10. Supply Chain Security — VM-side ---");
 
     // Same contract as 8.0: the debug shell is guaranteed by CI/the
@@ -1512,7 +1550,7 @@ async function main() {
         );
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 10. SC VM-side --- (skipped via --no-sessions)");
   }
 
@@ -1796,7 +1834,8 @@ async function main() {
 
   // Reuse the section 6/8 base-image gate. (The app itself is guaranteed by
   // the preflight — only environment gates may skip: no image, --no-sessions.)
-  let cliVMable = !SKIP_SESSIONS;
+  // Only when section 15 runs: every filtered Jenkins stage booted this probe.
+  let cliVMable = !SKIP_SESSIONS && sectionActive("15.");
   if (cliVMable) {
     try {
       const pid = createProfile("ACE2E_CLI_Probe");
@@ -1811,7 +1850,7 @@ async function main() {
   }
 
   if (!cliVMable) {
-    console.log(
+    if (sectionActive("15.")) console.log(
       "  \x1b[33mSKIP\x1b[0m  CLI VM tests (no base image — run `bromure-ac init` — or --no-sessions)"
     );
   } else {
@@ -2366,7 +2405,7 @@ async function main() {
         });
       });
     }
-  } else {
+  } else if (SKIP_SESSIONS) {
     console.log("\n--- 24. Worktrees (VM-side) --- (skipped via --no-sessions)");
   }
 
@@ -2624,6 +2663,48 @@ async function main() {
                   assert(seen, "server-side task never surfaced in the mirrored board counts");
                 } finally {
                   await api("DELETE", `/tasks/${TID}`);
+                }
+              });
+
+              // The shield in a fat client: the drawer opened, then a stage
+              // mount (the dashboard again) used to remove it from the window,
+              // so the shield did nothing. And no shield for a workspace with
+              // no sandbox (wsID has no policy).
+              await test("25.11 the mirror's shield opens the drawer, which survives a remount; none without a sandbox", async () => {
+                const made = await api("POST", "/profiles", {
+                  name: "ACE2E_RC_Sandboxed", closeAction: "shutdown",
+                  networkPolicy: "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n  read_write: [/tmp]\n",
+                });
+                assert(made.ok === true && made.id, `POST /profiles: ${JSON.stringify(made).slice(0, 200)}`);
+                const boxed = made.id;
+                try {
+                  let r = null;
+                  for (let i = 0; i < 20; i++) {
+                    await fc("select", { workspace: boxed });
+                    r = await fc("policy-drawer", { op: "state" });
+                    if (r.shield === true) break;
+                    await sleep(500);
+                  }
+                  assert(r && r.shield === true, `no shield for a sandboxed workspace: ${JSON.stringify(r)}`);
+                  r = await fc("policy-drawer", { op: "toggle" });
+                  assert(r.open === true && r.inStage === true, `the drawer didn't open: ${JSON.stringify(r)}`);
+                  await fc("select", { workspace: boxed });   // mounts its dashboard again
+                  await sleep(600);
+                  r = await fc("policy-drawer", { op: "state" });
+                  assert(r.open === true && r.inStage === true && r.topmost === true && r.onScreen === true,
+                         `the drawer left the window on a remount: ${JSON.stringify(r)}`);
+                  for (let i = 0; i < 20; i++) {
+                    await fc("select", { workspace: wsID });
+                    r = await fc("policy-drawer", { op: "state" });
+                    if (r.shield === false) break;
+                    await sleep(500);
+                  }
+                  assert(r.shield === false && r.open === false,
+                         `a workspace without a sandbox kept the shield or the drawer: ${JSON.stringify(r)}`);
+                  r = await fc("policy-drawer", { op: "toggle" });
+                  assert(r.open === false, `the drawer opened for a workspace without a sandbox: ${JSON.stringify(r)}`);
+                } finally {
+                  deleteProfile(boxed);
                 }
               });
             } finally {
@@ -3132,7 +3213,7 @@ async function main() {
   //   i.e. the firewall is unbypassable — and that the per-profile
   //   `disableTransparentProxy` opt-out actually opts out.
   // ======================================================================
-  if (!SKIP_SESSIONS) {
+  if (!SKIP_SESSIONS && sectionActive("27.")) {
     console.log("\n--- 27. Egress firewall — VM-side ---");
 
     await test("27.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", async () => {
@@ -3178,7 +3259,9 @@ async function main() {
           // Everything runs with `--noproxy '*'` — a direct connection that
           // ignores the guest's HTTP(S)_PROXY, so the only thing that can
           // enforce is host-side interception. No `-f`: we want the 403 status
-          // without curl bailing out. neverssl.com is guaranteed plain HTTP.
+          // without curl bailing out. example.com (IANA's reserved example
+          // domain) serves plain HTTP on 80 -- neverssl.com went silent once
+          // and failed this test with a bare 502.
           // Every curl is `--max-time 25`: an external upstream that connects
           // slowly (e.g. a dual-stack host whose IPv6 route black-holes on the
           // CI LAN) must fail THAT probe cleanly, not stall the whole exec past
@@ -3190,11 +3273,12 @@ ISSUER=$(curl --noproxy '*' --max-time 25 -sSv https://bromure.io/ 2>&1 | grep -
 GET443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' https://bromure.io/en)
 POST443=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST https://bromure.io/en)
 BODY443=$(curl --noproxy '*' --max-time 25 -sS -X POST https://bromure.io/en | head -c 200)
-GET80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' http://neverssl.com/)
-POST80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST http://neverssl.com/)
-BODY80=$(curl --noproxy '*' --max-time 25 -sS -X POST http://neverssl.com/ | head -c 200)
+GET80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' http://example.com/)
+WHY80=$(curl --noproxy '*' --max-time 25 -sS -D - -o /dev/null http://example.com/ | grep -i '^x-bromure-upstream-error:' | head -1)
+POST80=$(curl --noproxy '*' --max-time 25 -sS -o /dev/null -w '%{http_code}' -X POST http://example.com/)
+BODY80=$(curl --noproxy '*' --max-time 25 -sS -X POST http://example.com/ | head -c 200)
 echo "ISSUER=$ISSUER"; echo "GET443=$GET443"; echo "POST443=$POST443"; echo "BODY443=$BODY443"
-echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
+echo "GET80=$GET80"; echo "WHY80=$WHY80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           });
           assertEq(r._status, 200);
           const out = r.stdout || "";
@@ -3206,7 +3290,8 @@ echo "GET80=$GET80"; echo "POST80=$POST80"; echo "BODY80=$BODY80"`,
           assert(Number(grab(out, "GET443")) < 400, `GET https should be allowed, got ${grab(out, "GET443")}`);
           assertEq(grab(out, "POST443"), "403", `POST https should be blocked (403), got ${grab(out, "POST443")}`);
           assertIncludes(grab(out, "BODY443"), "Bromure firewall rule", "443 POST 403 not from the Bromure firewall");
-          assert(Number(grab(out, "GET80")) < 400, `GET http:80 should be allowed, got ${grab(out, "GET80")}`);
+          assert(Number(grab(out, "GET80")) < 400,
+            `GET http:80 should be allowed, got ${grab(out, "GET80")} ${grab(out, "WHY80")}`);
           assertEq(grab(out, "POST80"), "403", `POST http:80 should be blocked (403), got ${grab(out, "POST80")}`);
           assertIncludes(grab(out, "BODY80"), "Bromure firewall rule", "80 POST 403 not from the Bromure firewall");
         });
@@ -4419,8 +4504,9 @@ for n, c in enumerate(calls, 1):
           if (vm.error) throw new Error(vm.error);
         });
         if (!vm.error) {
-          for (const round of [1, 2]) {
-            await test(`32.${round + 1} round ${round}: two simultaneous launches each bind their own tab and conversation`, async () => {
+          // Each round a literal name: the filter index reads names from this
+          // file and never guesses what a template's number turns into.
+          const raceRound = async () => {
               const n = nonce();
               const specs = ["x", "y"].map((k) => ({
                 folder: `ace2e-race-${k}-${n}`, message: `ace2e race ${k} ${n}: which tab is mine`,
@@ -4454,8 +4540,9 @@ for n, c in enumerate(calls, 1):
                        && !st.path.includes(specs[1 - i].folder),
                        `session ${i}'s beautified view isn't its own conversation: ${JSON.stringify(st).slice(0, 300)}`);
               }
-            });
-          }
+          };
+          await test("32.2 round 1: two simultaneous launches each bind their own tab and conversation", raceRound);
+          await test("32.3 round 2: two simultaneous launches each bind their own tab and conversation", raceRound);
         }
       } finally {
         await stubVMDown(vm);
@@ -4504,7 +4591,17 @@ for n, c in enumerate(calls, 1):
       };
       const PORT = 41000 + Math.floor(Math.random() * 8000);
       const relayOnce = async (i, override) => {
-        const r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+        // A callback is single-use: once relayed, its listener lets the port
+        // go, and the listening sockets close a moment later, on the app's
+        // main queue. Re-armed straight away (each round here, far faster
+        // than any retried sign-in) the bind can land in that moment and be
+        // refused (seen on Jenkins, round 35 of 40). Give it that moment.
+        let r;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          r = await dbg("loopback-sim", { profile: vm.name, port: PORT, override });
+          if (r.ok === true || !String(r.error || "").startsWith("couldn't bind")) break;
+          await sleep(50);
+        }
         assert(r.ok === true, `loopback-sim ${i}: ${JSON.stringify(r)}`);
         const res = await fetch(`http://127.0.0.1:${PORT}/callback?code=ace2e-${i}`,
                                 { signal: AbortSignal.timeout(20000) });
@@ -4580,11 +4677,247 @@ for n, c in enumerate(calls, 1):
   }
 
   // ======================================================================
+  // 34. OpenShell sandbox (filesystem + strict process layer)
+  // ======================================================================
+  // A workspace whose OpenShell policy has filesystem_policy/landlock
+  // sections and the strict sandbox on, probed from INSIDE the sandbox:
+  // with a spec active, agentd runs a host exec (`bromure-ac vm exec`, and the
+  // API's /exec alike) in the sandboxed tree -- what an agent sees. The
+  // probes check what's enforced directly rather than what the sandbox
+  // reports about itself (its status file is outside the policy). OpenShell's own
+  // upstream suites replay against Bromure separately
+  // (scripts/openshell-e2e, the "OpenShell upstream replay" stage).
+  if (!SKIP_SESSIONS && sectionActive("34.")) {
+    console.log("\n--- 34. OpenShell sandbox (filesystem + strict) ---");
+
+    await test("34.0 app exposes the debug shell (BROMURE_DEBUG_CLAUDE)", debugShellTest);
+
+    if (!(await canBootSessions())) {
+      console.log("  \x1b[33mSKIP\x1b[0m  OpenShell sandbox tests (no base image — run `bromure-ac init` first)");
+    } else {
+      const NAME = "ACE2E_OpenShell";
+      const POLICY = [
+        "version: 1",
+        "",
+        "filesystem_policy:",
+        "  include_workdir: true",
+        "  read_only: [/usr, /lib, /etc, /bin, /proc, /dev/urandom, /var/log]",
+        "  read_write: [/home/ubuntu, /tmp, /dev/null]",
+        "",
+        "landlock:",
+        "  compatibility: best_effort",
+        "",
+      ].join("\n");
+      // Per-provider consent prompts would stop an unattended run on a modal.
+      const GUARDRAILS_OFF = Object.fromEntries(
+        ["aws", "bitbucket", "digitalOcean", "docker", "github", "gitlab", "kubernetes"].map((k) => [k, "off"]));
+      let id = null, bootErr = "";
+      try {
+        const stale = await api("GET", "/profiles");
+        for (const p of stale.profiles || []) if (p.name === NAME) await deleteWorkspace(p.id);
+        const r = await api("POST", "/profiles", {
+          name: NAME, closeAction: "shutdown", networkPolicy: POLICY, strictSandbox: true,
+          kernelSentry: "off", openShellAdvisorMode: "off", guardrails: GUARDRAILS_OFF,
+        });
+        if (r.ok !== true || !r.id) throw new Error(`POST /profiles: ${r._status} ${r.error || r._error || ""}`);
+        id = r.id;
+        await api("POST", "/sessions", { profile: id }, { timeoutMs: 120000 });
+      } catch (e) { bootErr = e.message; }
+
+      // A command inside the sandbox: its combined output (never throws —
+      // the probes print what happened, and the tests read that).
+      const sx = (script, timeoutMs = 60000) =>
+        cli(["vm", "exec", NAME, "--", "bash", "-c", script], { timeoutMs, allowFail: true });
+      // One Python probe line per outcome: "ok" or the errno name.
+      const PY_TRY = "import errno,os,socket,ctypes\n" +
+        "def t(label,f):\n" +
+        "  try:\n    f(); print(label,'ok')\n" +
+        "  except OSError as e: print(label, errno.errorcode.get(e.errno, e.errno))\n";
+      const py = (body) => sx(`python3 - <<'ACE2E'\n${PY_TRY}${body}\nACE2E`);
+      const outcomes = (out) => Object.fromEntries(
+        out.split("\n").map((l) => l.trim().split(/\s+/)).filter((w) => w.length === 2));
+
+      try {
+        await test("34.1 the workspace boots with the sandbox and answers from inside it", async () => {
+          assert(!bootErr, bootErr);
+          let last = "";
+          for (let i = 0; i < 60; i++) {
+            last = sx("echo ace2e-ready", 30000);
+            if (last.includes("ace2e-ready")) return;
+            await sleep(3000);
+          }
+          throw new Error(`no answer from inside the sandbox: ${last.slice(0, 300)}`);
+        });
+
+        await test("34.2 vm exec runs inside it: no_new_privs and a seccomp filter on the shell", async () => {
+          const out = sx("grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status");
+          assert(/NoNewPrivs:\s*1/.test(out), `NoNewPrivs: ${out}`);
+          assert(/Seccomp:\s*2/.test(out), `Seccomp: ${out}`);
+        });
+
+        await test("34.3 Landlock: read-only paths can't be written, read-write ones can, others can't be read", async () => {
+          const o = outcomes(await py(
+            "t('write_usr', lambda: open('/usr/ace2e-probe','w'))\n" +
+            "t('write_etc', lambda: open('/etc/ace2e-probe','w'))\n" +
+            "t('read_etc', lambda: open('/etc/hostname').read())\n" +
+            "t('write_home', lambda: open(os.path.expanduser('~/ace2e-probe'),'w').write('x'))\n" +
+            "t('write_tmp', lambda: open('/tmp/ace2e-probe','w').write('x'))\n" +
+            "t('read_outside', lambda: os.listdir('/var/lib'))\n"));
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.write_usr), `write /usr: ${o.write_usr}`);
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.write_etc), `write /etc: ${o.write_etc}`);
+          assertEq(o.read_etc, "ok", "read /etc");
+          assertEq(o.write_home, "ok", "write $HOME");
+          assertEq(o.write_tmp, "ok", "write /tmp");
+          assert(["EACCES", "EPERM"].includes(o.read_outside), `list /var/lib (outside the policy): ${o.read_outside}`);
+        });
+
+        await test("34.4 strict: no root — sudo is refused", async () => {
+          const out = sx("sudo -n true 2>/dev/null && echo ace2e-HAS-ROOT || echo ace2e-noroot");
+          assert(out.includes("ace2e-noroot") && !out.includes("ace2e-HAS-ROOT"), `sudo: ${out.slice(0, 300)}`);
+        });
+
+        await test("34.5 strict: seccomp refuses memfd, ptrace, user namespaces and raw packet sockets", async () => {
+          const o = outcomes(await py(
+            "libc=ctypes.CDLL(None,use_errno=True)\n" +
+            "def sc(f):\n" +
+            "  def g():\n" +
+            "    if f()<0: raise OSError(ctypes.get_errno(),'')\n" +
+            "  return g\n" +
+            "t('memfd', sc(lambda: libc.memfd_create(b'ace2e',0)))\n" +
+            "t('ptrace', sc(lambda: libc.ptrace(0,0,0,0)))\n" +
+            "t('userns', sc(lambda: libc.unshare(0x10000000)))\n" +
+            "t('packet', lambda: socket.socket(17, socket.SOCK_RAW, 0))\n"));
+          for (const k of ["memfd", "ptrace", "userns", "packet"]) {
+            assertEq(o[k], "EPERM", `${k}: ${JSON.stringify(o)}`);
+          }
+        });
+
+        // OpenShell's ban: a confined process can't open vsock, so it can't pose
+        // as the guest's own services (the shell pool, the attestor, the
+        // sentry). Bromure's helpers ask agentd's relay, outside the sandbox,
+        // which connects the MCP and plan-stream ports only.
+        await test("34.6 strict: vsock is refused in the sandbox; agentd relays the Bromure MCP ports only", async () => {
+          const o = outcomes(await py(
+            "t('vsock', lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM))\n" +
+            "def relay(port):\n" +
+            "  def g():\n" +
+            "    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(40)\n" +
+            "    c.connect('/tmp/bromure-vsock.sock'); c.sendall(b'bromure-vsock %d\\n' % port)\n" +
+            "    line = c.recv(64); c.close()\n" +
+            "    if line != b'ok\\n': raise OSError(errno.ECONNREFUSED, line.decode().strip())\n" +
+            "  return g\n" +
+            "t('relay_mcp', relay(5835))\n" +
+            "t('relay_shell', relay(5800))\n" +
+            "t('relay_attestor', relay(5840))\n"));
+          assertEq(o.vsock, "EPERM", `AF_VSOCK: ${JSON.stringify(o)}`);
+          assertEq(o.relay_mcp, "ok", `relay to the delegation MCP: ${JSON.stringify(o)}`);
+          assertEq(o.relay_shell, "ECONNREFUSED", `relay to the shell pool: ${JSON.stringify(o)}`);
+          assertEq(o.relay_attestor, "ECONNREFUSED", `relay to the attestor: ${JSON.stringify(o)}`);
+        });
+
+        await test("34.6b strict: a Bromure MCP server answers from inside the sandbox, through the relay", async () => {
+          const init = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+            params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "ace2e", version: "1" } } });
+          const out = sx(`(echo '${init}'; sleep 8) | timeout 30 python3 /mnt/bromure-meta/bromure-delegation-mcp.py w0 | head -1`, 60000);
+          assert(/"id"\s*:\s*1/.test(out) && /bromure-delegation/.test(out), `initialize: ${out.slice(0, 400)}`);
+        });
+
+        await test("34.7 the code agentd runs (the meta share) can't be modified from the sandbox", async () => {
+          const o = outcomes(await py("t('meta', lambda: open('/mnt/bromure-meta/ace2e-probe','w'))\n"));
+          assert(["EACCES", "EPERM", "EROFS"].includes(o.meta), `write the meta share: ${o.meta}`);
+        });
+
+        await test("34.8 Yama keeps the sandbox off agentd's memory (ptrace_scope >= 1)", async () => {
+          const v = parseInt(sx("cat /proc/sys/kernel/yama/ptrace_scope").trim(), 10);
+          assert(v >= 1, `kernel.yama.ptrace_scope = ${v}`);
+        });
+
+        await test("34.9 the outbox's signals can't be written from the sandbox; its URL relay can, and is read", async () => {
+          const o = outcomes(await py(
+            "t('outbox', lambda: open('/mnt/bromure-outbox/ace2e-probe.txt','w'))\n" +
+            // Not http(s): the host takes it and drops it, so no browser opens.
+            "t('relay', lambda: open('/mnt/bromure-outbox/urls/url-ace2e.txt','w').write('ace2e:not-a-web-page'))\n"));
+          assert(["EACCES", "EPERM"].includes(o.outbox), `write the outbox itself: ${o.outbox}`);
+          assertEq(o.relay, "ok", "write the URL relay");
+          let gone = false;
+          for (let i = 0; i < 20 && !gone; i++) {
+            await sleep(500);
+            gone = sx("test -e /mnt/bromure-outbox/urls/url-ace2e.txt && echo there || echo gone").includes("gone");
+          }
+          assert(gone, "the host never took the relayed URL file");
+        });
+
+        // The agents' hooks run in the sandbox too: their status (and tool
+        // calls) go through the outbox's agent/ folder. Without it a
+        // sandboxed tab never left idle and tasks never finished.
+        await test("34.10 the agents' hook reports a tab's status from inside the sandbox", async () => {
+          const o = outcomes(await py("t('agent', lambda: open('/mnt/bromure-outbox/agent/ace2e-probe','w').write('x'))\n"));
+          sx("rm -f /mnt/bromure-outbox/agent/ace2e-probe");
+          assertEq(o.agent, "ok", "write the hooks' folder");
+          // A tab of its own, the hook run as its command: typed into tab 0 it
+          // went to whatever runs there (the agent's CLI at its sign-in, on a
+          // fresh workspace), not a shell. The tab is listed by the host first:
+          // a status for a tab it doesn't know yet is dropped.
+          const T = "tmux -S /run/bromure-sandbox/server/tmux.sock";
+          const win = parseInt(sx(`${T} new-window -d -P -F '#{window_index}' -t bromure: 'sleep 300'`).trim(), 10);
+          assert(Number.isInteger(win), `no tab for the hook: ${win}`);
+          const tab = async () => {
+            const st = await api("GET", "/state");
+            const vm = (st.vms || []).find((v) => v.name === NAME);
+            return ((vm && vm.tabs) || []).find((t) => t.index === win);
+          };
+          const status = async () => (await tab())?.agentStatus;
+          try {
+            let listed = false;
+            for (let i = 0; i < 40 && !listed; i++) { listed = !!(await tab()); if (!listed) await sleep(500); }
+            if (!listed) {
+              // Seen on Jenkins with nothing to go on: say where the roster
+              // stopped. agentd publishes tmux's window list to tabs.txt in
+              // the outbox every 0.7s; the host lists what that file says.
+              const outbox = `${process.env.CFFIXED_USER_HOME || os.homedir()}` +
+                `/Library/Application Support/BromureAC/profiles/${id}/outbox`;
+              const read = (f, n) => {
+                try { return readFileSync(`${outbox}/${f}`, "utf8").trim().split("\n").slice(-n).join("\n"); }
+                catch (e) { return `(${e.code || e.message})`; }
+              };
+              const st = await api("GET", "/state").catch(() => ({}));
+              const vm = (st.vms || []).find((v) => v.name === NAME);
+              throw new Error(
+                `the host never listed tab ${win}\n` +
+                `  host tabs: ${JSON.stringify(((vm && vm.tabs) || []).map((t) => t.index))}\n` +
+                `  tmux in the sandbox: ${sx(`${T} list-windows -t bromure: -F '#{window_index} #{pane_current_command}'`).trim().replace(/\n/g, " | ")}\n` +
+                `  outbox tabs.txt: ${read("tabs.txt", 10).replace(/\n/g, " | ")}\n` +
+                `  agentd.log (last 25 lines):\n    ${read("agentd.log", 25).replace(/\n/g, "\n    ")}`);
+            }
+            for (const want of ["working", "done"]) {
+              sx(`${T} respawn-window -k -t bromure:${win} 'sh ~/.bromure/agent-status.sh ${want} </dev/null; sleep 300'`);
+              let got;
+              for (let i = 0; i < 20 && got !== want; i++) { await sleep(500); got = await status(); }
+              assertEq(got, want, `tab ${win}'s status after the hook said ${want}`);
+            }
+          } finally {
+            sx(`${T} kill-window -t bromure:${win}`);
+          }
+        });
+      } finally {
+        await stubVMDown(id ? { id, name: NAME } : null);
+      }
+    }
+  }
+
+  // ======================================================================
   // Done
   // ======================================================================
   console.log(
     `\n=== ${passed} passed, ${failed} failed, ${skipped} skipped ===\n`
   );
+
+  // A filtered run that ran nothing tested nothing: not a pass (a typo the
+  // index matched, or tests that all skipped themselves).
+  if (FILTER && passed + failed === 0) {
+    console.log(`--filter ${JSON.stringify(FILTER)} ran no test.`);
+    process.exit(1);
+  }
 
   if (failed > 0) {
     console.log("Failures:");

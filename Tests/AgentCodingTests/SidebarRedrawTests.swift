@@ -19,11 +19,11 @@ struct SidebarRedrawTests {
         }
     }
 
-    /// Measure passes over 1.5 s of 20 rows, each showing `v`, hosted with default sizing like the sidebar.
-    @MainActor private func measures<V: View>(_ v: V) async -> Int {
+    /// Measure passes over 1.5 s of `rows` rows, each showing `v`, hosted with default sizing like the sidebar.
+    @MainActor private func measures<V: View>(_ v: V, rows: Int = 20) async -> Int {
         let count = Count()
         let host = NSHostingView(rootView: Probe(count: count) {
-            VStack { ForEach(0..<20) { _ in HStack { v; Text("a session row") } } }
+            VStack { ForEach(0..<rows, id: \.self) { _ in HStack { v; Text("a session row") } } }
         })
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 600), styleMask: [.titled, .resizable],
                            backing: .buffered, defer: false)
@@ -57,5 +57,24 @@ struct SidebarRedrawTests {
         #expect(reference > 5, "the probe measures a per-frame redraw: \(reference)")
         #expect(orb == 0, "UnreadMark: \(orb) measure passes")
         #expect(working == 0, "AgentStatusDot: \(working) measure passes")
+    }
+
+    /// Board finding: "Restored sidebar sizing makes working-status animation
+    /// saturate the main thread", read off this file's old comment. Measured:
+    /// a full sidebar of working dots, hosted with the default sizing the main
+    /// window's sidebar has (it must, or the window can't be resized), isn't
+    /// re-measured while they pulse.
+    @MainActor @Test("a sidebar full of working dots, at default sizing, isn't re-measured while they pulse")
+    func workingDotsAtDefaultSizing() async throws {
+        let working = await measures(AgentStatusDot(status: .working), rows: 60)
+        #expect(working == 0, "AgentStatusDot × 60: \(working) measure passes")
+        // A busy machine or cluster row's spinner (AppKit's, spinning in its own layer).
+        let spinner = await measures(ProgressView().controlSize(.mini), rows: 60)
+        #expect(spinner == 0, "ProgressView × 60: \(spinner) measure passes")
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let w = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/UnifiedSessionWindow.swift"), encoding: .utf8)
+        let host = try #require(w.range(of: "let sidebarHost = NonMovableHostingView(rootView: sidebar)"))
+        #expect(!w[host.upperBound...].prefix(900).contains("sidebarHost.sizingOptions = []"))
+        #expect(!w.contains("every frame of a working dot's pulse\n        // re-measures"))
     }
 }

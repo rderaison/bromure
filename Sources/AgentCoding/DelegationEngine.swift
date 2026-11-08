@@ -273,7 +273,8 @@ final class DelegationEngine {
     }
 
     /// What a reach refusal tells the agent to pass on: where the user
-    /// opens it. New workspaces reach no other one until the user does.
+    /// opens it. A workspace whose reach the user narrowed reaches only the
+    /// ones ticked.
     nonisolated static func howToReach(_ target: String, from mine: String) -> String {
         "Ask the user to open “\(mine)” settings › General › Reach and tick “\(target)” "
             + "(or turn on “Every workspace”), then try again."

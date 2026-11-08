@@ -1599,6 +1599,7 @@
 "Upstream TLS" = "Upstream TLS";
 "Prompt injection" = "Prompt injection";
 "swapped in %@" = "swapped in %@";
+"presented client certificate" = "presented client certificate";
 "signed" = "signed";
 "blocked — exfiltration attempt, VM paused" = "blocked — exfiltration attempt, VM paused";
 
@@ -1838,8 +1839,7 @@
 "Let's set up a machine first." = "Let's set up a machine first.";
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "Runs in an isolated machine of its own. Nothing on your Mac is touched.";
 "Ask for anything — or just press Return to open %@." = "Ask for anything — or just press Return to open %@.";
-"Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "Open Linux (⌥⌘U) to answer in the terminal.";
+"Open the terminal (⌥⌘U) to answer there." = "Open the terminal (⌥⌘U) to answer there.";
 "Waking up…" = "Waking up…";
 "Almost there…" = "Almost there…";
 "Asleep. Your next message wakes it up and carries on from here." = "Asleep. Your next message wakes it up and carries on from here.";
@@ -2404,8 +2404,7 @@
 /* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
 "Session" = "Session";
 "Back to the session this terminal hosts (⌥⌘U)" = "Back to the session this terminal hosts (⌥⌘U)";
-"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "Or open Linux (⌥⌘U) to answer in the terminal.";
+"Or open the terminal (⌥⌘U) to answer there." = "Or open the terminal (⌥⌘U) to answer there.";
 "New machine…" = "New machine…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -3995,7 +3994,7 @@
 "access token renews on next use" = "access token renews on next use";
 "(exit code %d)" = "(exit code %d)";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "Not delivered — the agent didn't take it in. Edit it or send it again.";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace).";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Agents here reach no other workspace until you tick one below (or turn on Every workspace).";
 "Closes the editor without saving changes" = "Closes the editor without saving changes";
 
 /* prompt: Grok data-retention banner */
@@ -4391,3 +4390,8 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "It may be out of memory. What's shown here may be out of date.";
+"Show this session's terminal (⌥⌘U)" = "Show this session's terminal (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "Couldn't suspend “%@”: the disk is almost full.";
+"The workspace is still running." = "The workspace is still running.";

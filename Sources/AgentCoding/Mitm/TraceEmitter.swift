@@ -87,25 +87,7 @@ enum TraceEmitter {
             // prompt-injection "log" scan).
             onConversation?(conv)
         }
-        // Audit trail for credential.token_swap: every fake → real
-        // substitution that just left the VM. One event per swap so
-        // the admin UI can list "AI authenticated as <token name>
-        // against <host>". Previews only — real values stay in
-        // memory; the server would never see the secret bytes.
-        if !swaps.isEmpty {
-            BACDebug.log("[mitm/trace]", "swap-events emit count=\(swaps.count) host=\(host)")
-        }
-        for s in swaps {
-            BACEventEmitter.shared.emitDetached(
-                profileID: profileID,
-                eventType: "credential.token_swap",
-                eventData: [
-                    "host": .string(host),
-                    "path": .string(path),
-                    "fake_preview": .string(s.fakePreview),
-                    "real_preview": .string(s.realPreview),
-                ])
-        }
+        // (credential.token_swap went out above, before the trace gate.)
 
         let record = TraceRecord(
             sessionID: session.sessionID,

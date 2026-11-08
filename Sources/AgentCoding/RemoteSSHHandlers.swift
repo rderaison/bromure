@@ -356,6 +356,11 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
         lock.lock(); authorizedKeys = keys; machineOnlyKeys = machineOnly; lock.unlock()
     }
 
+    var currentAuthorizedKeys: Set<NIOSSHPublicKey> {
+        lock.lock(); defer { lock.unlock() }
+        return authorizedKeys
+    }
+
     func make(peerIP: String) -> RemoteAuthDelegate {
         lock.lock(); let keys = authorizedKeys; let machine = machineOnlyKeys; lock.unlock()
         return RemoteAuthDelegate(username: username, allowPassword: allowPassword,

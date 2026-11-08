@@ -560,6 +560,10 @@ public final class MitmEngine {
                                         "dst_ip": .string(destIP), "exe": .of(identity?.exe),
                                         "rule": .of(policy.firstMatch(ip: nil, hostnames: [host], proto: .tcp,
                                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                        "reason": .of(identity.flatMap {
+                                            policy.identityDenialReason(hostnames: peeked.map { [$0] } ?? [], ip: destAddr,
+                                                                        port: UInt16(truncatingIfNeeded: destPort), exe: $0.exe)
+                                        }),
                                         "by_policy": .bool(true)])
                         }
                         close(appFD); return
@@ -621,6 +625,12 @@ public final class MitmEngine {
                                     "rule": .of(policy.firstMatch(ip: nil, hostnames: sniHost.map { [$0] } ?? [],
                                                                   proto: .tcp,
                                                                   port: UInt16(truncatingIfNeeded: destPort))?.text),
+                                    // Allowed but not for this program (binaries enforced): which
+                                    // rule, which program -- not "default policy".
+                                    "reason": .of(identity.flatMap {
+                                        policy.identityDenialReason(hostnames: sniHost.map { [$0] } ?? [], ip: destAddr,
+                                                                    port: UInt16(truncatingIfNeeded: destPort), exe: $0.exe)
+                                    }),
                                     "by_policy": .bool(true)])
                     }
                     close(appFD); return

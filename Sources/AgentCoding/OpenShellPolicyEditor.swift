@@ -399,11 +399,12 @@ struct OpenShellPolicyEditor: View {
         # policies use, with the workload home (/sandbox there) at
         # /home/ubuntu, plus /opt, where the Bromure image installs tools
         # (grok, bun for omp, gcloud). The agent may read the system and
-        # write only its home, its project folders (include_workdir) and /tmp.
+        # write only its home, its project folders (include_workdir), /tmp,
+        # and /dev/shm (Python's multiprocessing and anything parallel on it).
         filesystem_policy:
           include_workdir: true
-          read_only: [/bin, /usr, /lib, /opt, /proc, /dev/urandom, /etc, /var/log]
-          read_write: [/home/ubuntu, /tmp, /dev/null]
+          read_only: [/bin, /usr, /lib, /opt, /proc, /dev/urandom, /dev/random, /dev/zero, /etc, /var/log]
+          read_write: [/home/ubuntu, /tmp, /dev/null, /dev/shm]
         landlock:
           compatibility: best_effort
 
@@ -542,18 +543,29 @@ struct OpenShellPolicyEditor: View {
     /// A working default for a coding agent: source hosting and the package
     /// registries, read-only where uploads are the risk. The agent's own
     /// services and credentialed hosts come from the provider layer.
+    /// Each rule names the programs it's for: with the strict sandbox a rule
+    /// without `binaries` applies to no program (OpenShell's semantics), so
+    /// this template allowed nothing there. System paths only, which the
+    /// sandbox can't write: a `**/node` glob would match a copy in $HOME.
     static let starterPolicy = """
     version: 1
 
     # OpenShell sandbox policy — https://github.com/NVIDIA/OpenShell
     # Everything not listed is denied. Bromure also allows the workspace's
     # agents and every host it injects a credential for (_provider_* rules).
+    # `binaries`: the programs a rule is for (or that they started). With
+    # the strict sandbox they're enforced, and a rule without any allows
+    # nothing; otherwise they're advisory.
     network_policies:
       github:
         endpoints:
           - { host: github.com, port: 443 }
           - { host: api.github.com, port: 443 }
           - { host: "**.githubusercontent.com", port: 443 }
+        binaries:
+          - { path: /usr/bin/git }
+          - { path: /usr/bin/gh }
+          - { path: /usr/bin/curl }
 
       npm:
         endpoints:
@@ -563,16 +575,23 @@ struct OpenShellPolicyEditor: View {
             enforcement: enforce
             access: read-only          # installs work; publish is blocked
             allow_encoded_slash: true  # scoped packages (@types%2Fnode)
+        binaries:
+          - { path: /usr/bin/node }    # npm, npx, pnpm and yarn run on it
+          - { path: /opt/bun/bin/bun }
 
       pypi:
         endpoints:
           - { host: pypi.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
           - { host: files.pythonhosted.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+        binaries:
+          - { path: "/usr/bin/python3*" }   # pip runs on it
 
       ubuntu_apt:
         endpoints:
           - { host: ports.ubuntu.com, ports: [80, 443] }
           - { host: security.ubuntu.com, ports: [80, 443] }
+        binaries:
+          - { path: "/usr/lib/apt/methods/*" }
 
     """
 }

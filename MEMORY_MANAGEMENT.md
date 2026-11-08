@@ -115,9 +115,17 @@ Smaller, and independent of the above:
 - **See whether agentd stays small.** A 7-day-old agentd held 934 MB: 782 MB in
   glibc arenas across 28 threads' worth, 43 MB in the main heap, with threads and
   fds flat. So it is freed memory that isn't returned, not a growing structure.
-  agentd now calls `malloc_trim(0)` every minute, which released 92% in a
-  simulation (178 MB to 15 MB). That hasn't been measured on a real agentd yet.
-  If it isn't enough, `mallopt(M_ARENA_MAX, 2)` at the top of `main()` is next.
+  agentd calls `malloc_trim(0)` every minute. That wasn't enough: a codereview
+  agentd with it running sat at 318 MB after a day, the main heap 14 MB and
+  ~250 MB in thread arenas of 13-48 MB each. glibc raises its mmap threshold as
+  large blocks are freed, after which a service thread's large transients come
+  out of its arena and stay. agentd now fixes the threshold at 128 KiB
+  (`fix_mmap_threshold`, first thing in `main()`). On glibc 2.39, 24 threads
+  building 30 MB transients: 833 MB as it was, 93 MB with the threshold fixed,
+  83 MB with the trim too. `M_ARENA_MAX 2` made that worse (1033 MB) and added
+  nothing on top, so it isn't set. The byte relay reads into one reused buffer
+  (30% less with 150 idle connections). agentd logs its RSS, threads and
+  bridges every 10 minutes: check that line on a long-running guest.
 - **Share the MCP helpers.** At 1135 MB they cost more than the agents did.
 - **Per-agent cgroups**: attribution, `memory.high` to throttle rather than kill,
   and `memory.oom.group` so an agent and its helpers go together.

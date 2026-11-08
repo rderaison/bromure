@@ -222,9 +222,12 @@ called out so they are not quietly reintroduced.
 process tree, not in the tmux server's — so a host-initiated `vm exec` is
 **outside the sandbox**.
 
-That is not reachable by the agent: the sandboxed tree cannot open `AF_VSOCK`
-(the seccomp filter blocks the domain), so it cannot drive that path. It is the
-host's own channel. But it does mean `vm exec` and a pane see different
+That was not reachable by the agent while the sandboxed tree could not open
+`AF_VSOCK` (the seccomp filter blocked the domain). **For now it can**
+(DESIGN.md §1.9, item 6, until 5.4.3): a sandboxed process can connect to the
+host's vsock listeners, the guest-initiated exec pool (5800) included, and be
+handed a host `vm exec` meant for agentd. It is meant to be the host's own
+channel. But it does mean `vm exec` and a pane see different
 filesystems under a `filesystem_policy`, which will confuse somebody eventually.
 
 If you want them to match, route `_run_interactive`'s `cmd` through

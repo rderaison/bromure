@@ -2,6 +2,7 @@ import Foundation
 #if canImport(os)
 import os
 #endif
+import CryptoKit
 
 // MARK: - Fat-client shared types (platform-independent)
 //
@@ -34,7 +35,7 @@ enum FatClientLog {
                 FileManager.default.createFile(atPath: filePath, contents: nil)
             }
             if let h = FileHandle(forWritingAtPath: filePath) {
-                h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+                _ = try? h.seekToEnd(); try? h.write(contentsOf: Data(line.utf8)); try? h.close()
             }
         }
     }
@@ -78,6 +79,20 @@ struct RemoteHost: Codable, Identifiable, Equatable, Hashable {
     /// carry that `127.0.0.1:N` for the session. Absent ⇒ the classic direct
     /// dial, unchanged. Optional so existing hosts.json decodes untouched.
     var peerDeviceID: String? = nil
+
+    /// A peer's id, the same at every connect: derived from its directory
+    /// device id. Peers aren't saved, and a fresh id each connect made a new
+    /// host of the same machine -- its Security Timeline rows went to a new
+    /// bucket beside the old one (counted twice, a stale machine in the
+    /// filter), and its per-host data folder started over (Finding:
+    /// "Reconnecting to a peer duplicates its security timeline history").
+    static func stablePeerID(_ deviceID: String) -> UUID {
+        var b = Array(SHA256.hash(data: Data("bromure-peer-host|\(deviceID)".utf8)).prefix(16))
+        b[6] = (b[6] & 0x0F) | 0x50   // a name-based UUID (version 5 layout)
+        b[8] = (b[8] & 0x3F) | 0x80
+        return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                           b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
+    }
 
     var connectLabel: String {
         peerDeviceID.map { "\(user)@peer:\(String($0.prefix(8)))" } ?? "\(user)@\(address):\(port)"

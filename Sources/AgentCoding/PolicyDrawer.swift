@@ -21,22 +21,32 @@ struct PolicyDrawer: View {
     @State private var needsRestart: Set<String> = []
     @State private var busy: Set<String> = []
     @State private var errors: [String: String] = [:]
-    @State private var proposals: [OpenShellAdvisor.Proposal] = []
-    @State private var packages: [OpenShellAdvisor.PackageRequest] = []
+    /// Bumped when this Mac's advisor changes (it isn't observable).
+    @State private var advisorTick = 0
     @State private var now = Date()
     @ObservedObject private var ticker = FirewallRulesTicker.shared
     /// The timeline and workspace to show (screenshots pass stand-ins; the
     /// app uses its own).
     var timeline: SecurityTimeline = .shared
     var profileOverride: Profile? = nil
+    /// Whose workspaces: this Mac's, or a fat client's host's (decisions go
+    /// to the host).
+    var backend: PolicyDrawerBackend = LocalPolicyDrawerBackend.shared
     private let clock = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
-    private var delegate: ACAppDelegate? { NSApp.delegate as? ACAppDelegate }
     private var profile: Profile? {
         let _ = ticker.generation
         if let profileOverride { return profileOverride }
         guard let id = list.stageProfileID else { return nil }
-        return delegate?.profiles.first { $0.id == id }
+        return backend.profile(id)
+    }
+    private var proposals: [DrawerProposal] {
+        let _ = advisorTick
+        return list.stageProfileID.map { backend.proposals($0) } ?? []
+    }
+    private var packages: [DrawerPackage] {
+        let _ = advisorTick
+        return list.stageProfileID.map { backend.packages($0) } ?? []
     }
     private var isOpenShell: Bool { profile?.usesOpenShellPolicy ?? false }
 
@@ -73,7 +83,9 @@ struct PolicyDrawer: View {
         .onAppear { reloadProposals(); markSeen() }
         .onChange(of: list.stageProfileID) { _, _ in
             dismissed = []; allowed = []; needsRestart = []; errors = [:]; reloadProposals(); markSeen()
+            closeIfUnsandboxed()
         }
+        .onChange(of: list.unsandboxedProfileIDs) { _, _ in closeIfUnsandboxed() }
         .onReceive(NotificationCenter.default.publisher(for: OpenShellAdvisor.changedNotification)) { _ in
             reloadProposals()
         }
@@ -84,7 +96,16 @@ struct PolicyDrawer: View {
             if open { reloadProposals() }
             PolicyDrawer.markSeen(list, closing: !open)
         }
-        .onReceive(clock) { now = $0; markSeen() }
+        .onReceive(clock) {
+            now = $0; markSeen()
+            if list.policyDrawerOpen { reloadProposals() }   // a host's: fetched again
+        }
+    }
+
+    /// The stage's workspace has no sandbox (switched to, or its policy
+    /// removed): its shield is gone, so is the drawer.
+    private func closeIfUnsandboxed() {
+        if list.policyDrawerOpen, list.stageProfileID != nil, !list.hasSandboxDrawer(list.stageProfileID) { onClose() }
     }
 
     // MARK: Header, tabs, footer
@@ -176,7 +197,8 @@ struct PolicyDrawer: View {
     /// The workspace's distinct blocked destinations from the last two
     /// hours, newest first.
     private func blocked(_ profile: Profile) -> [Blocked] {
-        Self.blockedRows(timeline.allEvents, profileID: profile.id, since: now.addingTimeInterval(-2 * 3600))
+        Self.blockedRows(timeline.allEvents, profileID: profile.id, since: now.addingTimeInterval(-2 * 3600),
+                         machine: backend.machine)
             .filter { !dismissed.contains($0.key) }
     }
 
@@ -187,9 +209,11 @@ struct PolicyDrawer: View {
         "\(host.lowercased()):\(port)" + (exe.map { "|" + $0 } ?? "")
     }
 
-    static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date) -> [Blocked] {
+    /// `machine`: whose events (nil = this Mac's, else a fat client's host's).
+    static func blockedRows(_ events: [SecurityTimeline.Event], profileID: UUID, since cutoff: Date,
+                            machine: String? = nil) -> [Blocked] {
         var byKey: [String: Blocked] = [:]
-        for e in events where e.profileID == profileID && e.machine == nil && e.time > cutoff {
+        for e in events where e.profileID == profileID && e.machine == machine && e.time > cutoff {
             guard let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port, port > 0 else { continue }
             let key = rowKey(host: host, port: port, exe: fw.exe)
@@ -315,10 +339,16 @@ struct PolicyDrawer: View {
     private func allowFirewall(_ item: Blocked, _ rule: EgressPolicy.Rule, _ d: FirewallRuleActions.Duration, _ profile: Profile) {
         var r = rule
         d.apply(to: &r, now: Date())
-        if delegate?.applyFirewallEdit(.insert(r), profileID: profile.id) == true || allowedNow(item, profile) {
-            allowed.insert(item.key); errors[item.key] = nil
-        } else {
-            errors[item.key] = NSLocalizedString("Couldn't add the rule.", comment: "network drawer")
+        let key = item.key, pid = profile.id
+        busy.insert(key)
+        Task { @MainActor in
+            let ok = await backend.editFirewall(.insert(r), profileID: pid)
+            busy.remove(key)
+            if ok || (self.profile.map { allowedNow(item, $0) } ?? false) {
+                allowed.insert(key); errors[key] = nil
+            } else {
+                errors[key] = NSLocalizedString("Couldn't add the rule.", comment: "network drawer")
+            }
         }
     }
 
@@ -330,7 +360,7 @@ struct PolicyDrawer: View {
         busy.insert(item.key)
         let pid = profile.id, host = item.host, port = item.port, key = item.key, exe = item.fw.exe
         Task { @MainActor in
-            let error = await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
+            let error = await backend.allowOpenShell(profileID: pid, host: host, port: port, exe: exe)
             busy.remove(key)
             if let error { errors[key] = error } else { allowed.insert(key); errors[key] = nil }
         }
@@ -368,7 +398,7 @@ struct PolicyDrawer: View {
     private func fileDenials(_ profile: Profile) -> [FileDenial] {
         let cutoff = now.addingTimeInterval(-2 * 3600)
         var byFolder: [String: FileDenial] = [:]
-        for e in timeline.allEvents where e.profileID == profile.id && e.machine == nil && e.time > cutoff
+        for e in timeline.allEvents where e.profileID == profile.id && e.machine == backend.machine && e.time > cutoff
             && e.eventType == "sentry.event" {
             guard let d = e.detail, case .string(let path)? = d["path"], path.hasPrefix("/") else { continue }
             if case .string("seccomp_denied")? = d["kind"] { continue }
@@ -400,7 +430,7 @@ struct PolicyDrawer: View {
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("Restart") { delegate?.restartProfile(profile.id) }
+                    Button("Restart") { backend.restart(profile.id) }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule).controlSize(.small).tint(.orange)
                 }
             }
@@ -469,11 +499,13 @@ struct PolicyDrawer: View {
     }
 
     private func allowPath(_ path: String, readWrite: Bool, _ profile: Profile, key: String? = nil) {
-        let k = key ?? path
-        if let error = delegate?.addSandboxPath(profileID: profile.id, path: path, readWrite: readWrite) {
-            errors["fs:" + k] = error
-        } else {
-            needsRestart.insert(k); errors["fs:" + k] = nil
+        let k = key ?? path, pid = profile.id
+        Task { @MainActor in
+            if let error = await backend.addSandboxPath(profileID: pid, path: path, readWrite: readWrite) {
+                errors["fs:" + k] = error
+            } else {
+                needsRestart.insert(k); errors["fs:" + k] = nil
+            }
         }
     }
 
@@ -503,8 +535,8 @@ struct PolicyDrawer: View {
                         Text(verbatim: p.intent).font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if !p.rule.binaries.isEmpty {
-                        Label(p.rule.binaries.joined(separator: ", "), systemImage: "terminal")
+                    if !p.binaries.isEmpty {
+                        Label(p.binaries.joined(separator: ", "), systemImage: "terminal")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if !p.findings.isEmpty {
@@ -521,12 +553,11 @@ struct PolicyDrawer: View {
                     HStack {
                         Spacer()
                         Button("Reject") {
-                            OpenShellAdvisor.shared.reject(id: p.id, profileID: profile.id, reason: "")
+                            backend.decideProposal(id: p.id, profileID: profile.id, approve: false)
                         }
                         .buttonBorderShape(.capsule)
                         Button("Approve") {
-                            let id = p.id, pid = profile.id
-                            Task { await OpenShellAdvisor.shared.approve(id: id, profileID: pid) }
+                            backend.decideProposal(id: p.id, profileID: profile.id, approve: true)
                         }
                         .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
                     }
@@ -537,9 +568,8 @@ struct PolicyDrawer: View {
     }
 
     private func reloadProposals() {
-        guard let id = list.stageProfileID else { proposals = []; packages = []; return }
-        proposals = OpenShellAdvisor.shared.proposals(for: id)
-        packages = OpenShellAdvisor.shared.packageRequests(for: id)
+        if let id = list.stageProfileID { backend.refresh(id) }
+        advisorTick &+= 1
     }
 
     /// System packages the agent asked for: waiting, installing, or just
@@ -564,12 +594,11 @@ struct PolicyDrawer: View {
                         HStack {
                             Spacer()
                             Button("Reject") {
-                                OpenShellAdvisor.shared.rejectPackages(id: r.id, profileID: profile.id, reason: "")
+                                backend.decidePackages(id: r.id, profileID: profile.id, approve: false)
                             }
                             .buttonBorderShape(.capsule)
                             Button("Install") {
-                                let id = r.id, pid = profile.id
-                                Task.detached { await OpenShellAdvisor.shared.approvePackages(id: id, profileID: pid) }
+                                backend.decidePackages(id: r.id, profileID: profile.id, approve: true)
                             }
                             .buttonStyle(.borderedProminent).buttonBorderShape(.capsule)
                         }
@@ -620,7 +649,10 @@ struct PolicyDrawer: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Button("End") { _ = delegate?.applyFirewallEdit(.remove(ruleText: r.text), profileID: profile.id) }
+                    Button("End") {
+                        let pid = profile.id, text = r.text
+                        Task { _ = await backend.editFirewall(.remove(ruleText: text), profileID: pid) }
+                    }
                         .buttonBorderShape(.capsule).controlSize(.small)
                 }
             }
@@ -642,12 +674,12 @@ struct PolicyDrawer: View {
 
     /// Distinct rows (destination and program) blocked since the drawer was last seen (the
     /// toolbar badge).
-    @MainActor static func unseenCount(profileID: UUID, list: SessionListModel) -> Int {
+    @MainActor static func unseenCount(profileID: UUID, list: SessionListModel, machine: String? = nil) -> Int {
         let since = list.policyDrawerSeen[profileID] ?? Date().addingTimeInterval(-2 * 3600)
         var keys = Set<String>()
         for e in SecurityTimeline.shared.allEvents.reversed() {
             if e.time <= since { break }
-            guard e.profileID == profileID, e.machine == nil, let fw = e.firewall, fw.denied, fw.byPolicy,
+            guard e.profileID == profileID, e.machine == machine, let fw = e.firewall, fw.denied, fw.byPolicy,
                   let host = fw.host ?? fw.ip, let port = fw.port else { continue }
             keys.insert(rowKey(host: host, port: port, exe: fw.exe))
         }
@@ -694,11 +726,17 @@ private struct DrawerSurface: ViewModifier {
 struct PolicyDrawerButton: View {
     @Bindable var list: SessionListModel
     let profileID: UUID
+    /// Whose blocks it counts (nil = this Mac's, else a fat client's host's).
+    var machine: String? = nil
     let action: () -> Void
 
     var body: some View {
+        if list.hasSandboxDrawer(profileID) { button }
+    }
+
+    @ViewBuilder private var button: some View {
         let _ = SecurityTimeline.shared.allEvents.count
-        let n = list.policyDrawerOpen ? 0 : PolicyDrawer.unseenCount(profileID: profileID, list: list)
+        let n = list.policyDrawerOpen ? 0 : PolicyDrawer.unseenCount(profileID: profileID, list: list, machine: machine)
         HeaderIcon(system: "shield.lefthalf.filled",
                    help: NSLocalizedString("Sandbox: what it blocked, ready to allow (⌃⌘N)", comment: "toolbar"),
                    active: list.policyDrawerOpen, action: action)

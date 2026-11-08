@@ -21,6 +21,14 @@ struct SecurityPosture: Identifiable {
     /// or process section, or the guest reported its filesystem sandbox
     /// enforced (`confinesGuest(_:)`).
     var sandbox: Bool = false
+    /// Whose workspace: nil = this Mac's, else a fat client's host (its
+    /// `securityMirrorKey`): the label and the filter.
+    var machine: String? = nil
+    /// That host's own id: what a cell's editor is routed by. Two hosts
+    /// can share a name, and the first window by name was another host's
+    /// (Finding: "Protection cell can open a different host's workspace
+    /// editor when host labels match").
+    var hostID: UUID? = nil
 }
 
 extension SecurityPosture {
@@ -32,11 +40,10 @@ extension SecurityPosture {
     @MainActor init(profile p: Profile) {
         var credentialsOnly = p
         credentialsOnly.egressRules = ""
-        let ruleset = p.egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
-        // An OpenShell policy denies by default: that's a firewall too.
+        // An OpenShell policy denies by default: that's a firewall too; so is
+        // the organization boundary, which applies to a workspace without one.
         self.init(id: p.id, name: p.name, colorHex: p.color.hexInUI,
-                  firewall: p.usesOpenShellPolicy
-                      || (!ruleset.isEmpty && ((try? EgressPolicy.parse(ruleset))?.isActive ?? false)),
+                  firewall: p.restrictsEgress,
                   supplyChain: p.supplyChain.isActive,
                   guardrails: ACAppDelegate.guardrailsRestrict(credentialsOnly),
                   promptInjection: p.promptInjection.isActive,
@@ -100,21 +107,81 @@ extension SecurityTimeline.Event {
     }
 }
 
-/// Opens a workspace's editor on one pane — the Overview's protection cells.
+/// Opens a workspace's editor on one pane — the Overview's protection cells:
+/// this Mac's editor for its own workspaces, the host's (through its fat
+/// client window) for a host's. A host's id is never looked up among this
+/// Mac's profiles: it matched none (the cell did nothing), or the wrong one.
 @MainActor
 enum SecurityEditorLauncher {
-    static func open(profileID: UUID, category: EditorCategory) {
-        guard let d = NSApp.delegate as? ACAppDelegate,
-              let p = d.profiles.first(where: { $0.id == profileID }) else { return }
-        d.openEditorWindow(editing: p, category: category)
+    enum Route: Equatable { case local, host(UUID) }
+
+    /// Where a cell's editor opens: this Mac's, when it's a workspace of this
+    /// Mac's; its host's (by the host's id, never its name), when that host
+    /// is connected; else nowhere.
+    nonisolated static func route(profileID: UUID, hostID: UUID?, localProfiles: Set<UUID>,
+                                  connectedHosts: Set<UUID>) -> Route? {
+        guard let hostID else { return localProfiles.contains(profileID) ? .local : nil }
+        return connectedHosts.contains(hostID) ? .host(hostID) : nil
+    }
+
+    static func open(profileID: UUID, hostID: UUID?, category: EditorCategory) {
+        guard let d = NSApp.delegate as? ACAppDelegate else { return }
+        let hosts = d.connectedRemoteHostWindows()
+        switch route(profileID: profileID, hostID: hostID, localProfiles: Set(d.profiles.map(\.id)),
+                     connectedHosts: Set(hosts.map(\.controller.host.id))) {
+        case .local?:
+            if let p = d.profiles.first(where: { $0.id == profileID }) { d.openEditorWindow(editing: p, category: category) }
+        case .host(let id)?:
+            hosts.first { $0.controller.host.id == id }?.openWorkspaceSettings(profileID, category: category)
+        case nil:
+            break
+        }
+    }
+}
+
+/// Which machine the Security window is for: set from the window in front
+/// when it's opened (a fat client's host, or this Mac), and again when it's
+/// reopened from another one.
+@MainActor
+@Observable
+final class SecurityWindowScope {
+    /// The machine filter it opens on: nil = all machines, "" = this Mac, a
+    /// host = that fat-client host (its `securityMirrorKey`).
+    var machine: String?
+    /// Bumped by every open, so reopening for the same machine still applies.
+    private(set) var generation = 0
+
+    init(machine: String? = nil) { self.machine = machine }
+
+    func focus(_ machine: String?) {
+        self.machine = machine
+        generation &+= 1
+    }
+
+    /// The scope for the window in front: a fat client's host is that host;
+    /// anything else is this Mac -- told apart only when hosts are mirrored.
+    nonisolated static func machine(frontHost: String?, mirroredHosts: Bool) -> String? {
+        if let frontHost { return frontHost }
+        return mirroredHosts ? "" : nil
     }
 }
 
 struct SecurityTimelineView: View {
     var timeline = SecurityTimeline.shared
     let onClose: () -> Void
-    /// This Mac's workspaces and which protections each has on.
-    var postures: () -> [SecurityPosture] = { [] }
+    /// The workspaces of a machine (nil = all, "" = this Mac, else a fat
+    /// client's host) and which protections each has on.
+    var postures: (String?) -> [SecurityPosture] = { _ in [] }
+    /// The machine it's for (the window in front when it opened).
+    var scope = SecurityWindowScope()
+    /// Fetch the fat-client hosts' history for this many hours (0 = all).
+    var loadHistory: (Int) -> Void = { _ in }
+
+    /// The hours of history the window needs: the Timeline's range, at least
+    /// the Overview's (0 = all).
+    nonisolated static func historyHours(range: Int, overview: Int) -> Int {
+        range == 0 || overview == 0 ? 0 : max(range, overview)
+    }
 
     /// Open on the Timeline tab instead of the Overview (screenshots).
     var startOnTimeline = false
@@ -147,7 +214,10 @@ struct SecurityTimelineView: View {
     /// The row whose lineage is open (double-click a Network row).
     @State private var lineage: SecurityTimeline.Event?
 
-    private var machines: [String] { timeline.remote.keys.sorted() }
+    /// Mirrored hosts' keys (their ids), by what they're called.
+    private var machines: [String] {
+        timeline.remote.keys.sorted { timeline.machineLabel($0).localizedStandardCompare(timeline.machineLabel($1)) == .orderedAscending }
+    }
 
     private var engines: [String] {
         Array(Set(timeline.allEvents.map(\.engine))).sorted()
@@ -157,7 +227,7 @@ struct SecurityTimelineView: View {
     private var workspaces: [(id: UUID, name: String)] {
         var names: [UUID: String] = [:]
         for e in timeline.allEvents { names[e.profileID] = e.workspace ?? names[e.profileID] }
-        for p in postures() { names[p.id] = p.name }
+        for p in postures(nil) { names[p.id] = p.name }
         return names.map { ($0.key, $0.value ?? "—") }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -166,7 +236,7 @@ struct SecurityTimelineView: View {
         engineFilter = f.engine
         outcomeFilter = f.outcome
         workspaceFilter = f.workspace
-        machineFilter = nil
+        // The Overview counted the machine shown: its tiles open on it too.
         query = f.query
         blockFilter = f.block.map { ($0, f.query) }
         tab = .timeline
@@ -191,7 +261,7 @@ struct SecurityTimelineView: View {
                     || $0.condition.lowercased().contains(q)
                     || $0.decision.lowercased().contains(q)
                     || ($0.workspace ?? "").lowercased().contains(q)
-                    || ($0.machine ?? "").lowercased().contains(q)
+                    || ($0.machine.map { timeline.machineLabel($0) } ?? "").lowercased().contains(q)
             }
         }
         return e.reversed()   // newest first
@@ -202,7 +272,8 @@ struct SecurityTimelineView: View {
             toolbar
             Divider()
             if tab == .overview {
-                SecurityOverview(timeline: timeline, postures: postures(),
+                SecurityOverview(timeline: timeline, postures: postures(machineFilter),
+                                 machine: machineFilter,
                                  rangeHours: SecurityTimeline.defaultRangeHours,
                                  showTimeline: { f in
                                      open(f)
@@ -227,7 +298,19 @@ struct SecurityTimelineView: View {
         .sheet(item: $lineage) { e in
             NetworkLineageView(timeline: timeline, focus: e, onClose: { lineage = nil })
         }
-        .onAppear { if startOnTimeline { tab = .timeline } }
+        .onAppear {
+            if startOnTimeline { tab = .timeline }
+            machineFilter = scope.machine
+            loadHistory(Self.historyHours(range: rangeHours, overview: SecurityTimeline.defaultRangeHours))
+        }
+        // Reopened from another window: show that machine, freshly fetched.
+        .onChange(of: scope.generation) { _, _ in
+            machineFilter = scope.machine
+            loadHistory(Self.historyHours(range: rangeHours, overview: SecurityTimeline.defaultRangeHours))
+        }
+        .onChange(of: rangeHours) { _, h in
+            loadHistory(Self.historyHours(range: h, overview: SecurityTimeline.defaultRangeHours))
+        }
         .onReceive(NotificationCenter.default.publisher(for: .bromureFirewallPolicyChanged)) { _ in
             rulesGeneration &+= 1
         }
@@ -317,7 +400,7 @@ struct SecurityTimelineView: View {
                 Picker("", selection: $machineFilter) {
                     Text(NSLocalizedString("All machines", comment: "security timeline")).tag(String?.none)
                     Text(NSLocalizedString("This Mac", comment: "security timeline")).tag(String?.some(""))
-                    ForEach(machines, id: \.self) { Text($0).tag(String?.some($0)) }
+                    ForEach(machines, id: \.self) { Text(timeline.machineLabel($0)).tag(String?.some($0)) }
                 }
                 .labelsHidden()
                 .fixedSize()
@@ -389,9 +472,16 @@ struct SecurityTimelineView: View {
         func field(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
         let iso = ISO8601DateFormatter()
         var out = "time,machine,workspace,engine,condition,decision,outcome\n"
-        for e in (tab == .timeline ? rows.reversed() : timeline.allEvents) {
+        // What's on screen: the Timeline's filtered rows, or the Overview's
+        // machine and range -- not every machine's events (a host's Overview
+        // exported this Mac's and other hosts' too).
+        let exported = tab == .timeline
+            ? Array(rows.reversed())
+            : SecurityOverview.shown(timeline.allEvents, machine: machineFilter,
+                                     rangeHours: SecurityTimeline.defaultRangeHours)
+        for e in exported {
             // Never export secret characters, whatever an older row carries.
-            out += [iso.string(from: e.time), e.machine ?? "This Mac", e.workspace ?? "", e.engine,
+            out += [iso.string(from: e.time), e.machine.map { timeline.machineLabel($0) } ?? "This Mac", e.workspace ?? "", e.engine,
                     SecretFingerprint.redactLegacy(e.condition), SecretFingerprint.redactLegacy(e.decision),
                     e.kind.wire].map(field).joined(separator: ",") + "\n"
         }
@@ -411,7 +501,7 @@ struct SecurityTimelineView: View {
 
             TableColumn(NSLocalizedString("Workspace", comment: "security timeline")) { e in
                 Text(machines.isEmpty ? (e.workspace ?? "—")
-                     : "\(e.machine ?? NSLocalizedString("This Mac", comment: "security timeline")) · \(e.workspace ?? "—")")
+                     : "\(timeline.machineLabel(e.machine)) · \(e.workspace ?? "—")")
                     .lineLimit(1).truncationMode(.tail)
                     .foregroundStyle(.secondary)
                     .help(e.workspace ?? "")
@@ -832,15 +922,32 @@ private struct SupplyChainRowActionButton: View {
 struct SecurityOverview: View {
     var timeline: SecurityTimeline
     let postures: [SecurityPosture]
+    /// The machine counted: nil = all, "" = this Mac, else a fat client's host.
+    var machine: String? = nil
     /// The range counted, in hours (0 = all history).
     var rangeHours = 24
     /// Open the Timeline with these filters.
     let showTimeline: (SecurityTimelineFilter) -> Void
 
     private var recent: [SecurityTimeline.Event] {
-        guard rangeHours > 0 else { return timeline.allEvents }
-        let since = Date().addingTimeInterval(-Double(rangeHours) * 3600)
-        return timeline.allEvents.filter { $0.time >= since }
+        Self.shown(timeline.allEvents, machine: machine, rangeHours: rangeHours)
+    }
+
+    /// What the Overview counts: one machine's events (nil = all) over its
+    /// range (0 = all history). Its CSV export saves this same set.
+    nonisolated static func shown(_ all: [SecurityTimeline.Event], machine: String?, rangeHours: Int,
+                                  now: Date = Date()) -> [SecurityTimeline.Event] {
+        let mine = events(all, machine: machine)
+        guard rangeHours > 0 else { return mine }
+        let since = now.addingTimeInterval(-Double(rangeHours) * 3600)
+        return mine.filter { $0.time >= since }
+    }
+
+    /// A machine's events: nil = all, "" = this Mac's (no machine), else that
+    /// host's.
+    nonisolated static func events(_ all: [SecurityTimeline.Event], machine: String?) -> [SecurityTimeline.Event] {
+        guard let machine else { return all }
+        return all.filter { ($0.machine ?? "") == machine }
     }
 
     /// The latest blocks, one row per distinct block: repeats fold into a
@@ -1024,7 +1131,7 @@ struct SecurityOverview: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Array([p.firewall, p.supplyChain, p.guardrails, p.promptInjection, p.pii, true, p.sandbox].enumerated()), id: \.offset) { i, on in
                 PostureCell(on: on, workspace: p.name, column: Self.columns[i]) {
-                    SecurityEditorLauncher.open(profileID: p.id, category: Self.columnCategories[i])
+                    SecurityEditorLauncher.open(profileID: p.id, hostID: p.hostID, category: Self.columnCategories[i])
                 }
                 .frame(width: 84)
             }

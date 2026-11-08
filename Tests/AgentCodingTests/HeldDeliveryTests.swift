@@ -238,13 +238,105 @@ struct HandedOverTests {
         // Not a turn that says something else, nor no turn at all.
         #expect(!M.attachmentTurnArrived(typed, since: ["something else entirely"][...]))
         #expect(!M.attachmentTurnArrived(typed, since: [][...]))
-        // Only files: any turn since is it.
+        // Only files: not by this (no words to find), see `fileOnly`.
         let onlyFiles = "\(dir)/20261105_shot.png"
-        #expect(M.attachmentTurnArrived(onlyFiles, since: ["[Image #1]"][...]))
+        #expect(!M.attachmentTurnArrived(onlyFiles, since: ["[Image #1]"][...]))
         #expect(!M.attachmentTurnArrived(onlyFiles, since: [][...]))
         // A message without files is matched as before, not by this.
         #expect(!M.attachmentTurnArrived("look at this screenshot", since: ["look at this screenshot"][...]))
         #expect(M.withoutAttachments("a [Image #12] b \(dir)/x.png  c") == "a b c")
+    }
+
+    /// The finding: a message of files only took ANY turn since its baseline
+    /// as its own, so with several queued while the agent was busy (one shared
+    /// baseline) the first one's turn cleared them all, and the rest vanished
+    /// from the queue (with their edit and failure controls) before delivery.
+    @Test("messages of files only each wait for a turn of their own")
+    func fileOnly() {
+        typealias M = BeautifiedSessionModel
+        let dir = GuestDrop.baseDir
+        func row(_ file: String, baseline: Int = 2) -> QueuedMessage {
+            QueuedMessage(text: "\(dir)/\(file)", held: false, editable: true, baseline: baseline)
+        }
+        let a = row("a.png"), b = row("b.png"), c = row("c.png")
+        let before = ["fix the build", "thanks"]
+        // The first one's turn is in: only the first goes.
+        #expect(M.fileOnlyArrivals([a, b, c], turns: before + ["[Image #1]"]) == [a.id])
+        // Two in: the first two.
+        #expect(M.fileOnlyArrivals([a, b, c], turns: before + ["[Image #1]", ""]) == [a.id, b.id])
+        // A turn with words (typed in the terminal) is none of them.
+        #expect(M.fileOnlyArrivals([a, b, c], turns: before + ["what's the status?"]).isEmpty)
+        // Nor a turn before they were queued.
+        #expect(M.fileOnlyArrivals([a], turns: ["[Image #1]", "thanks"]).isEmpty)
+        // A turn naming a file is that row's, whatever its place; several
+        // sent together can come out as one turn naming each.
+        let log = row("log.txt"), notes = row("notes.txt")
+        #expect(M.fileOnlyArrivals([a, log], turns: before + ["\(dir)/log.txt"]) == [log.id])
+        #expect(M.fileOnlyArrivals([log, notes], turns: before + ["\(dir)/log.txt \(dir)/notes.txt"]) == [log.id, notes.id])
+        // A whole path, not a longer one that starts like it.
+        #expect(M.fileOnlyArrivals([log], turns: before + ["\(dir)/log.txt.bak hi"]).isEmpty)
+        // A held one is matched elsewhere (it's typed in by Bromure).
+        var held = row("held.png"); held.held = true
+        #expect(M.fileOnlyArrivals([held], turns: before + ["[Image #1]"]).isEmpty)
+        // A message with words still goes by its words.
+        #expect(!M.isFileOnly("look \(dir)/a.png") && M.isFileOnly("\(dir)/a.png \(dir)/b.txt"))
+        let src = (try? String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)) ?? ""
+        #expect(src.contains("Self.resolveByTurns(&queued, turns: turns)"))
+        #expect(!src.contains("if want.isEmpty { return !turns.isEmpty }"))
+        // The same for words: one turn resolves one of two identical messages.
+        let t1 = QueuedMessage(text: "run the tests", held: false, editable: true, baseline: 2)
+        let turnsNow = before + ["run the tests"]
+        let first = M.textTurn(t1, turns: turnsNow, taken: [])
+        #expect(first == 2)
+        #expect(M.textTurn(t1, turns: turnsNow, taken: [2]) == nil)
+        #expect(M.textTurn(t1, turns: turnsNow + ["run the tests"], taken: [2]) == 3)
+        #expect(src.contains("if let i = textTurn(q, turns: turns, taken: textTurns[q.text] ?? [])"))
+    }
+
+    /// The finding: a claim lasted one poll. The next one (every second or
+    /// so), the resolved row gone, the same unchanged turn resolved the next
+    /// message queued like it, which the agent hadn't got.
+    @Test("poll after poll, one turn resolves one message: the next one queued like it stays")
+    func claimsLast() {
+        typealias M = BeautifiedSessionModel
+        let dir = GuestDrop.baseDir
+        func row(_ text: String) -> QueuedMessage {
+            QueuedMessage(text: text, held: false, editable: true, baseline: 2)
+        }
+        let before = ["fix the build", "thanks"]
+        // Two images queued while busy, one turn in.
+        let a = row("\(dir)/a.png"), b = row("\(dir)/b.png")
+        var rows = [a, b]
+        let turns = before + ["[Image #1]"]
+        #expect(M.resolveByTurns(&rows, turns: turns) == [a.id])
+        for _ in 0..<5 { M.resolveByTurns(&rows, turns: turns) }   // the polls that follow
+        #expect(rows.map(\.id) == [b.id], "the second image went with an unchanged turn")
+        #expect(rows.first?.baseline == 3)
+        // Its own turn resolves it.
+        #expect(M.resolveByTurns(&rows, turns: turns + ["[Image #2]"]) == [b.id])
+        #expect(rows.isEmpty)
+
+        // Two identical messages: the same.
+        let t1 = row("run the tests"), t2 = row("run the tests")
+        rows = [t1, t2]
+        let said = before + ["run the tests"]
+        #expect(M.resolveByTurns(&rows, turns: said) == [t1.id])
+        for _ in 0..<5 { M.resolveByTurns(&rows, turns: said) }
+        #expect(rows.map(\.id) == [t2.id])
+        #expect(M.resolveByTurns(&rows, turns: said + ["run the tests"]) == [t2.id])
+
+        // A different message queued later isn't moved: a merged turn still
+        // resolves both (and an earlier-queued one is never moved).
+        let x = row("first ask"), y = row("second ask")
+        rows = [x, y]
+        #expect(M.resolveByTurns(&rows, turns: before + ["first ask\nsecond ask"]) == [x.id, y.id])
+        // A held one is left as it is (Bromure types it, matched elsewhere).
+        var h = row("\(dir)/c.png"); h.held = true
+        rows = [row("\(dir)/d.png"), h]
+        M.resolveByTurns(&rows, turns: before + ["[Image #1]"])
+        #expect(rows.map(\.id) == [h.id] && rows[0].baseline == 2)
     }
 
         @Test("the While you were away panel goes by itself after 3 s, not while the pointer is on it")

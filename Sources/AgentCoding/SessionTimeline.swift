@@ -208,6 +208,39 @@ struct SessionTimeline: Equatable, Codable {
         return SessionTimeline(turns: turns)
     }
 
+    /// `a`'s turns, then `b`'s, re-numbered so no id repeats (the graph keys
+    /// its bars by them).
+    static func joined(_ a: SessionTimeline, _ b: SessionTimeline) -> SessionTimeline {
+        let shift = a.turns.map { max($0.id, $0.segments.map(\.id).max() ?? 0) }.max() ?? 0
+        return SessionTimeline(turns: a.turns + b.turns.map { t in
+            Turn(id: t.id + shift, prompt: t.prompt, start: t.start, end: t.end,
+                 segments: t.segments.map {
+                    Segment(id: $0.id + shift, kind: $0.kind, name: $0.name, detail: $0.detail,
+                            start: $0.start, end: $0.end, lane: $0.lane)
+                 })
+        })
+    }
+
+    /// A chat's timeline holds only the turns in the transcript it has
+    /// downloaded: the file's last ~24 MB, less once a long session trims the
+    /// head. Browser screenshots (~0.5 MB of base64 each) can fill that with
+    /// minutes of work, and the time worked then read as those minutes. The
+    /// index has the whole conversation (its copy keeps no images and never
+    /// shrinks): its turns from before the chat's first, then the chat's.
+    ///
+    /// Only when the index has the chat's first turn too: that is what says
+    /// the two hold the same conversation. A `/clear` in the chat's window
+    /// drops what came before from the chat; until the index has read past
+    /// the clear (and started over), its earlier turns are the old
+    /// conversation's, and the chat's alone are the time worked.
+    static func live(_ live: SessionTimeline, startingMidFile: Bool,
+                     index: SessionTimeline?) -> SessionTimeline {
+        guard startingMidFile, let index, let first = live.start,
+              let k = index.turns.lastIndex(where: { $0.start <= first && first.timeIntervalSince($0.start) < 1 }),
+              k > 0 else { return live }
+        return joined(SessionTimeline(turns: Array(index.turns[..<k])), live)
+    }
+
     /// First-fit lanes so overlapping segments (parallel tool calls) stack.
     private static func laned(_ segs: [Segment]) -> [Segment] {
         var laneEnds: [Date] = []
@@ -233,8 +266,15 @@ final class SessionTimelineStore {
     static let shared = SessionTimelineStore()
     private(set) var timelines: [UUID: SessionTimeline] = [:]
     @ObservationIgnored private var itemCounts: [UUID: Int] = [:]
+    /// Sessions whose chat holds the transcript from somewhere past its start.
+    private(set) var startsMidFile: Set<UUID> = []
 
-    func update(_ session: UUID, items: [TranscriptItem]) {
+    /// `startingMidFile`: the items are from a window that doesn't begin at
+    /// the file's start (see `SessionTimeline.live`).
+    func update(_ session: UUID, items: [TranscriptItem], startingMidFile: Bool = false) {
+        if startsMidFile.contains(session) != startingMidFile {
+            if startingMidFile { startsMidFile.insert(session) } else { startsMidFile.remove(session) }
+        }
         // Rebuilt only when the transcript grew.
         guard itemCounts[session] != items.count else { return }
         itemCounts[session] = items.count
@@ -242,11 +282,14 @@ final class SessionTimelineStore {
         if timelines[session] != t { timelines[session] = t }
     }
 
-    /// The live one (a chat showing it), else this Mac's transcript index
-    /// (a session no chat has open — a sleeping room member).
+    /// The live one (a chat showing it), with the index's earlier turns when
+    /// the chat holds only the end of the transcript; else this Mac's
+    /// transcript index (a session no chat has open — a sleeping room member).
     func timeline(_ session: UUID) -> SessionTimeline? {
         #if os(macOS)
-        return timelines[session] ?? TranscriptSearchIndex.shared.timeline(session)
+        let index = TranscriptSearchIndex.shared.timeline(session)
+        guard let live = timelines[session] else { return index }
+        return SessionTimeline.live(live, startingMidFile: startsMidFile.contains(session), index: index)
         #else
         return timelines[session]
         #endif

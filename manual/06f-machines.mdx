@@ -60,7 +60,7 @@ Click a machine's name to show its [dashboard](#the-machine-dashboard). Click on
 
 ### Agent tabs are sessions
 
-A running machine's tabs are the tmux windows inside it: the agent tabs your sessions run in, plus any terminal you open yourself. Any coding agent you start in a machine terminal (by typing `claude`, `codex` and so on), and every agent started by a coding task or an automation, also appears as a session in the sidebar's Sessions list. You can switch between an agent's chat and its terminal tab with the **Linux** pill (⌥⌘U); see [The Sessions Home](05-sessions-home.mdx).
+A running machine's tabs are the tmux windows inside it: the agent tabs your sessions run in, plus any terminal you open yourself. Any coding agent you start in a machine terminal (by typing `claude`, `codex` and so on), and every agent started by a coding task or an automation, also appears as a session in the sidebar's Sessions list. You can switch between an agent's chat and its terminal tab with the **Terminal** pill (⌥⌘U); see [The Sessions Home](05-sessions-home.mdx).
 
 ### Sessions on a deleted machine
 
@@ -207,7 +207,7 @@ The **⋯** button on a machine row adapts to the machine's state:
 
 The first time a machine boots successfully each day, Bromure keeps a copy-on-write checkpoint of its home image. It keeps at most three: the latest, and the newest of each of the last two days. A home larger than 64 GB gets no automatic checkpoint. Checkpoints cost nothing to create, but they take real disk space as the home diverges from them, and deleting a checkpoint of a large home can keep the disk busy.
 
-To delete every checkpoint of a machine, hold ⌥ and click the machine in the toolbar, then choose **Delete All Checkpoints…**. Making a machine's home larger also deletes its home checkpoints.
+To delete every checkpoint of a machine, hold ⌥ and click the machine in the toolbar, then choose **Delete All Checkpoints…**. When a machine's home grows to a larger size you set, at its next cold boot, its home checkpoints are deleted.
 
 **Rewind home…** opens a sheet listing those rollback points.
 

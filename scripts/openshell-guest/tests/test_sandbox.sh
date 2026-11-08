@@ -411,7 +411,9 @@ check "seccomp" "$(status_field seccomp)" "enforced"
 check "run_as uid" "$(python3 -c "
 import json;print(json.load(open('$WORK/run/status.json'))['run_as']['uid'])")" "$(id -u)"
 
-probe_pane "AF_VSOCK is blocked in a pane" "EPERM" <<'PROBE'
+# Temporarily allowed (DESIGN.md §1.9, item 6): Bromure's helpers reach the
+# host over vsock. 5.4.3 bridges them through agentd and restores "EPERM".
+probe_pane "AF_VSOCK is allowed in a pane (until 5.4.3)" "ALLOWED" <<'PROBE'
 python3 -c '
 import socket, errno
 try:
@@ -500,6 +502,29 @@ print(errno.errorcode.get(ctypes.get_errno()))
 PROBE
 kill_server
 rm -f "$WORK/scratch/strict.done"
+
+# --------------------------------------------------------------------------
+say "4b. strict without a process section, in boot order (revocation not yet marked)"
+# agentd's root script starts the supervisor BEFORE it touches strict.done, so
+# the plan is built with strict requested but not yet applied. The process
+# layer used to need the marker too when the policy has no `process` section:
+# such a workspace got Landlock and nothing else (no nnp, no filters).
+launch "$(full_spec best_effort null '"strict_sandbox":true,')" > /dev/null
+check "seccomp" "$(status_field seccomp)" "enforced"
+probe_pane "pane has no_new_privs" "1" <<'PROBE'
+awk '/^NoNewPrivs:/ {print $2}' /proc/self/status
+PROBE
+probe_pane "pane has a seccomp filter" "2" <<'PROBE'
+awk '/^Seccomp:/ {print $2}' /proc/self/status
+PROBE
+probe_pane "memfd_create is blocked in a pane" "EPERM" <<'PROBE'
+python3 -c '
+import ctypes, errno
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+print("ok" if libc.memfd_create(b"x", 0) >= 0 else errno.errorcode.get(ctypes.get_errno()))
+'
+PROBE
+kill_server
 
 # --------------------------------------------------------------------------
 say "5. hard_requirement with a missing path fails closed"

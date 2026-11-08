@@ -2052,6 +2052,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
             throw error
         }
         defer { close(upstreamFD) }
+        // Recorded once the handshake succeeded and the upstream asked for,
+        // and got, the identity -- not when it was merely looked up: a
+        // refused destination, a failed connect or handshake, or a server
+        // that asks for none presented nothing (Finding: "Failed WebSocket
+        // connections are logged as presented client certificates").
+        if let entry = identityEntry, (upstreamTLS as? TLSClientStream)?.clientCertificateSent == true {
+            Self.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)
+        }
 
         // Forward the upgrade request as-is. URLSession's hop-by-hop
         // header strip would have eaten Upgrade/Connection — that's
@@ -2360,6 +2368,50 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// response followed (after the standard CRLFCRLF separator) by
     /// the rendered frame transcript, so the inspector's existing
     /// body-display path serves it without any new code path.
+    /// Audit trail for credential.token_swap: every fake → real substitution
+    /// that just left the VM, one event per swap (the Security window's
+    /// credential brokering, the admin UI's "AI authenticated as <token>
+    /// against <host>"). Previews only — real values stay in memory. Sent
+    /// whatever the trace level: the timeline is always on.
+    static func emitSwapEvents(_ swaps: [SwapRecord], host: String, path: String, profileID: UUID,
+                               emit: (UUID, String, [String: AnyJSON]) -> Void = { pid, type, data in
+                                   BACEventEmitter.shared.emitDetached(profileID: pid, eventType: type, eventData: data)
+                               }) {
+        guard !swaps.isEmpty else { return }
+        BACDebug.log("[mitm/trace]", "swap-events emit count=\(swaps.count) host=\(host)")
+        for s in swaps {
+            emit(profileID, "credential.token_swap", [
+                "host": .string(host),
+                "path": .string(path),
+                "fake_preview": .string(s.fakePreview),
+                "real_preview": .string(s.realPreview),
+            ])
+        }
+    }
+
+    /// Audit trail for a client certificate the proxy presented upstream for
+    /// the guest (a kubeconfig's client-cert user: kubectl against k3s, kind,
+    /// most self-hosted clusters). No token is swapped there, so without this
+    /// the Security window's credential brokering never saw it. Names the
+    /// identity, never its key.
+    static func emitClientCertEvent(_ entry: ClientIdentityRegistry.Entry, host: String, port: Int,
+                                    profileID: UUID) {
+        BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "credential.client_cert",
+                                            eventData: clientCertEventData(entry, host: host, port: port))
+    }
+
+    static func clientCertEventData(_ entry: ClientIdentityRegistry.Entry, host: String, port: Int) -> [String: AnyJSON] {
+        var subject: String?
+        var cert: SecCertificate?
+        if SecIdentityCopyCertificate(entry.identity, &cert) == errSecSuccess, let cert {
+            subject = SecCertificateCopySubjectSummary(cert) as String?
+        }
+        return [
+            "host": .string(port == 443 ? host : "\(host):\(port)"),
+            "identity": .string(entry.consentDisplayName ?? subject ?? "client certificate"),
+        ]
+    }
+
     private func emitWebSocketTrace(host: String, port: Int,
                                     preSwapRequest: Data,
                                     handshakeResponse: Data,
@@ -2371,6 +2423,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                     leaks: [LeakEntry],
                                     latencyMs: Double,
                                     skipLLMExtract: Bool = false) async {
+        // Before the trace gate, as on the HTTP path.
+        Self.emitSwapEvents(swaps, host: host, path: Self.parseRequestLine(preSwapRequest).1, profileID: profileID)
         guard let session = sessionTraceProvider(),
               session.level.recordsActivity else { return }
 
@@ -2418,19 +2472,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
             BACDebug.log("[mitm/wsTrace]",
                          "llmextract done host=\(host) took=\(BACDebug.ms(wsExtractT0))")
         }
-        // Audit trail for credential.token_swap on the WS path —
-        // mirror the HTTP-emit hook above.
-        for s in swaps {
-            BACEventEmitter.shared.emitDetached(
-                profileID: profileID,
-                eventType: "credential.token_swap",
-                eventData: [
-                    "host": .string(host),
-                    "path": .string(path),
-                    "fake_preview": .string(s.fakePreview),
-                    "real_preview": .string(s.realPreview),
-                ])
-        }
+        // (credential.token_swap went out above, before the trace gate.)
 
         let record = TraceRecord(
             sessionID: session.sessionID,
@@ -2494,6 +2536,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                            leaks: [LeakEntry],
                            latencyMs: Double,
                            servedBy: String? = nil) async {
+        // Before the trace gate: the Security window's credential brokering
+        // counts these, and tracing is off by default -- behind the gate it
+        // stayed at 0.
+        Self.emitSwapEvents(swaps, host: host, path: Self.parseRequestLine(preSwapRequest).1, profileID: profileID)
         let pid = profileID
         await TraceEmitter.emit(
             session: sessionTraceProvider(), store: traceStore, profileID: pid,
@@ -3412,7 +3458,7 @@ private func emitSupplyChainFetch(profileID: UUID, ecosystem: String, package: S
 /// by installing a CA on the host, and the one we record on the Security
 /// Timeline. `body` is a plain-text explanation surfaced to the guest tool.
 // internal (not private) so `UpstreamErrorTests` can exercise the mapping.
-func describeUpstreamError(_ error: Error, host: String, allowInsecureHint: Bool = false)
+func describeUpstreamError(_ error: Error, host: String, dialerFailure: String? = nil, allowInsecureHint: Bool = false)
     -> (isTrust: Bool, reason: String, body: String) {
     let ns = error as NSError
     var isTrust = false
@@ -3441,6 +3487,12 @@ func describeUpstreamError(_ error: Error, host: String, allowInsecureHint: Bool
         default:
             reason = "the host running Bromure AC could not reach \(host): \(ns.localizedDescription)"
         }
+    } else if ns.domain == (kCFErrorDomainCFNetwork as String), ns.code == 306 || ns.code == 310 {
+        // kCFErrorHTTP(S)ProxyConnectionFailure: the session's loopback
+        // pinned dialer refused the destination or couldn't connect to it.
+        // It noted why; the bare code alone says nothing.
+        reason = "the host running Bromure AC could not connect to \(host)"
+            + (dialerFailure.map { " (\($0))" } ?? "")
     } else {
         reason = "the upstream request to \(host) failed: \(error.localizedDescription)"
     }
@@ -3726,7 +3778,11 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         // streamed a status line + body we can't inject a new status, so
         // rethrow and let the connection close.
         if responseStarted { throw error }
-        let d = describeUpstreamError(error, host: host, allowInsecureHint: insecureBypassAllowed)
+        // The reason THIS request's dialer noted (its session's own), never
+        // another request's.
+        let dialerFailure = (session.delegate as? ClientCertChallengeDelegate)?.dialer?.lastFailure
+        let d = describeUpstreamError(error, host: host, dialerFailure: dialerFailure,
+                                      allowInsecureHint: insecureBypassAllowed)
         var resp = "HTTP/1.1 502 Bad Gateway\r\n"
         resp += "Content-Type: text/plain; charset=utf-8\r\n"
         resp += "Content-Length: \(d.body.utf8.count)\r\n"
@@ -4001,6 +4057,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
                             "to authenticate with the API server at %@",
                             comment: ""), hostName))
                     if allowed {
+                        HTTPMitmConnection.emitClientCertEvent(entry, host: hostName, port: self.port, profileID: pid)
                         completionHandler(.useCredential,
                                           URLCredential(identity: entry.identity,
                                                         certificates: nil,
@@ -4010,6 +4067,7 @@ private final class ClientCertChallengeDelegate: NSObject, URLSessionTaskDelegat
                     }
                 }
             } else {
+                HTTPMitmConnection.emitClientCertEvent(entry, host: host, port: port, profileID: profileID)
                 completionHandler(.useCredential,
                                   URLCredential(identity: entry.identity,
                                                 certificates: nil,

@@ -40,6 +40,7 @@ Section index
   §2  Self-hash / hot-upgrade support
   §3  shell-agent   (vsock 5800 guest-initiated pool; exec + pty + views)
   §4  vm-bridge     (127.0.0.1:65534 + unix sockets → host vsock MITM)
+  §4b vsock relay   (/tmp/bromure-vsock.sock → host vsock, for the sandbox)
   §5  claude-token  (vsock 8446, ~/.claude/.credentials.json)
   §6  codex-token   (vsock 8447, ~/.codex/auth.json)
   §7  loopback-relay(vsock 5010, OAuth callback relay)
@@ -141,6 +142,24 @@ LLM_ENGINE_TCP_PORT = 11434
 # shell-agent pool
 POOL_SIZE = 4
 MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB
+# The host refuses a shell-channel response this large (AutomationServer's
+# `exchangeJSON`): one past it is never sent.
+MAX_RESPONSE_SIZE = 50 * 1024 * 1024
+# What a captured command's stdout and stderr keep at most, the two together
+# (`_drain`, `_CaptureBudget`). agentd is unconfined and serves every shell and
+# tab: a command printing without end must not take its memory. Two transcript
+# windows (2 x 24 MB, the chat's largest read) fit.
+CAPTURE_LIMIT = 48 * 1024 * 1024
+# How long a capture waits, once its command has exited, for the rest of the
+# output when it has no deadline of its own. Whatever still holds the pipe
+# then is a child the command left behind (`sleep 60 &`): its readers are
+# stopped rather than kept blocked for as long as it lives.
+CAPTURE_EXIT_GRACE = 10.0
+# Most entries a file-browser listing returns (`_file_op` "list"): a directory
+# the workload filled with a million names must not become a million objects.
+FILE_LIST_MAX = 100000
+# What each stream keeps of its own before drawing on the shared budget.
+CAPTURE_RESERVE = 64 * 1024
 
 # paths
 # Overridable for the same reason as HOST_CID above: the two-incarnation boot is
@@ -505,6 +524,11 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         else:
             run_env = dict(os.environ)
         run_env.update(env)
+        # A plain capture keeps its output to CAPTURE_LIMIT, as the confined
+        # path below does (`subprocess.run` would hold all of it).
+        if capture_output and stdout is None and stderr is None and not kwargs:
+            return _run_captured(args, text=text, timeout=timeout, cwd=cwd, check=check,
+                                 env=run_env if env else None)
         return subprocess.run(args, capture_output=capture_output, text=text,
                               timeout=timeout, cwd=cwd, check=check,
                               stdout=stdout, stderr=stderr,
@@ -539,6 +563,16 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         os.close(err_w)
         os.close(err_r)
     devnull = os.open(os.devnull, os.O_RDONLY)
+    # The pipes are read WHILE the supervisor runs the command. Read after its
+    # reply, a command writing more than a pipe holds (64 KiB) blocked on the
+    # write, never exited, so the supervisor never replied: every confined
+    # command with a large output timed out with 126 -- a session's chat could
+    # never load a real transcript under a sandbox (an unconfined run is
+    # `subprocess.run`, which reads as it waits).
+    budget = _CaptureBudget(CAPTURE_LIMIT)
+    out_reader = _drain_async(out_read, budget) if out_read is not None else None
+    err_reader = _drain_async(err_read, budget) if err_read is not None else None
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         reply = _sandbox_exec(args, cwd=cwd, env=env,
                               fds=[devnull, out_child, err_child],
@@ -549,8 +583,12 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
                 os.close(fd)
             except OSError:
                 pass
-    stdout = _drain(out_read) if out_read is not None else b""
-    stderr = _drain(err_read) if err_read is not None else b""
+    # The command is done; a child it left behind can still hold the pipes.
+    out, err = _collect_after_exit((out_reader, err_reader), deadline)
+    if out is None or err is None:
+        raise subprocess.TimeoutExpired(args, timeout if timeout is not None else CAPTURE_EXIT_GRACE)
+    stdout, out_cut = out
+    stderr, err_cut = err
     # A command the supervisor refused, or one whose confined child died before
     # `execvpe`, produced a bare 127 with empty output. On the first
     # `run_as_user: sandbox` workspace that made every command look like
@@ -574,19 +612,244 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         stdout = stdout.decode("utf-8", "replace")
         stderr = stderr.decode("utf-8", "replace")
     result = subprocess.CompletedProcess(args, code, stdout, stderr)
+    # Output past CAPTURE_LIMIT was dropped: callers that ship it say so.
+    result.truncated = out_cut or err_cut
     if check and code != 0:
         raise subprocess.CalledProcessError(code, args, stdout, stderr)
     return result
 
 
-def _drain(fd):
+def _exec_response_bytes(response):
+    """An exec reply, encoded; one the host would refuse (MAX_RESPONSE_SIZE)
+    becomes an error saying so, not a reply that fails the whole channel
+    exchange. Measured before it is built: JSON escaping can grow output that
+    fit CAPTURE_LIMIT sixfold (a NUL is `\\u0000`), and building that to find
+    out held a gigabyte."""
+    return _shell_reply_bytes(response, lambda: {
+        "stdout": "",
+        "stderr": "bromure: the command's output is too large to return "
+                  "(over %d MiB as JSON)\n" % (MAX_RESPONSE_SIZE >> 20),
+        "exit_code": -1,
+        "truncated": True,
+    })
+
+
+def _shell_reply_bytes(response, too_large):
+    """`response` as the shell channel sends it, or `too_large()` when its
+    JSON would reach MAX_RESPONSE_SIZE (the host refuses it). Never builds the
+    oversized text: `_json_size` counts it a slice at a time and stops at the
+    limit."""
+    if _json_size(response, MAX_RESPONSE_SIZE) >= MAX_RESPONSE_SIZE:
+        return json.dumps(too_large()).encode("utf-8")
+    return json.dumps(response).encode("utf-8")
+
+
+# How much of a string `_json_size` escapes at once: at most 12 bytes a
+# character come out (an astral one as two \\u escapes), so 12 MB at a time.
+_JSON_SIZE_SLICE = 1024 * 1024
+
+
+def _json_size(obj, limit):
+    """len(json.dumps(obj)) -- default separators, ASCII escaping -- without
+    building it; once the count passes `limit` it stops and returns more than
+    `limit`. Strings are escaped a slice at a time with json's own escaper,
+    so the count is exact and the escaped text never exists whole."""
+    if isinstance(obj, str):
+        total = 2
+        for i in range(0, len(obj), _JSON_SIZE_SLICE):
+            total += len(_json_escape(obj[i:i + _JSON_SIZE_SLICE])) - 2
+            if total > limit:
+                return total
+        return total
+    if isinstance(obj, dict):
+        total = 2 + max(0, 2 * (len(obj) - 1))            # {} and ", "
+        for k, v in obj.items():
+            key = k if isinstance(k, str) else json.dumps(k) if not isinstance(k, bool) else str(k).lower()
+            total += _json_size(str(key), limit - total) + 2   # ": "
+            if total > limit:
+                return total
+            total += _json_size(v, limit - total)
+            if total > limit:
+                return total
+        return total
+    if isinstance(obj, (list, tuple)):
+        total = 2 + max(0, 2 * (len(obj) - 1))
+        for v in obj:
+            total += _json_size(v, limit - total)
+            if total > limit:
+                return total
+        return total
+    return len(json.dumps(obj))
+
+
+_json_escape = json.encoder.encode_basestring_ascii
+
+
+def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None):
+    """`subprocess.run(args, capture_output=True, …)`, with stdout and stderr
+    kept to CAPTURE_LIMIT together (`_drain`); `.truncated` says some was dropped.
+    Decodes as the confined path does (UTF-8, invalid bytes replaced)."""
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    try:
+        # A session of its own: on a timeout the whole group goes, including
+        # what it left running in the background (`sleep 60 &` holding the
+        # pipes), not just a shell that has already exited.
+        p = subprocess.Popen(args, stdout=out_w, stderr=err_w, cwd=cwd, env=env,
+                             start_new_session=True)
+    except BaseException:
+        for fd in (out_r, err_r):
+            os.close(fd)
+        raise
+    finally:
+        os.close(out_w)
+        os.close(err_w)
+    budget = _CaptureBudget(CAPTURE_LIMIT)
+    out_reader = _drain_async(out_r, budget)
+    err_reader = _drain_async(err_r, budget)
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def left():
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+    try:
+        p.wait(timeout=left())
+        # Its output ends when the last writer goes (a child it left behind
+        # can hold the pipe): within the same deadline.
+        out, err = _collect_after_exit((out_reader, err_reader), deadline)
+        if out is None or err is None:
+            raise subprocess.TimeoutExpired(args, timeout if timeout is not None else CAPTURE_EXIT_GRACE)
+    except subprocess.TimeoutExpired:
+        # As `subprocess.run`: kill it and raise -- its whole group, and the
+        # readers stopped either way (a child that left the group can still
+        # hold the pipes): no thread or descriptor outlives the request.
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.kill()
+        p.wait()
+        out_reader.cancel()
+        err_reader.cancel()
+        raise
+    (stdout, out_cut), (stderr, err_cut) = out, err
+    if text:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    result = subprocess.CompletedProcess(args, p.returncode, stdout, stderr)
+    result.truncated = out_cut or err_cut
+    if check and p.returncode != 0:
+        raise subprocess.CalledProcessError(p.returncode, args, stdout, stderr)
+    return result
+
+
+def _collect_after_exit(readers, deadline):
+    """The readers' results once the command has exited: within its deadline
+    (at least half a second, for what was still in the pipe), or
+    CAPTURE_EXIT_GRACE without one. A reader still blocked then -- something
+    left behind holds its pipe -- is stopped, and both results are None."""
+    if deadline is None:
+        end = time.monotonic() + CAPTURE_EXIT_GRACE
+    else:
+        end = max(deadline, time.monotonic() + 0.5)
+    results = []
+    for reader in readers:
+        if reader is None:
+            results.append((b"", False))
+            continue
+        results.append(reader(max(0.0, end - time.monotonic())))
+    if any(r is None for r in results):
+        for reader in readers:
+            if reader is not None:
+                reader.cancel()
+        return None, None
+    return results[0], results[1]
+
+
+def _drain_async(fd, budget=None):
+    """Start reading `fd` to EOF on a thread; the returned call waits for it
+    and gives `_drain`'s (bytes, truncated). `result(timeout)` gives None if
+    the reading isn't done by then; `result.cancel()` stops the reading (the
+    thread ends and closes `fd` within a poll interval) and waits for it."""
+    box = {}
+    stop = threading.Event()
+    t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd, budget=budget, stop=stop)),
+                         daemon=True)
+    t.start()
+
+    def result(timeout=None):
+        t.join(timeout)
+        if t.is_alive():
+            return None
+        return box.get("data", (b"", False))
+
+    def cancel():
+        stop.set()
+        t.join()
+    result.cancel = cancel
+    return result
+
+
+# How often a stoppable `_drain` looks up from a pipe nobody writes to.
+_DRAIN_POLL_MS = 250
+
+
+class _CaptureBudget(object):
+    """What a command's two streams may keep between them, past each one's
+    CAPTURE_RESERVE: each up to CAPTURE_LIMIT on its own held twice that."""
+
+    def __init__(self, total):
+        self._left = total
+        self._lock = threading.Lock()
+
+    def take(self, n):
+        """Up to `n` more bytes: how many may be kept."""
+        with self._lock:
+            n = min(n, self._left)
+            self._left -= n
+            return n
+
+
+def _drain(fd, limit=None, budget=None, stop=None):
+    """Read `fd` to EOF: (its first `limit` bytes -- fewer if a `budget`
+    shared with the command's other stream runs out first -- and whether
+    there was more).
+
+    Past the limit (CAPTURE_LIMIT) the rest is still read, and dropped: the
+    writer must never block on a full pipe (see `_ws_run`), and agentd must
+    never hold what a command prints without end. With `stop`, it also ends
+    once that is set, even with a writer still holding the pipe.
+    """
+    if limit is None:
+        limit = CAPTURE_LIMIT
     chunks = []
+    kept = 0
+    truncated = False
+    poller = None
+    if stop is not None:
+        poller = select.poll()
+        poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
     try:
         while True:
+            if poller is not None:
+                if stop.is_set():
+                    break
+                if not poller.poll(_DRAIN_POLL_MS):
+                    continue
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            chunks.append(chunk)
+            room = max(limit - kept, 0)
+            if budget is not None:
+                # Its first CAPTURE_RESERVE bytes are its own: a short error
+                # on stderr survives a stdout that took the whole budget.
+                own = min(room, len(chunk), max(CAPTURE_RESERVE - kept, 0))
+                room = own + budget.take(min(room, len(chunk)) - own)
+            if len(chunk) > room:
+                truncated = True
+                chunk = chunk[:room]
+            if chunk:
+                chunks.append(chunk)
+                kept += len(chunk)
     except OSError:
         pass
     finally:
@@ -594,7 +857,7 @@ def _drain(fd):
             os.close(fd)
         except OSError:
             pass
-    return b"".join(chunks)
+    return b"".join(chunks), truncated
 
 
 class _SandboxPty(object):
@@ -708,6 +971,21 @@ def _ws_popen(args, cwd=None, env=None, stdout=None, stderr=None, stdin=None):
     return _WsProcess(args, cwd, env, fd)
 
 
+def _confined_env(env, pty):
+    """The environment a confined command runs with. A non-interactive one
+    (the host's `vm exec`, a workspace command) also gets $TMUX naming the
+    sandbox's tmux server, as tmux gives its own panes: the host's commands
+    run a bare `tmux` (tab liveness, captures, the transcript a tab pinned),
+    and under a sandbox there is no server on the default socket -- every
+    such command failed, and a session's chat never found its transcript.
+    Not for a pty: an interactive shell's `tmux attach` would refuse to nest."""
+    env = dict(env or {})
+    socket_path = _SANDBOX.get("tmux_socket")
+    if not pty and socket_path and "TMUX" not in env:
+        env["TMUX"] = "%s,0,0" % socket_path
+    return env
+
+
 def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
     """Hand argv and its descriptors to the supervisor. Blocks until it exits."""
     try:
@@ -715,7 +993,7 @@ def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
         c.settimeout(timeout if timeout else None)
         c.connect(SANDBOX_CTL)
         payload = json.dumps({"op": "exec", "argv": list(argv),
-                              "cwd": cwd, "env": env or {},
+                              "cwd": cwd, "env": _confined_env(env, pty),
                               "pty": bool(pty)}).encode()
         socket.send_fds(c, [payload], list(fds))
         data = b""
@@ -1331,8 +1609,12 @@ def _file_op(spec):
             return {"error": "path must be absolute", "exit_code": 1}
         if op == "list":
             entries = []
+            truncated = False
             with os.scandir(path) as it:
                 for e in it:
+                    if len(entries) >= FILE_LIST_MAX:
+                        truncated = True
+                        break
                     try:
                         st = e.stat(follow_symlinks=False)
                         isdir = e.is_dir(follow_symlinks=True)
@@ -1345,7 +1627,10 @@ def _file_op(spec):
                         "size": int(st.st_size),
                         "mtime": int(st.st_mtime),
                     })
-            return {"entries": entries, "exit_code": 0}
+            reply = {"entries": entries, "exit_code": 0}
+            if truncated:
+                reply["truncated"] = True
+            return reply
         if op == "read":
             offset = int(spec.get("offset", 0) or 0)
             length = int(spec.get("length", FILE_READ_MAX) or FILE_READ_MAX)
@@ -1474,7 +1759,8 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             else:
                 resp = {"exit_code": int(reply.get("exit_code", 1)),
                         "output": reply.get("output") or reply.get("reason") or ""}
-            resp_data = json.dumps(resp).encode("utf-8")
+            resp_data = _shell_reply_bytes(resp, lambda: {
+                "exit_code": 1, "output": "the install's output is too large to return"})
             vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
             return  # finally: close + replenish
         # The host's firewall cut a proxied connection: reset its bridge.
@@ -1512,7 +1798,8 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         # Native file op (host file browser) — no shell involved.
         fileop = req.get("file")
         if isinstance(fileop, dict):
-            resp_data = json.dumps(_file_op(fileop)).encode("utf-8")
+            resp_data = _shell_reply_bytes(_file_op(fileop), lambda: {
+                "error": "the reply is too large to return", "exit_code": 1})
             vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
             return  # finally: close + replenish (+ version-pinned respawn)
 
@@ -1582,11 +1869,24 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 (["/bin/sh", "-c", runnable] if use_shell else runnable),
                 capture_output=True, text=True, timeout=timeout, cwd=workdir
             )
-            response = {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode,
-            }
+            if getattr(result, "truncated", False):
+                # Cut output is not the command's output: a transcript read
+                # would pass for whole and its offsets for exact. An error,
+                # not part of it.
+                response = {
+                    "stdout": "",
+                    "stderr": "bromure: the command printed more than %d MiB "
+                              "(stdout and stderr together); its output is not "
+                              "returned\n" % (CAPTURE_LIMIT >> 20),
+                    "exit_code": -1,
+                    "truncated": True,
+                }
+            else:
+                response = {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.returncode,
+                }
             # Additive, and only when there is something to say. This is the one
             # channel that still works when the ATTESTOR is down -- and attestd
             # is what sends `sandbox_status`, so a workspace with no attestor
@@ -1609,7 +1909,7 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 "exit_code": -1,
             }
 
-        resp_data = json.dumps(response).encode("utf-8")
+        resp_data = _exec_response_bytes(response)
         resp_hdr = struct.pack(">I", len(resp_data))
         vsock_sock.sendall(resp_hdr + resp_data)
 
@@ -1872,14 +2172,38 @@ _BRIDGES = {}
 _BRIDGES_LOCK = threading.Lock()
 
 
+RELAY_CHUNK = 64 * 1024
+
+
+def _relay(src, dst, on_first=None, moved=None):
+    """Copy bytes from src to dst until src ends; the bytes moved (also kept
+    in `moved[0]` as they go, for a caller that's told of an error).
+
+    Into one buffer, reused: `recv` makes a new 64 KB object for every read,
+    and with a thread per direction of every open connection that churn is
+    spread over glibc's per-thread arenas, which keep what's freed. On glibc
+    2.39, 150 idle connections: 112 MB resident before, 78 MB after.
+    `on_first` sees the first chunk (a copy)."""
+    buf = bytearray(RELAY_CHUNK)
+    view = memoryview(buf)
+    total = 0
+    while True:
+        n = src.recv_into(buf)
+        if not n:
+            return total
+        if on_first is not None:
+            on_first(bytes(view[:n]))
+            on_first = None
+        dst.sendall(view[:n])
+        total += n
+        if moved is not None:
+            moved[0] = total
+
+
 def _bridge_pump(src, dst, conn=None, to_client=False):
     """Copy bytes from src to dst until either side closes."""
     try:
-        while True:
-            chunk = src.recv(64 * 1024)
-            if not chunk:
-                break
-            dst.sendall(chunk)
+        _relay(src, dst)
     except (OSError, ConnectionError):
         pass
     finally:
@@ -2119,6 +2443,216 @@ def bridge_llm_engine_service():
             target=_bridge, args=(conn, LLM_ENGINE_VSOCK_PORT, "llm"),
             daemon=True).start()
 
+
+
+# ─────────────── §4b vsock relay (for what the sandbox confines) ────────────
+# Under an OpenShell sandbox the workload's seccomp filter refuses AF_VSOCK, as
+# OpenShell's own does: with it, a confined process could reach every port the
+# host listens on -- the shell pool (5800) whose connections carry the host's
+# commands, the attestor (5840), the sentry's stream (5841) -- and pose as the
+# guest's own services. A few of the helpers the agent starts still have to
+# reach the host: its Bromure MCP servers and the plan driver. They ask agentd,
+# which runs outside the sandbox, over this socket:
+#
+#     client → "bromure-vsock <port>\n"
+#     agentd → "ok\n", then the bytes both ways, unchanged
+#            → "err <reason>\n", then closes
+#
+# Only the ports in VSOCK_RELAY_PORTS. That adds nothing a confined process
+# couldn't already say on those ports: the host tells MCP callers apart by what
+# is in the stream (the hello line), never by where the connection came from.
+# Outside a sandbox the helpers open AF_VSOCK themselves and never come here.
+#
+# Mode 0666 in /tmp, like the ssh-agent socket next to it: the confined
+# workload may run under a uid of its own. Whoever could replace this socket
+# could only intercept its own helpers' traffic -- every client is a process
+# the workload started.
+VSOCK_RELAY_PATH = "/tmp/bromure-vsock.sock"
+# The browser, task-board, plan-stream, automations, infrastructure, delegation
+# and Switchboard channels (SessionDisk's *VsockPort; a test keeps them equal).
+VSOCK_RELAY_PORTS = frozenset((5830, 5831, 5832, 5833, 5834, 5835, 5836))
+VSOCK_RELAY_HEADER_MAX = 64
+VSOCK_RELAY_HEADER_TIMEOUT = 5.0
+# At most this many relay clients at once, each holding two threads, a host
+# connection and two descriptors: the socket is open to the workload, and
+# agentd's threads and descriptors also serve the shell pool and every tab.
+# Each agent tab keeps about five MCP connections, so this is ~25 agents.
+# One more is answered "err busy" before anything is opened for it.
+VSOCK_RELAY_MAX_CLIENTS = 128
+# A relayed connection with no byte either way for this long is closed. The
+# shims and the plan driver reconnect on a drop (and an MCP call in flight
+# sends its reply long before this), so it costs a quiet tab nothing.
+VSOCK_RELAY_IDLE = 30 * 60.0
+# How often a relay pump wakes to look at the idle clock.
+VSOCK_RELAY_TICK = 30.0
+
+
+def _vsock_relay_port(conn):
+    """The port a relay client asks for, or None for a malformed request."""
+    conn.settimeout(VSOCK_RELAY_HEADER_TIMEOUT)
+    line = b""
+    while not line.endswith(b"\n"):
+        if len(line) >= VSOCK_RELAY_HEADER_MAX:
+            return None
+        b = conn.recv(1)   # one at a time: nothing past the line is ours
+        if not b:
+            return None
+        line += b
+    conn.settimeout(None)
+    parts = line.decode("ascii", "replace").split()
+    if len(parts) != 2 or parts[0] != "bromure-vsock" or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+def _vsock_relay_handle(conn, connect=None):
+    """Serve one relay client: check its port, connect, then splice."""
+    if connect is None:
+        def connect(port):
+            return _vsock_connect(port, "relay:%d" % port)
+    host = None
+    try:
+        try:
+            port = _vsock_relay_port(conn)
+        except OSError:
+            port = None
+        if port is None:
+            _bridge_log("[relay] malformed request")
+            _vsock_relay_reply(conn, b"err malformed request\n")
+            return
+        if port not in VSOCK_RELAY_PORTS:
+            _bridge_log("[relay] refused host port %d" % port)
+            _vsock_relay_reply(conn, b"err port not relayed\n")
+            return
+        try:
+            host = connect(port)
+        except Exception as e:
+            _bridge_log("[relay] vsock connect to host:%d failed: %s" % (port, e))
+            _vsock_relay_reply(conn, b"err host unreachable\n")
+            return
+        try:
+            conn.sendall(b"ok\n")
+        except OSError:
+            return
+        _vsock_relay_splice(conn, host)
+    finally:
+        for sock in (host, conn):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+
+def _vsock_relay_splice(conn, host, idle=None, tick=None):
+    """Relay both ways until both sides have ended, or nothing has moved for
+    `idle` seconds (VSOCK_RELAY_IDLE). An end of stream is passed on as a
+    half-close, as `_bridge_pump` does (a shim sends its request, shuts its
+    side, and reads the reply). On idle or an error both sockets are shut
+    down, which also frees a send blocked on a peer that stopped reading."""
+    idle = VSOCK_RELAY_IDLE if idle is None else idle
+    tick = min(VSOCK_RELAY_TICK if tick is None else tick, idle)
+    last = [time.monotonic()]
+    done = threading.Event()
+    lock = threading.Lock()
+    ended = [0]
+
+    def cut():
+        done.set()
+        for sock in (conn, host):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def stale():
+        return time.monotonic() - last[0] >= idle
+
+    def pump(src, dst):
+        buf = bytearray(RELAY_CHUNK)
+        view = memoryview(buf)
+        poller = select.poll()
+        poller.register(src, select.POLLIN | select.POLLHUP | select.POLLERR)
+        try:
+            while not done.is_set():
+                if not poller.poll(int(tick * 1000)):
+                    if stale():
+                        cut()
+                        return
+                    continue
+                n = src.recv_into(buf)
+                if not n:
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    break
+                last[0] = time.monotonic()
+                dst.sendall(view[:n])
+                last[0] = time.monotonic()
+        except (OSError, ValueError):
+            cut()
+            return
+        # This side has ended; the other may still be talking. Watch the idle
+        # clock for it (no third thread) until it ends too.
+        with lock:
+            ended[0] += 1
+            if ended[0] == 2:
+                done.set()
+        while not done.wait(tick):
+            if stale():
+                cut()
+
+    # A send bounded too: with both peers sending and neither reading, both
+    # pumps would sit in `sendall` with no one looking at the clock. Reads
+    # only follow a poll that saw data, so this timeout never ends one.
+    for sock in (conn, host):
+        sock.settimeout(idle)
+    t = threading.Thread(target=pump, args=(conn, host), daemon=True)
+    t.start()
+    pump(host, conn)
+    t.join()
+
+
+def _vsock_relay_reply(conn, line):
+    try:
+        conn.sendall(line)
+    except OSError:
+        pass
+
+
+def vsock_relay_service(path=None):
+    path = path or VSOCK_RELAY_PATH
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(path)
+    os.chmod(path, 0o666)
+    s.listen(16)
+    _bridge_log("[relay] listening on %s" % path)
+    slots = threading.BoundedSemaphore(VSOCK_RELAY_MAX_CLIENTS)
+    while True:
+        conn, _addr = s.accept()
+        if not slots.acquire(blocking=False):
+            # Full: refused here, on the accepting thread, before any thread
+            # or host connection exists for it.
+            _bridge_log("[relay] %d clients already: refused one" % VSOCK_RELAY_MAX_CLIENTS)
+            try:
+                conn.settimeout(0.5)
+                conn.sendall(b"err busy\n")
+            except OSError:
+                pass
+            conn.close()
+            continue
+
+        def serve(conn=conn):
+            try:
+                _vsock_relay_handle(conn)
+            finally:
+                slots.release()
+        threading.Thread(target=serve, daemon=True).start()
 
 # ─────────────────── §5 claude-token (vsock 8446, credentials) ──────────────
 # Connects to the host over vsock and answers read/write RPCs against
@@ -2450,26 +2984,20 @@ def _loopback_connect(port):
 
 
 def _loopback_pipe(src, dst, label=None):
-    total = 0
-    first = True
+    moved = [0]
+
+    def first_line(chunk):
+        head = chunk.split(b"\r\n", 1)[0][:160].decode("latin1", "replace")
+        _loopback_log("%s first line: %r" % (label, head))
+
     try:
-        while True:
-            chunk = src.recv(65536)
-            if not chunk:
-                break
-            if first and label:
-                head = chunk.split(b"\r\n", 1)[0][:160].decode("latin1",
-                                                               "replace")
-                _loopback_log("%s first line: %r" % (label, head))
-                first = False
-            total += len(chunk)
-            dst.sendall(chunk)
+        _relay(src, dst, on_first=first_line if label else None, moved=moved)
     except OSError as exc:
         if label:
-            _loopback_log("%s pipe error after %dB: %s" % (label, total, exc))
+            _loopback_log("%s pipe error after %dB: %s" % (label, moved[0], exc))
     finally:
         if label:
-            _loopback_log("%s done, %dB" % (label, total))
+            _loopback_log("%s done, %dB" % (label, moved[0]))
         try:
             dst.shutdown(socket.SHUT_WR)
         except OSError:
@@ -5621,6 +6149,23 @@ def _heal_stuck_mouse(tty, cmd, mouse_any):
         pass
 
 
+_ROSTER_FAILING = set()
+
+
+def _roster_note(step, ok, why):
+    """Say when the roster stops reaching the host, and when it's back --
+    once per streak, not every 0.7s tick. Both failures were silent: the host
+    just kept the last tab list (a sandboxed workspace whose new tab was never
+    listed left nothing in this log to say why)."""
+    if ok:
+        if step in _ROSTER_FAILING:
+            _ROSTER_FAILING.discard(step)
+            log("roster", "%s: working again" % step)
+    elif step not in _ROSTER_FAILING:
+        _ROSTER_FAILING.add(step)
+        log("roster", why)
+
+
 def publish_roster():
     """Build and atomically publish the window list to tabs.txt. Safe to call
     from both the roster loop (periodic) and the command loop (immediately
@@ -5629,6 +6174,7 @@ def publish_roster():
     with _ROSTER_LOCK:
         p = _tmux("list-windows", "-t", TMUX_S, "-F", _ROSTER_FMT)
         if p.returncode == 0:
+            _roster_note("list", True, "")
             out_lines = []
             seen_ttys = set()
             for raw in p.stdout.splitlines():
@@ -5663,8 +6209,12 @@ def publish_roster():
             for gone in [t for t in _stuck_mouse if t not in seen_ttys]:
                 _stuck_mouse.pop(gone, None)
             content = "".join(line + "\n" for line in out_lines)
-            _atomic_publish(".tabs.tmp", "tabs.txt", content)
-        elif not _has_session():
+            _roster_note("publish", _atomic_publish(".tabs.tmp", "tabs.txt", content),
+                         "couldn't write tabs.txt to the outbox: the host keeps the last tab list")
+        elif _has_session():
+            _roster_note("list", False, "tmux list-windows failed (%d): %s"
+                         % (p.returncode, (p.stderr or "").strip()[:200]))
+        else:
             # list-windows failed AND the session is genuinely gone — the user
             # closed the last window. Mark a pending reboot FIRST (host drains it
             # on its fast tick), then publish an EMPTY roster so the host's
@@ -5834,10 +6384,64 @@ def malloc_trim():
         return False
 
 
+# A codereview guest's agentd at 318 MB with the minute's trim running: no
+# connection open, the main heap 14 MB, and ~250 MB in glibc's per-thread
+# arenas, 13-48 MB each. glibc raises its mmap threshold (up to 32 MB) each time
+# a large mapped block is freed; after that, a service thread's large transients
+# (a subprocess's output, a big read) come out of its arena instead, and one
+# freed in the middle of an arena never goes back, trim or not. Fixed at 128
+# KiB, they stay mappings, unmapped the moment they're freed. On glibc 2.39, 24
+# threads building 30 MB transients: 833 MB kept as it was, 93 MB fixed (83 MB
+# with the trim). Capping the arenas instead made it worse. From <malloc.h>.
+M_MMAP_THRESHOLD = -3
+MALLOC_MMAP_THRESHOLD = 128 * 1024
+
+
+def fix_mmap_threshold(threshold=MALLOC_MMAP_THRESHOLD):
+    """Fix glibc's mmap threshold at `threshold` (which also stops it moving).
+    First thing in main(), before any thread allocates. True if it took;
+    False also where it's not glibc."""
+    try:
+        if not _LIBC:
+            import ctypes
+            _LIBC.append(ctypes.CDLL(None, use_errno=True))
+        import ctypes
+        return _LIBC[0].mallopt(ctypes.c_int(M_MMAP_THRESHOLD), ctypes.c_int(threshold)) == 1
+    except Exception:
+        return False
+
+
+# How often agentd says what it holds (its log): resident memory, threads,
+# open bridges. One line, so a report of it growing says where.
+MEMORY_REPORT_INTERVAL = 600
+
+
+def memory_report():
+    rss = hwm = "?"
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss = line.split()[1]
+                elif line.startswith("VmHWM:"):
+                    hwm = line.split()[1]
+    except OSError:
+        pass
+    with _BRIDGES_LOCK:
+        bridges = len(_BRIDGES)
+    return "rss %s kB (peak %s kB), %d threads, %d bridges" % (
+        rss, hwm, threading.active_count(), bridges)
+
+
 def malloc_trim_service():
+    since_report = 0
     while _RUNNING.is_set():
         time.sleep(MALLOC_TRIM_INTERVAL)
         malloc_trim()
+        since_report += MALLOC_TRIM_INTERVAL
+        if since_report >= MEMORY_REPORT_INTERVAL:
+            since_report = 0
+            log("agentd", "memory: " + memory_report())
 
 
 def vmstat_loop_service():
@@ -7026,6 +7630,13 @@ def _seed_claude_settings():
     # and persists it, and its copy-on-select double-copies against the
     # terminal's own selection copy (host Profile.swift does the same).
     settings["copyOnSelect"] = False
+    # Claude Code's built-in /diff plugin opens its own multi-window diff,
+    # which fights Bromure's session view: forced off, the user's other
+    # plugins kept (host Profile.swift does the same).
+    plugins = settings.get("enabledPlugins")
+    plugins = plugins if isinstance(plugins, dict) else {}
+    plugins["cc-plugin-diff@builtin"] = False
+    settings["enabledPlugins"] = plugins
     hook = "/home/ubuntu/.bromure/agent-status.sh"
 
     def _hook_cmd(arg):
@@ -7515,6 +8126,63 @@ def task_fix_systemd_unit():
     _sudo(["install", "-m", "644", tmp, _UNIT_PATH])
     _sudo(["systemctl", "daemon-reload"])
     log("session", "systemd unit upgraded (KillMode=process, python3 -s)")
+
+
+# The guest's URL relay (setup.sh installs it; `xdg-open` is a link to it and
+# $BROWSER names it): the same script, kept in step on images built before
+# it wrote to the outbox's `urls/` folder. Under an OpenShell filesystem
+# policy that folder is the only part of the outbox a sandboxed agent may
+# write, and without it no agent could open a URL on the Mac (a sign-in
+# page included).
+_BROMURE_OPEN_PATH = "/usr/local/bin/bromure-open"
+_BROMURE_OPEN = """#!/bin/sh
+# Usage: bromure-open <URL>
+# Sends the URL to the macOS host's default browser via the outbox share.
+URL="$1"
+[ -z "$URL" ] && exit 1
+OUTBOX=/mnt/bromure-outbox
+if [ ! -d "$OUTBOX" ]; then
+    echo "bromure-open: outbox share not mounted; cannot relay $URL" >&2
+    exit 2
+fi
+# The relay's own folder when the host made one: a sandboxed agent may
+# write there and nowhere else in the outbox.
+DIR="$OUTBOX/urls"
+[ -d "$DIR" ] || DIR="$OUTBOX"
+# Unique filename per call so concurrent opens don't collide.
+F="$DIR/url-$(date +%s)-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \\n').txt"
+if ! { printf '%s\\n' "$URL" > "$F"; } 2>/dev/null; then
+    echo "bromure-open: cannot write $DIR to relay $URL (a sandboxed agent may write only $OUTBOX/urls, which the host creates)" >&2
+    exit 2
+fi
+"""
+
+
+def task_bromure_open():
+    """Converge /usr/local/bin/bromure-open to _BROMURE_OPEN (before the
+    strict sandbox takes sudo away)."""
+    try:
+        with open(_BROMURE_OPEN_PATH) as f:
+            if f.read() == _BROMURE_OPEN:
+                return
+    except OSError:
+        return   # not installed (dev run): setup.sh owns creation
+    if not _have_sudo():
+        return
+    # The content goes to root on stdin, into root's own folder, then into
+    # place: never through /tmp, which a sandboxed agent can write (a file
+    # it planted there would be what root installed).
+    staged = _BROMURE_OPEN_PATH + ".new"
+    try:
+        subprocess.run(["sudo", "sh", "-c",
+                        'umask 022 && cat > "$1" && chmod 755 "$1" && mv -f "$1" "$2"',
+                        "sh", staged, _BROMURE_OPEN_PATH],
+                       input=_BROMURE_OPEN, text=True, stdout=_DEVNULL, stderr=_DEVNULL,
+                       check=True, timeout=30)
+    except Exception as e:
+        log("session", "bromure-open: could not upgrade it: %s" % e)
+        return
+    log("session", "bromure-open upgraded (relays through the outbox's urls/ folder)")
 
 
 def _sudo_write(path, content, mode="0644"):
@@ -8276,13 +8944,16 @@ def _run_once(name, fn):
 
 
 def main():
+    # 0. Before any thread allocates (see fix_mmap_threshold).
+    mmap_fixed = fix_mmap_threshold()
     # 1. Parse env / basic setup.
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     compute_self_hash()
-    log("agentd", "starting (pid %d, python %s, self %s)"
+    log("agentd", "starting (pid %d, python %s, self %s, mmap threshold %s)"
         % (os.getpid(), sys.version.split()[0],
-           (SELF_HASH[:8] if SELF_HASH else "?")))
+           (SELF_HASH[:8] if SELF_HASH else "?"),
+           ("fixed" if mmap_fixed else "glibc's")))
 
     # Truncate the vm-bridge log on each run (the original bridge did this).
     try:
@@ -8310,6 +8981,7 @@ def main():
         _run_once("home", task_home_setup)
         _run_once("folder-shares", task_folder_shares)
         _run_once("agent-stubs", task_heal_agent_stubs)
+        _run_once("bromure-open", task_bromure_open)
         # Only for workspaces without the strict sandbox; with strict, the root
         # script below starts attestd, the sentry and the supervisor before
         # revoking sudo, in that same order.
@@ -8357,6 +9029,7 @@ def main():
         ("ssh-agent", bridge_ssh_agent_service),
         ("aws-creds", bridge_aws_creds_service),
         ("llm-engine", bridge_llm_engine_service),
+        ("vsock-relay", vsock_relay_service),
         ("claude-token", claude_token_service),
         ("codex-token", codex_token_service),
         ("loopback-relay", loopback_relay_service),

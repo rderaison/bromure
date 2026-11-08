@@ -6,7 +6,7 @@ order: 6.1
 
 # The Chat
 
-Every session opens as a chat. You write in the composer at the bottom; the agent's replies, its questions and a summary of what it did appear above. Underneath, the agent runs in an ordinary terminal tab on its machine (a workspace, in the settings editor) — the chat reads its conversation and types into it for you, so everything the agent would do in the terminal it does here too. The terminal is always one click away with the **Linux** pill (**⌥⌘U**; see [The Sessions Home](05-sessions-home.mdx#the-toolbar)).
+Every session opens as a chat. You write in the composer at the bottom; the agent's replies, its questions and a summary of what it did appear above. Underneath, the agent runs in an ordinary terminal tab on its machine (a workspace, in the settings editor) — the chat reads its conversation and types into it for you, so everything the agent would do in the terminal it does here too. The terminal is always one click away with the **Terminal** pill (**⌥⌘U**; see [The Sessions Home](05-sessions-home.mdx#the-toolbar)).
 
 This chapter describes the chat of a running session. A paused or finished session shows the same conversation, read back from this Mac, with a composer whose next message resumes it — see [Paused and finished sessions](05-sessions-home.mdx#paused-and-finished-sessions).
 
@@ -144,7 +144,7 @@ Where Bromure can't sign in for the agent, the card drives the agent's own sign-
 
 ***agent* needs a model provider.** Oh My Pi has no account to sign in to: "*agent* has no model provider on this machine yet. Add an API key or a local model in the machine's settings, then start the session again." **Machine settings…** opens the machine's settings.
 
-**Other dialogs.** Any other menu the agent puts up is shown with its title and its options as buttons (the one Return would pick is highlighted), plus **Dismiss** (Esc) — "Or open Linux (⌥⌘U) to answer in the terminal." Approval panels and Kimi Code's multiple-choice questions appear this way. Kimi Code puts up neither in its default **Never ask** mode — it asks in plain text instead — only when the machine's **Kimi approvals** setting is **Ask when needed** (see [General](07-settings/general.mdx#kimi-approvals)).
+**Other dialogs.** Any other menu the agent puts up is shown with its title and its options as buttons (the one Return would pick is highlighted), plus **Dismiss** (Esc) — "Or open the terminal (⌥⌘U) to answer there." Approval panels and Kimi Code's multiple-choice questions appear this way. Kimi Code puts up neither in its default **Never ask** mode — it asks in plain text instead — only when the machine's **Kimi approvals** setting is **Ask when needed** (see [General](07-settings/general.mdx#kimi-approvals)).
 
 **Failures.** When the agent stops on an error, a red card says which kind — "The agent couldn't authenticate", "The agent hit a usage limit" or "The agent stopped with an error" — with the agent's own error line under it. An authentication failure offers **Sign in to *provider*…** when Bromure can sign in for the agent; otherwise the card reads "Switch to the terminal to resolve it, then send again."
 
@@ -156,4 +156,4 @@ There is no search field inside the chat. Use the sidebar's **Search sessions** 
 
 - **History.** The chat holds about 24 MB of a conversation's history at a time. Older parts of a longer conversation are fetched with **Load earlier conversation**; once the history held passes about 40 MB, its oldest part is dropped from view again. The conversation itself is untouched on the machine. In a [mirror of a remote Mac](14-remote-access.mdx), a chat's first open reads only the latest ~1.5 MB, and a chat opened again fetches only what's new since last time.
 - **Appearance.** The chat has its own look — warm paper in light mode, the system's colours in dark mode, following macOS. A machine's [Appearance settings](07-settings/appearance.mdx) (terminal font, colours, opacity) apply to its terminals, not to the chat.
-- **What the chat sees.** The chat is built from the agent's own conversation file and from what its terminal shows. Anything the chat doesn't recognise is still in the terminal: when in doubt, open **Linux** (⌥⌘U).
+- **What the chat sees.** The chat is built from the agent's own conversation file and from what its terminal shows. Anything the chat doesn't recognise is still in the terminal: when in doubt, open the **Terminal** (⌥⌘U).

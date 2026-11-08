@@ -147,16 +147,55 @@ public final class SessionDisk {
         try store.prepareBootstrapHomeDirectory(for: profile)
     }
 
-    /// Apparent (guest-visible) size of a freshly-created home image, GiB.
-    /// The host file is sparse, so this costs nothing up front; growing it
-    /// later is an online truncate + resize2fs, shrinking is not supported.
+    /// Apparent (guest-visible) size of a freshly-created home image, GiB:
+    /// `vm.homeImageGB` when set, else scaled to `freeBytes` (the free space
+    /// on the volume the workspaces live on; nil = unknown, the full default).
+    /// The host file is sparse, so this costs nothing up front -- but it is
+    /// how far the guest can fill the host's disk; growing it later is an
+    /// online truncate + resize2fs, shrinking is not supported.
     /// Override: defaults write io.bromure.agentic-coding vm.homeImageGB -int 128
-    public static func resolvedHomeImageGB() -> Int {
-        let raw = UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int ?? defaultHomeImageGB
-        return min(1024, max(8, raw))
+    public static func resolvedHomeImageGB(freeBytes: UInt64? = nil) -> Int {
+        min(1024, max(8, homeImageOverrideGB ?? scaledHomeImageGB(freeBytes: freeBytes)))
     }
 
-    /// A new workspace's home, GiB, unless `vm.homeImageGB` says otherwise.
+    /// The size a new home gets on THIS Mac (its `vm.homeImageGB`, else its
+    /// free space where the workspaces live): what a workspace with no size of
+    /// its own is created with here. A workspace on another Mac is sized by
+    /// that Mac — its editor shows the server's (`GET /storage/defaults`).
+    public static func newHomeDefaultGB() -> Int {
+        resolvedHomeImageGB(freeBytes: freeBytes(near: ProfileStore().profilesDirectory))
+    }
+
+    /// `vm.homeImageGB`, when the user set it.
+    static var homeImageOverrideGB: Int? {
+        UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int
+    }
+
+    /// A new home's size for the free space it will draw on:
+    ///   < 64 GB free  →  8 GB
+    ///   < 128 GB free → 12 GB
+    ///   otherwise     → 16 GB (`defaultHomeImageGB`)
+    /// 8 GB is the floor (`ProfileEditorView.minHomeGB`): the agents' CLIs, a
+    /// toolchain and one project's dependencies already take several.
+    public static func scaledHomeImageGB(freeBytes: UInt64?) -> Int {
+        guard let freeBytes else { return defaultHomeImageGB }
+        let gb = freeBytes >> 30
+        if gb < 64 { return 8 }
+        if gb < 128 { return 12 }
+        return defaultHomeImageGB
+    }
+
+    /// Free space where `url` is, or at its nearest existing parent (a new
+    /// workspace's directory doesn't exist yet).
+    static func freeBytes(near url: URL) -> UInt64? {
+        var dir = url
+        while !FileManager.default.fileExists(atPath: dir.path), dir.pathComponents.count > 1 {
+            dir = dir.deletingLastPathComponent()
+        }
+        return EphemeralDisk.freeBytes(at: dir.path)
+    }
+
+    /// The largest a new home gets, GiB, unless `vm.homeImageGB` says otherwise.
     public static let defaultHomeImageGB = 16
     /// A legacy (virtiofs) home is copied into a fresh image on its next
     /// boot, and that home can hold far more than a new one starts with: a
@@ -183,13 +222,23 @@ public final class SessionDisk {
     }
 
     /// The home image's guest-visible size: the workspace's own setting,
-    /// else the app-wide default (at least `migrationHomeImageGB` for a
-    /// legacy home's migration).
+    /// else the app-wide default for the free space where it lives (at least
+    /// `migrationHomeImageGB` for a legacy home's migration).
     public var homeImageTargetBytes: UInt64 {
+        let free = Self.freeBytes(near: homeImageURL.deletingLastPathComponent())
         let gb = profile.homeImageGB.map { min(1024, max(8, $0)) }
-            ?? (migrateHomeThisBoot ? max(Self.migrationHomeImageGB, Self.resolvedHomeImageGB())
-                                    : Self.resolvedHomeImageGB())
+            ?? (migrateHomeThisBoot ? max(Self.migrationHomeImageGB, Self.resolvedHomeImageGB(freeBytes: free))
+                                    : Self.resolvedHomeImageGB(freeBytes: free))
         return UInt64(gb) * 1024 * 1024 * 1024
+    }
+
+    /// Whether an existing home follows `homeImageTargetBytes` up: a size of
+    /// its own, or a migration. Not the app-wide default, free-space scaled or
+    /// `vm.homeImageGB` (which the manual says sizes new homes only): a home
+    /// made 8 GB on a full disk would otherwise grow at whichever cold boot
+    /// found more room, and a grow drops the home's checkpoints.
+    var homeGrowsToTarget: Bool {
+        profile.homeImageGB != nil || migrateHomeThisBoot
     }
 
     /// Grow an existing home image to its target size (never shrinks). The
@@ -208,6 +257,9 @@ public final class SessionDisk {
         guard size < target else {
             return "home image \(gib(size)) (setting \(profile.homeImageGB.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
         }
+        guard homeGrowsToTarget else {
+            return "home image \(gib(size)) (default size, kept: the default only sizes a new home) — nothing to grow"
+        }
         try EphemeralDisk.checkDiskSpace(at: homeImageURL.deletingLastPathComponent().path)
         guard let handle = FileHandle(forWritingAtPath: homeImageURL.path) else {
             throw CocoaError(.fileWriteUnknown)
@@ -215,9 +267,14 @@ public final class SessionDisk {
         defer { try? handle.close() }
         try handle.truncate(atOffset: target)
         ProfileStore.homeImageChanged(profile.id)
-        // The checkpoints of the smaller home go (the save that set the size
-        // started that; this catches a grow from the app-wide default, or one
-        // the save's delete hadn't finished). Off the main thread.
+        // The checkpoints of the smaller home go, once it has grown: one from
+        // before is the old home (rewinding to it undoes the resize), and on a
+        // server whose 128 GB home had grown over time, its full set is what
+        // stalled APFS. Not when the size is saved: the grow waits for a cold
+        // boot (a saved state defers it, the size can be set back), and until
+        // it happens they're the only rollback points. The delete is marked
+        // before this returns, so no revert reads one meanwhile. Off the main
+        // thread.
         let stale = ProfileStore.checkpointFiles(in: [store.homeCheckpointsDirectory(for: profile)])
         if !stale.isEmpty {
             ProfileStore.purgeCheckpointsInBackground(stale, of: profile.id, name: profile.name,
@@ -411,6 +468,14 @@ public final class SessionDisk {
     /// wants the host to open (e.g. when the user clicks a URL in kitty);
     /// the host polls + relays to NSWorkspace.
     public private(set) var outboxDirectory: URL?
+    /// The outbox's folder for URL relay requests (`urls/url-*.txt`).
+    public static let outboxURLRelayFolder = "urls"
+    /// The outbox's folder for the agents' hooks (agent-status.sh): tab
+    /// status (`agent-status-<win>.txt`), tool-call lineage
+    /// (`agent-tool-<win>.jsonl`) and its own owed-note marks. The hooks run
+    /// inside the OpenShell sandbox when one is on, which may write here
+    /// (bromure-sandboxd) and nowhere else in the outbox.
+    public static let outboxAgentFolder = "agent"
 
     /// True if `ensureDiskExists()` had to clonefile() a fresh disk on the
     /// most recent call. Caller uses this to stamp the profile with the
@@ -951,6 +1016,18 @@ public final class SessionDisk {
             // those; leave the live roster (tabs-alive.txt) and host commands.
             purgeStaleEvents(in: tmp)
         }
+        // Where the guest's URL relay (bromure-open, xdg-open, $BROWSER)
+        // drops its requests: a folder of its own, so a sandboxed agent can
+        // be let write there (bromure-sandboxd) and nowhere else in the
+        // outbox, where agentd's own signals (tabs, status, liveness) live.
+        try? fm.createDirectory(at: tmp.appendingPathComponent(Self.outboxURLRelayFolder, isDirectory: true),
+                                withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
+        // Same for the agents' hooks (status, tool calls): they run in the
+        // sandbox too, so they get a folder of their own.
+        try? fm.createDirectory(at: tmp.appendingPathComponent(Self.outboxAgentFolder, isDirectory: true),
+                                withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: NSNumber(value: 0o777)])
         outboxDirectory = tmp
         return tmp
     }

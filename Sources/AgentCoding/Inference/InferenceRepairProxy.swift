@@ -759,7 +759,7 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// Append one line to `/tmp/bromure-repair.log` (BROMURE_REPAIR_DEBUG only).
     private static func appendRepairLog(_ line: String) {
         if let h = FileHandle(forWritingAtPath: "/tmp/bromure-repair.log") {
-            h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
+            _ = try? h.seekToEnd(); try? h.write(contentsOf: Data(line.utf8)); try? h.close()
         } else { try? line.write(toFile: "/tmp/bromure-repair.log", atomically: true, encoding: .utf8) }
     }
 

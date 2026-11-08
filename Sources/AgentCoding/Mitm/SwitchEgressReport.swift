@@ -9,7 +9,9 @@ import SandboxEngine
 /// calls this. Shared by the macOS app and the Linux daemon, so a switch
 /// decision makes the same row on both.
 enum SwitchEgressReport {
-    static func record(_ ev: VMNetSwitch.EgressEvent) {
+    /// `engine`: the MiTM engine whose guardrails explain an identity-gate
+    /// denial (nil: the event goes without its reason).
+    static func record(_ ev: VMNetSwitch.EgressEvent, engine: MitmEngine? = nil) {
         let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
         let host = ev.proto == 41 ? "(no IPv6 rules)"
                  : (ev.hostnames.first ?? UtunPacket.ipString(ev.dstIP))
@@ -39,7 +41,17 @@ enum SwitchEgressReport {
             "by_policy": .bool(ev.byPolicy),
         ]
         // The program the identity gate denied: the drawer row's Allow names it.
-        if let exe = ev.exe { eventData["exe"] = .string(exe) }
+        if let exe = ev.exe {
+            eventData["exe"] = .string(exe)
+            // And why: the policy allows the destination, but not for this
+            // program. Without it the timeline said "default policy" and the
+            // agent was told the firewall "denies what no rule allows".
+            if ev.denied, let pid = ev.profileID,
+               let why = engine?.guardrailsConfig(for: pid)?.egressPolicy?
+                .identityDenialReason(hostnames: ev.hostnames, ip: ev.dstIP, port: ev.port, exe: exe) {
+                eventData["reason"] = .string(why)
+            }
+        }
         // One more connection to a destination already listed: count it
         // on the timeline's folded row (local only — no log line, no
         // cloud event per connection).

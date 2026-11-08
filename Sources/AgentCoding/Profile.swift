@@ -1715,6 +1715,24 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         !networkPolicy.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether anything restricts the workspace's traffic: its OpenShell
+    /// policy, the organization boundary (which puts every workspace under
+    /// OpenShell), or a Bromure Firewall ruleset that restricts something.
+    /// What the Sandbox drawer (the shield) is for -- not only OpenShell:
+    /// the firewall blocks too, and the drawer allows them (Finding:
+    /// "Sandbox shield disappears for workspaces using the Bromure
+    /// Firewall").
+    public var restrictsEgress: Bool {
+        if usesOpenShellPolicy { return true }
+        #if canImport(SandboxEngine)
+        if OpenShellGovernance.shared.boundaryYAML != nil { return true }
+        let rules = egressRules.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !rules.isEmpty && ((try? EgressPolicy.parse(rules))?.isActive ?? false)
+        #else
+        return !egressRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        #endif
+    }
+
     /// "Log allowed connections" (Firewall pane): whether the Security
     /// Timeline gets a row for connections the firewall lets through, not just
     /// the blocked ones. nil = automatic — logged while the workspace has
@@ -2011,12 +2029,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// passed — so the next boot after it, whichever comes last.
     public var baseImageUpgradeRemindAfter: Date?
     /// Which workspaces agents here may reach — delegate work into, ask a
-    /// session of by @nickname. A list names the only ones (empty = none
-    /// but this one) — what a new workspace starts with
-    /// (`newProfileFromTemplate`): reach is opened by the user, workspace
-    /// by workspace, in General › Reach. nil = every workspace (and remote
-    /// hosts): only for workspaces that stored it before, or once the user
-    /// turns "Every workspace" on.
+    /// session of by @nickname. nil = every workspace (and remote hosts):
+    /// what a new workspace starts with (`newProfileFromTemplate`). A list
+    /// names the only ones (empty = none but this one), once the user turns
+    /// "Every workspace" off in General › Reach.
     public var agentReach: [UUID]?
 
     /// Visual color in the picker sidebar. Optional in JSON for forward
@@ -2038,11 +2054,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// Sensible default RAM for a new profile, scaled to host memory.
     /// Same tier idea as the browser, bumped one notch since agent
     /// loads (npm, rust, model context windows) eat more than Chromium:
+    ///   <16 GB host → 2 GB VM (an 8 GB Mac: room left for macOS and a second VM)
     ///   <18 GB host → 4 GB VM
     ///   <36 GB host → 6 GB VM
     ///   ≥36 GB host → 8 GB VM
-    public static func defaultMemoryGB() -> Int {
-        let hostGB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
+    public static func defaultMemoryGB(hostBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let hostGB = hostBytes / (1024 * 1024 * 1024)
+        if hostGB < 16 { return 2 }
         if hostGB < 18 { return 4 }
         if hostGB < 36 { return 6 }
         return 8
@@ -2204,7 +2222,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// New profiles are created `.ext4`.
     public var homeModel: HomeModel
     /// Size of the ext4 home image, GiB; nil = the app-wide default
-    /// (`SessionDisk.resolvedHomeImageGB`). Grow-only: a larger value takes
+    /// (`SessionDisk.resolvedHomeImageGB`, scaled to free disk space when the
+    /// home is created, and not grown by it afterwards). Grow-only: a larger value takes
     /// effect at the next cold boot (the host grows home.img, the guest
     /// agent grows the filesystem) — a running VM can't see its disk grow.
     public var homeImageGB: Int? = nil
@@ -3236,14 +3255,19 @@ struct ProfileSecrets: Codable {
         }
         if var o = profile.modelOverride {
             var keys: [String: String] = [:]
+            // The redaction stand-in ("••••••••", what a describe/export sends
+            // for a key) is no key: lifted as one, it overwrote the stored key
+            // on the round trip -- a fat client's save, or `PATCH` of a fetched
+            // document -- and the proxy then sent it upstream (non-ASCII: every
+            // request refused as malformed).
             for k in o.settings.providers.indices {
                 if let key = o.settings.providers[k].apiKey, !key.isEmpty {
-                    keys[o.settings.providers[k].provider.rawValue] = key
+                    if !ModelSettings.isRedactedSecret(key) { keys[o.settings.providers[k].provider.rawValue] = key }
                     o.settings.providers[k].apiKey = ""
                 }
             }
             if let key = o.settings.localServer?.apiKey, !key.isEmpty {
-                s.modelLocalServerKey = key
+                if !ModelSettings.isRedactedSecret(key) { s.modelLocalServerKey = key }
                 o.settings.localServer?.apiKey = ""
             }
             if !keys.isEmpty { s.modelProviderKeys = keys }
@@ -3457,10 +3481,10 @@ struct ProfileSecrets: Codable {
         if let v = newer.twilioSecret { twilioSecret = v }
         if let v = newer.modelProviderKeys {
             var merged = modelProviderKeys ?? [:]
-            for (k, key) in v { merged[k] = key }
+            for (k, key) in v where !ModelSettings.isRedactedSecret(key) { merged[k] = key }
             modelProviderKeys = merged
         }
-        if let v = newer.modelLocalServerKey { modelLocalServerKey = v }
+        if let v = newer.modelLocalServerKey, !ModelSettings.isRedactedSecret(v) { modelLocalServerKey = v }
         if let m = newer.dockerRegistryPasswords {
             dockerRegistryPasswords = (dockerRegistryPasswords ?? [:]).merging(m) { _, n in n }
         }
@@ -3577,6 +3601,14 @@ public final class MACBindings: @unchecked Sendable {
     }
 }
 
+
+/// The checkpoint code's log line: the app's log on the Mac. The iOS app
+/// builds this file without it (and has no checkpoints to log).
+func checkpointLog(_ line: @autoclosure () -> String) {
+    #if os(macOS)
+    AppLog.stamp(line())
+    #endif
+}
 
 /// Deletes old checkpoints one at a time, at background priority, in small steps.
 ///
@@ -3827,10 +3859,10 @@ public final class ProfileStore {
         p.createdAt = Date()
         p.lastUsedAt = nil
         p.baseImageVersionAtClone = nil
-        // Reach is explicit for new workspaces: agents here reach no other
-        // workspace until the user ticks some (nil = "every workspace" stays
-        // only for workspaces that already stored it).
-        p.agentReach = []
+        // A new workspace's agents reach every workspace (and the remote
+        // hosts this Mac mirrors) until the user narrows it in General ›
+        // Reach — whatever the template holds.
+        p.agentReach = nil
         // The template's finish choice is the APP default, not a
         // per-workspace override: a new workspace follows it live.
         p.taskFinish = nil
@@ -4042,7 +4074,6 @@ public final class ProfileStore {
         try data.write(to: dir.appendingPathComponent("profile.json"), options: .atomic)
 
         try writeSecretsBlob(secrets, dir: dir)
-        purgeHomeCheckpointsIfGrowing(profile)
         return profile
     }
 
@@ -4208,6 +4239,15 @@ public final class ProfileStore {
         // list, which is confusing.
         fresh.createdAt = Date()
 
+        // The clones cost nothing at first but grow as either copy is
+        // written, like any new VM's disks: keep the same 1 GB floor.
+        // Before anything is written, so a refusal leaves no half-made
+        // profile behind. (macOS only: the iOS fat client compiles this file
+        // without SandboxEngine, and holds no VM disks.)
+        #if canImport(SandboxEngine)
+        try EphemeralDisk.checkDiskSpace(at: rootDir.path)
+        #endif
+
         // First, write the new profile.json + encrypted secrets blob to
         // the new dir. Doing this before the data clones means a clone
         // failure mid-way leaves us with a directory that at least has
@@ -4344,9 +4384,11 @@ public final class ProfileStore {
 
     /// The tiered "go back in time" ladder: which of `dates` to KEEP.
     /// The newest `boots` stay unconditionally (the last few sessions), then
-    /// the newest checkpoint of each calendar day for `days` days, then the
-    /// newest of each calendar week for `weeks` weeks; everything older is
-    /// pruned.
+    /// the newest checkpoint of each of today and the `days` calendar days
+    /// before it, then the newest of each of this and the `weeks` calendar
+    /// weeks before it; everything older is pruned. The cut-offs are midnight
+    /// and the week's start: a day's checkpoint isn't dropped because it was
+    /// taken earlier in that day than it is now.
     ///
     /// By default: the last session, and the newest of each calendar day back
     /// to the day before yesterday, so at most 3 an image (automatic ones are one a day). It kept
@@ -4366,7 +4408,10 @@ public final class ProfileStore {
                 if seen.insert(day).inserted { keep.insert(d) }
             }
         }
-        if weeks > 0, let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: now) {
+        // Whole weeks, as the days are whole days: from the start of the week
+        // `weeks` back, not this moment's weekday and time `weeks` back.
+        if weeks > 0, let thisWeek = calendar.dateInterval(of: .weekOfYear, for: now)?.start,
+           let weekCut = calendar.date(byAdding: .weekOfYear, value: -weeks, to: thisWeek) {
             var seen = Set<DateComponents>()
             for d in sorted where d >= weekCut {
                 let week = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: d)
@@ -4407,7 +4452,7 @@ public final class ProfileStore {
         let dir = homeCheckpointsDirectory(for: profile)
         if automatic, let size = (try? fm.attributesOfItem(atPath: image.path))?[.size] as? Int64,
            size > Self.automaticHomeCheckpointCap {
-            AppLog.stamp("'\(profile.name)': home is \(size >> 30) GB, over \(Self.automaticHomeCheckpointCap >> 30) GB: no automatic checkpoint")
+            checkpointLog("'\(profile.name)': home is \(size >> 30) GB, over \(Self.automaticHomeCheckpointCap >> 30) GB: no automatic checkpoint")
             return nil   // the ones it has still age out (`pruneCheckpoints`)
         }
         return try snapshotImage(image, of: profile, into: dir, at: date, automatic: automatic)
@@ -4417,7 +4462,7 @@ public final class ProfileStore {
                                at date: Date, automatic: Bool) throws -> DiskCheckpoint? {
         guard fm.fileExists(atPath: image.path) else { return nil }
         guard !Self.isPurgingCheckpoints(profile.id) else {
-            AppLog.stamp("'\(profile.name)': its checkpoints are being deleted: no new one of \(image.lastPathComponent)")
+            checkpointLog("'\(profile.name)': its checkpoints are being deleted: no new one of \(image.lastPathComponent)")
             return nil
         }
         if automatic, let newest = list(in: dir).first,
@@ -4452,6 +4497,34 @@ public final class ProfileStore {
             return DiskCheckpoint(id: String(ts), createdAt: Date(timeIntervalSince1970: TimeInterval(ts)),
                                   url: url, allocatedBytes: bytes)
         }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// A session start's checkpoints: the disk's, the home's, then what's beyond
+    /// the ladder. A delete of the workspace's checkpoints (the launch clearing
+    /// a backlog, Delete All) refuses new ones while it runs, so they wait for
+    /// it to end rather than being skipped: the session start doesn't come
+    /// again, and the boot would have no rollback point. Off the main thread.
+    func takeSessionStartCheckpoints(for profile: Profile, done: (@Sendable () -> Void)? = nil) {
+        Self.afterCheckpointPurge(profile.id) { [self] in
+            // Another delete started meanwhile: wait for that one too.
+            if Self.isPurgingCheckpoints(profile.id) {
+                checkpointLog("'\(profile.name)': session-start checkpoints wait for a checkpoint delete to end")
+                takeSessionStartCheckpoints(for: profile, done: done)
+                return
+            }
+            let now = Date()
+            do { _ = try snapshotDisk(for: profile, at: now, automatic: true) }
+            catch {
+                FileHandle.standardError.write(Data("[checkpoint] snapshot \(profile.name) failed: \(error)\n".utf8))
+            }
+            do { _ = try snapshotHomeImage(for: profile, at: now, automatic: true) }
+            catch {
+                FileHandle.standardError.write(Data("[checkpoint] home snapshot \(profile.name) failed: \(error)\n".utf8))
+            }
+            // Then what's beyond the ladder, both images at once.
+            pruneCheckpoints(for: profile, now: now)
+            done?()
+        }
     }
 
     /// Delete what a workspace holds beyond the ladder, disk and home, in one
@@ -4513,8 +4586,20 @@ public final class ProfileStore {
     /// Workspaces whose checkpoints are being deleted: no revert reads one
     /// meanwhile (`revertImage` refuses), and no second delete starts. Shared by
     /// "Delete All Checkpoints" and the delete a home resize starts.
-    private static let purging = CheckpointLock(initialState: Set<UUID>())
-    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0.contains(id) } }
+    /// Each with what waits for it to end (`afterCheckpointPurge`).
+    private static let purging = CheckpointLock(initialState: [UUID: [@Sendable () -> Void]]())
+    static func isPurgingCheckpoints(_ id: UUID) -> Bool { purging.withLock { $0[id] != nil } }
+
+    /// Run `work` on a background queue once no delete of `id`'s checkpoints
+    /// runs: now if none does, else when it ends.
+    static func afterCheckpointPurge(_ id: UUID, _ work: @escaping @Sendable () -> Void) {
+        let now = purging.withLock { s -> Bool in
+            guard s[id] != nil else { return true }
+            s[id]!.append(work)
+            return false
+        }
+        if now { DispatchQueue.global(qos: .utility).async(execute: work) }
+    }
 
     /// One delete at a time, app-wide: the backlog a launch clears for every
     /// workspace goes through it file by file, not all at once.
@@ -4527,16 +4612,21 @@ public final class ProfileStore {
     static func purgeCheckpointsInBackground(_ files: [URL], of id: UUID, name: String, why: String,
                                              done: @escaping @MainActor ((deleted: Int, failed: [URL]), TimeInterval) -> Void = { _, _ in })
         -> Bool {
-        guard purging.withLock({ $0.insert(id).inserted }) else { return false }
-        AppLog.stamp("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
+        guard purging.withLock({ s -> Bool in
+            guard s[id] == nil else { return false }
+            s[id] = []
+            return true
+        }) else { return false }
+        checkpointLog("'\(name)': deleting \(files.count) checkpoints (\(why)), one unlink each")
         purgeQueue.async {
             let t0 = Date()
             let result = unlinkOneByOne(files) { i, url, took in
-                AppLog.stamp("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
+                checkpointLog("'\(name)': checkpoint \(i + 1)/\(files.count) \(url.lastPathComponent) gone in \(String(format: "%.1f", took)) s")
             }
             let total = Date().timeIntervalSince(t0)
-            purging.withLock { _ = $0.remove(id) }
-            AppLog.stamp("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
+            let waiting = purging.withLock { $0.removeValue(forKey: id) ?? [] }
+            for work in waiting { DispatchQueue.global(qos: .utility).async(execute: work) }
+            checkpointLog("'\(name)': \(result.deleted) checkpoints deleted in \(Int(total)) s, \(result.failed.count) failed")
             DispatchQueue.main.async { MainActor.assumeIsolated { done(result, total) } }
         }
         return true
@@ -4575,7 +4665,9 @@ public final class ProfileStore {
             write("off")
             return 0
         }
-        guard (try? String(contentsOf: mark, encoding: .utf8)) != Self.ladderGeneration else { return 0 }
+        guard (try? String(contentsOf: mark, encoding: .utf8)) != Self.ladderGeneration else {
+            return sweepRetiredCheckpoints(profiles, done: done)
+        }
         let jobs = profiles.map { ($0, checkpointBacklog(for: $0, now: now)) }.filter { !$0.1.isEmpty }
         guard !jobs.isEmpty else {
             try? fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
@@ -4606,20 +4698,31 @@ public final class ProfileStore {
         return started
     }
 
-    /// A save that grows the home past its image: its checkpoints go first.
-    /// One from before a grow is the old, smaller home -- rewinding to it undoes
-    /// the resize -- and on a server whose 128 GB home had grown over time, its
-    /// full set of checkpoints is what stalled APFS. The grow itself waits for
-    /// the next cold boot.
-    func purgeHomeCheckpointsIfGrowing(_ profile: Profile) {
-        guard let gb = profile.homeImageGB else { return }
-        let target = UInt64(min(1024, max(8, gb))) << 30
-        guard let size = (try? fm.attributesOfItem(atPath: homeImageURL(for: profile).path))?[.size] as? NSNumber,
-              size.uint64Value < target else { return }
-        let files = Self.checkpointFiles(in: [homeCheckpointsDirectory(for: profile)])
-        guard !files.isEmpty else { return }
-        Self.purgeCheckpointsInBackground(files, of: profile.id, name: profile.name,
-                                          why: "home growing to \(gb) GB")
+    /// Every launch, once the ladder is settled: the checkpoints a delete had
+    /// renamed out of the list (`.deleting`) but not unlinked when the app quit
+    /// or crashed. Hidden from every list, they would hold their space until
+    /// that workspace's next session start pruned it, which may never come.
+    /// One that fails to unlink is logged and tried again at the next launch.
+    /// Returns how many workspaces it started on.
+    @discardableResult
+    func sweepRetiredCheckpoints(_ profiles: [Profile], done: @escaping @MainActor () -> Void = {}) -> Int {
+        let jobs = profiles.map { p -> (Profile, [URL]) in
+            let dirs = [checkpointsDirectory(for: p), homeCheckpointsDirectory(for: p)]
+            return (p, Self.checkpointFiles(in: dirs).filter { $0.pathExtension == CheckpointReaper.retiredExtension })
+        }.filter { !$0.1.isEmpty }
+        let left = CheckpointLock(initialState: jobs.count)
+        var started = 0
+        for (p, files) in jobs {
+            let ok = Self.purgeCheckpointsInBackground(files, of: p.id, name: p.name,
+                                                       why: "left half deleted by a quit") { _, _ in
+                if left.withLock({ $0 -= 1; return $0 == 0 }) { done() }
+            }
+            if ok { started += 1 } else if left.withLock({ $0 -= 1; return $0 == 0 }), started > 0 {
+                DispatchQueue.main.async { MainActor.assumeIsolated { done() } }   // the others already ended
+            }
+        }
+        if started == 0 { DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
+        return started
     }
 
     /// Unlink each file at once, one after another: the opposite of the reaper's
@@ -4836,6 +4939,8 @@ public final class ProfileStore {
     /// `permissions.additionalDirectories` merged in too: Claude's built-in
     /// read-only commands (ls, cat, grep…) then run there unprompted.
     static let claudeInboxDirectory = "~/.bromure/inbox"
+    /// Claude Code's built-in /diff plugin (kept off: see writeHomeSeedFiles).
+    static let claudeDiffPlugin = "cc-plugin-diff@builtin"
 
     /// ~/.grok/hooks/bromure-status.json: a cancelled Grok turn
     /// (`StopCancelled`, fired instead of `Stop`) reports the tab idle --
@@ -5296,6 +5401,13 @@ public final class ProfileStore {
             // settings.json, so seed-only-if-unset never wins. Flipping it
             // back mid-session (/config) works but resets next session.
             settings["copyOnSelect"] = false
+            // Claude Code's built-in /diff plugin opens its own multi-window
+            // diff, which fights Bromure's session view and Files pane. Forced
+            // off at every session start (bromure-agentd's twin does the
+            // same); the user's other plugins are kept.
+            var plugins = settings["enabledPlugins"] as? [String: Any] ?? [:]
+            plugins[Self.claudeDiffPlugin] = false
+            settings["enabledPlugins"] = plugins
             // Managed status hooks — report working/done/needsInput to the host
             // for the sidebar status dot.
             let hookScript = "/home/ubuntu/.bromure/agent-status.sh"
@@ -5572,6 +5684,10 @@ public final class ProfileStore {
             fi
             d=/mnt/bromure-outbox
             [ -d "$d" ] || exit 0
+            # The host's folder for these reports: under an OpenShell sandbox
+            # the hook may write there and nowhere else in the outbox. A host
+            # that didn't make it reads them from the outbox itself.
+            [ -d "$d/agent" ] && d="$d/agent"
             # No pane → bail. An empty -t target resolves to the ACTIVE window,
             # which stamps this signal onto whatever tab the user is looking at
             # (a task's "done" once killed the plan interview).

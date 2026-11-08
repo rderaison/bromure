@@ -206,7 +206,7 @@ final class ACAutomationServer {
     // docker-style VM control plane (CLI). Each returns plain dicts/bools so
     // the server stays free of app types.
     var onListVMs: (() -> [[String: Any]])?
-    var onStopVM: ((_ idOrName: String, _ action: String) async -> Bool)?
+    var onStopVM: ((_ idOrName: String, _ action: String) async -> (found: Bool, refusal: String?))?
     var onAttachVM: ((_ idOrName: String) async -> Bool)?
     /// Create (boot) a VM from a profile ref or inline spec + mounts. Returns
     /// the new VM's info dict, or nil on failure.
@@ -225,6 +225,11 @@ final class ACAutomationServer {
     /// policy advisor's pending proposals. Called on the server thread.
     var onProfileProposals: ((_ idOrName: String, _ method: String, _ sub: [String],
                               _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
+    /// `POST /profiles/{id}/openshell-allow {host, port, exe?}` and
+    /// `POST /profiles/{id}/sandbox-path {path, readWrite}`: the Sandbox
+    /// drawer's one-click decisions, from a fat client.
+    var onProfileSandboxDecision: ((_ idOrName: String, _ method: String, _ sub: [String],
+                                    _ body: [String: Any]) -> (status: Int, body: [String: Any]))?
     /// `/profiles/{id}/policy/revisions[/{n}]`: the workspace's saved policy
     /// versions. Called on the server thread.
     var onProfilePolicyRevisions: ((_ idOrName: String, _ method: String, _ sub: [String],
@@ -247,7 +252,11 @@ final class ACAutomationServer {
     /// POST /profiles/{id}/firewall {rules}: a fat client's firewall editor
     /// puts its rules in force as they're edited (saved and applied live).
     /// nil: not found or the rules don't parse.
-    var onCommitFirewall: ((_ id: String, _ rules: String) -> Bool?)?
+    var onCommitFirewall: ((_ id: String, _ rules: String) -> FirewallCommitResult?)?
+    /// POST /profiles/{id}/firewall-edit {op, …}: ONE edit, applied on the
+    /// main thread to the rules in force then (a fat client's drawer). nil:
+    /// no such workspace; else whether the rules changed.
+    var onFirewallEdit: ((_ id: String, _ edit: FirewallRuleActions.Edit) -> FirewallCommitResult?)?
     /// POST /profiles/{id}/squelch {enabled}: Squelch on or off for a
     /// workspace (saved, applies to its next model request). false: no such
     /// workspace.
@@ -299,6 +308,17 @@ final class ACAutomationServer {
     /// Recent Security Timeline rows for the fat-client mirror (the security
     /// engines run host-side, so the client can't build this itself).
     var onSecurityTimeline: (() -> [[String: Any]])?
+    /// The oldest timeline row this host still holds (epoch seconds), nil with none.
+    var onSecurityTimelineOldest: (() -> Double?)?
+    /// The first row the timeline holds, by its number, and the run those
+    /// numbers belong to: what a fat client prunes its fetched rows by.
+    var onSecurityTimelineRetention: (() -> (oldestSeq: Int?, epoch: String))?
+    /// A JSON value for an optional number: the number, or null (never a
+    /// boxed Optional, which JSONSerialization refuses).
+    nonisolated static func jsonNumberOrNull(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
+    /// A fat client's Security window: the host's timeline rows for the
+    /// last N hours (0 = all it holds), as many as its own window counts.
+    var onSecurityHistory: ((Int) -> [[String: Any]])?
     /// Local-model management for the fat client: the SERVER's unified memory
     /// (for the RAM-fit gate), which models are installed there, and any
     /// in-flight download state — the engine + downloads run host-side, so the
@@ -606,8 +626,11 @@ final class ACAutomationServer {
 
         // Console-presence: a fat client stamps every /state poll with its
         // user's idle time; the browser-MCP bridge routes agent browser
-        // streams to whichever console was used last.
-        if let r = headerBlock.lowercased().range(of: "x-bromure-console-idle-ms:") {
+        // streams to whichever console was used last. Only on the owner-only
+        // socket (the one `/state` answers on): from the loopback TCP listener
+        // any process could claim a fat client, and consent prompts would go
+        // to it instead of the local panel.
+        if isTrustedLocal, let r = headerBlock.lowercased().range(of: "x-bromure-console-idle-ms:") {
             let ms = Int(headerBlock.lowercased()[r.upperBound...]
                 .drop(while: { $0 == " " }).prefix(while: { $0.isNumber })) ?? Int.max / 2
             ConsolePresence.shared.noteRemote(idleMs: ms)
@@ -639,18 +662,16 @@ final class ACAutomationServer {
         // waiting for its verb) reads as long as its stream lives.
         Self.setReceiveTimeout(fd, 0)
         // A client that merges sections gets only those that changed; an
-        // older one (no header) the whole state each time, as before.
-        if method == "GET", path == "/state/subscribe",
-           headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil {
-            handleStateSubscribe(fd: fd, delta: true)
-            return
-        }
-        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip)
+        // older one (no header) the whole state each time, as before. Only a
+        // flag here: the route's owner-only guard decides who gets a feed.
+        let stateDelta = headerBlock.range(of: "x-bromure-state-delta: 1", options: .caseInsensitive) != nil
+        route(fd: fd, method: method, path: path, bodyJSON: bodyJSON, acceptGzip: acceptGzip, stateDelta: stateDelta)
     }
 
     // MARK: - Routing
 
-    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool) {
+    private func route(fd: Int32, method: String, path: String, bodyJSON: [String: Any], acceptGzip: Bool,
+                       stateDelta: Bool = false) {
         // Local shadow so every `sendResponse` in this switch honors the client's
         // gzip capability without threading a flag through ~50 call sites. The
         // real 4-arg method is reached via `self.sendResponse`.
@@ -771,6 +792,16 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 503, body: ["error": "unavailable"])
             }
 
+        // Sizes a workspace made here gets when it has none of its own — what
+        // a fat client's new-workspace editor shows (this Mac's free space and
+        // `vm.homeImageGB`, not the client's).
+        case ("GET", "/storage/defaults"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            sendResponse(fd: fd, status: 200, body: ["homeImageGB": SessionDisk.newHomeDefaultGB()])
+
         case ("PUT", "/preferences"), ("PATCH", "/preferences"):
             guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
@@ -849,7 +880,7 @@ final class ACAutomationServer {
         // to a slow heartbeat; older clients keep polling /state.
         case ("GET", "/state/subscribe"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
-            handleStateSubscribe(fd: fd)
+            handleStateSubscribe(fd: fd, delta: stateDelta)
 
         case ("GET", "/squelch"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
@@ -858,6 +889,24 @@ final class ACAutomationServer {
         case ("GET", "/state"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             sendResponse(fd: fd, status: 200, body: buildStateSnapshot())
+
+        // The fat client's Security window counts what this host's does:
+        // the live mirror in /state carries only the most recent rows.
+        case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"):
+            guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
+            var hours = 24
+            if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
+                for kv in q.split(separator: "&") {
+                    let pair = kv.split(separator: "=", maxSplits: 1)
+                    if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
+                }
+            }
+            let (rows, epoch) = DispatchQueue.main.sync {
+                (self.onSecurityHistory?(hours) ?? [], self.onSecurityTimelineRetention?().epoch)
+            }
+            var body: [String: Any] = ["rows": rows]
+            if let epoch { body["epoch"] = epoch }   // which run the rows' numbers are from
+            sendResponse(fd: fd, status: 200, body: body)
 
         // Fat-client local-model management: download/cancel/discard/remove a
         // model ON THE SERVER (that's where the engine + downloads live). The
@@ -1768,13 +1817,22 @@ final class ACAutomationServer {
         case "DELETE":
             let action = (bodyJSON["action"] as? String) ?? "shutdown"
             let semaphore = DispatchSemaphore(value: 0)
-            var ok = false
+            var result: (found: Bool, refusal: String?) = (false, nil)
             DispatchQueue.main.async {
-                Task { @MainActor in ok = await self.onStopVM?(id, action) ?? false; semaphore.signal() }
+                Task { @MainActor in
+                    result = await self.onStopVM?(id, action) ?? (false, nil)
+                    semaphore.signal()
+                }
             }
             semaphore.wait()
-            sendResponse(fd: fd, status: ok ? 200 : 404,
-                         body: ok ? ["status": "stopped"] : ["error": "VM not found"])
+            if !result.found {
+                sendResponse(fd: fd, status: 404, body: ["error": "VM not found"])
+            } else if let refusal = result.refusal {
+                // A suspend refused for lack of disk space: still running.
+                sendResponse(fd: fd, status: 409, body: ["error": refusal])
+            } else {
+                sendResponse(fd: fd, status: 200, body: ["status": "stopped"])
+            }
         case "GET":
             let vms = DispatchQueue.main.sync { self.onListVMs?() ?? [] }
             if let vm = vms.first(where: {
@@ -1887,6 +1945,19 @@ final class ACAutomationServer {
             sendResponse(fd: fd, status: (result["ok"] as? Bool) == true ? 200 : 409, body: result)
             return
         }
+        if method == "POST", raw.hasSuffix("/firewall-edit") {
+            let key = String(raw.dropLast("/firewall-edit".count))
+            guard let edit = FirewallRuleActions.Edit(wire: bodyJSON) else {
+                sendResponse(fd: fd, status: 400, body: ["error": "a valid edit (op insert|disable|enable|remove) required"])
+                return
+            }
+            let id = key.removingPercentEncoding ?? key
+            switch DispatchQueue.main.sync(execute: { self.onFirewallEdit?(id, edit) }) {
+            case .some(let result): sendFirewallResult(fd: fd, result)
+            case .none: sendResponse(fd: fd, status: 404, body: ["ok": false, "error": "unknown workspace"])
+            }
+            return
+        }
         if method == "POST", raw.hasSuffix("/firewall") {
             let key = String(raw.dropLast("/firewall".count))
             guard let rules = bodyJSON["rules"] as? String else {
@@ -1895,7 +1966,7 @@ final class ACAutomationServer {
             }
             let id = key.removingPercentEncoding ?? key
             switch DispatchQueue.main.sync(execute: { self.onCommitFirewall?(id, rules) }) {
-            case .some(let changed): sendResponse(fd: fd, status: 200, body: ["ok": true, "changed": changed])
+            case .some(let result): sendFirewallResult(fd: fd, result)
             case .none: sendResponse(fd: fd, status: 400, body: ["ok": false, "error": "unknown workspace or invalid rules"])
             }
             return
@@ -1909,6 +1980,7 @@ final class ACAutomationServer {
             switch sub.first {
             case "proposals": handler = onProfileProposals
             case "policy": handler = onProfilePolicyRevisions
+            case "openshell-allow", "sandbox-path": handler = onProfileSandboxDecision
             default: handler = nil
             }
             guard let handler else {
@@ -1939,6 +2011,9 @@ final class ACAutomationServer {
                     "hasHome": c.profileHomeURL != nil || c.profileHomeImageURL != nil,
                     "homeIsImage": c.profileHomeImageURL != nil,
                     "isRunning": c.isRunning,
+                    // What a home made here now gets (no image yet / erased):
+                    // this Mac's free space and setting, not the client's.
+                    "defaultHomeGB": SessionDisk.newHomeDefaultGB(),
                 ]
                 let iso = ISO8601DateFormatter()
                 if let v = c.baseImageVersion { body["baseVersion"] = v }
@@ -2432,6 +2507,13 @@ final class ACAutomationServer {
                 "pendingPrompts": self.onListPendingPrompts?() ?? [],
                 "subscriptions": self.onSubscriptionStatus?(nil) ?? [:],
                 "securityTimeline": self.onSecurityTimeline?() ?? [],
+                // The oldest row this host still holds: a fat client drops
+                // fetched history older than that (the host pruned it).
+                "securityTimelineOldest": Self.jsonNumberOrNull(self.onSecurityTimelineOldest?() ?? nil),
+                // The same, in the host's own order (a clock set back makes
+                // times go backwards): its first row's number, and whose.
+                "securityTimelineOldestSeq": (self.onSecurityTimelineRetention?().oldestSeq).map { $0 as Any } ?? NSNull(),
+                "securityTimelineEpoch": (self.onSecurityTimelineRetention?().epoch).map { $0 as Any } ?? NSNull(),
                 "localModels": self.onLocalModels?() ?? [:],
                 "kubeClusters": self.onListKubeClusters?() ?? ["clusters": [], "status": [:]],
             ]
@@ -2912,4 +2994,24 @@ struct ACShellExecResult {
     let stdout: String
     let stderr: String
     let exitCode: Int
+}
+
+extension ACAutomationServer {
+    /// A firewall change's answer: 200 when it holds (changed, or already
+    /// so), 409 with why when it couldn't be made or saved -- an `ok: true`
+    /// for a failed edit had a fat client's drawer show an Allow that
+    /// installed nothing (Finding: "Remote firewall drawer reports failed
+    /// edits as successful").
+    static func firewallResponse(_ result: FirewallCommitResult) -> (status: Int, body: [String: Any]) {
+        switch result {
+        case .changed:          return (200, ["ok": true, "changed": true])
+        case .unchanged:        return (200, ["ok": true, "changed": false])
+        case .failed(let why):  return (409, ["ok": false, "error": why])
+        }
+    }
+
+    func sendFirewallResult(fd: Int32, _ result: FirewallCommitResult) {
+        let r = Self.firewallResponse(result)
+        sendResponse(fd: fd, status: r.status, body: r.body)
+    }
 }

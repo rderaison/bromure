@@ -899,7 +899,8 @@ final class BeautifiedSessionModel: ObservableObject {
     private func rebuild() {
         // Where this session's time went (the flamegraph, the room timeline).
         if let sid = currentSession?()?.id {
-            SessionTimelineStore.shared.update(sid, items: parsedItems)
+            let base = currentPath.flatMap { buffers[$0]?.base } ?? 0
+            SessionTimelineStore.shared.update(sid, items: parsedItems, startingMidFile: base > 0)
         }
         let combined = parsedItems + pending.map(\.item)
         guard combined != items else { return }
@@ -985,11 +986,12 @@ final class BeautifiedSessionModel: ObservableObject {
         }
         queueStore.update(queueKey) { queued in
           var lost: Set<UUID> = []
+          // Files-only messages and words, each to a turn of its own; the
+          // ones still waiting are moved past the turns taken (`resolveByTurns`).
+          Self.resolveByTurns(&queued, turns: turns)
           queued.removeAll { q in
             if Self.arrivedAnyway(q, turns: turns) { return true }
             guard !q.held else { return false }
-            // A TUI may merge several queued messages into one turn.
-            if turns.dropFirst(q.baseline).contains(where: { $0.contains(q.text) }) { return true }
             // Sent with files: the agent takes their paths in as attachments,
             // so its turn never carries the text Bromure typed.
             if Self.attachmentTurnArrived(q.text, since: turns.dropFirst(q.baseline)) { return true }
@@ -1069,13 +1071,99 @@ final class BeautifiedSessionModel: ObservableObject {
     /// Whether a message sent with files (their guest paths after its words,
     /// `send`) has become a turn. The agent takes the paths in as attachments
     /// (Claude writes an image as "[Image #1]", or not at all in the text), so
-    /// the turn is compared without them: it carries the words, or, for a
-    /// message that was only files, it's any turn since.
+    /// the turn is compared without them: it carries the words. A message
+    /// that was only files has no words to find: `fileOnlyArrivals`.
     nonisolated static func attachmentTurnArrived(_ typed: String, since turns: ArraySlice<String>) -> Bool {
         guard typed.contains(GuestDrop.baseDir) else { return false }
         let want = withoutAttachments(typed)
-        if want.isEmpty { return !turns.isEmpty }
+        guard !want.isEmpty else { return false }
         return turns.contains { withoutAttachments($0).contains(want) }
+    }
+
+    /// The first turn since `q` was queued that carries its words and hasn't
+    /// resolved an earlier row with the same words (`taken`).
+    nonisolated static func textTurn(_ q: QueuedMessage, turns: [String], taken: Set<Int>) -> Int? {
+        turns.indices.first { $0 >= q.baseline && !taken.contains($0) && turns[$0].contains(q.text) }
+    }
+
+    /// A message of files only, no words.
+    nonisolated static func isFileOnly(_ typed: String) -> Bool {
+        typed.contains(GuestDrop.baseDir) && withoutAttachments(typed).isEmpty
+    }
+
+    /// Which of `rows` (in queue order) that were only files have become a turn.
+    /// Any turn since one was queued used to count: several sent while the
+    /// agent was busy share a baseline, so the first one's turn cleared them
+    /// all, and an unrelated one (typed in the terminal) did too. Now a row
+    /// is resolved by a turn that names one of its files (the agent kept the
+    /// path: several sent together may come out as one turn), or else by a
+    /// turn of attachments only ("[Image #1]", or no words at all) that no
+    /// other row has taken, the earliest first. A turn with words is never
+    /// one of these.
+    nonisolated static func fileOnlyArrivals(_ rows: [QueuedMessage], turns: [String]) -> Set<UUID> {
+        Set(fileOnlyClaims(rows, turns: turns).keys)
+    }
+
+    /// The not-held messages that have become a turn, files only
+    /// (`fileOnlyArrivals`) or words (`textTurn`), taken out of `rows`. A
+    /// claim lasted one pass only: the next poll, the resolved row gone, the
+    /// same turn resolved the next one queued like it, a message the agent
+    /// hadn't got. So each one still waiting that was queued after a
+    /// resolved one like it (files only; the same words) has its baseline
+    /// moved past that turn: its own turn comes later. In the rows, so it
+    /// holds from poll to poll, and across launches. The ids removed.
+    @discardableResult
+    nonisolated static func resolveByTurns(_ rows: inout [QueuedMessage], turns: [String]) -> Set<UUID> {
+        let files = fileOnlyClaims(rows, turns: turns)
+        var claims: [(id: UUID, turn: Int, words: String?)] = files.map { ($0.key, $0.value, nil) }
+        var textTurns: [String: Set<Int>] = [:]
+        for q in rows where !q.held && files[q.id] == nil {
+            // A TUI may merge several queued messages into one turn; the same
+            // words sent twice need two turns carrying them.
+            if let i = textTurn(q, turns: turns, taken: textTurns[q.text] ?? []) {
+                textTurns[q.text, default: []].insert(i)
+                claims.append((q.id, i, q.text))
+            }
+        }
+        guard !claims.isEmpty else { return [] }
+        let position = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($1.id, $0) })
+        let gone = Set(claims.map(\.id))
+        rows.removeAll { gone.contains($0.id) }
+        for c in claims {
+            guard let p = position[c.id] else { continue }
+            for k in rows.indices where !rows[k].held && (position[rows[k].id] ?? 0) > p
+                && rows[k].baseline <= c.turn {
+                let alike = c.words.map { rows[k].text == $0 } ?? isFileOnly(rows[k].text)
+                if alike { rows[k].baseline = c.turn + 1 }
+            }
+        }
+        return gone
+    }
+
+    /// Each files-only message that has become a turn, and the turn.
+    nonisolated static func fileOnlyClaims(_ rows: [QueuedMessage], turns: [String]) -> [UUID: Int] {
+        let candidates = rows.filter { !$0.held && isFileOnly($0.text) }
+        guard !candidates.isEmpty else { return [:] }
+        func paths(_ s: String) -> [Substring] {
+            s.split(whereSeparator: \.isWhitespace).filter { $0.hasPrefix(GuestDrop.baseDir) }
+        }
+        var arrived: [UUID: Int] = [:]
+        var taken: Set<Int> = []
+        // Named first (whole paths: a.png isn't a.png.bak): those turns are theirs.
+        let named = turns.map { Set(paths($0)) }
+        for q in candidates {
+            let mine = paths(q.text)
+            for i in turns.indices where i >= q.baseline && mine.contains(where: { named[i].contains($0) }) {
+                arrived[q.id] = max(arrived[q.id] ?? i, i); taken.insert(i)
+            }
+        }
+        // Then one attachment-only turn each, in order.
+        for q in candidates where arrived[q.id] == nil {
+            if let i = turns.indices.first(where: { $0 >= q.baseline && !taken.contains($0) && withoutAttachments(turns[$0]).isEmpty }) {
+                arrived[q.id] = i; taken.insert(i)
+            }
+        }
+        return arrived
     }
 
     /// The words of a message, without attachment paths or placeholders.
@@ -1859,7 +1947,7 @@ final class BeautifiedSessionModel: ObservableObject {
         return tail.contains { raw in
             let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
             return l.hasSuffix("[stop]") || l == "[stop]" || l.contains("esc to interrupt")
-                || l.contains("ctrl+c to interrupt")
+                || l.contains("ctrl+c to interrupt") || l.contains("ctrl-c to interrupt")
         }
     }
 
@@ -2050,9 +2138,14 @@ final class BeautifiedSessionModel: ObservableObject {
         }
     }
 
-    /// Interrupt the running agent — send Esc to its pane, the interrupt key
-    /// every supported TUI honours ("esc to interrupt"). Optimistically drops the
-    /// cue for instant feedback; the next poll reconciles from real status.
+    /// Interrupt the running agent with the key it takes for that: the one its
+    /// own busy line names ("esc to interrupt", "ctrl+c to interrupt", Grok's
+    /// "[stop]" is Ctrl-C), else its kind's. Still at it a moment later (Claude
+    /// running a command can need a second Esc), the same key once more, only
+    /// while that busy line is up: a second Ctrl-C to an idle agent quits it,
+    /// and a second Esc opens Claude's rewind. It used to be Esc for every
+    /// agent, once, which Grok ignores. Optimistically drops the cue for
+    /// instant feedback; the next poll reconciles from real status.
     func interrupt() {
         gate.interrupt()
         // Force the cue off now; the next poll feeds the real `isWorking()` to
@@ -2061,38 +2154,110 @@ final class BeautifiedSessionModel: ObservableObject {
         // omp hands its whole queue back to the input box on Esc — not sent,
         // and our rows for it then aged out of the strip unseen. Ours are
         // taken back and held here, typed in (and confirmed) once it's idle.
-        let restored = AgentQueueSupport.escapeRestoresQueue(agentKind)
-            ? queued.filter { !$0.held && !$0.isDelivered && !$0.sending } : []
+        let kind = agentKind
+        let restoring = queued.filter { !$0.held && !$0.isDelivered && !$0.sending }
+        // The turn this Stop is for: Stop drops the cue at once, so a message
+        // can be sent before the second press is due, and a new turn's busy
+        // line would read as the old one still going (CWE-367).
+        // And what the queue had typed in by then: off stage, the store's
+        // drain types held messages without passing through the gate.
+        let turn = StopTurn(gate: gate.turns,
+                            delivered: Set(queueStore.messages(queueKey).filter(\.isDelivered).map(\.id)))
         Task { [weak self] in
-            await self?.provider.pressKeys(["Escape"])
-            if !restored.isEmpty { await self?.reclaimAfterEscape(restored) }
-            await self?.rescanSoon()
+            guard let self else { return }
+            let key = Self.interruptKey(screen: await self.paneTail(), agent: kind)
+            await self.provider.pressKeys([key])
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if self.stoppedTurnStillCurrent(turn), Self.screenShowsBusy(await self.paneTail()),
+               self.stoppedTurnStillCurrent(turn) {
+                BACDebug.log("beautified", "stop: still busy after \(key), once more")
+                await self.provider.pressKeys([key])
+            }
+            if key == "Escape", AgentQueueSupport.escapeRestoresQueue(kind), !restoring.isEmpty {
+                await self.reclaimAfterEscape(restoring, turn: turn)
+            }
+            await self.rescanSoon()
         }
+    }
+
+    /// Which turn a Stop was for: the gate's count, and the queue's
+    /// messages already typed in.
+    struct StopTurn { let gate: Int; let delivered: Set<UUID> }
+
+    /// No turn started since the Stop at `turn` (a send, a held message the
+    /// chat or the store's drain typed in), and nothing being typed in now.
+    private func stoppedTurnStillCurrent(_ turn: StopTurn) -> Bool {
+        guard gate.sameTurn(as: turn.gate), !sending else { return false }
+        return !Self.queueStartedTurn(queueStore.messages(queueKey), since: turn.delivered)
+    }
+
+    /// A message of `queue` typed in since `delivered` was taken, or being typed now.
+    nonisolated static func queueStartedTurn(_ queue: [QueuedMessage], since delivered: Set<UUID>) -> Bool {
+        queue.contains { $0.sending || ($0.isDelivered && !delivered.contains($0.id)) }
+    }
+
+    /// The tmux key that interrupts this agent: what its busy line says, else
+    /// what its kind takes (Grok: Ctrl-C; the others: Esc).
+    nonisolated static func interruptKey(screen: String, agent: String?) -> String {
+        for raw in screen.split(whereSeparator: \.isNewline).suffix(14).reversed() {
+            let l = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            if l.contains("ctrl+c to interrupt") || l.contains("ctrl-c to interrupt") { return "C-c" }
+            if l.contains("esc to interrupt") { return "Escape" }
+            if l.hasSuffix("[stop]") || l == "[stop]" { return "C-c" }   // Grok's busy line
+        }
+        return agent == "grok" ? "C-c" : "Escape"
+    }
+
+    /// The last lines of the agent's pane, as on screen ("" if unreadable).
+    private func paneTail() async -> String {
+        guard let w = provider.activeTabIndex() else { return "" }
+        let probe = PaneTypeGuard.resolve(provider.paneTarget(window: w))
+            + "[ -n \"$_bt\" ] && tmux capture-pane -p -t \"$_bt\" 2>/dev/null | tail -n 30"
+        return await provider.execGuest(probe, timeout: 4) ?? ""
     }
 
     /// After Esc: when the agent put our queued messages back into its input
     /// box, empty the box and hold them here instead.
-    private func reclaimAfterEscape(_ restored: [QueuedMessage]) async {
+    private func reclaimAfterEscape(_ restored: [QueuedMessage], turn: StopTurn) async {
         guard let first = restored.first, let w = provider.activeTabIndex() else { return }
         let target = provider.paneTarget(window: w)
         let probe = PaneTypeGuard.resolve(target)
             + "[ -n \"$_bt\" ] && tmux capture-pane -p -e -t \"$_bt\" 2>/dev/null | tail -n 30"
+        func ownInBox() async -> Bool {
+            let screen = await provider.execGuest(probe, timeout: 8) ?? ""
+            if case .text(let d) = AgentInputBox.content(screen) { return AgentInputBox.isOwn(d, of: first.text) }
+            return false
+        }
         var inBox = false
         for _ in 0..<8 {
             try? await Task.sleep(nanoseconds: 400_000_000)
-            let screen = await provider.execGuest(probe, timeout: 8) ?? ""
-            if case .text(let d) = AgentInputBox.content(screen), AgentInputBox.isOwn(d, of: first.text) {
-                inBox = true
-                break
-            }
+            if await ownInBox() { inBox = true; break }
         }
-        guard inBox else {
+        // A send under way: wait it out (a fat client's can take tens of
+        // seconds). One that failed or was held started no turn: the queue
+        // omp gave back is still ours to hold, or these messages would age
+        // out of the strip undelivered. The box is looked at again, as that
+        // send may have left its own text in it (or emptied it).
+        var stillInBox = inBox
+        if sending {
+            for _ in 0..<300 where sending { try? await Task.sleep(nanoseconds: 200_000_000) }
+            if stoppedTurnStillCurrent(turn) { stillInBox = await ownInBox() }
+        }
+        // A turn sent since the Stop: what's in the box may be the user's now.
+        guard stoppedTurnStillCurrent(turn) else {
+            BACDebug.log("beautified", "after Esc: a turn started since the stop — box left as is")
+            return
+        }
+        guard inBox || stillInBox else {
             BACDebug.log("beautified", "after Esc: queued text not in the input box — left as is")
             return
         }
-        // One C-u per line (the restore joins them with blank lines).
-        let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
-        await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        // Emptied only while it still shows the queue: one C-u per line (the
+        // restore joins them with blank lines).
+        if stillInBox {
+            let lines = restored.reduce(0) { $0 + $1.text.split(separator: "\n", omittingEmptySubsequences: false).count + 1 }
+            await runKeys(Array(repeating: ["C-u"], count: lines + 1))
+        }
         let pinned = await provider.pinnedTarget(window: w)
         let ids = Set(restored.map(\.id))
         queueStore.update(queueKey) { l in
@@ -2211,7 +2376,7 @@ final class BeautifiedSessionModel: ObservableObject {
         failure = nil
         prompt = nil
         settleRecordedFailure()
-        gate.userSent()                   // a fresh send supersedes any prior stop
+        gate.userSending()                // a fresh send supersedes any prior stop
         // A slash command (/model, /cost, /help…) drives the TUI's own overlay;
         // it does NOT start an agent turn. Marking it "working" showed the
         // "Thinking…" cue the moment the command was sent, and — because a
@@ -2274,6 +2439,7 @@ final class BeautifiedSessionModel: ObservableObject {
                 self.queueStore.update(key) { $0.append(entry) }
                 let outcome: ChatQueueStore.Outcome = native ? await self.provider.send(text) : .typed
                 if native, outcome == .typed {
+                    self.gate.turnStarted()
                     self.queueStore.update(key) { l in
                         guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
                         l[i].handedOver = true
@@ -2368,7 +2534,7 @@ final class BeautifiedSessionModel: ObservableObject {
                                        failure: ChatQueueStore.notTypedText)
                 return
             case .typed:
-                break
+                self.gate.turnStarted()
             }
             if isCommand { self.watchCommand(raw, before: before) }
             await self.poll()
@@ -4818,7 +4984,7 @@ private struct PromptCard: View {
                                    comment: "Grok data-retention banner hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         } else {
-            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            Text(NSLocalizedString("Open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
     }
@@ -4842,7 +5008,7 @@ private struct PromptCard: View {
             }
             .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
         } else {
-            Text(NSLocalizedString("Open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+            Text(NSLocalizedString("Open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
     }
@@ -4893,7 +5059,7 @@ private struct PromptCard: View {
             .buttonStyle(.plain)
             .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
-        Text(NSLocalizedString("Or open Linux (⌥⌘U) to answer in the terminal.", comment: "prompt hint"))
+        Text(NSLocalizedString("Or open the terminal (⌥⌘U) to answer there.", comment: "prompt hint"))
             .font(.system(size: 11)).foregroundStyle(.tertiary)
     }
 

@@ -599,6 +599,23 @@ the point of divergence in the source.
    and it is what makes §1.4 work. With an empty tuple the function is
    byte-for-byte upstream's, which is what `differential/` exercises.
 
+**Not a divergence: the AF_VSOCK ban.** OpenShell's main filter refuses
+`socket(AF_VSOCK, …)`, and so does this one (`bromure-sandboxd` passes
+`allow_vsock=False`). Until 5.4.3 the ban was lifted, because Bromure's
+helpers the agent starts -- its MCP servers (browser, board, automations,
+infrastructure, delegation, Switchboard) and the plan driver -- reach the host
+over vsock. That let a sandboxed process reach any port the host listens on:
+the exec pool (5800) hands a host `vm exec` to whichever connection it
+dequeues, so a sandboxed process could take one meant for agentd, read the
+command and answer it; file transfer, the credential and attestor listeners
+take any connection the same way. Those helpers now ask agentd's relay
+(`bromure-agentd.py` §4b, `/tmp/bromure-vsock.sock`), outside the sandbox: a
+client names a port, agentd connects it only if it is one of 5830-5836, and
+relays the bytes unchanged. The helpers try AF_VSOCK first and use the relay
+only when the socket is refused, so a workspace without the process layer is
+unchanged. The Claude and Codex token agents, the VM bridge and the loopback
+relay run inside agentd and never needed it.
+
 **Not a divergence, though it looks like one:** `no_new_privs` is set explicitly
 before `restrict_self`. OpenShell reaches `restrict_self` with nnp already set,
 inherited across fork from the workload-launcher thread that sets it in

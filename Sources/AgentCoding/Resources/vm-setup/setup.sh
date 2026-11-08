@@ -741,9 +741,16 @@ if [ ! -d "$OUTBOX" ]; then
     echo "bromure-open: outbox share not mounted; cannot relay $URL" >&2
     exit 2
 fi
+# The relay's own folder when the host made one: a sandboxed agent may
+# write there and nowhere else in the outbox.
+DIR="$OUTBOX/urls"
+[ -d "$DIR" ] || DIR="$OUTBOX"
 # Unique filename per call so concurrent opens don't collide.
-F="$OUTBOX/url-$(date +%s)-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').txt"
-printf '%s\n' "$URL" > "$F"
+F="$DIR/url-$(date +%s)-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n').txt"
+if ! { printf '%s\n' "$URL" > "$F"; } 2>/dev/null; then
+    echo "bromure-open: cannot write $DIR to relay $URL (a sandboxed agent may write only $OUTBOX/urls, which the host creates)" >&2
+    exit 2
+fi
 EOO
 chmod +x /usr/local/bin/bromure-open
 

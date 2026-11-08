@@ -236,11 +236,23 @@ enum DropImageStore {
 /// reports idle on its own, or the user sends a new message.
 struct WorkingGate {
     private(set) var interrupted = false
+    /// Turns started (a send, a held message typed in): what a Stop's delayed
+    /// second press checks, so it never lands on a turn begun after the Stop.
+    private(set) var turns = 0
 
     /// User hit Stop/Esc — suppress "working" until reality catches up.
     mutating func interrupt() { interrupted = true }
     /// User sent a new message — a fresh turn supersedes the stop.
-    mutating func userSent() { interrupted = false }
+    mutating func userSent() { interrupted = false; turns &+= 1 }
+    /// The composer's send, under way: the cue shows at once, but no turn
+    /// counts until it is typed in (`turnStarted`). A send that fails, or is
+    /// held, starts none, and a Stop's reclaim of omp's queue still applies.
+    mutating func userSending() { interrupted = false }
+    /// The composer's send was typed in: a turn begun.
+    mutating func turnStarted() { turns &+= 1 }
+
+    /// Still the turn a Stop at `turn` stopped: none started since.
+    func sameTurn(as turn: Int) -> Bool { turns == turn }
 
     /// The effective working state for a raw `isWorking()` reading. While
     /// interrupted it stays `false`; the first idle reading releases the latch

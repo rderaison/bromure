@@ -278,7 +278,7 @@ Three layers stack to make the profile's environment. The bottom layer is shared
 
 | Setting | Description |
 |---|---|
-| **VM RAM** | RAM allocated to this profile's VM, in GB (2–32 GB, step 2). Defaults to a host-scaled value (4 GB on hosts with less than 18 GB RAM, 6 GB up to 36 GB, 8 GB on larger machines). Increase this if Claude / Codex feels sluggish or Rust builds run out of memory. |
+| **VM RAM** | RAM allocated to this profile's VM, in GB (2–32 GB, step 2). Defaults to a host-scaled value (2 GB on hosts with less than 16 GB RAM, 4 GB under 18 GB, 6 GB up to 36 GB, 8 GB on larger machines). Increase this if Claude / Codex feels sluggish or Rust builds run out of memory. |
 
 ### Network
 

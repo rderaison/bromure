@@ -156,7 +156,7 @@ struct APFSCalmTests {
 
         let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
         for _ in 0..<24 {   // two heavy ticks
-            for apply in await scanner.tick() { apply(vm) }
+            for apply in await scanner.tick().all { apply(vm) }
         }
         #expect(reboots == 1 && tabs == 1)
         #expect(ips == ["192.168.64.7"])           // reported once, though read twice
@@ -165,6 +165,117 @@ struct APFSCalmTests {
         #expect(ports.count == 1 && ports.first?.first?.port == 8080)
         let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
         #expect(left == ["ip.txt", "tabs.txt", "ports.txt"])
+    }
+
+    /// The finding (CWE-367): a relaunch cancelled the poll task, but a tick
+    /// already queued on the outbox's queue still ran: it removed one-shot
+    /// files the new guest wrote (reboot-intent, a URL to open, the home's
+    /// migration mark), and its events were applied anyway, to the outgoing
+    /// sandbox, whose callbacks reach the workspace's new session.
+    @Test("a cancelled scanner's tick, queued or not, consumes nothing; a cancelled poll applies nothing")
+    func cancelledScannerConsumesNothing() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        func put(_ name: String) throws { try "x".write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        try put("reboot-intent"); try put("url-1.txt")
+        // Cancelled before it ticks.
+        let old = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        old.cancel()
+        #expect(await old.tick().all.isEmpty)
+        // Queued behind a stalled tick, then cancelled before its turn.
+        let stalled = DispatchSemaphore(value: 0)
+        let q = UbuntuSandboxVM.OutboxScanner.queue(for: dir)
+        q.async { stalled.wait() }
+        let queuedScanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        async let queued = queuedScanner.tick()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        queuedScanner.cancel()
+        stalled.signal()
+        #expect(await queued.all.isEmpty)
+        // The next guest's one-shots are still there, for the new scanner.
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        #expect(left.isSuperset(of: ["reboot-intent", "url-1.txt"]))
+        let fresh = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        #expect(!(await fresh.tick()).all.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("reboot-intent").path))
+        // The poll: a tick that finished after the cancel isn't applied, and
+        // every stop goes through the one that cancels the scanner too.
+        let src = try source("Sources/AgentCoding/UbuntuSandboxVM.swift")
+        let poll = try body(of: "private func startOutboxPolling() {", in: src)
+        #expect(poll.contains("guard !Task.isCancelled, !scanner.isCancelled else {"))
+        #expect(src.components(separatedBy: "outboxPollTask?.cancel()").count - 1 == 1)   // only in cancelOutboxPoll
+        #expect(src.components(separatedBy: "cancelOutboxPoll()").count - 1 >= 6)
+    }
+
+    /// The finding (CWE-367): a scan removed a one-shot file (reboot-intent,
+    /// home-migrated.txt) and the poll was cancelled before its events were
+    /// applied: the guard dropped them all, the file already gone. The host
+    /// never stamped the migrated home, or took a guest reboot for a
+    /// shutdown. What a removed one-shot said is applied even when
+    /// cancelled; a stop waits for the last tick before it decides.
+    @Test("a cancelled poll still applies the one-shots its last tick removed; a stop waits for it")
+    @MainActor
+    func cancelledPollKeepsRemovedOneShots() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        func put(_ name: String, _ body: String) throws {
+            try body.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try put("reboot-intent", "")
+        try put("home-migrated.txt", "ok")
+        try put("agent-status-2.txt", "idle")
+        try put("ip.txt", "192.168.64.9")
+        try put("tabs.txt", "0\t1\tshell\t-\n")
+        let tmp = try tempDir(); defer { try? FileManager.default.removeItem(at: tmp) }
+        let vm = UbuntuSandboxVM(imageManager: UbuntuImageManager(storageDir: tmp, setupDir: tmp))
+        var reboots = 0, migrated = 0, statuses = 0, ips = 0, tabs = 0
+        vm.onGuestReboot = { reboots += 1 }
+        vm.onHomeMigrated = { migrated += 1 }
+        vm.onAgentStatus = { _, _ in statuses += 1 }
+        vm.onIPUpdate = { _ in ips += 1 }
+        vm.onTabList = { _ in tabs += 1 }
+        // A heavy tick's worth: the one-shots are marked as such; the reads
+        // (roster, IP) aren't, so a cancelled poll leaves them out.
+        let scanner = UbuntuSandboxVM.OutboxScanner(outbox: dir)
+        var all = 0
+        for _ in 0..<12 {
+            let found = await scanner.tick()
+            all += found.all.count
+            for apply in found.oneShots { apply(vm) }
+        }
+        #expect(reboots == 1 && migrated == 1 && statuses == 1)
+        #expect(ips == 0 && tabs == 0)
+        #expect(all > 3)
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        #expect(left == ["ip.txt", "tabs.txt"])
+
+        // settle: back when the task is, or after the bound, whichever first.
+        var t0 = Date()
+        await UbuntuSandboxVM.settle(Task { _ = try? await Task.sleep(nanoseconds: 50_000_000) }, within: 5)
+        #expect(Date().timeIntervalSince(t0) < 2)
+        t0 = Date()
+        let long = Task { _ = try? await Task.sleep(nanoseconds: 20_000_000_000) }
+        await UbuntuSandboxVM.settle(long, within: 0.2)
+        #expect(Date().timeIntervalSince(t0) < 3)
+        long.cancel()
+        await UbuntuSandboxVM.settle(nil, within: 5)
+
+        // Wired: the cancelled poll applies the removed one-shots; a scan a
+        // cancel stops keeps what it took; the guest's stop settles the last
+        // tick before onStopped decides reboot or shutdown.
+        let src = try source("Sources/AgentCoding/UbuntuSandboxVM.swift")
+        let poll = try body(of: "private func startOutboxPolling() {", in: src)
+        let cancelled = try #require(poll.range(of: "guard !Task.isCancelled, !scanner.isCancelled else {"))
+        #expect(poll[cancelled.upperBound...].prefix(120).contains("for apply in found.oneShots { apply(self) }"))
+        let scan = try #require(src.range(of: "private func scan() -> Found {"))
+        let scanBody = src[scan.upperBound...].prefix(30_000)
+        let scanEnd = scanBody.range(of: "\n        }\n")?.lowerBound ?? scanBody.endIndex
+        #expect(!scanBody[..<scanEnd].contains("return []"))
+        for marker in ["oneShot { $0.onGuestReboot?() }", "oneShot { $0.onHomeMigrated?() }", "oneShot { $0.onURLOpen?(url) }"] {
+            #expect(scanBody[..<scanEnd].contains(marker), "\(marker)")
+        }
+        let stop = try body(of: "public nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {", in: src)
+        let settle = try #require(stop.range(of: "await Self.settle(self.cancelOutboxPoll(), within: 2)"))
+        let stopped = try #require(stop.range(of: "self.onStopped?(nil)"))
+        #expect(settle.lowerBound < stopped.lowerBound)
     }
 
     @Test("two scanners of one outbox share a queue, so a relaunch's waits behind the old tick")
@@ -213,7 +324,7 @@ struct APFSCalmTests {
     func noSessionStartCheckpoint() throws {
         let src = try source("Sources/AgentCoding/BromureAC.swift")
         let guardAt = try #require(src.range(of: "guard CheckpointReaper.shared.enabled else {"))
-        let snap = try #require(src.range(of: "do { _ = try store.snapshotDisk(for: profile, at: now, automatic: true) }"))
+        let snap = try #require(src.range(of: "self.store.takeSessionStartCheckpoints(for: profile)"))
         #expect(guardAt.lowerBound < snap.lowerBound)
         #expect(src[guardAt.upperBound..<snap.lowerBound].contains("return"))
         #expect(src[guardAt.upperBound..<snap.lowerBound].count < 400)

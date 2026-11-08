@@ -1598,6 +1598,7 @@
 "Upstream TLS" = "TLS upstream";
 "Prompt injection" = "Injeção de prompt";
 "swapped in %@" = "trocado por %@";
+"presented client certificate" = "certificado de cliente apresentado";
 "signed" = "assinado";
 "blocked — exfiltration attempt, VM paused" = "bloqueado — tentativa de exfiltração, VM pausada";
 
@@ -1824,8 +1825,7 @@
 "Let's set up a machine first." = "Vamos configurar uma máquina primeiro.";
 "Runs in an isolated machine of its own. Nothing on your Mac is touched." = "Roda em uma máquina isolada só dela. Nada no seu Mac é tocado.";
 "Ask for anything — or just press Return to open %@." = "Peça o que quiser — ou apenas pressione Return para abrir %@.";
-"Linux" = "Linux";
-"Open Linux (⌥⌘U) to answer in the terminal." = "Abra o Linux (⌥⌘U) para responder no terminal.";
+"Open the terminal (⌥⌘U) to answer there." = "Abra o terminal (⌥⌘U) para responder lá.";
 "Waking up…" = "Acordando…";
 "Almost there…" = "Quase lá…";
 "Asleep. Your next message wakes it up and carries on from here." = "Dormindo. Sua próxima mensagem a acorda e continua daqui.";
@@ -2370,8 +2370,7 @@
 /* Added 2026-09-21: the Linux pill is a jump, the Session pill the way back */
 "Session" = "Sessão";
 "Back to the session this terminal hosts (⌥⌘U)" = "Voltar à sessão hospedada por este terminal (⌥⌘U)";
-"The Linux machine behind this session: its terminal tab in the Machines list (⌥⌘U)" = "A máquina Linux por trás desta sessão: sua aba de terminal na lista de máquinas (⌥⌘U)";
-"Or open Linux (⌥⌘U) to answer in the terminal." = "Ou abra o Linux (⌥⌘U) para responder no terminal.";
+"Or open the terminal (⌥⌘U) to answer there." = "Ou abra o terminal (⌥⌘U) para responder lá.";
 "New machine…" = "Nova máquina…";
 
 /* Added 2026-09-22 — Preferences window targets a remote server */
@@ -3961,7 +3960,7 @@
 "access token renews on next use" = "o token de acesso será renovado no próximo uso";
 "(exit code %d)" = "(código de saída %d)";
 "Not delivered — the agent didn't take it in. Edit it or send it again." = "Não entregue — o agente não o recebeu. Edite ou envie novamente.";
-"Off by default: agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Desativado por padrão: os agentes daqui não alcançam nenhum outro espaço de trabalho até você marcar um abaixo (ou ativar “Todos os espaços de trabalho”).";
+"Agents here reach no other workspace until you tick one below (or turn on Every workspace)." = "Os agentes daqui não alcançam nenhum outro espaço de trabalho até você marcar um abaixo (ou ativar “Todos os espaços de trabalho”).";
 "Closes the editor without saving changes" = "Fecha o editor sem salvar as alterações";
 
 /* prompt: Grok data-retention banner */
@@ -4357,3 +4356,8 @@
 
 /* beautified: the guest has gone silent */
 "It may be out of memory. What's shown here may be out of date." = "Ele pode estar sem memória. O que aparece aqui pode estar desatualizado.";
+"Show this session's terminal (⌥⌘U)" = "Mostrar o terminal desta sessão (⌥⌘U)";
+
+/* Suspend refused for lack of disk space */
+"Couldn't suspend “%@”: the disk is almost full." = "Não foi possível suspender “%@”: o disco está quase cheio.";
+"The workspace is still running." = "O espaço de trabalho continua em execução.";

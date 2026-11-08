@@ -37,7 +37,10 @@ final class AgentSessionEngine {
         self.store = store
         self.delegate = delegate
         // A session that leaves the store takes its transcript copy along.
-        store.onRemove = { [weak self] id in self?.transcripts.remove(id) }
+        store.onRemove = { [weak self] id in
+            self?.transcripts.remove(id)
+            TranscriptSearchIndex.shared.forget(id)   // its saved copy of the conversation too
+        }
         // A new agent run in an ended session's tab became a session of its
         // own: the window showing the old one follows the run.
         store.onSucceeded = { [weak self] old, new in

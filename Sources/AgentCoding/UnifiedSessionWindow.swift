@@ -533,8 +533,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         sidebarHost.translatesAutoresizingMaskIntoConstraints = false
         // Default sizing, unlike the fat client's sidebar: without it the
         // window collapsed to its header (118 pt) and couldn't be resized, even
-        // past a contentMinSize. The cost: every frame of a working dot's pulse
-        // re-measures the sidebar for the window's minimum size.
+        // past a contentMinSize. It costs nothing while rows animate: the
+        // working dot's pulse is scale and opacity, which SwiftUI draws without
+        // measuring, and the unread orb turns in Core Animation (0 measure
+        // passes each; SidebarRedrawTests). What re-measured the sidebar on a
+        // busy server was its rows being rebuilt on every roster pass, which
+        // no longer happens. Anything that animates in the sidebar has to keep
+        // it that way.
         self.sidebarHost = sidebarHost
 
         // Empty stage — shows the selected off/suspended profile's Start card.
@@ -1006,7 +1011,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
 
     /// ⌃⌘N / the toolbar's shield button.
     @objc func togglePolicyDrawer(_ sender: Any?) {
+        // No sandbox on the stage's workspace: no drawer (⌃⌘N included).
+        guard listModel.policyDrawerOpen || listModel.hasSandboxDrawer(listModel.stageProfileID) else { return }
         setPolicyDrawerOpen(!listModel.policyDrawerOpen)
+    }
+
+    /// E2E (`/debug/fatclient` action policy-drawer): {op: toggle|state}.
+    func debugPolicyDrawer(_ p: [String: Any]) -> [String: Any] {
+        if (p["op"] as? String) == "toggle" { togglePolicyDrawer(nil) }
+        contentView?.layoutSubtreeIfNeeded()
+        return RemoteHostWindow.policyDrawerReport(listModel, host: policyDrawerHost, stage: stage)
     }
 
     func setPolicyDrawerOpen(_ open: Bool) {
@@ -1034,8 +1048,11 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
             list: listModel,
             onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
             onOpenSettings: { [weak self] id in
-                ProfileEditorView.pendingWorkspaceCategory = (id, .firewall)
-                self?.acDelegate?.sidebarEditProfile(id)
+                // One call: a new editor opens on the pane, an open one is
+                // switched to it (the slot set here and never read, when the
+                // editor was open, opened a later editor on Firewall).
+                guard let d = self?.acDelegate, let p = d.profiles.first(where: { $0.id == id }) else { return }
+                d.openEditorWindow(editing: p, category: .firewall)
             })
         let host = NSHostingView(rootView: drawer)
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -6111,7 +6128,7 @@ struct LinuxPill: View {
                     .font(.system(size: 12))
                 Text(back ? NSLocalizedString("Session", comment: "toolbar")
                      : chat ? NSLocalizedString("Chat", comment: "toolbar")
-                     : NSLocalizedString("Linux", comment: "toolbar"))
+                     : NSLocalizedString("Terminal", comment: "toolbar"))
                     .font(.system(size: 12, weight: .medium))
             }
             .foregroundStyle(.secondary)
@@ -6125,7 +6142,7 @@ struct LinuxPill: View {
         .onHover { hovering = $0 }
         .help(back ? NSLocalizedString("Back to the session this terminal hosts (⌥⌘U)", comment: "toolbar")
                    : chat ? NSLocalizedString("Show this session as a chat (⌥⌘U)", comment: "toolbar")
-                   : NSLocalizedString("Show this session's Linux terminal (⌥⌘U)", comment: "toolbar"))
+                   : NSLocalizedString("Show this session's terminal (⌥⌘U)", comment: "toolbar"))
     }
 }
 

@@ -45,26 +45,40 @@ enum FirewallRuleActions {
     /// `text` with `edit` applied, or nil when the text doesn't parse or the
     /// edit changes nothing (rule not found).
     static func apply(_ edit: Edit, to text: String, now: Date = Date()) -> String? {
-        guard var policy = try? EgressPolicy.parse(text) else { return nil }
+        if case .changed(let out) = outcome(edit, to: text, now: now) { return out }
+        return nil
+    }
+
+    /// What an edit does to a ruleset: new rules, nothing (it's already so:
+    /// an Allow whose rule is there), or it can't be made, and why.
+    enum Outcome: Equatable {
+        case changed(String)
+        case unchanged
+        case failed(String)
+    }
+
+    static func outcome(_ edit: Edit, to text: String, now: Date = Date()) -> Outcome {
+        guard var policy = try? EgressPolicy.parse(text) else { return .failed("the workspace's firewall rules don't parse") }
+        let gone = Outcome.failed("that rule is no longer in the workspace's firewall")
         switch edit {
         case .insert(let rule):
             policy.rules.removeAll { $0.text == rule.text }
             policy.rules.insert(rule, at: 0)
         case .disable(let ruleText):
-            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return nil }
+            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return gone }
             policy.rules[i].enabled = false
             policy.rules[i].expiresAt = nil
             policy.rules[i].untilStop = false
         case .enable(let ruleText, let duration):
-            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return nil }
+            guard let i = policy.rules.firstIndex(where: { $0.text == ruleText }) else { return gone }
             duration.apply(to: &policy.rules[i], now: now)
         case .remove(let ruleText):
             let before = policy.rules.count
             policy.rules.removeAll { $0.text == ruleText }
-            guard policy.rules.count != before else { return nil }
+            guard policy.rules.count != before else { return gone }
         }
         let out = policy.serialize()
-        return out == text ? nil : out
+        return out == text ? .unchanged : .changed(out)
     }
 
     /// Whether `text` has a rule named `ruleText` (the timeline only offers to
@@ -286,4 +300,72 @@ extension Notification.Name {
     /// shows the rules' current verdict (the Security Timeline's "Allowed
     /// now" / "Blocked now") re-evaluates.
     static let bromureFirewallPolicyChanged = Notification.Name("io.bromure.firewallPolicyChanged")
+}
+
+// MARK: - One edit over the wire (a fat client's drawer → the host)
+
+extension FirewallRuleActions.Duration {
+    var wire: String {
+        switch self {
+        case .always: return "always"
+        case .fifteenMinutes: return "15m"
+        case .oneHour: return "1h"
+        case .untilStop: return "untilStop"
+        }
+    }
+    init?(wire: String) {
+        guard let d = Self.allCases.first(where: { $0.wire == wire }) else { return nil }
+        self = d
+    }
+}
+
+extension FirewallRuleActions.Edit {
+    /// One edit as a fat client sends it, for the host to apply to the rules
+    /// it holds at that moment (POST /profiles/{id}/firewall-edit). Sending
+    /// the whole edited document instead lost a concurrent edit: two quick
+    /// Allows each read the same rules, and the second's commit dropped the
+    /// first's rule (Finding CWE-362, "Concurrent remote firewall allows can
+    /// discard an earlier rule"). An inserted rule travels as a one-rule
+    /// document, so its on/off and time limit come along.
+    var wire: [String: Any] {
+        switch self {
+        case .insert(let rule):
+            return ["op": "insert", "rule": EgressPolicy(rules: [rule]).serialize()]
+        case .disable(let text):
+            return ["op": "disable", "ruleText": text]
+        case .enable(let text, let duration):
+            return ["op": "enable", "ruleText": text, "duration": duration.wire]
+        case .remove(let text):
+            return ["op": "remove", "ruleText": text]
+        }
+    }
+
+    init?(wire d: [String: Any]) {
+        switch d["op"] as? String {
+        case "insert":
+            guard let doc = d["rule"] as? String, doc.count <= 16_384,
+                  let policy = try? EgressPolicy.parse(doc), policy.rules.count == 1 else { return nil }
+            self = .insert(policy.rules[0])
+        case "disable":
+            guard let t = d["ruleText"] as? String, !t.isEmpty else { return nil }
+            self = .disable(ruleText: t)
+        case "enable":
+            guard let t = d["ruleText"] as? String, !t.isEmpty,
+                  let du = (d["duration"] as? String).flatMap(FirewallRuleActions.Duration.init(wire:)) else { return nil }
+            self = .enable(ruleText: t, du)
+        case "remove":
+            guard let t = d["ruleText"] as? String, !t.isEmpty else { return nil }
+            self = .remove(ruleText: t)
+        default:
+            return nil
+        }
+    }
+}
+
+/// A firewall commit's result: the rules changed, were already so, or
+/// couldn't be changed (why).
+enum FirewallCommitResult: Equatable {
+    case changed, unchanged
+    case failed(String)
+    var succeeded: Bool { if case .failed = self { return false }; return true }
 }

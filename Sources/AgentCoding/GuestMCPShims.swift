@@ -143,6 +143,48 @@ extension SessionDisk {
     HELLO = _hello()
     """
     static let taskMCPShimGuestPath = "/mnt/bromure-meta/bromure-task-mcp.py"
+    /// `vsock_connect`, as the shims use it: direct, or through agentd's relay
+    /// when an OpenShell sandbox refuses AF_VSOCK (bromure-agentd.py §4b).
+    static let shimVsockConnect = """
+    VSOCK_RELAY = os.environ.get("BROMURE_VSOCK_RELAY") or "/tmp/bromure-vsock.sock"
+    def vsock_connect(port):
+        # The host's `port` over vsock. Under an OpenShell sandbox the seccomp
+        # filter refuses AF_VSOCK (EPERM): then through agentd's relay, which
+        # runs outside it (bromure-agentd.py §4b). The bytes are the same.
+        try:
+            s = socket.socket(getattr(socket, "AF_VSOCK", 40), socket.SOCK_STREAM)
+        except OSError as e:
+            if e.errno not in (errno.EPERM, errno.EACCES, errno.EAFNOSUPPORT):
+                raise
+            return vsock_relay_connect(port)
+        try:
+            s.connect((HOST_CID, port))
+        except BaseException:
+            s.close()
+            raise
+        return s
+    def vsock_relay_connect(port):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(60)
+            s.connect(VSOCK_RELAY)
+            s.sendall(("bromure-vsock %d\\n" % port).encode())
+            line = b""
+            while not line.endswith(b"\\n") and len(line) < 256:
+                b = s.recv(1)
+                if not b:
+                    break
+                line += b
+            if line != b"ok\\n":
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "vsock relay: %s"
+                                             % (line.decode("utf-8", "replace").strip() or "closed"))
+            s.settimeout(None)
+            return s
+        except BaseException:
+            s.close()
+            raise
+    """
+
     /// The built-in `browser` MCP server entry (Claude JSON shape): a stdio
     /// shim the agent launches, which pipes JSON-RPC over vsock to the host.
     static var browserMCPClaudeEntry: [String: Any] {
@@ -172,6 +214,8 @@ extension SessionDisk {
     import socket, sys, threading, time
     HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
     PORT = \(browserMCPVsockPort)
+    import errno, os
+    \(shimVsockConnect)
     state_lock = threading.Lock()
     conn_lock = threading.Lock()
     sock = None
@@ -200,8 +244,7 @@ extension SessionDisk {
             delay = 0.2
             while stdin_open:
                 try:
-                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                    s.connect((HOST_CID, PORT))
+                    s = vsock_connect(PORT)
                     with state_lock:
                         sock = s
                     return s
@@ -266,6 +309,8 @@ extension SessionDisk {
     import socket, sys, threading, time
     HOST_CID = socket.VMADDR_CID_HOST if hasattr(socket, "VMADDR_CID_HOST") else 2
     PORT = \(taskBoardMCPVsockPort)
+    import errno, os
+    \(shimVsockConnect)
     HELLO = sys.argv[1] if len(sys.argv) > 1 else ""
     state_lock = threading.Lock()
     conn_lock = threading.Lock()
@@ -295,8 +340,7 @@ extension SessionDisk {
             delay = 0.2
             while stdin_open:
                 try:
-                    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-                    s.connect((HOST_CID, PORT))
+                    s = vsock_connect(PORT)
                     if HELLO:
                         s.sendall(("bromure-hello %s\\n" % HELLO).encode())
                     with state_lock:

@@ -31,6 +31,19 @@ private final class PollTimerBox {
 @Observable
 final class RemoteHostController {
     let host: RemoteHost
+    /// Stamps the Security window's history fetches; the range last asked
+    /// for; the stamp of the reply last applied (see `acceptsHistory`).
+    @ObservationIgnored var securityHistoryGeneration = 0
+    @ObservationIgnored var securityHistoryHours = 0
+    @ObservationIgnored var securityHistoryApplied = 0
+    /// History fetches under way, and when a failed one may be tried again
+    /// (backing off). A fetch that failed -- a restart's refetch, or the
+    /// window's first -- is retried by a later snapshot; a marker set before
+    /// the reply never was (Finding: "Failed restart history refetch is
+    /// never retried").
+    @ObservationIgnored var securityHistoryInFlight = 0
+    @ObservationIgnored var securityHistoryFailures = 0
+    @ObservationIgnored var securityHistoryRetryAt: Date?
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -1081,7 +1094,23 @@ final class RemoteHostController {
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
         if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
-            SecurityTimeline.shared.applyMirror(rows, host: host.name.isEmpty ? host.address : host.name)
+            // Who the bucket is: its label in the window.
+            SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
+            let epoch = snapshot["securityTimelineEpoch"] as? String
+            SecurityTimeline.shared.applyMirror(
+                rows, host: securityMirrorKey,
+                oldestRetained: (snapshot["securityTimelineOldest"] as? Double).map(Date.init(timeIntervalSince1970:)),
+                oldestSeq: snapshot["securityTimelineOldestSeq"] as? Int, epoch: epoch)
+            // The fetched history is from an earlier run of the host (it
+            // restarted) or didn't say -- its rows' numbers can't be compared
+            // -- or the last one asked for never landed: fetch it (again).
+            if Self.shouldFetchHistory(
+                requested: securityHistoryGeneration > 0,
+                outstanding: securityHistoryGeneration > securityHistoryApplied,
+                stale: SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch),
+                inFlight: securityHistoryInFlight > 0, now: Date(), retryAt: securityHistoryRetryAt) {
+                fetchSecurityHistory(hours: securityHistoryHours)
+            }
         }
 #endif
         revision &+= 1
@@ -1100,6 +1129,7 @@ final class RemoteHostController {
         var newProfiles: [Profile.ID: Profile] = [:]
         var newCredentials: [Profile.ID: WorkspaceCredentials] = [:]
         var newSpecs: [Profile.ID: WorkspaceSpec] = [:]
+        var unsandboxed = Set<Profile.ID>()
         for w in workspaces {
             guard let idStr = w["id"] as? String, let id = UUID(uuidString: idStr) else { continue }
             let name = w["name"] as? String ?? "?"
@@ -1120,6 +1150,8 @@ final class RemoteHostController {
                         .flatMap { try? JSONDecoder().decode(SquelchSummary.self, from: $0) }
                 },
                 notes: w["comments"] as? String ?? ""))
+            // Absent (an older host): unknown, so the shield stays.
+            if (w["sandboxed"] as? Bool) == false { unsandboxed.insert(id) }
 
             var spec = WorkspaceSpec()
             spec.memoryGB = w["memoryGB"] as? Int ?? 4
@@ -1170,6 +1202,7 @@ final class RemoteHostController {
         let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
         if listModel.profileRows != rows { listModel.profileRows = rows }
+        if listModel.unsandboxedProfileIDs != unsandboxed { listModel.unsandboxedProfileIDs = unsandboxed }
         for id in storageMoved {
             NotificationCenter.default.post(name: .bromureWorkspaceStorageChanged, object: id)
         }
@@ -1906,6 +1939,43 @@ final class RemoteHostController {
 
     func profile(for id: Profile.ID) -> Profile? { profilesByID[id] }
 
+    /// The document the settings window saves to the host: what the user
+    /// changed, nothing else.
+    ///
+    /// - A field changed is sent.
+    /// - A field cleared (the window opened with it, the edit no longer has
+    ///   it: the Profile encoder leaves a default out, `agentReach` nil is
+    ///   "Every workspace", `browserPersistent` only says true) is sent as an
+    ///   explicit null, which the host takes as "clear", as the CLI's
+    ///   `workspaces edit` does (`ProfileDocument.editedDocument`).
+    /// - A field as it opened stays out, and the host keeps what it has now,
+    ///   which may be newer: another window or the CLI may have changed it
+    ///   since. Sending the whole window back undid those, a restriction of
+    ///   the workspace's reach included (CWE-367).
+    ///
+    /// Without the baseline: reach is never widened (no null for it), and an
+    /// empty kube list is sent explicitly, as before (the host treats an
+    /// explicit array as the whole set). Notes and the Squelch switch follow
+    /// `dropUnedited`.
+    static func settingsDocument(edited: Profile, opened: Profile?) -> [String: Any]? {
+        guard var doc = ACAppDelegate.codableToDict(edited) else { return nil }
+        if let opened, let was = ACAppDelegate.codableToDict(opened) {
+            // `ProfileDocument.editedDocument`, which the iOS app doesn't build.
+            for key in was.keys where doc[key] == nil { doc[key] = NSNull() }
+            for key in Array(doc.keys) {
+                guard let now = doc[key], !(now is NSNull), let old = was[key] else { continue }
+                if (old as AnyObject).isEqual(now) { doc.removeValue(forKey: key) }
+            }
+            // The last kube context removed: an explicit empty list (a null
+            // would leave the host's contexts as they are).
+            if edited.kubeconfigs.isEmpty, !opened.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
+            dropUnedited(&doc, edited: edited, opened: opened)
+        } else if edited.kubeconfigs.isEmpty {
+            doc["kubeconfigs"] = [[String: Any]]()
+        }
+        return doc
+    }
+
     /// A settings document without what the editor left as it opened it and
     /// the app saves meanwhile (the dashboard's notes, the sidebar's Squelch
     /// switch): the host's merge keeps a key left out (Finding CWE-362,
@@ -2290,6 +2360,7 @@ final class RemoteHostController {
             base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
+        c.defaultHomeGB = resp.json["defaultHomeGB"] as? Int
         c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }
         return c
     }
@@ -2382,6 +2453,17 @@ final class RemoteHostController {
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
         return resp.json
+    }
+
+    /// The size a new home gets on the remote Mac (its free space and
+    /// setting) — what its new-workspace editor shows. nil when it can't
+    /// say (an older host): the editor then measures this Mac, as before.
+    func fetchNewHomeDefaultGB() async -> Int? {
+        let host = self.host
+        guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
+            try RemoteTransport.client(for: host).request("GET", "/storage/defaults")
+        }).value, resp.status == 200 else { return nil }
+        return resp.json["homeImageGB"] as? Int
     }
 
     /// The remote's preferences template (its Bromure → Preferences… defaults),
@@ -3150,6 +3232,8 @@ struct RemoteToolbarBar: View {
     var onToggleLinux: () -> Void = {}
     /// The machine's dashboard (the machine menu's "Machine Details").
     var onDetails: ((Profile.ID) -> Void)? = nil
+    /// The Sandbox drawer (the shield): the host's blocks and proposals.
+    var onTogglePolicyDrawer: () -> Void = {}
     /// The session hosted by a machine's tmux window, if any (profile, window
     /// index): decides whether a terminal on stage offers the way back.
     var sessionForTab: (Profile.ID, Int) -> UUID? = { _, _ in nil }
@@ -3239,6 +3323,9 @@ struct RemoteToolbarBar: View {
                             onDetach: { onDetach(entry.id) },
                             onDetails: onDetails.map { f in { f(entry.id) } },
                             ip: entry.model.ipAddress)
+                PolicyDrawerButton(list: model, profileID: entry.id, machine: controller.securityMirrorKey) {
+                    onTogglePolicyDrawer()
+                }
                 HeaderIcon(system: "globe", help: "Show or hide the agentic browser (⌃⌘B)",
                            active: model.browserPaneOpen) { onToggleBrowser() }
                 HeaderIcon(system: "sidebar.right", help: "Show or hide the Files pane (⌃⌘E)",
@@ -3528,6 +3615,13 @@ final class RemoteHostWindow: NSWindow {
     /// and prompt to restart when a VM-baked field (network, memory, mounts, …)
     /// changed — the remote applies those only on a fresh launch.
     private var settingsOriginals: [Profile.ID: Profile] = [:]
+    /// The pane last asked for per workspace while its editor loads: of two
+    /// opens in flight, the one that finishes last builds the editor, and it
+    /// must be on the later click's pane, not its own.
+    private var settingsRequestedPane: [Profile.ID: EditorCategory] = [:]
+    /// Editor loads under way per workspace: a failed one leaves the pane to
+    /// one still loading, which builds the editor on it.
+    private var settingsLoads: [Profile.ID: Int] = [:]
     /// A settings save still resolving, by workspace (its window may be
     /// closed already): a reopen waits for it, so the new editor reads what
     /// the save left in force and the old save can't touch the new window.
@@ -4228,6 +4322,7 @@ final class RemoteHostWindow: NSWindow {
             onToggleBeautified: { [weak self] id in self?.toggleBeautified(id) },
             onToggleLinux: { [weak self] in self?.toggleLinux() },
             onDetails: { [weak self] id in self?.showMachineDashboard(id) },
+            onTogglePolicyDrawer: { [weak self] in self?.togglePolicyDrawer() },
             sessionForTab: { [weak self] id, window in
                 self?.controller.sessionStore.session(profileID: id, windowIndex: window)?.id
             })
@@ -4242,6 +4337,91 @@ final class RemoteHostWindow: NSWindow {
         tb.allowsUserCustomization = false
         toolbarStyle = .unified
         toolbar = tb
+    }
+
+    // MARK: Sandbox drawer
+
+    /// The host's Sandbox drawer: blocks, file denials, the advisor's
+    /// proposals -- decided on the host, as in its own window.
+    private var policyDrawerHost: NSView?
+    private var policyDrawerTrailing: NSLayoutConstraint?
+    private lazy var policyBackend = RemotePolicyDrawerBackend(controller: controller)
+
+    func togglePolicyDrawer() {
+        let list = controller.listModel
+        guard list.policyDrawerOpen || list.hasSandboxDrawer(list.stageProfileID) else { return }
+        setPolicyDrawerOpen(!list.policyDrawerOpen)
+    }
+
+    func setPolicyDrawerOpen(_ open: Bool) {
+        let host = ensurePolicyDrawer()
+        controller.listModel.policyDrawerOpen = open
+        if open { host.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            policyDrawerTrailing?.animator().constant = open ? -10 : 400
+            host.animator().alphaValue = open ? 1 : 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.controller.listModel.policyDrawerOpen else { return }
+                self.policyDrawerHost?.isHidden = true
+            }
+        })
+    }
+
+    /// E2E: the drawer as the user would see it. The shield shows for the
+    /// stage's workspace; the drawer is on screen when its host is in the
+    /// window, unhidden, opaque, inside the stage, and topmost there.
+    static func policyDrawerReport(_ list: SessionListModel, host: NSView?, stage: NSView) -> [String: Any] {
+        let inStage = host?.superview === stage
+        let onScreen = inStage && host?.window != nil && host?.isHidden == false && (host?.alphaValue ?? 0) > 0.5
+            && stage.bounds.intersects(host?.frame ?? .zero)
+        return ["ok": true, "open": list.policyDrawerOpen,
+                "shield": list.hasSandboxDrawer(list.stageProfileID),
+                "stageProfile": list.stageProfileID?.uuidString ?? "",
+                "built": host != nil, "inStage": inStage, "onScreen": onScreen,
+                "topmost": stage.subviews.last === host && host != nil]
+    }
+
+    /// A stage occupant goes under the drawer, which stays on top.
+    static func addBelow(_ drawer: NSView?, _ view: NSView, on stage: NSView) {
+        if let drawer, drawer.superview === stage {
+            stage.addSubview(view, positioned: .below, relativeTo: drawer)
+        } else {
+            stage.addSubview(view)
+        }
+    }
+
+    /// Built on first open, on top of the stage.
+    private func ensurePolicyDrawer() -> NSView {
+        if let h = policyDrawerHost { return h }
+        let drawer = PolicyDrawer(
+            list: controller.listModel,
+            onClose: { [weak self] in self?.setPolicyDrawerOpen(false) },
+            onOpenSettings: { [weak self] id in
+                self?.openWorkspaceSettings(id, category: .firewall)
+            },
+            backend: policyBackend)
+        let host = NSHostingView(rootView: drawer)
+        host.translatesAutoresizingMaskIntoConstraints = false
+        host.sizingOptions = []
+        host.wantsLayer = true
+        host.alphaValue = 0
+        host.isHidden = true
+        stage.addSubview(host, positioned: .above, relativeTo: nil)
+        let trailing = host.trailingAnchor.constraint(equalTo: stage.trailingAnchor, constant: 400)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: stage.topAnchor, constant: 10),
+            host.bottomAnchor.constraint(equalTo: stage.bottomAnchor, constant: -10),
+            host.widthAnchor.constraint(equalToConstant: 368),
+            trailing,
+        ])
+        stage.layoutSubtreeIfNeeded()
+        policyDrawerHost = host
+        policyDrawerTrailing = trailing
+        return host
     }
 
     // MARK: File-explorer pane + file-browser windows
@@ -4282,11 +4462,42 @@ final class RemoteHostWindow: NSWindow {
     /// blanked) → edit → secret-preserving PUT. Host-side-only affordances
     /// (SSH-key import, subscription registration) stay hidden — their
     /// callbacks are nil, exactly like a freshly-created local profile.
-    private func openWorkspaceSettings(_ id: Profile.ID) {
-        if let win = settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
+    /// This host's workspace editor on one pane (the Security Overview's
+    /// protection cells).
+    /// The pane goes with the request, through the fetch, into the editor
+    /// it makes: a shared slot was overwritten by the next cell clicked (or
+    /// cleared by a local editor) while this one loaded, and the editor
+    /// opened on General (Finding: "Remote protection cells lose their
+    /// requested pane while the editor loads"). An editor already open is
+    /// brought forward and switched, as this Mac's is.
+    func openWorkspaceSettings(_ id: Profile.ID, category: EditorCategory) {
+        openWorkspaceSettings(id, initialCategory: category)
+    }
+
+    /// Whether a failed editor load drops the pane asked for: only when it
+    /// was the last load under way for the workspace (itself included).
+    nonisolated static func dropsRequestedPane(loadsUnderWay: Int) -> Bool { loadsUnderWay <= 1 }
+
+    /// Bring an open editor forward, switched to `category` when one's asked.
+    private func showOpenSettings(_ win: NSWindow, _ id: Profile.ID, _ category: EditorCategory?) {
+        win.makeKeyAndOrderFront(nil)
+        guard let category else { return }
+        NotificationCenter.default.post(
+            name: .bromureACSelectEditorCategory,
+            object: "workspace:\(id.uuidString.lowercased()):\(category.rawValue.lowercased())")
+    }
+
+    private func openWorkspaceSettings(_ id: Profile.ID, initialCategory: EditorCategory? = nil) {
+        if let win = settingsSessions[id]?.window { showOpenSettings(win, id, initialCategory); return }
+        if let initialCategory { settingsRequestedPane[id] = initialCategory }
+        settingsLoads[id, default: 0] += 1
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                let left = (self.settingsLoads[id] ?? 1) - 1
+                self.settingsLoads[id] = left > 0 ? left : nil
+            }
             if let pending = self.settingsSaves[id] { _ = await pending.result }
             // A close's revert (or a failed save's) only queues its POST:
             // the fetch below reads the host once it has landed.
@@ -4310,11 +4521,24 @@ final class RemoteHostWindow: NSWindow {
                 credentialRefs = (doc["configuredCredentialRefs"] as? [String])?
                     .compactMap { CredentialRef(wireID: $0) }
             } catch {
+                // Not left for a later open -- unless another load is still
+                // under way: the latest click's pane is that one's to open on
+                // (Finding: "Failed settings load clears another in-flight
+                // request's pane").
+                if Self.dropsRequestedPane(loadsUnderWay: self.settingsLoads[id] ?? 1) {
+                    self.settingsRequestedPane[id] = nil
+                }
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
             }
+            // Another request made the editor meanwhile, on the latest pane
+            // asked for by then -- this one's included (it was asked before):
+            // just bring it forward. A click after it was made switched it.
             if let win = self.settingsSessions[id]?.window { win.makeKeyAndOrderFront(nil); return }
+            // The latest pane asked for while it loaded (a later click's, when
+            // there was one).
+            let pane = self.settingsRequestedPane.removeValue(forKey: id) ?? initialCategory
             self.settingsOriginals[id] = profile   // baseline for the restart diff
             let live = FirewallLiveEdit(profileID: id, opening: profile.egressRules,
                                         commit: { [c] text in c.commitFirewall(id, rules: text); return true },
@@ -4368,7 +4592,8 @@ final class RemoteHostWindow: NSWindow {
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
                 onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
                 localModelsRemoteAny: modelBackend,
-                modelsPane: .workspace(global: remoteGlobalModels))
+                modelsPane: .workspace(global: remoteGlobalModels),
+                initialCategory: pane)
                 .withSubscriptionHealth({ [weak c] provider in provider.subscriptionKey.flatMap { c?.subscriptionStatus[$0]?.loginHealth } }))
             win.makeKeyAndOrderFront(nil)
             // Closed any way but a save: the firewall edits go back, and the
@@ -4412,17 +4637,9 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func saveWorkspaceSettings(_ id: Profile.ID, _ edited: Profile, generateSSH: Bool) {
-        guard var doc = ACAppDelegate.codableToDict(edited) else { return }
-        // The Profile encoder omits an empty kubeconfigs array; send it explicitly
-        // so removing the last kube context is honored server-side (an absent key
-        // means "leave kube untouched" — see automationUpsertProfile).
-        if edited.kubeconfigs.isEmpty { doc["kubeconfigs"] = [[String: Any]]() }
-        if generateSSH { doc["generateSSH"] = true }
         let original = settingsOriginals[id]
-        // Notes and the Squelch switch left as the window opened them aren't
-        // this save's: the host keeps what it has (a dashboard save, the
-        // sidebar's switch meanwhile).
-        if let original { RemoteHostController.dropUnedited(&doc, edited: edited, opened: original) }
+        guard var doc = RemoteHostController.settingsDocument(edited: edited, opened: original) else { return }
+        if generateSSH { doc["generateSSH"] = true }
         let c = controller
         // The firewall's live commits and this document are one ordered
         // stream: nothing more goes live, the ones sent land first, then the
@@ -4591,11 +4808,14 @@ final class RemoteHostWindow: NSWindow {
         let c = controller
         Task { @MainActor [weak self] in
             let global = (try? await c.fetchModelSettings()) ?? ModelSettings()
-            self?.presentNewWorkspaceEditor(draft: draft, remoteGlobalModels: global)
+            // Its home is sized on the remote Mac: show that Mac's default.
+            let homeGB = await c.fetchNewHomeDefaultGB()
+            self?.presentNewWorkspaceEditor(draft: draft, remoteGlobalModels: global, newHomeDefaultGB: homeGB)
         }
     }
 
-    private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings) {
+    private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings,
+                                           newHomeDefaultGB: Int?) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
             contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
@@ -4620,7 +4840,8 @@ final class RemoteHostWindow: NSWindow {
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
             localModelsRemoteAny: remoteModelBackend(),
-            modelsPane: .workspace(global: remoteGlobalModels))
+            modelsPane: .workspace(global: remoteGlobalModels),
+            newHomeDefaultGB: newHomeDefaultGB)
                 .withSubscriptionHealth({ [weak controller] provider in provider.subscriptionKey.flatMap { controller?.subscriptionStatus[$0]?.loginHealth } }))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
@@ -6560,6 +6781,11 @@ final class RemoteHostWindow: NSWindow {
                 "sidebarWidth": Double(sidebarWidthConstraint.constant),
                 "terminalFocused": focused(),
             ]
+        case "policy-drawer":
+            // {op: toggle|state}: the shield's click, and what's on screen.
+            if (p["op"] as? String) == "toggle" { togglePolicyDrawer() }
+            contentView?.layoutSubtreeIfNeeded()
+            return Self.policyDrawerReport(controller.listModel, host: policyDrawerHost, stage: stage)
         case "select":
             guard let id = resolveID() else { return ["error": "workspace not found"] }
             selectWorkspaceName(id)
@@ -7993,7 +8219,7 @@ final class RemoteHostWindow: NSWindow {
         // ON TOP of the mounted terminal; the next `mount(_:)` removes it.
         if host.superview !== stage {
             host.removeFromSuperview()
-            stage.addSubview(host)   // last subview = topmost
+            Self.addBelow(policyDrawerHost, host, on: stage)   // topmost but for the drawer
             NSLayoutConstraint.activate([
                 host.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
                 host.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -8293,11 +8519,17 @@ final class RemoteHostWindow: NSWindow {
     }
 
     private func mount(_ view: NSView) {
-        // Remove any current stage occupant except the one we're mounting.
-        for sub in stage.subviews where sub !== view { sub.removeFromSuperview() }
+        Self.mount(view, on: stage, keeping: policyDrawerHost)
+    }
+
+    /// Make `view` the stage's one occupant. Every other subview goes but the
+    /// Sandbox drawer, which floats over every occupant: removed with them,
+    /// the shield toggled a view no longer in the window.
+    static func mount(_ view: NSView, on stage: NSView, keeping drawer: NSView?) {
+        for sub in stage.subviews where sub !== view && sub !== drawer { sub.removeFromSuperview() }
         if view.superview !== stage {
             view.removeFromSuperview()
-            stage.addSubview(view)
+            addBelow(drawer, view, on: stage)
             NSLayoutConstraint.activate([
                 view.leadingAnchor.constraint(equalTo: stage.leadingAnchor),
                 view.trailingAnchor.constraint(equalTo: stage.trailingAnchor),
@@ -8323,7 +8555,9 @@ final class RemoteHostWindow: NSWindow {
         let reconnecting = presentation == .reconnecting
         let contentShown = presentation == .live || reconnecting
         statusHost?.isHidden = contentShown
-        stage.subviews.forEach { $0.isHidden = !contentShown }
+        for v in stage.subviews where v !== policyDrawerHost { v.isHidden = !contentShown }
+        // The drawer: shown only while open (and the content is).
+        policyDrawerHost?.isHidden = !(contentShown && controller.listModel.policyDrawerOpen)
         // The banner (down) or the slow-link pill. Non-blocking either way:
         // focus stays where the user left it — a terminal has its own
         // reconnect, and a blip shouldn't cost them a click back in.
@@ -8638,6 +8872,89 @@ final class RegistrationCallbackTunnel: @unchecked Sendable {
 /// on the parent's side through the same tunnel the mirror uses.
 extension RemoteHostController: RemoteDelegationLink {
     var hostName: String { host.name }
+    /// The host's bucket in the Security window (its events' `machine`) and
+    /// its filter's key: its id, never a display string -- a name made
+    /// unique among the saved hosts could still equal another host's (or a
+    /// peer's, which isn't saved), and one host's rows overwrote the other's
+    /// (Finding: "Security timeline host keys can still collide across
+    /// distinct hosts"). What the window shows is
+    /// `SecurityTimeline.machineLabel(_:)`.
+    var securityMirrorKey: String { host.id.uuidString }
+
+#if os(macOS)
+    /// The host's security timeline for the last `hours` (0 = all it holds),
+    /// replacing its bucket: the snapshot's mirror is only its most recent
+    /// rows, so counts made from it fell short of the server's own. A host
+    /// without the route (older) keeps the mirror.
+    func fetchSecurityHistory(hours: Int) {
+        let host = self.host
+        let key = securityMirrorKey
+        // Each fetch stamped with its range (see `acceptsHistory`).
+        securityHistoryGeneration &+= 1
+        let generation = securityHistoryGeneration
+        let range = max(0, hours)
+        securityHistoryHours = range
+        securityHistoryInFlight += 1
+        // Not the poll queue: a slow fetch must not hold the state polls.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resp = try? RemoteTransport.client(for: host).request(
+                "GET", "/security-timeline?hours=\(range)", recvTimeoutSeconds: 30)
+            let rows = resp.flatMap { $0.status == 200 ? $0.json["rows"] as? [[String: Any]] : nil }
+            let epoch = resp?.json["epoch"] as? String
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)
+                    guard let rows else {
+                        // Failed: a later snapshot tries again, backing off.
+                        self.securityHistoryFailures += 1
+                        self.securityHistoryRetryAt = Date().addingTimeInterval(
+                            Self.historyRetryDelay(failures: self.securityHistoryFailures))
+                        return
+                    }
+                    self.securityHistoryFailures = 0
+                    self.securityHistoryRetryAt = nil
+                    guard Self.acceptsHistory(generation: generation, hours: range,
+                                              requestedHours: self.securityHistoryHours,
+                                              applied: self.securityHistoryApplied) else { return }
+                    self.securityHistoryApplied = generation
+                    SecurityTimeline.shared.noteMachine(key, host: host)   // named before the first snapshot too
+                    // From the run it came from: if the host restarted since,
+                    // the next snapshot finds it stale and fetches again.
+                    SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
+                }
+            }
+        }
+    }
+
+    /// Whether a snapshot fetches the host's history: the window asked for it
+    /// once, and what's held is from another run of the host, or the last
+    /// request never landed -- unless one is under way, or a failed one's
+    /// back-off hasn't passed.
+    nonisolated static func shouldFetchHistory(requested: Bool, outstanding: Bool, stale: Bool, inFlight: Bool,
+                                               now: Date, retryAt: Date?) -> Bool {
+        guard requested, !inFlight else { return false }
+        if let retryAt, now < retryAt { return false }
+        return stale || outstanding
+    }
+
+    /// After `failures` failed fetches in a row: 10 s, doubling, at most 2 min.
+    nonisolated static func historyRetryDelay(failures: Int) -> TimeInterval {
+        min(120, 10 * pow(2, Double(max(0, failures - 1))))
+    }
+    /// Whether a history reply lands: it covers the range asked for last (a
+    /// slower 24 h reply after the window went to 7 days would cut the
+    /// history back), and it's newer than the reply applied last (an older
+    /// one never replaces fresher rows). Not "only the newest request's":
+    /// a repeat for the same range that failed discarded the earlier one's
+    /// good reply, leaving only the live mirror (Finding: "Failed repeat
+    /// history fetch discards an earlier successful reply").
+    nonisolated static func acceptsHistory(generation: Int, hours: Int, requestedHours: Int, applied: Int) -> Bool {
+        guard generation > applied else { return false }
+        if hours == 0 { return true }                      // all it holds covers any range
+        return requestedHours != 0 && hours >= requestedHours
+    }
+#endif
     var remoteSessions: AgentSessionStore { sessionStore }
     var remoteDelegations: DelegationStore { delegationStore }
     func remoteWorkspaceName(_ id: UUID) -> String { profile(for: id)?.name ?? "" }
