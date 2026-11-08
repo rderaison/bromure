@@ -29,7 +29,7 @@ extension Daemon {
             return ControlResponse(200, v)
         case ("POST", let p) where p.hasPrefix("/profiles/") && p.hasSuffix("/compromised"):
             let raw = String(p.dropFirst("/profiles/".count).dropLast("/compromised".count))
-            return resolveCompromise(raw.removingPercentEncoding ?? raw, action: body["action"]?.stringValue ?? "")
+            return await resolveCompromise(raw.removingPercentEncoding ?? raw, action: body["action"]?.stringValue ?? "")
         case ("PUT", let p) where p.hasPrefix("/profiles/"), ("PATCH", let p) where p.hasPrefix("/profiles/"):
             let raw = String(p.dropFirst("/profiles/".count))
             return await updateProfile(raw.removingPercentEncoding ?? raw, body)

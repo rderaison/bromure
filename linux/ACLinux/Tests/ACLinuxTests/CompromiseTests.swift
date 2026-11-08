@@ -56,6 +56,50 @@ extension DaemonGlobalSuites {
             await d.shutdown()
         }
 
+        /// "Wipe and Restore": the VM's disk, home, checkpoints, saved state,
+        /// meta and outbox are erased; the profile stays; the mark goes,
+        /// recorded as a wipe. Refused while the VM runs; a clear after it,
+        /// or a second wipe, says what happened.
+        @Test func aWipeErasesTheVMsImagesAndKeepsTheProfile() async throws {
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let prior = ProfileStore.defaultRootDir
+            ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
+            defer { ProfileStore.defaultRootDir = prior }
+            let p = try ProfileStore().save(Profile(name: "to-wipe", tool: .claude, authMode: .token))
+            let key = p.id.uuidString.lowercased()
+            var rec = RepairMarksTests.stopped(key)
+            rec.name = "to-wipe"
+            rec.state = .running
+            try await d.registerForTesting(rec)
+            let vm = await d.vmDir(key)
+            for sub in ["meta", "outbox", "checkpoints/home", "snapshot"] {
+                try FileManager.default.createDirectory(atPath: vm + "/" + sub, withIntermediateDirectories: true)
+            }
+            for f in ["disk.raw", "home.img", "checkpoints/1.img", "snapshot/vm.state", "meta/x"] {
+                try Data("x".utf8).write(to: URL(fileURLWithPath: vm + "/" + f))
+            }
+            Daemon.markCompromised(p, store: ProfileStore())
+            let busy = await d.resolveCompromise(p.name, action: "wipe")
+            #expect(busy.status == 409 && "\(busy.body)".contains("Shut the workspace down"), "\(busy.body)")
+            #expect(FileManager.default.fileExists(atPath: vm + "/disk.raw"), "nothing wiped while it runs")
+            rec.state = .suspended
+            try await d.registerForTesting(rec)
+            #expect(await d.resolveCompromise(p.name, action: "wipe").status == 200)
+            for f in ["disk.raw", "home.img", "checkpoints", "snapshot", "meta", "outbox"] {
+                #expect(!FileManager.default.fileExists(atPath: vm + "/" + f), "\(f) erased")
+            }
+            #expect(!Daemon.isCompromised(p, store: ProfileStore()))
+            #expect(ProfileStore().loadAll().contains { $0.id == p.id }, "its settings and credentials stay")
+            #expect(await d.registry.find(key)?.state == .stopped, "its saved state went: it boots fresh")
+            let resolved = ProfileStore().profileDirectory(for: p).appendingPathComponent("compromise.resolved")
+            #expect((try? String(contentsOf: resolved, encoding: .utf8)) == "wipe")
+            #expect(await d.resolveCompromise(p.name, action: "wipe").status == 200, "a second wipe: already done")
+            let clear = await d.resolveCompromise(p.name, action: "clear")
+            #expect(clear.status == 409 && "\(clear.body)".contains("already wiped"), "\(clear.body)")
+            await d.shutdown()
+        }
+
         @Test func aMarkedWorkspaceDoesntBootUntilTheMarkIsCleared() async throws {
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()
             defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -69,8 +113,10 @@ extension DaemonGlobalSuites {
             #expect(Daemon.isCompromised(p, store: ProfileStore()))
             let refused = await d.start(rec)
             #expect(refused.status == 409 && "\(refused.body)".contains("compromised"), "\(refused.body)")
-            #expect(await d.resolveCompromise(p.name, action: "wipe").status == 501, "no wipe on Linux yet: said so")
             #expect(await d.resolveCompromise(p.name, action: "clear").status == 200)
+            // A wipe confirmed after the clear: nothing wiped, and said so.
+            let late = await d.resolveCompromise(p.name, action: "wipe")
+            #expect(late.status == 409 && "\(late.body)".contains("cleared meanwhile"), "\(late.body)")
             #expect(!Daemon.isCompromised(p, store: ProfileStore()))
             let resolved = ProfileStore().profileDirectory(for: p).appendingPathComponent("compromise.resolved")
             #expect((try? String(contentsOf: resolved, encoding: .utf8)) == "clear", "recorded as a false alarm")

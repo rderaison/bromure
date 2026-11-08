@@ -195,27 +195,117 @@ extension Daemon {
         try? FileManager.default.removeItem(at: url.deletingLastPathComponent().appendingPathComponent("compromise.resolved"))
     }
 
-    /// `POST /profiles/<id>/compromised {"action": "clear"}`: a false alarm,
-    /// the mark goes and the disk is kept (macOS: resolveCompromise's clear).
-    // partial: "wipe" isn't on Linux yet (the workspace's disk and home erased): clear the mark or remove the workspace
-    // @port-skip linux-only: resolveCompromise's clear on the daemon
-    func resolveCompromise(_ key: String, action: String) -> ControlResponse {
+    /// How the mark was last resolved (`compromise.resolved`: macOS's
+    /// SessionDisk.lastCompromiseResolution), or nil.
+    // @port-skip linux-only: SessionDisk.lastCompromiseResolution at the same path
+    static func lastCompromiseResolution(_ profile: Profile, store: ProfileStore) -> SessionDisk.CompromiseRemedy? {
+        let url = store.profileDirectory(for: profile).appendingPathComponent("compromise.resolved")
+        return (try? String(contentsOf: url, encoding: .utf8)).flatMap(SessionDisk.CompromiseRemedy.init(rawValue:))
+    }
+
+    // @port-skip linux-only: SessionDisk.recordCompromiseResolution at the same path
+    static func recordCompromiseResolution(_ how: SessionDisk.CompromiseRemedy, _ profile: Profile, store: ProfileStore) {
+        let url = store.profileDirectory(for: profile).appendingPathComponent("compromise.resolved")
+        try? Data(how.rawValue.utf8).write(to: url, options: .atomic)
+    }
+
+    /// What a wipe or a clear does about the mark it was asked to resolve,
+    /// checked when the answer comes: still marked, do it; gone the way
+    /// asked, nothing to do; gone the other way (or nobody knows how), the
+    /// asked one didn't happen.
+    enum CompromiseStep: Equatable { case perform, already, undone }
+
+    // @port ACAppDelegate.static compromiseStep(_: CompromiseRemedy, marked: Bool, last: CompromiseRemedy?) h=764c5a5b722b27d7 @641863f2
+    static func compromiseStep(_ action: SessionDisk.CompromiseRemedy, marked: Bool,
+                               last: SessionDisk.CompromiseRemedy?) -> CompromiseStep {
+        if marked { return .perform }
+        if last == action { return .already }
+        // Unmarked with no record: a clear has nothing left to do; a wipe
+        // can't say the disk was erased.
+        return action == .clear && last == nil ? .already : .undone
+    }
+
+    /// What a compromise wipe erases of a VM (macOS: SessionDisk.wipeForCompromise's
+    /// list, in the daemon's layout): the system disk, the home and data
+    /// images, their checkpoints, the saved state, the meta share and the
+    /// outbox. The profile (settings, credentials, keys) stays.
+    // @port-skip linux-only: wipeForCompromise's contaminated list over the daemon's VM directory
+    static func compromiseWipeTargets(vmDir: String) -> [String] {
+        ["/disk.raw", "/home.img", "/data.img", "/checkpoints", "/snapshot", "/meta", "/outbox"].map { vmDir + $0 }
+    }
+
+    /// `POST /profiles/<id>/compromised {"action": "wipe" | "clear"}`: a fat
+    /// client's "Wipe and Restore…" / "Clear Compromised Mark…" (macOS:
+    /// automationCompromise and resolveCompromise). A wipe needs the VM
+    /// stopped (a suspended one's saved state goes with it); a clear keeps
+    /// the disk. A mark resolved the other way meanwhile is said, never
+    /// reported as done.
+    // @port ACAppDelegate.automationCompromise(_: String, _: String) h=28d2887ce4c1a943 @641863f2
+    func resolveCompromise(_ key: String, action: String) async -> ControlResponse {
+        guard let how = SessionDisk.CompromiseRemedy(rawValue: action) else {
+            return ControlResponse(400, ["ok": false, "error": "action must be wipe or clear"])
+        }
         guard let profile = Self.workspace(key) else { return ControlResponse(404, ["ok": false, "error": "workspace not found"]) }
-        switch action {
-        case "clear":
-            let url = Self.compromiseMarkURL(profile, store: profileStore)
-            guard FileManager.default.fileExists(atPath: url.path) else { return ControlResponse(200, ["ok": true]) }
+        let store = profileStore
+        let marked = Self.isCompromised(profile, store: store)
+        let step = Self.compromiseStep(how, marked: marked, last: Self.lastCompromiseResolution(profile, store: store))
+        func refused(_ why: String) -> ControlResponse { ControlResponse(409, ["ok": false, "error": .string(why)]) }
+        switch (how, step) {
+        case (_, .already):
+            return ControlResponse(200, ["ok": true])
+        case (.wipe, .undone):
+            return refused("Its compromised mark was cleared meanwhile, so nothing was wiped: it starts on its current disk.")
+        case (.clear, .undone):
+            return refused("It was already wiped: its disk and home were erased, and it boots fresh next time.")
+        case (.clear, .perform):
+            let url = Self.compromiseMarkURL(profile, store: store)
             do { try FileManager.default.removeItem(at: url) } catch {
                 return ControlResponse(500, ["ok": false, "error": .string("the mark couldn't be removed: \(error.localizedDescription)")])
             }
-            try? Data("clear".utf8).write(to: url.deletingLastPathComponent().appendingPathComponent("compromise.resolved"), options: .atomic)
+            Self.recordCompromiseResolution(.clear, profile, store: store)
+            FileHandle.standardError.write(Data("[compromise] mark cleared on \(profile.name) (\(profile.id)) by the user\n".utf8))
             BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "vm.compromise_cleared",
                                                 eventData: ["reason": .string("false alarm")])
             return ControlResponse(200, ["ok": true])
-        case "wipe":
-            return ControlResponse(501, ["ok": false, "error": "wiping a compromised workspace isn't on Linux yet: clear the mark (a false alarm) or remove the workspace"])
-        default:
-            return ControlResponse(400, ["ok": false, "error": "action must be wipe or clear"])
+        case (.wipe, .perform):
+            return await wipeCompromised(profile)
         }
+    }
+
+    /// The wipe (macOS: wipeCompromised + SessionDisk.wipeForCompromise):
+    /// refused while the VM's disks are in use; anything left after it
+    /// keeps the workspace marked.
+    // @port ACAppDelegate.wipeCompromised(profile: Profile) h=aac0aae62f8a7fb9 @641863f2
+    func wipeCompromised(_ profile: Profile) async -> ControlResponse {
+        let key = profile.id.uuidString.lowercased()
+        if let rec = registry.find(key) {
+            guard live[key] == nil, !starting.contains(key), !repairMarks.contains(key), !hasRescue(for: key),
+                  rec.state == .stopped || rec.state == .suspended else {
+                return ControlResponse(409, ["ok": false, "error": "Shut the workspace down first: its disk is in use."])
+            }
+        }
+        let fm = FileManager.default
+        // A UUID-named directory of ours: the targets are its files.
+        let targets = Self.compromiseWipeTargets(vmDir: vmDir(key))
+        for t in targets { try? fm.removeItem(atPath: t) }
+        let left = targets.filter { fm.fileExists(atPath: $0) }
+        guard left.isEmpty else {
+            let names = left.map { ($0 as NSString).lastPathComponent }
+            FileHandle.standardError.write(Data("[compromise] wipe of \(profile.name) left \(left) -- still marked\n".utf8))
+            return ControlResponse(500, ["ok": false, "error": .string(
+                "Some of its files couldn't be erased (\(names.joined(separator: ", "))), so it's still marked compromised. Shut it down and try again.")])
+        }
+        // Its saved state went with it: it boots fresh.
+        if var rec = registry.find(key), rec.state == .suspended {
+            rec.state = .stopped
+            try? registry.upsert(rec)
+        }
+        try? fm.removeItem(at: Self.compromiseMarkURL(profile, store: profileStore))
+        Self.recordCompromiseResolution(.wipe, profile, store: profileStore)
+        FileHandle.standardError.write(Data("[compromise] \(profile.name) (\(profile.id)) wiped by the user\n".utf8))
+        // macOS: emitDiskResetEvent(reason: "compromised").
+        BACEventEmitter.shared.emitDetached(profileID: profile.id, eventType: "vm.disk_reset",
+                                            eventData: ["reason": .string("compromised")])
+        return ControlResponse(200, ["ok": true])
     }
 }
