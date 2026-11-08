@@ -198,12 +198,18 @@ pipeline {
                         # the archive never asks Apple to mint a development
                         # profile (which a team with no registered devices can't
                         # do). Each target reads its own PROFILE_* variable.
+                        # Package plugins (SwiftTerm's SwiftTermBuildInfoPlugin) and
+                        # macros need a one-time "Trust" click in Xcode; a CI
+                        # agent can't click, so the archive skips the prompt
+                        # ("Validate plug-in … ARCHIVE FAILED" otherwise).
                         xcodebuild archive \
                             -project "$PROJECT" \
                             -scheme "$SCHEME" \
                             -configuration Release \
                             -destination 'generic/platform=iOS' \
                             -archivePath "$ARCHIVE" \
+                            -skipPackagePluginValidation \
+                            -skipMacroValidation \
                             IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
                             PROFILE_APP="$PROFILE_APP" \
                             PROFILE_NSE="$PROFILE_NSE" \
@@ -223,6 +229,8 @@ pipeline {
                                 -configuration Release \
                                 -destination 'generic/platform=visionOS' \
                                 -archivePath "$ARCHIVE_XR" \
+                                -skipPackagePluginValidation \
+                                -skipMacroValidation \
                                 IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
                                 PROFILE_APP="$PROFILE_APP" \
                                 PROFILE_NSE="$PROFILE_NSE" \
