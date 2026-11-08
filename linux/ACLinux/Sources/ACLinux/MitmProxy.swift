@@ -26,7 +26,6 @@ import X509
 /// the guardrails, compromise detection and strict credential mode; then
 /// the supply-chain policy (SupplyChainLinux.swift), prompt injection and PII
 /// protection (its reply restored by PIIRelay).
-// partial: the supply-chain policy has no Depi re-route on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -300,14 +299,6 @@ final class MitmProxy: @unchecked Sendable {
             let summary = bits.isEmpty ? "off" : bits.joined(separator: " ")
             SupplyChainLog.shared.record(
                 "[supply-chain] policy engaged for \(profileID.uuidString.prefix(8)): \(summary)")
-            // Never a silent fail-open: npm traffic Depi was chosen to filter
-            // goes to the registry as it is until the re-route reaches Linux.
-            if policy.depiActive {
-                let why = "Depi's re-route isn't applied on Linux yet: npm installs go to the registry unfiltered by Depi"
-                SupplyChainLog.shared.record("[depi] \(why) (\(profileID.uuidString.prefix(8)))")
-                ProxyPolicy.recordScanSkipped(host: DepiRegistry.host, path: "", engines: ["supply_chain"],
-                                              reason: why, profileID: profileID)
-            }
         }
     }
     // @port MitmEngine.supplyChainPolicy(for: UUID) h=c9f2fe57fc0db459 @8e2543eb
@@ -901,7 +892,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case answer(Data)
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
                      mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
-                     supplyChain: SupplyChainRewrite? = nil)
+                     supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -968,7 +959,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // The supply-chain policy: a package fetch refused, or its reply read
         // whole and rewritten (macOS: driveTLS's supply-chain block).
         var supplyChain: SupplyChainRewrite?
-        switch await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method, path: path) {
+        // Depi's re-route: redialled to Depi with the workspace's key.
+        let depiKey = depiRoute(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path)
+        let dial = depiKey.map { _ in (host: DepiRegistry.host, port: DepiRegistry.port) }
+        switch await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
+                                     depiKey: depiKey) {
         case .none: break
         case .answer(let reply): return .answer(reply)
         case .rewrite(let forward, let rewrite, let done):
@@ -1073,7 +1068,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             return .answer(response)
         }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
-                        supplyChain: supplyChain)
+                        supplyChain: supplyChain, dial: dial)
     }
 
     /// The guest drained: the upstream may be read again (ResponseRelay
@@ -1090,8 +1085,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain):
-            proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, pinned: pinned,
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial):
+            // Where it's dialed: the guest's destination, or Depi (TLS, its
+            // own name: nothing the guest pinned) for a re-routed request.
+            proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
+                                  profileID: profileID, pinned: dial == nil ? pinned : nil,
                                   on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):

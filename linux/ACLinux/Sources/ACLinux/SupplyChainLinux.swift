@@ -19,10 +19,54 @@ extension RequestReader {
     /// (and npm's integrity stripped), an artifact checked before it's
     /// fetched (publish-time backstop, OSV, socket.dev, the fail-closed hold,
     /// npm ci's bypass), and an npm tarball's install scripts stripped.
-    // partial: no Depi re-route on Linux yet
+    /// `depiKey`: the request was re-routed to Depi (depiRoute) with this
+    /// key: Depi's auth failures are answered, and a reply the policy
+    /// doesn't otherwise rewrite is still read whole for that.
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's supply-chain block, on the Linux request chain
     static func supplyChainStep(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
-                                method: String, path: String) async -> SupplyChainPlan {
+                                method: String, path: String, depiKey: String? = nil) async -> SupplyChainPlan {
+        let plan = await policyStep(request, proxy: proxy, profileID: profileID, host: host, method: method,
+                                    path: path, depiKey: depiKey)
+        // Depi-routed traffic goes through a read-whole reply so a 401 can be
+        // swapped for a self-explanatory error before any byte reaches the
+        // guest (driveTLS's buffered relay for it).
+        if case .none = plan, let depiKey {
+            return .rewrite(request: request, { raw in
+                SupplyChainProxy.depiResponseGate(raw: raw, apiKey: depiKey, profileID: profileID, path: path) ?? raw
+            }, done: {})
+        }
+        return plan
+    }
+
+    /// Depi's secure-registry re-route (driveTLS's): with Depi as the
+    /// workspace's package filter, an npm registry request is redialled to
+    /// Depi with the key as its Bearer token (any guest Authorization
+    /// replaced: the key never enters the VM); one addressed to Depi only
+    /// needs the key. The key when re-routed (`request` rewritten), else nil;
+    /// a partly configured Depi says why it didn't re-route.
+    // @port-skip linux-only: HTTPMitmConnection.driveTLS's Depi re-route, on the Linux request chain
+    static func depiRoute(_ request: inout Data, proxy: MitmProxy, profileID: UUID, host: String,
+                          method: String, path: String) -> String? {
+        let scPolicy = proxy.supplyChainPolicy(for: profileID)
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
+            // Depi's name as the Host (macOS's URLSession sends the URL's).
+            request = HTTPRequestFraming.replacingHeaders(DepiRegistry.authorize(rawRequest: request, apiKey: p.depiAPIKey),
+                                                          drop: ["host"], add: "Host: \(DepiRegistry.host)")
+            SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) → https://\(DepiRegistry.host)")
+            return p.depiAPIKey
+        } else if DepiRegistry.shouldRoute(host: host),
+                  scPolicy?.packageFilter == .depi || !(scPolicy?.depiAPIKey ?? "").isEmpty {
+            let why = scPolicy == nil ? "no supply-chain policy on this workspace"
+                : scPolicy?.packageFilter != .depi ? "package filter isn't set to Depi"
+                : "no Depi API key entered"
+            SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — \(why)")
+        }
+        return nil
+    }
+
+    // @port-skip linux-only: see supplyChainStep
+    private static func policyStep(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String,
+                                   method: String, path: String, depiKey: String?) async -> SupplyChainPlan {
         let scPolicy = proxy.supplyChainPolicy(for: profileID)
         let enforce = scPolicy?.isActive ?? false
         // apt: observe-only, but every .deb an agent installs is recorded.
@@ -47,7 +91,7 @@ extension RequestReader {
             let ageOn = policy.ageGateEnabled
             let outcome = (allowlisted && !stripIntegrity) ? "allowed" : "rewritten"
             let rewrite = SupplyChainProxy.metadataRewrite(
-                ecosystem: ecosystem, pkg: pkg, path: path, depiRouted: false, depiKey: "",
+                ecosystem: ecosystem, pkg: pkg, path: path, depiRouted: depiKey != nil, depiKey: depiKey ?? "",
                 profileID: profileID, ageOn: ageOn, cutoff: cutoff, allowlisted: allowlisted,
                 stripIntegrity: stripIntegrity, cache: proxy.publishTimeCache)
             // npm: the full packument, so the age gate sees publish times.
@@ -84,7 +128,7 @@ extension RequestReader {
             }
             let result = TarballStripBox()
             let rewrite = SupplyChainProxy.tarballRewrite(
-                pkg: pkg, version: version, path: path, depiRouted: false, depiKey: "",
+                pkg: pkg, version: version, path: path, depiRouted: depiKey != nil, depiKey: depiKey ?? "",
                 profileID: profileID, onResult: { result.set($0) })
             let checked = record
             return .rewrite(request: request, rewrite, done: {

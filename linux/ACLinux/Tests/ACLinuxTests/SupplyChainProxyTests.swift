@@ -233,17 +233,6 @@ struct SupplyChainProxyTests {
         #expect(count.withLockedValue { $0 } == 1)
     }
 
-    /// A policy with Depi as its filter says, in the log and on the
-    /// Timeline, that Depi's re-route isn't applied here yet.
-    @Test func aDepiPolicySaysItsNotAppliedYet() throws {
-        let dir = try shortTempDir()
-        defer { try? FileManager.default.removeItem(atPath: dir) }
-        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
-        let before = SupplyChainLog.shared.snapshot().last?.id ?? 0
-        proxy.setSupplyChainPolicy(SupplyChainPolicy(packageFilter: .depi, depiAPIKey: "depi-test-key"), for: UUID())
-        #expect(SupplyChainLog.shared.snapshot().contains { $0.id > before && $0.message.contains("isn't applied on Linux yet") })
-    }
-
     /// npm ci's bypass asked of the client through the consent broker:
     /// allowed once, the lockfile-pinned tarball goes up as it is.
     @Test func npmCiGoesThroughWhenTheClientAllowsIt() async throws {
@@ -259,6 +248,70 @@ struct SupplyChainProxyTests {
         let reply = g.readAll()
         #expect(Self.body(reply) == Data("tarball".utf8), "\(String(decoding: reply.prefix(200), as: UTF8.self))")
         #expect(registry.requests.withLockedValue { $0 }.count == 1)
+    }
+
+    /// Depi's stand-in: TLS under Depi's name, signed by a test CA the proxy
+    /// trusts; every connection is routed to it.
+    static func depiRig(_ policy: SupplyChainPolicy, reply: String) throws -> (MitmProxy, UUID, MTLSServer, String) {
+        let ip = try #require(Daemon.primaryIPv4(), "a host address (loopback is always refused)")
+        let dir = try shortTempDir()
+        let ca = try TestCA("test Depi CA")
+        let server = try MTLSServer(host: ip, leaf: try ca.leaf(DepiRegistry.host, dns: [DepiRegistry.host], client: false),
+                                    clientCA: nil, reply: reply)
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true), extraRoots: [ca.nio])
+        proxy.routeAllTo = (ip, server.port)
+        let pid = UUID()
+        proxy.setSupplyChainPolicy(policy, for: pid)
+        return (proxy, pid, server, dir)
+    }
+
+    /// Depi as the package filter: an npm request is redialled to Depi
+    /// (TLS, its name) with the workspace's key as its Bearer token (the
+    /// guest's token never leaves) and Depi's name as its Host, and the
+    /// metadata rewrite still applies on top.
+    @Test func depiReRoutesWithTheWorkspacesKey() async throws {
+        let reply = String(decoding: Self.response(Self.packument(), type: "application/json"), as: UTF8.self)
+        let (proxy, pid, server, dir) = try Self.depiRig(SupplyChainPolicy(ageGateEnabled: true, packageFilter: .depi,
+                                                                           depiAPIKey: "depi-test-key"), reply: reply)
+        defer { server.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\nAuthorization: Bearer guest-token\r\n\r\n")
+        let got = g.readAll()
+        let seen = server.lastRequest.value
+        #expect(seen.contains("Authorization: Bearer depi-test-key") && !seen.contains("guest-token"), "\(seen)")
+        #expect(seen.contains("Host: \(DepiRegistry.host)") && !seen.contains("Host: registry.npmjs.org"), "\(seen)")
+        let doc = try? JSONSerialization.jsonObject(with: Self.body(got)) as? [String: Any]
+        #expect((doc?["versions"] as? [String: Any]).map { Array($0.keys) } == ["1.0.0"], "the age gate on top")
+    }
+
+    /// Depi rejecting the key: the guest gets Depi's self-explanatory
+    /// answer, even for a request the policy doesn't otherwise rewrite.
+    @Test func depisAuthFailureIsExplained() async throws {
+        let (proxy, pid, server, dir) = try Self.depiRig(SupplyChainPolicy(ageGateEnabled: false, packageFilter: .depi,
+                                                                           depiAPIKey: "depi-test-key"),
+                                                         reply: "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        defer { server.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /-/whoami HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
+        let reply = String(decoding: g.readAll(), as: UTF8.self)
+        #expect(reply.contains("X-Bromure-Block: depi-auth"), "\(reply.prefix(400))")
+    }
+
+    /// A key without Depi chosen as the filter: not re-routed.
+    @Test func aDepiKeyAloneDoesntReRoute() async throws {
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: false, packageFilter: .socketDev,
+                                                                           depiAPIKey: "depi-test-key")) { _ in
+            Self.response(Data("{}".utf8), type: "application/json")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /-/whoami HTTP/1.1\r\nHost: registry.npmjs.org\r\nAuthorization: Bearer guest-token\r\n\r\n")
+        _ = g.readAll()
+        let seen = registry.requests.withLockedValue { $0 }.first ?? ""
+        #expect(seen.contains("guest-token") && !seen.contains("depi-test-key"), "\(seen)")
     }
 
     /// With the policy off, a package fetch is only recorded: it goes up and

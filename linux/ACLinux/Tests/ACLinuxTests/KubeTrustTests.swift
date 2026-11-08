@@ -10,7 +10,7 @@ import X509
 @testable import ACLinux
 
 /// A throwaway PKI: a CA, and leaves it signs (server or client).
-private struct TestCA {
+struct TestCA {
     let cert: Certificate
     let key: P256.Signing.PrivateKey
     var pem: String { try! cert.serializeAsPEM().pemString }
@@ -52,7 +52,7 @@ private struct TestCA {
 
 /// An API server stand-in: TLS with `leaf`, a client certificate signed by
 /// `clientCA` required; answers any request "kube ok" and counts connections.
-private final class MTLSServer: @unchecked Sendable {
+final class MTLSServer: @unchecked Sendable {
     let channel: Channel
     let connections = NIOLockedValueBoxShim(0)
     /// The last request it read, as it read it.

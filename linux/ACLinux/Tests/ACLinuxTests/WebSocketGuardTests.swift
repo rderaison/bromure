@@ -293,7 +293,7 @@ extension DaemonGlobalSuites {
                 var trace: RequestReader.Trace?
                 let plan = await RequestReader.rewrite(upgrade, proxy: proxy, profileID: pid, host: "chatgpt.com", port: 443,
                                                        tls: true, session: proxy.strictSession(of: pid), trace: &trace)
-                guard case .forward(let out, _, _, let isUpgrade, _, let ws, _, _) = plan else { Issue.record("\(plan)"); continue }
+                guard case .forward(let out, _, _, let isUpgrade, _, let ws, _, _, _) = plan else { Issue.record("\(plan)"); continue }
                 let s = String(decoding: out, as: UTF8.self).lowercased()
                 #expect(isUpgrade && (ws != nil) == on)
                 #expect(s.contains("sec-websocket-extensions") != on, "on: \(on): \(s)")
