@@ -500,6 +500,9 @@ public final class MitmEngine {
         // Off the cooperative pool: the connection blocks on its sockets.
         MitmTasks.spawn { [weak self] in
             guard let self else { close(appFD); return }
+            // A quarantined workspace's flows go nowhere (a passthrough splice
+            // included; one open when it starts is cut by its own registration).
+            if WorkspaceQuarantine.shared.contains(profileID) { close(appFD); return }
 
             // A frame the guest addressed to loopback / link-local reaches
             // the switch only if it was forged; never dial the Mac's own.
@@ -573,7 +576,7 @@ public final class MitmEngine {
                     }
                 }
                 if shouldSplice {
-                    MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
+                    MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort, profileID: profileID)
                 } else {
                     await self.makeConnection(fd: appFD, profileID: profileID, identity: identity)
                         .runTransparentHTTP(host: host, port: destPort)
@@ -649,7 +652,7 @@ public final class MitmEngine {
                         "[firewall] ✗ deny uninspectable tcp \(destIP):\(destPort) — strict credentials (\(profileID.uuidString.prefix(8)))")
                     close(appFD); return
                 }
-                MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort)
+                MitmPassthrough.splice(appFD: appFD, destIP: destIP, destPort: destPort, profileID: profileID)
                 return
             }
 

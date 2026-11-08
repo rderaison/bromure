@@ -10,25 +10,34 @@ enum MitmPassthrough {
     /// pinned host reaches its real endpoint. Raw bytes both ways; no TLS, no
     /// cert. Closes both fds when either side ends. This is also the fail-open
     /// fallback for unclassifiable flows.
-    static func splice(appFD: Int32, destIP: String, destPort: Int) {
+    /// `profileID`: the workspace whose quarantine cuts the splice.
+    static func splice(appFD: Int32, destIP: String, destPort: Int, profileID: UUID? = nil) {
         guard let upstream = connectRawTCP(ip: destIP, port: destPort) else {
             close(appFD)
             return
         }
-        pumpBothWays(appFD: appFD, upstream: upstream)
+        pumpBothWays(appFD: appFD, upstream: upstream, profileID: profileID)
     }
 
     /// Splice to addresses that already passed the destination checks (a
     /// proxied CONNECT to a `tls: skip` endpoint) — never re-resolved.
-    static func splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int) {
+    static func splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int, profileID: UUID? = nil) {
         guard let upstream = try? UpstreamPinning.connect(addresses, port: destPort) else {
             close(appFD)
             return
         }
-        pumpBothWays(appFD: appFD, upstream: upstream)
+        pumpBothWays(appFD: appFD, upstream: upstream, profileID: profileID)
     }
 
-    private static func pumpBothWays(appFD: Int32, upstream: Int32) {
+    private static func pumpBothWays(appFD: Int32, upstream: Int32, profileID: UUID? = nil) {
+        // A quarantine shuts both sides (its cut gone before the fds close,
+        // so it can never reach a reused descriptor).
+        let cut = profileID.map { pid in
+            WorkspaceQuarantine.shared.onQuarantine(pid) {
+                shutdown(appFD, SHUT_RDWR)
+                shutdown(upstream, SHUT_RDWR)
+            }
+        }
         let group = DispatchGroup()
         for (from, to) in [(appFD, upstream), (upstream, appFD)] {
             group.enter()
@@ -39,6 +48,7 @@ enum MitmPassthrough {
             }
         }
         group.notify(queue: .global()) {
+            if let cut, let profileID { WorkspaceQuarantine.shared.remove(cut, for: profileID) }
             close(appFD)
             close(upstream)
         }

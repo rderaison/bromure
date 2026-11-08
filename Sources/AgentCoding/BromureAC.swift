@@ -15507,6 +15507,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             Task { @MainActor in
                 guard let self,
                       Self.eventIsForCurrent(sandbox, current: self.runningSessions[pid]?.sandbox) else { return }
+                // A quarantined workspace opens nothing on the host.
+                if WorkspaceQuarantine.shared.refusesURLOpen(url, for: pid) { return }
                 // If this is an OAuth login URL whose redirect_uri points at a
                 // guest loopback port, stand up a forwarder so the host
                 // browser's callback reaches the in-VM CLI before we open it
@@ -16680,6 +16682,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 win.host?.paneRequestsClose(win)
                 return
             }
+            // A guest reboot gets a new switch port: a quarantined workspace's
+            // stays cut (only Release opens it, as before the reboot).
+            if WorkspaceQuarantine.shared.contains(profile.id) { sandbox.setNetworkQuarantined(true) }
             // `prepare()` above CoW-clones a fresh disk from base.img when
             // there isn't one — which is exactly what a Reset System Disk
             // remedy sets up. Re-stamp the recorded base version like

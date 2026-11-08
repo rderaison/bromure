@@ -420,7 +420,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let own = dup(fd)
                 if own >= 0 {
                     if let addrs = upstreamAddresses(host: host, port: port) {
-                        MitmPassthrough.splice(appFD: own, addresses: addrs, destPort: port)
+                        MitmPassthrough.splice(appFD: own, addresses: addrs, destPort: port, profileID: profileID)
                     } else {
                         close(own)
                     }
@@ -447,9 +447,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// otherwise miss this connection.
     private func trackedForFirewall(host: String, port: Int, route: String,
                                     _ body: () async throws -> Void) async throws {
-        // A quarantined workspace's connections go nowhere (every route
-        // comes through here; an open one is cut by the quarantine).
-        if WorkspaceQuarantine.shared.contains(profileID) { return }
         let rule = ProxyPolicy.trackedRule(policy: guardrailsProvider()?.egressPolicy, host: host, port: port)
         let token = EgressConnectionRegistry.shared.register(
             profileID: profileID, host: host, port: port, route: route, rule: rule,
@@ -457,6 +454,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 self?.cutForFirewall()
             }
         defer { EgressConnectionRegistry.shared.unregister(token) }
+        // A quarantined workspace's connections go nowhere (every route
+        // comes through here). Checked once registered: a quarantine that
+        // starts after this cuts it (cutAll), one that started before is seen.
+        if WorkspaceQuarantine.shared.contains(profileID) { return }
         if ProxyPolicy.deniedOnceTracked(policy: guardrailsProvider()?.egressPolicy, host: host, port: port,
                                          identity: binaryIdentity) {
             return

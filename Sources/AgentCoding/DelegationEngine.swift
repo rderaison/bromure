@@ -1587,6 +1587,9 @@ final class DelegationEngine {
         // and is never typed in or resumed for.
         guard !items.isEmpty, let s = sessions.session(sessionID), delegate != nil, !s.isDeleted, !s.isArchived
         else { return }
+        // A quarantined workspace hears nothing (results of what it sent
+        // elsewhere included): its notices wait on the record for a Release.
+        if WorkspaceQuarantine.shared.contains(s.profileID) { return }
         // About to be put away (a delegate over while its Mac was away, back
         // now): never resumed or typed into first.
         if store.delegations.contains(where: { $0.childSessionID == sessionID && $0.retireWhenBack == true }) { return }

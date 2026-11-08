@@ -39,6 +39,51 @@ struct WorkspaceQuarantineTests {
         q.set(false, for: pid)
     }
 
+    @Test func aGuestPageIsNotOpenedWhileQuarantined() throws {
+        let pid = UUID()
+        let url = try #require(URL(string: "https://signin.example/authorize?state=secret"))
+        #expect(!WorkspaceQuarantine.shared.refusesURLOpen(url, for: pid))
+        WorkspaceQuarantine.shared.set(true, for: pid)
+        defer { WorkspaceQuarantine.shared.set(false, for: pid) }
+        #expect(WorkspaceQuarantine.shared.refusesURLOpen(url, for: pid))
+    }
+
+    @Test func aCutRegisteredWithoutRunNowWaitsForTheNextStart() {
+        let q = WorkspaceQuarantine(), pid = UUID(), cuts = Counter()
+        q.set(true, for: pid)
+        q.onQuarantine(pid, runNow: false) { cuts.bump() }
+        #expect(cuts.value == 0, "the caller refuses its requests itself")
+        q.set(false, for: pid)
+        q.set(true, for: pid)
+        #expect(cuts.value == 1)
+        q.set(false, for: pid)
+    }
+
+    /// A slow MCP call in flight (a delegation's wait) when the quarantine
+    /// starts: cancelled, and the refusal is what the guest gets.
+    final class Slow: MCPLineHandler {
+        func handle(line: String, branch: String?) async -> String? {
+            for _ in 0..<500 {
+                if Task.isCancelled { return "cancelled-result" }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return "late-result"
+        }
+    }
+
+    @MainActor @Test func aCallInFlightIsCancelledAndItsResultNotRelayed() async throws {
+        let pid = UUID()
+        let gated = QuarantineGatedMCP(Slow(), profileID: pid)
+        let started = ContinuousClock.now
+        let answer = Task { await gated.handle(line: #"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, branch: nil) }
+        try await Task.sleep(for: .milliseconds(100))
+        WorkspaceQuarantine.shared.set(true, for: pid)
+        defer { WorkspaceQuarantine.shared.set(false, for: pid) }
+        let reply = try #require(await answer.value)
+        #expect(reply.contains("quarantined") && !reply.contains("result"), "\(reply)")
+        #expect(ContinuousClock.now - started < .seconds(3), "cancelled, not run to its end")
+    }
+
     final class Echo: MCPLineHandler {
         func handle(line: String, branch: String?) async -> String? { "served" }
     }

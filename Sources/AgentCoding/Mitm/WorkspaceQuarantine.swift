@@ -61,6 +61,16 @@ public final class WorkspaceQuarantine: @unchecked Sendable {
         return token
     }
 
+    /// A page the guest opens (the host's browser, a sign-in handed to a
+    /// client): refused while quarantined, and logged (the host only: the
+    /// URL itself may carry what the guest wants out).
+    public func refusesURLOpen(_ url: URL, for profileID: UUID) -> Bool {
+        guard contains(profileID) else { return false }
+        SupplyChainLog.shared.record(
+            "[quarantine] ✗ guest page not opened: \(url.host ?? "?") (\(profileID.uuidString.prefix(8)) is quarantined)")
+        return true
+    }
+
     public func remove(_ token: UUID, for profileID: UUID) {
         lock.lock(); defer { lock.unlock() }
         cuts[profileID]?[token] = nil
@@ -80,9 +90,21 @@ final class QuarantineGatedMCP: MCPLineHandler {
         self.profileID = profileID
     }
 
+    /// A call in flight when the quarantine starts is cancelled (a long one:
+    /// a delegation's wait, a cluster's creation), and whatever it comes back
+    /// with isn't relayed into the quarantined guest: the refusal is.
     func handle(line: String, branch: String?) async -> String? {
-        guard WorkspaceQuarantine.shared.contains(profileID) else { return await inner.handle(line: line, branch: branch) }
-        return Self.refusal(to: line)
+        let pid = profileID
+        guard !WorkspaceQuarantine.shared.contains(pid) else { return Self.refusal(to: line) }
+        let inner = self.inner
+        let call = Task { await inner.handle(line: line, branch: branch) }
+        let cut = WorkspaceQuarantine.shared.onQuarantine(pid, runNow: false) { call.cancel() }
+        // Registered, then checked again: a quarantine that started in
+        // between ran its cuts before this one was there.
+        if WorkspaceQuarantine.shared.contains(pid) { call.cancel() }
+        let answer = await call.value
+        WorkspaceQuarantine.shared.remove(cut, for: pid)
+        return WorkspaceQuarantine.shared.contains(pid) ? Self.refusal(to: line) : answer
     }
 
     @MainActor func responseNotWritten(to line: String, branch: String?) {
