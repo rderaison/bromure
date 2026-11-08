@@ -2318,6 +2318,18 @@ VSOCK_RELAY_PATH = "/tmp/bromure-vsock.sock"
 VSOCK_RELAY_PORTS = frozenset((5830, 5831, 5832, 5833, 5834, 5835, 5836))
 VSOCK_RELAY_HEADER_MAX = 64
 VSOCK_RELAY_HEADER_TIMEOUT = 5.0
+# At most this many relay clients at once, each holding two threads, a host
+# connection and two descriptors: the socket is open to the workload, and
+# agentd's threads and descriptors also serve the shell pool and every tab.
+# Each agent tab keeps about five MCP connections, so this is ~25 agents.
+# One more is answered "err busy" before anything is opened for it.
+VSOCK_RELAY_MAX_CLIENTS = 128
+# A relayed connection with no byte either way for this long is closed. The
+# shims and the plan driver reconnect on a drop (and an MCP call in flight
+# sends its reply long before this), so it costs a quiet tab nothing.
+VSOCK_RELAY_IDLE = 30 * 60.0
+# How often a relay pump wakes to look at the idle clock.
+VSOCK_RELAY_TICK = 30.0
 
 
 def _vsock_relay_port(conn):
@@ -2367,10 +2379,7 @@ def _vsock_relay_handle(conn, connect=None):
             conn.sendall(b"ok\n")
         except OSError:
             return
-        t = threading.Thread(target=_bridge_pump, args=(conn, host), daemon=True)
-        t.start()
-        _bridge_pump(host, conn)
-        t.join()
+        _vsock_relay_splice(conn, host)
     finally:
         for sock in (host, conn):
             if sock is not None:
@@ -2378,6 +2387,76 @@ def _vsock_relay_handle(conn, connect=None):
                     sock.close()
                 except OSError:
                     pass
+
+
+def _vsock_relay_splice(conn, host, idle=None, tick=None):
+    """Relay both ways until both sides have ended, or nothing has moved for
+    `idle` seconds (VSOCK_RELAY_IDLE). An end of stream is passed on as a
+    half-close, as `_bridge_pump` does (a shim sends its request, shuts its
+    side, and reads the reply). On idle or an error both sockets are shut
+    down, which also frees a send blocked on a peer that stopped reading."""
+    idle = VSOCK_RELAY_IDLE if idle is None else idle
+    tick = min(VSOCK_RELAY_TICK if tick is None else tick, idle)
+    last = [time.monotonic()]
+    done = threading.Event()
+    lock = threading.Lock()
+    ended = [0]
+
+    def cut():
+        done.set()
+        for sock in (conn, host):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def stale():
+        return time.monotonic() - last[0] >= idle
+
+    def pump(src, dst):
+        buf = bytearray(RELAY_CHUNK)
+        view = memoryview(buf)
+        poller = select.poll()
+        poller.register(src, select.POLLIN | select.POLLHUP | select.POLLERR)
+        try:
+            while not done.is_set():
+                if not poller.poll(int(tick * 1000)):
+                    if stale():
+                        cut()
+                        return
+                    continue
+                n = src.recv_into(buf)
+                if not n:
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    break
+                last[0] = time.monotonic()
+                dst.sendall(view[:n])
+                last[0] = time.monotonic()
+        except (OSError, ValueError):
+            cut()
+            return
+        # This side has ended; the other may still be talking. Watch the idle
+        # clock for it (no third thread) until it ends too.
+        with lock:
+            ended[0] += 1
+            if ended[0] == 2:
+                done.set()
+        while not done.wait(tick):
+            if stale():
+                cut()
+
+    # A send bounded too: with both peers sending and neither reading, both
+    # pumps would sit in `sendall` with no one looking at the clock. Reads
+    # only follow a poll that saw data, so this timeout never ends one.
+    for sock in (conn, host):
+        sock.settimeout(idle)
+    t = threading.Thread(target=pump, args=(conn, host), daemon=True)
+    t.start()
+    pump(host, conn)
+    t.join()
 
 
 def _vsock_relay_reply(conn, line):
@@ -2398,9 +2477,27 @@ def vsock_relay_service(path=None):
     os.chmod(path, 0o666)
     s.listen(16)
     _bridge_log("[relay] listening on %s" % path)
+    slots = threading.BoundedSemaphore(VSOCK_RELAY_MAX_CLIENTS)
     while True:
         conn, _addr = s.accept()
-        threading.Thread(target=_vsock_relay_handle, args=(conn,), daemon=True).start()
+        if not slots.acquire(blocking=False):
+            # Full: refused here, on the accepting thread, before any thread
+            # or host connection exists for it.
+            _bridge_log("[relay] %d clients already: refused one" % VSOCK_RELAY_MAX_CLIENTS)
+            try:
+                conn.settimeout(0.5)
+                conn.sendall(b"err busy\n")
+            except OSError:
+                pass
+            conn.close()
+            continue
+
+        def serve(conn=conn):
+            try:
+                _vsock_relay_handle(conn)
+            finally:
+                slots.release()
+        threading.Thread(target=serve, daemon=True).start()
 
 # ─────────────────── §5 claude-token (vsock 8446, credentials) ──────────────
 # Connects to the host over vsock and answers read/write RPCs against
