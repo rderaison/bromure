@@ -66,12 +66,18 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
     private let session: OpaquePointer
     let inputNames: Set<String>
     private let names: [String]
+    /// Outputs past this many values are refused (64 Mi floats: 256 MiB).
+    static let maxOutput = 64 << 20
 
     // @port-skip linux-only: see OrtCInjectionSession
-    init(modelPath: String) throws {
+    init(modelPath: String, threads: Int32 = 0, output: String? = nil) throws {
         _ = try OnnxRuntimeLibrary.load()
         var err = [CChar](repeating: 0, count: 512)
-        guard let s = acl_ort_session_create(modelPath, 0, &err, err.count) else {
+        guard let s = acl_ort_session_create(modelPath, threads, &err, err.count) else {
+            throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err))
+        }
+        if let output, acl_ort_session_use_output(s, output, &err, err.count) < 0 {
+            acl_ort_session_release(s)
             throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err))
         }
         session = s
@@ -102,14 +108,23 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
         var out = [Float](repeating: 0, count: 4096)
         var n = 0
         var err = [CChar](repeating: 0, count: 512)
-        let rc = namePtrs.withUnsafeBufferPointer { np in
-            dataPtrs.withUnsafeBufferPointer { dp in
-                acl_ort_run_int64(session, np.baseAddress, dp.baseAddress, fed.count, dims, dims.count,
-                                  &out, out.count, &n, &err, err.count)
+        func run() -> Int32 {
+            namePtrs.withUnsafeBufferPointer { np in
+                dataPtrs.withUnsafeBufferPointer { dp in
+                    acl_ort_run_int64(session, np.baseAddress, dp.baseAddress, fed.count, dims, dims.count,
+                                      &out, out.count, &n, &err, err.count)
+                }
             }
         }
-        guard rc == 0 else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
-        guard n <= out.count else { throw OnnxRuntimeLibrary.Unavailable(why: "an output of \(n) values") }
+        guard run() == 0 else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
+        // A larger output (a token classifier's: a score per token and
+        // label): run again into room for all of it.
+        if n > out.count {
+            guard n <= Self.maxOutput else { throw OnnxRuntimeLibrary.Unavailable(why: "an output of \(n) values") }
+            out = [Float](repeating: 0, count: n)
+            guard run() == 0 else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
+            guard n <= out.count else { throw OnnxRuntimeLibrary.Unavailable(why: "an output of \(n) values") }
+        }
         return Array(out.prefix(n))
     }
 }
@@ -119,6 +134,13 @@ enum InjectionRuntime {
     // @port-skip linux-only: macOS's InjectionRuntime.session (PromptInjectionClassifier+Apple.swift) on the C API
     static func session(modelPath: String) throws -> any InjectionSession {
         try OrtCInjectionSession(modelPath: modelPath)
+    }
+
+    /// A token classifier's session (PIIDetector's): on the CPU with
+    /// `threads` intra-op threads, reading `output` when the model has it.
+    // @port-skip linux-only: macOS's InjectionRuntime.tokenSession (PromptInjectionClassifier+Apple.swift) on the C API
+    static func tokenSession(modelPath: String, threads: Int32, output: String) throws -> any InjectionSession {
+        try OrtCInjectionSession(modelPath: modelPath, threads: threads, output: output)
     }
 }
 

@@ -106,6 +106,22 @@ fail:
     return NULL;
 }
 
+int acl_ort_session_use_output(acl_ort_session *s, const char *name, char *err, size_t errlen) {
+    if (!api || !s) { say(err, errlen, "no session", NULL); return -1; }
+    OrtAllocator *al = NULL;
+    size_t nout = 0;
+    if (failed(api->GetAllocatorWithDefaultOptions(&al), err, errlen, "allocator")) return -1;
+    if (failed(api->SessionGetOutputCount(s->session, &nout), err, errlen, "outputs")) return -1;
+    for (size_t i = 0; i < nout; i++) {
+        char *out = NULL;
+        if (failed(api->SessionGetOutputName(s->session, i, al, &out), err, errlen, "output name")) return -1;
+        char *copy = take_name(al, out);
+        if (copy && strcmp(copy, name) == 0) { free(s->output); s->output = copy; return 0; }
+        free(copy);
+    }
+    return 1;
+}
+
 size_t acl_ort_input_count(const acl_ort_session *s) { return s ? s->ninputs : 0; }
 const char *acl_ort_input_name(const acl_ort_session *s, size_t i) { return s && i < s->ninputs ? s->inputs[i] : NULL; }
 

@@ -20,11 +20,14 @@ typedef struct acl_ort_session acl_ort_session;
 /* A CPU session over the model at model_path, graph optimisations on. */
 acl_ort_session *acl_ort_session_create(const char *model_path, int intra_threads, char *err, size_t errlen);
 void acl_ort_session_release(acl_ort_session *s);
+/* Read the output called `name` from now on, when the model has one (else
+ * the first, as before); 0 when it was found. */
+int acl_ort_session_use_output(acl_ort_session *s, const char *name, char *err, size_t errlen);
 size_t acl_ort_input_count(const acl_ort_session *s);
 const char *acl_ort_input_name(const acl_ort_session *s, size_t i);
 /* Run with int64 inputs of one shape (rank `rank`), named as the model
- * declares them; the first output as float32 into out (up to outcap
- * values), its element count in *outlen. */
+ * declares them; the output (the first, or the one chosen) as float32 into
+ * out (up to outcap values), its element count in *outlen. */
 int acl_ort_run_int64(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
                       const int64_t *shape, size_t rank, float *out, size_t outcap, size_t *outlen,
                       char *err, size_t errlen);
