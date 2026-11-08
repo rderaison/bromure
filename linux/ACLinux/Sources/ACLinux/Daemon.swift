@@ -768,6 +768,7 @@ public actor Daemon {
         } catch {
             CIDAllocator.shared.release(cid)
             try? registry.remove(id: id)
+            if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
             return .error(500, "Failed to create VM: \(error)")
         }
     }
@@ -964,8 +965,10 @@ public actor Daemon {
                 var s = registry.find(rec.id) ?? rec
                 s.state = .suspended
                 try? registry.upsert(s)
+                if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
                 return .error(500, "Resume failed (still suspended; resume again, or start it fresh with stop then start): \(error)")
             }
+            if let r = error as? SandboxUnavailable { return .error(409, r.description, ["unavailable": .array(r.missing.map(JSONValue.string))]) }
             return .error(500, "Start failed: \(error)")
         }
     }
@@ -1082,6 +1085,8 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
+        // TEMPORARY, until the guest sandbox is staged (DaemonSandboxGuard.swift).
+        try await refuseUnenforceableSandbox(rec)
         do {
             try await launchVM(&rec, restoreFrom: restoreFrom)
         } catch {
