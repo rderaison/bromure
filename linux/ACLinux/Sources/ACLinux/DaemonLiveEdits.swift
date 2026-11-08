@@ -92,7 +92,7 @@ extension Daemon {
 
     /// The credential half: the policies, the plan and swap map, and the
     /// guest's files, as the launch stages them, with the map merged.
-    // partial: no supply-chain or PII policy, fusion, 1Password error prompt, or grok/kimi stand-in files (not on Linux yet)
+    // partial: no supply-chain policy, PII model download, fusion, 1Password error prompt, or grok/kimi stand-in files (not on Linux yet)
     // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=12a93ff58499be07 @0e28fd20
     @discardableResult
     func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {

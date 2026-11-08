@@ -61,11 +61,13 @@ extension MitmProxy {
 
     /// A workspace's live policies, from its profile, as macOS pushes them at
     /// launch and on a save (ACAppDelegate's setGuardrailsConfig and
-    /// setPromptInjectionPolicy calls): its guardrails and egress policy,
-    /// its prompt-injection policy, and the name the guardrails prompt shows.
+    /// setPromptInjectionPolicy and setPIIPolicy calls): its guardrails and
+    /// egress policy, its prompt-injection and PII policies, and the name the
+    /// guardrails prompt shows.
     // @port-skip linux-only: the daemon's share of launch / applyLiveFirewall's proxy wiring
     func applyWorkspacePolicies(_ profile: Profile) {
         setPromptInjectionPolicy(profile.promptInjection, for: profile.id)
+        setPIIPolicy(profile.pii, for: profile.id)
         setGuardrailsConfig(GuardrailsConfig.make(for: profile), for: profile.id)
         let (broker, piBroker, name, pid) = (guardrailsBroker, promptInjectionBroker, profile.name, profile.id)
         Task.detached {
@@ -78,6 +80,7 @@ extension MitmProxy {
     // @port-skip linux-only: the daemon's share of cleanupSessionRegistrations
     func clearWorkspacePolicies(_ profileID: UUID) {
         clearPromptInjectionPolicy(for: profileID)
+        clearPIIPolicy(for: profileID)
         clearGuardrailsConfig(for: profileID)
     }
 
@@ -299,22 +302,79 @@ extension RequestReader {
     }
 
     /// Prompt injection on an AI host's request, before it's forwarded
-    /// (macOS: driveTLS's enforcement). With the policy on, in any mode, a
-    /// content-coded body is decoded and forwarded decoded (the trace's copy
-    /// too, for log mode's scan); one that can't be decoded is refused with a
-    /// 415 and recorded. In ask and block modes: tool output the user already
+    /// (macOS: driveTLS's enforcement). With prompt injection or PII
+    /// protection on, in any mode, a content-coded body is decoded and
+    /// forwarded decoded (the trace's copy too, for log mode's scan); one
+    /// that can't be decoded is refused with a 415 and recorded. With prompt
+    /// injection in ask and block modes: tool output the user already
     /// blocked goes out as the placeholder; a detector model still loading
     /// answers "retry" (503); a finding is refused (451) in block mode, or
     /// asked of the client in ask mode. The answer, or nil to go on with
     /// `request`.
+    /// PII protection on an AI host's request (macOS: driveTLS's PII step):
+    /// personal data in the conversation swapped for stand-ins before it
+    /// leaves the machine; the relay puts the real values back in the reply
+    /// (the vault returned). Not for a turn the local-inference sentinel
+    /// serves on this machine; a custom engine on another machine gets the
+    /// swap (PIIEngineScope). A body still content-coded goes out unscanned,
+    /// logged, as on macOS (promptInjectionAnswer has already decoded any
+    /// coding it can). A detector model still loading
+    /// answers "retry" (503). The answer, or nil to go on.
+    // @port-skip linux-only: HTTPMitmConnection.driveTLS's PII step, on the Linux request chain
+    static func piiSwap(_ request: inout Data, proxy: MitmProxy, profileID: UUID, host: String, method: String,
+                        path: String) async -> (answer: Data?, vault: PIIVault?) {
+        let local = host.lowercased() == InferenceService.localMitmHost
+        let offMachineEngine = local ? PIIEngineScope.offMacEngineHost(profileID: profileID) : nil
+        guard !local || offMachineEngine != nil,
+              let pii = proxy.piiPolicy(for: profileID), pii.isActive,
+              let split = request.range(of: Data("\r\n\r\n".utf8)) else { return (nil, nil) }
+        let body = Data(request[split.upperBound...])
+        // Still coded, not just marked: a `Content-Encoding: identity` the
+        // guest added doesn't skip the scan (as macOS).
+        let encoded = decodeRequestContentEncoding(request) != .identity
+        guard !encoded, PIIRewriter.isEligible(host: host, method: method, body: body,
+                                              localEngineOffMac: offMachineEngine != nil) else {
+            if encoded, TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) {
+                FileHandle.standardError.write(Data("[pii] \(host) \(path): compressed request body — not scanned\n".utf8))
+            }
+            return (nil, nil)
+        }
+        if await PIIDetector.shared.readiness() == .loading {
+            FileHandle.standardError.write(Data("[mitm] \(host): PII protection model still loading — answered 503\n".utf8))
+            return (ProxyPolicy.detectorWarmingResponse(["PII protection"]), nil)
+        }
+        let vault = PIIVault.forProfile(profileID)
+        let t = Date()
+        let outcome = await PIIRewriter.rewriteRequest(body, policy: pii, vault: vault)
+        if outcome.body != body { request = ProxyPolicy.replacingBody(of: request, with: outcome.body) }
+        let ms = Date().timeIntervalSince(t) * 1000
+        // A partial scan is recorded even with nothing swapped: the Timeline
+        // must show that part of the text got pattern rules only. It names
+        // where the text really went: the custom engine's host, not the
+        // sentinel.
+        if outcome.total > 0 || outcome.partial {
+            ProxyPolicy.recordPIISwaps(outcome, host: offMachineEngine ?? host, profileID: profileID, ms: ms)
+        }
+        if outcome.total > 0 || ms > 250 || outcome.partial {
+            FileHandle.standardError.write(Data(String(
+                format: "[pii] %@ %@: %d new value(s) swapped, %d → %d bytes, %.0f ms%@\n",
+                host, path, outcome.total, body.count, outcome.body.count, ms,
+                outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
+        }
+        return (nil, vault.isEmpty ? nil : vault)
+    }
+
     /// Tests: the detectors' readiness (nil: the classifiers').
     static let detectorReadinessForTesting = NIOLockedValueBox<(source: ModelReadiness, rules: ModelReadiness)?>(nil)
 
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's prompt-injection step, on the Linux request chain
     static func promptInjectionAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                                       host: String, path: String, trace: inout Trace?) async -> Data? {
-        guard let pi = proxy.promptInjectionPolicy(for: profileID), pi.isActive,
-              TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) else { return nil }
+        guard TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) else { return nil }
+        let pi = proxy.promptInjectionPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
+        let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false
+        guard pi != nil || piiOn else { return nil }
+        let engines = [pi != nil ? "prompt_injection" : nil, piiOn ? "pii" : nil].compactMap { $0 }
         switch decodeRequestContentEncoding(request) {
         case .identity:
             break
@@ -332,12 +392,12 @@ extension RequestReader {
             }
             request = plain
         case .undecodable(let encoding):
-            ProxyPolicy.recordScanSkipped(host: host, path: path, engines: ["prompt_injection"],
+            ProxyPolicy.recordScanSkipped(host: host, path: path, engines: engines,
                                           reason: ProxyPolicy.undecodableReason(encoding),
                                           profileID: profileID, blocked: true)
-            return ProxyPolicy.undecodableBodyResponse(encoding: encoding, engines: ["prompt_injection"])
+            return ProxyPolicy.undecodableBodyResponse(encoding: encoding, engines: engines)
         }
-        guard pi.onDetection != .log, let split = request.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        guard let pi, pi.onDetection != .log, let split = request.range(of: Data("\r\n\r\n".utf8)) else { return nil }
         // Already blocked: resent with every turn, it goes as a placeholder
         // instead of failing each later request (the session goes on).
         if PromptInjectionRedactions.shared.hasAny(profileID),

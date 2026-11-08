@@ -23,8 +23,9 @@ import X509
 /// Each request is traced as macOS traces it (TraceEmitter, at the
 /// workspace's trace level). The workspace's policy chain runs on each
 /// request first (MitmEgress.swift): OpenShell's checks, the middleware,
-/// the guardrails, compromise detection and strict credential mode.
-// partial: no PII or supply-chain policy on Linux yet
+/// the guardrails, compromise detection and strict credential mode; then
+/// prompt injection and PII protection (its reply restored by PIIRelay).
+// partial: no supply-chain policy on Linux yet, nor PII on WebSocket turns
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -44,6 +45,8 @@ final class MitmProxy: @unchecked Sendable {
     /// Each workspace's prompt-injection policy (macOS: MitmEngine's
     /// promptInjectionPolicies), read when a traced conversation is parsed.
     private let promptInjectionPolicies = NIOLockedValueBox<[UUID: PromptInjectionPolicy]>([:])
+    /// Each workspace's PII protection (setPIIPolicy), read per request.
+    private let piiPolicies = NIOLockedValueBox<[UUID: PIIPolicy]>([:])
     /// Each workspace's guardrails and egress policy (macOS: MitmEngine's
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).
@@ -228,6 +231,27 @@ final class MitmProxy: @unchecked Sendable {
     // @port MitmEngine.promptInjectionPolicy(for: UUID) h=e80d49232134d71c @8e2543eb
     func promptInjectionPolicy(for profileID: UUID) -> PromptInjectionPolicy? {
         promptInjectionPolicies.withLockedValue { $0[profileID] }
+    }
+    // @port MitmEngine.setPIIPolicy(_: PIIPolicy, for: UUID) h=9b96102637454989 @8e2543eb
+    func setPIIPolicy(_ policy: PIIPolicy, for profileID: UUID) {
+        let prior = piiPolicies.withLockedValue { all -> PIIPolicy? in
+            defer { all[profileID] = policy }
+            return all[profileID]
+        }
+        if prior != policy {
+            SupplyChainLog.shared.record(
+                "[pii] protection \(policy.isActive ? "on" : "off") for \(profileID.uuidString.prefix(8))")
+        }
+    }
+    // @port MitmEngine.piiPolicy(for: UUID) h=8ce35c1891f58dbf @8e2543eb
+    func piiPolicy(for profileID: UUID) -> PIIPolicy? {
+        piiPolicies.withLockedValue { $0[profileID] }
+    }
+    /// A stopped workspace's PII policy, gone with its other policies
+    /// (macOS keeps its engine's until the app quits).
+    // @port-skip linux-only: clearWorkspacePolicies' share (macOS's MitmEngine has no clearPIIPolicy)
+    func clearPIIPolicy(for profileID: UUID) {
+        piiPolicies.withLockedValue { $0[profileID] = nil }
     }
     // @port MitmEngine.clearPromptInjectionPolicy(for: UUID) h=b926618e76eae15c @8e2543eb
     func clearPromptInjectionPolicy(for profileID: UUID) {
@@ -811,7 +835,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     enum Plan {
         case answer(Data)
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
-                     mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil)
+                     mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -882,6 +906,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                                     trace: &trace) {
             return .answer(answer)
         }
+        // PII protection: stand-ins for personal data before it leaves; the
+        // relay restores the reply (macOS: driveTLS's PII step).
+        let pii = await piiSwap(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path)
+        if let answer = pii.answer { return .answer(answer) }
         // An imported kubeconfig's client certificate flagged for approval:
         // asked before it's presented (macOS asks at the server's challenge,
         // and before an upgrade); refused with a real reply, not a close.
@@ -942,7 +970,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // upgrade's refusal too): the reply is asked for uncompressed (what a
         // guest behind macOS's URLSession gets; nothing here decodes gzip or br).
         let tracedBodies = !upgrade && trace.map({ $0.session.level.capturesBodyForHost(host) }) == true
-        if capture == nil, tracedBodies || UnmanagedCredentialGuard.shared.isEnabled(for: profileID) {
+        // A reply PII restores is read too (macOS's URLSession decodes it).
+        if capture == nil, tracedBodies || pii.vault != nil || UnmanagedCredentialGuard.shared.isEnabled(for: profileID) {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["accept-encoding"], add: "Accept-Encoding: identity")
         }
         // A model provider's WebSocket with prompt injection on: its frames are
@@ -966,7 +995,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
             return .answer(response)
         }
-        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws)
+        return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault)
     }
 
     /// The guest drained: the upstream may be read again (ResponseRelay
@@ -983,7 +1012,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws):
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii):
             proxy.connectUpstream(host: host, port: port, tls: tls, profileID: profileID, pinned: pinned,
                                   on: channel.eventLoop).whenComplete { r in
                 switch r {
@@ -997,7 +1026,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     let relay = ResponseRelay(guest: channel, profileID: self.profileID, injected: injected,
                                               capture: capture, upgrade: upgrade, proxy: self.proxy, trace: trace, host: host,
                                               mint: mint.map { (self.proxy.credentialMinter, $0) }, strictSession: session,
-                                              ws: ws)
+                                              ws: ws, pii: pii,
+                                              // An HTTP/1.0 guest gets a restored body up to the close, not chunks.
+                                              guestHTTP11: !Self.isHTTP10(req))
                     relay.onUpstreamWritable = { self.readGuestIfAllowed(channel) }
                     // The upgrade's held bytes follow the 101; anything else's are dropped.
                     relay.onSwitched = { switched, server in
@@ -1066,6 +1097,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     private func reply(_ context: ChannelHandlerContext, _ data: Data) {
         started = true
         write(data, to: context.channel, close: true)
+    }
+
+    /// Whether a request's line says HTTP/1.0 (its reply can't be chunked).
+    // @port-skip linux-only: the Linux relay's re-framing of a restored reply
+    static func isHTTP10(_ req: Data) -> Bool {
+        let end = req.range(of: Data("\r\n".utf8))?.lowerBound ?? req.endIndex
+        return String(decoding: req[req.startIndex..<end], as: UTF8.self).hasSuffix(" HTTP/1.0")
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1145,6 +1183,8 @@ final class ResponseRelay: ChannelInboundHandler {
     /// The upgrade's prompt-injection guard (nil: an opaque pipe).
     private let ws: WSPromptGuard?
     private var wsServer: WSServerSide?
+    /// The reply PII protection restores (its stand-ins put back), if any.
+    private let pii: PIIRelay?
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1175,9 +1215,10 @@ final class ResponseRelay: ChannelInboundHandler {
     init(guest: Channel, profileID: UUID, injected: SubscriptionAuthRewrite.Injected,
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
          host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0,
-         ws: WSPromptGuard? = nil) {
+         ws: WSPromptGuard? = nil, pii: PIIVault? = nil, guestHTTP11: Bool = true) {
         self.guest = guest
         self.ws = ws
+        self.pii = pii.map { PIIRelay(vault: $0, chunkedOut: guestHTTP11, host: host, profileID: profileID) }
         self.mint = mint
         self.host = host
         self.profileID = profileID
@@ -1215,6 +1256,18 @@ final class ResponseRelay: ChannelInboundHandler {
             return
         }
         if headDone {
+            if let pii, pii.restoring {
+                // Restored: the trace and the learning read what the guest gets.
+                let out = pii.feed(Data(b.readableBytesView))
+                keepForTrace(out)
+                keepForLearning(out)
+                relayed = true
+                if !out.isEmpty { guest.write(guest.allocator.buffer(bytes: out), promise: nil) }
+                // Broken framing: the guest's reply is cut here, never ended.
+                if pii.failed { context.close(promise: nil); return }
+                holdIfGuestFull(context)
+                return
+            }
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
             keepForLearning(b.readableBytesView)
             relayed = true
@@ -1285,7 +1338,23 @@ final class ResponseRelay: ChannelInboundHandler {
             if upgrade { onSwitched?(false, nil) }
             let h = HTTPRequestFraming.replacingHeaders(head0, drop: ["connection", "keep-alive"], add: "Connection: close")
             noteStatus(h)
-            out = h + rest
+            switch pii?.head(h) {
+            case .restored(let head)?:
+                out = head + pii!.feed(rest)
+            case .refused(let why)?:
+                // A reply that can't be framed with certainty isn't passed on.
+                FileHandle.standardError.write(Data("[pii] \(host): reply refused: \(why)\n".utf8))
+                let reply = RequestReader.simple(502, "Bad Gateway",
+                                                 body: "Bromure: the reply from \(host) couldn't be read with certainty (\(why)); it was not passed on.\n")
+                onSwitched = nil
+                keepForTrace(reply)
+                relayed = true
+                guest.write(guest.allocator.buffer(bytes: reply), promise: nil)
+                context.close(promise: nil)
+                return
+            case .asItCame?, nil:
+                out = h + rest
+            }
         }
         onSwitched = nil
         keepForTrace(out)
@@ -1425,6 +1494,12 @@ final class ResponseRelay: ChannelInboundHandler {
             if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: 0, truncated: false) }
             guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in self.guest.close(promise: nil) }
             return
+        }
+        // A restored body read up to the close: what's held, and the last chunk.
+        if let pii, pii.restoring, !pii.ended {
+            let tail = pii.finish()
+            keepForTrace(tail)
+            guest.write(guest.allocator.buffer(bytes: tail), promise: nil)
         }
         if let proxy, let trace {
             proxy.emitTrace(trace, response: traceTruncated ? traceCopy : HTTPRequestFraming.dechunkedResponse(traceCopy),
