@@ -51,174 +51,178 @@ final class FakeDriver: @unchecked Sendable {
     }
 }
 
-@Suite("Plan streams", .serialized)
-@MainActor
-struct PlanStreamTests {
-    /// Waits (yielding to the main queue the listener reads on) until `cond`.
-    func until(_ cond: () -> Bool) async -> Bool {
-        for _ in 0..<1000 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
-        return cond()
-    }
-
-    final class Rig {
-        let dir: String
-        let stores: SessionStores
-        let pid = UUID()
-        let task: CodingTask
-        let bridge: PlanStreamListener
-        let ended = Box<[(String, Bool, String?)]>([])
-        let priorShared: SessionStores?
-        final class Box<T> { var v: T; init(_ v: T) { self.v = v } }
-        @MainActor init() throws {
-            dir = try shortTempDir()
-            stores = SessionStores(stateDir: dir)
-            // The engine host reads the daemon's stores through `shared`.
-            priorShared = SessionStores.shared
-            SessionStores.shared = stores
-            var t = CodingTask(title: "Plan the thing", profileID: pid)
-            t.branchSlug = "plan-thing"
-            task = t
-            stores.codingTasks.upsert(t)
-            stores.codingTaskEngine = CodingTaskEngine(store: stores.codingTasks, delegate: nil)
-            bridge = try PlanStreamListener(udsPath: dir + "/v.sock", fdStoreName: "test-plan")
-            stores.attachPlanBridge(bridge, pid: pid)
-            let ended = self.ended
-            stores.planStreamHub.onEnded = { _, branch, ok, err in ended.v.append((branch, ok, err)) }
+extension DaemonGlobalSuites {
+    // Under the serialized parent: the rig swaps SessionStores.shared, as
+    // other daemon suites do.
+    @Suite("Plan streams", .serialized)
+    @MainActor
+    struct PlanStreamTests {
+        /// Waits (yielding to the main queue the listener reads on) until `cond`.
+        func until(_ cond: () -> Bool) async -> Bool {
+            for _ in 0..<1000 { if cond() { return true }; try? await Task.sleep(nanoseconds: 10_000_000) }
+            return cond()
         }
-        @MainActor func stop() {
-            stores.detachPlanBridge(pid: pid)
-            SessionStores.shared = priorShared
-            FDStore.remove("test-plan")
-            try? FileManager.default.removeItem(atPath: dir)
+
+        final class Rig {
+            let dir: String
+            let stores: SessionStores
+            let pid = UUID()
+            let task: CodingTask
+            let bridge: PlanStreamListener
+            let ended = Box<[(String, Bool, String?)]>([])
+            let priorShared: SessionStores?
+            final class Box<T> { var v: T; init(_ v: T) { self.v = v } }
+            @MainActor init() throws {
+                dir = try shortTempDir()
+                stores = SessionStores(stateDir: dir)
+                // The engine host reads the daemon's stores through `shared`.
+                priorShared = SessionStores.shared
+                SessionStores.shared = stores
+                var t = CodingTask(title: "Plan the thing", profileID: pid)
+                t.branchSlug = "plan-thing"
+                task = t
+                stores.codingTasks.upsert(t)
+                stores.codingTaskEngine = CodingTaskEngine(store: stores.codingTasks, delegate: nil)
+                bridge = try PlanStreamListener(udsPath: dir + "/v.sock", fdStoreName: "test-plan")
+                stores.attachPlanBridge(bridge, pid: pid)
+                let ended = self.ended
+                stores.planStreamHub.onEnded = { _, branch, ok, err in ended.v.append((branch, ok, err)) }
+            }
+            @MainActor func stop() {
+                stores.detachPlanBridge(pid: pid)
+                SessionStores.shared = priorShared
+                FDStore.remove("test-plan")
+                try? FileManager.default.removeItem(atPath: dir)
+            }
         }
-    }
 
-    @Test func eventsBecomeTheItemsTheClientPolls() async throws {
-        let rig = try Rig(); defer { rig.stop() }
-        let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
-        d.send(#"{"ev":"text","role":"assistant","text":"before any hello: dropped"}"#,
-               #"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
-               #"{"ev":"text","role":"assistant","text":"Let me look at the repo."}"#,
-               #"{"ev":"tool","name":"Read","summary":"README.md"}"#,
-               #"{"ev":"thinking","text":"hmm"}"#,
-               "not json at all",
-               #"{"ev":"from-a-newer-guest","x":1}"#)
-        #expect(await until { rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing")?.items.count == 3 })
-        let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
-        #expect(out["live"] as? Bool == true)
-        let items = out["items"] as? [[String: Any]] ?? []
-        #expect(items.map { $0["k"] as? String } == ["assistant", "tool", "thinking"], "\(items)")
-        #expect(items.first?["text"] as? String == "Let me look at the repo.")
-        #expect(out["session"] as? String != nil)
-        // The cursor: only what's new.
-        let next = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 2])
-        #expect((next["items"] as? [[String: Any]])?.count == 1 && next["since"] as? Int == 2)
-        // The engine's watchdog signal (CodingTaskHost.planStreamLive).
-        let (host, _, hdir) = try await SessionListModelTests.host()
-        defer { try? FileManager.default.removeItem(atPath: hdir) }
-        #expect(host.planStreamLive(profileID: rig.pid, branch: "wt/plan-thing"))
-        #expect(!host.planStreamLive(profileID: rig.pid, branch: "wt/other"))
-    }
+        @Test func eventsBecomeTheItemsTheClientPolls() async throws {
+            let rig = try Rig(); defer { rig.stop() }
+            let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
+            d.send(#"{"ev":"text","role":"assistant","text":"before any hello: dropped"}"#,
+                   #"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
+                   #"{"ev":"text","role":"assistant","text":"Let me look at the repo."}"#,
+                   #"{"ev":"tool","name":"Read","summary":"README.md"}"#,
+                   #"{"ev":"thinking","text":"hmm"}"#,
+                   "not json at all",
+                   #"{"ev":"from-a-newer-guest","x":1}"#)
+            #expect(await until { rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing")?.items.count == 3 })
+            let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
+            #expect(out["live"] as? Bool == true)
+            let items = out["items"] as? [[String: Any]] ?? []
+            #expect(items.map { $0["k"] as? String } == ["assistant", "tool", "thinking"], "\(items)")
+            #expect(items.first?["text"] as? String == "Let me look at the repo.")
+            #expect(out["session"] as? String != nil)
+            // The cursor: only what's new.
+            let next = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 2])
+            #expect((next["items"] as? [[String: Any]])?.count == 1 && next["since"] as? Int == 2)
+            // The engine's watchdog signal (CodingTaskHost.planStreamLive).
+            let (host, _, hdir) = try await SessionListModelTests.host()
+            defer { try? FileManager.default.removeItem(atPath: hdir) }
+            #expect(host.planStreamLive(profileID: rig.pid, branch: "wt/plan-thing"))
+            #expect(!host.planStreamLive(profileID: rig.pid, branch: "wt/other"))
+        }
 
-    @Test func turnsAndAnswersGoBackToTheDriver() async throws {
-        let rig = try Rig(); defer { rig.stop() }
-        let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
-        // Nothing is live yet: refused.
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "hi"])["error"] as? String == "no live plan stream")
-        d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"codex"}"#)
-        #expect(await until { rig.bridge.isBound(branch: "wt/plan-thing") })
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "go on"])["ok"] as? Bool == true)
-        let userLine = await d.read()
-        #expect((try? JSONSerialization.jsonObject(with: Data(userLine.utf8)) as? [String: Any])?["text"] as? String == "go on", "\(userLine)")
-        // No pending question: an answer is refused.
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "answer", "answers": []])["error"] as? String == "no pending question")
-        d.send(#"{"ev":"question","qid":"q1","questions":[{"question":"Which DB?","header":"DB","multiSelect":false,"options":[{"label":"Postgres","description":""},{"label":"SQLite","description":""}]}]}"#)
-        #expect(await until { rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing")?.pendingQID == "q1" })
-        let r = rig.stores.taskCommand(rig.task.id, "plan-cmd",
-                                       ["type": "answer", "answers": [["question": "Which DB?", "labels": ["SQLite"]]]])
-        #expect(r["ok"] as? Bool == true)
-        let line = await d.read()
-        let obj = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any], "\(line)")
-        #expect(obj["cmd"] as? String == "answer" && obj["qid"] as? String == "q1")
-        #expect((obj["answers"] as? [[String: Any]])?.first?["labels"] as? [String] == ["SQLite"])
-        #expect((obj["answers"] as? [[String: Any]])?.first?["other"] is NSNull, "an explicit null, as the protocol shows")
-        // Consumed: a second submit reports it.
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "answer", "answers": []])["error"] as? String == "no pending question")
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "bogus"])["error"] as? String == "unknown plan-cmd type")
-        // The engine's end: the driver is told.
-        let (host, _, hdir) = try await SessionListModelTests.host()
-        defer { try? FileManager.default.removeItem(atPath: hdir) }
-        host.endPlanStream(profileID: rig.pid, branch: "wt/plan-thing")
-        #expect(await d.read() == #"{"cmd":"end"}"# + "\n")
-    }
+        @Test func turnsAndAnswersGoBackToTheDriver() async throws {
+            let rig = try Rig(); defer { rig.stop() }
+            let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
+            // Nothing is live yet: refused.
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "hi"])["error"] as? String == "no live plan stream")
+            d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"codex"}"#)
+            #expect(await until { rig.bridge.isBound(branch: "wt/plan-thing") })
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "go on"])["ok"] as? Bool == true)
+            let userLine = await d.read()
+            #expect((try? JSONSerialization.jsonObject(with: Data(userLine.utf8)) as? [String: Any])?["text"] as? String == "go on", "\(userLine)")
+            // No pending question: an answer is refused.
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "answer", "answers": []])["error"] as? String == "no pending question")
+            d.send(#"{"ev":"question","qid":"q1","questions":[{"question":"Which DB?","header":"DB","multiSelect":false,"options":[{"label":"Postgres","description":""},{"label":"SQLite","description":""}]}]}"#)
+            #expect(await until { rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing")?.pendingQID == "q1" })
+            let r = rig.stores.taskCommand(rig.task.id, "plan-cmd",
+                                           ["type": "answer", "answers": [["question": "Which DB?", "labels": ["SQLite"]]]])
+            #expect(r["ok"] as? Bool == true)
+            let line = await d.read()
+            let obj = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any], "\(line)")
+            #expect(obj["cmd"] as? String == "answer" && obj["qid"] as? String == "q1")
+            #expect((obj["answers"] as? [[String: Any]])?.first?["labels"] as? [String] == ["SQLite"])
+            #expect((obj["answers"] as? [[String: Any]])?.first?["other"] is NSNull, "an explicit null, as the protocol shows")
+            // Consumed: a second submit reports it.
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "answer", "answers": []])["error"] as? String == "no pending question")
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "bogus"])["error"] as? String == "unknown plan-cmd type")
+            // The engine's end: the driver is told.
+            let (host, _, hdir) = try await SessionListModelTests.host()
+            defer { try? FileManager.default.removeItem(atPath: hdir) }
+            host.endPlanStream(profileID: rig.pid, branch: "wt/plan-thing")
+            #expect(await d.read() == #"{"cmd":"end"}"# + "\n")
+        }
 
-    @Test func aTerminalEventEndsThePlanAndLaterEventsAreDropped() async throws {
-        let rig = try Rig(); defer { rig.stop() }
-        let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
-        d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
-               #"{"ev":"text","role":"assistant","text":"done"}"#,
-               #"{"ev":"result","ok":true}"#,
-               #"{"ev":"text","role":"assistant","text":"a straggler"}"#)
-        #expect(await until { rig.ended.v.count == 1 })
-        #expect(rig.ended.v.first?.0 == "wt/plan-thing" && rig.ended.v.first?.1 == true)
-        #expect(!rig.bridge.isBound(branch: "wt/plan-thing"), "commands refused after the terminal event")
-        let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
-        #expect(out["live"] as? Bool == false)
-        #expect((out["items"] as? [[String: Any]])?.count == 1, "the straggler isn't shown")
-        #expect((out["ended"] as? [String: Any])?["ok"] as? Bool == true)
-    }
+        @Test func aTerminalEventEndsThePlanAndLaterEventsAreDropped() async throws {
+            let rig = try Rig(); defer { rig.stop() }
+            let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
+            d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
+                   #"{"ev":"text","role":"assistant","text":"done"}"#,
+                   #"{"ev":"result","ok":true}"#,
+                   #"{"ev":"text","role":"assistant","text":"a straggler"}"#)
+            #expect(await until { rig.ended.v.count == 1 })
+            #expect(rig.ended.v.first?.0 == "wt/plan-thing" && rig.ended.v.first?.1 == true)
+            #expect(!rig.bridge.isBound(branch: "wt/plan-thing"), "commands refused after the terminal event")
+            let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
+            #expect(out["live"] as? Bool == false)
+            #expect((out["items"] as? [[String: Any]])?.count == 1, "the straggler isn't shown")
+            #expect((out["ended"] as? [String: Any])?["ok"] as? Bool == true)
+        }
 
-    @Test func aReconnectReplacesTheOldConnectionAndALostDriverIsDeclaredDead() async throws {
-        let rig = try Rig(); defer { rig.stop() }
-        SessionStores.planReconnectGrace = 200_000_000   // 0.2 s here (macOS: 90 s)
-        defer { SessionStores.planReconnectGrace = 90_000_000_000 }
-        let a = try FakeDriver(path: rig.bridge.path); defer { a.close() }
-        a.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#)
-        #expect(await until { rig.bridge.isBound(branch: "wt/plan-thing") })
-        // The driver reconnects (a socket drop): the newest socket wins.
-        let b = try FakeDriver(path: rig.bridge.path); defer { b.close() }
-        b.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#)
-        try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "interrupt"])["ok"] as? Bool == true)
-        #expect(await b.read() == #"{"cmd":"interrupt"}"# + "\n", "to the new connection")
-        #expect(rig.ended.v.isEmpty, "the replaced connection closing isn't a loss")
-        // Now the driver dies without a terminal event, and doesn't come back.
-        b.close()
-        #expect(await until { rig.ended.v.count == 1 })
-        #expect(rig.ended.v.first?.1 == false)
-        #expect(rig.ended.v.first?.2?.contains("did not reconnect") == true)
-    }
+        @Test func aReconnectReplacesTheOldConnectionAndALostDriverIsDeclaredDead() async throws {
+            let rig = try Rig(); defer { rig.stop() }
+            SessionStores.planReconnectGrace = 200_000_000   // 0.2 s here (macOS: 90 s)
+            defer { SessionStores.planReconnectGrace = 90_000_000_000 }
+            let a = try FakeDriver(path: rig.bridge.path); defer { a.close() }
+            a.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#)
+            #expect(await until { rig.bridge.isBound(branch: "wt/plan-thing") })
+            // The driver reconnects (a socket drop): the newest socket wins.
+            let b = try FakeDriver(path: rig.bridge.path); defer { b.close() }
+            b.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "interrupt"])["ok"] as? Bool == true)
+            #expect(await b.read() == #"{"cmd":"interrupt"}"# + "\n", "to the new connection")
+            #expect(rig.ended.v.isEmpty, "the replaced connection closing isn't a loss")
+            // Now the driver dies without a terminal event, and doesn't come back.
+            b.close()
+            #expect(await until { rig.ended.v.count == 1 })
+            #expect(rig.ended.v.first?.1 == false)
+            #expect(rig.ended.v.first?.2?.contains("did not reconnect") == true)
+        }
 
-    @Test func aGuestReachesOnlyItsOwnWorkspacesPlans() async throws {
-        // Each VM has its own socket, bound to its workspace: B's driver
-        // claiming A's task branch makes a session under B, never A's.
-        let rig = try Rig(); defer { rig.stop() }
-        let pidB = UUID()
-        let bridgeB = try PlanStreamListener(udsPath: rig.dir + "/vb.sock", fdStoreName: "test-plan-b")
-        rig.stores.attachPlanBridge(bridgeB, pid: pidB)
-        defer { rig.stores.detachPlanBridge(pid: pidB); FDStore.remove("test-plan-b") }
-        let d = try FakeDriver(path: bridgeB.path); defer { d.close() }
-        d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
-               #"{"ev":"text","role":"assistant","text":"from B"}"#,
-               #"{"ev":"result","ok":true}"#)
-        #expect(await until { rig.stores.planStreamHub.session(profileID: pidB, branch: "wt/plan-thing")?.items.count == 1 })
-        #expect(rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing") == nil, "A's task has no session")
-        let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
-        #expect(out["live"] as? Bool == false && (out["items"] as? [Any])?.isEmpty == true, "A's client sees nothing of B's")
-        #expect(rig.ended.v.isEmpty || rig.ended.v.allSatisfy { $0.0 == "wt/plan-thing" })
-        #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "x"])["error"] as? String == "no live plan stream",
-                "and nothing of A's reaches B's driver")
-    }
+        @Test func aGuestReachesOnlyItsOwnWorkspacesPlans() async throws {
+            // Each VM has its own socket, bound to its workspace: B's driver
+            // claiming A's task branch makes a session under B, never A's.
+            let rig = try Rig(); defer { rig.stop() }
+            let pidB = UUID()
+            let bridgeB = try PlanStreamListener(udsPath: rig.dir + "/vb.sock", fdStoreName: "test-plan-b")
+            rig.stores.attachPlanBridge(bridgeB, pid: pidB)
+            defer { rig.stores.detachPlanBridge(pid: pidB); FDStore.remove("test-plan-b") }
+            let d = try FakeDriver(path: bridgeB.path); defer { d.close() }
+            d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"claude"}"#,
+                   #"{"ev":"text","role":"assistant","text":"from B"}"#,
+                   #"{"ev":"result","ok":true}"#)
+            #expect(await until { rig.stores.planStreamHub.session(profileID: pidB, branch: "wt/plan-thing")?.items.count == 1 })
+            #expect(rig.stores.planStreamHub.session(profileID: rig.pid, branch: "wt/plan-thing") == nil, "A's task has no session")
+            let out = rig.stores.taskCommand(rig.task.id, "plan-events", ["since": 0])
+            #expect(out["live"] as? Bool == false && (out["items"] as? [Any])?.isEmpty == true, "A's client sees nothing of B's")
+            #expect(rig.ended.v.isEmpty || rig.ended.v.allSatisfy { $0.0 == "wt/plan-thing" })
+            #expect(rig.stores.taskCommand(rig.task.id, "plan-cmd", ["type": "user", "text": "x"])["error"] as? String == "no live plan stream",
+                    "and nothing of A's reaches B's driver")
+        }
 
-    @Test func aStoppedWorkspaceTakesItsSessionsWithIt() async throws {
-        let rig = try Rig(); defer { rig.stop() }
-        let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
-        d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"grok"}"#)
-        #expect(await until { rig.stores.planStreamHub.isLive(profileID: rig.pid, branch: "wt/plan-thing") })
-        rig.stores.detachPlanBridge(pid: rig.pid)
-        #expect(!rig.stores.planStreamHub.isLive(profileID: rig.pid, branch: "wt/plan-thing"))
-        #expect(rig.stores.planBridges[rig.pid] == nil)
-        #expect(!FileManager.default.fileExists(atPath: rig.bridge.path), "the socket file removed")
+        @Test func aStoppedWorkspaceTakesItsSessionsWithIt() async throws {
+            let rig = try Rig(); defer { rig.stop() }
+            let d = try FakeDriver(path: rig.bridge.path); defer { d.close() }
+            d.send(#"{"ev":"hello","branch":"wt/plan-thing","tool":"grok"}"#)
+            #expect(await until { rig.stores.planStreamHub.isLive(profileID: rig.pid, branch: "wt/plan-thing") })
+            rig.stores.detachPlanBridge(pid: rig.pid)
+            #expect(!rig.stores.planStreamHub.isLive(profileID: rig.pid, branch: "wt/plan-thing"))
+            #expect(rig.stores.planBridges[rig.pid] == nil)
+            #expect(!FileManager.default.fileExists(atPath: rig.bridge.path), "the socket file removed")
+        }
     }
 }
 
