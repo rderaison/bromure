@@ -356,6 +356,8 @@ struct StrictSandboxVsockTests {
                     sent += s.send(b"x" * 65536)
                 except BlockingIOError:
                     time.sleep(0.01)
+                except OSError:
+                    break
             r["stuckSent"] = sent > 65536
             for _ in range(100):
                 if threading.active_count() <= base:
@@ -363,6 +365,35 @@ struct StrictSandboxVsockTests {
                 time.sleep(0.05)
             r["threadsLeft"] = threading.active_count() - base
             s.close()
+            # Both peers sending, neither reading: a host that floods back
+            # without reading either. The send timeout frees both pumps.
+            flood = socket.socket(); flood.bind(("127.0.0.1", 0)); flood.listen(4)
+            def flooder():
+                c, _ = flood.accept()
+                try:
+                    while True:
+                        c.sendall(b"y" * 65536)
+                except OSError:
+                    pass
+            threading.Thread(target=flooder, daemon=True).start()
+            m._vsock_connect = lambda port, label, **kw: socket.create_connection(flood.getsockname())
+            base = threading.active_count()
+            b2 = opened()
+            b2.setblocking(False)
+            end = time.monotonic() + 1.0
+            while time.monotonic() < end:
+                try:
+                    b2.send(b"x" * 65536)
+                except BlockingIOError:
+                    time.sleep(0.01)
+                except OSError:
+                    break
+            for _ in range(100):
+                if threading.active_count() <= base + 1:     # the flooder's own thread
+                    break
+                time.sleep(0.05)
+            r["bothStuckThreads"] = threading.active_count() - base
+            b2.close()
             print(json.dumps(r))
             """)
         let r = try #require(try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])
@@ -372,5 +403,6 @@ struct StrictSandboxVsockTests {
         #expect(r["talking"] as? Bool == true)
         #expect(r["stuckSent"] as? Bool == true)
         #expect(r["threadsLeft"] as? Int == 0)
+        #expect((r["bothStuckThreads"] as? Int ?? 9) <= 1, "\(r["bothStuckThreads"] ?? "nil")")
     }
 }

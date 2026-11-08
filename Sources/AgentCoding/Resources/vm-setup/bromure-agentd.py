@@ -2448,6 +2448,11 @@ def _vsock_relay_splice(conn, host, idle=None, tick=None):
             if stale():
                 cut()
 
+    # A send bounded too: with both peers sending and neither reading, both
+    # pumps would sit in `sendall` with no one looking at the clock. Reads
+    # only follow a poll that saw data, so this timeout never ends one.
+    for sock in (conn, host):
+        sock.settimeout(idle)
     t = threading.Thread(target=pump, args=(conn, host), daemon=True)
     t.start()
     pump(host, conn)
