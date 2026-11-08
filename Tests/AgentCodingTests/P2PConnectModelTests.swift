@@ -25,6 +25,31 @@ struct P2PConnectModelTests {
         else { Issue.record("expected .peer kind") }
     }
 
+    /// Finding: "Reconnecting to a peer duplicates its security timeline
+    /// history". A peer got a fresh id at every connect (peers aren't
+    /// saved): the same machine's rows went to a new timeline bucket beside
+    /// the old one, counted twice. Its id is now derived from its device id.
+    @Test("a peer is the same host at every connect: one id, one timeline bucket")
+    func peerIDStableAcrossConnects() {
+        let first = RemoteConnectModel.peerHost(for: device(id: "server-device-123"))
+        let again = RemoteConnectModel.peerHost(for: device(id: "server-device-123"))
+        let other = RemoteConnectModel.peerHost(for: device(id: "server-device-456"))
+        #expect(first.id == again.id)
+        #expect(first.id != other.id)
+        #expect(first.id == RemoteHost.stablePeerID("server-device-123"))
+        // Reconnected, its rows replace its own bucket: never a second one.
+        let tl = SecurityTimeline(directory: nil)
+        let row: [String: Any] = ["engine": "Firewall", "condition": "c", "decision": "d", "kind": "blocked",
+                                  "t": Date().timeIntervalSince1970, "profileID": UUID().uuidString]
+        for host in [first, again] {
+            let key = host.id.uuidString            // `securityMirrorKey`
+            tl.noteMachine(key, host: host)
+            tl.applyHistory([row, row], host: key)
+            tl.applyMirror([row], host: key)
+        }
+        #expect(tl.remote.count == 1)
+    }
+
     @Test("a peer that can't be resolved fails in the connect window, bounded")
     func peerResolveFailure() async throws {
         var captured: RemoteHost?
