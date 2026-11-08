@@ -850,6 +850,10 @@ public final class SessionDisk {
                 } else {
                     try? fm.removeItem(at: marker)
                 }
+                // attestd builds `sandbox_status` with this module: a strict
+                // workspace without a sandbox spec needs it too, or its state
+                // never reaches the host.
+                let statusModule = "bromure_sandbox_status.py"
                 // Package installs under the OpenShell engine (no root):
                 // `home-packages` makes pip default to the home folder;
                 // `pkg-bin/` puts the apt / apt-get / sudo shims ahead of the
@@ -901,7 +905,7 @@ public final class SessionDisk {
                 // kernel differs). Staged only with an active spec.
                 let setupDir = adURL.deletingLastPathComponent()
                 let guestFiles = ["bromure-sandboxd", "bromure-sentryd", "bromure_openshell.py",
-                                  "bromure_idmap.py", "bromure_sandbox_status.py"]
+                                  "bromure_idmap.py", statusModule]
                 let sentryDest = tmp.appendingPathComponent("sentry")
                 if spec.isActive {
                     for name in guestFiles {
@@ -935,8 +939,18 @@ public final class SessionDisk {
                     if (try? Data(contentsOf: specDest)) != data { try data.write(to: specDest, options: .atomic) }
                 } else {
                     try? fm.removeItem(at: specDest)
-                    for name in guestFiles { try? fm.removeItem(at: tmp.appendingPathComponent(name)) }
+                    for name in guestFiles where !(name == statusModule && profile.effectiveStrictSandbox) {
+                        try? fm.removeItem(at: tmp.appendingPathComponent(name))
+                    }
                     try? fm.removeItem(at: sentryDest)
+                    if profile.effectiveStrictSandbox {
+                        let src = setupDir.appendingPathComponent(statusModule)
+                        let dst = tmp.appendingPathComponent(statusModule)
+                        if let data = try? Data(contentsOf: src), (try? Data(contentsOf: dst)) != data {
+                            try data.write(to: dst, options: .atomic)
+                            try fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: dst.path)
+                        }
+                    }
                 }
             }
 
