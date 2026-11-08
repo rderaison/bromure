@@ -33,4 +33,13 @@ struct DiskSpaceFloorTests {
         }
         try EphemeralDisk.checkDiskSpace(at: dir + "/missing/volume", minimumFreeBytes: .max)
     }
+
+    /// A suspend under the floor is refused before anything is touched
+    /// (main: the RAM snapshot needs room; the VM keeps running).
+    @Test func aSuspendUnderTheFloorIsRefused() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let why = try #require(Daemon.suspendRefusal(vmDir: dir, floor: .max))
+        #expect(!why.isEmpty)
+        #expect(Daemon.suspendRefusal(vmDir: dir, floor: 0) == nil)
+    }
 }

@@ -903,10 +903,17 @@ public actor Daemon {
 
     /// Suspend: a full snapshot of the running VM (its virtiofsds' state with
     /// it), its two disks' identities recorded, then the VM ends suspended.
+    /// The RAM snapshot needs room: below the free-space floor the suspend
+    /// is refused (409, why) before anything is touched, and the VM keeps
+    /// running (macOS: stopSession's floor check).
     // @port-skip linux-only: Firecracker snapshot suspend (macOS: requestStopSession(.suspend) saves VZ state)
-    func suspend(_ rec: VMRecord) async -> ControlResponse {
+    func suspend(_ rec: VMRecord, floor: UInt64 = EphemeralDisk.minimumFreeBytes) async -> ControlResponse {
         guard let l = live[rec.id] else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
+        }
+        if let why = Self.suspendRefusal(vmDir: vmDir(rec.id), floor: floor) {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': suspend refused: \(why)\n".utf8))
+            return .error(409, why)
         }
         let dir = snapshotDir(rec.id)
         try? FileManager.default.removeItem(atPath: dir)
@@ -925,6 +932,14 @@ public actor Daemon {
         return ControlResponse(200, ["status": "suspended"])
     }
 
+    /// Why a suspend can't save its RAM snapshot under `vmDir` now (under
+    /// the free-space floor), or nil.
+    // @port-skip linux-only: stopSession's suspend floor check, testable
+    static func suspendRefusal(vmDir: String, floor: UInt64 = EphemeralDisk.minimumFreeBytes) -> String? {
+        do { try EphemeralDisk.checkDiskSpace(at: vmDir, minimumFreeBytes: floor) } catch { return error.localizedDescription }
+        return nil
+    }
+
     /// The snapshot in `dir` still pairs with the VM's disks.
     // @port-skip linux-only: snapshot identity for both disks
     func snapshotUsable(_ rec: VMRecord, _ dir: String) -> String? {
@@ -941,8 +956,10 @@ public actor Daemon {
         }
     }
 
-    /// `DELETE /vms/{id}` with `{"action": "shutdown"|"suspend"|"kill"}`.
-    // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=eaa996c40011d353 @7dd92fdf
+    /// `DELETE /vms/{id}` with `{"action": "shutdown"|"suspend"|"kill"}`; a
+    /// suspend refused for lack of disk space is a 409 saying so (the VM
+    /// still runs).
+    // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=3801d3e89fa37bfb @f127f8ab
     func deleteVM(_ rec: VMRecord, action: String) async -> ControlResponse {
         if action == "suspend" { return await suspend(rec) }
         // A suspended VM shut down: its saved state goes, it's stopped.
