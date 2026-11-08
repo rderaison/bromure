@@ -231,3 +231,13 @@ private final class LockedTestRunDirectories: @unchecked Sendable {
         return url
     }
 }
+
+/// `body` inside an autorelease pool where there is one (Darwin's
+/// Objective-C runtime); elsewhere nothing is autoreleased, so it just runs.
+func withAutoreleasePool<T>(_ body: () throws -> T) rethrows -> T {
+    #if canImport(ObjectiveC)
+    return try autoreleasepool(invoking: body)
+    #else
+    return try body()
+    #endif
+}

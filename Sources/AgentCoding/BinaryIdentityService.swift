@@ -1,5 +1,4 @@
 import Foundation
-import Virtualization
 import SandboxEngine
 
 /// Host side of strict-sandbox binary identity (OpenShell RFC 0012): one
@@ -33,23 +32,20 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// Tests: answer attestor queries without a VM.
     var queryOverride: ((UUID, [String: Any]) async -> [String: Any]?)?
 
-    /// Start listening for a VM's attestor. `secretFile` is host-side storage
-    /// for the pinned secret (survives a suspend / restore of the VM).
-    @MainActor
-    public func attach(profileID: UUID, socketDevice: VZVirtioSocketDevice, secretFile: URL) {
-        let bridge = AttestorBridge(profileID: profileID, secretFile: secretFile)
-        bridge.listen(on: socketDevice)
+    /// A VM's attestor channel, listening (the host's vsock listener feeds
+    /// it: BinaryIdentityService+VZ.swift on macOS).
+    func adoptBridge(_ bridge: AttestorBridge, for profileID: UUID) {
         lock.lock(); bridges[profileID] = bridge; lock.unlock()
     }
 
-    @MainActor
-    public func detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) {
+    /// A VM's attestor channel gone, with what was pinned and gated for it.
+    func dropBridge(_ profileID: UUID) -> AttestorBridge? {
         lock.lock()
         let b = bridges.removeValue(forKey: profileID)
         pinnedHashes[profileID] = nil
         gateResults = gateResults.filter { $0.key.pid != profileID }
         lock.unlock()
-        b?.stop(socketDevice: socketDevice)
+        return b
     }
 
     public func isAttestorConnected(_ profileID: UUID) -> Bool {
@@ -205,16 +201,19 @@ public final class BinaryIdentityService: @unchecked Sendable {
 }
 
 /// One VM's attestor channel (newline-delimited JSON over vsock).
-final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
+final class AttestorBridge: NSObject, @unchecked Sendable {
     let profileID: UUID
     let secretFile: URL
     private let lock = NSLock()
     private var fd: Int32 = -1
-    private var connection: VZVirtioSocketConnection?
+    /// What keeps the accepted connection alive while it serves (macOS's
+    /// VZVirtioSocketConnection), if anything.
+    private var connection: AnyObject?
     private var pinnedSecret: String?
     private var nextID = 1
     private var waiters: [Int: CheckedContinuation<[String: Any]?, Never>] = [:]
-    private var listener: VZVirtioSocketListener?
+    /// The host's listener feeding this channel (retained with it).
+    var listener: AnyObject?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return fd >= 0 }
     /// When this bridge started listening (the VM's boot, for a fresh start).
@@ -228,29 +227,12 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         super.init()
     }
 
-    @MainActor func listen(on device: VZVirtioSocketDevice) {
-        let l = VZVirtioSocketListener()
-        l.delegate = self
-        listener = l
-        device.setSocketListener(l, forPort: BinaryIdentityService.vsockPort)
-    }
-
-    @MainActor func stop(socketDevice: VZVirtioSocketDevice?) {
-        socketDevice?.removeSocketListener(forPort: BinaryIdentityService.vsockPort)
-        closeChannel()
-    }
-
-    func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection,
-                  from socketDevice: VZVirtioSocketDevice) -> Bool {
-        let cfd = dup(connection.fileDescriptor)
-        guard cfd >= 0 else { return false }
-        Thread.detachNewThread { [weak self] in self?.handshakeAndServe(cfd, connection: connection) }
-        return true
-    }
+    /// The channel closed (the VM went).
+    func stop() { closeChannel() }
 
     /// Validate the attestor's hello (secret pinning), then serve replies
     /// until the channel closes. Blocking; runs on its own thread.
-    func handshakeAndServe(_ cfd: Int32, connection: VZVirtioSocketConnection?) {
+    func handshakeAndServe(_ cfd: Int32, connection: AnyObject?) {
         var reader = LineReader(fd: cfd)
         // The hello must come promptly and carry the attestor's secret.
         var tv = timeval(tv_sec: 5, tv_usec: 0)
@@ -303,7 +285,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     /// runs on a raw Thread for the VM's lifetime, whose pool never drains,
     /// and every line's objects would stay alive until the VM stopped.
     static func serveLines(_ reader: inout LineReader, _ handle: ([String: Any]) -> Void) {
-        while autoreleasepool(invoking: { () -> Bool in
+        while withAutoreleasePool({ () -> Bool in
             guard let line = reader.next() else { return false }
             if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] { handle(obj) }
             return true
