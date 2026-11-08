@@ -16725,9 +16725,6 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
         session.stopping = true
-        // A suspended/off VM can't serve its ports; tear down any Cloudflare
-        // exposures pointing at it (the SSH front door tunnel is unaffected).
-        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         func shutDown() async {
             sandbox.sessionDisk?.clearSavedState()
             do { try vm.requestStop() }
@@ -16810,6 +16807,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         case .ask, .background:
             break   // unreachable: both collapse to .suspend above
         }
+        // A suspended/off VM can't serve its ports; tear down any Cloudflare
+        // exposures pointing at it (the SSH front door tunnel is unaffected).
+        // Only now, with the VM stopped: a suspend that fails for lack of disk
+        // space returns above with the VM running again, and its tunnels must
+        // still be up. Re-exposing them later would mint new quick-tunnel
+        // URLs and break the published ones.
+        CloudflareTunnelSupervisor.shared.unexposeAll(prefix: "ws:\(profileID.uuidString):")
         // A clean guest poweroff fires onStopped → handleSessionStopped, but
         // suspend and a forced vm.stop() do NOT — so finish teardown here too.
         // Idempotent: a no-op if onStopped already ran.
