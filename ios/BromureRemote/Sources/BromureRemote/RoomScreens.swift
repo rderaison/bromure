@@ -298,6 +298,8 @@ struct MobileRoomScreen: View {
     /// every frame.
     @State private var zoomMoving: UUID?
     @State private var draft = ""
+    /// The software keyboard is up (SoftwareKeyboardWatch).
+    @State private var keyboardUp = false
     @State private var sending = false
     @State private var renaming: AgentRoom?
     @State private var deleting: AgentRoom?
@@ -371,11 +373,9 @@ struct MobileRoomScreen: View {
             }
         }
         .navigationTitle(room?.name ?? "")
-        .toolbar {
-            // The room's name with what's on screen under it -- the focused
-            // session's status, which a 1×1 cell no longer shows in a bar.
-            ToolbarItem(placement: .principal) { roomTitle }
-        }
+        // Typing: the bar, the tabs and the cells' headers step aside.
+        .toolbar(keyboardUp ? .hidden : .visible, for: .navigationBar)
+        .modifier(SoftwareKeyboardWatch(up: $keyboardUp))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
@@ -453,7 +453,8 @@ struct MobileRoomScreen: View {
                 .padding(.vertical, 8)
                 .background(Color.primary.opacity(0.05))
             }
-            if zoomedID == nil { tabStrip }
+            // The composer's "To" still switches while the strip is away.
+            if zoomedID == nil, !keyboardUp { tabStrip }
             if members.isEmpty && !toSwitchboard {
                 empty
             } else {
@@ -556,15 +557,6 @@ struct MobileRoomScreen: View {
             .foregroundStyle(on ? Color.primary : Color.secondary)
         }
         .buttonStyle(.plain)
-        // One session to a tab: its cell has no bar, so its menu is here.
-        .contextMenu {
-            if single, let s = p.first {
-                Button { onOpenSession(s.id) } label: { Label("Open as Session", systemImage: "arrow.up.forward.app") }
-                Button { MobileRooms.move(controller, s.id, to: nil) } label: {
-                    Label("Remove from Room", systemImage: "rectangle.portrait.and.arrow.right")
-                }
-            }
-        }
     }
 
     /// The session whose files the toolbar offers: one that fills the
@@ -619,31 +611,12 @@ struct MobileRoomScreen: View {
                             },
                             onOpen: { onOpenSession(s.id) },
                             onRemove: { MobileRooms.move(controller, s.id, to: nil) },
-                            showsHeader: layout.size > 1)
+                            showsHeader: !keyboardUp)
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(isFocused ? accent.opacity(addressed ? 1 : 0.4) : Color.primary.opacity(0.08),
                               lineWidth: isFocused ? 2 : 1))
             .shadow(color: .black.opacity(addressed ? 0.12 : 0.04), radius: addressed ? 8 : 2, y: 2)
             .simultaneousGesture(TapGesture().onEnded { focus(s.id) })
-    }
-
-    private var roomTitle: some View {
-        VStack(spacing: 1) {
-            Text(room?.name ?? "").font(.subheadline.weight(.semibold)).lineLimit(1)
-            if !toSwitchboard, let f = focused {
-                HStack(spacing: 4) {
-                    AgentAvatar(tool: f.tool, size: 11, status: SessionHome.dot(for: f, in: model))
-                    Text(f.title).lineLimit(1)
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(SessionHome.statusLine(for: f, in: model)).lineLimit(1)
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            } else if toSwitchboard {
-                Text("Switchboard").font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 
     // MARK: Switchboard tab
@@ -652,8 +625,7 @@ struct MobileRoomScreen: View {
     /// session's cell — or what it takes to get one going.
     private var switchboardPane: some View {
         VStack(spacing: 0) {
-            // Its tab says "Switchboard" already; the bar only in a grid.
-            if layout.size > 1 {
+            if !keyboardUp {
                 HStack(spacing: 8) {
                     SwitchboardMark(accent: accent, size: 20)
                     Text("Switchboard").font(.subheadline.weight(.semibold))
@@ -1076,9 +1048,7 @@ struct RoomCellView: View {
     let onZoom: () -> Void
     let onOpen: () -> Void
     let onRemove: () -> Void
-    /// The identity bar. Off when the cell has the screen to itself (a 1×1
-    /// room, the phone): the tab above names it, the navigation bar shows
-    /// its status, and the tab's long-press has its menu.
+    /// The identity bar -- put away while the software keyboard is up.
     var showsHeader = true
 
     var body: some View {

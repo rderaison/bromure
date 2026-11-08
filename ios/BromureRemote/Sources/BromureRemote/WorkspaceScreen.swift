@@ -1435,6 +1435,9 @@ struct TailFollowingScroll<Content: View>: View {
             }
             .coordinateSpace(name: Self.space)
             .defaultScrollAnchor(.bottom)
+            // A drag on the conversation puts the keyboard away -- and with
+            // it back come the bars that step aside while typing.
+            .scrollDismissesKeyboard(.interactively)
             .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
                 viewport = h
                 if let y = follow.tailY { tailMoved(y, proxy) }   // the keyboard, a rotation
