@@ -1,24 +1,5 @@
 import Foundation
 
-/// The artifact checks' questions before the consent broker reaches Linux:
-/// no answer, which is no, as when nobody answers macOS's panel (an
-/// override, a package with no verdict and npm ci's bypass are refused).
-// partial: SupplyChainConsentBroker (its remembered answers, the client's prompt) isn't on Linux yet
-// @port-skip linux-only: stands in for SupplyChainConsentBroker until it's ported
-struct NoSupplyChainConsent: SupplyChainConsenting {
-    // @port-skip linux-only: see NoSupplyChainConsent
-    func consent(profileID: UUID, scope: String, scopeDisplayName: String, detail: String) async -> Bool {
-        SupplyChainLog.shared.record("[supply-chain] \(scopeDisplayName): no one to ask on this host, refused")
-        return false
-    }
-    // @port-skip linux-only: see NoSupplyChainConsent
-    func consentOverride(profileID: UUID, ecosystem: String, name: String, version: String,
-                         reason: String) async -> Bool { false }
-    // @port-skip linux-only: see NoSupplyChainConsent
-    func consentUnverified(profileID: UUID, ecosystem: String, name: String, version: String,
-                           why: String) async -> Bool { false }
-}
-
 extension RequestReader {
     /// What the supply-chain step decided for a request.
     enum SupplyChainPlan {

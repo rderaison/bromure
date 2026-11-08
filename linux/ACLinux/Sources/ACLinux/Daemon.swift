@@ -210,6 +210,7 @@ public actor Daemon {
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
+        if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             await MainActor.run { mitm.setUpTraceStore(rootDir: root) }

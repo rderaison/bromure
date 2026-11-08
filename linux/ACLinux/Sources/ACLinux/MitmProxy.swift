@@ -26,7 +26,7 @@ import X509
 /// the guardrails, compromise detection and strict credential mode; then
 /// the supply-chain policy (SupplyChainLinux.swift), prompt injection and PII
 /// protection (its reply restored by PIIRelay).
-// partial: the supply-chain policy has no Depi re-route nor consent broker on Linux yet
+// partial: the supply-chain policy has no Depi re-route on Linux yet
 // @port-skip linux-only: macOS's MitmEngine runs HTTPMitmConnection (SecureTransport) per VZ vsock connection
 final class MitmProxy: @unchecked Sendable {
     static let vsockPort: UInt32 = 8443
@@ -55,8 +55,12 @@ final class MitmProxy: @unchecked Sendable {
     let socketClient = SocketDevClient()
     let publishTimeCache = PublishTimeCache()
     /// Who answers the artifact checks' questions (an override, a package
-    /// with no verdict, npm ci's bypass).
-    let supplyChainConsent: any SupplyChainConsenting = NoSupplyChainConsent()
+    /// with no verdict, npm ci's bypass), remembering the answers (macOS:
+    /// MitmEngine's supplyChainBroker); the questions go to the client.
+    let supplyChainBroker = SupplyChainConsentBroker()
+    /// The checks' consent: the broker.
+    // @port-skip linux-only: the Linux proxy's handle on its broker for SupplyChainProxy.artifactChecks
+    var supplyChainConsent: any SupplyChainConsenting { supplyChainBroker }
     /// Each workspace's guardrails and egress policy (macOS: MitmEngine's
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).

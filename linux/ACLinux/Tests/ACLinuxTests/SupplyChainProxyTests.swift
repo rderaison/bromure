@@ -7,10 +7,12 @@ import Testing
 @testable import ACLinux
 import SandboxEngine
 
+extension DaemonGlobalSuites {
 /// The supply-chain policy on the Linux proxy (macOS: driveTLS's
 /// supply-chain block), through a RequestReader to a local stand-in for the
 /// npm registry (the name pinned, never looked up or dialed). OSV,
-/// socket.dev and PyPI stay off: no test reaches a real host.
+/// socket.dev and PyPI stay off: no test reaches a real host. In the
+/// serialized parent: the consent tests set ConsentPrompt.chooseForTesting.
 @Suite("Supply chain on the proxy", .serialized)
 struct SupplyChainProxyTests {
     /// A guest socket on a RequestReader for `host` (plain HTTP).
@@ -242,6 +244,23 @@ struct SupplyChainProxyTests {
         #expect(SupplyChainLog.shared.snapshot().contains { $0.id > before && $0.message.contains("isn't applied on Linux yet") })
     }
 
+    /// npm ci's bypass asked of the client through the consent broker:
+    /// allowed once, the lockfile-pinned tarball goes up as it is.
+    @Test func npmCiGoesThroughWhenTheClientAllowsIt() async throws {
+        ConsentPrompt.chooseForTesting.withLockedValue { $0 = { _ in 1 } }   // "Allow once"
+        defer { ConsentPrompt.chooseForTesting.withLockedValue { $0 = nil } }
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: false, lockfilePrompt: true)) { _ in
+            Self.response(Data("tarball".utf8), type: "application/octet-stream")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /demo/-/demo-1.0.0.tgz HTTP/1.1\r\nHost: registry.npmjs.org\r\nnpm-command: ci\r\n\r\n")
+        let reply = g.readAll()
+        #expect(Self.body(reply) == Data("tarball".utf8), "\(String(decoding: reply.prefix(200), as: UTF8.self))")
+        #expect(registry.requests.withLockedValue { $0 }.count == 1)
+    }
+
     /// With the policy off, a package fetch is only recorded: it goes up and
     /// comes back as it was.
     @Test func withThePolicyOffAFetchGoesThroughAsItWas() async throws {
@@ -257,4 +276,5 @@ struct SupplyChainProxyTests {
         let doc = try? JSONSerialization.jsonObject(with: Self.body(reply)) as? [String: Any]
         #expect((doc?["versions"] as? [String: Any])?.count == 2)
     }
+}
 }

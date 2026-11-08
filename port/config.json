@@ -152,6 +152,7 @@
     "Sources/AgentCoding/Mitm/SubscriptionFakeMint.swift",
     "Sources/AgentCoding/Mitm/SubscriptionProviders.swift",
     "Sources/AgentCoding/Mitm/SubscriptionStoreFile.swift",
+    "Sources/AgentCoding/Mitm/SupplyChainConsentBroker.swift",
     "Sources/AgentCoding/Mitm/SupplyChainEnforcer.swift",
     "Sources/AgentCoding/Mitm/SupplyChainLog.swift",
     "Sources/AgentCoding/Mitm/SupplyChainPolicy.swift",
