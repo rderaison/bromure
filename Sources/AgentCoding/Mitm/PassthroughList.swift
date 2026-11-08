@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 
 /// Host-side list of hostnames whose TLS must NOT be intercepted — spliced raw
 /// to the origin instead. Cert-pinners (google et al.) are built in; the
@@ -27,7 +28,7 @@ struct PassthroughList {
 
     /// True if `host` equals or is a subdomain of any entry.
     func matches(_ host: String) -> Bool {
-        let h = host.lowercased()
+        let h = EgressPolicy.normalizedHost(host)
         return entries.contains { h == $0 || h.hasSuffix("." + $0) }
     }
 

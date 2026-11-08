@@ -123,9 +123,11 @@ public struct OpenShellPolicy: Sendable, Equatable {
             guard ports.contains(port) else { return false }
             guard let host else { return !allowedIPs.isEmpty || !ambiguity.allowedIPsRaw.isEmpty }   // hostless
             guard let h else { return false }
-            let lh = h.lowercased()
-            if host.contains("*") { return RegoGlob.match(host.lowercased(), delimiters: ["."], lh) }
-            return host == lh
+            // A fully qualified name (`api.example.com.`) is the same host.
+            let lh = EgressPolicy.normalizedHost(h)
+            let eh = EgressPolicy.normalizedHost(host)
+            if host.contains("*") { return RegoGlob.match(eh, delimiters: ["."], lh) }
+            return eh == lh
         }
 
         /// The endpoint `path` selector (schema: empty / `**` / `/**` match

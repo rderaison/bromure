@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 
 /// Depi secure npm registry (Lupin & Holmes / landh.tech). Unlike
 /// socket.dev — a reputation API the proxy *consults* before letting
@@ -31,7 +32,7 @@ enum DepiRegistry {
     /// npm registry hosts to re-route. Mirrors the recogniser in
     /// `SupplyChainRegistry.classify`.
     static func isNpmRegistryHost(_ h: String) -> Bool {
-        let lower = h.lowercased()
+        let lower = EgressPolicy.normalizedHost(h)
         return lower == "registry.npmjs.org" || lower.hasSuffix(".npmjs.org")
     }
 
@@ -39,7 +40,7 @@ enum DepiRegistry {
     /// for Depi: npm's registry (re-route + key) or Depi itself
     /// (key only — it's already the destination).
     static func shouldRoute(host h: String) -> Bool {
-        isNpmRegistryHost(h) || h.lowercased() == host
+        isNpmRegistryHost(h) || EgressPolicy.normalizedHost(h) == host
     }
 
     /// The requests the Depi key goes with (and that are re-routed): the

@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 
 /// Per-request supply-chain enforcement entry point. Lives between
 /// the MITM proxy's guardrails block and its upstream forward; called
@@ -124,7 +125,7 @@ public enum SupplyChainRegistry {
     /// the URL doesn't belong to any recognised registry.
     public static func classify(host: String, path: String)
             -> SupplyChainEnforcer.RequestKind? {
-        let h = host.lowercased()
+        let h = EgressPolicy.normalizedHost(host)   // `registry.npmjs.org.` is npm
         let p = stripQuery(path)
 
         // npm — registry.npmjs.org, plus Depi's npm-compatible
