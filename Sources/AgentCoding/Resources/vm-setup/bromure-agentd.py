@@ -145,11 +145,16 @@ MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB
 # The host refuses a shell-channel response this large (AutomationServer's
 # `exchangeJSON`): one past it is never sent.
 MAX_RESPONSE_SIZE = 50 * 1024 * 1024
-# What a captured command's stdout, and its stderr, keep at most (`_drain`).
-# agentd is unconfined and serves every shell and tab: a command printing
-# without end must not take its memory. Two transcript windows (2 x 24 MB, the
-# chat's largest read) fit.
+# What a captured command's stdout and stderr keep at most, the two together
+# (`_drain`, `_CaptureBudget`). agentd is unconfined and serves every shell and
+# tab: a command printing without end must not take its memory. Two transcript
+# windows (2 x 24 MB, the chat's largest read) fit.
 CAPTURE_LIMIT = 48 * 1024 * 1024
+# Most entries a file-browser listing returns (`_file_op` "list"): a directory
+# the workload filled with a million names must not become a million objects.
+FILE_LIST_MAX = 100000
+# What each stream keeps of its own before drawing on the shared budget.
+CAPTURE_RESERVE = 64 * 1024
 
 # paths
 # Overridable for the same reason as HOST_CID above: the two-incarnation boot is
@@ -514,7 +519,7 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         else:
             run_env = dict(os.environ)
         run_env.update(env)
-        # A plain capture keeps each stream to CAPTURE_LIMIT, as the confined
+        # A plain capture keeps its output to CAPTURE_LIMIT, as the confined
         # path below does (`subprocess.run` would hold all of it).
         if capture_output and stdout is None and stderr is None and not kwargs:
             return _run_captured(args, text=text, timeout=timeout, cwd=cwd, check=check,
@@ -559,8 +564,9 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
     # command with a large output timed out with 126 -- a session's chat could
     # never load a real transcript under a sandbox (an unconfined run is
     # `subprocess.run`, which reads as it waits).
-    out_reader = _drain_async(out_read) if out_read is not None else None
-    err_reader = _drain_async(err_read) if err_read is not None else None
+    budget = _CaptureBudget(CAPTURE_LIMIT)
+    out_reader = _drain_async(out_read, budget) if out_read is not None else None
+    err_reader = _drain_async(err_read, budget) if err_read is not None else None
     try:
         reply = _sandbox_exec(args, cwd=cwd, env=env,
                               fds=[devnull, out_child, err_child],
@@ -604,24 +610,74 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
 
 
 def _exec_response_bytes(response):
-    """An exec reply, encoded; one the host would refuse (MAX_RESPONSE_SIZE --
-    JSON escaping can grow output that fit CAPTURE_LIMIT past it) becomes an
-    error saying so, not a reply that fails the whole channel exchange."""
-    data = json.dumps(response).encode("utf-8")
-    if len(data) < MAX_RESPONSE_SIZE:
-        return data
-    return json.dumps({
+    """An exec reply, encoded; one the host would refuse (MAX_RESPONSE_SIZE)
+    becomes an error saying so, not a reply that fails the whole channel
+    exchange. Measured before it is built: JSON escaping can grow output that
+    fit CAPTURE_LIMIT sixfold (a NUL is `\\u0000`), and building that to find
+    out held a gigabyte."""
+    return _shell_reply_bytes(response, lambda: {
         "stdout": "",
-        "stderr": "bromure: the command's output is too large to return (%d MiB)\n"
-                  % (len(data) >> 20),
+        "stderr": "bromure: the command's output is too large to return "
+                  "(over %d MiB as JSON)\n" % (MAX_RESPONSE_SIZE >> 20),
         "exit_code": -1,
         "truncated": True,
-    }).encode("utf-8")
+    })
+
+
+def _shell_reply_bytes(response, too_large):
+    """`response` as the shell channel sends it, or `too_large()` when its
+    JSON would reach MAX_RESPONSE_SIZE (the host refuses it). Never builds the
+    oversized text: `_json_size` counts it a slice at a time and stops at the
+    limit."""
+    if _json_size(response, MAX_RESPONSE_SIZE) >= MAX_RESPONSE_SIZE:
+        return json.dumps(too_large()).encode("utf-8")
+    return json.dumps(response).encode("utf-8")
+
+
+# How much of a string `_json_size` escapes at once: at most 12 bytes a
+# character come out (an astral one as two \\u escapes), so 12 MB at a time.
+_JSON_SIZE_SLICE = 1024 * 1024
+
+
+def _json_size(obj, limit):
+    """len(json.dumps(obj)) -- default separators, ASCII escaping -- without
+    building it; once the count passes `limit` it stops and returns more than
+    `limit`. Strings are escaped a slice at a time with json's own escaper,
+    so the count is exact and the escaped text never exists whole."""
+    if isinstance(obj, str):
+        total = 2
+        for i in range(0, len(obj), _JSON_SIZE_SLICE):
+            total += len(_json_escape(obj[i:i + _JSON_SIZE_SLICE])) - 2
+            if total > limit:
+                return total
+        return total
+    if isinstance(obj, dict):
+        total = 2 + max(0, 2 * (len(obj) - 1))            # {} and ", "
+        for k, v in obj.items():
+            key = k if isinstance(k, str) else json.dumps(k) if not isinstance(k, bool) else str(k).lower()
+            total += _json_size(str(key), limit - total) + 2   # ": "
+            if total > limit:
+                return total
+            total += _json_size(v, limit - total)
+            if total > limit:
+                return total
+        return total
+    if isinstance(obj, (list, tuple)):
+        total = 2 + max(0, 2 * (len(obj) - 1))
+        for v in obj:
+            total += _json_size(v, limit - total)
+            if total > limit:
+                return total
+        return total
+    return len(json.dumps(obj))
+
+
+_json_escape = json.encoder.encode_basestring_ascii
 
 
 def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None):
     """`subprocess.run(args, capture_output=True, …)`, with stdout and stderr
-    each kept to CAPTURE_LIMIT (`_drain`); `.truncated` says some was dropped.
+    kept to CAPTURE_LIMIT together (`_drain`); `.truncated` says some was dropped.
     Decodes as the confined path does (UTF-8, invalid bytes replaced)."""
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
@@ -634,8 +690,9 @@ def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None
     finally:
         os.close(out_w)
         os.close(err_w)
-    out_reader = _drain_async(out_r)
-    err_reader = _drain_async(err_r)
+    budget = _CaptureBudget(CAPTURE_LIMIT)
+    out_reader = _drain_async(out_r, budget)
+    err_reader = _drain_async(err_r, budget)
     deadline = None if timeout is None else time.monotonic() + timeout
 
     def left():
@@ -665,12 +722,13 @@ def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None
     return result
 
 
-def _drain_async(fd):
+def _drain_async(fd, budget=None):
     """Start reading `fd` to EOF on a thread; the returned call waits for it
     and gives `_drain`'s (bytes, truncated). `result(timeout)` gives None if
     the reading isn't done by then."""
     box = {}
-    t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd)), daemon=True)
+    t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd, budget=budget)),
+                         daemon=True)
     t.start()
 
     def result(timeout=None):
@@ -681,8 +739,26 @@ def _drain_async(fd):
     return result
 
 
-def _drain(fd, limit=None):
-    """Read `fd` to EOF: (its first `limit` bytes, whether there was more).
+class _CaptureBudget(object):
+    """What a command's two streams may keep between them, past each one's
+    CAPTURE_RESERVE: each up to CAPTURE_LIMIT on its own held twice that."""
+
+    def __init__(self, total):
+        self._left = total
+        self._lock = threading.Lock()
+
+    def take(self, n):
+        """Up to `n` more bytes: how many may be kept."""
+        with self._lock:
+            n = min(n, self._left)
+            self._left -= n
+            return n
+
+
+def _drain(fd, limit=None, budget=None):
+    """Read `fd` to EOF: (its first `limit` bytes -- fewer if a `budget`
+    shared with the command's other stream runs out first -- and whether
+    there was more).
 
     Past the limit (CAPTURE_LIMIT) the rest is still read, and dropped: the
     writer must never block on a full pipe (see `_ws_run`), and agentd must
@@ -698,10 +774,15 @@ def _drain(fd, limit=None):
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            room = limit - kept
+            room = max(limit - kept, 0)
+            if budget is not None:
+                # Its first CAPTURE_RESERVE bytes are its own: a short error
+                # on stderr survives a stdout that took the whole budget.
+                own = min(room, len(chunk), max(CAPTURE_RESERVE - kept, 0))
+                room = own + budget.take(min(room, len(chunk)) - own)
             if len(chunk) > room:
                 truncated = True
-                chunk = chunk[:max(room, 0)]
+                chunk = chunk[:room]
             if chunk:
                 chunks.append(chunk)
                 kept += len(chunk)
@@ -1464,8 +1545,12 @@ def _file_op(spec):
             return {"error": "path must be absolute", "exit_code": 1}
         if op == "list":
             entries = []
+            truncated = False
             with os.scandir(path) as it:
                 for e in it:
+                    if len(entries) >= FILE_LIST_MAX:
+                        truncated = True
+                        break
                     try:
                         st = e.stat(follow_symlinks=False)
                         isdir = e.is_dir(follow_symlinks=True)
@@ -1478,7 +1563,10 @@ def _file_op(spec):
                         "size": int(st.st_size),
                         "mtime": int(st.st_mtime),
                     })
-            return {"entries": entries, "exit_code": 0}
+            reply = {"entries": entries, "exit_code": 0}
+            if truncated:
+                reply["truncated"] = True
+            return reply
         if op == "read":
             offset = int(spec.get("offset", 0) or 0)
             length = int(spec.get("length", FILE_READ_MAX) or FILE_READ_MAX)
@@ -1607,7 +1695,8 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
             else:
                 resp = {"exit_code": int(reply.get("exit_code", 1)),
                         "output": reply.get("output") or reply.get("reason") or ""}
-            resp_data = json.dumps(resp).encode("utf-8")
+            resp_data = _shell_reply_bytes(resp, lambda: {
+                "exit_code": 1, "output": "the install's output is too large to return"})
             vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
             return  # finally: close + replenish
         # The host's firewall cut a proxied connection: reset its bridge.
@@ -1645,7 +1734,8 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         # Native file op (host file browser) — no shell involved.
         fileop = req.get("file")
         if isinstance(fileop, dict):
-            resp_data = json.dumps(_file_op(fileop)).encode("utf-8")
+            resp_data = _shell_reply_bytes(_file_op(fileop), lambda: {
+                "error": "the reply is too large to return", "exit_code": 1})
             vsock_sock.sendall(struct.pack(">I", len(resp_data)) + resp_data)
             return  # finally: close + replenish (+ version-pinned respawn)
 
@@ -1721,8 +1811,9 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 # not part of it.
                 response = {
                     "stdout": "",
-                    "stderr": "bromure: the command printed more than %d MiB; "
-                              "its output is not returned\n" % (CAPTURE_LIMIT >> 20),
+                    "stderr": "bromure: the command printed more than %d MiB "
+                              "(stdout and stderr together); its output is not "
+                              "returned\n" % (CAPTURE_LIMIT >> 20),
                     "exit_code": -1,
                     "truncated": True,
                 }
