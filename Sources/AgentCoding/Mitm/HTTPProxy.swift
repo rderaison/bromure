@@ -1610,10 +1610,6 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         overridable: scOverridable)
                 }
 
-                // Three pre-flight checks before forward. Each may
-                // 451-block; none of them touch the upstream until
-                // we decide to forward.
-
                 // Pre-flight checks before forward (SupplyChainProxy); each
                 // may 451-block, none touches the upstream.
                 var record = SupplyChainProxy.FetchRecord()
