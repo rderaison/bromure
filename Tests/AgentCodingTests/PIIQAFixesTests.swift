@@ -208,5 +208,7 @@ struct PIIQAFixesTests {
             #expect(!TraceLevel.isAIHost(h), "\(h)")
         }
         #expect(TraceLevel.aiDetails.capturesBodyForHost("api.anthropic.com") && !TraceLevel.aiDetails.capturesBodyForHost("relax.ai"))
+        // The conversation parser picks a provider's format the same way.
+        #expect(TraceLevel.host("api.kimi.ai", isUnder: "kimi.ai") && !TraceLevel.host("notkimi.ai", isUnder: "kimi.ai"))
     }
 }
