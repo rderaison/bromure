@@ -411,9 +411,9 @@ check "seccomp" "$(status_field seccomp)" "enforced"
 check "run_as uid" "$(python3 -c "
 import json;print(json.load(open('$WORK/run/status.json'))['run_as']['uid'])")" "$(id -u)"
 
-# Temporarily allowed (DESIGN.md §1.9, item 6): Bromure's helpers reach the
-# host over vsock. 5.4.3 bridges them through agentd and restores "EPERM".
-probe_pane "AF_VSOCK is allowed in a pane (until 5.4.3)" "ALLOWED" <<'PROBE'
+# OpenShell's ban, restored (DESIGN.md §1.9, item 6): a confined process can't
+# open AF_VSOCK; Bromure's helpers reach the host through agentd's relay.
+probe_pane "AF_VSOCK is refused in a pane (agentd relays Bromure's helpers)" "EPERM" <<'PROBE'
 python3 -c '
 import socket, errno
 try:
@@ -1356,6 +1356,7 @@ import os, re, subprocess, sys, threading
 src = open("$ROOT/patched/bromure-agentd.py").read()
 ns = {"os": os, "subprocess": subprocess, "json": __import__("json"),
       "socket": __import__("socket"), "threading": threading,
+      "select": __import__("select"), "time": __import__("time"),
       "log": lambda *a: None,
       # A socket that is not there, which is the shape of the real failure.
       "_SANDBOX": {"control_socket": "$WORK/no-such-ctl.sock"},
@@ -1364,10 +1365,15 @@ ns = {"os": os, "subprocess": subprocess, "json": __import__("json"),
 m = re.search(r"\n_CA_TRUST_ENV = \{.*?\n\}", src, re.S)
 exec(compile(m.group(0), "ca", "exec"), ns)
 ns["_CA_TRUST_FOR_EXEC"] = None
-for name in ("SandboxRoutingError", "_run_unconfined", "_harden_argv",
-             "_ca_trust_for_exec", "_sandbox_reason", "_drain", "_ws_run",
+# The capture bounds _ws_run and its readers use, as agentd sets them.
+for const in ("CAPTURE_LIMIT", "CAPTURE_RESERVE", "CAPTURE_EXIT_GRACE", "_DRAIN_POLL_MS"):
+    m = re.search(r"\n%s = ([^\n]+)" % const, src)
+    ns[const] = eval(m.group(1), ns)
+for name in ("SandboxRoutingError", "_CaptureBudget", "_run_unconfined", "_harden_argv",
+             "_ca_trust_for_exec", "_sandbox_reason", "_drain_async", "_drain",
+             "_collect_after_exit", "_run_captured", "_ws_run",
              "_sandbox_exec"):
-    kind = "class" if name[0].isupper() else "def"
+    kind = "class" if name.lstrip("_")[0].isupper() else "def"
     m = re.search(r"\n%s %s\b.*?(?=\n(?:def |class |# ---))" % (kind, name),
                   src, re.S)
     exec(compile(m.group(0), name, "exec"), ns)

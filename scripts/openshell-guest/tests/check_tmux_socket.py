@@ -30,7 +30,7 @@ def check(path):
         if isinstance(node, ast.Call):
             fn = node.func
             name = getattr(fn, "id", None) or getattr(fn, "attr", None)
-            if name in ("log", "_bridge_log", "print", "warn"):
+            if name in ("log", "_bridge_log", "print", "warn", "_roster_note"):
                 for arg in ast.walk(node):
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                         logged.add(id(arg))
