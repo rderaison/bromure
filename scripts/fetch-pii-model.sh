@@ -45,32 +45,40 @@ while IFS='|' read -r name remote sha; do
     cached="$CACHE_DIR/$name"
     if [ ! -f "$cached" ] || [ "$(sha256 "$cached")" != "$sha" ]; then
         echo "fetch-pii-model: downloading ${remote}…" >&2
-        curl -fsSL "$BASE/$remote" -o "$cached.part"
-        got="$(sha256 "$cached.part")"
+        # Downloaded into a fresh private directory (mktemp), never through
+        # a name someone else could have planted (a symlink at .part in a
+        # shared cache), then moved into the cache once it checks out.
+        tmp="$(mktemp -d "$CACHE_DIR/.fetch.XXXXXX")"
+        curl -fsSL "$BASE/$remote" -o "$tmp/$name"
+        got="$(sha256 "$tmp/$name")"
         if [ "$got" != "$sha" ]; then
             echo "fetch-pii-model: SHA-256 mismatch for $remote" >&2
             echo "  got  $got" >&2
             echo "  want $sha" >&2
-            rm -f "$cached.part"
+            rm -rf "$tmp"
             exit 1
         fi
-        mv "$cached.part" "$cached"
+        mv -f "$tmp/$name" "$cached"
+        rmdir "$tmp"
     fi
 done <<< "$FILES"
 
 if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
     mkdir -p "$1"
-    # Each copy checked where it landed: the cache may be writable by
-    # someone else between its check and the copy.
+    # Each copy checked where it landed (the cache may be writable by
+    # someone else between its check and the copy), copied first into a
+    # fresh private directory beside the destination, then moved into place.
     while IFS='|' read -r name _ sha; do
-        cp "$CACHE_DIR/$name" "$1/$name.part"
-        got="$(sha256 "$1/$name.part")"
+        tmp="$(mktemp -d "$1/.copy.XXXXXX")"
+        cp "$CACHE_DIR/$name" "$tmp/$name"
+        got="$(sha256 "$tmp/$name")"
         if [ "$got" != "$sha" ]; then
             echo "fetch-pii-model: SHA-256 mismatch for the copy of $name in $1" >&2
-            rm -f "$1/$name.part"
+            rm -rf "$tmp"
             exit 1
         fi
-        mv "$1/$name.part" "$1/$name"
+        mv -f "$tmp/$name" "$1/$name"
+        rmdir "$tmp"
     done <<< "$FILES"
 fi
 echo "$CACHE_DIR"
