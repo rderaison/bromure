@@ -95,16 +95,17 @@ extension MitmProxy {
     /// swap that landed before the registration denies it already (the
     /// caller closes it). macOS: HTTPMitmConnection.trackedForFirewall.
     // @port-skip linux-only: trackedForFirewall on a NIO channel (macOS wraps the connection's life in a closure)
-    func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String) -> Bool {
+    func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String,
+                          identity: OpenShellPolicy.BinaryIdentity? = nil) -> Bool {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy
         let token = EgressConnectionRegistry.shared.register(
             profileID: profileID, host: host, port: port, route: route,
-            rule: ProxyPolicy.trackedRule(policy: policy, host: host, port: port)) { [weak channel] in
+            rule: ProxyPolicy.trackedRule(policy: policy, host: host, port: port), identity: identity) { [weak channel] in
                 channel?.close(promise: nil)
             }
         channel.closeFuture.whenComplete { _ in EgressConnectionRegistry.shared.unregister(token) }
         return !ProxyPolicy.deniedOnceTracked(policy: guardrailsConfig(for: profileID)?.egressPolicy,
-                                              host: host, port: port, identity: nil)
+                                              host: host, port: port, identity: identity)
     }
 
     /// An OpenShell `tls: skip` endpoint, or a transparent flow left alone:
@@ -457,13 +458,14 @@ extension RequestReader {
     // partial: OpenShell's strict framing limits (chunk-line, header and trailer sizes) aren't applied; the Linux framer re-frames every body with a Content-Length
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
-                             host: String, port: Int, tls: Bool, session: UInt64) async -> Data? {
+                             host: String, port: Int, tls: Bool, session: UInt64,
+                             identity: OpenShellPolicy.BinaryIdentity? = nil) async -> Data? {
         let guardrails = proxy.guardrailsConfig(for: profileID)
         let policy = guardrails?.egressPolicy
         let scheme = tls ? "https" : "http"
         if let answer = ProxyPolicy.openShellHeadAnswer(&request, policy: policy, profileID: profileID,
                                                         host: host, port: port, cleartext: !tls,
-                                                        scheme: scheme, identity: nil) {
+                                                        scheme: scheme, identity: identity) {
             return answer
         }
         let (method, path) = HTTPFrames.parseRequestLine(request)
@@ -473,7 +475,7 @@ extension RequestReader {
         }
         if let answer = ProxyPolicy.requestRuleAnswer(policy: policy, profileID: profileID, host: host, port: port,
                                                       method: method, path: path, request: request,
-                                                      bodyComplete: true, scheme: scheme, identity: nil) {
+                                                      bodyComplete: true, scheme: scheme, identity: identity) {
             return answer
         }
         let fakes = proxy.swapper.entries(for: profileID).map(\.fake)

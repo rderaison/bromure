@@ -1,5 +1,6 @@
 import Foundation
 import Glibc
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import NIOSSL
@@ -16,7 +17,6 @@ extension MitmProxy {
     /// non-TLS / unparseable flows are spliced raw (fail open); everything
     /// else is MiTM'd through the workspace's policy chain. Takes ownership
     /// of `appFD`.
-    // partial: no binary identity (no attestor on Linux)
     // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=85d1555a8e0b2840 @8e2543eb
     func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int = 0) {
         // Off the event loops, on a thread of its own: the peeks block on the
@@ -39,8 +39,16 @@ extension MitmProxy {
             guard Self.waitForData(appFD, timeoutMs: Self.firstByteTimeoutMs) else {
                 close(appFD); return
             }
-            let identity: OpenShellPolicy.BinaryIdentity? = nil
             let guardrails = guardrailsConfig(for: profileID)
+            // Strict sandbox: ask the guest's root attestor which executable
+            // opened this connection (by its source port), before any policy
+            // decision. No answer = no identity: a rule scoped to `binaries`
+            // doesn't match it (fail closed), only provider rules apply.
+            var identity: OpenShellPolicy.BinaryIdentity?
+            if guardrails?.egressPolicy?.enforceBinaries == true, srcPort > 0 {
+                identity = attestedIdentity(profileID, UInt16(truncatingIfNeeded: srcPort),
+                                            destIP, UInt16(truncatingIfNeeded: destPort))
+            }
 
             // Plain HTTP (:80) — no TLS. Peek the Host header to identify the
             // destination, apply the egress policy, then MiTM as cleartext (or
@@ -58,6 +66,7 @@ extension MitmProxy {
             if plainHTTP {
                 let peeked = Self.peekHTTPHost(fd: appFD)
                 let host = peeked ?? destIP
+                BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: peeked, port: destPort)
                 let strict80 = guardrails?.strictCredentials ?? false
                 var shouldSplice = !strict80 && PassthroughList.current().matches(host)
                 // `policy.local` on its reserved address: the advisor, answered
@@ -72,7 +81,8 @@ extension MitmProxy {
                                           port: UInt16(truncatingIfNeeded: destPort), identity: identity) {
                     case .deny:
                         Self.reportTransparentDeny(policy: policy, profileID: profileID, label: host,
-                                                   hostnames: [host], destIP: destIP, destPort: destPort, layer: "l4")
+                                                   hostnames: [host], destIP: destIP, destPort: destPort, layer: "l4",
+                                                   exe: identity?.exe)
                         close(appFD); return
                     case .mitm:   shouldSplice = false
                     case .splice: shouldSplice = true
@@ -82,7 +92,8 @@ extension MitmProxy {
                 if shouldSplice {
                     spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
                 } else {
-                    serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: false)
+                    serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: false,
+                                     identity: identity)
                 }
                 return
             }
@@ -110,6 +121,7 @@ extension MitmProxy {
             // An OpenShell policy also decides SNI-less and non-TLS flows (by
             // destination address) instead of letting them fail open.
             let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: sniHost, port: destPort)
             if let policy = guardrails?.egressPolicy, sniHost != nil || policy.openShell != nil {
                 switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,
                                       hostnames: sniHost.map { [$0] } ?? [], proto: .tcp,
@@ -117,7 +129,7 @@ extension MitmProxy {
                 case .deny:
                     Self.reportTransparentDeny(policy: policy, profileID: profileID, label: sniHost ?? destIP,
                                                hostnames: sniHost.map { [$0] } ?? [], destIP: destIP,
-                                               destPort: destPort, layer: "sni")
+                                               destPort: destPort, layer: "sni", exe: identity?.exe)
                     close(appFD); return
                 case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
                 case .splice: shouldSplice = true               // OpenShell `tls: skip`
@@ -137,8 +149,27 @@ extension MitmProxy {
                 spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
                 return
             }
-            serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: true)
+            serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: true,
+                             identity: identity)
         }
+    }
+
+    /// The attested identity of a transparent flow's guest socket
+    /// (BinaryIdentityService.identity, bounded: an attestor not up yet is
+    /// waited for briefly, then none). Called on the flow's own thread,
+    /// which waits for it as macOS's flow task awaits it.
+    // @port-skip linux-only: the transparent flow's thread waiting on BinaryIdentityService.identity (macOS awaits it in a task)
+    func attestedIdentity(_ profileID: UUID, _ sport: UInt16, _ dst: String, _ dport: UInt16) -> OpenShellPolicy.BinaryIdentity? {
+        let lookup = identityLookup
+        let answer = NIOLockedValueBox<OpenShellPolicy.BinaryIdentity?>(nil)
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            let id = await lookup(profileID, sport, dst, dport)
+            answer.withLockedValue { $0 = id }
+            done.signal()
+        }
+        done.wait()
+        return answer.withLockedValue { $0 }
     }
 
     /// The Timeline row for a transparent flow the egress policy refused
@@ -146,15 +177,15 @@ extension MitmProxy {
     /// `sni` for TLS), once a minute per destination.
     // @port-skip linux-only: acceptTransparentFlow's deny report, factored once
     static func reportTransparentDeny(policy: EgressPolicy, profileID: UUID, label: String, hostnames: [String],
-                                      destIP: String, destPort: Int, layer: String) {
+                                      destIP: String, destPort: Int, layer: String, exe: String? = nil) {
         guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
-                                                      port: destPort, denied: true, exe: nil) else { return }
+                                                      port: destPort, denied: true, exe: exe) else { return }
         SupplyChainLog.shared.record(
             "[firewall] ✗ deny tcp \(label):\(destPort) (\(profileID.uuidString.prefix(8)))")
         BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall",
             eventData: ["action": .string("deny"), "proto": .string("tcp"),
                         "host": .string(label), "port": .int(destPort), "layer": .string(layer),
-                        "dst_ip": .string(destIP), "exe": .of(nil as String?),
+                        "dst_ip": .string(destIP), "exe": .of(exe),
                         "rule": .of(policy.firstMatch(ip: nil, hostnames: hostnames, proto: .tcp,
                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
                         "by_policy": .bool(true)])
@@ -165,7 +196,8 @@ extension MitmProxy {
     /// with the firewall's registry (macOS: runTransparentTLS /
     /// runTransparentHTTP, route "transparent").
     // @port-skip linux-only: makeConnection + runTransparentTLS / runTransparentHTTP on NIO
-    func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool) {
+    func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool,
+                          identity: OpenShellPolicy.BinaryIdentity? = nil) {
         // The leaf first: until withConnectedSocket takes `appFD`, a failure
         // is ours to close.
         let context: NIOSSLContext?
@@ -174,7 +206,8 @@ extension MitmProxy {
             do {
                 let ops = ch.pipeline.syncOperations
                 if let context { try ops.addHandler(NIOSSLServerHandler(context: context)) }
-                try ops.addHandler(RequestReader(proxy: self, profileID: profileID, host: host, port: port, tls: tls))
+                try ops.addHandler(RequestReader(proxy: self, profileID: profileID, host: host, port: port, tls: tls,
+                                                 identity: identity))
                 return ch.eventLoop.makeSucceededVoidFuture()
             } catch {
                 return ch.eventLoop.makeFailedFuture(error)
@@ -185,7 +218,7 @@ extension MitmProxy {
         // would hit whoever has the number by then. (The one failure before
         // it, BaseSocket's ignoreSIGPIPE, can't happen on Linux.)
         guard let ch = try? bootstrap.withConnectedSocket(appFD).wait() else { return }
-        if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent") {
+        if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent", identity: identity) {
             ch.close(promise: nil)
         }
     }

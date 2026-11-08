@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import SandboxEngine
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
@@ -136,6 +137,11 @@ final class MitmProxy: @unchecked Sendable {
     /// the test route (a release build has none), or a route that doesn't
     /// parse, fails closed instead of falling back to the real hosts.
     var refusesRealUpstreams = false
+    /// Who opened a guest socket (`sport` → `dst:dport`), as the guest's
+    /// attestor says: BinaryIdentityService's (tests stub it).
+    var identityLookup: @Sendable (UUID, UInt16, String, UInt16) async -> OpenShellPolicy.BinaryIdentity? = {
+        await BinaryIdentityService.shared.identity(profileID: $0, sport: $1, dst: $2, dport: $3)
+    }
     /// A multi-user server: the host's own addresses are refused too
     /// (ProxyDestination.swift), as the switch refuses them.
     var blocksHostAddresses = false
@@ -439,7 +445,8 @@ final class MitmProxy: @unchecked Sendable {
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
     /// `local`: the request's routing, decided once by its plan (nil: decide here).
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
-                         pinned: [IPAddress]? = nil, local: Bool? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
+                         pinned: [IPAddress]? = nil, local: Bool? = nil,
+                         identity: OpenShellPolicy.BinaryIdentity? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed: (host: String, port: Int, tls: Bool, local: Bool) = local.map {
             $0 ? (InferenceService.engineHost, InferenceService.repairProxyPort, false, true) : (host, port, requestedTLS, false)
         } ?? route(host: host, port: port, tls: requestedTLS, profileID: profileID)
@@ -464,7 +471,7 @@ final class MitmProxy: @unchecked Sendable {
         // Either way the dial uses exactly the addresses it passed.
         // No pinned addresses (a name the CONNECT left to the dial): checked now.
         let checked = pinned.flatMap { $0.isEmpty ? nil : loop.makeSucceededFuture($0) }
-            ?? checkDestination(host: host, port: port, profileID: profileID, on: loop)
+            ?? checkDestination(host: host, port: port, profileID: profileID, identity: identity, on: loop)
         return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
                 return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop)
@@ -804,6 +811,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// The addresses this connection's destination check passed (a
     /// CONNECT's): the upstream dials only these, never re-resolving.
     let pinned: [MitmProxy.IPAddress]?
+    /// The program that opened a transparent flow, as the guest's attestor
+    /// named it (strict sandbox + a policy's `binaries`); nil elsewhere
+    /// (macOS: HTTPMitmConnection.binaryIdentity).
+    let identity: OpenShellPolicy.BinaryIdentity?
     private var buf = ByteBuffer()
     private var started = false
     /// After the request went upstream: the guest's further bytes (a
@@ -830,13 +841,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
-         pinned: [MitmProxy.IPAddress]? = nil) {
+         pinned: [MitmProxy.IPAddress]? = nil, identity: OpenShellPolicy.BinaryIdentity? = nil) {
         self.proxy = proxy
         self.profileID = profileID
         self.host = host
         self.port = port
         self.tls = tls
         self.pinned = pinned
+        self.identity = identity
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -886,7 +898,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                     Trace(session: $0, profileID: pid, host: host, port: port, start: start, request: request)
                 }
                 let plan = await Self.rewrite(request, proxy: proxy, profileID: pid, host: host, port: port, tls: tls,
-                                              session: session, trace: &trace)
+                                              session: session, trace: &trace, identity: identity)
                 loop.execute { self.send(plan, trace: trace, channel: channel, host: host, port: port, tls: tls, session: session) }
             }
         }
@@ -932,10 +944,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// the 5f sign-in capture on what would go out.
     // @port-skip linux-only: the swap order of HTTPMitmConnection.driveTLS (5c–5f, then TokenSwapper)
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
-                        session: UInt64, trace: inout Trace?) async -> Plan {
+                        session: UInt64, trace: inout Trace?,
+                        identity: OpenShellPolicy.BinaryIdentity? = nil) async -> Plan {
         var req = origin(raw)
         if let answer = await policyAnswer(&req, proxy: proxy, profileID: profileID, host: host, port: port, tls: tls,
-                                           session: session) {
+                                           session: session, identity: identity) {
             return .answer(answer)
         }
         let head = SubscriptionAuthRewrite.rawHeaderSection(of: req) ?? ""
@@ -1130,7 +1143,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             // own name: nothing the guest pinned) for a re-routed request.
             proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
                                   profileID: profileID, pinned: dial == nil ? pinned : nil, local: local,
-                                  on: channel.eventLoop).whenComplete { r in
+                                  identity: identity, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
                     let reply = (e as? ProxyDestinationDenied).map {
