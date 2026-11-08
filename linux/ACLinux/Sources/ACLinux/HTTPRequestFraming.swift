@@ -68,7 +68,9 @@ enum HTTPRequestFraming {
             guard let eol = s[i...].range(of: crlf) else { return .needMore }
             let sizeText = String(decoding: s[i..<eol.lowerBound], as: UTF8.self)
                 .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-            guard let size = Int(sizeText, radix: 16), size >= 0 else { return .invalid }
+            // Hex digits only (no sign), and a size Int can hold.
+            guard !sizeText.isEmpty, sizeText.allSatisfy(\.isHexDigit),
+                  let size = Int(sizeText, radix: 16) else { return .invalid }
             i = eol.upperBound
             if size == 0 {
                 // Trailers, then the empty line.
@@ -79,9 +81,15 @@ enum HTTPRequestFraming {
                     if empty { return .complete(body, Data(s[i...])) }
                 }
             }
-            guard s.distance(from: i, to: s.endIndex) >= size + 2 else { return .needMore }
-            body.append(contentsOf: s[i..<s.index(i, offsetBy: size)])
-            i = s.index(i, offsetBy: size + 2)
+            // Bounded by what's here before any arithmetic: a size near
+            // Int.max made `size + 2` overflow (a trap, the daemon gone).
+            let left = s.distance(from: i, to: s.endIndex)
+            guard left >= 2, size <= left - 2 else { return .needMore }
+            let end = s.index(i, offsetBy: size)
+            // The chunk's data is followed by its CRLF.
+            guard s[end] == 0x0D, s[s.index(after: end)] == 0x0A else { return .invalid }
+            body.append(contentsOf: s[i..<end])
+            i = s.index(end, offsetBy: 2)
         }
     }
 

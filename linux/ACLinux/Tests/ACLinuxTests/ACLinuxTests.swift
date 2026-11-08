@@ -1539,6 +1539,24 @@ struct ProxyFramingTests {
                 == .complete(Data("GET / HTTP/1.1\r\nHost: a\r\n\r\n".utf8), extra: Data()))
     }
 
+    /// A chunk size near Int.max made `size + 2` overflow, a trap that took
+    /// the daemon down (reachable from the request reader and from the trace
+    /// and learning de-chunkers, on any host). It waits for the data now,
+    /// which never comes; a sign, a non-hex size or a missing CRLF after a
+    /// chunk is refused.
+    @Test(arguments: ["7fffffffffffffff", "7FFFFFFFFFFFFFFE", "ffffffffffffffff0", "+5", "-0", "", "5 x"])
+    func aChunkSizeThatCantBeTrustedNeverTraps(size: String) {
+        let req = "POST /v1 HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n\(size)\r\nabcde\r\n0\r\n\r\n"
+        let r = HTTPRequestFraming.complete(Data(req.utf8))
+        #expect(r == .needMore || r == .invalid, "\(size): \(r)")
+        // The response side's de-chunkers (the trace's, strict mode's) too.
+        let resp = Data("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\(size)\r\nabcde\r\n0\r\n\r\n".utf8)
+        _ = HTTPRequestFraming.dechunkedResponse(resp)
+        _ = HTTPRequestFraming.responseStatusAndBody(resp)
+        let bad = "POST /v1 HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY0\r\n\r\n"
+        #expect(HTTPRequestFraming.complete(Data(bad.utf8)) == .invalid, "a chunk without its CRLF")
+    }
+
     @Test("one request per connection: Connection headers replaced; absolute-form to origin-form; a response's status and dechunked body")
     func edits() {
         let closed = String(decoding: RequestReader.closing(Data(
