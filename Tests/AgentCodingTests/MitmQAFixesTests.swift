@@ -113,6 +113,43 @@ struct MitmQAFixesTests {
         #expect(HTTPMitmConnection.decodeRequestContentEncoding(p) == .identity)
     }
 
+    @Test("Every Content-Encoding line counts, one leading empty line is allowed, an unreadable line is refused")
+    func requestHeaderRule() throws {
+        let json = #"{"messages":[{"role":"user","content":"hello"}]}"#
+        let deflated = try #require((Data(json.utf8) as NSData).compressed(using: .zlib) as Data?)
+        var gz = Data([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03])
+        gz.append(deflated)
+        gz.append(Data(repeating: 0, count: 8))
+        func raw(_ headers: String, lead: String = "") -> Data {
+            Data("\(lead)POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n\(headers)Content-Length: \(gz.count)\r\n\r\n".utf8) + gz
+        }
+        func body(_ r: HTTPMitmConnection.RequestBodyDecoding) -> Data? {
+            guard case .decoded(let plain) = r, let sep = plain.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+            return plain.subdata(in: sep.upperBound..<plain.endIndex)
+        }
+        // `identity` after `gzip` doesn't make the body plain.
+        #expect(body(HTTPMitmConnection.decodeRequestContentEncoding(
+            raw("Content-Encoding: gzip\r\nContent-Encoding: identity\r\n"))) == Data(json.utf8))
+        #expect(body(HTTPMitmConnection.decodeRequestContentEncoding(
+            raw("Content-Encoding: identity\r\nContent-Encoding: gzip\r\n"))) == Data(json.utf8))
+        // RFC 9112 §2.2: one empty line before the request line.
+        #expect(body(HTTPMitmConnection.decodeRequestContentEncoding(
+            raw("Content-Encoding: gzip\r\n", lead: "\r\n"))) == Data(json.utf8))
+        #expect(HTTPMitmConnection.decodeRequestContentEncoding(
+            Data("\r\n".utf8) + request("POST", "/v1/messages", host: "api.anthropic.com", body: "{}")) == .identity)
+        // An obs-fold continuation could hide a coding.
+        #expect(HTTPMitmConnection.decodeRequestContentEncoding(raw("X-Note: a\r\n gzip\r\n"))
+                == .undecodable("an unreadable header line"))
+        // More than four stacked codings aren't undone.
+        #expect(HTTPMitmConnection.decodeRequestContentEncoding(raw("Content-Encoding: gzip, gzip, gzip, gzip, gzip\r\n"))
+                == .undecodable("5 stacked codings"))
+        // The 415 and the Timeline read properly for a reason as for a coding.
+        let refused = String(decoding: HTTPMitmConnection.undecodableBodyResponse(encoding: "5 stacked codings", engines: ["pii"]), as: UTF8.self)
+        #expect(refused.contains("its body could not be decoded (5 stacked codings), so PII protection") && !refused.contains("-compressed"))
+        #expect(HTTPMitmConnection.undecodableReason("an unreadable header line") == "request body could not be decoded (an unreadable header line)")
+        #expect(HTTPMitmConnection.undecodableReason("gzip") == "gzip-compressed request body could not be decoded")
+    }
+
     // MARK: B37 — tool output in OpenAI-chat (Kimi) requests
 
     @Test("Tool output in an OpenAI-chat (Kimi) request reaches the injection scan (B37)")

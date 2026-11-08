@@ -2525,7 +2525,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         }
                     case .undecodable(let encoding):
                         Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
-                                               reason: "\(encoding)-compressed request body could not be decoded",
+                                               reason: Self.undecodableReason(encoding),
                                                profileID: profileID, blocked: true)
                         let response = Self.undecodableBodyResponse(encoding: encoding, engines: engines)
                         try? tls.write(response)
@@ -3725,21 +3725,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
         case undecodable(String)
     }
 
+    /// More stacked codings than this aren't decoded (refused).
+    static let maxRequestCodings = 4
+
     /// Decode a content-coded request body (gzip / deflate / br / zstd) so
     /// the content scans can read it. The result is forwarded as identity —
     /// every provider accepts an uncompressed body (Grok's own identity side
     /// requests and the gzip/br path already rely on it).
     static func decodeRequestContentEncoding(_ raw: Data) -> RequestBodyDecoding {
+        // One empty line before the request line is allowed (RFC 9112 §2.2).
+        let raw = raw.starts(with: Data("\r\n".utf8)) ? raw.dropFirst(2) : raw
+        // A header line this can't read with certainty (no colon, an obs-fold
+        // continuation, a bare LF) could hide a coding: undecodable, refused
+        // rather than guessed at.
+        if let header = rawHeaderSection(of: raw),
+           header.components(separatedBy: "\r\n").dropFirst().contains(where: {
+               $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" || !$0.contains(":")
+           }) {
+            return .undecodable("an unreadable header line")
+        }
         guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
-              let header = rawHeaderSection(of: raw),
-              let enc = headerValue("content-encoding", inHeaderSection: header)?
-                .trimmingCharacters(in: .whitespaces).lowercased(),
-              !enc.isEmpty, enc != "identity" else { return .identity }
+              let header = rawHeaderSection(of: raw) else { return .identity }
+        // Every Content-Encoding line counts: a later `identity` doesn't make
+        // an earlier `gzip` plain.
+        let codings = header.components(separatedBy: "\r\n").dropFirst().flatMap { line -> [String] in
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "content-encoding" else { return [] }
+            return line[line.index(after: colon)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .filter { !$0.isEmpty && $0 != "identity" }
+        }
+        guard !codings.isEmpty else { return .identity }
+        guard codings.count <= Self.maxRequestCodings else { return .undecodable("\(codings.count) stacked codings") }
         let body = raw.subdata(in: sep.upperBound..<raw.endIndex)
         // Stacked codings ("gzip, br") are applied in order; undo in reverse.
         var plain = body
-        for coding in enc.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).reversed()
-        where !coding.isEmpty && coding != "identity" {
+        for coding in codings.reversed() {
             let next: Data?
             switch coding {
             case "gzip", "x-gzip", "deflate": next = decompressBody(plain, encoding: coding == "x-gzip" ? "gzip" : coding)
@@ -3822,11 +3843,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
     static let detectorWarmingRetryAfter = 2
 
+    /// Why a request body couldn't be decoded, for the Security Timeline:
+    /// `encoding` is a coding's name (a content-coding is a token, no spaces)
+    /// or the decoder's own reason ("an unreadable header line").
+    static func undecodableReason(_ encoding: String) -> String {
+        encoding.contains(" ") ? "request body could not be decoded (\(encoding))"
+            : "\(encoding)-compressed request body could not be decoded"
+    }
+
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")
-        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
-            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
+        let what = encoding.contains(" ") ? "its body could not be decoded (\(encoding))"
+            : "its body is \(encoding)-compressed in a way Bromure could not decode"
+        let body = "Bromure blocked this request: \(what), so \(names) could not check it. It was not sent. "
             + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
         var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
         r += "Content-Type: text/plain; charset=utf-8\r\n"
