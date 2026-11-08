@@ -50,6 +50,20 @@ enum ConsentPrompt {
     /// Tests: the answer, by workspace (nil: asked as above).
     static let chooseForTesting = NIOLockedValueBox<(@Sendable (UUID) async -> Int?)?>(nil)
 
+    /// A one-button notice (nothing to decide): the connected fat client's
+    /// prompt; a headless terminal session gets none (the caller logs it),
+    /// and there's no local panel to show it in.
+    // @port-skip linux-only: ConsentPrompt.notice without the local panel
+    static func notice(profileID: UUID, title: String, message: String) {
+        guard case .fatClient = RemoteConsent.route(for: profileID) else { return }
+        Task { @MainActor in
+            _ = await PendingPromptBroker.shared.askAsync(
+                profileID: profileID, title: title, message: message,
+                buttons: [NSLocalizedString("OK", comment: "")],
+                fallback: 0, timeout: 120)
+        }
+    }
+
     /// There is no local panel to take back.
     // @port-skip linux-only: ConsentPrompt.withdrawLocal (no local panel)
     static func withdrawLocal(token: UUID) {}

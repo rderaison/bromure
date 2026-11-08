@@ -94,3 +94,5 @@ int acl_pam_check(const char *service, const char *user, const char *password);
 // frees; -1 corrupt or truncated; -2 past `cap`.
 int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_t **out, size_t *out_len);
 int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
+/* Raw deflate (no zlib or gzip wrapper) of all of `in`, malloc'ed into *out. */
+int acl_deflate_raw(const uint8_t *in, size_t n, uint8_t **out, size_t *out_len);

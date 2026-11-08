@@ -81,3 +81,21 @@ int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, si
     *out = buf; *out_len = len;
     return 0;
 }
+
+int acl_deflate_raw(const uint8_t *in, size_t n, uint8_t **out, size_t *out_len) {
+    *out = NULL; *out_len = 0;
+    if (n > UINT_MAX) return -2;                 // zlib counts input in 32 bits
+    z_stream s; memset(&s, 0, sizeof s);
+    if (deflateInit2(&s, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return -1;
+    uLong bound = deflateBound(&s, (uLong)n);
+    uint8_t *buf = malloc(bound ? bound : 1);
+    if (!buf) { deflateEnd(&s); return -1; }
+    s.next_in = (Bytef *)in; s.avail_in = (uInt)n;
+    s.next_out = buf; s.avail_out = (uInt)bound;
+    int z = deflate(&s, Z_FINISH);
+    size_t len = bound - s.avail_out;
+    deflateEnd(&s);
+    if (z != Z_STREAM_END) { free(buf); return -1; }
+    *out = buf; *out_len = len;
+    return 0;
+}
