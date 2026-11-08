@@ -43,6 +43,19 @@ struct DepiTests {
         }
     }
 
+    @Test("A path an upstream might normalise is malformed, and never a lookup")
+    func malformedPaths() {
+        for p in ["/./-/whoami", "//-/npm/v1/tokens", "/%zz/%2e%2e/-/npm/v1/tokens", "/x/../left-pad/-/left-pad-1.3.0.tgz",
+                  "/left-pad//", "/%2e/left-pad", "/left-pad/.", "left-pad", "/a%00b"] {
+            #expect(DepiRegistry.isMalformedPath(p), "\(p)")
+            #expect(!DepiRegistry.isReadOnlyLookup(method: "GET", path: p), "\(p)")
+        }
+        for p in ["/", "/left-pad", "/left-pad/", "/@scope%2fpkg", "/left-pad/-/left-pad-1.3.0.tgz?x=..", "/-/whoami"] {
+            #expect(!DepiRegistry.isMalformedPath(p), "\(p)")
+        }
+        #expect(DepiRegistry.isReadOnlyLookup(method: "GET", path: "/left-pad/"), "a single trailing slash")
+    }
+
     @Test("Depi host classifies as npm — metadata")
     func depiHostMetadata() {
         guard case let .metadata(eco, pkg)? = SupplyChainRegistry.classify(

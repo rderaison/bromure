@@ -49,14 +49,12 @@ enum DepiRegistry {
     /// publish, unpublish, login, token, whoami, owner, team, org or
     /// dist-tag change — gets neither: a guest can't act on the workspace
     /// owner's Depi account with its key. The path is judged decoded (as
-    /// the registry reads it), its query aside; a `..` segment is no
+    /// the registry reads it), its query aside; a malformed one is never a
     /// lookup.
     static func isReadOnlyLookup(method: String, path rawPath: String) -> Bool {
+        guard !isMalformedPath(rawPath) else { return false }
         let path = String(rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
-        let decoded = path.removingPercentEncoding ?? path
-        guard decoded.hasPrefix("/"), !decoded.contains("\0"),
-              !decoded.split(separator: "/", omittingEmptySubsequences: false).contains("..") else { return false }
-        let lower = decoded.lowercased()
+        let lower = (path.removingPercentEncoding ?? path).lowercased()
         switch method.uppercased() {
         case "GET", "HEAD":
             if !lower.hasPrefix("/-/") { return true }
@@ -68,6 +66,24 @@ enum DepiRegistry {
             return false
         }
     }
+
+    /// A path an upstream might normalise into another one: it doesn't
+    /// decode, or has a `.`, `..` or empty segment (a single trailing slash
+    /// aside), or a NUL. `/./-/whoami` or `//-/npm/v1/tokens` would read as
+    /// lookups and be answered on the owner's account; such a request on an
+    /// npm or Depi host is refused (400) while Depi is on, never forwarded
+    /// unscanned.
+    static func isMalformedPath(_ rawPath: String) -> Bool {
+        let path = String(rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        guard let decoded = path.removingPercentEncoding, decoded.hasPrefix("/"), !decoded.contains("\0") else { return true }
+        var segments = decoded.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+        if segments == [""] { return false }                       // "/"
+        if segments.count > 1, segments.last == "" { segments.removeLast() }
+        return segments.contains { $0.isEmpty || $0 == "." || $0 == ".." }
+    }
+
+    /// The answer to a malformed path on an npm or Depi host.
+    static let malformedPathDetail = "Bromure: a registry path with '.', '..', empty or undecodable segments is refused while Depi screens this workspace's npm traffic."
 
     /// Attach the Depi key as `Authorization: Bearer`, replacing any
     /// Authorization header the guest sent (a guest npm token means

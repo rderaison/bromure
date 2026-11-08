@@ -1391,7 +1391,14 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // layers (age gate, OSV, script-strip) still apply on top —
         // Depi replaces socket.dev, not the local policy.
         var depiRouted = false
-        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host), DepiRegistry.isMalformedPath(reqPath) {
+            // A path an upstream might normalise into another: refused,
+            // neither re-routed nor sent on unscanned.
+            SupplyChainLog.shared.record("[depi] ✗ \(reqMethod) \(host)\(reqPath) — malformed registry path, refused")
+            rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request", detail: DepiRegistry.malformedPathDetail,
+                               host: host, port: port, method: reqMethod, path: reqPath)
+            return
+        } else if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
            !DepiRegistry.isReadOnlyLookup(method: reqMethod, path: reqPath) {
             // Not a lookup (a publish, a login, a token…): neither the key
             // nor the re-route — it goes where the guest sent it.
