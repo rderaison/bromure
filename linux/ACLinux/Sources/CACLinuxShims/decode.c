@@ -45,7 +45,9 @@ int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_
         len = have - s.avail_out;
         if (z == Z_STREAM_END) {
             // gzip members may be concatenated (RFC 1952): the next one follows.
-            if (s.avail_in > 0 && (window_bits & 16)) { if (inflateReset(&s) != Z_OK) break; continue; }
+            // Only gzip (window_bits 16+): a raw stream's (negative bits) trailing
+            // bytes aren't another member (-15 & 16 is set too).
+            if (s.avail_in > 0 && window_bits > 15 && (window_bits & 16)) { if (inflateReset(&s) != Z_OK) break; continue; }
             rc = 0; break;
         }
         if (z == Z_BUF_ERROR && s.avail_in == 0 && s.avail_out > 0) break;   // truncated (a full output buffer just grows)
