@@ -708,6 +708,21 @@ def _ws_popen(args, cwd=None, env=None, stdout=None, stderr=None, stdin=None):
     return _WsProcess(args, cwd, env, fd)
 
 
+def _confined_env(env, pty):
+    """The environment a confined command runs with. A non-interactive one
+    (the host's `vm exec`, a workspace command) also gets $TMUX naming the
+    sandbox's tmux server, as tmux gives its own panes: the host's commands
+    run a bare `tmux` (tab liveness, captures, the transcript a tab pinned),
+    and under a sandbox there is no server on the default socket -- every
+    such command failed, and a session's chat never found its transcript.
+    Not for a pty: an interactive shell's `tmux attach` would refuse to nest."""
+    env = dict(env or {})
+    socket_path = _SANDBOX.get("tmux_socket")
+    if not pty and socket_path and "TMUX" not in env:
+        env["TMUX"] = "%s,0,0" % socket_path
+    return env
+
+
 def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
     """Hand argv and its descriptors to the supervisor. Blocks until it exits."""
     try:
@@ -715,7 +730,7 @@ def _sandbox_exec(argv, cwd=None, env=None, fds=(), pty=False, timeout=None):
         c.settimeout(timeout if timeout else None)
         c.connect(SANDBOX_CTL)
         payload = json.dumps({"op": "exec", "argv": list(argv),
-                              "cwd": cwd, "env": env or {},
+                              "cwd": cwd, "env": _confined_env(env, pty),
                               "pty": bool(pty)}).encode()
         socket.send_fds(c, [payload], list(fds))
         data = b""
