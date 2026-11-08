@@ -316,4 +316,19 @@ struct SecurityWindowFatClientTests {
         #expect(tl.remote.count == 2 && tl.allEvents.count == 3)
         #expect(tl.machineLabel(a.id.uuidString) == "rack" && tl.machineLabel(b.id.uuidString) == "studio")
     }
+
+    /// Finding: "Failed settings load clears another in-flight request's
+    /// pane". Two opens of one workspace loading: the later click set the
+    /// pane, then failed before the earlier one landed and cleared it; the
+    /// earlier one opened the editor on its own, older pane. A failed load
+    /// drops the pane only when no other load is under way.
+    @Test("a failed editor load leaves the pane to a load still under way")
+    func failedLoadKeepsLatestPane() throws {
+        #expect(RemoteHostWindow.dropsRequestedPane(loadsUnderWay: 1))      // the only one: drop it
+        #expect(!RemoteHostWindow.dropsRequestedPane(loadsUnderWay: 2))     // another builds the editor on it
+        let fc = try source("Sources/AgentCoding/FatClientController.swift")
+        #expect(fc.contains("settingsLoads[id, default: 0] += 1"))
+        #expect(fc.contains("if Self.dropsRequestedPane(loadsUnderWay: self.settingsLoads[id] ?? 1) {"))
+        #expect(!fc.contains("self.settingsRequestedPane[id] = nil   // not left for a later open"))
+    }
 }

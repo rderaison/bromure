@@ -3599,6 +3599,9 @@ final class RemoteHostWindow: NSWindow {
     /// opens in flight, the one that finishes last builds the editor, and it
     /// must be on the later click's pane, not its own.
     private var settingsRequestedPane: [Profile.ID: EditorCategory] = [:]
+    /// Editor loads under way per workspace: a failed one leaves the pane to
+    /// one still loading, which builds the editor on it.
+    private var settingsLoads: [Profile.ID: Int] = [:]
     /// A settings save still resolving, by workspace (its window may be
     /// closed already): a reopen waits for it, so the new editor reads what
     /// the save left in force and the old save can't touch the new window.
@@ -4451,6 +4454,10 @@ final class RemoteHostWindow: NSWindow {
         openWorkspaceSettings(id, initialCategory: category)
     }
 
+    /// Whether a failed editor load drops the pane asked for: only when it
+    /// was the last load under way for the workspace (itself included).
+    nonisolated static func dropsRequestedPane(loadsUnderWay: Int) -> Bool { loadsUnderWay <= 1 }
+
     /// Bring an open editor forward, switched to `category` when one's asked.
     private func showOpenSettings(_ win: NSWindow, _ id: Profile.ID, _ category: EditorCategory?) {
         win.makeKeyAndOrderFront(nil)
@@ -4463,9 +4470,14 @@ final class RemoteHostWindow: NSWindow {
     private func openWorkspaceSettings(_ id: Profile.ID, initialCategory: EditorCategory? = nil) {
         if let win = settingsSessions[id]?.window { showOpenSettings(win, id, initialCategory); return }
         if let initialCategory { settingsRequestedPane[id] = initialCategory }
+        settingsLoads[id, default: 0] += 1
         let c = controller
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                let left = (self.settingsLoads[id] ?? 1) - 1
+                self.settingsLoads[id] = left > 0 ? left : nil
+            }
             if let pending = self.settingsSaves[id] { _ = await pending.result }
             // A close's revert (or a failed save's) only queues its POST:
             // the fetch below reads the host once it has landed.
@@ -4489,7 +4501,13 @@ final class RemoteHostWindow: NSWindow {
                 credentialRefs = (doc["configuredCredentialRefs"] as? [String])?
                     .compactMap { CredentialRef(wireID: $0) }
             } catch {
-                self.settingsRequestedPane[id] = nil   // not left for a later open
+                // Not left for a later open -- unless another load is still
+                // under way: the latest click's pane is that one's to open on
+                // (Finding: "Failed settings load clears another in-flight
+                // request's pane").
+                if Self.dropsRequestedPane(loadsUnderWay: self.settingsLoads[id] ?? 1) {
+                    self.settingsRequestedPane[id] = nil
+                }
                 Self.presentRemoteError(
                     NSLocalizedString("Couldn't load the workspace settings", comment: ""), error)
                 return
