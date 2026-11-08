@@ -125,9 +125,12 @@ int acl_ort_session_use_output(acl_ort_session *s, const char *name, char *err, 
 size_t acl_ort_input_count(const acl_ort_session *s) { return s ? s->ninputs : 0; }
 const char *acl_ort_input_name(const acl_ort_session *s, size_t i) { return s && i < s->ninputs ? s->inputs[i] : NULL; }
 
-int acl_ort_run_int64(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
-                      const int64_t *shape, size_t rank, float *out, size_t outcap, size_t *outlen,
-                      char *err, size_t errlen) {
+/* The run itself: the output as float32 into out (up to outcap values), or,
+ * with alloc set, into a buffer of the output's own size (*allocated, for the
+ * caller to free); its element count in *outlen. */
+static int run_int64(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
+                     const int64_t *shape, size_t rank, float *out, size_t outcap, float **allocated, size_t maxlen,
+                     size_t *outlen, char *err, size_t errlen) {
     if (!api || !s) { say(err, errlen, "no session", NULL); return -1; }
     size_t count = 1;
     for (size_t i = 0; i < rank; i++) {
@@ -160,7 +163,14 @@ int acl_ort_run_int64(acl_ort_session *s, const char *const *names, const int64_
     float *p = NULL;
     if (failed(api->GetTensorMutableData(result, (void **)&p), err, errlen, "output data")) goto done;
     *outlen = n;
-    memcpy(out, p, (n < outcap ? n : outcap) * sizeof(float));
+    if (allocated) {
+        if (n > maxlen) { say(err, errlen, "the output is too large", NULL); goto done; }
+        *allocated = malloc((n ? n : 1) * sizeof(float));
+        if (!*allocated) { say(err, errlen, "out of memory", NULL); goto done; }
+        memcpy(*allocated, p, n * sizeof(float));
+    } else {
+        memcpy(out, p, (n < outcap ? n : outcap) * sizeof(float));
+    }
     rc = 0;
 done:
     if (result) api->ReleaseValue(result);
@@ -168,4 +178,17 @@ done:
     free(in);
     if (mem) api->ReleaseMemoryInfo(mem);
     return rc;
+}
+
+int acl_ort_run_int64(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
+                      const int64_t *shape, size_t rank, float *out, size_t outcap, size_t *outlen,
+                      char *err, size_t errlen) {
+    return run_int64(s, names, data, ninputs, shape, rank, out, outcap, NULL, 0, outlen, err, errlen);
+}
+
+int acl_ort_run_int64_alloc(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
+                            const int64_t *shape, size_t rank, float **out, size_t maxlen, size_t *outlen,
+                            char *err, size_t errlen) {
+    *out = NULL;
+    return run_int64(s, names, data, ninputs, shape, rank, NULL, 0, out, maxlen, outlen, err, errlen);
 }

@@ -105,27 +105,20 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
         let namePtrs = cnames.map { UnsafePointer($0) }
         let dataPtrs = bufs.map { UnsafePointer($0) as UnsafePointer<Int64>? }
         let dims = shape.map(Int64.init)
-        var out = [Float](repeating: 0, count: 4096)
+        // One run, the output copied at its own size (a token classifier's
+        // is a score per token and label: far past a fixed buffer).
+        var out: UnsafeMutablePointer<Float>?
         var n = 0
         var err = [CChar](repeating: 0, count: 512)
-        func run() -> Int32 {
-            namePtrs.withUnsafeBufferPointer { np in
-                dataPtrs.withUnsafeBufferPointer { dp in
-                    acl_ort_run_int64(session, np.baseAddress, dp.baseAddress, fed.count, dims, dims.count,
-                                      &out, out.count, &n, &err, err.count)
-                }
+        let rc = namePtrs.withUnsafeBufferPointer { np in
+            dataPtrs.withUnsafeBufferPointer { dp in
+                acl_ort_run_int64_alloc(session, np.baseAddress, dp.baseAddress, fed.count, dims, dims.count,
+                                        &out, Self.maxOutput, &n, &err, err.count)
             }
         }
-        guard run() == 0 else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
-        // A larger output (a token classifier's: a score per token and
-        // label): run again into room for all of it.
-        if n > out.count {
-            guard n <= Self.maxOutput else { throw OnnxRuntimeLibrary.Unavailable(why: "an output of \(n) values") }
-            out = [Float](repeating: 0, count: n)
-            guard run() == 0 else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
-            guard n <= out.count else { throw OnnxRuntimeLibrary.Unavailable(why: "an output of \(n) values") }
-        }
-        return Array(out.prefix(n))
+        defer { free(out) }
+        guard rc == 0, let out else { throw OnnxRuntimeLibrary.Unavailable(why: String(cString: err)) }
+        return Array(UnsafeBufferPointer(start: out, count: n))
     }
 }
 

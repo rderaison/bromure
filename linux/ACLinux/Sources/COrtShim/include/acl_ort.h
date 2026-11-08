@@ -31,4 +31,10 @@ const char *acl_ort_input_name(const acl_ort_session *s, size_t i);
 int acl_ort_run_int64(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
                       const int64_t *shape, size_t rank, float *out, size_t outcap, size_t *outlen,
                       char *err, size_t errlen);
+/* The same run, the output copied into a buffer of its own size (read from
+ * the output's shape, one run whatever it is), malloc'ed into *out for the
+ * caller to free; refused past maxlen values. */
+int acl_ort_run_int64_alloc(acl_ort_session *s, const char *const *names, const int64_t *const *data, size_t ninputs,
+                            const int64_t *shape, size_t rank, float **out, size_t maxlen, size_t *outlen,
+                            char *err, size_t errlen);
 #endif
