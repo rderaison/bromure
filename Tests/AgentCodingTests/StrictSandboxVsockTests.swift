@@ -263,4 +263,114 @@ struct StrictSandboxVsockTests {
             #expect(!(try source(file)).contains("socket.socket(socket.AF_VSOCK"), "\(file)")
         }
     }
+
+    /// Finding (CWE-400): the relay socket is open to the workload, and every
+    /// accepted client got a thread -- two, and a host connection, once it
+    /// named an allowed port -- with no cap and no idle deadline. A workload
+    /// holding many quiet connections could run agentd (and the shell pool,
+    /// and every tab it serves) out of threads and descriptors. Clients are now
+    /// capped, the extra one refused before anything is opened for it, and a
+    /// relayed connection idle that long is closed.
+    @Test("the relay caps its clients and refuses the next before opening anything for it",
+          .enabled(if: python))
+    func relayCapped() throws {
+        let out = try harness("""
+            m.VSOCK_RELAY_MAX_CLIENTS = 3
+            R2 = tempfile.mktemp(prefix="bvc", dir="/tmp")
+            threading.Thread(target=m.vsock_relay_service, args=(R2,), daemon=True).start()
+            for _ in range(1000):
+                if os.path.exists(R2):
+                    break
+                time.sleep(0.01)
+            def opened():
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(10)
+                c.connect(R2); c.sendall(b"bromure-vsock 5835\\n")
+                return c, c.recv(16)
+            time.sleep(0.2)
+            base_asked = len(asked)
+            held = [opened() for _ in range(3)]
+            r = {"held": [line.decode() for _, line in held]}
+            time.sleep(0.2)
+            before = threading.active_count()
+            extra, line = opened()
+            r["extra"] = line.decode()
+            time.sleep(0.2)
+            r["hostConnections"] = len(asked) - base_asked
+            r["extraThreads"] = threading.active_count() - before
+            extra.close()
+            held[0][0].close()
+            time.sleep(0.5)
+            again, line = opened()
+            r["afterRelease"] = line.decode()
+            again.sendall(b"ping\\n"); r["echo"] = again.recv(16).decode()
+            for c, _ in held[1:] + [(again, None)]:
+                c.close()
+            print(json.dumps(r))
+            """)
+        let r = try #require(try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])
+        #expect(r["held"] as? [String] == ["ok\n", "ok\n", "ok\n"])
+        #expect(r["extra"] as? String == "err busy\n")
+        #expect(r["hostConnections"] as? Int == 3, "the refused client opened nothing on the host")
+        #expect(r["extraThreads"] as? Int == 0, "no thread for the refused client")
+        #expect(r["afterRelease"] as? String == "ok\n")
+        #expect(r["echo"] as? String == "ping\n")
+    }
+
+    @Test("a relayed connection quiet for VSOCK_RELAY_IDLE is closed; a talking one, or one stuck sending, isn't kept by it",
+          .enabled(if: python))
+    func relayIdle() throws {
+        let out = try harness("""
+            m.VSOCK_RELAY_IDLE = 0.6
+            m.VSOCK_RELAY_TICK = 0.1
+            r = {}
+            def opened():
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(10)
+                c.connect(RELAY); c.sendall(b"bromure-vsock 5835\\n")
+                assert c.recv(3) == b"ok\\n"
+                return c
+            time.sleep(0.2)
+            base = threading.active_count()
+            # Quiet: closed after the idle time, its threads gone.
+            q = opened()
+            t0 = time.monotonic()
+            r["quietEOF"] = q.recv(16) == b""
+            r["quietAfter"] = round(time.monotonic() - t0, 1)
+            q.close()
+            # Talking every 0.2 s for 2 s: never cut.
+            a = opened()
+            ok = True
+            for i in range(10):
+                a.sendall(b"p%d\\n" % i)
+                ok = ok and a.recv(16) == b"p%d\\n" % i
+                time.sleep(0.2)
+            r["talking"] = ok
+            a.close()
+            # Stuck: sends megabytes and never reads -- the echo backs up and both
+            # relay threads block; the idle clock frees them.
+            s = opened()
+            s.setblocking(False)
+            sent = 0
+            end = time.monotonic() + 1.0
+            while time.monotonic() < end:
+                try:
+                    sent += s.send(b"x" * 65536)
+                except BlockingIOError:
+                    time.sleep(0.01)
+            r["stuckSent"] = sent > 65536
+            for _ in range(100):
+                if threading.active_count() <= base:
+                    break
+                time.sleep(0.05)
+            r["threadsLeft"] = threading.active_count() - base
+            s.close()
+            print(json.dumps(r))
+            """)
+        let r = try #require(try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any])
+        #expect(r["quietEOF"] as? Bool == true)
+        let after = try #require(r["quietAfter"] as? Double)
+        #expect(after >= 0.4 && after < 3, "closed after \(after) s")
+        #expect(r["talking"] as? Bool == true)
+        #expect(r["stuckSent"] as? Bool == true)
+        #expect(r["threadsLeft"] as? Int == 0)
+    }
 }
