@@ -122,8 +122,7 @@ final class ChatQueueStore: ObservableObject {
     /// The app's queue file — none in a test run, which must never write
     /// the user's.
     private static func defaultFileURL() -> URL? {
-        let testing = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
-            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let testing = isTestRun()
         guard !testing else { return nil }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("BromureAC", isDirectory: true)
