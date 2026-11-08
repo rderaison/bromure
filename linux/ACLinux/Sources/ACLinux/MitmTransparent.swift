@@ -85,7 +85,7 @@ extension MitmProxy {
                 if case .notTLS = d { plainHTTP = true } else { tlsPeek = d }
             }
             if plainHTTP {
-                let peeked = Self.peekHTTPHost(fd: appFD)
+                let peeked = Self.peekHTTPHost(fd: appFD).map(EgressPolicy.normalizedHost)
                 let host = peeked ?? destIP
                 BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: peeked, port: destPort)
                 let strict80 = guardrails?.strictCredentials ?? false
@@ -128,8 +128,8 @@ extension MitmProxy {
             var shouldSplice: Bool
             switch decision {
             case .sni(let s):
-                host = s
-                shouldSplice = passthrough.matches(s)          // pinned / operator-listed
+                host = EgressPolicy.normalizedHost(s)          // the SNI as every decision sees it
+                shouldSplice = passthrough.matches(host)       // pinned / operator-listed
             case .noSNI:
                 host = destIP                                  // MiTM with an IP-literal leaf
                 shouldSplice = false
@@ -142,7 +142,7 @@ extension MitmProxy {
             // TLS, and the fallback for names the switch couldn't map at L4).
             // An OpenShell policy also decides SNI-less and non-TLS flows (by
             // destination address) instead of letting them fail open.
-            let sniHost: String? = { if case .sni(let s) = decision { return s }; return nil }()
+            let sniHost: String? = { if case .sni(let s) = decision { return EgressPolicy.normalizedHost(s) }; return nil }()
             BinaryIdentityService.shared.noteHost(identity, profileID: profileID, host: sniHost, port: destPort)
             if let policy = guardrails?.egressPolicy, sniHost != nil || policy.openShell != nil {
                 switch policy.verdict(ip: policy.openShell != nil ? destAddr : nil,

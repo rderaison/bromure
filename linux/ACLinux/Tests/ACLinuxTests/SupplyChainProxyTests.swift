@@ -490,6 +490,14 @@ struct SupplyChainProxyTests {
         #expect(reply.hasPrefix("HTTP/1.1 403 ") && reply.contains("quarantined"), "\(reply.prefix(200))")
     }
 
+    /// The proxy's parse gives every decision the host lowercased, without
+    /// a fully qualified name's trailing dots (CONNECT and absolute form).
+    @Test func aTrailingDotHostIsParsedAsTheHost() {
+        #expect(ConnectHandler.split("Registry.NPMJS.org.:443", defaultPort: 443) == ("registry.npmjs.org", 443))
+        #expect(ConnectHandler.split("registry.npmjs.org.", defaultPort: 80) == ("registry.npmjs.org", 80))
+        #expect(ConnectHandler.split("[2001:DB8::1]:8443", defaultPort: 443) == ("2001:db8::1", 8443))
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()

@@ -735,7 +735,8 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 }
                 // A plain-HTTP request through the proxy: absolute form.
                 guard let url = URL(string: String(parts[1])), url.scheme?.lowercased() == "http",
-                      let host = url.host else { return reject(context, 405, "Method Not Allowed") }
+                      let rawHost = url.host else { return reject(context, 405, "Method Not Allowed") }
+                let host = EgressPolicy.normalizedHost(rawHost)   // as every decision sees it
                 let port = url.port ?? 80
                 let policy = proxy.guardrailsConfig(for: profileID)?.egressPolicy
                 if host.lowercased() != OpenShellAdvisor.host,
@@ -814,14 +815,16 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     static func split(_ target: String, defaultPort: Int) -> (String, Int) {
+        // The host every decision then sees: lowercased, a fully qualified
+        // name's trailing dots gone (`registry.npmjs.org.` is npm's registry).
         if target.hasPrefix("["), let close = target.firstIndex(of: "]") {
             let h = String(target[target.index(after: target.startIndex)..<close])
-            return (h, Int(target[target.index(after: close)...].dropFirst()) ?? defaultPort)
+            return (h.lowercased(), Int(target[target.index(after: close)...].dropFirst()) ?? defaultPort)
         }
         if let c = target.lastIndex(of: ":"), let p = Int(target[target.index(after: c)...]) {
-            return (String(target[..<c]), p)
+            return (EgressPolicy.normalizedHost(String(target[..<c])), p)
         }
-        return (target, defaultPort)
+        return (EgressPolicy.normalizedHost(target), defaultPort)
     }
 }
 
