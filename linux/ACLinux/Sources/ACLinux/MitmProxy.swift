@@ -144,13 +144,18 @@ final class MitmProxy: @unchecked Sendable {
         sshAgent = SSHAgentServer(consent: broker)
         awsResigner = AWSResigner(credServer: awsCreds)
         kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
-        claudeStore = ClaudeSubscriptionStore()
+        // The user's logins (the support folder), except in a test run: a
+        // test's proxy keeps its stores beside its CA, so it never reads the
+        // user's real files with a test's vault key (each such read saved an
+        // `.unreadable-…` copy beside them) nor writes them.
+        let stores: URL? = isTestRun() ? caDirectory.appendingPathComponent("subscriptions", isDirectory: true) : nil
+        claudeStore = ClaudeSubscriptionStore(fileURL: stores?.appendingPathComponent("claude-subscription.enc"))
         claudeRefresher = ClaudeSubscriptionRefresher(store: claudeStore)
-        codexStore = CodexSubscriptionStore()
+        codexStore = CodexSubscriptionStore(fileURL: stores?.appendingPathComponent("codex-subscription.enc"))
         codexRefresher = CodexSubscriptionRefresher(store: codexStore)
-        grokStore = GrokSubscriptionStore()
+        grokStore = GrokSubscriptionStore(fileURL: stores?.appendingPathComponent("grok-subscription.enc"))
         grokRefresher = GrokSubscriptionRefresher(store: grokStore)
-        kimiStore = KimiSubscriptionStore()
+        kimiStore = KimiSubscriptionStore(fileURL: stores?.appendingPathComponent("kimi-subscription.enc"))
         kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
         self.group = group
         credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
