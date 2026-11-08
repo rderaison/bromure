@@ -70,6 +70,7 @@
     "Sources/AgentCoding/Inference/InferenceMetrics.swift",
     "Sources/AgentCoding/Inference/InferenceRepairProxy.swift",
     "Sources/AgentCoding/Inference/InferenceService.swift",
+    "Sources/AgentCoding/Inference/LLMRouting.swift",
     "Sources/AgentCoding/Inference/LocalStreamEmitter.swift",
     "Sources/AgentCoding/Inference/LogBuffer.swift",
     "Sources/AgentCoding/Inference/ModelCatalog.swift",
