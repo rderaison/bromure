@@ -107,7 +107,10 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
         onChange?(profileID)
     }
 
-    func update(profileID: UUID, report r: [String: Any], now: Date = Date()) {
+    /// `onlyIfAbsent`: an answer the host asked for, not stored over a status
+    /// the guest pushed meanwhile.
+    func update(profileID: UUID, report r: [String: Any], now: Date = Date(), onlyIfAbsent: Bool = false) {
+        if onlyIfAbsent, status(for: profileID) != nil { return }
         // Kernels first, even while the sandbox is still `pending`: the sentry
         // loads before the sandbox is assembled, and may be waiting for the
         // host to fetch its module.
@@ -139,6 +142,7 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
             filesystemRequested: (r["requested"] as? [String: Any])?["filesystem"] as? Bool)
         lock.lock()
         let previous = statuses[profileID]
+        if onlyIfAbsent, previous != nil { lock.unlock(); return }   // a push won the race
         statuses[profileID] = st
         lock.unlock()
         KernelSentryService.shared.crossCheck(profileID: profileID, guestSentry: st.sentry,

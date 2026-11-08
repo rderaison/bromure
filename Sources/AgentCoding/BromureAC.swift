@@ -11200,7 +11200,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let secret = store.profileDirectory(for: profile).appendingPathComponent("attestor.secret")
         if !restoring { try? FileManager.default.removeItem(at: secret) }
         BinaryIdentityService.shared.attach(profileID: profile.id, socketDevice: socketDevice, secretFile: secret,
-                                            restoring: restoring)
+                                            restoring: restoring, strict: profile.effectiveStrictSandbox)
     }
 
     /// Connect the OpenShell policy advisor to the live workspaces: mode and

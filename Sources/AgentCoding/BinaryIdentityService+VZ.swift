@@ -11,8 +11,9 @@ extension BinaryIdentityService {
     @MainActor
     /// `restoring`: a VM taken back, whose attestor must present the
     /// secret pinned on disk (none: refused).
-    public func attach(profileID: UUID, socketDevice: VZVirtioSocketDevice, secretFile: URL, restoring: Bool) {
-        let bridge = AttestorBridge(profileID: profileID, secretFile: secretFile, mayPin: !restoring)
+    public func attach(profileID: UUID, socketDevice: VZVirtioSocketDevice, secretFile: URL,
+                       restoring: Bool, strict: Bool) {
+        let bridge = AttestorBridge(profileID: profileID, secretFile: secretFile, mayPin: !restoring, strict: strict)
         let l = AttestorVsockListener(bridge: bridge)
         l.listen(on: socketDevice)
         bridge.listener = l
@@ -44,8 +45,10 @@ final class AttestorVsockListener: NSObject, VZVirtioSocketListenerDelegate, @un
 
     func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection,
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
+        guard let bridge else { return false }
         let cfd = dup(connection.fileDescriptor)
         guard cfd >= 0 else { return false }
+        bridge.admitHandshake(cfd)
         Thread.detachNewThread { [weak bridge] in bridge?.handshakeAndServe(cfd, connection: connection) }
         return true
     }

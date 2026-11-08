@@ -229,7 +229,7 @@ struct BinaryIdentityGateTests {
         try Data("half".utf8).write(to: leftover)
         let other = dir.appendingPathComponent("unrelated.tmp-x")
         try Data().write(to: other)
-        let b = AttestorBridge(profileID: UUID(), secretFile: file, mayPin: true)
+        let b = AttestorBridge(profileID: UUID(), secretFile: file, mayPin: true, strict: false)
         // Unpinned: the first hello pins.
         var fds: [Int32] = [0, 0]
         _ = fds.withUnsafeMutableBufferPointer { socketpair(AF_UNIX, Self.streamSocketType, 0, $0.baseAddress!) }
@@ -237,6 +237,7 @@ struct BinaryIdentityGateTests {
         let secret = String(repeating: "cd", count: 32)
         _ = "{\"hello\":\"attestd\",\"version\":1,\"secret\":\"\(secret)\"}\n".withCString { write(fds[0], $0, strlen($0)) }
         let hostFD = fds[1]
+        b.admitHandshake(hostFD)
         Thread.detachNewThread { b.handshakeAndServe(hostFD, connection: nil) }
         for _ in 0..<50 where !b.isConnected { usleep(20_000) }
         #expect(b.isConnected)
@@ -255,7 +256,7 @@ struct BinaryIdentityGateTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("attestor.secret")
         if emptyFile { try Data().write(to: file) }
-        let b = AttestorBridge(profileID: UUID(), secretFile: file, mayPin: false)
+        let b = AttestorBridge(profileID: UUID(), secretFile: file, mayPin: false, strict: false)
         var fds: [Int32] = [0, 0]
         _ = fds.withUnsafeMutableBufferPointer { socketpair(AF_UNIX, Self.streamSocketType, 0, $0.baseAddress!) }
         defer { close(fds[0]) }

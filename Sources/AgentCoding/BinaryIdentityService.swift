@@ -151,16 +151,16 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// The attested identity of the guest socket `sport → dst:dport`, or nil.
     public func identity(profileID: UUID, sport: UInt16, dst: String, dport: UInt16) async
         -> OpenShellPolicy.BinaryIdentity? {
-        // A strict revocation that didn't fully land leaves the agent a path
-        // to root, so the attestor's answers can't be trusted: no identity,
-        // and binary-scoped rules fail closed.
-        if GuestSandboxStatusStore.shared.status(for: profileID)?.strictApplied == false {
-            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
-                "action": .string("deny"), "layer": .string("identity"), "host": .string(dst), "port": .int(Int(dport)),
-                "reason": .string("the strict sandbox didn't fully apply in the VM, so binary identity can't be trusted")])
-            return nil
-        }
-        let req: [String: Any] = ["op": "who", "sport": Int(sport), "dst": dst, "dport": Int(dport)]
+        if case .identity(let id) = await attest(profileID: profileID, sport: sport, dst: dst, dport: dport) { return id }
+        return nil
+    }
+
+    /// An attestation: the identity (nil: none, decided), or not yet
+    /// decidable (a strict workspace whose sandbox status isn't known:
+    /// asked again later, never remembered as a deny).
+    enum Attestation { case identity(OpenShellPolicy.BinaryIdentity?), notYet }
+
+    func attest(profileID: UUID, sport: UInt16, dst: String, dport: UInt16) async -> Attestation {
         lock.lock(); let bridge = bridges[profileID]; lock.unlock()
         // Early in a boot the guest's attestor may not have connected yet;
         // wait briefly for it rather than failing binary rules closed on a
@@ -172,13 +172,37 @@ public final class BinaryIdentityService: @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
+        // A strict workspace's status not heard yet (a VM taken back, whose
+        // store starts empty, or one just booted): ask the guest for it
+        // before trusting any answer. Stored only if nothing newer came
+        // pushed meanwhile.
+        if queryOverride == nil, let bridge, bridge.strict,
+           GuestSandboxStatusStore.shared.status(for: profileID) == nil,
+           let reply = await bridge.query(["op": "sandbox_status"]),
+           reply["ok"] as? Bool == true, let report = reply["status"] as? [String: Any] {
+            GuestSandboxStatusStore.shared.update(profileID: profileID, report: report, onlyIfAbsent: true)
+        }
+        // A strict revocation that didn't fully land leaves the agent a path
+        // to root, so the attestor's answers can't be trusted: no identity,
+        // and binary-scoped rules fail closed.
+        let status = GuestSandboxStatusStore.shared.status(for: profileID)
+        if status?.strictApplied == false {
+            BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                "action": .string("deny"), "layer": .string("identity"), "host": .string(dst), "port": .int(Int(dport)),
+                "reason": .string("the strict sandbox didn't fully apply in the VM, so binary identity can't be trusted")])
+            return .identity(nil)
+        }
+        // Still unknown (the guest's status module can come up to ~80 s
+        // after its attestor on a spec-less strict boot): not yet.
+        if queryOverride == nil, bridge?.strict == true, status == nil { return .notYet }
+        let req: [String: Any] = ["op": "who", "sport": Int(sport), "dst": dst, "dport": Int(dport)]
         let answer: [String: Any]?
         if let queryOverride { answer = await queryOverride(profileID, req) }
         else { answer = await bridge?.query(req) }
         guard let reply = answer,
               reply["ok"] as? Bool == true,
               let exe = reply["exe"] as? String, let sha = reply["sha256"] as? String else {
-            return nil
+            return .identity(nil)
         }
         let rawAncestors = reply["ancestors"] as? [[String: Any]] ?? []
         // OpenShell refuses an identity with a missing digest or a relative
@@ -194,13 +218,13 @@ public final class BinaryIdentityService: @unchecked Sendable {
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
                 "action": .string("deny"), "layer": .string("identity"), "host": .string(dst), "port": .int(Int(dport)),
                 "reason": .string(refusal)])
-            return nil
+            return .identity(nil)
         }
         let identity = OpenShellPolicy.BinaryIdentity(
             exe: exe, sha256: sha,
             ancestors: links.dropFirst().map { .init(exe: $0.exe, sha256: $0.sha256 ?? "") })
         noteExe(exe, profileID: profileID, destinations: [dst], port: Int(dport))
-        return identity
+        return .identity(identity)
     }
 
     /// `VMNetSwitch.identityGate`: decide a non-intercepted TCP connection for
@@ -275,8 +299,10 @@ public final class BinaryIdentityService: @unchecked Sendable {
     /// waiting for a slot is asked.
     private func startQuery(_ profileID: UUID, _ key: GateKey, hostnames: [String]) {
         Task {
-            let id = await self.identity(profileID: profileID, sport: key.sport,
-                                         dst: EgressPolicy.ipv4String(key.dstIP), dport: key.dport)
+            let answer = await self.attest(profileID: profileID, sport: key.sport,
+                                           dst: EgressPolicy.ipv4String(key.dstIP), dport: key.dport)
+            let id: OpenShellPolicy.BinaryIdentity?
+            if case .identity(let i) = answer { id = i } else { id = nil }
             // The names are every one cached for this IP — a guess at what
             // the connection was for (a shared CDN address has many): they
             // don't replace the program attested for any of them.
@@ -284,9 +310,15 @@ public final class BinaryIdentityService: @unchecked Sendable {
             self.lock.lock()
             // Only into a question still pending (not pruned, nor the VM gone).
             if self.gateResults[profileID]?[key]?.state == .asking {
-                self.gateResults[profileID]?[key]?.state = .answered
-                self.gateResults[profileID]?[key]?.identity = id
-                self.gateResults[profileID]?[key]?.at = self.clock()
+                if case .notYet = answer {
+                    // Not decidable yet: forgotten, so the SYN's retransmit
+                    // asks again; never a remembered deny.
+                    self.gateResults[profileID]?[key] = nil
+                } else {
+                    self.gateResults[profileID]?[key]?.state = .answered
+                    self.gateResults[profileID]?[key]?.identity = id
+                    self.gateResults[profileID]?[key]?.at = self.clock()
+                }
             }
             // The slot passes to the oldest flow still waiting, if any.
             var next: (GateKey, [String])?
@@ -324,6 +356,17 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
     private var waiters: [Int: CheckedContinuation<[String: Any]?, Never>] = [:]
     /// The host's listener feeding this channel (retained with it).
     var listener: AnyObject?
+    /// A strict-sandbox workspace: its attestor's answers count only once
+    /// the guest has reported the revocation applied.
+    let strict: Bool
+    /// Connections waiting for their hello (each holds a thread), oldest
+    /// first.
+    private var pendingHandshakes: [Int32] = []
+    static let maxPendingHandshakes = 4
+    /// The hello: whole, within this long, and at most this size (attestd
+    /// says it the moment it connects).
+    static let helloDeadline: TimeInterval = 1
+    static let maxHelloBytes = 4096
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return fd >= 0 }
     /// When this bridge started listening (the VM's boot, for a fresh start).
@@ -334,9 +377,10 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
     /// restored) has its agent running already: without a valid pin on
     /// disk it refuses every hello, rather than let whoever connects first
     /// be trusted.
-    init(profileID: UUID, secretFile: URL, mayPin: Bool) {
+    init(profileID: UUID, secretFile: URL, mayPin: Bool, strict: Bool) {
         self.profileID = profileID
         self.secretFile = secretFile
+        self.strict = strict
         // An empty file (a write cut short by a power loss) is no pin.
         let saved = (try? String(contentsOf: secretFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -352,14 +396,30 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
     /// The channel closed (the VM went).
     func stop() { closeChannel() }
 
+    /// A new connection `fd` starts its handshake (handshakeAndServe next).
+    /// At most `maxPendingHandshakes` wait for their hello at once: past
+    /// that the OLDEST is cut off, so connections that never say hello
+    /// can't keep the real attestor (which says it at once) out.
+    func admitHandshake(_ fd: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        if pendingHandshakes.count >= Self.maxPendingHandshakes {
+            // Its thread's poll wakes and gives up; it closes the fd.
+            shutdown(pendingHandshakes.removeFirst(), Int32(SHUT_RDWR))
+        }
+        pendingHandshakes.append(fd)
+    }
+
     /// Validate the attestor's hello (secret pinning), then serve replies
-    /// until the channel closes. Blocking; runs on its own thread.
+    /// until the channel closes. Blocking; runs on its own thread. The
+    /// connection was admitted (admitHandshake).
     func handshakeAndServe(_ cfd: Int32, connection: AnyObject?) {
         var reader = LineReader(fd: cfd)
-        // The hello must come promptly and carry the attestor's secret.
-        var tv = timeval(tv_sec: 5, tv_usec: 0)
-        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        guard let helloLine = reader.next(),
+        // The hello must come whole and promptly, small, and carry the
+        // attestor's secret.
+        let helloLine = Self.readHello(cfd, into: &reader)
+        // Out of the pending list before the fd can be closed (and reused).
+        lock.lock(); pendingHandshakes.removeAll { $0 == cfd }; lock.unlock()
+        guard let helloLine,
               let hello = try? JSONSerialization.jsonObject(with: helloLine) as? [String: Any],
               hello["hello"] as? String == "attestd",
               let secret = hello["secret"] as? String, secret.count == 64 else {
@@ -376,6 +436,9 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
         if accept {
             fd = cfd
             self.connection = connection
+            // A query's write never blocks for long on a stalled guest.
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
             if pinned == nil {
                 // Pinned for this run either way; only a saved pin survives
                 // a restart of the host, so a failed save is said.
@@ -404,8 +467,6 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
             return
         }
         FileHandle.standardError.write(Data("[identity] attestor connected for \(profileID)\n".utf8))
-        tv = timeval(tv_sec: 0, tv_usec: 0)
-        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         Self.serveLines(&reader) { obj in
             // Unsolicited guest reports (no id): the sandbox launcher's status.
             if obj["id"] == nil, let event = obj["event"] as? String {
@@ -417,6 +478,30 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
             w?.resume(returning: obj)
         }
         closeChannel()
+    }
+
+    /// The first line, within `helloDeadline` overall (a trickle doesn't
+    /// extend it) and `maxHelloBytes`; what follows it stays in `reader`.
+    static func readHello(_ fd: Int32, into reader: inout LineReader) -> Data? {
+        let deadline = Date().addingTimeInterval(helloDeadline)
+        var buf = Data()
+        var chunk = [UInt8](repeating: 0, count: maxHelloBytes)
+        while true {
+            if let nl = buf.firstIndex(of: 0x0A) {
+                reader.buffer = buf.subdata(in: buf.index(after: nl)..<buf.endIndex)
+                return buf.subdata(in: buf.startIndex..<nl)
+            }
+            guard buf.count < maxHelloBytes else { return nil }
+            let left = deadline.timeIntervalSinceNow
+            guard left > 0 else { return nil }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let r = poll(&pfd, 1, Int32(max(1, min(left * 1000, 60_000))))
+            if r < 0, errno == EINTR { continue }
+            guard r > 0 else { return nil }
+            let n = read(fd, &chunk, maxHelloBytes - buf.count)
+            guard n > 0 else { return nil }
+            buf.append(contentsOf: chunk[0..<n])
+        }
     }
 
     /// The pinned secret, created 0600 (never readable in between), on
@@ -495,7 +580,12 @@ final class AttestorBridge: NSObject, @unchecked Sendable {
                 }
                 return true
             }
-            if !ok { finish(id, nil) }
+            if !ok {
+                // A write cut short leaves half a line on the channel: drop
+                // it (the attestor reconnects with its secret).
+                finish(id, nil)
+                closeChannel()
+            }
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in self?.finish(id, nil) }
         }
     }
