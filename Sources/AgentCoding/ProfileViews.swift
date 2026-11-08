@@ -239,6 +239,10 @@ struct ProfileStorageContext {
     /// server (the URLs above are only placeholders there), and the erase /
     /// reset / restore actions left to the server Mac.
     var remoteSizes: StorageSizes? = nil
+    /// A REMOTE workspace's server: the size a home it makes now gets (no
+    /// image yet, or erased) — its free space and setting, not this Mac's.
+    /// nil here (measured locally) or from a server too old to say.
+    var defaultHomeGB: Int? = nil
     /// The same context measured again now. Everything above is a snapshot
     /// taken when the editor opened, and the editor stays open across a
     /// boot that creates the home image or an erase that deletes it: the
@@ -716,6 +720,8 @@ struct ProfileEditorView: View {
     /// type-erased because Swift forbids `#if` in an init parameter list and
     /// `RemoteModelBackend` is macOS-only; the macOS pane casts it back.
     let localModelsRemoteAny: Any?
+    /// See the init's `newHomeDefaultGB`.
+    private let newHomeDefaultGB: Int?
 
     init(
         profile: Profile? = nil,
@@ -756,8 +762,13 @@ struct ProfileEditorView: View {
         /// The pane to open on, asked for with this editor (not through the
         /// shared `pendingWorkspaceCategory`, which another open overwrote
         /// while a fat client's editor was still loading).
-        initialCategory: EditorCategory? = nil
+        initialCategory: EditorCategory? = nil,
+        /// The size a new home gets on the Mac the workspace is created on,
+        /// when that isn't this one (a fat client's new-workspace editor: the
+        /// server's `GET /storage/defaults`). nil = measure this Mac.
+        newHomeDefaultGB: Int? = nil
     ) {
+        self.newHomeDefaultGB = newHomeDefaultGB
         self.onImportSSHKey = onImportSSHKey
         self.onRemoveSSHKey = onRemoveSSHKey
         self.hostAgentSockets = hostAgentSockets
@@ -4026,9 +4037,25 @@ struct ProfileEditorView: View {
         return Int(n.int64Value >> 30)
     }
 
-    private static var defaultHomeGB: Int {
+    /// The size shown before the home exists — what the workspace will be
+    /// created with when no size is set. A workspace on another Mac is sized
+    /// there (`SessionDisk.homeImageTargetBytes` runs on the server, from its
+    /// free space): its editor shows the server's number, never this Mac's,
+    /// which could say 8 GB where the server makes 16 or the reverse.
+    private var defaultHomeGB: Int {
+        Self.homeDefault(given: newHomeDefaultGB, server: currentStorage?.defaultHomeGB,
+                         local: { Self.localDefaultHomeGB })
+    }
+
+    /// The default's source, in order: the one the editor was given, the
+    /// server's (a remote workspace's storage), else this Mac's.
+    static func homeDefault(given: Int?, server: Int?, local: () -> Int) -> Int {
+        given ?? server ?? local()
+    }
+
+    private static var localDefaultHomeGB: Int {
         #if os(macOS)
-        SessionDisk.resolvedHomeImageGB(freeBytes: SessionDisk.freeBytes(near: ProfileStore().profilesDirectory))
+        SessionDisk.newHomeDefaultGB()
         #else
         16
         #endif
@@ -4100,7 +4127,7 @@ struct ProfileEditorView: View {
     private var homeSizeSection: some View {
         _ = storageRevision   // re-read the image after an erase or reset
         let existing = homeCapacityGB
-        let bounds = HomeSizeBounds(existingGB: existing, defaultGB: Self.defaultHomeGB)
+        let bounds = HomeSizeBounds(existingGB: existing, defaultGB: defaultHomeGB)
         let (current, floor) = (bounds.current, bounds.floor)
         let chosen = bounds.shown(draft.homeImageGB)
         // Any whole GB from the floor up to 1 TB; below an existing

@@ -158,6 +158,14 @@ public final class SessionDisk {
         min(1024, max(8, homeImageOverrideGB ?? scaledHomeImageGB(freeBytes: freeBytes)))
     }
 
+    /// The size a new home gets on THIS Mac (its `vm.homeImageGB`, else its
+    /// free space where the workspaces live): what a workspace with no size of
+    /// its own is created with here. A workspace on another Mac is sized by
+    /// that Mac — its editor shows the server's (`GET /storage/defaults`).
+    public static func newHomeDefaultGB() -> Int {
+        resolvedHomeImageGB(freeBytes: freeBytes(near: ProfileStore().profilesDirectory))
+    }
+
     /// `vm.homeImageGB`, when the user set it.
     static var homeImageOverrideGB: Int? {
         UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int

@@ -48,6 +48,9 @@ struct WorkspaceEditorSheet: View {
         var credentialRefs: [CredentialRef]?
         /// Baseline for the restart-requiring diff (edit flavour only).
         var original: Profile?
+        /// A new workspace's home is sized on the host: its default (nil: an
+        /// older host that can't say).
+        var newHomeDefaultGB: Int? = nil
     }
 
     var body: some View {
@@ -130,7 +133,8 @@ struct WorkspaceEditorSheet: View {
             storageContext: nil,
             remoteCredentialRefs: state.credentialRefs,
             onSave: { edited, generateSSH in save(edited, generateSSH: generateSSH) },
-            onCancel: onClose)
+            onCancel: onClose,
+            newHomeDefaultGB: state.newHomeDefaultGB)
             .disabled(saving)
             .overlay {
                 if saving { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -148,9 +152,10 @@ struct WorkspaceEditorSheet: View {
             var n = controller.profiles.count + 1
             var name = "Workspace \(n)"
             while taken.contains(name) { n += 1; name = "Workspace \(n)" }
+            let homeGB = await controller.fetchNewHomeDefaultGB()
             loaded = LoadedEditor(
                 profile: Profile(name: name, tool: .claude, authMode: .subscription),
-                isNew: true, credentialRefs: nil, original: nil)
+                isNew: true, credentialRefs: nil, original: nil, newHomeDefaultGB: homeGB)
             return
         }
         do {

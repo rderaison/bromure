@@ -792,6 +792,16 @@ final class ACAutomationServer {
                 sendResponse(fd: fd, status: 503, body: ["error": "unavailable"])
             }
 
+        // Sizes a workspace made here gets when it has none of its own — what
+        // a fat client's new-workspace editor shows (this Mac's free space and
+        // `vm.homeImageGB`, not the client's).
+        case ("GET", "/storage/defaults"):
+            guard debugEnabled || isTrustedLocal else {
+                sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
+                return
+            }
+            sendResponse(fd: fd, status: 200, body: ["homeImageGB": SessionDisk.newHomeDefaultGB()])
+
         case ("PUT", "/preferences"), ("PATCH", "/preferences"):
             guard debugEnabled || isTrustedLocal else {
                 sendResponse(fd: fd, status: 403, body: ["error": "Control endpoints require the local control socket"])
@@ -2001,6 +2011,9 @@ final class ACAutomationServer {
                     "hasHome": c.profileHomeURL != nil || c.profileHomeImageURL != nil,
                     "homeIsImage": c.profileHomeImageURL != nil,
                     "isRunning": c.isRunning,
+                    // What a home made here now gets (no image yet / erased):
+                    // this Mac's free space and setting, not the client's.
+                    "defaultHomeGB": SessionDisk.newHomeDefaultGB(),
                 ]
                 let iso = ISO8601DateFormatter()
                 if let v = c.baseImageVersion { body["baseVersion"] = v }

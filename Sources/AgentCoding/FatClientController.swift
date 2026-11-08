@@ -2360,6 +2360,7 @@ final class RemoteHostController {
             base: j, disk: bytes("diskBytes"), home: bytes("homeBytes"),
             homeMTime: (resp.json["homeModified"] as? String).flatMap(iso.date(from:)),
             homeCapacity: bytes("homeCapacity"))
+        c.defaultHomeGB = resp.json["defaultHomeGB"] as? Int
         c.remeasure = { [weak self] in await self?.fetchStorageContext(id) }
         return c
     }
@@ -2452,6 +2453,17 @@ final class RemoteHostController {
         }
         DispatchQueue.main.async { [weak self] in self?.pollOnce() }
         return resp.json
+    }
+
+    /// The size a new home gets on the remote Mac (its free space and
+    /// setting) — what its new-workspace editor shows. nil when it can't
+    /// say (an older host): the editor then measures this Mac, as before.
+    func fetchNewHomeDefaultGB() async -> Int? {
+        let host = self.host
+        guard let resp = try? await Task.detached(priority: .userInitiated, operation: {
+            try RemoteTransport.client(for: host).request("GET", "/storage/defaults")
+        }).value, resp.status == 200 else { return nil }
+        return resp.json["homeImageGB"] as? Int
     }
 
     /// The remote's preferences template (its Bromure → Preferences… defaults),
@@ -4796,11 +4808,14 @@ final class RemoteHostWindow: NSWindow {
         let c = controller
         Task { @MainActor [weak self] in
             let global = (try? await c.fetchModelSettings()) ?? ModelSettings()
-            self?.presentNewWorkspaceEditor(draft: draft, remoteGlobalModels: global)
+            // Its home is sized on the remote Mac: show that Mac's default.
+            let homeGB = await c.fetchNewHomeDefaultGB()
+            self?.presentNewWorkspaceEditor(draft: draft, remoteGlobalModels: global, newHomeDefaultGB: homeGB)
         }
     }
 
-    private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings) {
+    private func presentNewWorkspaceEditor(draft: Profile, remoteGlobalModels: ModelSettings,
+                                           newHomeDefaultGB: Int?) {
         if let win = newWorkspaceWindow { win.makeKeyAndOrderFront(nil); return }
         let win = NSWindow(
             contentRect: NSRect(origin: .zero, size: ProfileEditorView.idealWindowSize),
@@ -4825,7 +4840,8 @@ final class RemoteHostWindow: NSWindow {
             onCancel: { [weak self] in self?.closeNewWorkspaceWindow() },
             onTitleChange: { [weak win] title in win?.title = "\(title) — \(hostName)" },
             localModelsRemoteAny: remoteModelBackend(),
-            modelsPane: .workspace(global: remoteGlobalModels))
+            modelsPane: .workspace(global: remoteGlobalModels),
+            newHomeDefaultGB: newHomeDefaultGB)
                 .withSubscriptionHealth({ [weak controller] provider in provider.subscriptionKey.flatMap { controller?.subscriptionStatus[$0]?.loginHealth } }))
         win.makeKeyAndOrderFront(nil)
         newWorkspaceWindow = win
