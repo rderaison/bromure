@@ -1,5 +1,4 @@
 import Foundation
-import Compression
 
 /// npm-registry-specific transforms applied to upstream responses
 /// before they reach the agent.
@@ -441,66 +440,10 @@ public enum NPMRegistryTransforms {
     /// unmodified (and the caller says so) rather than ballooning RAM.
     static let maxTarballBytes = 512 * 1024 * 1024
 
-    /// Streaming raw-deflate decode, bounded by `limit`. nil on error.
-    static func inflateRaw(_ payload: Data, limit: Int) -> Data? {
-        let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: 256 * 1024)
-        defer { dst.deallocate() }
-        var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
-            return nil
-        }
-        defer { compression_stream_destroy(&stream) }
-        var out = Data()
-        return payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Data? in
-            guard let base = src.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
-            stream.src_ptr = base
-            stream.src_size = src.count
-            while true {
-                stream.dst_ptr = dst
-                stream.dst_size = 256 * 1024
-                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                let produced = 256 * 1024 - stream.dst_size
-                if produced > 0 { out.append(dst, count: produced) }
-                if out.count > limit { return nil }
-                switch status {
-                case COMPRESSION_STATUS_END: return out
-                case COMPRESSION_STATUS_OK:
-                    if produced == 0 && stream.src_size == 0 { return nil }   // stalled: truncated input
-                default: return nil
-                }
-            }
-        }
-    }
-
     private static func gzip(_ data: Data) -> Data? {
-        // Streaming raw-deflate encode (no guessed output size).
-        let deflated: Data
-        do {
-            let cap = 256 * 1024
-            let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: cap)
-            defer { dst.deallocate() }
-            var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
-            guard compression_stream_init(&stream, COMPRESSION_STREAM_ENCODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
-                return nil
-            }
-            defer { compression_stream_destroy(&stream) }
-            var acc = Data()
-            let ok: Bool = data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Bool in
-                stream.src_ptr = src.baseAddress?.assumingMemoryBound(to: UInt8.self) ?? UnsafePointer(dst)
-                stream.src_size = src.count
-                while true {
-                    stream.dst_ptr = dst
-                    stream.dst_size = cap
-                    let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                    let produced = cap - stream.dst_size
-                    if produced > 0 { acc.append(dst, count: produced) }
-                    if status == COMPRESSION_STATUS_END { return true }
-                    if status != COMPRESSION_STATUS_OK { return false }
-                }
-            }
-            guard ok else { return nil }
-            deflated = acc
-        }
+        // Raw deflate (NPMRegistryTransforms+Apple.swift: Compression's
+        // streaming encoder; Linux: zlib).
+        guard let deflated = deflateRaw(data) else { return nil }
 
         // Build gzip wrapper.
         var gz = Data()
