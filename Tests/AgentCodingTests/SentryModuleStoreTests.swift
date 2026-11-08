@@ -114,6 +114,40 @@ struct SentryModuleStoreTests {
         #expect(!c.isWellFormed(for: String(repeating: "b", count: 64)))
     }
 
+    /// amd64 guests (a Linux/KVM server's) report the same kernel releases
+    /// as arm64 ones: their modules are a catalog of their own under
+    /// `sentry/<hash>/amd64/`, and neither catalog may name the other's tree.
+    @Test("An amd64 catalog lives under amd64/ and names only its own modules")
+    func archCatalogs() async throws {
+        let c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSigned.utf8))
+        #expect(c.isWellFormed(for: Self.hash, arch: .arm64))
+        #expect(!c.isWellFormed(for: Self.hash, arch: .amd64), "arm64 paths aren't amd64 modules")
+        var amd = c
+        for i in amd.modules.indices {
+            amd.modules[i].path = amd.modules[i].path.replacingOccurrences(
+                of: "sentry/\(Self.hash)/", with: "sentry/\(Self.hash)/amd64/")
+        }
+        #expect(amd.isWellFormed(for: Self.hash, arch: .amd64))
+        #expect(!amd.isWellFormed(for: Self.hash, arch: .arm64), "an arm64 catalog can't name the amd64 tree")
+        #expect(SentryModuleArch.arm64.prefix(Self.hash) == "sentry/\(Self.hash)/", "the path shipped apps read")
+
+        // An amd64 store reads its own catalog and modules (unsigned: a test base).
+        let host = "cdn-\(UUID().uuidString.prefix(8)).test"
+        let root = tempDir(); defer { try? FileManager.default.removeItem(at: root) }
+        let json = String(data: try JSONEncoder().encode(amd), encoding: .utf8)!
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/amd64/catalog.json", 200, Data(json.utf8))
+        SentryStubProtocol.serve(host, "/sentry/\(Self.hash)/amd64/6.8.0-142-generic/bromure_sentry-6.8.0-142-generic-b714b2e23f3f.ko",
+                                 200, Data("module-A-bytes".utf8))
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SentryStubProtocol.self]
+        let s = SentryModuleStore(root: root, base: URL(string: "https://\(host)/")!, requireSignature: false,
+                                  publicKeyBase64: Self.testPublicKey, session: URLSession(configuration: config), arch: .amd64)
+        #expect(await s.ensure(kernel: "6.8.0-142-generic", hash: Self.hash) == nil)
+        // The arm64 tree is never asked for.
+        let paths = SentryStubProtocol.lock.withLock { SentryStubProtocol.hits[host] ?? [] }
+        #expect(paths.allSatisfy { $0.hasPrefix("/sentry/\(Self.hash)/amd64/") }, "\(paths)")
+    }
+
     @Test("Source hash matches scripts/openshell-guest/sentry/source-hash.sh")
     func sourceHashVector() throws {
         let dir = tempDir()

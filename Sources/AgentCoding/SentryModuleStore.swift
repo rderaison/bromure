@@ -95,17 +95,44 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
     /// Shape checks independent of the signature: a well-signed catalog
     /// still can't point outside its own source's prefix or name a kernel
     /// that would escape a file name.
-    public func isWellFormed(for hash: String) -> Bool {
+    public func isWellFormed(for hash: String, arch: SentryModuleArch = .arm64) -> Bool {
         guard formatVersion == 1, sourceHash == hash else { return false }
-        let prefix = "sentry/\(hash)/"
+        let prefix = arch.prefix(hash)
+        // An arm64 catalog never names the amd64 tree under its prefix.
+        let foreign = SentryModuleArch.amd64.prefix(hash)
         return modules.allSatisfy { m in
             Self.isKernelName(m.kernel) && m.path.hasPrefix(prefix) && !m.path.contains("..")
+                && (arch == .amd64 || !m.path.hasPrefix(foreign))
                 && m.sha256.count == 64 && m.sha256.allSatisfy(\.isHexDigit)
                 && m.bytes > 0 && m.bytes < 64 << 20
         }
     }
 
     public func module(for kernel: String) -> Module? { modules.first { $0.kernel == kernel } }
+}
+
+/// Which guests a catalog's modules are for: a module loads only into the
+/// kernel it was built for, and arm64 (Apple silicon) and amd64 (a Linux/KVM
+/// server's) guests report the same Ubuntu kernel releases. The arm64
+/// catalog keeps the path every shipped app reads, `sentry/<hash>/`; the
+/// amd64 one is a catalog of its own under `sentry/<hash>/amd64/`, same
+/// format and signature (which covers each module's path, so its arch too).
+public enum SentryModuleArch: String, Sendable {
+    case arm64, amd64
+
+    /// This host's guests' (they run the host's architecture).
+    public static var host: SentryModuleArch {
+        #if arch(x86_64)
+        return .amd64
+        #else
+        return .arm64
+        #endif
+    }
+
+    /// Where its catalog and modules live, under the source's hash.
+    public func prefix(_ hash: String) -> String {
+        self == .arm64 ? "sentry/\(hash)/" : "sentry/\(hash)/amd64/"
+    }
 }
 
 /// Downloads, verifies, caches and stages kernel sentry modules.
@@ -137,6 +164,8 @@ public final class SentryModuleStore: @unchecked Sendable {
 
     let root: URL
     let base: URL
+    /// Which catalog: arm64 unless told (the macOS app's guests).
+    let arch: SentryModuleArch
     let requireSignature: Bool
     let publicKeyBase64: String
     private let session: URLSession
@@ -159,11 +188,12 @@ public final class SentryModuleStore: @unchecked Sendable {
 
     public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
                 publicKeyBase64: String = PinnedSigningKey.publicKeyBase64,
-                session: URLSession = .shared) {
+                session: URLSession = .shared, arch: SentryModuleArch = .arm64) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BromureAC", isDirectory: true)
         self.root = root ?? support.appendingPathComponent("sentry-modules", isDirectory: true)
         self.base = base ?? Self.overrideBase ?? Self.defaultBase
+        self.arch = arch
         self.requireSignature = requireSignature ?? (Self.overrideBase == nil)
         self.publicKeyBase64 = publicKeyBase64
         self.session = session
@@ -207,7 +237,7 @@ public final class SentryModuleStore: @unchecked Sendable {
     /// gave up on its sentry. A catalog is taken only when every module's own
     /// signature verifies too; anything less keeps the one already cached.
     private func accept(_ c: SentryModuleCatalog, for hash: String) -> Bool {
-        guard c.isWellFormed(for: hash) else { return false }
+        guard c.isWellFormed(for: hash, arch: arch) else { return false }
         guard requireSignature else { return true }
         return c.isSignatureValid(publicKeyBase64: publicKeyBase64)
             && c.modules.allSatisfy { c.isModuleSignatureValid($0, publicKeyBase64: publicKeyBase64) }
@@ -247,7 +277,7 @@ public final class SentryModuleStore: @unchecked Sendable {
         lock.unlock()
         let cached = cachedCatalog(hash)
         if recent && !force { return (cached, acceptedRecently && cached != nil) }
-        let url = base.appendingPathComponent("sentry/\(hash)/catalog.json")
+        let url = base.appendingPathComponent(arch.prefix(hash) + "catalog.json")
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         guard let (data, response) = try? await session.data(for: request),
