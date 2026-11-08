@@ -2672,8 +2672,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
             let head = toForward.subdata(in: 0..<split.upperBound)
             let body = toForward.subdata(in: split.upperBound..<toForward.count)
-            let encoded = Self.headerValue("Content-Encoding",
-                                           inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
+            // Still coded (a coding the decode above didn't undo), not just
+            // marked: a `Content-Encoding: identity` the guest added doesn't
+            // skip the scan.
+            let encoded = Self.decodeRequestContentEncoding(toForward) != .identity
             if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
                                                 localEngineOffMac: offMacEngine != nil) {
                 if await PIIDetector.shared.readiness() == .loading {
