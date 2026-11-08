@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 
 /// Depi secure npm registry (Lupin & Holmes / landh.tech). Unlike
 /// socket.dev — a reputation API the proxy *consults* before letting
@@ -43,7 +42,7 @@ enum DepiRegistry {
     /// Authorization header the guest sent (a guest npm token means
     /// nothing to Depi and must not leak there).
     static func authorize(rawRequest: Data, apiKey: String) -> Data {
-        HTTPMitmConnection.replaceAuthorizationBearer(rawRequest: rawRequest, token: apiKey)
+        SubscriptionAuthRewrite.replaceAuthorizationBearer(rawRequest: rawRequest, token: apiKey)
     }
 
     /// Guest-facing response substituted when Depi rejects our API
@@ -95,29 +94,8 @@ enum DepiRegistry {
             "The Depi registry answered HTTP %d. npm installs in this workspace are routed through Depi and will fail until the API key is corrected in Settings → Supply Chain.",
             comment: "Depi auth failure alert body"), status)
 
-        switch RemoteConsent.route(for: profileID) {
-        case .localAlert:
-            // Non-modal: a runModal here froze the main thread (and the
-            // control socket) until someone clicked OK.
-            Task { @MainActor in
-                _ = await ConsentPanelPresenter.shared.present(
-                    profileID: profileID, title: title, message: body,
-                    choices: [NSLocalizedString("OK", comment: "")], denyIndex: 0,
-                    style: .warning, detailText: nil, timeout: 600, isNotice: true)
-            }
-        case .fatClient:
-            // Surface it on the connected fat client's Mac (over the tunnel).
-            // Fire-and-forget: a one-button acknowledgement, no decision needed.
-            Task { @MainActor in
-                _ = await PendingPromptBroker.shared.askAsync(
-                    profileID: profileID, title: title, message: body,
-                    buttons: [NSLocalizedString("OK", comment: "")],
-                    fallback: 0, timeout: 120)
-            }
-        case .terminalPump:
-            // Headless (SSH/TUI) sessions have no GUI to alert; the log line
-            // above plus the rewritten npm error keep them informed.
-            break
-        }
+        // Headless (SSH/TUI) sessions get no notice; the log line above plus
+        // the rewritten npm error keep them informed.
+        ConsentPrompt.notice(profileID: profileID, title: title, message: body)
     }
 }

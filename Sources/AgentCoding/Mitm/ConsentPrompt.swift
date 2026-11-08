@@ -82,6 +82,34 @@ enum ConsentPrompt {
 }
 
 extension ConsentPrompt {
+    /// A one-button notice (nothing to decide): a non-modal warning panel
+    /// here, or the connected fat client's prompt; a headless terminal
+    /// session gets none (the caller logs it).
+    static func notice(profileID: UUID, title: String, message: String) {
+        switch RemoteConsent.route(for: profileID) {
+        case .localAlert:
+            // Non-modal: a runModal here froze the main thread (and the
+            // control socket) until someone clicked OK.
+            Task { @MainActor in
+                _ = await ConsentPanelPresenter.shared.present(
+                    profileID: profileID, title: title, message: message,
+                    choices: [NSLocalizedString("OK", comment: "")], denyIndex: 0,
+                    style: .warning, detailText: nil, timeout: 600, isNotice: true)
+            }
+        case .fatClient:
+            // Surface it on the connected fat client's Mac (over the tunnel).
+            // Fire-and-forget: a one-button acknowledgement, no decision needed.
+            Task { @MainActor in
+                _ = await PendingPromptBroker.shared.askAsync(
+                    profileID: profileID, title: title, message: message,
+                    buttons: [NSLocalizedString("OK", comment: "")],
+                    fallback: 0, timeout: 120)
+            }
+        case .terminalPump:
+            break
+        }
+    }
+
     /// Takes back the local panel asked under `token` (its asker gets nil).
     /// The Linux daemon's ConsentPrompt has no local panel: a no-op there.
     static func withdrawLocal(token: UUID) {
