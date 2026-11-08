@@ -37,7 +37,18 @@ final class FakeDriver: @unchecked Sendable {
             return String(decoding: out, as: UTF8.self)
         }.value
     }
-    func close() { Glibc.close(fd) }
+    /// Once: a test closes it to make the driver die, and its defer runs
+    /// too. A second close(2) of the number would close whatever reused it
+    /// (it closed BoringSSL's CA bundle stream mid-read, NIO sockets, a tap:
+    /// the unit suite's intermittent EBADF crash).
+    private let closed = NSLock()
+    private var isClosed = false
+    func close() {
+        closed.lock(); defer { closed.unlock() }
+        guard !isClosed else { return }
+        isClosed = true
+        Glibc.close(fd)
+    }
 }
 
 @Suite("Plan streams", .serialized)
@@ -282,7 +293,8 @@ struct PlanStreamBoundsTests {
             return true
         }
         #expect(await writer.value, "the guest's writes all went in")
-        #expect(rig.listener.readTurns >= 256, "16 MiB at 64 KiB a turn at most: \(rig.listener.readTurns)")
+        // Written isn't read yet: the socket buffer holds the last chunks.
+        #expect(await until { rig.listener.readTurns >= 256 }, "16 MiB at 64 KiB a turn at most: \(rig.listener.readTurns)")
         #expect(rig.listener.longestTurn < .milliseconds(250), "no callback held the main queue: \(rig.listener.longestTurn)")
         d.send(Self.hello("after"), Self.text)
         #expect(await until { rig.events.count == 2 }, "\(rig.events)")
