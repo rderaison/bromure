@@ -335,8 +335,10 @@ final class MitmProxy: @unchecked Sendable {
     /// off the event loop. A parsed conversation gets the prompt-injection
     /// log scan when the workspace's policy is on with "log but continue"
     /// (ask and block run before the request is forwarded: policyAnswer).
+    /// The token-swap events go out whether traced or not, as the request
+    /// is forwarded (RequestReader.rewrite), not here.
 
-    // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=22ed0216edbd064f @cb7cdd6a
+    // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=87bd4b6a9748938b @c980e76e
     func emitTrace(_ t: RequestReader.Trace, response: Data, wireBytes: Int, truncated: Bool) {
         guard let store = traces.withLockedValue({ $0 }) else { return }
         let latency = Date().timeIntervalSince(t.start) * 1000
@@ -1173,6 +1175,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         if dial == nil, local {
             out = MitmProxy.engineAuth(out, profileID: profileID)
         }
+        // The swaps this request carries out, one audit event each, whatever
+        // the trace level (macOS: emitTrace sends them before its trace gate):
+        // a request refused above never left, so it has none.
+        TraceEmitter.emitSwapEvents(swapped.swaps, host: host, path: path, profileID: profileID)
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
                         supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy,
                         squelchLearn: squelchLearnOnPump)
