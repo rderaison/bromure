@@ -150,6 +150,11 @@ MAX_RESPONSE_SIZE = 50 * 1024 * 1024
 # without end must not take its memory. Two transcript windows (2 x 24 MB, the
 # chat's largest read) fit.
 CAPTURE_LIMIT = 48 * 1024 * 1024
+# How long a capture waits, once its command has exited, for the rest of the
+# output when it has no deadline of its own. Whatever still holds the pipe
+# then is a child the command left behind (`sleep 60 &`): its readers are
+# stopped rather than kept blocked for as long as it lives.
+CAPTURE_EXIT_GRACE = 10.0
 
 # paths
 # Overridable for the same reason as HOST_CID above: the two-incarnation boot is
@@ -561,6 +566,7 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
     # `subprocess.run`, which reads as it waits).
     out_reader = _drain_async(out_read) if out_read is not None else None
     err_reader = _drain_async(err_read) if err_read is not None else None
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         reply = _sandbox_exec(args, cwd=cwd, env=env,
                               fds=[devnull, out_child, err_child],
@@ -571,8 +577,12 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
                 os.close(fd)
             except OSError:
                 pass
-    stdout, out_cut = out_reader() if out_reader is not None else (b"", False)
-    stderr, err_cut = err_reader() if err_reader is not None else (b"", False)
+    # The command is done; a child it left behind can still hold the pipes.
+    out, err = _collect_after_exit((out_reader, err_reader), deadline)
+    if out is None or err is None:
+        raise subprocess.TimeoutExpired(args, timeout if timeout is not None else CAPTURE_EXIT_GRACE)
+    stdout, out_cut = out
+    stderr, err_cut = err
     # A command the supervisor refused, or one whose confined child died before
     # `execvpe`, produced a bare 127 with empty output. On the first
     # `run_as_user: sandbox` workspace that made every command look like
@@ -626,7 +636,11 @@ def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None
     out_r, out_w = os.pipe()
     err_r, err_w = os.pipe()
     try:
-        p = subprocess.Popen(args, stdout=out_w, stderr=err_w, cwd=cwd, env=env)
+        # A session of its own: on a timeout the whole group goes, including
+        # what it left running in the background (`sleep 60 &` holding the
+        # pipes), not just a shell that has already exited.
+        p = subprocess.Popen(args, stdout=out_w, stderr=err_w, cwd=cwd, env=env,
+                             start_new_session=True)
     except BaseException:
         for fd in (out_r, err_r):
             os.close(fd)
@@ -644,15 +658,21 @@ def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None
         p.wait(timeout=left())
         # Its output ends when the last writer goes (a child it left behind
         # can hold the pipe): within the same deadline.
-        out = out_reader(left())
-        err = err_reader(left())
+        out, err = _collect_after_exit((out_reader, err_reader), deadline)
         if out is None or err is None:
-            raise subprocess.TimeoutExpired(args, timeout)
+            raise subprocess.TimeoutExpired(args, timeout if timeout is not None else CAPTURE_EXIT_GRACE)
     except subprocess.TimeoutExpired:
-        # As `subprocess.run`: kill it and raise. The readers finish (and close
-        # their ends) on their own threads when the pipes close.
+        # As `subprocess.run`: kill it and raise -- its whole group, and the
+        # readers stopped either way (a child that left the group can still
+        # hold the pipes): no thread or descriptor outlives the request.
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
         p.kill()
         p.wait()
+        out_reader.cancel()
+        err_reader.cancel()
         raise
     (stdout, out_cut), (stderr, err_cut) = out, err
     if text:
@@ -665,12 +685,38 @@ def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None
     return result
 
 
+def _collect_after_exit(readers, deadline):
+    """The readers' results once the command has exited: within its deadline
+    (at least half a second, for what was still in the pipe), or
+    CAPTURE_EXIT_GRACE without one. A reader still blocked then -- something
+    left behind holds its pipe -- is stopped, and both results are None."""
+    if deadline is None:
+        end = time.monotonic() + CAPTURE_EXIT_GRACE
+    else:
+        end = max(deadline, time.monotonic() + 0.5)
+    results = []
+    for reader in readers:
+        if reader is None:
+            results.append((b"", False))
+            continue
+        results.append(reader(max(0.0, end - time.monotonic())))
+    if any(r is None for r in results):
+        for reader in readers:
+            if reader is not None:
+                reader.cancel()
+        return None, None
+    return results[0], results[1]
+
+
 def _drain_async(fd):
     """Start reading `fd` to EOF on a thread; the returned call waits for it
     and gives `_drain`'s (bytes, truncated). `result(timeout)` gives None if
-    the reading isn't done by then."""
+    the reading isn't done by then; `result.cancel()` stops the reading (the
+    thread ends and closes `fd` within a poll interval) and waits for it."""
     box = {}
-    t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd)), daemon=True)
+    stop = threading.Event()
+    t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd, stop=stop)),
+                         daemon=True)
     t.start()
 
     def result(timeout=None):
@@ -678,23 +724,42 @@ def _drain_async(fd):
         if t.is_alive():
             return None
         return box.get("data", (b"", False))
+
+    def cancel():
+        stop.set()
+        t.join()
+    result.cancel = cancel
     return result
 
 
-def _drain(fd, limit=None):
+# How often a stoppable `_drain` looks up from a pipe nobody writes to.
+_DRAIN_POLL_MS = 250
+
+
+def _drain(fd, limit=None, stop=None):
     """Read `fd` to EOF: (its first `limit` bytes, whether there was more).
 
     Past the limit (CAPTURE_LIMIT) the rest is still read, and dropped: the
     writer must never block on a full pipe (see `_ws_run`), and agentd must
-    never hold what a command prints without end.
+    never hold what a command prints without end. With `stop`, it also ends
+    once that is set, even with a writer still holding the pipe.
     """
     if limit is None:
         limit = CAPTURE_LIMIT
     chunks = []
     kept = 0
     truncated = False
+    poller = None
+    if stop is not None:
+        poller = select.poll()
+        poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
     try:
         while True:
+            if poller is not None:
+                if stop.is_set():
+                    break
+                if not poller.poll(_DRAIN_POLL_MS):
+                    continue
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
