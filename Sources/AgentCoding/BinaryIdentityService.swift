@@ -179,7 +179,7 @@ public final class BinaryIdentityService: @unchecked Sendable {
         // connection that raced it. (An attestor that never comes up still
         // fails closed after the wait.)
         if queryOverride == nil, let bridge, !bridge.isConnected,
-           Date().timeIntervalSince(bridge.attachedAt) < 60 {
+           Date().timeIntervalSince(bridge.attachedAt) < AttestorBridge.statusGrace {
             for _ in 0..<40 where !bridge.isConnected {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -189,10 +189,8 @@ public final class BinaryIdentityService: @unchecked Sendable {
         // before trusting any answer. Stored only if nothing newer came
         // pushed meanwhile.
         if queryOverride == nil, let bridge, bridge.strict,
-           GuestSandboxStatusStore.shared.status(for: profileID) == nil,
-           let reply = await bridge.query(["op": "sandbox_status"]),
-           reply["ok"] as? Bool == true, let report = reply["status"] as? [String: Any] {
-            GuestSandboxStatusStore.shared.update(profileID: profileID, report: report, onlyIfAbsent: true)
+           GuestSandboxStatusStore.shared.status(for: profileID) == nil {
+            await bridge.askSandboxStatus()
         }
         // A strict revocation that didn't fully land leaves the agent a path
         // to root, so the attestor's answers can't be trusted: no identity,
@@ -204,9 +202,24 @@ public final class BinaryIdentityService: @unchecked Sendable {
                 "reason": .string("the strict sandbox didn't fully apply in the VM, so binary identity can't be trusted")])
             return .identity(nil)
         }
-        // Still unknown (the guest's status module can come up to ~80 s
-        // after its attestor on a spec-less strict boot): not yet.
-        if queryOverride == nil, bridge?.strict == true, status == nil { return .notYet }
+        // A strict workspace counts only once the guest has said its
+        // revocation applied. Not said yet (no status, or one without
+        // `strict_applied`: the guest's status module can come up to ~80 s
+        // after its attestor on a spec-less strict boot): not yet, while the
+        // channel is up or the VM just attached. With no channel past that
+        // (a VM taken back that can't pin, an attestor that died): no
+        // identity, so the deny, its event and the RST happen.
+        if queryOverride == nil, let bridge, bridge.strict, status?.strictApplied != true {
+            if bridge.isConnected || Date().timeIntervalSince(bridge.attachedAt) < AttestorBridge.statusGrace {
+                return .notYet
+            }
+            if bridge.noteStatusOverdue() {
+                BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.status", eventData: [
+                    "state": .string("unknown"),
+                    "reason": .string("the strict VM's sandbox status never reached the host (no attestor channel): binary rules fail closed")])
+            }
+            return .identity(nil)
+        }
         let req: [String: Any] = ["op": "who", "sport": Int(sport), "dst": dst, "dport": Int(dport)]
         let answer: [String: Any]?
         if let queryOverride { answer = await queryOverride(profileID, req) }
@@ -272,11 +285,12 @@ public final class BinaryIdentityService: @unchecked Sendable {
                 gateResults[profileID]?[key] = nil                // expired: asked again
             }
         }
-        var table = gateResults[profileID] ?? [:]
-        if table.count >= Self.maxGateEntries {
+        if gateResults[profileID, default: [:]].count >= Self.maxGateEntries {
             // Expired answers and abandoned questions go; then, only as far
             // as needed, the least recently used answer, one the switch
-            // already remembers first.
+            // already remembers first. (Only when full: the table is
+            // otherwise changed in place.)
+            var table = gateResults.removeValue(forKey: profileID) ?? [:]
             table = table.filter {
                 let age = now.timeIntervalSince($0.value.at)
                 switch $0.value.state {
@@ -291,16 +305,15 @@ public final class BinaryIdentityService: @unchecked Sendable {
                }) {
                 table[victim.key] = nil
             }
+            let full = table.count >= Self.maxGateEntries
+            gateResults[profileID] = table
             // Full of flows still being decided: hold it (fail closed, no RST).
-            guard table.count < Self.maxGateEntries else {
-                gateResults[profileID] = table; lock.unlock(); return nil
-            }
+            guard !full else { lock.unlock(); return nil }
         }
         let ask = gateQueries[profileID, default: 0] < Self.maxGateQueries
         let names = Array(hostnames.prefix(Self.maxGateHostnames))
-        table[key] = GateEntry(state: ask ? .asking : .queued, identity: nil, at: now,
-                               hostnames: ask ? [] : names, lastUse: now)
-        gateResults[profileID] = table
+        gateResults[profileID, default: [:]][key] = GateEntry(state: ask ? .asking : .queued, identity: nil, at: now,
+                                                              hostnames: ask ? [] : names, lastUse: now)
         if ask { gateQueries[profileID, default: 0] += 1 } else { gateQueue[profileID, default: []].append(key) }
         lock.unlock()
         if ask { startQuery(profileID, key, hostnames: names) }
@@ -365,12 +378,50 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     private var nextID = 1
     private var waiters: [Int: CheckedContinuation<[String: Any]?, Never>] = [:]
     private var listener: VZVirtioSocketListener?
+    /// Bumped on each accepted channel: a close for an older one is a no-op.
+    private(set) var generation: UInt64 = 0
+    /// Serialises writes, and closes against them.
+    private let writeLock = NSLock()
+    private var lastRefusalReport = Date.distantPast
+    static let refusalReportEvery: TimeInterval = 30
+    /// How long after attaching a strict VM may stay undecided with no channel.
+    static let statusGrace: TimeInterval = 30
+    private var statusOverdueSaid = false
+    private var statusAsk: Task<Void, Never>?
+
+    /// True the first time: the strict status is overdue (said once).
+    func noteStatusOverdue() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if statusOverdueSaid { return false }
+        statusOverdueSaid = true
+        return true
+    }
+
+    /// Ask the guest for its sandbox status (stored only if nothing newer
+    /// came pushed meanwhile); concurrent asks share one question.
+    func askSandboxStatus() async {
+        lock.lock()
+        let task: Task<Void, Never>
+        if let running = statusAsk { task = running } else {
+            task = Task { [weak self] in
+                guard let self else { return }
+                if let reply = await self.query(["op": "sandbox_status"]),
+                   reply["ok"] as? Bool == true, let report = reply["status"] as? [String: Any] {
+                    GuestSandboxStatusStore.shared.update(profileID: self.profileID, report: report, onlyIfAbsent: true)
+                }
+                self.lock.lock(); self.statusAsk = nil; self.lock.unlock()
+            }
+            statusAsk = task
+        }
+        lock.unlock()
+        await task.value
+    }
     /// A strict-sandbox workspace: its attestor's answers count only once
     /// the guest has reported the revocation applied.
     let strict: Bool
     /// Connections waiting for their hello (each holds a thread), oldest
     /// first.
-    private var pendingHandshakes: [Int32] = []
+    private var pendingHandshakes: [(fd: Int32, at: Date)] = []
     static let maxPendingHandshakes = 4
     /// The hello: whole, within this long, and at most this size (attestd
     /// says it the moment it connects).
@@ -379,7 +430,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return fd >= 0 }
     /// When this bridge started listening (the VM's boot, for a fresh start).
-    let attachedAt = Date()
+    var attachedAt = Date()
 
     /// `mayPin`: a fresh boot, whose attestor says hello before any agent
     /// code runs, pins the first secret it hears. A VM taken back (or
@@ -418,7 +469,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
                   from socketDevice: VZVirtioSocketDevice) -> Bool {
         let cfd = dup(connection.fileDescriptor)
         guard cfd >= 0 else { return false }
-        admitHandshake(cfd)
+        guard admitHandshake(cfd) else { close(cfd); return false }
         Thread.detachNewThread { [weak self] in self?.handshakeAndServe(cfd, connection: connection) }
         return true
     }
@@ -427,14 +478,34 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     /// At most `maxPendingHandshakes` wait for their hello at once: past
     /// that the OLDEST is cut off, so connections that never say hello
     /// can't keep the real attestor (which says it at once) out.
-    func admitHandshake(_ fd: Int32) {
+    /// Only one that has had `minPendingAge` to say hello is cut off; past
+    /// that, the newcomer waits its turn (refused). False: refused (the
+    /// caller closes it).
+    @discardableResult
+    func admitHandshake(_ fd: Int32) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        let now = Date()
         if pendingHandshakes.count >= Self.maxPendingHandshakes {
+            guard now.timeIntervalSince(pendingHandshakes[0].at) >= Self.minPendingAge else { return false }
             // Its thread's poll wakes and gives up; it closes the fd.
-            shutdown(pendingHandshakes.removeFirst(), Int32(SHUT_RDWR))
+            shutdown(pendingHandshakes.removeFirst().fd, Int32(SHUT_RDWR))
+            evictions.append(now)
+            evictions.removeAll { now.timeIntervalSince($0) > 10 }
+            if evictions.count >= Self.evictionStorm, now.timeIntervalSince(lastStormReport) > 10 {
+                lastStormReport = now
+                FileHandle.standardError.write(Data("[identity] \(evictions.count) silent attestor connections cut off in 10 s for \(profileID): something in the VM is flooding vsock \(BinaryIdentityService.vsockPort)\n".utf8))
+                BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
+                    "action": .string("deny"), "layer": .string("identity"), "host": .string("attestor"), "port": .int(Int(BinaryIdentityService.vsockPort)),
+                    "reason": .string("many connections to the attestor's port that never said hello: something in the VM may be trying to crowd the attestor out")])
+            }
         }
-        pendingHandshakes.append(fd)
+        pendingHandshakes.append((fd, now))
+        return true
     }
+    private var evictions: [Date] = []
+    private var lastStormReport = Date.distantPast
+    static let minPendingAge: TimeInterval = 0.1
+    static let evictionStorm = 20
 
     /// Validate the attestor's hello (secret pinning), then serve replies
     /// until the channel closes. Blocking; runs on its own thread. The
@@ -445,7 +516,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         // attestor's secret.
         let helloLine = Self.readHello(cfd, into: &reader)
         // Out of the pending list before the fd can be closed (and reused).
-        lock.lock(); pendingHandshakes.removeAll { $0 == cfd }; lock.unlock()
+        lock.lock(); pendingHandshakes.removeAll { $0.fd == cfd }; lock.unlock()
         guard let helloLine,
               let hello = try? JSONSerialization.jsonObject(with: helloLine) as? [String: Any],
               hello["hello"] as? String == "attestd",
@@ -460,12 +531,19 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         let quiet = unpinnable && saidUnpinnable
         if unpinnable { saidUnpinnable = true }
         let accept = !busy && !unpinnable && (pinned == nil || pinned == secret)
+        let quietRefusal = !accept && !unpinnable && Date().timeIntervalSince(lastRefusalReport) < Self.refusalReportEvery
+        if !accept, !unpinnable, !quietRefusal { lastRefusalReport = Date() }
         if accept {
             fd = cfd
+            generation &+= 1
             self.connection = connection
-            // A query's write never blocks for long on a stalled guest.
+            // A query's write never blocks for long on a stalled guest, nor
+            // raises SIGPIPE when the guest has gone (Darwin; the Linux
+            // daemon ignores SIGPIPE process-wide).
             var tv = timeval(tv_sec: 1, tv_usec: 0)
             setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            var one: Int32 = 1
+            setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             if pinned == nil {
                 // Pinned for this run either way; only a saved pin survives
                 // a restart of the host, so a failed save is said.
@@ -486,6 +564,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
                     "reason": .string("the VM was taken back without its attestor's pinned secret: binary identity stays off (binary rules fail closed) until it restarts")])
                 return
             }
+            if quietRefusal { return }                          // reported once per refusalReportEvery
             let why = busy ? "channel taken" : unpinnable ? "no pinned secret for a VM taken back" : "wrong secret"
             FileHandle.standardError.write(Data("[identity] refused an attestor connection for \(profileID) (\(why))\n".utf8))
             BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "egress.firewall", eventData: [
@@ -493,6 +572,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
                 "reason": .string("refused an attestor connection that isn't the pinned one — possible impersonation attempt")])
             return
         }
+        lock.lock(); let myGeneration = generation; lock.unlock()
         FileHandle.standardError.write(Data("[identity] attestor connected for \(profileID)\n".utf8))
         Self.serveLines(&reader) { obj in
             // Unsolicited guest reports (no id): the sandbox launcher's status.
@@ -504,7 +584,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
             lock.lock(); let w = waiters.removeValue(forKey: id); lock.unlock()
             w?.resume(returning: obj)
         }
-        closeChannel()
+        closeChannel(generation: myGeneration)
     }
 
     /// The first line, within `helloDeadline` overall (a trickle doesn't
@@ -570,8 +650,13 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
         }) {}
     }
 
-    private func closeChannel() {
+    /// Close the channel, if it's still the one of `generation` (nil: any).
+    /// Takes the write lock, so no query is mid-write on the fd it closes.
+    func closeChannel(generation gen: UInt64? = nil, writeLocked: Bool = false) {
+        if !writeLocked { writeLock.lock() }
+        defer { if !writeLocked { writeLock.unlock() } }
         lock.lock()
+        if let gen, gen != generation || fd < 0 { lock.unlock(); return }
         let f = fd
         fd = -1
         connection = nil
@@ -587,12 +672,16 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     /// One request/response, nil on no channel or a 1 s timeout.
     func query(_ req: [String: Any]) async -> [String: Any]? {
         await withCheckedContinuation { (cont: CheckedContinuation<[String: Any]?, Never>) in
+            // One write at a time, and the fd can't be closed (nor reused)
+            // under it: closeChannel takes the same lock.
+            writeLock.lock()
+            defer { writeLock.unlock() }
             lock.lock()
             guard fd >= 0 else { lock.unlock(); cont.resume(returning: nil); return }
             let id = nextID
             nextID += 1
             waiters[id] = cont
-            let f = fd
+            let f = fd, gen = generation
             lock.unlock()
             var body = req
             body["id"] = id
@@ -611,7 +700,7 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
                 // A write cut short leaves half a line on the channel: drop
                 // it (the attestor reconnects with its secret).
                 finish(id, nil)
-                closeChannel()
+                closeChannel(generation: gen, writeLocked: true)
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in self?.finish(id, nil) }
         }
@@ -719,6 +808,10 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     }
 
     private let lock = NSLock()
+
+    /// Serialises update(): a report applies whole.
+
+    private let updating = NSLock()
     private var statuses: [UUID: Status] = [:]
     /// Fired on every change (UI refresh).
     public var onChange: (@Sendable (UUID) -> Void)?
@@ -755,6 +848,9 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
     /// `onlyIfAbsent`: an answer the host asked for, not stored over a status
     /// the guest pushed meanwhile.
     func update(profileID: UUID, report r: [String: Any], now: Date = Date(), onlyIfAbsent: Bool = false) {
+        // One report at a time, whole: an asked-for one checks and applies
+        // (its kernels, sentry state and status) with no pushed one between.
+        updating.lock(); defer { updating.unlock() }
         if onlyIfAbsent, status(for: profileID) != nil { return }
         // Kernels first, even while the sandbox is still `pending`: the sentry
         // loads before the sandbox is assembled, and may be waiting for the
@@ -787,7 +883,6 @@ public final class GuestSandboxStatusStore: @unchecked Sendable {
             filesystemRequested: (r["requested"] as? [String: Any])?["filesystem"] as? Bool)
         lock.lock()
         let previous = statuses[profileID]
-        if onlyIfAbsent, previous != nil { lock.unlock(); return }   // a push won the race
         statuses[profileID] = st
         lock.unlock()
         KernelSentryService.shared.crossCheck(profileID: profileID, guestSentry: st.sentry,
