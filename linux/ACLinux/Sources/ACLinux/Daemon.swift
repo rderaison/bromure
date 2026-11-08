@@ -336,6 +336,11 @@ public actor Daemon {
     /// daemon has, same paths and JSON; anything else is 404 with a JSON error.
     // @port-skip linux-only: the Linux router (each route below carries its own @port)
     public func handle(_ req: ControlRequest) async -> ControlResponse {
+        // A mutating request moves /state's generation on as it starts and
+        // as its response goes out (macOS: route's noteMutation pair).
+        let mutating = StateGeneration.isMutating(req.method, path: req.path)
+        if mutating { StateGeneration.noteMutation() }
+        defer { if mutating { StateGeneration.noteMutation() } }
         let path = String(req.path.split(separator: "?", maxSplits: 1).first ?? "")
         // An attached machine parks its links here, and requests aimed at it
         // go down one (DaemonMachines.swift).
@@ -414,7 +419,7 @@ public actor Daemon {
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // partial: no gridLayout, automations, tasks, pendingPrompts, subscriptions, securityTimeline, generation/epoch, or agent sessions yet
+    // partial: no instance-level snapshot cache (built per request)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
 
@@ -429,7 +434,7 @@ public actor Daemon {
     /// (`{"set": {section: value}, "unset": [section]}`); an older one the
     /// whole state each time. Ends when a write fails; the client
     /// half-closing (the SSH bridge forwards its EOF) doesn't end it.
-    // partial: one producer per subscriber (macOS shares one build among them), and no generation/epoch stamps in the deltas (none in Linux's /state)
+    // partial: one producer per subscriber (macOS shares one build among them)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
     // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
     func stateSubscribe(delta: Bool = false) -> ControlResponse {
@@ -483,11 +488,14 @@ public actor Daemon {
         return out
     }
 
-    /// Each top-level section as it's compared: its JSON, the VMs' uptime
-    /// left out (withoutUptime).
+    /// Each top-level section as it's compared: its JSON, without the
+    /// stamps that move with every request (generation, epoch) and the
+    /// VMs' uptime (macOS: pushComparable).
     // @port-skip linux-only: comparableSections over JSONValue, compared as encoded bytes
     static func comparableSections(_ state: JSONValue, _ enc: JSONEncoder) -> [String: Data] {
-        guard case .object(let o) = withoutUptime(state) else { return [:] }
+        guard case .object(var o) = withoutUptime(state) else { return [:] }
+        o["generation"] = nil
+        o["epoch"] = nil
         var out: [String: Data] = [:]
         for (k, v) in o { out[k] = (try? enc.encode(v)) ?? Data() }
         return out
@@ -500,8 +508,8 @@ public actor Daemon {
         return (set, unset)
     }
 
-    /// What changed, with the stamps that move on every build (none in
-    /// Linux's /state yet).
+    /// What changed, with the stamps that move on every build (a client
+    /// orders snapshots by them).
     // @port ACAutomationServer.static deltaFrame(snapshot: [String:Any], set: [String], unset: [String]) h=9fdc0f7b359c0c64 @30634ab2
     static func deltaFrame(snapshot: JSONValue, set: [String], unset: [String], _ enc: JSONEncoder) -> Data? {
         guard case .object(let o) = snapshot else { return nil }
@@ -641,6 +649,12 @@ public actor Daemon {
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
             "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
             "localModels": Self.localModels(),
+            // A server has no window, so no grid (macOS without a window).
+            "gridLayout": ["cells": .array([])],
+            // Ordering for clients: the generation grows within one daemon
+            // run, the epoch says which run.
+            "generation": .number(Double(StateGeneration.current)),
+            "epoch": .string(StateGeneration.epoch),
         ].merging(sessionEntries) { a, _ in a }
         return .object(Self.withMachines(body))
     }
