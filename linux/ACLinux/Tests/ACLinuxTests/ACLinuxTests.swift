@@ -71,13 +71,22 @@ struct PasstUplinkTests {
                        + me + [192, 168, 64, 2] + [UInt8](repeating: 0, count: 6) + [192, 168, 64, 1]
                        + [UInt8](repeating: 0, count: 18))
         up.send(arp)
-        var it = up.inbound.makeAsyncIterator()
-        var reply: [UInt8] = []
-        let deadline = ContinuousClock.now + .seconds(5)
-        while ContinuousClock.now < deadline {
-            guard let f = await it.next() else { break }
-            let b = [UInt8](f)
-            if b.count >= 42, b[12] == 0x08, b[13] == 0x06, b[21] == 2 { reply = b; break }
+        // The reply, or nothing after 5 s: the wait itself is bounded (a
+        // reply that never comes used to leave next() waiting forever, the
+        // suite with it).
+        let inbound = up.inbound
+        let reply: [UInt8] = await withTaskGroup(of: [UInt8]?.self) { g in
+            g.addTask {
+                for await f in inbound {
+                    let b = [UInt8](f)
+                    if b.count >= 42, b[12] == 0x08, b[13] == 0x06, b[21] == 2 { return b }
+                }
+                return nil
+            }
+            g.addTask { try? await Task.sleep(for: .seconds(5)); return nil }
+            let first = await g.next() ?? nil
+            g.cancelAll()
+            return first ?? []
         }
         #expect(reply.count >= 42, "no ARP reply from passt")
         #expect(Array(reply[22..<28]) == [0x9a, 0x55, 0x9a, 0x55, 0x9a, 0x55])
