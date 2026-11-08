@@ -99,6 +99,7 @@ struct RootView: View {
     @State private var editMode: EditMode = .inactive
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
     /// When the app went to the background — used to reconnect on return only
     /// after a real absence (a brief app-switch keeps its sockets).
     @State private var backgroundedAt: Date?
@@ -391,12 +392,11 @@ struct RootView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 15)
-                        .background(
-                            LinearGradient(colors: [Color.blue, Color.indigo],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing),
-                            in: RoundedRectangle(cornerRadius: 15))
+                        // The brand's flat accent -- no gradient, no glow. The
+                        // light-mode indigo in dark mode too: white on the
+                        // dark accent (periwinkle) wouldn't read.
+                        .background(Color(hex: "#5866FE"), in: RoundedRectangle(cornerRadius: 15))
                         .foregroundStyle(.white)
-                        .shadow(color: .blue.opacity(0.35), radius: 12, y: 6)
                     }
                     .disabled(directory.p2pBusy)
                     #endif
@@ -404,6 +404,10 @@ struct RootView: View {
                     Button { showAddServer = true } label: {
                         Text("Add a server by address")
                             .font(.subheadline.weight(.medium))
+                            // Small accent text: the brand's navy on light
+                            // (its indigo is under 4.5:1 on white), periwinkle
+                            // on dark.
+                            .foregroundStyle(Color(hex: colorScheme == .dark ? "#93AEFF" : "#33497B"))
                     }
 
                     if let err = directory.p2pError {
