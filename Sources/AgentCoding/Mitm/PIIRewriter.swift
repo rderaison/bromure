@@ -868,8 +868,12 @@ final class PIIResponseRestorer {
             // Only the held tail: blank every other streamed field it carried.
             for d in Self.deltaFields(ev, type: ev["type"] as? String ?? "") { Self.set(ev, d.path, "") }
             Self.set(ev, slot.path, vault.restore(slot.pending, jsonFragment: slot.json))
-            if let choices = ev["choices"] as? NSMutableArray {
-                for case let c as NSMutableDictionary in choices { c["finish_reason"] = NSNull() }
+            if let choices = ev["choices"] as? [Any] {
+                ev["choices"] = choices.map { c -> Any in
+                    guard var d = c as? [String: Any] else { return c }
+                    d["finish_reason"] = NSNull()
+                    return d
+                }
             }
             var lines = [slot.eventLine, "data: "].compactMap { $0 }
             out.append(Self.serialize(ev, lines: &lines, at: lines.count - 1, separator: Data("\n\n".utf8)))
@@ -978,30 +982,42 @@ final class PIIResponseRestorer {
     }
 
     /// Restore every string in a whole event (skipping signed/opaque keys).
-    /// Returns whether anything changed.
-    private static func restoreAll(_ o: Any, vault: PIIVault, key: String? = nil) -> Bool {
+    /// Returns whether anything changed. Nested containers are rebuilt and
+    /// written back, not edited in place: corelibs Foundation hands an
+    /// NSDictionary's nested containers back as Swift values (copies).
+    private static func restoreAll(_ o: NSMutableDictionary, vault: PIIVault) -> Bool {
         var changed = false
-        if let d = o as? NSMutableDictionary {
-            for k in d.allKeys {
-                guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks) else { continue }
-                if let s = d[ks] as? String {
-                    let r = restoreValue(s, key: ks, vault: vault)
-                    if r != s { d[ks] = r; changed = true }
-                } else if let v = d[ks], restoreAll(v, vault: vault, key: ks) {
-                    changed = true
-                }
-            }
-        } else if let a = o as? NSMutableArray {
-            for i in 0..<a.count {
-                if let s = a[i] as? String {
-                    let r = vault.restore(s)
-                    if r != s { a[i] = r; changed = true }
-                } else if restoreAll(a[i], vault: vault, key: key) {
-                    changed = true
-                }
-            }
+        for k in o.allKeys {
+            guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks), let v = o[ks],
+                  let r = restored(v, vault: vault, key: ks) else { continue }
+            o[ks] = r
+            changed = true
         }
         return changed
+    }
+
+    /// `v` with every string restored (skipping signed/opaque keys), or nil
+    /// when nothing changed.
+    private static func restored(_ v: Any, vault: PIIVault, key: String?) -> Any? {
+        if let s = v as? String {
+            let r = key == nil ? vault.restore(s) : restoreValue(s, key: key, vault: vault)
+            return r != s ? r : nil
+        }
+        if var d = v as? [String: Any] {
+            var changed = false
+            for (k, x) in d where !PIIRewriter.skipKeys.contains(k) {
+                if let r = restored(x, vault: vault, key: k) { d[k] = r; changed = true }
+            }
+            return changed ? d : nil
+        }
+        if var a = v as? [Any] {
+            var changed = false
+            for i in a.indices {
+                if let r = restored(a[i], vault: vault, key: (a[i] is String) ? nil : key) { a[i] = r; changed = true }
+            }
+            return changed ? a : nil
+        }
+        return nil
     }
 
     /// Restore one whole string value. Tool-call `arguments` hold a JSON
@@ -1035,9 +1051,30 @@ final class PIIResponseRestorer {
         return cur
     }
 
-    private static func set(_ o: Any, _ path: [Any], _ value: String) {
-        guard let last = path.last, let parent = get(o, Array(path.dropLast())) else { return }
-        if let k = last as? String, let d = parent as? NSMutableDictionary { d[k] = value }
-        else if let i = last as? Int, let a = parent as? NSMutableArray, i < a.count { a[i] = value }
+    /// Set the string at `path` in an event: its top-level value rebuilt
+    /// along the path and written back (see restoreAll). Nothing changes when
+    /// the path's parent isn't there (or an index is out of range).
+    private static func set(_ o: NSMutableDictionary, _ path: [Any], _ value: String) {
+        guard let k = path.first as? String else { return }
+        if path.count == 1 { o[k] = value; return }
+        if let v = o[k], let r = setting(v, path.dropFirst(), value) { o[k] = r }
+    }
+
+    // A copy of `v` with `value` at `path`; nil when the path can't be followed.
+    private static func setting(_ v: Any, _ path: ArraySlice<Any>, _ value: String) -> Any? {
+        guard let p = path.first else { return value }
+        let rest = path.dropFirst()
+        if let k = p as? String, var d = v as? [String: Any] {
+            if rest.isEmpty { d[k] = value; return d }
+            guard let child = d[k], let r = setting(child, rest, value) else { return nil }
+            d[k] = r
+            return d
+        }
+        if let i = p as? Int, var a = v as? [Any], i < a.count {
+            guard let r = setting(a[i], rest, value) else { return nil }
+            a[i] = r
+            return a
+        }
+        return nil
     }
 }
