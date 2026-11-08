@@ -1709,10 +1709,12 @@ public actor Daemon {
 
     /// Creates the sparse home image if missing (ftruncate: all holes). An
     /// existing one is left alone: it's the VM's home.
-    // partial: no free-space check (EphemeralDisk.checkDiskSpace) and no ProfileStore change notice
+    // partial: no ProfileStore change notice
     // @port SessionDisk.ensureHomeImageExists() h=83d4fac81b0747d2 @25ad3a88
-    static func ensureHomeImage(atPath path: String, bytes: UInt64) throws {
+    static func ensureHomeImage(atPath path: String, bytes: UInt64,
+                                floor: UInt64 = EphemeralDisk.minimumFreeBytes) throws {
         guard !FileManager.default.fileExists(atPath: path) else { return }
+        try EphemeralDisk.checkDiskSpace(at: (path as NSString).deletingLastPathComponent, minimumFreeBytes: floor)
         let fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw MachineError.io("create \(path)", errno) }
         defer { close(fd) }
@@ -1734,9 +1736,10 @@ public actor Daemon {
     /// Grows an existing home image to `target` (never shrinks; it stays
     /// sparse; agentd runs resize2fs after mounting). Returns what it did,
     /// for the log: a grow that doesn't happen says why.
-    // partial: no free-space check (EphemeralDisk.checkDiskSpace), no ProfileStore change notice, and no home checkpoints to purge after a grow
+    // partial: no ProfileStore change notice, and no home checkpoints to purge after a grow
     // @port SessionDisk.growHomeImageIfNeeded() h=2e3adcbd5eaa9db6 @b41d9876
-    static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?) throws -> String {
+    static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?,
+                                      floor: UInt64 = EphemeralDisk.minimumFreeBytes) throws -> String {
         let gib = { (b: UInt64) in "\(b >> 30) GiB" }
         var st = stat()
         guard stat(path, &st) == 0 else { return "home image unreadable at \(path) — not grown (target \(gib(target)))" }
@@ -1744,6 +1747,7 @@ public actor Daemon {
         guard size < target else {
             return "home image \(gib(size)) (setting \(setting.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
         }
+        try EphemeralDisk.checkDiskSpace(at: (path as NSString).deletingLastPathComponent, minimumFreeBytes: floor)
         let fd = open(path, O_WRONLY | O_CLOEXEC)
         guard fd >= 0 else { throw MachineError.io("open \(path)", errno) }
         defer { close(fd) }

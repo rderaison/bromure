@@ -1,5 +1,6 @@
 import CACLinuxShims
 import Foundation
+import SandboxEngine
 
 /// One Firecracker VM: the firecracker process, a virtiofsd per share, and
 /// its API socket. MachineConfig, rendered into Firecracker's JSON by
@@ -117,6 +118,10 @@ public actor FirecrackerMachine {
         do {
             try fm.createDirectory(atPath: config.runDirectory, withIntermediateDirectories: true)
             if !config.writeBaseInPlace, !fm.fileExists(atPath: config.overlay) {
+                // The copy grows as the guest writes: a nearly full host would
+                // wedge the session mid-run, so it isn't made under the floor
+                // (macOS: SessionDisk's disk clone; SandboxError.diskFull).
+                try EphemeralDisk.checkDiskSpace(at: (config.overlay as NSString).deletingLastPathComponent)
                 // A sparse copy: ~1 s for the 3.7 GB the base holds.
                 let tmp = config.overlay + ".tmp"
                 try? fm.removeItem(atPath: tmp)
