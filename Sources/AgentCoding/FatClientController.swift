@@ -2894,12 +2894,20 @@ final class RemoteHostController {
     func fetchTaskTranscript(_ id: UUID) async -> Data? {
         let host = self.host
         let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/transcript"
-        let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.bulkClient(for: host).request("GET", path)
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try RemoteTransport.bulkClient(for: host).request("GET", path) }
         }.value
-        guard let resp, resp.status == 200,
-              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
-        return Data(base64Encoded: b64)
+        switch result {
+        case .failure(let error):
+            FatClientLog.log("task transcript \(id.uuidString.prefix(8)): request failed — \(error)")
+            return nil
+        case .success(let resp):
+            let b64 = resp.json["transcript"] as? String ?? ""
+            FatClientLog.log("task transcript \(id.uuidString.prefix(8)): status=\(resp.status) "
+                + "b64=\(b64.count) error=\(resp.json["error"] as? String ?? "-")")
+            guard resp.status == 200, !b64.isEmpty else { return nil }
+            return Data(base64Encoded: b64)
+        }
     }
 
     func upsertAutomation(_ automation: ScheduledAutomation) {

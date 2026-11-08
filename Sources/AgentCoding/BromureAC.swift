@@ -14272,9 +14272,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// A finished task's full session transcript: the host archive first
     /// (written when the card reached Done — survives even workspace
     /// deletion), then the guest (live vsock read), then the ext4 home
-    /// image (workspace off).
+    /// image (workspace off). Before the guest: the task's own session —
+    /// the `wt/` session its launch bound (`bindSession`) — whose transcript
+    /// the host keeps a copy of, so a task whose worktree was cleaned up
+    /// still reads after a restart drops the clients' caches. NOT a session
+    /// the task was handed to (`assignment`): that conversation is mostly
+    /// the session's other work; such a task reports through its delivery.
     func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
+        if let sid = task.sessionID, let s = agentSessionStore.session(sid),
+           let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty {
+            return String(decoding: data, as: UTF8.self)
+        }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
         // Kimi: the session's own journal by id, when the task's session

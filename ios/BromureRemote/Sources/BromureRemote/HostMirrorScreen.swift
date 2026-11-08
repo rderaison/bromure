@@ -674,6 +674,9 @@ struct CodingBoardScreen: View {
                 subtitle: nil,
                 fetch: { await controller.fetchTaskTranscript(t.id) },
                 agent: controller.taskStore.task(t.id)?.tool.rawValue,
+                // What the agent said when it delivered or merged: the
+                // report when no transcript can be read (as on the desktop).
+                fallbackReport: controller.taskStore.task(t.id).flatMap { $0.mergeReport ?? $0.deliverySummary },
                 reportOnly: t.report)
         }
     }
@@ -696,6 +699,8 @@ struct TranscriptScreen: View {
     /// Canonical agent kind of the tool that wrote the transcript (the
     /// task's / automation's tool); nil sniffs the format from the lines.
     var agent: String? = nil
+    /// Shown as the report when the transcript can't be read.
+    var fallbackReport: String? = nil
     /// Open on the agent's final report (a finished task's "Read Report")
     /// rather than the whole conversation; the toolbar switches.
     @State var reportOnly = false
@@ -750,6 +755,9 @@ struct TranscriptScreen: View {
                                                          agent: agent), !r.isEmpty {
                     report = [TranscriptItem(id: 0, kind: .assistantText(r), timestamp: nil)]
                 }
+            } else if let r = fallbackReport, !r.isEmpty {
+                // No transcript, but the agent's own word on what it did.
+                items = [TranscriptItem(id: 0, kind: .assistantText(r), timestamp: nil)]
             } else {
                 failed = true
             }
