@@ -79,7 +79,10 @@ public enum BACEnrollmentStore {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BromureAC", isDirectory: true)
             .appendingPathComponent("managed", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        // An existing one too: the install's token pointer and leaf live here.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: base.path)
         return base
     }
 
@@ -128,19 +131,35 @@ public enum BACEnrollmentStore {
     /// cert + key, CA cert. The next launch comes back to the
     /// "not enrolled" state.
     public static func destroy() {
+        writeLock.lock(); defer { writeLock.unlock() }
+        // A renewal in flight (begun before this) must not store its leaf after.
+        epochValue &+= 1
+        // Every leaf key this install stored (they live in the Keychain / the
+        // secret store, by serial; the ledger names them), before the pointer goes.
+        for serial in knownLeafSerials() { deleteKeychain(account: leafCertKeyPrefix + serial) }
+        try? FileManager.default.removeItem(at: leafSerialsURL)
         try? FileManager.default.removeItem(at: installJSONURL)
         try? FileManager.default.removeItem(at: leafCertPemURL)
         try? FileManager.default.removeItem(at: caCertPemURL)
         try? FileManager.default.removeItem(at: leafSerialURL)
         try? FileManager.default.removeItem(at: healthURL)
         deleteKeychain(account: installTokenKey)
-        // Leaf cert keys are stored per-serial so we walk known accounts.
-        // (Cheap — there's at most a handful as cert renewal turns over.)
-        let keys = (try? FileManager.default
-            .contentsOfDirectory(atPath: managedDir.path)) ?? []
-        for k in keys where k.hasPrefix("leaf-cert-key-") {
-            try? FileManager.default.removeItem(at: managedDir.appendingPathComponent(k))
-        }
+    }
+
+    /// Serializes leaf writes against destroy().
+    private static let writeLock = NSLock()
+    nonisolated(unsafe) private static var epochValue = 0
+
+    /// Bumped by destroy(): a leaf fetched under an older epoch isn't stored.
+    public static var epoch: Int { writeLock.lock(); defer { writeLock.unlock() }; return epochValue }
+
+    /// The serials whose keys were stored (one per line), and the current one.
+    private static var leafSerialsURL: URL { managedDir.appendingPathComponent("leaf-serials") }
+
+    private static func knownLeafSerials() -> [String] {
+        let listed = ((try? String(contentsOf: leafSerialsURL, encoding: .utf8)) ?? "")
+            .split(whereSeparator: \.isNewline).map(String.init)
+        return Array(Set(listed + [loadLeafSerial()].compactMap { $0 })).filter { !$0.isEmpty }
     }
 
     // MARK: - Bearer token
@@ -179,8 +198,21 @@ public enum BACEnrollmentStore {
     // old cert expires. URLSession-side construction of a SecIdentity
     // happens at request time.
 
-    public static func storeLeafCert(certPem: String, caPem: String, privateKeyDER: Data, serialHex: String) throws {
+    /// `epoch`: the store's epoch when the leaf was requested; a destroy()
+    /// since (an unenroll, or a new enrollment) refuses it.
+    public static func storeLeafCert(certPem: String, caPem: String, privateKeyDER: Data, serialHex: String,
+                                     epoch: Int? = nil) throws {
+        writeLock.lock(); defer { writeLock.unlock() }
+        if let epoch, epoch != epochValue { throw BACEnrollmentError.notEnrolled }
         let lower = serialHex.lowercased()
+        let previous = loadLeafSerial()
+        // The serial is in the ledger before its key is stored: a destroy
+        // finds every key this install ever stored.
+        let listed = ((try? String(contentsOf: leafSerialsURL, encoding: .utf8)) ?? "")
+            .split(whereSeparator: \.isNewline).map(String.init)
+        if !listed.contains(lower) {
+            try (listed + [lower]).joined(separator: "\n").appending("\n").write(to: leafSerialsURL, atomically: true, encoding: .utf8)
+        }
         try certPem.write(to: leafCertPemURL, atomically: true, encoding: .utf8)
         try caPem.write(to: caCertPemURL, atomically: true, encoding: .utf8)
         try storeKeychain(account: leafCertKeyPrefix + lower, data: privateKeyDER)
@@ -188,6 +220,12 @@ public enum BACEnrollmentStore {
         // leaves the previous (cert, key) pair selectable rather than
         // pointing at material that doesn't exist yet.
         try lower.write(to: leafSerialURL, atomically: true, encoding: .utf8)
+        // The previous leaf's cert is gone (overwritten): its key goes too.
+        if let previous, previous != lower {
+            deleteKeychain(account: leafCertKeyPrefix + previous)
+            let kept = (listed + [lower]).filter { $0 != previous }
+            try? kept.joined(separator: "\n").appending("\n").write(to: leafSerialsURL, atomically: true, encoding: .utf8)
+        }
     }
 
     public static func loadLeafCertPem() -> String? {
@@ -449,6 +487,8 @@ public final class BACEnrollment {
     /// supplied, which is the path AC always uses.
     @discardableResult
     public func fetchLeafCert(install: BACInstall? = nil) async throws -> Date {
+        // The store's epoch now: an unenroll while the CSR is signed fences it.
+        let epoch = BACEnrollmentStore.epoch
         guard let install = install ?? BACEnrollmentStore.load(),
               let token = BACEnrollmentStore.loadInstallToken() else {
             throw BACEnrollmentError.notEnrolled
@@ -479,6 +519,7 @@ public final class BACEnrollment {
             caPem: resp.caCertPem,
             privateKeyDER: priv.derRepresentation,
             serialHex: resp.serialHex,
+            epoch: epoch,
         )
         // New material → drop any cached SecIdentity so subsequent uploads
         // present the freshly-issued leaf.
