@@ -330,6 +330,8 @@ public actor Daemon {
             mitm = try MitmProxy(caDirectory: URL(fileURLWithPath: config.stateDir + "/mitm", isDirectory: true),
                                  extraRoots: Self.testUpstreamRoots())
             mitm?.blocksHostAddresses = config.multiUser
+            // The workspaces' ssh-agent sockets: in the 0700 runtime directory.
+            mitm?.sshAgentDirectory.withLockedValue { $0 = config.runtimeDir + "/ssh-agents" }
             mitm?.routeAllTo = Self.testUpstream()
             Self.applyTestSSOPortal()
             // AWS SSO reads ~/.aws where the AWS CLI writes it: $HOME (Foundation's
@@ -809,7 +811,8 @@ public actor Daemon {
         guard let mitm else { return }
         _ = await kubeconfig(for: profile, plan: sessionTokenPlan(for: profile))
         pushAWSCredentials(for: profile, meta: meta)
-        mitm.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: profileStore), for: profile.id)
+        // Its agent died with the previous daemon: a new one, keys and all.
+        await loadWorkspaceSSHKeys(profile)
         mitm.applyWorkspacePolicies(profile)
     }
 
@@ -1292,6 +1295,9 @@ public actor Daemon {
         // with it (macOS: MitmEngine.unregister).
         mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
+        // Its ssh-agent: the imported keys exist only in that process
+        // (macOS: MitmEngine.unregister's terminateSSHAgent).
+        mitm?.terminateSSHAgent(for: pid)
         // The attestor's channel goes with the session (macOS: detach at teardown).
         BinaryIdentityService.shared.dropBridge(pid)?.stop()
         // The kernel sentry's too (macOS: KernelSentryService.detach at teardown).
@@ -1391,9 +1397,10 @@ public actor Daemon {
                                      meta: meta, kubeYAML: kubeYAML)
             if rec.registration != true {
                 pushAWSCredentials(for: profile, meta: meta.path)
-                // The workspace's SSH key, signing for the guest through the
-                // host's agent (macOS: launch's sshAgent.setKeys).
-                mitm?.sshAgent.setKeys(Self.loadAgentKeys(for: profile, store: store), for: profile.id)
+                // The workspace's SSH keys, signing for the guest through the
+                // host's agents: its own, the imported ones, those picked out
+                // of host agents (macOS: launch's agent block).
+                await loadWorkspaceSSHKeys(profile)
                 mitm?.applyWorkspacePolicies(profile)
                 // Its VM's port, governed before the VM runs (macOS: attachPort's policy).
                 Self.clearQuarantineMark(vmDir(rec.id))
@@ -2019,6 +2026,7 @@ public actor Daemon {
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }
+        mitm?.terminateAllSSHAgents()
         sw.stop()
         await passt.close()
     }

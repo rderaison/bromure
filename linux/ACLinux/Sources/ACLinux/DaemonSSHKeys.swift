@@ -1,0 +1,527 @@
+import Foundation
+import Glibc
+
+/// Imported SSH keys (macOS: the editor's "Import key…" and "Add keys from a
+/// host ssh-agent"): a key file copied into the workspace's host-only
+/// `agent/imported/`, its passphrase in the encrypted vault, ssh-add'ed at
+/// launch into the workspace's own ssh-agent process, which the shared
+/// SSHAgentServer forwards the guest's requests to; or a key picked out of
+/// a host agent, forwarded there alone. Each key's "ask before use" gate is
+/// the agent server's.
+
+/// Imported keys' passphrases (macOS: the Keychain's generic-password items
+/// under the same service and account), as vault items.
+enum PassphraseKeychain {
+    private static let service = "io.bromure.agentic-coding.ssh-key-passphrases"
+
+    // @port PassphraseKeychain.static account(profileID: UUID, filename: String) h=0d587d6a5efe0bcc @fa9bef09
+    private static func account(profileID: UUID, filename: String) -> String {
+        "\(profileID.uuidString)/\(filename)"
+    }
+
+    // @port PassphraseKeychain.static set(passphrase: String, profileID: UUID, filename: String) h=d36301383587e0c2 @fa9bef09
+    static func set(passphrase: String, profileID: UUID, filename: String) throws {
+        try VaultItems.set(Data(passphrase.utf8), service: service, account: account(profileID: profileID, filename: filename))
+    }
+
+    // @port PassphraseKeychain.static get(profileID: UUID, filename: String) h=3ec40f2cf4592b0d @fa9bef09
+    static func get(profileID: UUID, filename: String) -> String? {
+        guard let data = try? VaultItems.get(service: service, account: account(profileID: profileID, filename: filename)) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    // @port PassphraseKeychain.static delete(profileID: UUID, filename: String) h=70a3e74a7b9b2fbf @fa9bef09
+    static func delete(profileID: UUID, filename: String) {
+        VaultItems.delete(service: service, account: account(profileID: profileID, filename: filename))
+    }
+}
+
+/// One workspace's own `ssh-agent -D -a <socket>` (macOS: PrivateSSHAgent):
+/// an agent signs for every key it holds, so each workspace has its own,
+/// its keys gone with it. Spawned as a ChildProcess (a clean signal mask:
+/// Foundation's Process passed on the pool thread's, SIGTERM blocked, and
+/// lost the exits), its socket in the daemon's 0700 runtime directory,
+/// named after the daemon's pid so a later daemon can tell a gone one's.
+// @port-skip linux-only: PrivateSSHAgent over ChildProcess, in the runtime directory
+final class WorkspaceSSHAgent: Sendable {
+    let socketPath: String
+    private let process: ChildProcess
+
+    // @port-skip linux-only: see WorkspaceSSHAgent
+    init(directory: String, label: String) throws {
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let path = (directory as NSString).appendingPathComponent("bromure-ac-agent-\(getpid())-\(label).sock")
+        try? FileManager.default.removeItem(atPath: path)
+        let p = try ChildProcess(name: "ssh-agent", executable: "/usr/bin/ssh-agent", arguments: ["-D", "-a", path],
+                                 logPath: "/dev/null")
+        try p.start()
+        let deadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: path), Date() < deadline { usleep(10_000) }
+        guard FileManager.default.fileExists(atPath: path) else {
+            p.signal(SIGKILL)
+            throw MachineError.invalidConfig("ssh-agent failed to bind \(path)")
+        }
+        socketPath = path
+        process = p
+    }
+
+    /// Its keys die with it.
+    // @port-skip linux-only: see WorkspaceSSHAgent
+    func terminate() {
+        _ = process.signal(SIGTERM)
+        try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    // @port-skip linux-only: tests
+    var exitStatus: Int32? { process.exitStatus }
+
+    /// The workspace agents a gone daemon left (one that crashed, or was
+    /// restarted): an `ssh-agent -a …/bromure-ac-agent-<pid>-<label>.sock`
+    /// whose <pid> isn't us and no longer runs, with its socket. Another
+    /// live daemon's (the same user's test daemons, a second instance) are
+    /// never touched (macOS's reapOrphans kills every match: one app per
+    /// user). `processes`: pid and argv of every process.
+    // @port-skip linux-only: see WorkspaceSSHAgent
+    static func orphans(_ processes: [(pid: pid_t, argv: [String])], ourPID: pid_t = getpid(),
+                        alive: (pid_t) -> Bool) -> [(pid: pid_t, socket: String)] {
+        processes.compactMap { p in
+            guard (p.argv.first.map { ($0 as NSString).lastPathComponent } ?? "") == "ssh-agent",
+                  let a = p.argv.firstIndex(of: "-a"), a + 1 < p.argv.count,
+                  let owner = ownerPID(ofSocket: p.argv[a + 1]), owner != ourPID, !alive(owner) else { return nil }
+            return (p.pid, p.argv[a + 1])
+        }
+    }
+
+    /// The daemon pid in an agent socket's name (bromure-ac-agent-<pid>-<label>.sock).
+    // @port-skip linux-only: see orphans
+    static func ownerPID(ofSocket path: String) -> pid_t? {
+        let name = (path as NSString).lastPathComponent
+        guard name.hasPrefix("bromure-ac-agent-"), name.hasSuffix(".sock") else { return nil }
+        return pid_t(name.dropFirst("bromure-ac-agent-".count).prefix { $0 != "-" })
+    }
+
+    /// SIGTERM a gone daemon's agents (their keys die with them) and drop
+    /// their sockets. Run once at the proxy's start, before any agent of
+    /// ours (macOS: the engine's reapOrphans).
+    // @port-skip linux-only: see orphans
+    static func reapOrphansOfGoneDaemons() {
+        func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
+        var processes: [(pid: pid_t, argv: [String])] = []
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? [] {
+            guard let pid = pid_t(entry), let raw = FileManager.default.contents(atPath: "/proc/\(entry)/cmdline") else { continue }
+            processes.append((pid, raw.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }))
+        }
+        let found = orphans(processes, alive: alive)
+        for o in found {
+            kill(o.pid, SIGTERM)
+            try? FileManager.default.removeItem(atPath: o.socket)
+        }
+        if !found.isEmpty {
+            FileHandle.standardError.write(Data("[mitm] reaped \(found.count) ssh-agent(s) of a gone bromure-ac daemon\n".utf8))
+        }
+    }
+}
+
+extension MitmProxy {
+    /// This workspace's ssh-agent socket, spawning the agent on first use.
+    /// nil only if ssh-agent itself failed to start — never another
+    /// workspace's socket.
+    // partial: a WorkspaceSSHAgent in the daemon's runtime directory (macOS: a PrivateSSHAgent in the temporary one)
+    // @port MitmEngine.sshAgentSocket(for: UUID) h=ebaaccbc1be48941 @79b2d8c0
+    func sshAgentSocket(for profileID: UUID) -> String? {
+        sshAgents.withLockedValue { agents in
+            if let existing = agents[profileID] { return existing.socketPath }
+            do {
+                // 8 hex chars keeps the socket path inside sun_path's 108 bytes.
+                let label = String(profileID.uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+                let agent = try WorkspaceSSHAgent(directory: sshAgentDirectory.withLockedValue { $0 }, label: label)
+                agents[profileID] = agent
+                HostAgentClient.register(socketPath: agent.socketPath, for: profileID)
+                return agent.socketPath
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] ssh-agent spawn failed for profile \(profileID.uuidString.prefix(8)): \(error)\n".utf8))
+                return nil
+            }
+        }
+    }
+
+    /// Kill one workspace's agent — its keys exist only in that process,
+    /// so this is what makes them unreachable at session end.
+    // @port MitmEngine.terminateSSHAgent(for: UUID) h=2aea26d842f5ee90 @79b2d8c0
+    func terminateSSHAgent(for profileID: UUID) {
+        let agent = sshAgents.withLockedValue { $0.removeValue(forKey: profileID) }
+        HostAgentClient.unregister(profileID: profileID)
+        agent?.terminate()
+    }
+
+    /// The daemon's stop: every workspace's agent at once.
+    // @port MitmEngine.terminateAllSSHAgents() h=0ecfdb04a0e7ce28 @79b2d8c0
+    func terminateAllSSHAgents() {
+        let all = sshAgents.withLockedValue { a in defer { a.removeAll() }; return a }
+        for (pid, agent) in all {
+            HostAgentClient.unregister(profileID: pid)
+            agent.terminate()
+        }
+    }
+}
+
+extension Daemon {
+    /// The workspace's keys into the agents at launch (or a taken-back VM's,
+    /// whose agent died with the previous daemon): its own key in process
+    /// and in its ssh-agent, the imported ones ssh-add'ed there (their
+    /// passphrases from the vault), each imported key's gate, and the keys
+    /// picked out of host agents (macOS: launch's agent block).
+    // @port-skip linux-only: the agent block of ACAppDelegate.launch, for a Linux launch and a re-adoption
+    func loadWorkspaceSSHKeys(_ profile: Profile) async {
+        guard let mitm else { return }
+        let store = profileStore
+        let keys = Self.loadAgentKeys(for: profile, store: store)
+        mitm.sshAgent.setKeys(keys, for: profile.id)
+        let askpassDir = config.runtimeDir
+        let needsAgent = !keys.isEmpty || profile.importedSSHKeys.contains { !$0.isFromHostAgent }
+        if needsAgent, let socket = mitm.sshAgentSocket(for: profile.id) {
+            let dir = store.profileDirectory(for: profile)
+            await Task.detached {
+                for key in keys {
+                    Self.addKeyToHostAgent(seed: key.seed, publicKey: key.publicKey,
+                                           comment: "bromure-ac:\(profile.name)", agentSocket: socket)
+                }
+                Self.loadImportedSSHKeys(for: profile, profileDirectory: dir, agentSocket: socket, askpassDir: askpassDir)
+            }.value
+        }
+        mitm.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
+        mitm.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
+    }
+
+    /// Add the per-profile key to the workspace's private ssh-agent, from
+    /// stdin (`ssh-add -`): in memory only, never a file.
+    // partial: the agent socket is the caller's (macOS looks it up here)
+    // @port ACAppDelegate.addKeyToHostAgent(seed: Data, publicKey: Data, comment: String, profileID: UUID) h=2b3910cd19102fb5 @2134fc7a
+    nonisolated static func addKeyToHostAgent(seed: Data, publicKey: Data, comment: String, agentSocket: String) {
+        let pem = OpenSSHKeyFormat.ed25519PEM(seed: seed, publicKey: publicKey, comment: comment)
+        do {
+            _ = try sshTool("/usr/bin/ssh-add", ["-"], env: ["SSH_AUTH_SOCK": agentSocket], input: pem, timeout: 15)
+        } catch {
+            FileHandle.standardError.write(Data("[mitm] ssh-add failed: \(error)\n".utf8))
+        }
+    }
+
+    /// An OpenSSH tool run to completion (ChildProcess: Foundation's Process
+    /// lost short-lived children's exits here), with `env` added to the
+    /// daemon's environment through env(1) — paths only, never a secret:
+    /// a passphrase goes through an askpass file, key bytes through stdin.
+    // @port-skip linux-only: the Linux spawn of ssh-add / ssh-keygen (macOS: Process)
+    nonisolated static func sshTool(_ tool: String, _ arguments: [String], env: [String: String],
+                                    input: Data?, timeout: TimeInterval) throws -> Data {
+        try ChildProcess.capture("/usr/bin/env", env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" } + [tool] + arguments,
+                                 input: input ?? Data(), timeout: timeout)
+    }
+
+    /// ssh-add each of the profile's imported key files into its agent.
+    // partial: the agent socket and directories are the caller's
+    // @port ACAppDelegate.loadImportedSSHKeys(for: Profile) h=67ed87709dce47af @2134fc7a
+    nonisolated static func loadImportedSSHKeys(for profile: Profile, profileDirectory: URL, agentSocket: String, askpassDir: String) {
+        let importedDir = profileDirectory.appendingPathComponent("agent/imported", isDirectory: true)
+        for key in profile.importedSSHKeys where !key.isFromHostAgent {
+            let path = importedDir.appendingPathComponent(key.filename).path
+            guard !key.filename.isEmpty, FileManager.default.fileExists(atPath: path) else {
+                FileHandle.standardError.write(Data("[mitm] imported key '\(key.label)' missing on disk (\(path))\n".utf8))
+                continue
+            }
+            sshAddImportedKey(path: path, label: key.label,
+                              passphrase: key.hasPassphrase ? PassphraseKeychain.get(profileID: profile.id, filename: key.filename) : nil,
+                              agentSocket: agentSocket, askpassDir: askpassDir)
+        }
+    }
+
+    /// `ssh-add <path>` into the agent, the passphrase through SSH_ASKPASS
+    /// (answered once: a wrong one isn't offered again). The askpass script
+    /// is made 0700 in the daemon's own 0700 runtime directory (never a
+    /// shared /tmp, where it would be readable for a moment), and goes
+    /// right after.
+    // partial: the askpass script lives in the daemon's runtime dir, created 0700 (macOS: the temporary directory, chmod after); spawned through sshTool
+    // @port ACAppDelegate.sshAddImportedKey(path: String, label: String, passphrase: String?, agentSocket: String) h=22d847d746e4f5f3 @2134fc7a
+    nonisolated static func sshAddImportedKey(path: String, label: String, passphrase: String?, agentSocket: String, askpassDir: String) {
+        let askpass = (askpassDir as NSString).appendingPathComponent("askpass-\(UUID().uuidString).sh")
+        defer {
+            try? FileManager.default.removeItem(atPath: askpass)
+            try? FileManager.default.removeItem(atPath: askpass + ".used")
+        }
+        guard FileManager.default.createFile(atPath: askpass, contents: Data(askpassScript(passphrase: passphrase).utf8),
+                                             attributes: [.posixPermissions: NSNumber(value: 0o700)]) else {
+            FileHandle.standardError.write(Data("[mitm] ssh-add (imported '\(label)'): no askpass in \(askpassDir)\n".utf8))
+            return
+        }
+        do {
+            _ = try sshTool("/usr/bin/ssh-add", [path],
+                            env: ["SSH_AUTH_SOCK": agentSocket, "SSH_ASKPASS": askpass, "DISPLAY": ":0", "SSH_ASKPASS_REQUIRE": "force"],
+                            input: nil, timeout: 15)
+            FileHandle.standardError.write(Data("[mitm] added imported key '\(label)'\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data("[mitm] ssh-add (imported '\(label)') failed: \(error)\n".utf8))
+        }
+    }
+
+    /// The askpass ssh-add runs for an imported key: the passphrase (when
+    /// there is one) on its first call, a refusal after.
+    // @port ACAppDelegate.static askpassScript(passphrase: String?) h=5df54a7a6bd2a6d4 @2134fc7a
+    nonisolated static func askpassScript(passphrase: String?) -> String {
+        guard let pass = passphrase, !pass.isEmpty else { return "#!/bin/sh\nexit 1\n" }
+        let escaped = pass.replacingOccurrences(of: "'", with: "'\\''")
+        return "#!/bin/sh\n[ -e \"$0.used\" ] && exit 1\n: > \"$0.used\"\nprintf '%s\\n' '\(escaped)'\n"
+    }
+
+    /// The imported keys whose signing asks first, by public-key blob.
+    // @port ACAppDelegate.static importedKeyApprovals(_: Profile) h=d2d68597f99ddb7d @2134fc7a
+    nonisolated static func importedKeyApprovals(_ profile: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals: [Data: SSHAgentServer.ImportedApproval] = [:]
+        for k in profile.importedSSHKeys where k.requireApproval {
+            guard let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            approvals[blob] = SSHAgentServer.ImportedApproval(label: k.label, consentCredentialID: ConsentCredentialID.sshKey(k.id.uuidString))
+        }
+        return approvals
+    }
+
+    /// A running session's gates after a live edit: the saved profile's,
+    /// plus every gate it holds for a key taken off the list (still loaded
+    /// in the agent until the restart: it stays gated).
+    // @port ACAppDelegate.static liveImportedKeyApprovals(running: [Data:SSHAgentServer.ImportedApproval], to: Profile) h=17368f6ffa533cfa @2134fc7a
+    nonisolated static func liveImportedKeyApprovals(running: [Data: SSHAgentServer.ImportedApproval],
+                                                     to new: Profile) -> [Data: SSHAgentServer.ImportedApproval] {
+        var approvals = importedKeyApprovals(new)
+        let listed = Set(new.importedSSHKeys.compactMap { sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+        for (blob, a) in running where !listed.contains(blob) { approvals[blob] = a }
+        return approvals
+    }
+
+    /// Host-agent keys the VM may see and sign with: blob → socket.
+    // @port ACAppDelegate.static hostAgentKeys(_: Profile) h=94dcca148da25d07 @2134fc7a
+    nonisolated static func hostAgentKeys(_ profile: Profile) -> [Data: String] {
+        var keys: [Data: String] = [:]
+        for k in profile.importedSSHKeys {
+            guard let socket = k.hostAgentSocket, let blob = sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText) else { continue }
+            keys[blob] = socket
+        }
+        return keys
+    }
+
+    // @port ACAppDelegate.static sshPublicKeyBlob(fromOpenSSHText: String) h=3596519a56678c9b @2134fc7a
+    nonisolated static func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
+        let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first?.trimmingCharacters(in: .whitespaces) ?? ""
+        let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { return nil }
+        return Data(base64Encoded: String(parts[1]))
+    }
+
+    /// Copy a private key file into the workspace's host-only
+    /// `agent/imported/` (renamed: a UUID prefix), its `.pub` beside it
+    /// (copied, or derived with ssh-keygen), the passphrase into the vault.
+    // partial: the passphrase goes to the vault (macOS: the Keychain); ssh-keygen gets it on stdin through SSH_ASKPASS, not argv
+    // @port ACAppDelegate.importSSHKey(at: URL, passphrase: String?, label: String, for: Profile) h=f6470b0a6c91eaec @2134fc7a
+    /// `savePassphrase` false: the caller saves it (on its own task, whose
+    /// vault it is).
+    nonisolated static func importSSHKey(at sourceURL: URL, passphrase: String?, label: String,
+                                         for profile: Profile, profileDirectory: URL, askpassDir: String,
+                                         savePassphrase: Bool = true) throws -> ImportedSSHKey {
+        let importedDir = profileDirectory.appendingPathComponent("agent/imported", isDirectory: true)
+        try FileManager.default.createDirectory(at: importedDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        let basename = "\(UUID().uuidString)-\(sourceURL.lastPathComponent)"
+        let dst = importedDir.appendingPathComponent(basename)
+        guard let bytes = FileManager.default.contents(atPath: sourceURL.path) else {
+            throw SSHKeyImportError("can't read \(sourceURL.path)")
+        }
+        guard FileManager.default.createFile(atPath: dst.path, contents: bytes,
+                                             attributes: [.posixPermissions: NSNumber(value: 0o600)]) else {
+            throw SSHKeyImportError("can't write \(dst.path)")
+        }
+        var pubText = ""
+        for pubURL in [URL(fileURLWithPath: sourceURL.path + ".pub"), sourceURL.deletingPathExtension().appendingPathExtension("pub")] {
+            if let s = try? String(contentsOf: pubURL, encoding: .utf8) {
+                pubText = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
+                break
+            }
+        }
+        let trimmed = passphrase ?? ""
+        if pubText.isEmpty, let derived = derivePublicKey(dst.path, passphrase: trimmed, askpassDir: askpassDir) {
+            pubText = derived
+            try? derived.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
+        }
+        if !trimmed.isEmpty, savePassphrase {
+            do { try PassphraseKeychain.set(passphrase: trimmed, profileID: profile.id, filename: basename) } catch {
+                try? FileManager.default.removeItem(at: dst)
+                try? FileManager.default.removeItem(at: importedDir.appendingPathComponent(basename + ".pub"))
+                throw error
+            }
+        }
+        return ImportedSSHKey(label: label.isEmpty ? sourceURL.lastPathComponent : label, filename: basename,
+                              publicKeyText: pubText, hasPassphrase: !trimmed.isEmpty)
+    }
+
+    /// The public key of a private key file (`ssh-keygen -y`), its
+    /// passphrase through SSH_ASKPASS: never on a command line, which other
+    /// users of the server can read.
+    // @port-skip linux-only: importSSHKey's ssh-keygen -y step without the passphrase in argv
+    nonisolated static func derivePublicKey(_ path: String, passphrase: String, askpassDir: String) -> String? {
+        let askpass = (askpassDir as NSString).appendingPathComponent("askpass-\(UUID().uuidString).sh")
+        defer {
+            try? FileManager.default.removeItem(atPath: askpass)
+            try? FileManager.default.removeItem(atPath: askpass + ".used")
+        }
+        guard FileManager.default.createFile(atPath: askpass, contents: Data(askpassScript(passphrase: passphrase).utf8),
+                                             attributes: [.posixPermissions: NSNumber(value: 0o700)]) else { return nil }
+        guard let out = try? sshTool("/usr/bin/ssh-keygen", ["-y", "-f", path],
+                                     env: ["SSH_ASKPASS": askpass, "DISPLAY": ":0", "SSH_ASKPASS_REQUIRE": "force"],
+                                     input: nil, timeout: 15) else { return nil }
+        let derived = String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return derived.isEmpty ? nil : derived
+    }
+
+    struct SSHKeyImportError: Error, CustomStringConvertible {
+        let description: String
+        // @port-skip linux-only: the import route's error
+        init(_ d: String) { description = d }
+    }
+
+    /// The keys a host ssh-agent holds, as ImportedSSHKeys ready to add:
+    /// nothing copied, `hostAgentSocket` points signing back at the agent.
+    // @port ACAppDelegate.static listHostAgentKeys(socket: String) h=cc9283a4111ed8e5 @2134fc7a
+    nonisolated static func listHostAgentKeys(socket: String) throws -> [ImportedSSHKey] {
+        guard let path = HostAgentClient.resolveHostSocket(socket) else {
+            throw SSHKeyImportError("SSH_AUTH_SOCK isn't set for the daemon: name the agent's socket")
+        }
+        guard FileManager.default.fileExists(atPath: path) else { throw SSHKeyImportError("No agent socket at \(path).") }
+        return HostAgentClient(socketPath: path, timeout: 10).identities().compactMap { ident in
+            guard ident.blob.count > 4 else { return nil }
+            let n = ident.blob.prefix(4).reduce(0) { $0 << 8 | Int($1) }
+            guard n > 0, 4 + n <= ident.blob.count,
+                  let type = String(data: ident.blob.subdata(in: 4..<(4 + n)), encoding: .utf8) else { return nil }
+            let comment = ident.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ImportedSSHKey(label: comment.isEmpty ? type : comment, filename: "",
+                                  publicKeyText: "\(type) \(ident.blob.base64EncodedString())" + (comment.isEmpty ? "" : " \(comment)"),
+                                  hostAgentSocket: socket)
+        }
+    }
+
+    /// Remove an imported key's file, `.pub` and vault passphrase.
+    // @port ACAppDelegate.removeImportedSSHKey(_: ImportedSSHKey, for: Profile) h=8862938c66b6210d @2134fc7a
+    nonisolated static func removeImportedSSHKey(_ key: ImportedSSHKey, for profile: Profile, profileDirectory: URL) {
+        // A host-agent key has no file (filename "" would name the whole
+        // imported/ dir) — the agent keeps it.
+        guard !key.isFromHostAgent, !key.filename.isEmpty, !key.filename.contains("/") else { return }
+        let importedDir = profileDirectory.appendingPathComponent("agent/imported", isDirectory: true)
+        try? FileManager.default.removeItem(at: importedDir.appendingPathComponent(key.filename))
+        try? FileManager.default.removeItem(at: importedDir.appendingPathComponent(key.filename + ".pub"))
+        if key.hasPassphrase { PassphraseKeychain.delete(profileID: profile.id, filename: key.filename) }
+    }
+
+    /// A workspace's imported keys as a client lists them (no secret: the
+    /// passphrase stays in the vault).
+    // @port-skip linux-only: the key list of the editor's Credentials pane, over the control API
+    static func sshKeyRows(_ p: Profile) -> JSONValue {
+        .array(p.importedSSHKeys.map { k in
+            var o: [String: JSONValue] = ["id": .string(k.id.uuidString), "label": .string(k.label),
+                                          "publicKey": .string(k.publicKeyText), "hasPassphrase": .bool(k.hasPassphrase),
+                                          "requireApproval": .bool(k.requireApproval)]
+            if let s = k.hostAgentSocket { o["hostAgentSocket"] = .string(s) }
+            return .object(o)
+        })
+    }
+
+    /// `/profiles/<workspace>/ssh-keys…` (macOS: the editor's Credentials
+    /// pane; a server has none): GET lists; POST `{path, label?,
+    /// passphrase?, requireApproval?}` imports a key file on this server;
+    /// POST `{hostAgentSocket, publicKey?, requireApproval?}` adds a host
+    /// agent's keys (the one whose public key is given, else all); POST
+    /// `host-agent {socket}` lists an agent's keys; POST `<id>
+    /// {requireApproval}` sets a key's gate; DELETE `<id>` removes one. A
+    /// running workspace's gates follow at once; added or removed keys load
+    /// at its next boot (as macOS's restart diff).
+    // @port-skip linux-only: the editor's imported-key actions over the control API
+    func sshKeysRoute(_ prof: Profile, method: String, sub: [String], body: JSONValue) async -> ControlResponse {
+        let store = profileStore
+        let dir = store.profileDirectory(for: prof)
+        func saved(_ p: Profile) async -> ControlResponse {
+            do { _ = try store.update(p) } catch { return .error(500, "Couldn't save '\(p.name)': \(error)") }
+            if let id = await runningVMID(of: p.id) { _ = scheduleLiveRefresh(id) }
+            return ControlResponse(200, ["ok": true, "keys": Self.sshKeyRows(p)])
+        }
+        var p = prof
+        switch (method, sub.count > 1 ? sub[1] : "") {
+        case ("GET", ""):
+            return ControlResponse(200, ["keys": Self.sshKeyRows(p)])
+        case ("POST", "host-agent"):
+            let socket = body["socket"]?.stringValue ?? ""
+            do {
+                let keys = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value
+                return ControlResponse(200, ["keys": .array(keys.map { .object(["label": .string($0.label), "publicKey": .string($0.publicKeyText)]) })])
+            } catch { return .error(400, "\(error)") }
+        case ("POST", ""):
+            let approve = body["requireApproval"] == .bool(true)
+            if let socket = body["hostAgentSocket"]?.stringValue {
+                let want = body["publicKey"]?.stringValue.flatMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0) }
+                let found: [ImportedSSHKey]
+                do { found = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value } catch {
+                    return .error(400, "\(error)")
+                }
+                let have = Set(p.importedSSHKeys.compactMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+                let picked = found.filter { k in
+                    guard let blob = Self.sshPublicKeyBlob(fromOpenSSHText: k.publicKeyText), !have.contains(blob) else { return false }
+                    return want.map { $0 == blob } ?? true
+                }
+                guard !picked.isEmpty else {
+                    return .error(404, want == nil ? "The agent holds no key this workspace hasn't got" : "The agent doesn't hold that key")
+                }
+                p.importedSSHKeys += picked.map { var k = $0; k.requireApproval = approve; return k }
+                return await saved(p)
+            }
+            guard let path = body["path"]?.stringValue, !path.isEmpty else { return .error(400, "path or hostAgentSocket required") }
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            let label = body["label"]?.stringValue ?? ""
+            let passphrase = body["passphrase"]?.stringValue
+            let askpassDir = config.runtimeDir
+            do {
+                // The file work off the actor; the passphrase into the vault
+                // here, on this task.
+                var key = try await Task.detached {
+                    try Self.importSSHKey(at: url, passphrase: passphrase, label: label, for: prof, profileDirectory: dir,
+                                          askpassDir: askpassDir, savePassphrase: false)
+                }.value
+                if key.hasPassphrase, let passphrase {
+                    do { try PassphraseKeychain.set(passphrase: passphrase, profileID: prof.id, filename: key.filename) } catch {
+                        Self.removeImportedSSHKey(ImportedSSHKey(label: key.label, filename: key.filename, publicKeyText: ""),
+                                                  for: prof, profileDirectory: dir)
+                        throw error
+                    }
+                }
+                key.requireApproval = approve
+                p.importedSSHKeys.append(key)
+            } catch { return .error(400, "Couldn't import \(url.path): \(error)") }
+            let r = await saved(p)
+            if r.status != 200, let key = p.importedSSHKeys.last { Self.removeImportedSSHKey(key, for: p, profileDirectory: dir) }
+            return r
+        case ("POST", let id):
+            guard let i = p.importedSSHKeys.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else {
+                return .error(404, "No such key")
+            }
+            guard case .bool(let approve)? = body["requireApproval"] else { return .error(400, "requireApproval required") }
+            p.importedSSHKeys[i].requireApproval = approve
+            return await saved(p)
+        case ("DELETE", let id) where !id.isEmpty:
+            guard let i = p.importedSSHKeys.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else {
+                return .error(404, "No such key")
+            }
+            let key = p.importedSSHKeys.remove(at: i)
+            let r = await saved(p)
+            if r.status == 200 { Self.removeImportedSSHKey(key, for: p, profileDirectory: dir) }
+            return r
+        default:
+            return .error(405, "Method not allowed")
+        }
+    }
+}

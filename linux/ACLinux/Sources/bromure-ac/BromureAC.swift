@@ -11,7 +11,7 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Cloud.self, Gateway.self, LANHelperCommand.self, Admin.self, StopPost.self])
+        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Cloud.self, Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self])
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)

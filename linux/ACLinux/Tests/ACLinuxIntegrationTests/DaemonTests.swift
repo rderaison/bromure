@@ -442,6 +442,50 @@ struct DaemonTests {
         _ = try w.cli("vm", "kill", "--force", "keep1")
     }
 
+    @Test("ssh-key import: a passphrase-protected key file is the guest's to sign with (its agent lists it), the passphrase in the vault")
+    func importedSSHKey() async throws {
+        var w = try World()
+        // A vault of the test's own, its key in a file there (never sealed
+        // with the user's systemd credentials).
+        w.extraEnv["BROMURE_VAULT_KEY_SOURCE"] = "file"
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let keyDir = w.root + "/keys"
+        try FileManager.default.createDirectory(atPath: keyDir, withIntermediateDirectories: true)
+        let keygen = Process()
+        keygen.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        keygen.arguments = ["-q", "-t", "ed25519", "-N", "fixture-pass", "-C", "e2e-imported", "-f", keyDir + "/id_e2e"]
+        try keygen.run()
+        keygen.waitUntilExit()
+        let pub = try String(contentsOfFile: keyDir + "/id_e2e.pub", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        #expect(try w.cli("vm", "run", "--name", "sk1", "--tool", "claude").0 == 0)
+        #expect(try w.cli("vm", "kill", "sk1").0 == 0)
+        for _ in 0..<40 where try w.state(of: "sk1") != "stopped" { try await Task.sleep(for: .milliseconds(250)) }
+        let (irc, iout, ierr) = try w.cli(["ssh-key", "import", "sk1", keyDir + "/id_e2e", "--label", "e2e", "--passphrase-stdin"],
+                                          input: "fixture-pass\n")
+        #expect(irc == 0, "import: \(ierr)")
+        #expect(iout.contains("e2e") && iout.contains("passphrase in the vault"), "\(iout)")
+        let secrets = try FileManager.default.subpathsOfDirectory(atPath: w.root + "/data")
+        #expect(secrets.contains { $0.contains("ssh-key-passphrases") }, "a vault item")
+        for f in secrets where !f.hasSuffix(".img") {
+            if let d = FileManager.default.contents(atPath: w.root + "/data/" + f) {
+                #expect(d.range(of: Data("fixture-pass".utf8)) == nil, "never in the clear: \(f)")
+            }
+        }
+
+        #expect(try w.cli("vm", "start", "sk1").0 == 0)
+        var listed = ""
+        for _ in 0..<60 {
+            listed = (try? w.cli("vm", "exec", "sk1", "--", "sh", "-c", "SSH_AUTH_SOCK=/tmp/bromure-agent.sock ssh-add -L 2>&1").1) ?? ""
+            if listed.contains(pub.split(separator: " ")[1]) { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(listed.contains(pub.split(separator: " ")[1]), "the guest's agent lists the imported key: \(listed)")
+        _ = try w.cli("vm", "kill", "--force", "sk1")
+    }
+
     @Test("POST /sessions/<workspace>/tab: agentd opens and closes the tab (tmux windows, read back from tabs.txt)")
     func tabs() async throws {
         let w = try World()

@@ -63,6 +63,13 @@ extension Daemon {
         }
         // The SSH key's "ask before use" gate is the host agent's.
         if steps.sshGate { mitm.sshAgent.setKeys(Self.loadAgentKeys(for: new, store: profileStore), for: new.id) }
+        // The imported and host-agent keys' gates too (a key taken off stays
+        // loaded, and gated, until the restart).
+        if steps.importedKeys {
+            mitm.sshAgent.setImportedKeyApprovals(
+                Self.liveImportedKeyApprovals(running: mitm.sshAgent.importedKeyApprovals(for: new.id), to: new), for: new.id)
+            mitm.sshAgent.setHostAgentKeys(Self.hostAgentKeys(new), for: new.id)
+        }
         // Applied only once all of it is: a restage that failed is done
         // again on the next refresh.
         if steps.restage, !(await pushLiveCredentials(rec, new)) { return }
@@ -72,7 +79,7 @@ extension Daemon {
     /// Which of a live refresh's steps an edit from `old` (nil: unknown)
     /// to `new` needs.
     struct LiveSteps: Equatable {
-        var routing = true, sshGate = true, restage = true
+        var routing = true, sshGate = true, importedKeys = true, restage = true
     }
 
     // @port-skip linux-only: applyLiveSessionRefresh's conditions, as a function
@@ -80,6 +87,7 @@ extension Daemon {
         guard let old else { return LiveSteps() }
         return LiveSteps(routing: routingChanged(from: old, to: new),
                          sshGate: old.sshKeyRequiresApproval != new.sshKeyRequiresApproval,
+                         importedKeys: old.importedSSHKeys != new.importedSSHKeys,
                          restage: Profile.sessionRefreshAffectingChange(from: old, to: new))
     }
 

@@ -85,6 +85,11 @@ final class MitmProxy: @unchecked Sendable {
     /// The workspaces' SSH agent (macOS: MitmEngine.sshAgent): their keys
     /// stay on the host; guests sign through vsock 8444.
     let sshAgent: SSHAgentServer
+    /// Each workspace's own ssh-agent process, its imported keys loaded
+    /// (macOS: MitmEngine.sshAgents; DaemonSSHKeys.swift).
+    let sshAgents = NIOLockedValueBox<[UUID: WorkspaceSSHAgent]>([:])
+    /// Where their sockets go: the daemon's 0700 runtime directory.
+    let sshAgentDirectory = NIOLockedValueBox<String>(NSTemporaryDirectory())
     /// AWS requests re-signed with the real keys (macOS: MitmEngine.awsResigner).
     let awsResigner: AWSResigner
     /// Credentials the guest mints through the proxy: replaced by fakes in
@@ -171,6 +176,9 @@ final class MitmProxy: @unchecked Sendable {
         swapper = TokenSwapper(consent: broker)
         awsCreds = AWSCredentialServer(consent: broker)
         sshAgent = SSHAgentServer(consent: broker)
+        // A gone daemon's agents (and their keys) go before any of ours
+        // starts (macOS: the engine's reapOrphans); never in a test run.
+        if !isTestRun() { WorkspaceSSHAgent.reapOrphansOfGoneDaemons() }
         awsResigner = AWSResigner(credServer: awsCreds)
         kubeTrust = KubeUpstreamTrust(extraRoots: extraRoots)
         // The user's logins (the support folder), except in a test run: a

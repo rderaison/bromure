@@ -54,6 +54,8 @@ extension Daemon {
             switch sub[0] {
             case "policy":
                 r = ProfileSubRoutes.policyRevisionsRoute(directory: profileStore.profileDirectory(for: prof), method: method, sub: sub)
+            case "ssh-keys":
+                return await sshKeysRoute(prof, method: method, sub: sub, body: body)
             case "proposals", "openshell-allow", "sandbox-path":
                 r = await Self.advisorSubRoute(prof.id, method: method, sub: sub,
                                                body: body.foundationObject as? [String: Any] ?? [:])
@@ -111,6 +113,10 @@ extension Daemon {
             try profileStore.delete(p)
         } catch {
             return ["ok": false, "error": "Couldn't delete '\(p.name)': \(error.localizedDescription)"]
+        }
+        // Its imported keys' passphrases leave the vault with it.
+        for key in p.importedSSHKeys where key.hasPassphrase && !key.filename.isEmpty {
+            PassphraseKeychain.delete(profileID: p.id, filename: key.filename)
         }
         // As the sidebar's own delete does: its cluster access goes too.
         await MainActor.run { SessionStores.shared?.kubeEngine?.workspaceDeleted(p.id) }

@@ -24,26 +24,28 @@ extension DaemonGlobalSuites {
             var old = Profile(name: "w", tool: .claude, authMode: .token)
             old.apiKey = Self.realA
             #expect(Daemon.liveSteps(from: nil, to: old) == .init(), "unknown (a restarted daemon): everything")
-            #expect(Daemon.liveSteps(from: old, to: old) == .init(routing: false, sshGate: false, restage: false))
+            #expect(Daemon.liveSteps(from: old, to: old) == .init(routing: false, sshGate: false, importedKeys: false, restage: false))
             func steps(_ edit: (inout Profile) -> Void) -> Daemon.LiveSteps {
                 var new = old
                 edit(&new)
                 return Daemon.liveSteps(from: old, to: new)
             }
             // Cosmetic and trace-only edits: nothing (the trace is the edit host's).
-            #expect(steps { $0.name = "renamed" } == .init(routing: false, sshGate: false, restage: false))
-            #expect(steps { $0.traceLevel = .activity } == .init(routing: false, sshGate: false, restage: false))
+            #expect(steps { $0.name = "renamed" } == .init(routing: false, sshGate: false, importedKeys: false, restage: false))
+            #expect(steps { $0.traceLevel = .activity } == .init(routing: false, sshGate: false, importedKeys: false, restage: false))
             // A credential, a variable, a policy: the restage only.
-            #expect(steps { $0.apiKey = Self.realB } == .init(routing: false, sshGate: false, restage: true))
+            #expect(steps { $0.apiKey = Self.realB } == .init(routing: false, sshGate: false, importedKeys: false, restage: true))
             #expect(steps { $0.environmentVariables = [EnvironmentVariable(name: "X", value: "1")] }
-                        == .init(routing: false, sshGate: false, restage: true))
+                        == .init(routing: false, sshGate: false, importedKeys: false, restage: true))
             #expect(steps { $0.manualTokens = [ManualToken(name: "s", realValue: Self.realStripe, envVarName: "S", hostFilters: [])] }
-                        == .init(routing: false, sshGate: false, restage: true))
+                        == .init(routing: false, sshGate: false, importedKeys: false, restage: true))
             #expect(steps { $0.promptInjection.detectSourceInjection.toggle() }.restage)
             // The SSH key's gate: the agent only.
-            #expect(steps { $0.sshKeyRequiresApproval.toggle() } == .init(routing: false, sshGate: true, restage: false))
+            #expect(steps { $0.sshKeyRequiresApproval.toggle() } == .init(routing: false, sshGate: true, importedKeys: false, restage: false))
+            // An imported key added, or its gate: the agent server's gates.
+            #expect(steps { $0.importedSSHKeys = [ImportedSSHKey(label: "k", filename: "f", requireApproval: true)] }.importedKeys)
             // The local engine: the route, and the restage (its env and files).
-            #expect(steps { $0.localEngineAPIKey = "k" } == .init(routing: true, sshGate: false, restage: true))
+            #expect(steps { $0.localEngineAPIKey = "k" } == .init(routing: true, sshGate: false, importedKeys: false, restage: true))
             #expect(steps { $0.activeModelID = "some/model" }.routing)
         }
 
