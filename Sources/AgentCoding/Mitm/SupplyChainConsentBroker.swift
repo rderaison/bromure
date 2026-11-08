@@ -423,3 +423,6 @@ public actor SupplyChainConsentBroker {
         denies.removeAll()
     }
 }
+
+/// The answers the proxy's artifact checks ask for (SupplyChainProxy).
+extension SupplyChainConsentBroker: SupplyChainConsenting {}
