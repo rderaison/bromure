@@ -54,6 +54,7 @@
     "Sources/AgentCoding/GuestExecError.swift",
     "Sources/AgentCoding/GuestLivenessBeat.swift",
     "Sources/AgentCoding/GuestMCPShims.swift",
+    "Sources/AgentCoding/GuestOutboxReports.swift",
     "Sources/AgentCoding/GuestPorts.swift",
     "Sources/AgentCoding/GuestSandboxStatus.swift",
     "Sources/AgentCoding/GuestURLGate.swift",

@@ -456,8 +456,12 @@ public actor Daemon {
     }
 
     /// A VM's `/state` / `/vms` entry: the record, and for a running VM what
-    /// its agentd reports in the outbox: the tab roster (a fat client mounts
-    /// a terminal once it's non-empty: tmux is up) and its vitals.
+    /// macOS's entry carries: its workspace's fields (tool, folders, network
+    /// mode, base image, cluster), its disk, and what its agentd reports in
+    /// the outbox: the tab roster (a fat client mounts a terminal once it's
+    /// non-empty: tmux is up), its vitals, its listening ports and its
+    /// docker state (GuestOutboxReports, as macOS's outbox poll reads them).
+    // partial: no fusion fields (fusionConfigurable/fusionEngaged: no fusion on Linux)
     // @port-skip linux-only: the per-VM half of ACAppDelegate.automationVMList (VMRecord.json, GuestOutbox)
     func vmEntry(_ rec: VMRecord) -> JSONValue {
         guard case .object(var o) = rec.json else { return rec.json }
@@ -467,7 +471,56 @@ public actor Daemon {
         o["tabs"] = .array(GuestOutbox.parseRoster(GuestOutbox.read(outbox + "tabs.txt") ?? "").map(GuestOutbox.tabJSON))
         for (k, v) in GuestOutbox.vitalsJSON(GuestOutbox.read(outbox + "vmstat.txt") ?? "") { o[k] = v }
         o["guestUnresponsive"] = .bool(guestSilent.contains(rec.id))
+        o["kubeClusterID"] = .string(rec.kube ?? "")
+        if let p = existingProfile(for: rec) {
+            o["tool"] = .string(p.tool.rawValue)
+            o["mounts"] = .array(p.folderPaths.map(JSONValue.string))
+            o["networkMode"] = .string(p.networkMode.rawValue)
+            o["baseImageVersion"] = .string(p.baseImageVersionAtClone ?? "unknown")
+        }
+        let disk = vmDir(rec.id) + "/disk.raw"
+        var st = stat()
+        o["diskPath"] = .string(disk)
+        o["diskAllocatedBytes"] = .number(stat(disk, &st) == 0 ? Double(st.st_blocks) * 512 : 0)
+        for (k, v) in Self.outboxReports(outbox) { o[k] = v }
         return .object(o)
+    }
+
+    /// The guest's listening ports and docker state from its outbox, as
+    /// macOS's entry carries them (RunningSession's mirrors: a container's
+    /// stats and arch merged by short id).
+    // @port-skip linux-only: RunningSession.listeningPorts / dockerContainers… mirrors, read from the outbox per entry
+    static func outboxReports(_ outbox: String) -> [String: JSONValue] {
+        func read(_ name: String) -> String { GuestOutbox.read(outbox + name) ?? "" }
+        let stats = Dictionary(GuestOutboxReports.dockerStats(read("docker-stats.txt")).map { (String($0.id.prefix(12)), $0) },
+                               uniquingKeysWith: { a, _ in a })
+        let arch = Dictionary(GuestOutboxReports.dockerArch(read("docker-arch.txt")).map { (String($0.id.prefix(12)), $0.arch) },
+                              uniquingKeysWith: { a, _ in a })
+        let containers = GuestOutboxReports.dockerContainers(read("docker.txt")).map { c -> JSONValue in
+            var c = c
+            if let s = stats[c.shortID] { c.cpuPerc = s.cpu; c.memUsage = s.mem }
+            if let a = arch[c.shortID] { c.arch = a }
+            return ["id": .string(c.id), "name": .string(c.name), "image": .string(c.image), "status": .string(c.status),
+                    "state": .string(c.state), "ports": .string(c.ports), "runningFor": .string(c.runningFor),
+                    "mounts": .string(c.mounts), "cpuPerc": .string(c.cpuPerc), "memUsage": .string(c.memUsage),
+                    "arch": .string(c.arch)]
+        }
+        return [
+            "listeningPorts": .array(GuestOutboxReports.listeningPorts(read("ports.txt")).map {
+                ["proto": .string($0.proto), "addr": .string($0.addr), "port": .number(Double($0.port)),
+                 "process": .string($0.process)]
+            }),
+            "dockerContainers": .array(containers),
+            "dockerImages": .array(GuestOutboxReports.dockerImages(read("docker-images.txt")).map {
+                ["id": .string($0.id), "repository": .string($0.repository), "tag": .string($0.tag),
+                 "size": .string($0.size), "created": .string($0.created)]
+            }),
+            "dockerVolumes": .array(GuestOutboxReports.dockerVolumes(read("docker-volumes.txt")).map {
+                ["name": .string($0.name), "driver": .string($0.driver), "mountpoint": .string($0.mountpoint),
+                 "createdAt": .string($0.createdAt), "size": .string($0.size)]
+            }),
+            "dockerBinfmt": .array(GuestOutboxReports.dockerBinfmt(read("docker-binfmt.txt")).map(JSONValue.string)),
+        ]
     }
 
     /// `/state` as the push compares it: without the VMs' `uptimeSeconds`.
@@ -535,7 +588,7 @@ public actor Daemon {
         return .object(Self.withMachines(body))
     }
 
-    // partial: entries lack tabs, stats, ports, docker, disk and kube fields (see VMRecord.json)
+    // partial: entries lack fusion fields (no fusion on Linux)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/vms"): h=b80678b83121852e @7dd92fdf
     func listVMs() -> ControlResponse {
         let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
@@ -667,9 +720,9 @@ public actor Daemon {
         }
     }
 
-    // partial: the entry is VMRecord.json, a subset of macOS's vmEntry
+    // partial: the entry has no fusion fields (vmEntry)
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "GET": h=a05dae914d2f170b @7dd92fdf
-    func getVM(_ rec: VMRecord) -> ControlResponse { ControlResponse(200, withIP(rec).json) }
+    func getVM(_ rec: VMRecord) -> ControlResponse { ControlResponse(200, vmEntry(withIP(rec))) }
 
     /// The record's machine type: Firecracker is the only backend.
     static let machineType = "firecracker"
