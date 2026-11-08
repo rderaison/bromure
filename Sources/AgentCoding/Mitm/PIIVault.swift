@@ -30,8 +30,13 @@ final class PIIVault: @unchecked Sendable {
     }
 
     private static func loadSecret(for id: UUID) -> Data {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BromureAC/pii", isDirectory: true)
+        // A test run keeps its keys in a folder of the process's own, never
+        // the user's.
+        let dir = isTestRun()
+            ? FileManager.default.temporaryDirectory
+                .appendingPathComponent("bromure-test-pii-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("BromureAC/pii", isDirectory: true)
         let file = dir.appendingPathComponent("\(id.uuidString).key")
         if let d = try? Data(contentsOf: file), d.count == 32 { return d }
         var bytes = [UInt8](repeating: 0, count: 32)

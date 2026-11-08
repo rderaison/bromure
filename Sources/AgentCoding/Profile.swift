@@ -3715,6 +3715,9 @@ public final class ProfileStore {
         self.reaper = reaper
         if let rootDir {
             self.rootDir = rootDir
+        } else if isTestRun() {
+            self.rootDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("bromure-test-profiles-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         } else {
             let appSupport = FileManager.default.urls(
                 for: .applicationSupportDirectory, in: .userDomainMask
