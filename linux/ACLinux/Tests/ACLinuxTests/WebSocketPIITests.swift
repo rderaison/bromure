@@ -31,13 +31,18 @@ struct WebSocketPIITests {
         } + [WSFrame.encode(opcode: WSFrame.text, payload: Data(#"{"type":"content_block_stop","index":0}"#.utf8), masked: false)]
     }
 
-    /// The deltas' text in what reached the client.
+    /// The deltas' text in what reached the client, its messages reassembled
+    /// (one the restorer left unchanged goes through in its original
+    /// fragments: whether it's changed depends on the key order its JSON is
+    /// written back in, which varies from run to run).
     static func text(_ wire: Data) -> String {
         let r = WSFrameReader()
         r.feed(wire)
+        var assembler = WSMessageAssembler()
         var out = ""
         while let f = r.next() {
-            let o = try? JSONSerialization.jsonObject(with: f.payload) as? [String: Any]
+            guard !f.isControl, case .complete(_, let payload, _) = assembler.add(f) else { continue }
+            let o = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
             out += (o?["delta"] as? [String: Any])?["text"] as? String ?? ""
         }
         return out
