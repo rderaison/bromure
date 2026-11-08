@@ -35,8 +35,11 @@ struct ConsentPromptTests {
         install()
         let a = UUID(), b = UUID()
         let p = ConsentPanelPresenter.shared
+        // Each `async let` child starts off the main actor and hops onto it,
+        // so they can reach the queue in any order: a1 is on screen first.
         async let r1 = p.present(profileID: a, title: "a1", message: "", choices: ["Yes", "No"], denyIndex: 1,
                                  style: .informational, detailText: nil, timeout: 30)
+        for _ in 0..<100 where !p.shownTitles.contains("a1") { try await Task.sleep(nanoseconds: 10_000_000) }
         async let r2 = p.present(profileID: a, title: "a2", message: "", choices: ["Yes", "No"], denyIndex: 1,
                                  style: .informational, detailText: nil, timeout: 30)
         async let r3 = p.present(profileID: b, title: "b1", message: "", choices: ["Yes", "No"], denyIndex: 1,
