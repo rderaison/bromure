@@ -155,4 +155,42 @@ struct PIIQAFixesTests {
         let third = await detector.detectIncremental(grown)
         #expect(third.cached && third.modelUnits == 0)
     }
+
+    // MARK: The restorer's buffers
+
+    @Test("A reply past the restorer's cap passes through as it came, JSON or one long SSE event")
+    func restorerCap() {
+        let vault = PIIVault(secret: Data(repeating: 4, count: 32))
+        let s = vault.learn("margaret.holloway@example.org", label: .email).surrogate
+        let big = Data(repeating: 0x20, count: PIIResponseRestorer.maxBuffered)
+        let json = PIIResponseRestorer(vault: vault, contentType: "application/json")
+        let head = Data("{\"text\":\"\(s)\",\"pad\":\"".utf8)
+        #expect(json.feed(head).isEmpty)
+        let passed = json.feed(big)
+        #expect(passed == head + big, "the held body goes on as it came")
+        #expect(json.feed(Data("x\"}".utf8)) == Data("x\"}".utf8) && json.finish().isEmpty)
+        let sse = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        let event = Data("data: {\"text\":\"\(s)".utf8)
+        #expect(sse.feed(event).isEmpty)
+        #expect(sse.feed(big) == event + big)
+        #expect(sse.feed(Data("\"}\n\n".utf8)) == Data("\"}\n\n".utf8))
+    }
+
+    @Test("An SSE boundary split across chunks still ends the event; a long event is read in linear time")
+    func restorerBoundaryScan() {
+        let vault = PIIVault(secret: Data(repeating: 4, count: 32))
+        let s = vault.learn("margaret.holloway@example.org", label: .email).surrogate
+        let r = PIIResponseRestorer(vault: vault, contentType: "text/event-stream")
+        var out = r.feed(Data("data: {\"type\":\"x\",\"text\":\"\(s)\"}\r\n\r".utf8))
+        #expect(out.isEmpty)
+        out += r.feed(Data("\n".utf8))
+        #expect(String(decoding: out, as: UTF8.self).contains("margaret.holloway@example.org"))
+        // 4 MiB of one event in 1 KiB pieces: each piece is searched, not the
+        // whole event again (quadratic, this took minutes).
+        let t = Date()
+        let piece = Data(repeating: 0x61, count: 1024)
+        _ = r.feed(Data("data: {\"type\":\"x\",\"pad\":\"".utf8))
+        for _ in 0..<4096 { _ = r.feed(piece) }
+        #expect(Date().timeIntervalSince(t) < 5)
+    }
 }
