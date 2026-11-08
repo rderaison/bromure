@@ -80,52 +80,7 @@ for s in "${SUITES[@]}"; do
 done
 
 # The verdict.
-python3 - "$OUT" "$HERE/expected-failures.tsv" "${SUITES[@]}" <<'PY'
-import os, re, sys
-out, tsv, suites = sys.argv[1], sys.argv[2], sys.argv[3:]
-expected = []
-for line in open(tsv):
-    if line.startswith("#") or not line.strip():
-        continue
-    suite, rx, count, why = line.rstrip("\n").split("\t")
-    expected.append((suite, re.compile(rx), int(count), why))
-status, unexpected_pass = 0, 0
-print("\n%-15s %4s %6s %6s %10s %6s" % ("suite", "rc", "ok", "FAIL", "unexpected", "SKIP"))
-for s in suites:
-    lines = open(os.path.join(out, s + ".log"), errors="replace").read().splitlines()
-    rc = next((l.split("=", 1)[1] for l in reversed(lines) if l.startswith("SUITE_RC=")), "none")
-    ok = sum(1 for l in lines if re.match(r"\s*ok\s", l))
-    fails = [l.strip() for l in lines if re.match(r"\s*FAIL\s", l)]
-    skips = sum(1 for l in lines if re.match(r"\s*SKIP\s", l))
-    mine = [e for e in expected if e[0] == s]
-    unexpected = [f for f in fails if not any(e[1].search(f) for e in mine)]
-    print("%-15s %4s %6d %6d %10d %6d" % (s, rc, ok, len(fails), len(unexpected), skips))
-    for f in unexpected:
-        print("    UNEXPECTED " + f[:160])
-    if unexpected or (rc not in ("0", "1", "77") ) or (rc == "1" and not fails):
-        status = max(status, 1)
-        if rc == "1" and not fails:
-            print("    the suite exited 1 without a FAIL line")
-        if rc not in ("0", "1", "77"):
-            print("    the suite did not finish normally (rc %s)" % rc)
-print("\nexpected failures:")
-for suite, rx, count, why in expected:
-    if suite not in suites:
-        continue
-    lines = open(os.path.join(out, suite + ".log"), errors="replace").read().splitlines()
-    seen = sum(1 for l in lines if rx.search(l.strip()) or rx.search(l))
-    if seen == count:
-        verdict = "expected (%d)" % seen
-    elif seen < count:
-        verdict = "UNEXPECTED PASS: %d of %d still fail -- update expected-failures.tsv" % (seen, count)
-        unexpected_pass = 1
-    else:
-        verdict = "seen %d times, expected %d" % (seen, count)
-        status = max(status, 1)
-    print("  %-14s %-58s %s" % (suite, rx.pattern[:58], verdict))
-    print("  %-14s %s" % ("", why[:110]))
-sys.exit(status if status else (2 if unexpected_pass else 0))
-PY
+PYTHONDONTWRITEBYTECODE=1 python3 -I "$HERE/verdict.py" "$OUT" "$HERE/expected-failures.tsv" "${SUITES[@]}"
 V=$?
 log "total $(( $(date +%s) - T0 ))s; logs in $OUT; exit $V"
 exit $V

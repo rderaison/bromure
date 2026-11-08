@@ -86,6 +86,8 @@ if [ "${BROMURE_UNIT_KVM:-0}" = 1 ]; then
 else
   echo "skipped (BROMURE_UNIT_KVM=1 to run)"
 fi
+step "guest suites: the verdict on fixture logs (no VM)"
+"$ROOT/linux/guest-suites/test-verdict.sh"
 step "guest suites (opt-in: BROMURE_GUEST_SUITES=1, ~4.5 min)"
 # test_sentry -> test_boot -> test_sandbox -> test_net_flow -> test_strict ->
 # test_lockdown --raise in a daemon VM; expected failures are listed in
