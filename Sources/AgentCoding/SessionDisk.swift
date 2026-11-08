@@ -171,18 +171,9 @@ public final class SessionDisk {
         UserDefaults.standard.object(forKey: "vm.homeImageGB") as? Int
     }
 
-    /// A new home's size for the free space it will draw on:
-    ///   < 64 GB free  →  8 GB
-    ///   < 128 GB free → 12 GB
-    ///   otherwise     → 16 GB (`defaultHomeImageGB`)
-    /// 8 GB is the floor (`ProfileEditorView.minHomeGB`): the agents' CLIs, a
-    /// toolchain and one project's dependencies already take several.
+    /// A new home's size for the free space it will draw on (HomeImageSizing).
     public static func scaledHomeImageGB(freeBytes: UInt64?) -> Int {
-        guard let freeBytes else { return defaultHomeImageGB }
-        let gb = freeBytes >> 30
-        if gb < 64 { return 8 }
-        if gb < 128 { return 12 }
-        return defaultHomeImageGB
+        HomeImageSizing.scaledGB(freeBytes: freeBytes)
     }
 
     /// Free space where `url` is, or at its nearest existing parent (a new
@@ -196,7 +187,7 @@ public final class SessionDisk {
     }
 
     /// The largest a new home gets, GiB, unless `vm.homeImageGB` says otherwise.
-    public static let defaultHomeImageGB = 16
+    public static let defaultHomeImageGB = HomeImageSizing.defaultGB
     /// A legacy (virtiofs) home is copied into a fresh image on its next
     /// boot, and that home can hold far more than a new one starts with: a
     /// workspace with no size of its own migrates into the size the image
