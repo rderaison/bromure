@@ -1012,9 +1012,11 @@ final class DelegationEngine {
     /// withholds it (the message stays on the record, marked blocked).
     /// Files are copied into the recipient's inbox first.
     @discardableResult
+    /// `attachments`: files the user dropped (an answer from the board),
+    /// landed in the recipient's inbox once the text has passed the scan.
     func post(_ delegationID: UUID, from: DelegationMessage.Party, kind: DelegationMessage.Kind,
               text: String, answering: UUID? = nil, files: [String] = [],
-              landed: [String] = []) async throws -> DelegationMessage {
+              landed: [String] = [], attachments: [DroppedFile] = []) async throws -> DelegationMessage {
         guard var d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DelegationRefusal("Nothing to say.") }
@@ -1070,6 +1072,11 @@ final class DelegationEngine {
         }
         // Files a remote parent already landed here for this message.
         if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+        // The user's own files: after the scan, like a sender's files above --
+        // a withheld message must not have left them in the inbox.
+        if !attachments.isEmpty {
+            m.files = (m.files ?? []) + (try await landAttachments(attachments, for: d))
+        }
         // Cancelled or closed while the scan or the copy ran: it stays so —
         // a deliver recorded now made it delivered again.
         if kind != .note, let now = store.delegation(delegationID),
@@ -1109,9 +1116,8 @@ final class DelegationEngine {
                 attachments: [DroppedFile] = []) async throws -> DelegationMessage {
         let mine = store.delegations(parent: parentID)
         if let (d, ask) = store.message(matching: askKey, in: mine), ask.kind == .ask {
-            let landed = try await landAttachments(attachments, for: d)
             return try await post(d.id, from: party, kind: .answer, text: text, answering: ask.id,
-                                  landed: landed)
+                                  attachments: attachments)
         }
         // A question from a peer on another host: answered there.
         for link in remoteLinks() {
@@ -1398,9 +1404,19 @@ final class DelegationEngine {
         }
         let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))/answer-\(DelegationNotice.shortID(UUID()))"
         _ = try await guestExec(profileID: recipient.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+        do {
+            return try await landAttachments(files, in: dest, profileID: recipient.profileID)
+        } catch {
+            // None of a half-landed answer stays: the agent is never told of it.
+            _ = try? await guestExec(profileID: recipient.profileID, command: "rm -rf \(Self.q(dest))", timeout: 30)
+            throw error
+        }
+    }
+
+    private func landAttachments(_ files: [DroppedFile], in dest: String, profileID: UUID) async throws -> [String] {
         let op: FolderUpload.FileOp = { [weak self] dict in
             guard let self else { throw DelegationRefusal("Files can't travel without the machines.") }
-            return try await self.guestFileOp(profileID: recipient.profileID, op: dict, timeout: 600)
+            return try await self.guestFileOp(profileID: profileID, op: dict, timeout: 600)
         }
         var out: [String] = []
         for (f, name) in zip(files, Self.attachmentNames(files.map(\.name))) {
