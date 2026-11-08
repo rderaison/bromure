@@ -64,14 +64,38 @@ extension DaemonGlobalSuites {
             await d.shutdown()
         }
 
-        @Test func modulesComeOnlyFromAConfiguredCatalog() {
-            #expect(Daemon.makeSentryModuleStore(stateDir: "/nonexistent-state", env: [:]) == nil)
-            #expect(Daemon.makeSentryModuleStore(stateDir: "/nonexistent-state", env: ["BROMURE_SENTRY_CATALOG_BASE": ""]) == nil)
+        /// The catalog: none for a config made in code (tests never reach
+        /// the CDN); from the environment, the published, signed one, or
+        /// BROMURE_SENTRY_CATALOG_BASE (unsigned accepted); this host's arch.
+        @Test func modulesComeFromThePublishedCatalogOrTheConfiguredOne() {
+            #expect(Daemon.makeSentryModuleStore(stateDir: "/nonexistent-state", source: nil) == nil)
+            #expect(SentryCatalogSource.fromEnvironment([:]) == .published)
+            #expect(SentryCatalogSource.fromEnvironment(["BROMURE_SENTRY_CATALOG_BASE": ""]) == .published)
+            #expect(SentryCatalogSource.published.base == SentryModuleStore.defaultBase && SentryCatalogSource.published.signed)
+            let local = SentryCatalogSource.fromEnvironment(["BROMURE_SENTRY_CATALOG_BASE": "http://127.0.0.1:9"])
+            #expect(local.base.absoluteString == "http://127.0.0.1:9/" && !local.signed)
             let dir = (try? shortTempDir()) ?? NSTemporaryDirectory()
             defer { try? FileManager.default.removeItem(atPath: dir) }
-            let s = Daemon.makeSentryModuleStore(stateDir: dir, env: ["BROMURE_SENTRY_CATALOG_BASE": "http://127.0.0.1:9/"])
+            let s = Daemon.makeSentryModuleStore(stateDir: dir, source: local)
             #expect(s?.root.path == dir + "/sentry-modules")
             #expect(s?.base.absoluteString == "http://127.0.0.1:9/" && s?.requireSignature == false)
+            #expect(s?.arch == .host)
+            let signed = Daemon.makeSentryModuleStore(stateDir: dir, source: .published)
+            #expect(signed?.requireSignature == true && signed?.base == SentryModuleStore.defaultBase)
+            // A config made in code has none.
+            #expect(DaemonConfig(stateDir: dir, runtimeDir: dir, imageDir: dir, agentdPath: dir).sentryCatalog == nil)
+        }
+
+        /// Only a workspace with the sentry on fetches its kernels' modules
+        /// (the catalog is never asked for one without).
+        @Test func onlyASentryWorkspaceFetches() {
+            var on = Profile(name: "on", tool: .claude, authMode: .token)
+            on.kernelSentry = .bestEffort
+            var off = Profile(name: "off", tool: .claude, authMode: .token)
+            off.kernelSentry = .off
+            #expect(Daemon.sentryOn(on.id, in: [on, off]))
+            #expect(!Daemon.sentryOn(off.id, in: [on, off]))
+            #expect(!Daemon.sentryOn(UUID(), in: [on, off]), "an unknown workspace")
         }
 
         /// A launch's staging (writeCredentialFiles) puts the cached module of

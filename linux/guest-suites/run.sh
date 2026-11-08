@@ -30,6 +30,9 @@ export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state
 # logins, model settings, engine key or secrets vault (~/.local/share); the
 # image stays the user's (read only).
 export BROMURE_AC_IMAGE=${BROMURE_AC_IMAGE:-${XDG_DATA_HOME:-$HOME/.local/share}/bromure-ac/image-amd64} XDG_DATA_HOME=$W/data
+# Sentry modules from a dead local port, never the published CDN (the
+# suites build the module in the guest; tests never reach real hosts).
+export BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 T0=$(date +%s)
 log() { echo "[guest-suites $(date +%T)] $*"; }

@@ -32,6 +32,8 @@ struct DaemonTests {
             e["XDG_DATA_HOME"] = root + "/data"
             e["BROMURE_AC_IMAGE"] = Env.image
             e["BROMURE_AGENTD"] = Env.agentd
+            // Sentry modules from a dead local port, never the published CDN.
+            e["BROMURE_SENTRY_CATALOG_BASE"] = "http://127.0.0.1:9/"
             e.removeValue(forKey: "NOTIFY_SOCKET")
             e.merge(extraEnv) { _, new in new }
             return e

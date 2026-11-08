@@ -6,7 +6,7 @@ extension DaemonGlobalSuites {
     /// TEMPORARY, with DaemonSandboxGuard.swift: a workspace asking for a
     /// guest protection this server can't stage yet isn't started (409,
     /// naming it), rather than booted without it.
-    @Suite("Unenforceable sandbox refused (temporary)", .serialized)
+    @Suite("Unenforceable sandbox refused", .serialized)
     struct SandboxGuardTests {
         @Test func onlyTheSentryIsRefused() {
             var p = Profile(name: "plain", tool: .claude, authMode: .token)
@@ -18,6 +18,8 @@ extension DaemonGlobalSuites {
             for mode in [KernelSentryMode.bestEffort, .hard] {
                 p.kernelSentry = mode
                 #expect(Daemon.unenforceableProtections(p) == ["the kernel sentry (\(mode.rawValue))"], "any sentry mode")
+                // With a verified catalog for this host's arch, it starts (as on macOS).
+                #expect(Daemon.unenforceableProtections(p, sentryCatalog: true).isEmpty)
             }
         }
 

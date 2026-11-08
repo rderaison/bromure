@@ -30,6 +30,12 @@ public struct DaemonConfig: Sendable {
     /// The control socket, when not `runtimeDir/control.sock`
     /// (BROMURE_AC_CONTROL_SOCKET; multi-user: systemd's socket unit).
     public var controlSocketOverride: String?
+    /// Where the kernel sentry's modules come from: the published, signed
+    /// catalog for this host's architecture (fromEnvironment's default, as
+    /// the macOS app's), or BROMURE_SENTRY_CATALOG_BASE (a local or test
+    /// catalog, unsigned accepted). nil: none (a config made in code, as
+    /// tests' are: they never reach the CDN).
+    public var sentryCatalog: SentryCatalogSource?
 
     // @port-skip linux-only: Linux daemon configuration
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
@@ -55,6 +61,7 @@ public struct DaemonConfig: Sendable {
                 c.multiUser = env["BROMURE_AC_MULTIUSER"] == "1"
                 c.gatewayUser = env["BROMURE_AC_GATEWAY_USER"].flatMap { $0.isEmpty ? nil : $0 }
                 c.controlSocketOverride = env["BROMURE_AC_CONTROL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
+                c.sentryCatalog = SentryCatalogSource.fromEnvironment(env)
             }
     }
 
@@ -298,7 +305,7 @@ public actor Daemon {
     private init(config: DaemonConfig, passt: PasstUplink) {
         self.config = config
         self.passt = passt
-        self.sentryModules = Self.makeSentryModuleStore(stateDir: config.stateDir)
+        self.sentryModules = Self.makeSentryModuleStore(stateDir: config.stateDir, source: config.sentryCatalog)
         self.sw = InterimSwitch(uplink: passt)
         if config.multiUser {
             // The host's own addresses and every user's LAN pool, granted
@@ -1241,7 +1248,7 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
-        // TEMPORARY, until the sentry's modules are staged (DaemonSandboxGuard.swift).
+        // A protection this server can't enforce refuses the launch (DaemonSandboxGuard.swift).
         try await refuseUnenforceableSandbox(rec)
         do {
             try await launchVM(&rec, restoreFrom: restoreFrom)
@@ -1646,9 +1653,9 @@ public actor Daemon {
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
                 live[id] = l
-                // TEMPORARY, with the launch refusal (DaemonSandboxGuard.swift):
+                // As the launch refusal (DaemonSandboxGuard.swift):
                 // a VM taken back isn't stopped, but said to be unprotected.
-                if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile, staged: URL(fileURLWithPath: vmDir(rec.id) + "/meta")) }
+                if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile, staged: URL(fileURLWithPath: vmDir(rec.id) + "/meta"), sentryCatalog: sentryCatalogCached()) }
                 if reask, let pid = UUID(uuidString: id) {
                     Task { await self.quarantineAndAsk(pid, signals: []) }
                 } else {

@@ -44,7 +44,7 @@ sudo -n systemd-run -q --unit="$U" --uid="$(id -u)" --gid="$(id -g)" -p Suppleme
   -p Restart=on-failure -p RestartSec=2 -p FileDescriptorStoreMax=64 -p ExecStopPost="$BIN stop-post" \
   -p StartLimitBurst=1000 \
   --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=XDG_STATE_HOME="$XDG_STATE_HOME" \
-    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" \
+    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" --setenv=BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ \
   --setenv=BROMURE_AGENTD="$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" "$BIN" daemon || exit 1
 cli vm run --name cu >/dev/null && cli vm exec cu -- true || { echo "vm run failed"; exit 1; }
 # The uploader: one connection at a time, 1 MiB writes; "<conn> <bytes> <time>"
