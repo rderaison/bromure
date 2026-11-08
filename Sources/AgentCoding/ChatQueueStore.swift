@@ -321,6 +321,7 @@ final class ChatQueueStore: ObservableObject {
                     l[i].editable = false
                     l[i].awaitingAnswer = nil
                     l[i].delivered = true
+                    l[i].deliveredAt = Date()
                 }
             case .held:
                 // A menu or dialog is up in the tab: it waits for the user

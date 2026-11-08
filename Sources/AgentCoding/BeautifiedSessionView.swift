@@ -588,6 +588,27 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// it's still waiting to be sent. Never while held: taken back (omp's Esc)
     /// or found lost, it's waiting on Bromure again, whatever happened before.
     var agentHasIt: Bool { !held && (isDelivered || handedOver == true) }
+    /// When the agent got it (typed in by Bromure, or handed to its own
+    /// queue). Optional so an older saved queue decodes.
+    var deliveredAt: Date? = nil
+    /// How long a delivered row stays on the strip at most: the transcript
+    /// doesn't always show the turn in a form the chat recognizes while the
+    /// agent keeps working, and the row stayed for good ("Delivered — queued
+    /// by …" until the user switched sessions).
+    static let deliveredShownFor: TimeInterval = 30
+    /// Delivered long enough ago to leave the strip (`deliveredShownFor`).
+    func deliveredExpired(at now: Date) -> Bool {
+        guard agentHasIt, let at = deliveredAt else { return false }
+        return now.timeIntervalSince(at) >= Self.deliveredShownFor
+    }
+    /// The row offers Edit: never once the agent has it (it's the agent's
+    /// now; editing would send it a second time).
+    func offersEdit(alwaysEditable: Bool) -> Bool {
+        guard !sending else { return false }
+        if failure != nil { return true }
+        if agentHasIt { return false }
+        return editable || alwaysEditable
+    }
     /// Times Bromure typed it in without the agent ever taking it (typed as
     /// a dialog closed, into a screen still redrawing): put back on hold
     /// once, then shown as not delivered — never silently dropped.
@@ -1362,6 +1383,17 @@ final class BeautifiedSessionModel: ObservableObject {
             // mid-turn `queued_command`): any record written since it was
             // queued that carries the text — bar Claude's own queue log.
             if deliveredInRaw(q) { return true }
+            // Delivered a while ago and still on the strip: the agent has
+            // it, so the row goes whatever the transcript shows -- unless
+            // Bromure typed it, the agent is idle and took no turn since:
+            // that one was lost on the way in and goes back on hold (below).
+            if q.deliveredExpired(at: now) {
+                if let idle = idleSince, now.timeIntervalSince(idle) > 20,
+                   q.isDelivered, turns.count <= q.baseline, !transcriptGrew(since: q) {
+                    lost.insert(q.id); return false
+                }
+                return true
+            }
             // Idle a while and still not in the transcript: the agent never
             // took it (cleared, interrupted) — stop showing it. Unless
             // Bromure typed it and the agent took NO turn since: then it
@@ -1377,6 +1409,7 @@ final class BeautifiedSessionModel: ObservableObject {
           }
           for i in queued.indices where lost.contains(queued[i].id) {
               queued[i].delivered = nil
+              queued[i].deliveredAt = nil
               queued[i].editable = true
               queued[i].held = true
               queued[i].redeliveries = (queued[i].redeliveries ?? 0) + 1
@@ -2800,6 +2833,7 @@ final class BeautifiedSessionModel: ObservableObject {
                     self.queueStore.update(key) { l in
                         guard let i = l.firstIndex(where: { $0.id == entry.id }) else { return }
                         l[i].handedOver = true
+                        l[i].deliveredAt = Date()
                     }
                     self.sending = false
                     // The turn may already be there: an agent that had just
@@ -6516,9 +6550,23 @@ struct QueuedMessagesStrip: View {
                                                comment: "queued message held behind a menu no card shows"), agent)
     }
 
+    /// The rows on show: a delivered one leaves after
+    /// `QueuedMessage.deliveredShownFor` even if no chat's reconcile has run
+    /// (one off stage, the paused view) -- checked every few seconds.
+    nonisolated static func shown(_ queued: [QueuedMessage], at now: Date) -> [QueuedMessage] {
+        queued.filter { !$0.deliveredExpired(at: now) }
+    }
+
     var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            let rows = Self.shown(queued, at: context.date)
+            if !rows.isEmpty { strip(rows) }
+        }
+    }
+
+    private func strip(_ rows: [QueuedMessage]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(queued) { q in
+            ForEach(rows) { q in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: q.failure != nil ? "exclamationmark.triangle"
                           : q.waitingOnDialog ? "hand.raised"
@@ -6572,7 +6620,7 @@ struct QueuedMessagesStrip: View {
                         }
                     }
                     Spacer(minLength: 4)
-                    if q.editable || q.failure != nil || alwaysEditable, !q.sending {
+                    if q.offersEdit(alwaysEditable: alwaysEditable) {
                         Button(NSLocalizedString("Edit", comment: "queued message")) { onEdit(q.id) }
                             .buttonStyle(.link)
                             .font(.system(size: 11))
