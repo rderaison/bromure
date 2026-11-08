@@ -9,7 +9,7 @@ extension Daemon {
     /// read before building: a mutation landing during the build marks it
     /// stale (conservative), never a stale build fresh. The TTL is under the
     /// feed's 0.5 s wake, so a lone subscriber still sees each change.
-    // @port ACAutomationServer.stampedStateSnapshot() h=ad08f3388e67aed5 @61818379
+    // @port ACAutomationServer.stampedStateSnapshot() h=9092e4ffef3827ea @f127f8ab
     func cachedStateBody() async -> JSONValue {
         let generation = StateGeneration.current
         if let c = stateCache, c.generation == generation, ContinuousClock.now - c.at < .milliseconds(400) {

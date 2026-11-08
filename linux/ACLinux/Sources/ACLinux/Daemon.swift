@@ -413,6 +413,7 @@ public actor Daemon {
         switch (req.method, path) {
         case ("GET", "/health"): return health()
         case ("GET", "/storage/defaults"): return storageDefaults()
+        case ("GET", let p) where p == "/security-timeline": return await securityTimelineHistory(req.path)
         case ("GET", "/state"):
             // Only the fat client stamps its polls: it is connected, and can
             // show consent prompts (RemoteConsent.route).
@@ -484,6 +485,22 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/health"): h=ec3227f904b323b7 @f127f8ab
     func health() -> ControlResponse {
         ControlResponse(200, ["status": "ok", "service": "bromure-ac-automation", "debugEnabled": false])
+    }
+
+    /// `GET /security-timeline?hours=N` (default 24): this host's rows of the
+    /// last N hours, for a fat client's Security window (the live mirror in
+    /// /state carries only the most recent), and which run numbered them.
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=38a02ee17b6a23e7 @f127f8ab
+    func securityTimelineHistory(_ fullPath: String) async -> ControlResponse {
+        var hours = 24
+        if let q = fullPath.split(separator: "?", maxSplits: 1).dropFirst().first {
+            for kv in q.split(separator: "&") {
+                let pair = kv.split(separator: "=", maxSplits: 1)
+                if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
+            }
+        }
+        let (rows, epoch) = await MainActor.run { (SecurityTimeline.shared.historyRows(hours: hours), SecurityTimeline.shared.epoch) }
+        return ControlResponse(200, ["rows": JSONValue(foundation: rows) ?? .array([]), "epoch": .string(epoch)])
     }
 
     /// `GET /storage/defaults`: the sizes a workspace made here gets when it
@@ -700,6 +717,15 @@ public actor Daemon {
                 .merging([
                     "subscriptions": JSONValue(foundation: Daemon.subscriptionStatus(mitm: mitmProxy)) ?? .object([:]),
                     "securityTimeline": JSONValue(foundation: Daemon.securityTimelineRows()) ?? .array([]),
+                    // The oldest row this host still holds: a fat client drops
+                    // fetched history older than that (the host pruned it).
+                    "securityTimelineOldest": SecurityTimeline.shared.oldestRetained
+                        .map { .number($0.timeIntervalSince1970) } ?? .null,
+                    // The same, in the host's own order (a clock set back makes
+                    // times go backwards): its first row's number, and whose.
+                    "securityTimelineOldestSeq": SecurityTimeline.shared.oldestRetainedSeq
+                        .map { .number(Double($0)) } ?? .null,
+                    "securityTimelineEpoch": .string(SecurityTimeline.shared.epoch),
                     "kubeClusters": JSONValue(foundation: SessionStores.shared?.kube.snapshot() ?? ["clusters": [], "status": [:]]) ?? .object([:]),
                 ]) { a, _ in a },
                     LinuxSessionHost.shared?.tabStatuses() ?? [:])
