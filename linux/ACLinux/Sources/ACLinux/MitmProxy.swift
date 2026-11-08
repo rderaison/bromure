@@ -1242,11 +1242,15 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                         scheme: tls ? "wss" : "ws")
                                     let compression = OpenShellWebSocket.negotiatedCompression(
                                         responseHeader: String(decoding: responseHead, as: UTF8.self))
+                                    let onBinaryViolation = ProxyPolicy.webSocketViolation(
+                                        profileID: self.profileID, host: host, port: port, path: Self.requestTarget(req),
+                                        scheme: tls ? "wss" : "ws", method: "WEBSOCKET_BINARY")
                                     self.wsGate = OpenShellWebSocket.ClientStream(compression: compression, decide: { text in
                                         let v = messagePolicy(text)
                                         if case .deny(let why) = v { onViolation(why, true) }
                                         return v
-                                    }, onAudit: { onViolation($0, false) }, transform: wsPolicy.messageTransform)
+                                    }, onAudit: { onViolation($0, false) }, transform: wsPolicy.messageTransform,
+                                       decideBinary: wsPolicy.binaryPolicy.map { ProxyPolicy.reportingBinary($0, onBinaryViolation) })
                                     var held = Data()
                                     for p in self.pending { held.append(contentsOf: p.readableBytesView) }
                                     if !held.isEmpty { self.gateToUpstream(held, guest: channel, upstream: up) }

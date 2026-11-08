@@ -97,6 +97,61 @@ struct OpenShellWebSocketRouteTests {
         #expect(up.frames.withLockedValue { $0 } == [query], "the mutation never went up")
     }
 
+    /// Binary messages are judged too (WEBSOCKET_BINARY): a route whose
+    /// rules take only text ends the session at the first one, which never
+    /// goes up; the read-write preset takes them.
+    @Test func aBinaryMessageIsJudged() async throws {
+        func route(_ rules: String) -> String {
+            """
+            version: 1
+            network_policies:
+              bin:
+                endpoints:
+                  - host: ws.example
+                    port: 80
+                    protocol: websocket
+                    enforcement: enforce
+            \(rules)
+            """
+        }
+        let textOnly = route(["        rules:",
+                              "          - allow: { method: GET, path: \"/graphql\" }",
+                              "          - allow: { method: WEBSOCKET_TEXT, path: \"/graphql\" }"].joined(separator: "\n"))
+        let readWrite = route("        access: read-write")
+        for (yaml, allowed) in [(textOnly, false), (readWrite, true)] {
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+            let pid = UUID()
+            proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [],
+                                                       egressPolicy: EgressPolicy(openShell: try OpenShellPolicy.parse(yaml))),
+                                      for: pid)
+            let ip = try #require(Daemon.primaryIPv4())
+            let up = try WSUpstream(host: ip)
+            defer { up.stop() }
+            proxy.routeAllTo = (ip, up.port)
+            let w = try await Wire(proxy: proxy, pid: pid)
+            defer { w.close() }
+            w.send(Self.upgrade)
+            #expect(String(decoding: w.read(), as: UTF8.self).hasPrefix("HTTP/1.1 101"))
+            let text = WSFrame.encode(opcode: WSFrame.text, payload: Data("hi".utf8), masked: true)
+            let bin = WSFrame.encode(opcode: WSFrame.binary, payload: Data([0, 1, 2, 3, 0xFF]), masked: true)
+            w.send(text)
+            for _ in 0..<300 where up.frames.withLockedValue({ $0 }).isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+            w.send(bin)
+            if allowed {
+                for _ in 0..<300 where up.frames.withLockedValue({ $0 }).count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+                #expect(up.frames.withLockedValue { $0 } == [text, bin], "read-write: the binary message went up")
+            } else {
+                let close = w.read()
+                #expect(close.first == 0x88 && close.count > 4 && close[close.startIndex + 2] == 0x03
+                        && close[close.startIndex + 3] == 0xF0, "a 1008 close: \(Array(close.prefix(4)))")
+                #expect(String(decoding: close.dropFirst(4), as: UTF8.self).contains("WEBSOCKET_BINARY"))
+                try await Task.sleep(for: .milliseconds(100))
+                #expect(up.frames.withLockedValue { $0 } == [text], "the binary message never went up")
+            }
+        }
+    }
+
     /// No OpenShell WebSocket route: the socket's frames pass as before.
     @Test func elsewhereTheSocketIsUntouched() async throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
