@@ -334,8 +334,7 @@ final class MitmProxy: @unchecked Sendable {
     /// One request's trace record (macOS: HTTPMitmConnection.emitTrace),
     /// off the event loop. A parsed conversation gets the prompt-injection
     /// log scan when the workspace's policy is on with "log but continue"
-    /// (ask and block run before the request is forwarded: not on Linux yet).
-    // partial: log mode only (ask and block, which run before the request is forwarded, aren't on Linux yet)
+    /// (ask and block run before the request is forwarded: policyAnswer).
 
     // @port HTTPMitmConnection.emitTrace(host: String, port: Int, preSwapRequest: Data, upstreamResponse: Data, upstreamWireBytes: Int, responseTruncated: Bool, swaps: [SwapRecord], leaks: [LeakEntry], latencyMs: Double, servedBy: String?) h=22ed0216edbd064f @cb7cdd6a
     func emitTrace(_ t: RequestReader.Trace, response: Data, wireBytes: Int, truncated: Bool) {
