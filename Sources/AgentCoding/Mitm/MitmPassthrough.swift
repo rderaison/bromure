@@ -30,14 +30,9 @@ enum MitmPassthrough {
     }
 
     private static func pumpBothWays(appFD: Int32, upstream: Int32, profileID: UUID? = nil) {
-        // A quarantine shuts both sides (its cut gone before the fds close,
-        // so it can never reach a reused descriptor).
-        let cut = profileID.map { pid in
-            WorkspaceQuarantine.shared.onQuarantine(pid) {
-                shutdown(appFD, SHUT_RDWR)
-                shutdown(upstream, SHUT_RDWR)
-            }
-        }
+        // A quarantine shuts both sides, only while they're open (CuttableFDs).
+        let fds = CuttableFDs([appFD, upstream])
+        let cut = profileID.map { pid in WorkspaceQuarantine.shared.onQuarantine(pid) { fds.cut() } }
         let group = DispatchGroup()
         for (from, to) in [(appFD, upstream), (upstream, appFD)] {
             group.enter()
@@ -49,8 +44,7 @@ enum MitmPassthrough {
         }
         group.notify(queue: .global()) {
             if let cut, let profileID { WorkspaceQuarantine.shared.remove(cut, for: profileID) }
-            close(appFD)
-            close(upstream)
+            fds.close()
         }
     }
 

@@ -84,6 +84,29 @@ struct WorkspaceQuarantineTests {
         #expect(ContinuousClock.now - started < .seconds(3), "cancelled, not run to its end")
     }
 
+    /// A cut that runs after the channel closed (copied out by `set` just as
+    /// it ended) never reaches the descriptor its number was reused for.
+    @Test func aLateCutNeverReachesAReusedDescriptor() {
+        var a: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, LibC.sockStream, 0, &a) == 0)
+        let fds = CuttableFDs([a[0]])
+        fds.close()
+        Foundation.close(a[1])
+        var b: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, LibC.sockStream, 0, &b) == 0)
+        defer { Foundation.close(b[0]); Foundation.close(b[1]) }
+        fds.cut()                                  // late: a no-op
+        let byte: [UInt8] = [42]
+        #expect(byte.withUnsafeBytes { write(b[0], $0.baseAddress, 1) } == 1, "the reused number still writes")
+        var got: UInt8 = 0
+        #expect(read(b[1], &got, 1) == 1 && got == 42)
+        // While open, the cut shuts it: the peer reads the end.
+        let live = CuttableFDs([b[0]])
+        live.cut()
+        #expect(read(b[1], &got, 1) == 0, "shut down by the cut")
+        live.markClosing()
+    }
+
     final class Echo: MCPLineHandler {
         func handle(line: String, branch: String?) async -> String? { "served" }
     }

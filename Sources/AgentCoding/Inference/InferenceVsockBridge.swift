@@ -25,7 +25,11 @@ final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate 
         if let profileID, WorkspaceQuarantine.shared.contains(profileID) { return false }
         let fd = dup(connection.fileDescriptor)
         let pid = profileID
-        let cut = pid.map { p in WorkspaceQuarantine.shared.onQuarantine(p) { _ = shutdown(fd, SHUT_RDWR) } }
+        // The cut shuts `fd` only while it's open (CuttableFDs: cut and
+        // close under one lock): a cut that runs after the pump closed it
+        // can't reach a reused descriptor.
+        let open = CuttableFDs([fd])
+        let cut = pid.map { p in WorkspaceQuarantine.shared.onQuarantine(p) { open.cut() } }
         // Splice to the tool-call repair proxy (which forwards to the engine),
         // not the engine directly, so leaked-as-text tool calls get rescued.
         // Read its dynamic port at connect time — the proxy is up by now.
@@ -33,6 +37,7 @@ final class InferenceListenerDelegate: NSObject, VZVirtioSocketListenerDelegate 
         Thread.detachNewThread {
             InferenceVsockBridge.pump(vsockFD: fd, host: "127.0.0.1", port: port, beforeClose: {
                 if let cut, let pid { WorkspaceQuarantine.shared.remove(cut, for: pid) }
+                open.markClosing()
             })
         }
         return true

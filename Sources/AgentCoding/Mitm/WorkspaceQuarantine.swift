@@ -78,6 +78,39 @@ public final class WorkspaceQuarantine: @unchecked Sendable {
     }
 }
 
+/// File descriptors a quarantine's cut may shut down while, and only
+/// while, they're open: the cut and the close (or the owner saying it's
+/// about to close them) are under one lock, so a cut that runs late (copied
+/// out by `set` just as the channel ended) can never reach a descriptor the
+/// number was reused for.
+public final class CuttableFDs: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = true
+    private let fds: [Int32]
+
+    public init(_ fds: [Int32]) { self.fds = fds }
+
+    /// Both directions shut, if still open.
+    public func cut() {
+        lock.lock(); defer { lock.unlock() }
+        guard open else { return }
+        for fd in fds { _ = shutdown(fd, Int32(SHUT_RDWR)) }
+    }
+
+    /// No cut from now on; the owner closes them itself.
+    public func markClosing() {
+        lock.lock(); open = false; lock.unlock()
+    }
+
+    /// No cut from now on, and closed (once).
+    public func close() {
+        lock.lock(); defer { lock.unlock() }
+        guard open else { return }
+        open = false
+        for fd in fds { _ = Foundation.close(fd) }
+    }
+}
+
 /// An MCP server as a quarantined workspace's guest reaches it: every
 /// request answered with an error (a notification with nothing) while the
 /// quarantine lasts, the server untouched.

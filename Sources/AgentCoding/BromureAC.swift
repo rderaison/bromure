@@ -15407,19 +15407,22 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 choice = await PendingPromptBroker.shared.askAsync(
                     profileID: pid, title: title, message: info, buttons: buttons, fallback: 1, timeout: 180)
             }
+            // The VM the answer is about now: a relaunch (a guest reboot)
+            // while the prompt was up replaced the one captured at the trip.
+            let current = self.runningSessions[pid]?.sandbox ?? sandbox
             switch choice {
             case 2:
-                sandbox.setNetworkQuarantined(false)
+                current.setNetworkQuarantined(false)
                 WorkspaceQuarantine.shared.set(false, for: pid)
                 AgentWatchdog.shared.release(profileID: pid)
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = current.vm, vm.state == .paused { try? await vm.resume() }
             case 1:
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = current.vm, vm.state == .paused { try? await vm.resume() }
             default:
                 // A forced stop (the guest is paused and untrusted, so no clean
                 // poweroff) fires no delegate callback: finish the teardown here,
                 // or the session stays listed as running with no VM behind it.
-                if let vm = sandbox.vm { await Self.forceStop(vm) }
+                if let vm = current.vm { await Self.forceStop(vm) }
                 handleSessionStopped(profileID: pid)
             }
         }
@@ -16675,6 +16678,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                             "[ac] home-seed staging (reboot) failed: \(error)\n".utf8))
                     }
                 }
+                // The new switch port exists once configured: a quarantined
+                // workspace's is cut before the VM runs a cycle on it.
+                if WorkspaceQuarantine.shared.contains(profile.id) { sandbox.setNetworkQuarantined(true) }
                 try await sandbox.start()
             } catch {
                 self.showError(error, message:
