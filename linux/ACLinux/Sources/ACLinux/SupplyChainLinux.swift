@@ -296,7 +296,8 @@ final class SupplyChainBudget: @unchecked Sendable {
     private var holders: [UInt64: Int] = [:]
     private var waiters: Set<UInt64> = []
     private var nextTicket: UInt64 = 0
-    /// When a reply last got or gave back some of it.
+    /// When room last came back, or the head of the line last got some:
+    /// progress for the replies waiting (a younger reply's trickle isn't).
     private var lastActivity = Date()
     /// Rewrites queued or running: the budget isn't idle meanwhile.
     private var rewrites = 0
@@ -334,7 +335,7 @@ final class SupplyChainBudget: @unchecked Sendable {
             waiters.remove(t)
             held += n
             holders[t, default: 0] += n
-            lastActivity = Date()
+            if head { lastActivity = Date() }
             return true
         }
     }
@@ -370,7 +371,6 @@ final class SupplyChainBudget: @unchecked Sendable {
         lock.withLock {
             held += n
             holders[t, default: 0] += n
-            lastActivity = Date()
         }
     }
 
@@ -386,9 +386,9 @@ final class SupplyChainBudget: @unchecked Sendable {
     // @port-skip linux-only: see SupplyChainBudget
     func holding(_ t: UInt64) -> Int { lock.withLock { holders[t] ?? 0 } }
 
-    /// A rewrite queued (`true`) or done (`false`).
+    /// A rewrite queued (`true`) or handed to the guest (`false`).
     // @port-skip linux-only: see SupplyChainBudget
-    func rewriting(_ on: Bool) { lock.withLock { rewrites += on ? 1 : -1; lastActivity = Date() } }
+    func rewriting(_ on: Bool) { lock.withLock { rewrites += on ? 1 : -1 } }
 
     /// How long nothing was got or given back and no rewrite was under way,
     /// counted from `since` at the earliest: a reply waits while the others

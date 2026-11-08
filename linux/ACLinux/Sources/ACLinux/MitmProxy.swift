@@ -121,6 +121,9 @@ final class MitmProxy: @unchecked Sendable {
     private let upstreamContext: NIOSSLContext
     /// Tests: every upstream connection goes here instead (SNI kept), trusting `extraRoots`.
     var routeAllTo: (host: String, port: Int)?
+    /// The read-whole budget this proxy's package replies share (the
+    /// daemon's; a test's proxy has its own).
+    var supplyChainBudget = ResponseRelay.supplyChainBudget
     /// An e2e run (BROMURE_AC_E2E=1): every upstream goes to the test
     /// upstream (`routeAllTo`) or is refused, never dialed; a splice goes to
     /// the test host only. Its guests' requests (and the credentials swapped
@@ -1285,7 +1288,9 @@ final class ResponseRelay: ChannelInboundHandler {
     /// (256 MiB), so parallel fetches can't take the host's memory.
     static let supplyChainBudget = SupplyChainBudget(limit: 256 << 20)
     /// This reply's place among the budget's holders (the oldest proceeds).
-    private let supplyChainTicket = ResponseRelay.supplyChainBudget.ticket()
+    private lazy var supplyChainTicket = budget.ticket()
+    /// The budget it takes room from (its proxy's).
+    private let budget: SupplyChainBudget
     /// Chunks waiting, in order, for room in the budget (reads stopped
     /// meanwhile): a batch already being read still arrives, behind them.
     private var waiting: [ByteBuffer] = []
@@ -1314,6 +1319,15 @@ final class ResponseRelay: ChannelInboundHandler {
     /// stopped for the budget) is refused: a byte trickled now and then
     /// can't hold its share for ever. (Tests shorten it.)
     static let supplyChainReadIdle = NIOLockedValueBox<TimeInterval>(30)
+    /// A read-whole reply not read whole within this (from its first byte)
+    /// is refused too: a byte trickled every 29 s can't hold its share for
+    /// ever. (Tests shorten it.)
+    static let supplyChainReadTotal = NIOLockedValueBox<TimeInterval>(300)
+    /// How long the guest has to take its rewritten reply. (Tests shorten it.)
+    static let supplyChainWriteDeadline = NIOLockedValueBox<TimeInterval>(60)
+    /// When the reply's first byte came, and its last (the clocks start at
+    /// the first: a slow first byte isn't a stall).
+    private var firstRead: Date?
     private var lastRead = Date()
     private var stalled = false
     private var stallCheck: RepeatedTask?
@@ -1323,10 +1337,13 @@ final class ResponseRelay: ChannelInboundHandler {
         self.context = context
         guard supplyChain != nil else { return }
         let idle = Self.supplyChainReadIdle.withLockedValue { $0 }
-        let every = TimeAmount.milliseconds(Int64(min(5, idle / 4) * 1000))
+        let total = Self.supplyChainReadTotal.withLockedValue { $0 }
+        let every = TimeAmount.milliseconds(Int64(min(5, min(idle, total) / 4) * 1000))
         stallCheck = context.eventLoop.scheduleRepeatedTask(initialDelay: every, delay: every) { [weak self] _ in
-            guard let self, let context = self.context, self.waitingSince == nil,
-                  Date().timeIntervalSince(self.lastRead) > idle else { return }
+            guard let self, let context = self.context, let first = self.firstRead else { return }
+            let now = Date()
+            let idleTooLong = self.waitingSince == nil && now.timeIntervalSince(self.lastRead) > idle
+            guard idleTooLong || now.timeIntervalSince(first) > total else { return }
             self.stalled = true
             context.close(promise: nil)
         }
@@ -1349,7 +1366,7 @@ final class ResponseRelay: ChannelInboundHandler {
     /// one timer retrying every 50 ms.
     // @port-skip linux-only: the Linux relay's read-whole budget
     private func takeSupplyChainChunk(_ context: ChannelHandlerContext, _ b: ByteBuffer) {
-        if waiting.isEmpty, Self.supplyChainBudget.reserve(b.readableBytes, for: supplyChainTicket) {
+        if waiting.isEmpty, budget.reserve(b.readableBytes, for: supplyChainTicket) {
             whole.append(contentsOf: b.readableBytesView)
             return
         }
@@ -1366,7 +1383,7 @@ final class ResponseRelay: ChannelInboundHandler {
         context.eventLoop.scheduleTask(in: .milliseconds(50)) { [self] in
             // The upstream closed meanwhile: channelInactive took the chunks.
             guard context.channel.isActive, let since = waitingSince else { return }
-            while let b = waiting.first, Self.supplyChainBudget.reserve(b.readableBytes, for: supplyChainTicket) {
+            while let b = waiting.first, budget.reserve(b.readableBytes, for: supplyChainTicket) {
                 waiting.removeFirst()
                 waitingBytes -= b.readableBytes
                     whole.append(contentsOf: b.readableBytesView)
@@ -1375,7 +1392,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 waitingSince = nil
                 lastRead = Date()
                 readUpstreamIfAllowed()
-            } else if Self.supplyChainBudget.idle(since: since) > Self.supplyChainWait {
+            } else if budget.idle(since: since) > Self.supplyChainWait {
                 waiting.removeAll()
                 waitingBytes = 0
                 waitingSince = nil
@@ -1417,8 +1434,9 @@ final class ResponseRelay: ChannelInboundHandler {
          capture: SignInCapture?, upgrade: Bool, proxy: MitmProxy? = nil, trace: RequestReader.Trace? = nil,
          host: String = "", mint: (CredentialMinter, CredentialMint.Kind)? = nil, strictSession: UInt64 = 0,
          ws: WSPromptGuard? = nil, pii: PIIVault? = nil, supplyChain: SupplyChainRewrite? = nil,
-         guestHTTP11: Bool = true) {
+         guestHTTP11: Bool = true, budget: SupplyChainBudget? = nil) {
         self.guest = guest
+        self.budget = budget ?? proxy?.supplyChainBudget ?? Self.supplyChainBudget
         self.supplyChain = supplyChain
         self.ws = ws
         self.pii = pii.map { PIIRelay(vault: $0, chunkedOut: guestHTTP11, host: host, profileID: profileID) }
@@ -1454,6 +1472,7 @@ final class ResponseRelay: ChannelInboundHandler {
             if supplyChain != nil {
                 guard !overflowed, !stalled else { return }
                 lastRead = Date()
+                if firstRead == nil { firstRead = lastRead }
                 guard whole.count + waitingBytes + b.readableBytes <= Self.supplyChainCap else {
                     overflowed = true
                     waiting.removeAll()
@@ -1604,6 +1623,7 @@ final class ResponseRelay: ChannelInboundHandler {
         let host: String
         let clean: Bool
         let ticket: UInt64
+        let budget: SupplyChainBudget
         let guest: Channel
         let proxy: MitmProxy?
         let trace: RequestReader.Trace?
@@ -1613,7 +1633,8 @@ final class ResponseRelay: ChannelInboundHandler {
 
         // @port-skip linux-only: see SupplyChainJob
         init(raw: Data, supplyChain: SupplyChainRewrite, host: String, clean: Bool, ticket: UInt64,
-             guest: Channel, proxy: MitmProxy?, trace: RequestReader.Trace?) {
+             budget: SupplyChainBudget, guest: Channel, proxy: MitmProxy?, trace: RequestReader.Trace?) {
+            self.budget = budget
             self.raw = raw
             self.wire = raw.count
             self.supplyChain = supplyChain
@@ -1625,10 +1646,10 @@ final class ResponseRelay: ChannelInboundHandler {
             self.trace = trace
         }
 
-        /// Queued (the budget isn't idle until it's done).
+        /// Queued (the budget isn't idle until it's handed to the guest).
         // @port-skip linux-only: see SupplyChainJob
         func start() {
-            ResponseRelay.supplyChainBudget.rewriting(true)
+            budget.rewriting(true)
             ResponseRelay.supplyChainQueue.addOperation { self.step() }
         }
 
@@ -1641,11 +1662,10 @@ final class ResponseRelay: ChannelInboundHandler {
 
         // @port-skip linux-only: see SupplyChainJob
         func step() {
-            let budget = ResponseRelay.supplyChainBudget
             // The guest left meanwhile: nobody to rewrite it for.
             guard guest.isActive else { return finish(nil) }
             if plain == nil {
-                let decoded = ResponseRelay.isEncoded(raw) ? ResponseRelay.supplyChainCap : raw.count
+                let decoded = ResponseRelay.finalIsEncoded(raw) ? ResponseRelay.supplyChainCap : raw.count
                 guard budget.reserve(raw.count + decoded, for: ticket) else { return later() }
                 guard let final = HTTPRequestFraming.finalResponse(raw) else {
                     return finish(ResponseRelay.supplyChainRefusal(host, "couldn't be read"))
@@ -1670,17 +1690,26 @@ final class ResponseRelay: ChannelInboundHandler {
         }
 
         /// The reply to the guest (nil: none, it left); the share goes back
-        /// once it's written.
+        /// once it's written. The rewrite counts as under way up to this
+        /// hand-off only, and a guest that stops reading (a suspended VM, a
+        /// zero window) is closed past the write deadline, which fails the
+        /// write and gives the share back.
         // @port-skip linux-only: see SupplyChainJob
         private func finish(_ reply: Data?) {
-            let budget = ResponseRelay.supplyChainBudget, ticket = ticket
+            let (budget, ticket) = (budget, ticket)
             raw = Data(); plain = nil
-            guard let reply else { budget.finish(ticket); budget.rewriting(false); return }
+            budget.rewriting(false)
+            guard let reply else { budget.finish(ticket); return }
             let (guest, proxy, trace, wire) = (guest, proxy, trace, wire)
+            let deadline = ResponseRelay.supplyChainWriteDeadline.withLockedValue { $0 }
             guest.eventLoop.execute {
+                let late = guest.eventLoop.scheduleTask(in: .milliseconds(Int64(deadline * 1000))) {
+                    FileHandle.standardError.write(Data("[supply-chain] the guest didn't take its reply in \(deadline) s: closed\n".utf8))
+                    guest.close(promise: nil)
+                }
                 guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in
+                    late.cancel()
                     budget.finish(ticket)
-                    budget.rewriting(false)
                     guest.close(promise: nil)
                 }
                 if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: wire, truncated: false) }
@@ -1750,7 +1779,7 @@ final class ResponseRelay: ChannelInboundHandler {
         let ticket = supplyChainTicket
         stallCheck?.cancel()
         var handedOff = false
-        defer { if !handedOff { Self.supplyChainBudget.finish(ticket) } }
+        defer { if !handedOff { budget.finish(ticket) } }
         if !learnBuf.isEmpty {
             // De-chunked, as macOS's URLSession hands it the body. A body still
             // encoded (gzip or br, though identity was asked for) is skipped,
@@ -1796,7 +1825,7 @@ final class ResponseRelay: ChannelInboundHandler {
             if overflowed || stalled {
                 let reply = Self.supplyChainRefusal(host, overflowed
                     ? "is too large to check (over \(Self.supplyChainCap >> 20) MiB, or no room for it in time)"
-                    : "stalled (nothing came for \(Self.supplyChainReadIdle.withLockedValue { $0 }) s)")
+                    : "stalled (too slow, or nothing came for a while)")
                 whole = Data(); waiting.removeAll(); waitingBytes = 0; waitingSince = nil
                 let guest = self.guest
                 guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
@@ -1809,14 +1838,14 @@ final class ResponseRelay: ChannelInboundHandler {
             var raw = Data()
             swap(&raw, &whole)
             for b in waiting { raw.append(contentsOf: b.readableBytesView) }
-            Self.supplyChainBudget.add(waitingBytes, for: ticket)
+            budget.add(waitingBytes, for: ticket)
             waiting.removeAll()
             waitingBytes = 0
             waitingSince = nil
             noteStatus(raw)
             handedOff = true
             SupplyChainJob(raw: raw, supplyChain: supplyChain, host: host, clean: failure == nil, ticket: ticket,
-                           guest: guest, proxy: proxy, trace: trace).start()
+                           budget: budget, guest: guest, proxy: proxy, trace: trace).start()
             return
         }
         if let capture {
@@ -1888,6 +1917,30 @@ final class ResponseRelay: ChannelInboundHandler {
 
     /// Whether a response's body is content-encoded (gzip, br, …).
     // @port-skip linux-only: proxy response parsing
+    /// Whether the final response (past any 1xx interim heads) is
+    /// content-coded, by every Content-Encoding line it has. Read in place:
+    /// nothing copied before the rewrite has room for its copies.
+    // @port-skip linux-only: the read-whole budget's decoded-size estimate
+    static func finalIsEncoded(_ raw: Data) -> Bool {
+        var start = raw.startIndex
+        while let end = raw[start...].range(of: Data("\r\n\r\n".utf8)) {
+            let head = String(decoding: raw[start..<end.lowerBound], as: UTF8.self)
+            let lines = head.components(separatedBy: "\r\n")
+            let status = lines.first.flatMap { Int($0.split(separator: " ").dropFirst().first ?? "") } ?? 0
+            if (100..<200).contains(status), status != 101 { start = end.upperBound; continue }
+            return lines.dropFirst().contains { line in
+                guard let colon = line.firstIndex(of: ":"),
+                      line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "content-encoding" else { return false }
+                return line[line.index(after: colon)...].split(separator: ",").contains {
+                    let t = $0.trimmingCharacters(in: .whitespaces).lowercased()
+                    return !t.isEmpty && t != "identity"
+                }
+            }
+        }
+        return false
+    }
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
     static func isEncoded(_ raw: Data) -> Bool {
         guard let end = raw.range(of: Data("\r\n\r\n".utf8)) else { return false }
         let head = String(decoding: raw[raw.startIndex..<end.lowerBound], as: UTF8.self)

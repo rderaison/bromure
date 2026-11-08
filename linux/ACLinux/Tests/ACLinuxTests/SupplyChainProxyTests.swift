@@ -123,6 +123,8 @@ struct SupplyChainProxyTests {
         -> (MitmProxy, UUID, Registry, String) {
         let dir = try shortTempDir()
         let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        // Its own budget: suites running alongside don't share it.
+        proxy.supplyChainBudget = SupplyChainBudget(limit: 256 << 20)
         let pid = UUID()
         proxy.setSupplyChainPolicy(policy, for: pid)
         let ip = try #require(Daemon.primaryIPv4(), "a host address (loopback is always refused)")
@@ -245,7 +247,7 @@ struct SupplyChainProxyTests {
             Self.response(Self.packument(), type: "application/json")
         }
         defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
-        let budget = ResponseRelay.supplyChainBudget, holder = budget.ticket()
+        let budget = proxy.supplyChainBudget, holder = budget.ticket()
         let taken = budget.limit - budget.total
         #expect(budget.reserve(taken, for: holder), "the whole budget held, by an older holder")
         let release = Task { try await Task.sleep(for: .milliseconds(400)); budget.finish(holder) }
@@ -469,7 +471,7 @@ extension DaemonGlobalSuites.SupplyChainProxyTests {
     /// room comes before the end or the upstream closes first.
     @Test(arguments: [false, true])
     func chunksOfOneBatchWaitInOrder(closesFirst: Bool) async throws {
-        let budget = ResponseRelay.supplyChainBudget, holder = budget.ticket()
+        let budget = SupplyChainBudget(limit: 1 << 20), holder = budget.ticket()
         let taken = budget.limit - budget.total
         #expect(budget.reserve(taken, for: holder))
         let body = Data((0..<3000).map { UInt8(truncatingIfNeeded: $0 % 251) })
@@ -477,7 +479,8 @@ extension DaemonGlobalSuites.SupplyChainProxyTests {
         let loop = NIOAsyncTestingEventLoop()
         let guest = NIOAsyncTestingChannel(loop: loop)
         let relay = ResponseRelay(guest: guest, profileID: UUID(), injected: .init(), capture: nil, upgrade: false,
-                                  host: "registry.npmjs.org", supplyChain: SupplyChainRewrite(rewrite: { $0 }, done: {}))
+                                  host: "registry.npmjs.org", supplyChain: SupplyChainRewrite(rewrite: { $0 }, done: {}),
+                                  budget: budget)
         let up = try await NIOAsyncTestingChannel(handler: relay, loop: loop)
         try await up.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1))
         try await guest.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 2))
@@ -524,10 +527,6 @@ extension DaemonGlobalSuites.SupplyChainProxyTests {
     /// before they're made (only the head's goes past the limit).
     @Test(arguments: [false, true])
     func fiveLargeRepliesAllComplete(gzipped: Bool) async throws {
-        let budget = ResponseRelay.supplyChainBudget
-        let prior = budget.limit
-        budget.limit = 2 << 20
-        defer { budget.limit = prior }
         // A 12 MB packument (more than the sockets buffer, so a waiting
         // reply really stops reading): five are thirty times the budget.
         var doc = try #require(try JSONSerialization.jsonObject(with: Self.packument()) as? [String: Any])
@@ -540,6 +539,8 @@ extension DaemonGlobalSuites.SupplyChainProxyTests {
                 : Self.response(big, type: "application/json")
         }
         defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let budget = SupplyChainBudget(limit: 2 << 20)
+        proxy.supplyChainBudget = budget
         var guests: [Guest] = []
         for _ in 0..<5 { guests.append(try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")) }
         defer { for g in guests { g.close() } }
@@ -590,8 +591,92 @@ extension DaemonGlobalSuites.SupplyChainProxyTests {
         g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
         let reply = String(decoding: g.readAll(), as: UTF8.self)
         #expect(reply.hasPrefix("HTTP/1.1 502 ") && reply.contains("stalled"), "\(reply.prefix(300))")
-        for _ in 0..<100 where ResponseRelay.supplyChainBudget.total != 0 { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(ResponseRelay.supplyChainBudget.total == 0)
+        for _ in 0..<100 where proxy.supplyChainBudget.total != 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(proxy.supplyChainBudget.total == 0)
+    }
+
+    /// A trickle (a byte now and then, never idle long enough) is refused
+    /// once the reply isn't whole within the total time from its first byte.
+    @Test func aTrickleIsRefusedPastTheTotalTime() async throws {
+        let prior = ResponseRelay.supplyChainReadTotal.withLockedValue { $0 }
+        ResponseRelay.supplyChainReadTotal.withLockedValue { $0 = 0.1 }
+        defer { ResponseRelay.supplyChainReadTotal.withLockedValue { $0 = prior } }
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: true, ageGateDays: 2), pauseAfter: 100) { _ in
+            Self.response(Self.packument(), type: "application/json")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
+        let reply = String(decoding: g.readAll(), as: UTF8.self)
+        #expect(reply.hasPrefix("HTTP/1.1 502 ") && reply.contains("stalled"), "\(reply.prefix(300))")
+    }
+
+    /// The clocks start at the reply's first byte: a slow first byte (past
+    /// the idle time) isn't a stall.
+    @Test func aSlowFirstByteIsntAStall() async throws {
+        let prior = ResponseRelay.supplyChainReadIdle.withLockedValue { $0 }
+        ResponseRelay.supplyChainReadIdle.withLockedValue { $0 = 0.1 }
+        defer { ResponseRelay.supplyChainReadIdle.withLockedValue { $0 = prior } }
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: true, ageGateDays: 2), pauseAfter: 0) { _ in
+            Self.response(Self.packument(), type: "application/json")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")
+        let reply = String(decoding: g.readAll(), as: UTF8.self)
+        #expect(reply.hasPrefix("HTTP/1.1 200 "), "\(reply.prefix(300))")
+    }
+
+    /// A guest that stops reading its rewritten reply is closed past the
+    /// write deadline: its share goes back, and the budget isn't held "busy"
+    /// by it (the rewrite counted up to the hand-off only).
+    @Test func aGuestThatStopsReadingLetsGo() async throws {
+        let prior = ResponseRelay.supplyChainWriteDeadline.withLockedValue { $0 }
+        ResponseRelay.supplyChainWriteDeadline.withLockedValue { $0 = 0.3 }
+        defer { ResponseRelay.supplyChainWriteDeadline.withLockedValue { $0 = prior } }
+        var doc = try #require(try JSONSerialization.jsonObject(with: Self.packument()) as? [String: Any])
+        doc["readme"] = String(repeating: "x", count: 12_000_000)     // past what the sockets buffer
+        let big = try JSONSerialization.data(withJSONObject: doc)
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: true, ageGateDays: 2)) { _ in
+            Self.response(big, type: "application/json")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n")       // never read
+        var gone = false
+        for _ in 0..<300 {
+            if registry.requests.withLockedValue({ $0.count }) == 1, proxy.supplyChainBudget.total == 0,
+               proxy.supplyChainBudget.idle(since: .distantPast) > 0.05 { gone = true; break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(gone, "the share went back, and the budget is idle again: \(proxy.supplyChainBudget.total)")
+        let got = g.readAll()
+        #expect(got.count < big.count, "the guest's reply was cut")
+    }
+
+    /// The decoded-size estimate reads the final head, every coding line.
+    @Test func theFinalHeadsCodingCounts() {
+        let raw = Data("HTTP/1.1 103 Early Hints\r\nLink: </x>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Encoding: identity\r\n\r\nbody".utf8)
+        #expect(ResponseRelay.finalIsEncoded(raw))
+        #expect(!ResponseRelay.finalIsEncoded(Data("HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\n\r\n".utf8)))
+        #expect(ResponseRelay.finalIsEncoded(Data("HTTP/1.1 200 OK\r\ncontent-encoding: identity, br\r\n\r\n".utf8)))
+    }
+
+    /// Progress for the replies waiting is room coming back or the head
+    /// growing, not a younger reply's trickle.
+    @Test func aYoungerTrickleIsntProgress() {
+        let b = SupplyChainBudget(limit: 100)
+        let head = b.ticket(), young = b.ticket()
+        let past = Date().addingTimeInterval(-100)
+        #expect(b.reserve(50, for: head))
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(b.reserve(10, for: young))
+        #expect(b.idle(since: past) >= 0.05, "the younger reply's bytes refresh nothing")
+        #expect(b.reserve(10, for: head))
+        #expect(b.idle(since: past) < 0.05, "the head's do")
     }
 }
 
