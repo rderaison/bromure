@@ -5271,6 +5271,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Toggle the Files pane (⌃⌘E).
                     self.unifiedWindow?.toggleFilePane(nil)
                     return ["ok": true, "filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false]
+                case "files-select":
+                    // Show a file (relative to the pane's folder) in the Files
+                    // pane's preview; then `files-detail` says what it shows.
+                    guard let path = params["path"] as? String,
+                          let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "path and a Files pane required"] }
+                    m.select(path)
+                    return ["ok": true]
+                case "files-detail":
+                    guard let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "no Files pane"] }
+                    return ["ok": true, "selected": m.selectedPath ?? "", "detail": m.detailKind]
                 case "browser":
                     // Toggle the agentic browser pane (⌃⌘B) for the selected workspace.
                     self.unifiedWindow?.toggleBrowserPane(nil)

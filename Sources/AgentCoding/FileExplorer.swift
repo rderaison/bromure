@@ -246,11 +246,29 @@ final class FileExplorerModel {
         case diff(DiffDocument)
         case markdown(String)
         case code(String, language: String?)
+        /// An image or a video, shown by `MediaView` from `path` (absolute, on
+        /// the machine) through `reader` -- read a chunk at a time, not
+        /// through the text preview's 512 KB window.
+        case media(path: String, reader: DisplayFileReader)
         case binary
         case tooLarge
         case error(String)
     }
     private(set) var detail: Detail = .none
+    /// What the preview shows, in a word (the debug route, tests).
+    var detailKind: String {
+        switch detail {
+        case .none: "none"
+        case .loading: "loading"
+        case .diff: "diff"
+        case .markdown: "markdown"
+        case .code: "code"
+        case .media: "media"
+        case .binary: "binary"
+        case .tooLarge: "tooLarge"
+        case .error(let m): "error: " + m
+        }
+    }
 
     enum DetailMode { case diff, preview }
     private(set) var detailMode: DetailMode = .preview
@@ -600,6 +618,13 @@ final class FileExplorerModel {
 
     // MARK: Transfers (the guest file service)
 
+    /// Reads a file off the machine for the media preview (nil: no file
+    /// service here).
+    private func mediaReader() -> DisplayFileReader? {
+        guard profileID != nil, fileOpProvider != nil else { return nil }
+        return DisplayFileReader.chunked { [weak self] op in try? await self?.fileOp(op) }
+    }
+
     private func fileOp(_ op: [String: Any]) async throws -> [String: Any] {
         guard let profileID, let fileOpProvider else { throw ACAppDelegate.GuestExecError.vmNotRunning }
         return try await fileOpProvider(profileID, op)
@@ -869,6 +894,16 @@ final class FileExplorerModel {
             } else if statuses[path] == .deleted {
                 guard generation == detailGeneration else { return }
                 detail = .error("File was deleted — switch to Diff to see what was removed.")
+            } else if DisplayMediaKind(path: path) != nil, let reader = mediaReader() {
+                // An image or a video: shown, not called binary (or too large
+                // at 512 KB). Its size and time are in the cache key, so a
+                // file the agent rewrites isn't shown as it was.
+                let stamp = (try? await exec("stat -c '%s %Y' \(qroot)/\(qpath) 2>/dev/null"))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard generation == detailGeneration else { return }
+                var scoped = reader
+                scoped.scope = "files\u{1}\(profileID?.uuidString ?? "")\u{1}\(stamp)"
+                detail = .media(path: (root as NSString).appendingPathComponent(path), reader: scoped)
             } else {
                 let out = try await exec(
                     "head -c \(Self.maxPreviewBytes + 1) \(qroot)/\(qpath) | base64 -w0")

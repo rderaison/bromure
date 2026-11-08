@@ -695,6 +695,15 @@ private struct FileDetailSection: View {
             .background(Color.platformTextBackground)
         case .code(let text, let language):
             CodePreview(text: text, language: language)
+        case .media(let path, let reader):
+            ScrollView {
+                MediaView(path: path, expanded: true)
+                    .environment(\.displayFileReader, reader)
+                    .padding(10)
+            }
+            // A new file is a new view: its own player and loading state.
+            .id(reader.cacheKey(path))
+            .background(Color.platformTextBackground)
         case .binary:
             centered("Binary file")
         case .tooLarge:
