@@ -61,27 +61,44 @@ public final class KernelSentryService: @unchecked Sendable {
     #if canImport(Virtualization)
     @MainActor
     public func attach(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) {
-        let requirement = profile.effectiveKernelSentry
         detach(profileID: profile.id, socketDevice: socketDevice)
-        guard requirement != .off else { return }
-        let bridge = SentryBridge(profileID: profile.id, requirement: requirement, restoring: restoring,
-                                  strict: profile.effectiveStrictSandbox,
-                                  pinFile: pinDirectory?(profile)?.appendingPathComponent("sentry.pin"))
+        guard let bridge = makeBridge(profile: profile, restoring: restoring) else { return }
         bridge.listen(on: socketDevice)
-        lock.lock()
-        bridges[profile.id] = bridge
-        if timer == nil { startMonitor() }
-        lock.unlock()
+        adoptBridge(bridge)
     }
 
     @MainActor
     public func detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) {
-        lock.lock()
-        let b = bridges.removeValue(forKey: profileID)
-        lock.unlock()
-        b?.stop(socketDevice: socketDevice)
+        dropBridge(profileID)?.stop(socketDevice: socketDevice)
     }
     #endif
+
+    /// The channel for `profile`'s VM (nil: its sentry is off), not yet
+    /// listening or registered: the host's listener feeds it, then
+    /// `adoptBridge` registers it.
+    @MainActor
+    func makeBridge(profile: Profile, restoring: Bool) -> SentryBridge? {
+        let requirement = profile.effectiveKernelSentry
+        guard requirement != .off else { return nil }
+        return SentryBridge(profileID: profile.id, requirement: requirement, restoring: restoring,
+                            strict: profile.effectiveStrictSandbox,
+                            pinFile: pinDirectory?(profile)?.appendingPathComponent("sentry.pin"))
+    }
+
+    /// Registers `bridge` as its VM's channel (the liveness check starts
+    /// with the first).
+    func adoptBridge(_ bridge: SentryBridge) {
+        lock.lock()
+        bridges[bridge.profileID] = bridge
+        if timer == nil { startMonitor() }
+        lock.unlock()
+    }
+
+    /// Unregisters a VM's channel; the caller stops it.
+    func dropBridge(_ profileID: UUID) -> SentryBridge? {
+        lock.lock(); defer { lock.unlock() }
+        return bridges.removeValue(forKey: profileID)
+    }
 
     /// The guest's root attestor independently reports whether the sentry
     /// runs and a digest of its secret; a live connection that doesn't match
