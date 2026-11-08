@@ -4821,17 +4821,31 @@ for n, c in enumerate(calls, 1):
           const o = outcomes(await py("t('agent', lambda: open('/mnt/bromure-outbox/agent/ace2e-probe','w').write('x'))\n"));
           sx("rm -f /mnt/bromure-outbox/agent/ace2e-probe");
           assertEq(o.agent, "ok", "write the hooks' folder");
+          // A tab of its own, the hook run as its command: typed into tab 0 it
+          // went to whatever runs there (the agent's CLI at its sign-in, on a
+          // fresh workspace), not a shell. The tab is listed by the host first:
+          // a status for a tab it doesn't know yet is dropped.
           const T = "tmux -S /run/bromure-sandbox/server/tmux.sock";
-          const status = async () => {
+          const win = parseInt(sx(`${T} new-window -d -P -F '#{window_index}' -t bromure: 'sleep 300'`).trim(), 10);
+          assert(Number.isInteger(win), `no tab for the hook: ${win}`);
+          const tab = async () => {
             const st = await api("GET", "/state");
             const vm = (st.vms || []).find((v) => v.name === NAME);
-            return ((vm && vm.tabs) || []).find((t) => t.index === 0)?.agentStatus;
+            return ((vm && vm.tabs) || []).find((t) => t.index === win);
           };
-          for (const want of ["working", "done"]) {
-            sx(`${T} send-keys -t bromure:0 'sh ~/.bromure/agent-status.sh ${want} </dev/null' Enter`);
-            let got;
-            for (let i = 0; i < 20 && got !== want; i++) { await sleep(500); got = await status(); }
-            assertEq(got, want, `tab 0's status after the hook said ${want}`);
+          const status = async () => (await tab())?.agentStatus;
+          try {
+            let listed = false;
+            for (let i = 0; i < 40 && !listed; i++) { listed = !!(await tab()); if (!listed) await sleep(500); }
+            assert(listed, `the host never listed tab ${win}`);
+            for (const want of ["working", "done"]) {
+              sx(`${T} respawn-window -k -t bromure:${win} 'sh ~/.bromure/agent-status.sh ${want} </dev/null; sleep 300'`);
+              let got;
+              for (let i = 0; i < 20 && got !== want; i++) { await sleep(500); got = await status(); }
+              assertEq(got, want, `tab ${win}'s status after the hook said ${want}`);
+            }
+          } finally {
+            sx(`${T} kill-window -t bromure:${win}`);
           }
         });
       } finally {
