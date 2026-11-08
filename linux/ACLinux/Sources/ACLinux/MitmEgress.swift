@@ -319,13 +319,21 @@ extension RequestReader {
         case .identity:
             break
         case .decoded(let plain):
-            request = plain
-            if let t = trace, case .decoded(let plainTrace) = decodeRequestContentEncoding(t.request) {
-                trace?.request = plainTrace
+            // The trace's copy carries the same encoded body (swaps rewrite
+            // headers): the decoded one, without decoding it again.
+            let body = { (r: Data) in r.range(of: Data("\r\n\r\n".utf8)).map { Data(r[$0.upperBound...]) } }
+            if let t = trace {
+                if let tb = body(t.request), tb == body(request), let pb = body(plain),
+                   let copy = withDecodedBody(t.request, pb) {
+                    trace?.request = copy
+                } else if case .decoded(let plainTrace) = decodeRequestContentEncoding(t.request) {
+                    trace?.request = plainTrace
+                }
             }
+            request = plain
         case .undecodable(let encoding):
             ProxyPolicy.recordScanSkipped(host: host, path: path, engines: ["prompt_injection"],
-                                          reason: "\(encoding)-compressed request body could not be decoded",
+                                          reason: ProxyPolicy.undecodableReason(encoding),
                                           profileID: profileID, blocked: true)
             return ProxyPolicy.undecodableBodyResponse(encoding: encoding, engines: ["prompt_injection"])
         }

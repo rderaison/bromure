@@ -20,15 +20,26 @@ enum RequestBodyDecoding: Equatable {
 extension RequestReader {
     /// Decoded bodies stop here (macOS's cap).
     static let decodedBodyCap = 64 << 20
+    /// More stacked codings than this aren't decoded (refused).
+    static let maxCodings = 4
 
     /// The request's body decoded. Every Content-Encoding line counts (a
     /// later `identity` doesn't make an earlier `gzip` plain); stacked codings
-    /// are undone in reverse, as they were applied in order.
-    // @port HTTPMitmConnection.static decodeRequestContentEncoding(_: Data) h=53e3c61c88724cc4 @cf1cec65
+    /// are undone in reverse, as they were applied in order, at most
+    /// `maxCodings` of them. A header line this can't read with certainty (no
+    /// colon, an obs-fold continuation, a bare LF) could hide a coding: the
+    /// request is undecodable. One empty line may lead the request line. Headers
+    /// are Latin-1, as macOS reads them.
+    // @port HTTPMitmConnection.static decodeRequestContentEncoding(_: Data) h=0d9bf1c5e5591c9e @b0ecb81f
     static func decodeRequestContentEncoding(_ raw: Data) -> RequestBodyDecoding {
-        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)) else { return .identity }
-        let header = String(decoding: raw[raw.startIndex..<sep.lowerBound], as: UTF8.self)
+        // One empty line before the request line is allowed (RFC 9112 §2.2).
+        let raw = raw.starts(with: Data("\r\n".utf8)) ? raw.dropFirst(2) : raw
+        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
+              let header = String(data: raw[raw.startIndex..<sep.lowerBound], encoding: .isoLatin1) else { return .identity }
         let lines = header.components(separatedBy: "\r\n")
+        if lines.dropFirst().contains(where: { $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" || !$0.contains(":") }) {
+            return .undecodable("an unreadable header line")
+        }
         let codings = lines.dropFirst().flatMap { line -> [String] in
             guard let colon = line.firstIndex(of: ":"),
                   line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "content-encoding" else { return [] }
@@ -37,6 +48,7 @@ extension RequestReader {
                 .filter { !$0.isEmpty && $0 != "identity" }
         }
         guard !codings.isEmpty else { return .identity }
+        guard codings.count <= maxCodings else { return .undecodable("\(codings.count) stacked codings") }
         var plain = Data(raw[sep.upperBound...])
         for coding in codings.reversed() {
             let next: Data?
@@ -50,12 +62,27 @@ extension RequestReader {
             guard let next else { return .undecodable(coding) }
             plain = next
         }
+        return .decoded(withDecodedBody(lines, plain))
+    }
+
+    /// `raw` with `plain` as its body (its coding and length headers
+    /// replaced): the trace's copy of a request whose body was decoded once.
+    // @port-skip linux-only: the trace copy's share of one decode
+    static func withDecodedBody(_ raw: Data, _ plain: Data) -> Data? {
+        guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
+              let header = String(data: raw[raw.startIndex..<sep.lowerBound], encoding: .isoLatin1) else { return nil }
+        return withDecodedBody(header.components(separatedBy: "\r\n"), plain)
+    }
+
+    // @port-skip linux-only: decodeRequestContentEncoding's header rewrite
+    private static func withDecodedBody(_ lines: [String], _ plain: Data) -> Data {
         let kept = lines.filter { line in
             guard let colon = line.firstIndex(of: ":") else { return true }
             let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
             return name != "content-encoding" && name != "content-length" && name != "transfer-encoding"
         }
-        return .decoded(Data((kept.joined(separator: "\r\n") + "\r\nContent-Length: \(plain.count)\r\n\r\n").utf8) + plain)
+        let head = kept.joined(separator: "\r\n") + "\r\nContent-Length: \(plain.count)\r\n\r\n"
+        return (head.data(using: .isoLatin1) ?? Data(head.utf8)) + plain
     }
 
     // @port-skip linux-only: zlib's inflate (macOS: Compression.framework's)

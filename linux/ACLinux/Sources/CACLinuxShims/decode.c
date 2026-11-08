@@ -1,7 +1,9 @@
 // Content-coding decoders for the proxy's content scans (macOS:
 // Compression.framework's zlib and brotli in HTTPProxy.swift), over the
 // system's zlib and libbrotlidec. Output is capped: a body that inflates past
-// `cap` fails, as macOS's does at 64 MiB.
+// `cap` fails, as macOS's does at 64 MiB (one of exactly `cap` bytes is
+// fine: the buffer may grow one byte past it, and only more fails).
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #if !__has_include(<zlib.h>)
@@ -29,13 +31,14 @@ static int room(uint8_t **buf, size_t *have, size_t len, size_t cap) {
 
 int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_t **out, size_t *out_len) {
     *out = NULL; *out_len = 0;
+    if (n > UINT_MAX) return -2;                 // zlib counts input in 32 bits
     z_stream s; memset(&s, 0, sizeof s);
     if (inflateInit2(&s, window_bits) != Z_OK) return -1;
     uint8_t *buf = NULL; size_t have = 0, len = 0;
     s.next_in = (Bytef *)in; s.avail_in = (uInt)n;
     int rc = -1;
     for (;;) {
-        int g = room(&buf, &have, len, cap);
+        int g = room(&buf, &have, len, cap + 1);
         if (g != 0) { rc = g; break; }
         s.next_out = buf + len; s.avail_out = (uInt)(have - len);
         int z = inflate(&s, Z_NO_FLUSH);
@@ -49,6 +52,7 @@ int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_
         if (z != Z_OK && z != Z_BUF_ERROR) break;               // corrupt
     }
     inflateEnd(&s);
+    if (rc == 0 && len > cap) rc = -2;
     if (rc != 0) { free(buf); return rc; }
     *out = buf; *out_len = len;
     return 0;
@@ -62,7 +66,7 @@ int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, si
     size_t avail_in = n; const uint8_t *next_in = in;
     int rc = -1;
     for (;;) {
-        int g = room(&buf, &have, len, cap);
+        int g = room(&buf, &have, len, cap + 1);
         if (g != 0) { rc = g; break; }
         size_t avail_out = have - len; uint8_t *next_out = buf + len;
         BrotliDecoderResult r = BrotliDecoderDecompressStream(st, &avail_in, &next_in, &avail_out, &next_out, NULL);
@@ -72,6 +76,7 @@ int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, si
         break;   // error, or NEEDS_MORE_INPUT with none left (truncated)
     }
     BrotliDecoderDestroyInstance(st);
+    if (rc == 0 && len > cap) rc = -2;
     if (rc != 0) { free(buf); return rc; }
     *out = buf; *out_len = len;
     return 0;
