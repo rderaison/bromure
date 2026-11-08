@@ -994,6 +994,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // empty 200, never sent (macOS: HTTPProxy's short-circuit).
         if let answer = proxy.localShortCircuit(host: host, path: path, profileID: profileID) { return .answer(answer) }
         var upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
+        // A package registry speaks no WebSocket (macOS refuses the upgrade
+        // before its supply-chain checks would be skipped).
+        if upgrade, SupplyChainRegistry.isRegistryRequest(host: host, path: path) {
+            SupplyChainLog.shared.record("[supply-chain] ✗ WebSocket upgrade to \(host)\(path) refused (a package registry)")
+            return .answer(RequestReader.simple(400, "Bad Request",
+                body: "Bromure: a WebSocket upgrade to a package registry is refused (its requests go through the supply-chain checks).\n"))
+        }
         // Only a WebSocket upgrade is offered: another protocol (h2c above
         // all) would carry every later request past the per-request policy.
         // Every other token goes, across every Upgrade header; none left, and

@@ -429,6 +429,21 @@ struct SupplyChainProxyTests {
         #expect(publish == raw)
     }
 
+    /// A WebSocket upgrade to a package registry is refused (400), never
+    /// sent up past the supply-chain checks.
+    @Test func aWebSocketUpgradeToARegistryIsRefused() async throws {
+        let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: true)) { _ in
+            Self.response(Data("tarball".utf8), type: "application/octet-stream")
+        }
+        defer { registry.stop(); try? FileManager.default.removeItem(atPath: dir) }
+        let g = try await Guest(proxy: proxy, pid: pid, host: "registry.npmjs.org")
+        defer { g.close() }
+        g.send("GET /x/../left-pad/-/left-pad-1.3.0.tgz HTTP/1.1\r\nHost: registry.npmjs.org\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        let reply = String(decoding: g.readAll(), as: UTF8.self)
+        #expect(reply.hasPrefix("HTTP/1.1 400 "), "\(reply.prefix(200))")
+        #expect(registry.requests.withLockedValue { $0 }.isEmpty, "nothing went up")
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()
