@@ -141,6 +141,14 @@ LLM_ENGINE_TCP_PORT = 11434
 # shell-agent pool
 POOL_SIZE = 4
 MAX_REQUEST_SIZE = 10 * 1024 * 1024  # 10 MB
+# The host refuses a shell-channel response this large (AutomationServer's
+# `exchangeJSON`): one past it is never sent.
+MAX_RESPONSE_SIZE = 50 * 1024 * 1024
+# What a captured command's stdout, and its stderr, keep at most (`_drain`).
+# agentd is unconfined and serves every shell and tab: a command printing
+# without end must not take its memory. Two transcript windows (2 x 24 MB, the
+# chat's largest read) fit.
+CAPTURE_LIMIT = 48 * 1024 * 1024
 
 # paths
 # Overridable for the same reason as HOST_CID above: the two-incarnation boot is
@@ -505,6 +513,11 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         else:
             run_env = dict(os.environ)
         run_env.update(env)
+        # A plain capture keeps each stream to CAPTURE_LIMIT, as the confined
+        # path below does (`subprocess.run` would hold all of it).
+        if capture_output and stdout is None and stderr is None and not kwargs:
+            return _run_captured(args, text=text, timeout=timeout, cwd=cwd, check=check,
+                                 env=run_env if env else None)
         return subprocess.run(args, capture_output=capture_output, text=text,
                               timeout=timeout, cwd=cwd, check=check,
                               stdout=stdout, stderr=stderr,
@@ -557,8 +570,8 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
                 os.close(fd)
             except OSError:
                 pass
-    stdout = out_reader() if out_reader is not None else b""
-    stderr = err_reader() if err_reader is not None else b""
+    stdout, out_cut = out_reader() if out_reader is not None else (b"", False)
+    stderr, err_cut = err_reader() if err_reader is not None else (b"", False)
     # A command the supervisor refused, or one whose confined child died before
     # `execvpe`, produced a bare 127 with empty output. On the first
     # `run_as_user: sandbox` workspace that made every command look like
@@ -582,32 +595,115 @@ def _ws_run(args, capture_output=False, text=True, timeout=None, cwd=None,
         stdout = stdout.decode("utf-8", "replace")
         stderr = stderr.decode("utf-8", "replace")
     result = subprocess.CompletedProcess(args, code, stdout, stderr)
+    # Output past CAPTURE_LIMIT was dropped: callers that ship it say so.
+    result.truncated = out_cut or err_cut
     if check and code != 0:
         raise subprocess.CalledProcessError(code, args, stdout, stderr)
     return result
 
 
+def _exec_response_bytes(response):
+    """An exec reply, encoded; one the host would refuse (MAX_RESPONSE_SIZE --
+    JSON escaping can grow output that fit CAPTURE_LIMIT past it) becomes an
+    error saying so, not a reply that fails the whole channel exchange."""
+    data = json.dumps(response).encode("utf-8")
+    if len(data) < MAX_RESPONSE_SIZE:
+        return data
+    return json.dumps({
+        "stdout": "",
+        "stderr": "bromure: the command's output is too large to return (%d MiB)\n"
+                  % (len(data) >> 20),
+        "exit_code": -1,
+        "truncated": True,
+    }).encode("utf-8")
+
+
+def _run_captured(args, text=True, timeout=None, cwd=None, check=False, env=None):
+    """`subprocess.run(args, capture_output=True, …)`, with stdout and stderr
+    each kept to CAPTURE_LIMIT (`_drain`); `.truncated` says some was dropped.
+    Decodes as the confined path does (UTF-8, invalid bytes replaced)."""
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    try:
+        p = subprocess.Popen(args, stdout=out_w, stderr=err_w, cwd=cwd, env=env)
+    except BaseException:
+        for fd in (out_r, err_r):
+            os.close(fd)
+        raise
+    finally:
+        os.close(out_w)
+        os.close(err_w)
+    out_reader = _drain_async(out_r)
+    err_reader = _drain_async(err_r)
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def left():
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+    try:
+        p.wait(timeout=left())
+        # Its output ends when the last writer goes (a child it left behind
+        # can hold the pipe): within the same deadline.
+        out = out_reader(left())
+        err = err_reader(left())
+        if out is None or err is None:
+            raise subprocess.TimeoutExpired(args, timeout)
+    except subprocess.TimeoutExpired:
+        # As `subprocess.run`: kill it and raise. The readers finish (and close
+        # their ends) on their own threads when the pipes close.
+        p.kill()
+        p.wait()
+        raise
+    (stdout, out_cut), (stderr, err_cut) = out, err
+    if text:
+        stdout = stdout.decode("utf-8", "replace")
+        stderr = stderr.decode("utf-8", "replace")
+    result = subprocess.CompletedProcess(args, p.returncode, stdout, stderr)
+    result.truncated = out_cut or err_cut
+    if check and p.returncode != 0:
+        raise subprocess.CalledProcessError(p.returncode, args, stdout, stderr)
+    return result
+
+
 def _drain_async(fd):
     """Start reading `fd` to EOF on a thread; the returned call waits for it
-    and gives the bytes."""
+    and gives `_drain`'s (bytes, truncated). `result(timeout)` gives None if
+    the reading isn't done by then."""
     box = {}
     t = threading.Thread(target=lambda: box.__setitem__("data", _drain(fd)), daemon=True)
     t.start()
 
-    def result():
-        t.join()
-        return box.get("data", b"")
+    def result(timeout=None):
+        t.join(timeout)
+        if t.is_alive():
+            return None
+        return box.get("data", (b"", False))
     return result
 
 
-def _drain(fd):
+def _drain(fd, limit=None):
+    """Read `fd` to EOF: (its first `limit` bytes, whether there was more).
+
+    Past the limit (CAPTURE_LIMIT) the rest is still read, and dropped: the
+    writer must never block on a full pipe (see `_ws_run`), and agentd must
+    never hold what a command prints without end.
+    """
+    if limit is None:
+        limit = CAPTURE_LIMIT
     chunks = []
+    kept = 0
+    truncated = False
     try:
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            chunks.append(chunk)
+            room = limit - kept
+            if len(chunk) > room:
+                truncated = True
+                chunk = chunk[:max(room, 0)]
+            if chunk:
+                chunks.append(chunk)
+                kept += len(chunk)
     except OSError:
         pass
     finally:
@@ -615,7 +711,7 @@ def _drain(fd):
             os.close(fd)
         except OSError:
             pass
-    return b"".join(chunks)
+    return b"".join(chunks), truncated
 
 
 class _SandboxPty(object):
@@ -1618,11 +1714,23 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 (["/bin/sh", "-c", runnable] if use_shell else runnable),
                 capture_output=True, text=True, timeout=timeout, cwd=workdir
             )
-            response = {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode,
-            }
+            if getattr(result, "truncated", False):
+                # Cut output is not the command's output: a transcript read
+                # would pass for whole and its offsets for exact. An error,
+                # not part of it.
+                response = {
+                    "stdout": "",
+                    "stderr": "bromure: the command printed more than %d MiB; "
+                              "its output is not returned\n" % (CAPTURE_LIMIT >> 20),
+                    "exit_code": -1,
+                    "truncated": True,
+                }
+            else:
+                response = {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.returncode,
+                }
             # Additive, and only when there is something to say. This is the one
             # channel that still works when the ATTESTOR is down -- and attestd
             # is what sends `sandbox_status`, so a workspace with no attestor
@@ -1645,7 +1753,7 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
                 "exit_code": -1,
             }
 
-        resp_data = json.dumps(response).encode("utf-8")
+        resp_data = _exec_response_bytes(response)
         resp_hdr = struct.pack(">I", len(resp_data))
         vsock_sock.sendall(resp_hdr + resp_data)
 
