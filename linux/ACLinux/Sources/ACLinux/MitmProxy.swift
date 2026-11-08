@@ -1361,6 +1361,8 @@ final class ResponseRelay: ChannelInboundHandler {
         keepForLearning(out)
         relayed = true
         guest.write(guest.allocator.buffer(bytes: out), promise: nil)
+        // Broken framing in the first read already: cut here, as the body path does.
+        if pii?.failed == true { context.close(promise: nil); return }
         holdIfGuestFull(context)
     }
 
@@ -1495,9 +1497,11 @@ final class ResponseRelay: ChannelInboundHandler {
             guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in self.guest.close(promise: nil) }
             return
         }
-        // A restored body read up to the close: what's held, and the last chunk.
+        // A restored body read up to the close: what's held, and the last
+        // chunk only when the upstream closed cleanly (a reset or an unclean
+        // TLS shutdown leaves the reply cut).
         if let pii, pii.restoring, !pii.ended {
-            let tail = pii.finish()
+            let tail = pii.finish(clean: failure == nil)
             keepForTrace(tail)
             guest.write(guest.allocator.buffer(bytes: tail), promise: nil)
         }

@@ -4,8 +4,11 @@ import Foundation
 /// with its responseRestorer, over URLSession's decoded body): the upstream's
 /// body is read through its framing (a Content-Length, chunks, or up to the
 /// close), its stand-ins put back by the shared PIIResponseRestorer, and sent
-/// on re-chunked (the restored body's length differs), as macOS sends it; to
-/// an HTTP/1.0 guest, up to the close instead.
+/// on re-chunked (the restored body's length differs), as macOS sends it. An
+/// HTTP/1.0 guest can't be sent chunks: a JSON reply (restored whole) goes
+/// with its exact Content-Length, sent once it's complete, so a cut one
+/// never reads as complete; a stream goes up to the close, where a cut one
+/// can't be told from a whole one (HTTP/1.0's own limit).
 ///
 /// A reply with no body (204, 304) goes on as it came; so does one still
 /// content- or transfer-coded (identity was asked for; nothing here decodes
@@ -47,6 +50,10 @@ final class PIIRelay {
     private let profileID: UUID
     private var restorer: PIIResponseRestorer?
     private var body = Body.untilClose
+    /// An HTTP/1.0 guest's JSON reply: its head, sent with the restored
+    /// body's length once that's complete (or without one, up to the close,
+    /// if the restorer lets a body past its cap through first).
+    private var heldHead: String?
     /// The body is complete (by its framing) and its end has gone out.
     private(set) var ended = false
     /// The upstream's framing broke mid-body: the guest's reply is cut, never
@@ -72,6 +79,11 @@ final class PIIRelay {
     func head(_ head: Data) -> Head {
         guard let text = String(data: head, encoding: .isoLatin1) else { return .refused("an unreadable head") }
         let lines = text.components(separatedBy: "\r\n").filter { !$0.isEmpty }
+        // A line this can't read with certainty (a bare LF, an obs-fold
+        // continuation) could hide a length or a coding, as on the request side.
+        if lines.dropFirst().contains(where: { $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" }) {
+            return .refused("an unreadable header line")
+        }
         let status = lines.first.flatMap { Int($0.split(separator: " ").dropFirst().first ?? "") } ?? 0
         var lengths: [String] = [], transfer: [String] = [], coding: [String] = []
         var contentType = ""
@@ -108,6 +120,12 @@ final class PIIRelay {
         let kept = lines.filter { line in
             let name = line.split(separator: ":", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces).lowercased()
             return name != "content-length" && name != "transfer-encoding"
+        }
+        let ct = contentType.lowercased()
+        if !chunkedOut, !ct.contains("text/event-stream"), ct.contains("json") {
+            heldHead = kept.joined(separator: "\r\n")
+            if case .length(0) = body { return .restored(end()) }
+            return .restored(Data())
         }
         let out = kept.joined(separator: "\r\n") + (chunkedOut ? "\r\nTransfer-Encoding: chunked" : "") + "\r\n\r\n"
         var data = out.data(using: .isoLatin1) ?? Data(out.utf8)
@@ -184,14 +202,17 @@ final class PIIRelay {
         return out
     }
 
-    /// The upstream closed. A body read up to the close ends here (what's
-    /// held, then the last chunk); one cut short of its length or its last
-    /// chunk gets what's held but no end, so the guest sees it cut.
+    /// The upstream closed. A body read up to a clean close ends here
+    /// (what's held, then the last chunk). One cut short of its length or its
+    /// last chunk, or ended by a reset or an unclean TLS shutdown
+    /// (`clean` false), gets what's held but no end, so the guest sees it cut.
     // @port-skip linux-only: see PIIRelay
-    func finish() -> Data {
+    func finish(clean: Bool = true) -> Data {
         guard let restorer, !ended, !failed else { return Data() }
-        if case .untilClose = body { return end() }
+        if clean, case .untilClose = body { return end() }
         failed = true
+        // An HTTP/1.0 guest's held JSON reply never goes: it would read as whole.
+        guard heldHead == nil else { return Data() }
         return frame(restorer.finish())
     }
 
@@ -199,12 +220,25 @@ final class PIIRelay {
     private func end() -> Data {
         guard let restorer else { return Data() }
         ended = true
+        if let head = heldHead {
+            // The whole restored body (plus any the restorer already let
+            // through past its cap: then the head went without a length).
+            heldHead = nil
+            let body = restorer.finish()
+            let out = head + "\r\nContent-Length: \(body.count)\r\n\r\n"
+            return (out.data(using: .isoLatin1) ?? Data(out.utf8)) + body
+        }
         return frame(restorer.finish()) + (chunkedOut ? Data("0\r\n\r\n".utf8) : Data())
     }
 
     // @port-skip linux-only: see PIIRelay
     private func frame(_ d: Data) -> Data {
         guard !d.isEmpty else { return Data() }
+        if let head = heldHead {
+            // Past the restorer's cap before the end: up to the close, no length.
+            heldHead = nil
+            return ((head + "\r\n\r\n").data(using: .isoLatin1) ?? Data(head.utf8)) + d
+        }
         guard chunkedOut else { return d }
         return Data(String(d.count, radix: 16).utf8) + Data("\r\n".utf8) + d + Data("\r\n".utf8)
     }

@@ -215,6 +215,54 @@ struct PIIProxyTests {
         #expect(!String(decoding: out, as: UTF8.self).hasSuffix("0\r\n\r\n"))
     }
 
+    /// A body read up to the close ends cleanly only on a clean close: one
+    /// cut by a reset or an unclean TLS shutdown never gets the last chunk.
+    @Test func aResetUpToTheCloseIsNotAnEnd() throws {
+        let (vault, _) = Self.vaultWithEmail()
+        for clean in [true, false] {
+            let relay = PIIRelay(vault: vault)
+            guard case .restored = relay.head(Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".utf8)) else {
+                Issue.record("not restored"); return
+            }
+            _ = relay.feed(Self.sse(["hello"]))
+            let tail = String(decoding: relay.finish(clean: clean), as: UTF8.self)
+            #expect(tail.hasSuffix("0\r\n\r\n") == clean && relay.failed == !clean, "clean: \(clean)")
+        }
+    }
+
+    /// An HTTP/1.0 guest's JSON reply goes whole with its exact length; cut,
+    /// it never goes (it would read as complete).
+    @Test(arguments: ["whole", "cut", "reset"])
+    func anHTTP10GuestsJSONReplyHasItsLength(kind: String) throws {
+        let (vault, s) = Self.vaultWithEmail()
+        let body = Data("{\"text\":\"mail \(s)\"}".utf8)
+        let relay = PIIRelay(vault: vault, chunkedOut: false)
+        // Cut: 10 bytes short of its length. Reset: read up to a close that
+        // wasn't clean.
+        let length = kind == "cut" ? "Content-Length: \(body.count + 10)\r\n" : kind == "whole" ? "Content-Length: \(body.count)\r\n" : ""
+        guard case .restored(var out) = relay.head(Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(length)\r\n".utf8)) else {
+            Issue.record("not restored"); return
+        }
+        #expect(out.isEmpty, "the head waits for the body")
+        out += relay.feed(body) + relay.finish(clean: kind != "reset")
+        if kind == "whole" {
+            let restored = Data("{\"text\":\"mail \(Self.email)\"}".utf8)
+            let text = String(decoding: out, as: UTF8.self)
+            #expect(text.contains("Content-Length: \(restored.count)\r\n") && Self.body(out) == restored, "\(text)")
+        } else {
+            #expect(out.isEmpty && relay.failed)
+        }
+    }
+
+    /// A head line that can't be read with certainty is refused.
+    @Test(arguments: ["X-A: 1\nContent-Length: 3", "X-A: 1\r\n folded"])
+    func anUnreadableHeadLineIsRefused(line: String) {
+        let (vault, _) = Self.vaultWithEmail()
+        guard case .refused = PIIRelay(vault: vault).head(Data("HTTP/1.1 200 OK\r\n\(line)\r\n\r\n".utf8)) else {
+            Issue.record("not refused"); return
+        }
+    }
+
     /// An HTTP/1.0 guest gets the restored body up to the close, unchunked;
     /// a Latin-1 header value goes back byte for byte.
     @Test func anHTTP10GuestGetsNoChunks() throws {
@@ -258,6 +306,26 @@ struct PIIProxyTests {
         #expect(Self.text(ofChunked: reply) == "mail \(Self.email) ok", "\(String(decoding: reply.prefix(600), as: UTF8.self))")
     }
 
+    /// Broken framing in the reply's first read: the guest's connection is
+    /// closed at once (not left waiting on an upstream that stays open).
+    @Test func aBadFirstChunkClosesTheGuest() async throws {
+        let (proxy, pid, dir) = try Self.proxy()
+        defer { Self.cleanup(dir, pid) }
+        let ip = try #require(Daemon.primaryIPv4())
+        let up = try EchoSSEUpstream(host: ip, badChunk: true)
+        defer { up.stop() }
+        proxy.routeAllTo = (ip, up.port)
+        let w = try await DaemonGlobalSuites.WebSocketGuardTests.Wire(proxy: proxy, pid: pid)
+        defer { w.close() }
+        w.send(Self.request(host: "chatgpt.com"))
+        let t = Date()
+        var got = Data()
+        for _ in 0..<10 { let d = w.read(); if d.isEmpty { break }; got += d }
+        #expect(Date().timeIntervalSince(t) < 3, "closed, not left waiting (5 s read timeout)")
+        let text = String(decoding: got, as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 200 ") && !text.hasSuffix("0\r\n\r\n"), "\(text)")
+    }
+
     /// A reply with a negative length: the guest gets a 502, and the proxy
     /// (the daemon) is still up for the next request.
     @Test func aNegativeLengthIsA502NotACrash() async throws {
@@ -284,11 +352,12 @@ final class EchoSSEUpstream: @unchecked Sendable {
     let channel: Channel
     var port: Int { channel.localAddress!.port! }
 
-    /// `badLength`: the reply claims `Content-Length: -1`.
-    init(host: String, badLength: Bool = false) throws {
+    /// `badLength`: the reply claims `Content-Length: -1`. `badChunk`: its
+    /// first chunk line isn't hex, and the upstream then stays open.
+    init(host: String, badLength: Bool = false, badChunk: Bool = false) throws {
         let request = self.request
         channel = try ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .childChannelInitializer { $0.pipeline.addHandler(Handler(request, badLength: badLength)) }
+            .childChannelInitializer { $0.pipeline.addHandler(Handler(request, badLength: badLength, badChunk: badChunk)) }
             .bind(host: host, port: 0).wait()
     }
     func stop() { channel.close(promise: nil) }
@@ -298,8 +367,11 @@ final class EchoSSEUpstream: @unchecked Sendable {
         typealias OutboundOut = ByteBuffer
         let request: NIOLockedValueBox<String>
         let badLength: Bool
+        let badChunk: Bool
         var buf = Data()
-        init(_ r: NIOLockedValueBox<String>, badLength: Bool) { request = r; self.badLength = badLength }
+        init(_ r: NIOLockedValueBox<String>, badLength: Bool, badChunk: Bool) {
+            request = r; self.badLength = badLength; self.badChunk = badChunk
+        }
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             let b = unwrapInboundIn(data)
             buf.append(contentsOf: b.readableBytesView)
@@ -322,6 +394,10 @@ final class EchoSSEUpstream: @unchecked Sendable {
                 + chunk(body.prefix(mid))
             let second = chunk(body.dropFirst(mid)) + Data("0\r\n\r\n".utf8)
             let ch = context.channel
+            if badChunk {
+                ch.writeAndFlush(ch.allocator.buffer(bytes: Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".utf8)), promise: nil)
+                return
+            }
             if badLength {
                 let reply = Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: -1\r\n\r\n".utf8) + body
                 ch.writeAndFlush(ch.allocator.buffer(bytes: reply)).whenComplete { _ in ch.close(promise: nil) }
