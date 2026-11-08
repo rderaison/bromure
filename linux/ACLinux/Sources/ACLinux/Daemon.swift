@@ -1218,6 +1218,9 @@ public actor Daemon {
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': \(homeNote)\n".utf8))
         // The guest's hostname (agentd's task_apply_hostname), from the VM's name.
         try (Self.sanitizeHostname(rec.name) + "\n").write(toFile: dir + "/meta/hostname.txt", atomically: true, encoding: .utf8)
+        // The host's time zone (agentd's task_set_timezone applies it), read
+        // again each launch so a change on the host is reflected, as on macOS.
+        try (TimeZone.current.identifier + "\n").write(toFile: dir + "/meta/tz", atomically: true, encoding: .utf8)
         try "ext4\n".write(toFile: dir + "/meta/home.mode", atomically: true, encoding: .utf8)
         // The home seed agentd applies to the ext4 home before the session,
         // and the counters it polls; bumped every launch, as on macOS (on a
