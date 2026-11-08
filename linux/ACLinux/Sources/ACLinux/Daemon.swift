@@ -344,6 +344,12 @@ public actor Daemon {
         // be skipped by unsetting HTTP(S)_PROXY. A workspace can opt out
         // (Profile.disableTransparentProxy); BROMURE_NO_TRANSPARENT forces it
         // off (debugging).
+        // The switch's decisions on the Timeline, a binary-identity denial
+        // with its reason from the proxy's guardrails (macOS: the egress
+        // observer hands SwitchEgressReport the MiTM engine).
+        if let mitm {
+            sw.egress.observer = { [weak mitm] ev in SwitchEgressReport.record(ev, engine: mitm) }
+        }
         if ProcessInfo.processInfo.environment["BROMURE_NO_TRANSPARENT"] == nil, let mitm {
             let egress = sw.egress
             let interceptor = SwitchInterceptor(proxy: mitm, guestMTU: passt.mtu) { portID, ip in

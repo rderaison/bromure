@@ -17,7 +17,7 @@ extension MitmProxy {
     /// non-TLS / unparseable flows are spliced raw (fail open); everything
     /// else is MiTM'd through the workspace's policy chain. Takes ownership
     /// of `appFD`.
-    // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=85d1555a8e0b2840 @8e2543eb
+    // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=08650ec6e3bd951c @79b2d8c0
     func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int = 0) {
         // Off the event loops, on a thread of its own: the peeks block on the
         // socket, and a pool would let a few hundred idle guest connections
@@ -101,7 +101,8 @@ extension MitmProxy {
                     case .deny:
                         Self.reportTransparentDeny(policy: policy, profileID: profileID, label: host,
                                                    hostnames: [host], destIP: destIP, destPort: destPort, layer: "l4",
-                                                   exe: identity?.exe)
+                                                   exe: identity?.exe, reasonHostnames: peeked.map { [$0] } ?? [],
+                                                   destAddr: destAddr)
                         close(appFD); return
                     case .mitm:   shouldSplice = false
                     case .splice: shouldSplice = true
@@ -148,7 +149,8 @@ extension MitmProxy {
                 case .deny:
                     Self.reportTransparentDeny(policy: policy, profileID: profileID, label: sniHost ?? destIP,
                                                hostnames: sniHost.map { [$0] } ?? [], destIP: destIP,
-                                               destPort: destPort, layer: "sni", exe: identity?.exe)
+                                               destPort: destPort, layer: "sni", exe: identity?.exe,
+                                               reasonHostnames: sniHost.map { [$0] } ?? [], destAddr: destAddr)
                     close(appFD); return
                 case .mitm:   shouldSplice = false              // `web` rule / inspected endpoint overrides passthrough
                 case .splice: shouldSplice = true               // OpenShell `tls: skip`
@@ -224,10 +226,13 @@ extension MitmProxy {
 
     /// The Timeline row for a transparent flow the egress policy refused
     /// (macOS: acceptTransparentFlow's two deny reports, `l4` for HTTP and
-    /// `sni` for TLS), once a minute per destination.
+    /// `sni` for TLS), once a minute per destination. A destination the
+    /// policy allows but not for this program (binaries enforced) says so:
+    /// which rule, which program, not "default policy".
     // @port-skip linux-only: acceptTransparentFlow's deny report, factored once
     static func reportTransparentDeny(policy: EgressPolicy, profileID: UUID, label: String, hostnames: [String],
-                                      destIP: String, destPort: Int, layer: String, exe: String? = nil) {
+                                      destIP: String, destPort: Int, layer: String, exe: String? = nil,
+                                      reasonHostnames: [String] = [], destAddr: UInt32? = nil) {
         guard EgressReportDeduper.shared.shouldReport(profileID: profileID, host: label,
                                                       port: destPort, denied: true, exe: exe) else { return }
         SupplyChainLog.shared.record(
@@ -238,6 +243,10 @@ extension MitmProxy {
                         "dst_ip": .string(destIP), "exe": .of(exe),
                         "rule": .of(policy.firstMatch(ip: nil, hostnames: hostnames, proto: .tcp,
                                                       port: UInt16(truncatingIfNeeded: destPort))?.text),
+                        "reason": .of(exe.flatMap {
+                            policy.identityDenialReason(hostnames: reasonHostnames, ip: destAddr,
+                                                        port: UInt16(truncatingIfNeeded: destPort), exe: $0)
+                        }),
                         "by_policy": .bool(true)])
     }
 

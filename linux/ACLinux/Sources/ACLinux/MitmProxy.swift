@@ -2125,3 +2125,8 @@ final class ResponseRelay: ChannelInboundHandler {
         SubscriptionAuthRewrite.noteUnauthorized(injected, response: head, profileID: profileID)
     }
 }
+
+/// What explains a switch denial (SwitchEgressReport): the guardrails this
+/// proxy enforces for each workspace (macOS: MitmEngine).
+// @port-skip linux-only: the daemon's proxy as SwitchEgressReport's GuardrailsConfigSource
+extension MitmProxy: GuardrailsConfigSource {}
