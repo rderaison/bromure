@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 import Glibc
 
 /// Imported SSH keys (macOS: the editor's "Import key…" and "Add keys from a
@@ -181,6 +182,12 @@ extension Daemon {
         let store = profileStore
         let keys = Self.loadAgentKeys(for: profile, store: store)
         mitm.sshAgent.setKeys(keys, for: profile.id)
+        // The gates first: the agent is reachable from the guest as soon as
+        // it's registered (a taken-back VM runs), so no imported key may be
+        // in it, even for a moment, before its "ask before use" applies.
+        mitm.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
+        mitm.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
+        Self.sshAgentRegisteredForTesting.withLockedValue { $0 }?(profile.id)
         let askpassDir = config.runtimeDir
         let needsAgent = !keys.isEmpty || profile.importedSSHKeys.contains { !$0.isFromHostAgent }
         if needsAgent, let socket = mitm.sshAgentSocket(for: profile.id) {
@@ -193,8 +200,45 @@ extension Daemon {
                 Self.loadImportedSSHKeys(for: profile, profileDirectory: dir, agentSocket: socket, askpassDir: askpassDir)
             }.value
         }
-        mitm.sshAgent.setImportedKeyApprovals(Self.importedKeyApprovals(profile), for: profile.id)
-        mitm.sshAgent.setHostAgentKeys(Self.hostAgentKeys(profile), for: profile.id)
+    }
+
+    /// Tests: called once the gates are set, before the agent is made or
+    /// any key goes into it.
+    static let sshAgentRegisteredForTesting = NIOLockedValueBox<(@Sendable (UUID) -> Void)?>(nil)
+
+    /// What a crash during an ssh-add or ssh-keygen left: its askpass
+    /// script (a passphrase in it) in the runtime directory. Swept at
+    /// start, before any import or launch.
+    // @port-skip linux-only: the askpass scripts' sweep (macOS's live in a temporary directory the OS clears)
+    nonisolated static func sweepAskpassScripts(in dir: String) {
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+            where entry.hasPrefix("askpass-") && (entry.hasSuffix(".sh") || entry.hasSuffix(".sh.used")) {
+            try? FileManager.default.removeItem(atPath: (dir as NSString).appendingPathComponent(entry))
+        }
+    }
+
+    /// Why a host agent socket may not be used: one of this daemon's own
+    /// (a workspace's private agent: another workspace would sign with its
+    /// keys past its gates), or, on a shared server, one under a directory
+    /// the daemon's sandbox hides (ProtectHome, PrivateTmp).
+    // @port-skip linux-only: host-agent sockets on a server
+    func hostAgentSocketRefusal(_ socket: String) -> String? {
+        guard let path = HostAgentClient.resolveHostSocket(socket) else { return nil }
+        return Self.hostAgentSocketRefusal(path: path, ownDirectories: [config.runtimeDir, mitm?.sshAgentDirectory.withLockedValue { $0 }].compactMap { $0 },
+                                           multiUser: config.multiUser)
+    }
+
+    // @port-skip linux-only: see hostAgentSocketRefusal
+    nonisolated static func hostAgentSocketRefusal(path: String, ownDirectories: [String], multiUser: Bool) -> String? {
+        let real = ((path as NSString).resolvingSymlinksInPath as NSString).standardizingPath
+        let own = ownDirectories.map { (($0 as NSString).resolvingSymlinksInPath as NSString).standardizingPath }
+        for dir in own where real == dir || real.hasPrefix(dir + "/") {
+            return "\(path) is one of this server's own agents, not a host agent"
+        }
+        if multiUser, ["/home", "/tmp", "/run/user"].contains(where: { real == $0 || real.hasPrefix($0 + "/") }) {
+            return "a shared server's daemon can't see \(path) (its sandbox hides /home, /tmp and /run/user): use an agent socket outside them"
+        }
+        return nil
     }
 
     /// Add the per-profile key to the workspace's private ssh-agent, from
@@ -324,23 +368,31 @@ extension Daemon {
     // @port ACAppDelegate.importSSHKey(at: URL, passphrase: String?, label: String, for: Profile) h=f6470b0a6c91eaec @2134fc7a
     /// `savePassphrase` false: the caller saves it (on its own task, whose
     /// vault it is).
+    /// `keyBytes`/`publicKey`: the file's contents as the client read them
+    /// (a shared server's daemon can't see the user's /home), `sourceURL`
+    /// then only naming it.
     nonisolated static func importSSHKey(at sourceURL: URL, passphrase: String?, label: String,
                                          for profile: Profile, profileDirectory: URL, askpassDir: String,
-                                         savePassphrase: Bool = true) throws -> ImportedSSHKey {
+                                         savePassphrase: Bool = true, keyBytes: Data? = nil,
+                                         publicKey: String? = nil) throws -> ImportedSSHKey {
         let importedDir = profileDirectory.appendingPathComponent("agent/imported", isDirectory: true)
         try FileManager.default.createDirectory(at: importedDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: NSNumber(value: 0o700)])
         let basename = "\(UUID().uuidString)-\(sourceURL.lastPathComponent)"
         let dst = importedDir.appendingPathComponent(basename)
-        guard let bytes = FileManager.default.contents(atPath: sourceURL.path) else {
+        guard let bytes = keyBytes ?? FileManager.default.contents(atPath: sourceURL.path) else {
             throw SSHKeyImportError("can't read \(sourceURL.path)")
         }
         guard FileManager.default.createFile(atPath: dst.path, contents: bytes,
                                              attributes: [.posixPermissions: NSNumber(value: 0o600)]) else {
             throw SSHKeyImportError("can't write \(dst.path)")
         }
-        var pubText = ""
-        for pubURL in [URL(fileURLWithPath: sourceURL.path + ".pub"), sourceURL.deletingPathExtension().appendingPathExtension("pub")] {
+        var pubText = publicKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !pubText.isEmpty {
+            try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
+        }
+        for pubURL in [URL(fileURLWithPath: sourceURL.path + ".pub"), sourceURL.deletingPathExtension().appendingPathExtension("pub")]
+            where keyBytes == nil && pubText.isEmpty {
             if let s = try? String(contentsOf: pubURL, encoding: .utf8) {
                 pubText = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 try? pubText.appending("\n").write(to: importedDir.appendingPathComponent(basename + ".pub"), atomically: true, encoding: .utf8)
@@ -434,8 +486,9 @@ extension Daemon {
     }
 
     /// `/profiles/<workspace>/ssh-keys…` (macOS: the editor's Credentials
-    /// pane; a server has none): GET lists; POST `{path, label?,
-    /// passphrase?, requireApproval?}` imports a key file on this server;
+    /// pane; a server has none): GET lists; POST `{path, keyData?,
+    /// publicKey?, label?, passphrase?, requireApproval?}` imports a key
+    /// file (its bytes as the client read them, else `path` on this server);
     /// POST `{hostAgentSocket, publicKey?, requireApproval?}` adds a host
     /// agent's keys (the one whose public key is given, else all); POST
     /// `host-agent {socket}` lists an agent's keys; POST `<id>
@@ -457,6 +510,7 @@ extension Daemon {
             return ControlResponse(200, ["keys": Self.sshKeyRows(p)])
         case ("POST", "host-agent"):
             let socket = body["socket"]?.stringValue ?? ""
+            if let why = hostAgentSocketRefusal(socket) { return .error(400, why) }
             do {
                 let keys = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value
                 return ControlResponse(200, ["keys": .array(keys.map { .object(["label": .string($0.label), "publicKey": .string($0.publicKeyText)]) })])
@@ -464,6 +518,7 @@ extension Daemon {
         case ("POST", ""):
             let approve = body["requireApproval"] == .bool(true)
             if let socket = body["hostAgentSocket"]?.stringValue {
+                if let why = hostAgentSocketRefusal(socket) { return .error(400, why) }
                 let want = body["publicKey"]?.stringValue.flatMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0) }
                 let found: [ImportedSSHKey]
                 do { found = try await Task.detached { try Self.listHostAgentKeys(socket: socket) }.value } catch {
@@ -482,6 +537,16 @@ extension Daemon {
             }
             guard let path = body["path"]?.stringValue, !path.isEmpty else { return .error(400, "path or hostAgentSocket required") }
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            // The key's bytes as the CLI read them (the caller's own file),
+            // else the daemon reads `path` itself.
+            var keyBytes: Data?
+            if let b64 = body["keyData"]?.stringValue {
+                guard let d = Data(base64Encoded: b64), !d.isEmpty, d.count <= 64 << 10 else {
+                    return .error(400, "keyData isn't a key file (base64, at most 64 KiB)")
+                }
+                keyBytes = d
+            }
+            let publicKey = body["publicKey"]?.stringValue
             let label = body["label"]?.stringValue ?? ""
             let passphrase = body["passphrase"]?.stringValue
             let askpassDir = config.runtimeDir
@@ -490,7 +555,7 @@ extension Daemon {
                 // here, on this task.
                 var key = try await Task.detached {
                     try Self.importSSHKey(at: url, passphrase: passphrase, label: label, for: prof, profileDirectory: dir,
-                                          askpassDir: askpassDir, savePassphrase: false)
+                                          askpassDir: askpassDir, savePassphrase: false, keyBytes: keyBytes, publicKey: publicKey)
                 }.value
                 if key.hasPassphrase, let passphrase {
                     do { try PassphraseKeychain.set(passphrase: passphrase, profileID: prof.id, filename: key.filename) } catch {

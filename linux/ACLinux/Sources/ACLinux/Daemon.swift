@@ -332,6 +332,8 @@ public actor Daemon {
             mitm?.blocksHostAddresses = config.multiUser
             // The workspaces' ssh-agent sockets: in the 0700 runtime directory.
             mitm?.sshAgentDirectory.withLockedValue { $0 = config.runtimeDir + "/ssh-agents" }
+            // A crashed ssh-add's askpass (a passphrase in it) goes first.
+            Self.sweepAskpassScripts(in: config.runtimeDir)
             mitm?.routeAllTo = Self.testUpstream()
             Self.applyTestSSOPortal()
             // AWS SSO reads ~/.aws where the AWS CLI writes it: $HOME (Foundation's

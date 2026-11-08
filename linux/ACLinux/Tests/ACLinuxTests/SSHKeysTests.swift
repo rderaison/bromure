@@ -1,5 +1,6 @@
 import Foundation
 import Glibc
+import NIOConcurrencyHelpers
 import Testing
 @testable import ACLinux
 
@@ -126,12 +127,94 @@ struct SSHKeysTests {
     }
 }
 
+extension SSHKeysTests {
+    @Test func aCrashedImportsAskpassIsSwept() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        for f in ["askpass-1.sh", "askpass-1.sh.used", "askpass-2.sh", "control.sock", "askpass-notes.txt"] {
+            FileManager.default.createFile(atPath: dir + "/" + f, contents: Data("x".utf8))
+        }
+        Daemon.sweepAskpassScripts(in: dir)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir).sorted() == ["askpass-notes.txt", "control.sock"])
+    }
+
+    @Test func aHostAgentSocketIsNeverOneOfOurs() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let own = [dir + "/run", dir + "/run/ssh-agents"]
+        try FileManager.default.createDirectory(atPath: dir + "/run/ssh-agents", withIntermediateDirectories: true)
+        // A sibling workspace's private agent, directly or through a link.
+        #expect(Daemon.hostAgentSocketRefusal(path: dir + "/run/ssh-agents/bromure-ac-agent-1-abc.sock", ownDirectories: own, multiUser: false) != nil)
+        try FileManager.default.createSymbolicLink(atPath: dir + "/link", withDestinationPath: dir + "/run/ssh-agents")
+        #expect(Daemon.hostAgentSocketRefusal(path: dir + "/link/x.sock", ownDirectories: own, multiUser: false) != nil)
+        #expect(Daemon.hostAgentSocketRefusal(path: dir + "/run/../run/control.sock", ownDirectories: own, multiUser: false) != nil)
+        #expect(Daemon.hostAgentSocketRefusal(path: "/run/gpg/S.gpg-agent.ssh", ownDirectories: own, multiUser: false) == nil)
+        // A shared server's daemon can't see /home, /tmp or /run/user: said so.
+        let hidden = Daemon.hostAgentSocketRefusal(path: "/run/user/1000/gnupg/S.gpg-agent.ssh", ownDirectories: own, multiUser: true)
+        #expect(hidden?.contains("can't see") == true)
+        #expect(Daemon.hostAgentSocketRefusal(path: "/run/user/1000/gnupg/S.gpg-agent.ssh", ownDirectories: own, multiUser: false) == nil)
+        #expect(Daemon.hostAgentSocketRefusal(path: "/srv/agent.sock", ownDirectories: own, multiUser: true) == nil)
+    }
+}
+
 extension DaemonGlobalSuites {
     /// `/profiles/<workspace>/ssh-keys`: import (the passphrase into the
     /// vault), list (no secret), the gate, remove (file and vault entry go);
     /// a deleted workspace's passphrases leave the vault.
     @Suite("ssh-keys route", .serialized)
     struct SSHKeysRouteTests {
+        /// A taken-back VM's agent: every imported key's gate is set before
+        /// the agent exists (the guest reaches it once it's registered).
+        @Test func theGatesComeBeforeTheAgent() async throws {
+            try await SSHKeysTests.withVault { _ in
+                try await VMRunTests.withStore { d, dir in
+                    let mitm = try #require(await d.mitm)
+                    let (src, pub) = try SSHKeysTests.makeKey(dir, passphrase: "", keepPub: true)
+                    var p = try ProfileStore().save(Profile(name: "gated", tool: .claude, authMode: .token))
+                    let key = try Daemon.importSSHKey(at: URL(fileURLWithPath: src), passphrase: nil, label: "g", for: p,
+                                                      profileDirectory: ProfileStore().profileDirectory(for: p), askpassDir: dir)
+                    p.importedSSHKeys = [ImportedSSHKey(id: key.id, label: key.label, filename: key.filename,
+                                                        publicKeyText: key.publicKeyText, requireApproval: true)]
+                    let seen = NIOLockedValueBox<(gates: Int, agent: Bool)?>(nil)
+                    Daemon.sshAgentRegisteredForTesting.withLockedValue { $0 = { pid in
+                        seen.withLockedValue { $0 = (mitm.sshAgent.importedKeyApprovals(for: pid).count, HostAgentClient.client(for: pid) != nil) }
+                    } }
+                    defer { Daemon.sshAgentRegisteredForTesting.withLockedValue { $0 = nil } }
+                    await d.loadWorkspaceSSHKeys(p)
+                    defer { mitm.terminateSSHAgent(for: p.id) }
+                    let at = try #require(seen.withLockedValue { $0 })
+                    #expect(at.gates == 1 && !at.agent, "gated before any agent: \(at)")
+                    let socket = try #require(HostAgentClient.client(for: p.id)).socketPath
+                    #expect(HostAgentClient(socketPath: socket, timeout: 5).identities().map(\.blob)
+                                .contains(try #require(Daemon.sshPublicKeyBlob(fromOpenSSHText: pub))), "and then loaded")
+                }
+            }
+        }
+
+        /// The CLI's import: the key's bytes in the body (a shared server's
+        /// daemon can't read the user's /home); the path only names it.
+        @Test func aKeyComesAsTheClientReadIt() async throws {
+            try await SSHKeysTests.withVault { _ in
+                try await VMRunTests.withStore { d, dir in
+                    let p = try ProfileStore().save(Profile(name: "bytes", tool: .claude, authMode: .token))
+                    let (src, pub) = try SSHKeysTests.makeKey(dir, passphrase: "fixture-pass", keepPub: true)
+                    let bytes = try #require(FileManager.default.contents(atPath: src))
+                    let r = await d.sshKeysRoute(p, method: "POST", sub: ["ssh-keys"], body: [
+                        "path": "/home/someone/.ssh/id_unseen", "keyData": .string(bytes.base64EncodedString()),
+                        "publicKey": .string(pub), "passphrase": "fixture-pass"])
+                    #expect(r.status == 200, "\(r.body)")
+                    let k = try #require(ProfileStore().loadAll().first { $0.id == p.id }?.importedSSHKeys.first)
+                    #expect(k.publicKeyText == pub && k.filename.hasSuffix("-id_unseen") && k.hasPassphrase)
+                    #expect(FileManager.default.contents(atPath: ProfileStore().profileDirectory(for: p)
+                        .appendingPathComponent("agent/imported/" + k.filename).path) == bytes)
+                    #expect(await d.sshKeysRoute(p, method: "POST", sub: ["ssh-keys"],
+                                                 body: ["path": "/x", "keyData": "not base64!"]).status == 400)
+                    // Our own agents aren't host agents.
+                    let refused = await d.sshKeysRoute(p, method: "POST", sub: ["ssh-keys"],
+                                                       body: ["hostAgentSocket": .string(d.config.runtimeDir + "/ssh-agents/bromure-ac-agent-1-x.sock")])
+                    #expect(refused.status == 400 && "\(refused.body)".contains("own agents"))
+                }
+            }
+        }
+
         @Test func importListGateRemove() async throws {
             try await SSHKeysTests.withVault { _ in
                 try await VMRunTests.withStore { d, dir in

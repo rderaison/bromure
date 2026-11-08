@@ -54,7 +54,15 @@ struct SSHKey: AsyncParsableCommand {
         @Flag(help: "Ask before each signature with this key.") var approve = false
         // @port-skip linux-only: CLI
         func run() async throws {
-            var body: [String: JSONValue] = ["path": .string(VM.Run.absoluteHostPath(file)), "requireApproval": .bool(approve)]
+            // Read here, as the calling user: a shared server's daemon can't
+            // see this account's /home.
+            let path = VM.Run.absoluteHostPath(file)
+            guard let bytes = FileManager.default.contents(atPath: path) else { throw ValidationError("can't read \(path)") }
+            var body: [String: JSONValue] = ["path": .string(path), "keyData": .string(bytes.base64EncodedString()),
+                                             "requireApproval": .bool(approve)]
+            for pub in [path + ".pub", (path as NSString).deletingPathExtension + ".pub"] {
+                if let text = try? String(contentsOfFile: pub, encoding: .utf8) { body["publicKey"] = .string(text); break }
+            }
             if let label { body["label"] = .string(label) }
             if passphraseStdin {
                 let pass = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
