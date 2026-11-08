@@ -93,6 +93,19 @@ extension DaemonGlobalSuites {
             #expect(AWSSSOResolver.sha1Hex("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d")
         }
 
+        /// A daemon made while a home is already chosen (another daemon's, or
+        /// a test's) leaves it: daemons made in parallel suites used to reset
+        /// it to $HOME under a test reading its own cache.
+        @Test func aSecondDaemonKeepsTheChosenHome() async throws {
+            let chosen = URL(fileURLWithPath: "/nonexistent-sso-home", isDirectory: true)
+            AWSSSOResolver.homeOverride = chosen
+            defer { AWSSSOResolver.homeOverride = nil }
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            #expect(AWSSSOResolver.homeOverride == chosen)
+            await d.shutdown()
+        }
+
         @Test func anSSOProfileIsResolvedFromTheCache() async throws {
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()
             defer { try? FileManager.default.removeItem(atPath: dir) }

@@ -312,7 +312,9 @@ public actor Daemon {
             Self.applyTestSSOPortal()
             // AWS SSO reads ~/.aws where the AWS CLI writes it: $HOME (Foundation's
             // account home ignores $HOME on Linux).
-            if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+            // Set once per process: a daemon made while another runs (tests)
+            // doesn't replace a home already chosen.
+            if AWSSSOResolver.homeOverride == nil, let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
                 AWSSSOResolver.homeOverride = URL(fileURLWithPath: home, isDirectory: true)
             }
             // An e2e run marks itself: it reaches its test upstream or no
