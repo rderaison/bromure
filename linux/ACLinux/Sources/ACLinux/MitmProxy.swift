@@ -1199,7 +1199,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
-                                if let wsPolicy, let messagePolicy = wsPolicy.messagePolicy {
+                                if let wsPolicy {
+                                    // Keyed on the plan alone: a rewrite with
+                                    // no rule still goes through the gate.
+                                    let messagePolicy = wsPolicy.messagePolicy ?? { _ in .allow }
                                     // OpenShell's per-message gate on the
                                     // guest's frames (macOS: the pump's
                                     // ClientStream gate); the upstream's pass.
