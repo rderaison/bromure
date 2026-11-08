@@ -797,6 +797,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// WebSocket's frames) go to the upstream channel, once its reply
     /// switched protocols (`upgraded`).
     private var upstream: Channel?
+    /// The upstream's relay, whose one decision resumes its reads. Weak:
+    /// the relay's hooks reach back here (the upstream's pipeline holds it).
+    private weak var relay: ResponseRelay?
     private var pending: [ByteBuffer] = []
     private var pendingBytes = 0
     /// One request per connection (each is checked, swapped and decided
@@ -880,6 +883,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     func channelInactive(context: ChannelHandlerContext) {
         wsFilter?.cancel()           // a scan, and an ask it's waiting on, dropped
         upstream?.close(promise: nil)
+        relay = nil
         context.fireChannelInactive()
     }
 
@@ -969,7 +973,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .rewrite(let forward, let rewrite, let done):
             req = Self.readWhole(forward)
             upgrade = false
-            supplyChain = SupplyChainRewrite(rewrite: rewrite, done: done)
+            supplyChain = SupplyChainRewrite(rewrite: rewrite, bodiless: method.uppercased() == "HEAD", done: done)
         }
         // Prompt injection, ask or block, before the model sees a byte
         // (macOS: driveTLS's enforcement after the swaps; log mode stays in
@@ -1075,7 +1079,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// paused it while the guest was full).
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable { _ = upstream?.setOption(ChannelOptions.autoRead, value: true) }
+        if context.channel.isWritable { relay?.readUpstreamIfAllowed() }
         context.fireChannelWritabilityChanged()
     }
 
@@ -1105,10 +1109,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                               ws: ws, pii: pii, supplyChain: supplyChain,
                                               // An HTTP/1.0 guest gets a restored body up to the close, not chunks.
                                               guestHTTP11: !Self.isHTTP10(req))
-                    relay.onUpstreamWritable = { self.readGuestIfAllowed(channel) }
+                    relay.onUpstreamWritable = { [weak self] in self?.readGuestIfAllowed(channel) }
                     // The upgrade's held bytes follow the 101; anything else's are dropped.
-                    relay.onSwitched = { switched, server in
+                    relay.onSwitched = { [weak self] switched, server in
                         channel.eventLoop.execute {
+                            guard let self else { return }
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
@@ -1135,7 +1140,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                         }
                     }
                     up.pipeline.addHandler(relay).whenComplete { _ in
+                        // The guest left while the upstream was being set up:
+                        // nobody will close it (channelInactive saw none).
+                        guard channel.isActive else { up.close(promise: nil); return }
                         self.upstream = up
+                        self.relay = relay
                         self.awaitingUpgrade = upgrade
                         up.writeAndFlush(up.allocator.buffer(bytes: req), promise: nil)
                         if !upgrade {
@@ -1262,18 +1271,116 @@ final class ResponseRelay: ChannelInboundHandler {
     /// The reply PII protection restores (its stand-ins put back), if any.
     private let pii: PIIRelay?
     /// A package fetch's reply the supply-chain policy rewrites, read whole.
-    private let supplyChain: SupplyChainRewrite?
+    let supplyChain: SupplyChainRewrite?
     /// A rewritten package reply past this is refused, not kept (a full npm
     /// packument or a tarball is read whole, as macOS's URLSession reads
     /// it): the request decoder's cap.
     static let supplyChainCap = 64 << 20
-    /// What all the daemon's package replies being read whole may hold at
-    /// once: past it a reply is refused too, so parallel fetches can't take
-    /// the host's memory.
-    static let supplyChainBudget = 256 << 20
-    static let supplyChainHeld = NIOLockedValueBox(0)
-    /// This reply's share of `supplyChainHeld`.
-    private var supplyChainReserved = 0
+    /// What all the daemon's package replies being read whole hold at once
+    /// (256 MiB), so parallel fetches can't take the host's memory.
+    static let supplyChainBudget = SupplyChainBudget(limit: 256 << 20)
+    /// This reply's place among the budget's holders (the oldest proceeds).
+    private let supplyChainTicket = ResponseRelay.supplyChainBudget.ticket()
+    /// Chunks waiting, in order, for room in the budget (reads stopped
+    /// meanwhile): a batch already being read still arrives, behind them.
+    private var waiting: [ByteBuffer] = []
+    private var waitingBytes = 0
+    /// Since when the first waiting chunk waits (one timer for them all).
+    private var waitingSince: Date?
+    /// How long a chunk waits with the budget idle (no reply growing or
+    /// done) before the reply is refused.
+    static let supplyChainWait: TimeInterval = 30
+    /// Where the rewrites run: off the event loops (a packument's filter,
+    /// a tarball's re-gzip; the shared rewrite may wait on the publish-time
+    /// cache), on a small pool of threads of their own, not Swift's
+    /// cooperative pool.
+    static let supplyChainQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "bromure.supply-chain.rewrite"
+        q.maxConcurrentOperationCount = 4
+        return q
+    }()
+    /// The relay's own context (its reads are decided here).
+    private var context: ChannelHandlerContext?
+    /// Tests: each relay as it's made (to watch it go).
+    static let madeForTesting = NIOLockedValueBox<((ResponseRelay) -> Void)?>(nil)
+
+    /// A read-whole reply with nothing read for this long (reads not
+    /// stopped for the budget) is refused: a byte trickled now and then
+    /// can't hold its share for ever. (Tests shorten it.)
+    static let supplyChainReadIdle = NIOLockedValueBox<TimeInterval>(30)
+    private var lastRead = Date()
+    private var stalled = false
+    private var stallCheck: RepeatedTask?
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func handlerAdded(context: ChannelHandlerContext) {
+        self.context = context
+        guard supplyChain != nil else { return }
+        let idle = Self.supplyChainReadIdle.withLockedValue { $0 }
+        let every = TimeAmount.milliseconds(Int64(min(5, idle / 4) * 1000))
+        stallCheck = context.eventLoop.scheduleRepeatedTask(initialDelay: every, delay: every) { [weak self] _ in
+            guard let self, let context = self.context, self.waitingSince == nil,
+                  Date().timeIntervalSince(self.lastRead) > idle else { return }
+            self.stalled = true
+            context.close(promise: nil)
+        }
+    }
+
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func handlerRemoved(context: ChannelHandlerContext) { self.context = nil; stallCheck?.cancel() }
+
+    /// The one decision on reading the upstream again, whichever pause ends
+    /// (the guest draining, room in the budget): only when the guest can take
+    /// more and no chunk waits for room.
+    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    func readUpstreamIfAllowed() {
+        guard let context, context.channel.isActive else { return }
+        _ = context.channel.setOption(ChannelOptions.autoRead, value: guest.isWritable && waiting.isEmpty)
+    }
+
+    /// A chunk of a package reply: kept, if the budget has room and nothing
+    /// waits before it; else it waits behind the others (reads stop), with
+    /// one timer retrying every 50 ms.
+    // @port-skip linux-only: the Linux relay's read-whole budget
+    private func takeSupplyChainChunk(_ context: ChannelHandlerContext, _ b: ByteBuffer) {
+        if waiting.isEmpty, Self.supplyChainBudget.reserve(b.readableBytes, for: supplyChainTicket) {
+            whole.append(contentsOf: b.readableBytesView)
+            return
+        }
+        waiting.append(b)
+        waitingBytes += b.readableBytes
+        guard waitingSince == nil else { return }
+        waitingSince = Date()
+        _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
+        retryWaiting(context)
+    }
+
+    // @port-skip linux-only: the Linux relay's read-whole budget
+    private func retryWaiting(_ context: ChannelHandlerContext) {
+        context.eventLoop.scheduleTask(in: .milliseconds(50)) { [self] in
+            // The upstream closed meanwhile: channelInactive took the chunks.
+            guard context.channel.isActive, let since = waitingSince else { return }
+            while let b = waiting.first, Self.supplyChainBudget.reserve(b.readableBytes, for: supplyChainTicket) {
+                waiting.removeFirst()
+                waitingBytes -= b.readableBytes
+                    whole.append(contentsOf: b.readableBytesView)
+            }
+            if waiting.isEmpty {
+                waitingSince = nil
+                lastRead = Date()
+                readUpstreamIfAllowed()
+            } else if Self.supplyChainBudget.idle(since: since) > Self.supplyChainWait {
+                waiting.removeAll()
+                waitingBytes = 0
+                waitingSince = nil
+                overflowed = true
+                context.close(promise: nil)
+            } else {
+                retryWaiting(context)
+            }
+        }
+    }
     /// Whether any of the response reached the guest; the upstream's error, if any.
     private var relayed = false
     private let host: String
@@ -1319,6 +1426,7 @@ final class ResponseRelay: ChannelInboundHandler {
         self.proxy = proxy
         self.trace = trace
         self.strictSession = strictSession
+        Self.madeForTesting.withLockedValue { $0 }?(self)
     }
 
     /// What reached the guest, for the trace.
@@ -1339,18 +1447,19 @@ final class ResponseRelay: ChannelInboundHandler {
         var b = unwrapInboundIn(data)
         if capture != nil || mint != nil || supplyChain != nil {
             if supplyChain != nil {
-                let n = b.readableBytes
-                let fits = Self.supplyChainHeld.withLockedValue { held -> Bool in
-                    guard held + n <= Self.supplyChainBudget else { return false }
-                    held += n
-                    return true
-                }
-                if fits { supplyChainReserved += n }
-                if !fits || whole.count + n > Self.supplyChainCap {
+                guard !overflowed, !stalled else { return }
+                lastRead = Date()
+                guard whole.count + waitingBytes + b.readableBytes <= Self.supplyChainCap else {
                     overflowed = true
+                    waiting.removeAll()
+                    waitingBytes = 0
                     context.close(promise: nil)
                     return
                 }
+                // The daemon's budget is full (or chunks already wait): this
+                // one waits behind them, not refused at once.
+                takeSupplyChainChunk(context, b)
+                return
             } else if whole.count + b.readableBytes > Self.wholeCap {
                 overflowed = true
                 context.close(promise: nil)
@@ -1471,6 +1580,109 @@ final class ResponseRelay: ChannelInboundHandler {
         holdIfGuestFull(context)
     }
 
+    /// A package reply refused, not passed on (502).
+    // @port-skip linux-only: relayUpstreamBuffered's refusal, on the Linux relay
+    static func supplyChainRefusal(_ host: String, _ why: String) -> Data {
+        RequestReader.simple(502, "Bad Gateway", body: "Bromure: the package reply from \(host) \(why); it was not passed on.\n")
+    }
+
+    /// A read-whole package reply's rewrite (macOS: relayUpstreamBuffered's),
+    /// in steps on the rewrite pool, none blocking a worker: room for its
+    /// decoded copy (the cap when it's encoded, its own size when not, plus
+    /// the framing's working copy), then room for its rewritten copy, each
+    /// taken in line from the budget. A step with no room goes back to the
+    /// queue (50 ms on). Each copy, once made, frees the one before it, and
+    /// the reply's share goes back once the guest's write completes.
+    // @port-skip linux-only: relayUpstreamBuffered's rewrite, off the Linux relay's loop
+    final class SupplyChainJob: @unchecked Sendable {
+        let supplyChain: SupplyChainRewrite
+        let host: String
+        let clean: Bool
+        let ticket: UInt64
+        let guest: Channel
+        let proxy: MitmProxy?
+        let trace: RequestReader.Trace?
+        let wire: Int
+        private var raw: Data
+        private var plain: Data?
+
+        // @port-skip linux-only: see SupplyChainJob
+        init(raw: Data, supplyChain: SupplyChainRewrite, host: String, clean: Bool, ticket: UInt64,
+             guest: Channel, proxy: MitmProxy?, trace: RequestReader.Trace?) {
+            self.raw = raw
+            self.wire = raw.count
+            self.supplyChain = supplyChain
+            self.host = host
+            self.clean = clean
+            self.ticket = ticket
+            self.guest = guest
+            self.proxy = proxy
+            self.trace = trace
+        }
+
+        /// Queued (the budget isn't idle until it's done).
+        // @port-skip linux-only: see SupplyChainJob
+        func start() {
+            ResponseRelay.supplyChainBudget.rewriting(true)
+            ResponseRelay.supplyChainQueue.addOperation { self.step() }
+        }
+
+        // @port-skip linux-only: see SupplyChainJob
+        private func later() {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                ResponseRelay.supplyChainQueue.addOperation { self.step() }
+            }
+        }
+
+        // @port-skip linux-only: see SupplyChainJob
+        func step() {
+            let budget = ResponseRelay.supplyChainBudget
+            // The guest left meanwhile: nobody to rewrite it for.
+            guard guest.isActive else { return finish(nil) }
+            if plain == nil {
+                let decoded = ResponseRelay.isEncoded(raw) ? ResponseRelay.supplyChainCap : raw.count
+                guard budget.reserve(raw.count + decoded, for: ticket) else { return later() }
+                guard let final = HTTPRequestFraming.finalResponse(raw) else {
+                    return finish(ResponseRelay.supplyChainRefusal(host, "couldn't be read"))
+                }
+                switch RequestReader.supplyChainPlain(final, cleanClose: clean, head: supplyChain.bodiless) {
+                case .bodiless(let reply)?:
+                    return finish(reply)
+                case .whole(let p)?:
+                    raw = Data()
+                    plain = p
+                    budget.hold(p.count, for: ticket)
+                case nil:
+                    return finish(ResponseRelay.supplyChainRefusal(host, "couldn't be read"))
+                }
+            }
+            guard let p = plain else { return }
+            guard budget.reserve(p.count, for: ticket) else { return later() }
+            let out = supplyChain.rewrite(p)
+            plain = nil
+            budget.hold(out.count, for: ticket)
+            finish(out)
+        }
+
+        /// The reply to the guest (nil: none, it left); the share goes back
+        /// once it's written.
+        // @port-skip linux-only: see SupplyChainJob
+        private func finish(_ reply: Data?) {
+            let budget = ResponseRelay.supplyChainBudget, ticket = ticket
+            raw = Data(); plain = nil
+            guard let reply else { budget.finish(ticket); budget.rewriting(false); return }
+            let (guest, proxy, trace, wire) = (guest, proxy, trace, wire)
+            guest.eventLoop.execute {
+                guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in
+                    budget.finish(ticket)
+                    budget.rewriting(false)
+                    guest.close(promise: nil)
+                }
+                if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: wire, truncated: false) }
+            }
+        }
+    }
+
     /// Kept for learning while strict credential mode is on for the workspace
     /// (the final response: an upgrade's stream carries no tokens to learn).
     // @port-skip linux-only: relayUpstream's response buffer for UnmanagedCredentialGuard.learn, on NIO
@@ -1526,6 +1738,14 @@ final class ResponseRelay: ChannelInboundHandler {
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func channelInactive(context: ChannelHandlerContext) {
+        // The hooks into the request side go with the upstream.
+        defer { onUpstreamWritable = nil; onSwitched = nil }
+        // This reply's share of the read-whole budget goes back on every
+        // path, unless the rewrite took it (it releases it when it's done).
+        let ticket = supplyChainTicket
+        stallCheck?.cancel()
+        var handedOff = false
+        defer { if !handedOff { Self.supplyChainBudget.finish(ticket) } }
         if !learnBuf.isEmpty {
             // De-chunked, as macOS's URLSession hands it the body. A body still
             // encoded (gzip or br, though identity was asked for) is skipped,
@@ -1564,29 +1784,34 @@ final class ResponseRelay: ChannelInboundHandler {
         }
         if let supplyChain {
             // The final response, decoded and rewritten before any byte
-            // reaches the guest (macOS: relayUpstreamBuffered). One past the
-            // cap, or one that can't be decoded, is refused, not passed on
-            // unchecked.
-            let raw = whole
-            noteStatus(raw)
-            let reply: Data
-            if overflowed {
-                reply = RequestReader.simple(502, "Bad Gateway",
-                                             body: "Bromure: the package reply from \(host) is too large to check (over \(Self.supplyChainCap >> 20) MiB, or too many at once); it was not passed on.\n")
-            } else if let final = HTTPRequestFraming.finalResponse(raw),
-                      let plain = RequestReader.supplyChainPlain(final, cleanClose: failure == nil) {
-                reply = supplyChain.rewrite(plain)
-            } else {
-                reply = RequestReader.simple(502, "Bad Gateway",
-                                             body: "Bromure: the package reply from \(host) couldn't be read; it was not passed on.\n")
+            // reaches the guest (macOS: relayUpstreamBuffered), off the event
+            // loop; written back on it. One past the cap, or one that can't
+            // be decoded, is refused, not passed on unchecked.
+            // One past the cap, or stalled: refused here, its bytes let go.
+            if overflowed || stalled {
+                let reply = Self.supplyChainRefusal(host, overflowed
+                    ? "is too large to check (over \(Self.supplyChainCap >> 20) MiB, or no room for it in time)"
+                    : "stalled (nothing came for \(Self.supplyChainReadIdle.withLockedValue { $0 }) s)")
+                whole = Data(); waiting.removeAll(); waitingBytes = 0; waitingSince = nil
+                let guest = self.guest
+                guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
+                if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
+                return
             }
-            let guest = self.guest
-            guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
-            if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: raw.count, truncated: false) }
-            whole = Data()
-            let reserved = supplyChainReserved
-            supplyChainReserved = 0
-            Self.supplyChainHeld.withLockedValue { $0 -= reserved }
+            // Chunks still waiting for room come along, in order: already in
+            // memory, they're counted, not waited for. (The buffer is moved,
+            // not copied, then appended to in place.)
+            var raw = Data()
+            swap(&raw, &whole)
+            for b in waiting { raw.append(contentsOf: b.readableBytesView) }
+            Self.supplyChainBudget.add(waitingBytes, for: ticket)
+            waiting.removeAll()
+            waitingBytes = 0
+            waitingSince = nil
+            noteStatus(raw)
+            handedOff = true
+            SupplyChainJob(raw: raw, supplyChain: supplyChain, host: host, clean: failure == nil, ticket: ticket,
+                           guest: guest, proxy: proxy, trace: trace).start()
             return
         }
         if let capture {

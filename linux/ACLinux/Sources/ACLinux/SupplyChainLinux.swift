@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 
 extension RequestReader {
     /// What the supply-chain step decided for a request.
@@ -159,11 +160,25 @@ extension RequestReader {
     /// macOS) when it isn't whole: cut short of its Content-Length or its
     /// last chunk, read up to a close that wasn't clean (`cleanClose`), or
     /// framed or coded in a way that can't be read.
+    /// What a read-whole reply is for the rewrite.
+    enum SupplyChainReply {
+        /// Whole: its normalized form, for the rewrite.
+        case whole(Data)
+        /// Without a body (HEAD's, 204, 304): on as it is, not rewritten.
+        case bodiless(Data)
+    }
+
     // @port-skip linux-only: relayUpstreamCollecting's normalization, on the Linux relay's raw reply
-    static func supplyChainPlain(_ final: Data, cleanClose: Bool) -> Data? {
+    static func supplyChainPlain(_ final: Data, cleanClose: Bool, head isHead: Bool = false) -> SupplyChainReply? {
         guard let sep = final.range(of: Data("\r\n\r\n".utf8)),
               let head = String(data: final[final.startIndex..<sep.lowerBound], encoding: .isoLatin1) else { return nil }
         let lines = head.components(separatedBy: "\r\n")
+        let status = lines.first.flatMap { Int($0.split(separator: " ").dropFirst().first ?? "") } ?? 0
+        if isHead || status == 204 || status == 304 {
+            return .bodiless(HTTPRequestFraming.replacingHeaders(Data(final[final.startIndex..<sep.upperBound]),
+                                                                 drop: ["connection", "keep-alive", "proxy-connection"],
+                                                                 add: "Connection: close"))
+        }
         func values(_ name: String) -> [String] {
             lines.dropFirst().flatMap { line -> [String] in
                 guard let colon = line.firstIndex(of: ":"),
@@ -189,17 +204,23 @@ extension RequestReader {
             guard let colon = line.firstIndex(of: ":") else { return true }
             return !framing.contains(line[..<colon].trimmingCharacters(in: .whitespaces).lowercased())
         }.joined(separator: "\r\n") + "\r\n\r\n"
-        let whole = (unframed.data(using: .isoLatin1) ?? Data(unframed.utf8)) + body
-        let decoded: Data
-        switch decodeRequestContentEncoding(whole) {
-        case .identity: decoded = whole
-        case .decoded(let d): decoded = d
-        case .undecodable: return nil
+        let headData = unframed.data(using: .isoLatin1) ?? Data(unframed.utf8)
+        var whole = headData + body
+        body = Data()
+        // An empty body has nothing to decode, whatever its coding says.
+        if whole.count > headData.count {
+            switch decodeRequestContentEncoding(whole) {
+            case .identity: break
+            case .decoded(let d): whole = d
+            case .undecodable: return nil
+            }
+        } else {
+            whole = HTTPRequestFraming.replacingHeaders(whole, drop: ["content-encoding"], add: "Content-Length: 0")
         }
-        return HTTPRequestFraming.replacingHeaders(
-            Self.withDecodedBodyLength(decoded),
+        return .whole(HTTPRequestFraming.replacingHeaders(
+            Self.withDecodedBodyLength(whole),
             drop: ["connection", "keep-alive", "proxy-connection", "te", "trailer", "upgrade"],
-            add: "Connection: close")
+            add: "Connection: close"))
     }
 
     /// `raw` with a Content-Length for its body (one only).
@@ -216,12 +237,15 @@ extension RequestReader {
 /// whichever way the request ended (rewritten, refused later in the chain,
 /// its upstream unreachable), as macOS's defer emits it.
 // @port-skip linux-only: relayUpstreamBuffered's rewrite, carried to the Linux relay
-final class SupplyChainRewrite {
+final class SupplyChainRewrite: @unchecked Sendable {
     let rewrite: (Data) -> Data
+    /// A HEAD request's: its reply has no body to rewrite.
+    let bodiless: Bool
     private let done: @Sendable () -> Void
     // @port-skip linux-only: see SupplyChainRewrite
-    init(rewrite: @escaping (Data) -> Data, done: @escaping @Sendable () -> Void) {
+    init(rewrite: @escaping (Data) -> Data, bodiless: Bool = false, done: @escaping @Sendable () -> Void) {
         self.rewrite = rewrite
+        self.bodiless = bodiless
         self.done = done
     }
     // @port-skip linux-only: see SupplyChainRewrite
@@ -237,4 +261,122 @@ final class TarballStripBox: @unchecked Sendable {
     func set(_ v: NPMRegistryTransforms.TarballStrip) { lock.lock(); value = v; lock.unlock() }
     // @port-skip linux-only: see TarballStripBox
     func get() -> NPMRegistryTransforms.TarballStrip { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// What the daemon's package replies being read whole hold at once
+/// (ResponseRelay's): their raw bytes, and the decoded and rewritten
+/// copies the rewrite makes. Room goes in line: a reply that found none
+/// waits, and none behind it in line takes room before it. Only the head
+/// of the line (the oldest reply in it) gets room past the limit, so the
+/// replies in it never all wait on each other: it finishes, gives its
+/// share back, and the next goes on.
+// @port-skip linux-only: the Linux relay's read-whole budget
+final class SupplyChainBudget: @unchecked Sendable {
+    private let lock = NIOLock()
+    private var limitBytes: Int
+    private var held = 0
+    private var holders: [UInt64: Int] = [:]
+    private var waiters: Set<UInt64> = []
+    private var nextTicket: UInt64 = 0
+    /// When a reply last got or gave back some of it.
+    private var lastActivity = Date()
+    /// Rewrites queued or running: the budget isn't idle meanwhile.
+    private var rewrites = 0
+
+    // @port-skip linux-only: see SupplyChainBudget
+    init(limit: Int) { limitBytes = limit }
+
+    /// The limit (tests lower it).
+    // @port-skip linux-only: see SupplyChainBudget
+    var limit: Int {
+        get { lock.withLock { limitBytes } }
+        set { lock.withLock { limitBytes = newValue } }
+    }
+
+    /// What's held, by every reply.
+    // @port-skip linux-only: see SupplyChainBudget
+    var total: Int { lock.withLock { held } }
+
+    /// A reply's place in line: an earlier one is older.
+    // @port-skip linux-only: see SupplyChainBudget
+    func ticket() -> UInt64 { lock.withLock { nextTicket += 1; return nextTicket } }
+
+    /// `n` more bytes for the reply `t`: if it's the head of the line, or
+    /// they fit and no reply before it waits. Refused, it waits in line.
+    // @port-skip linux-only: see SupplyChainBudget
+    func reserve(_ n: Int, for t: UInt64) -> Bool {
+        lock.withLock {
+            // The head: the oldest reply holding some or waiting for room.
+            let head = [holders.keys.min(), waiters.min(), t].compactMap { $0 }.min() == t
+            let ahead = waiters.contains { $0 < t }
+            guard head || (held + n <= limitBytes && !ahead) else {
+                waiters.insert(t)
+                return false
+            }
+            waiters.remove(t)
+            held += n
+            holders[t, default: 0] += n
+            lastActivity = Date()
+            return true
+        }
+    }
+
+    // @port-skip linux-only: see SupplyChainBudget
+    func release(_ n: Int, for t: UInt64) {
+        guard n > 0 else { return }
+        lock.withLock {
+            held -= n
+            let left = (holders[t] ?? 0) - n
+            holders[t] = left > 0 ? left : nil
+            lastActivity = Date()
+        }
+    }
+
+    /// The reply `t` is done: what it still holds goes back, and it leaves
+    /// the line.
+    // @port-skip linux-only: see SupplyChainBudget
+    func finish(_ t: UInt64) {
+        lock.withLock {
+            held -= holders.removeValue(forKey: t) ?? 0
+            waiters.remove(t)
+            lastActivity = Date()
+        }
+    }
+
+    /// `n` more bytes for the reply `t` already in memory (a decoded copy
+    /// past its estimate, a cut reply's waiting chunks): counted, whatever
+    /// the room.
+    // @port-skip linux-only: see SupplyChainBudget
+    func add(_ n: Int, for t: UInt64) {
+        guard n > 0 else { return }
+        lock.withLock {
+            held += n
+            holders[t, default: 0] += n
+            lastActivity = Date()
+        }
+    }
+
+    /// What the reply `t` holds, set to `n` (a copy made, the one before it
+    /// dropped): counted, whatever the room.
+    // @port-skip linux-only: see SupplyChainBudget
+    func hold(_ n: Int, for t: UInt64) {
+        let h = holding(t)
+        if n > h { add(n - h, for: t) } else { release(h - n, for: t) }
+    }
+
+    /// What the reply `t` holds.
+    // @port-skip linux-only: see SupplyChainBudget
+    func holding(_ t: UInt64) -> Int { lock.withLock { holders[t] ?? 0 } }
+
+    /// A rewrite queued (`true`) or done (`false`).
+    // @port-skip linux-only: see SupplyChainBudget
+    func rewriting(_ on: Bool) { lock.withLock { rewrites += on ? 1 : -1; lastActivity = Date() } }
+
+    /// How long nothing was got or given back and no rewrite was under way,
+    /// counted from `since` at the earliest: a reply waits while the others
+    /// make progress.
+    // @port-skip linux-only: see SupplyChainBudget
+    func idle(since: Date, now: Date = Date()) -> TimeInterval {
+        lock.withLock { rewrites > 0 ? 0 : now.timeIntervalSince(max(since, lastActivity)) }
+    }
 }
