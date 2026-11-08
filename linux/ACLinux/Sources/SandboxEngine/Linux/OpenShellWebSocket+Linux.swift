@@ -5,20 +5,22 @@ import Foundation
 // (OpenShellWebSocket+Apple.swift), here on the system's zlib.
 
 extension OpenShellWebSocket {
-    /// Raw DEFLATE decode of `input` into at most `cap` bytes, as macOS's
-    /// compression_decode_buffer: what it decoded, `cap` bytes when the
-    /// output would pass it, empty when it couldn't decode.
+    /// One raw DEFLATE stream from `input`, as macOS's: ended (its final
+    /// block decoded), truncated, corrupt, or too large (`cap` bytes or more).
     // @port-skip linux-only: macOS's decodeRawDeflate (OpenShellWebSocket+Apple.swift) on zlib
-    static func decodeRawDeflate(_ input: Data, cap: Int) -> Data {
-        guard !input.isEmpty else { return Data() }
+    static func decodeRawDeflate(_ input: Data, cap: Int) -> RawInflate {
+        guard !input.isEmpty else { return .truncated }
         var out: UnsafeMutablePointer<UInt8>?
         var len = 0
         let rc = input.withUnsafeBytes { raw in
-            acl_inflate(raw.bindMemory(to: UInt8.self).baseAddress!, input.count, -15, cap, &out, &len)
+            acl_inflate_raw_message(raw.bindMemory(to: UInt8.self).baseAddress!, input.count, cap, &out, &len)
         }
         defer { free(out) }
-        if rc == -2 { return Data(count: cap) }          // past the cap: as many bytes as it holds
-        guard rc == 0, let out else { return Data() }
-        return Data(bytes: out, count: min(len, cap))
+        switch rc {
+        case 0: return len >= cap ? .tooLarge : .ended(out.map { Data(bytes: $0, count: len) } ?? Data())
+        case -2: return .tooLarge
+        case -3: return .truncated
+        default: return .corrupt
+        }
     }
 }

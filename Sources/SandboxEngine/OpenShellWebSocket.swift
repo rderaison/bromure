@@ -79,18 +79,50 @@ public enum OpenShellWebSocket {
 
     /// Inflate one permessage-deflate message (no context takeover).
     static func inflate(_ payload: Data) -> Result<Data, OpenShellHTTP.Rejection> {
+        let cap = maxTextMessageBytes + 1
+        let tooLarge = Result<Data, OpenShellHTTP.Rejection>.failure(
+            .init("websocket text message exceeds \(maxTextMessageBytes) byte limit"))
+        let broken = Result<Data, OpenShellHTTP.Rejection>.failure(.init("websocket permessage-deflate decompression failed"))
+        // A message may end with its own final block (RFC 7692 7.2.3.4): it's
+        // whole as it came, and nothing may follow that block. One byte less
+        // must then no longer hold the whole stream; if it still does, bytes
+        // follow the block, which aren't part of the message and aren't
+        // passed on unjudged. (Decoders don't all say where a stream ended:
+        // Compression.framework's doesn't.)
+        switch decodeRawDeflate(payload, cap: cap) {
+        case .tooLarge: return tooLarge
+        case .ended(let out):
+            if case .ended = decodeRawDeflate(payload.dropLast(), cap: cap) {
+                return .failure(.init("websocket permessage-deflate message has data after its final block"))
+            }
+            return .success(out)
+        case .truncated, .corrupt:
+            // The usual form, its sync-flush tail stripped (a decoder may
+            // call an unfinished stream either): decoded with the tail back.
+            break
+        }
         // The sync-flush tail, then an empty final stored block so the raw
         // DEFLATE stream is complete.
         var input = payload
         input.append(contentsOf: [0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff])
-        let cap = maxTextMessageBytes + 1
-        let out = decodeRawDeflate(input, cap: cap)
-        let n = out.count
-        if n == 0, !payload.isEmpty, payload != Data([0x00]), payload != Data([0x02, 0x00]) {
-            return .failure(.init("websocket permessage-deflate decompression failed"))
+        switch decodeRawDeflate(input, cap: cap) {
+        case .ended(let out): return .success(out)
+        case .tooLarge: return tooLarge
+        case .truncated, .corrupt: return broken
         }
-        if n >= cap { return .failure(.init("websocket text message exceeds \(maxTextMessageBytes) byte limit")) }
-        return .success(out)
+    }
+
+    /// decodeRawDeflate's outcome (OpenShellWebSocket+Apple.swift; the
+    /// Linux build's over zlib).
+    enum RawInflate: Equatable {
+        /// The stream reached its final block's end.
+        case ended(Data)
+        /// The input ran out before that.
+        case truncated
+        /// Not a valid stream.
+        case corrupt
+        /// `cap` bytes or more.
+        case tooLarge
     }
 
     // MARK: client stream

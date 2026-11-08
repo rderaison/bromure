@@ -60,6 +60,31 @@ int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_
     return 0;
 }
 
+int acl_inflate_raw_message(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len) {
+    *out = NULL; *out_len = 0;
+    if (n > UINT_MAX) return -2;
+    z_stream s; memset(&s, 0, sizeof s);
+    if (inflateInit2(&s, -15) != Z_OK) return -1;
+    uint8_t *buf = NULL; size_t have = 0, len = 0;
+    s.next_in = (Bytef *)in; s.avail_in = (uInt)n;
+    int rc = -1;
+    for (;;) {
+        int g = room(&buf, &have, len, cap + 1);
+        if (g != 0) { rc = g; break; }
+        s.next_out = buf + len; s.avail_out = (uInt)(have - len);
+        int z = inflate(&s, Z_NO_FLUSH);
+        len = have - s.avail_out;
+        if (z == Z_STREAM_END) { rc = 0; break; }                       // its final block (what follows isn't read)
+        if (z == Z_BUF_ERROR && s.avail_in == 0 && s.avail_out > 0) { rc = -3; break; }   // truncated
+        if (z != Z_OK && z != Z_BUF_ERROR) break;                       // corrupt
+    }
+    inflateEnd(&s);
+    if (rc == 0 && len > cap) rc = -2;
+    if (rc != 0) { free(buf); return rc; }
+    *out = buf; *out_len = len;
+    return 0;
+}
+
 int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len) {
     *out = NULL; *out_len = 0;
     BrotliDecoderState *st = BrotliDecoderCreateInstance(NULL, NULL, NULL);

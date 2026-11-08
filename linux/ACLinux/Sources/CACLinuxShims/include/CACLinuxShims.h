@@ -93,6 +93,10 @@ int acl_pam_check(const char *service, const char *user, const char *password);
 // Content-coding decoders (decode.c): 0 and a malloc'd buffer the caller
 // frees; -1 corrupt or truncated; -2 past `cap`.
 int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_t **out, size_t *out_len);
+/* One raw-deflate stream (a permessage-deflate message), as macOS's decoder
+   sees it: 0 once its final block is decoded (what follows isn't read);
+   -3 truncated; -1 corrupt; -2 past `cap`. */
+int acl_inflate_raw_message(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
 int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
 /* Raw deflate (no zlib or gzip wrapper) of all of `in`, malloc'ed into *out. */
 int acl_deflate_raw(const uint8_t *in, size_t n, uint8_t **out, size_t *out_len);
