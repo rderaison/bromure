@@ -210,6 +210,7 @@
     "Sources/AgentCoding/SessionBranches.swift",
     "Sources/AgentCoding/SessionChatModels.swift",
     "Sources/AgentCoding/SessionCommands.swift",
+    "Sources/AgentCoding/SessionDisk+Compromise.swift",
     "Sources/AgentCoding/SessionModels.swift",
     "Sources/AgentCoding/SessionSignIn.swift",
     "Sources/AgentCoding/SessionStartCoalescer.swift",

@@ -246,15 +246,6 @@ public final class SessionDisk {
     /// disk + home are presumed contaminated; only the profile's
     /// declared tokens / config (which live in profile.json, NOT
     /// here) are kept.
-    /// What the sidebar offers on a workspace marked compromised.
-    public enum CompromiseRemedy: String, Sendable {
-        /// Wipe its disk, home and saved state now (as "Wipe and Launch"
-        /// would), without booting it.
-        case wipe
-        /// A false alarm: drop the mark, keep everything.
-        case clear
-    }
-
     public var compromisedFlagURL: URL {
         store.profileDirectory(for: profile).appendingPathComponent("compromised.flag")
     }
