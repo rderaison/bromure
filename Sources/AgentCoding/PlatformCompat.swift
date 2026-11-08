@@ -1,6 +1,7 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+import Security
 #elseif canImport(Glibc)
 import Glibc
 #endif
@@ -156,4 +157,18 @@ final class LockedState<State>: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return try body(&state)
     }
+}
+
+/// `n` bytes from the system's secure random source (a WebSocket frame's
+/// mask key): Security's on Darwin, getrandom(2) through
+/// SystemRandomNumberGenerator elsewhere.
+func secureRandomBytes(_ n: Int) -> [UInt8] {
+#if canImport(Darwin)
+    var key = [UInt8](repeating: 0, count: n)
+    if SecRandomCopyBytes(kSecRandomDefault, n, &key) == errSecSuccess { return key }
+    return (0..<n).map { _ in UInt8.random(in: 0...255) }
+#else
+    var g = SystemRandomNumberGenerator()
+    return (0..<n).map { _ in UInt8.random(in: 0...255, using: &g) }
+#endif
 }
