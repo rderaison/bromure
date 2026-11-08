@@ -52,6 +52,7 @@
     "Sources/AgentCoding/GuestCommandEncoding.swift",
     "Sources/AgentCoding/GuestEnv.swift",
     "Sources/AgentCoding/GuestExecError.swift",
+    "Sources/AgentCoding/GuestLivenessBeat.swift",
     "Sources/AgentCoding/GuestMCPShims.swift",
     "Sources/AgentCoding/GuestPorts.swift",
     "Sources/AgentCoding/GuestSandboxStatus.swift",

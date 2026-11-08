@@ -153,6 +153,10 @@ public actor Daemon {
     var releaseWhenFree: Set<String> = []
     /// VMs whose watchdog question is up.
     var watchdogAsking: Set<String> = []
+    /// Each running guest's heartbeat (DaemonLiveness.swift), and the ones
+    /// gone silent.
+    var guestLiveness: [String: GuestLiveness] = [:]
+    var guestSilent: Set<String> = []
 
     /// The fd store entries a VM holds, `<prefix><short id>`: its network
     /// end and every vsock listener. Adoption takes them back, a stop
@@ -462,6 +466,7 @@ public actor Daemon {
         let outbox = vmDir(rec.id) + "/outbox/"
         o["tabs"] = .array(GuestOutbox.parseRoster(GuestOutbox.read(outbox + "tabs.txt") ?? "").map(GuestOutbox.tabJSON))
         for (k, v) in GuestOutbox.vitalsJSON(GuestOutbox.read(outbox + "vmstat.txt") ?? "") { o[k] = v }
+        o["guestUnresponsive"] = .bool(guestSilent.contains(rec.id))
         return .object(o)
     }
 

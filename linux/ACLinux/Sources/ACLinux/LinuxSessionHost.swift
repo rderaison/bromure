@@ -14,6 +14,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// The running workspaces, kept by the daemon as VMs come and go (macOS:
     /// the app's running sessions).
     nonisolated static let running = NIOLockedValueBox<Set<UUID>>([])
+    /// The workspaces whose guest has stopped answering (Daemon.observeGuestLiveness).
+    nonisolated static let unresponsive = NIOLockedValueBox<Set<UUID>>([])
 
     private(set) weak var daemon: Daemon?
     /// The registration sign-in in flight (LinuxRegistration; macOS:
@@ -109,7 +111,6 @@ final class LinuxSessionHost: AgentSessionHost {
     /// What the workspace's guest last said of its memory (`vmstat.txt` in its
     /// outbox, as GuestOutbox reads it for /state), when it said it (the
     /// file's date); nil while it isn't running here.
-    // partial: no "guest unresponsive" (the daemon doesn't track a frozen guest yet)
     // @port-skip linux-only: macOS reads the VM's RunningSession fields (AgentSessionHost+App.swift)
     func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? {
         guard Self.running.withLockedValue({ $0.contains(id) }) else { return nil }
@@ -129,7 +130,7 @@ final class LinuxSessionHost: AgentSessionHost {
             }
         }
         guard total > 0 else { return nil }
-        return GuestMemoryReport(unresponsive: false, at: at,
+        return GuestMemoryReport(unresponsive: Self.unresponsive.withLockedValue { $0.contains(id) }, at: at,
                                  snapshot: GuestMemorySnapshot(availableKB: total - used, totalKB: total,
                                                                pressureSome: some, pressureFull: full))
     }
