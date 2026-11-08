@@ -8,24 +8,16 @@ extension DaemonGlobalSuites {
     /// naming it), rather than booted without it.
     @Suite("Unenforceable sandbox refused (temporary)", .serialized)
     struct SandboxGuardTests {
-        @Test func eachProtectionIsNamed() {
+        @Test func onlyTheSentryIsRefused() {
             var p = Profile(name: "plain", tool: .claude, authMode: .token)
             #expect(Daemon.unenforceableProtections(p).isEmpty, "a plain workspace starts")
-            p.networkPolicy = "version: 1\nnetwork_policies: {}\n"
-            #expect(Daemon.unenforceableProtections(p).isEmpty, "network rules only: enforced on the host")
+            // Staged since writeSandboxFiles: the strict sandbox, the spec.
             p.strictSandbox = true
-            #expect(Daemon.unenforceableProtections(p) == ["the strict sandbox"])
-            p.strictSandbox = false
-            p.networkPolicy = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\n"
-            #expect(Daemon.unenforceableProtections(p).contains("an OpenShell filesystem_policy"))
-            p.networkPolicy = "version: 1\nprocess:\n  run_as_user: sandbox\n"
-            let process = Daemon.unenforceableProtections(p)
-            #expect(process.contains("OpenShell process rules") && process.contains("the strict sandbox"),
-                    "a process section implies strict (effectiveStrictSandbox): \(process)")
-            p.networkPolicy = ""
+            p.networkPolicy = "version: 1\nfilesystem_policy:\n  read_only: [/usr]\nprocess:\n  run_as_user: sandbox\n"
+            #expect(Daemon.unenforceableProtections(p).isEmpty, "strict and a confining spec start")
             for mode in [KernelSentryMode.bestEffort, .hard] {
                 p.kernelSentry = mode
-                #expect(Daemon.unenforceableProtections(p) == ["the kernel sentry (\(mode.rawValue))"], "any mode")
+                #expect(Daemon.unenforceableProtections(p) == ["the kernel sentry (\(mode.rawValue))"], "any sentry mode")
             }
         }
 
@@ -34,7 +26,7 @@ extension DaemonGlobalSuites {
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()
             defer { ProfileStore.defaultRootDir = prior; try? FileManager.default.removeItem(atPath: dir) }
             ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
-            var p = Profile(name: "strict-one", tool: .claude, authMode: .token)
+            var p = Profile(name: "sentry-one", tool: .claude, authMode: .token)
             p.strictSandbox = true
             p.kernelSentry = .hard
             p = try ProfileStore().save(p)
@@ -42,7 +34,7 @@ extension DaemonGlobalSuites {
             try await d.registerForTesting(rec)
             let r = await d.start(rec)
             #expect(r.status == 409, "\(r.body)")
-            #expect("\(r.body)".contains("the strict sandbox") && "\(r.body)".contains("the kernel sentry (hard)"), "\(r.body)")
+            #expect("\(r.body)".contains("the kernel sentry (hard)") && !"\(r.body)".contains("strict"), "\(r.body)")
             #expect(await d.registry.find(rec.id)?.state == .stopped, "still stopped")
             await d.shutdown()
         }
@@ -51,7 +43,7 @@ extension DaemonGlobalSuites {
         /// unstaged protection is said: on the Security Timeline as a
         /// degraded sandbox (and loudly in the daemon log).
         @Test func anAdoptedVMIsReportedUnprotected() async throws {
-            var p = Profile(name: "adopted-strict", tool: .claude, authMode: .token)
+            var p = Profile(name: "adopted-sentry", tool: .claude, authMode: .token)
             p.strictSandbox = true
             p.kernelSentry = .bestEffort
             let rec = RepairMarksTests.stopped(p.id.uuidString.lowercased())

@@ -1,13 +1,11 @@
 import Foundation
-import SandboxEngine
 
-/// TEMPORARY (remove when the guest sandbox staging lands on Linux): the
-/// daemon doesn't stage the guest's sandbox yet (macOS's prepareMetadataShare
-/// sandbox section: the OpenShell spec and its root launcher, the strict
-/// marker and attestor, the kernel sentry), and a guest without those files
-/// runs unconfined, saying nothing. So a workspace that asks for any of them
-/// isn't started at all, rather than booted without the protection it
-/// expects: fail closed.
+/// TEMPORARY (remove when the kernel sentry's modules are staged on
+/// Linux): the guest's sandbox is staged (writeSandboxFiles), but not the
+/// sentry's kernel modules (no module catalog on Linux yet), and a guest
+/// whose sentry can't load runs without it. So a workspace that asks for
+/// the sentry isn't started at all, rather than booted without the
+/// protection it expects: fail closed.
 struct SandboxUnavailable: Error, CustomStringConvertible {
     let workspace: String
     let missing: [String]
@@ -23,14 +21,10 @@ extension Daemon {
     /// nothing). TEMPORARY, with SandboxUnavailable.
     // @port-skip linux-only: a temporary Linux refusal (macOS stages the guest sandbox)
     static func unenforceableProtections(_ profile: Profile) -> [String] {
-        var out: [String] = []
-        if profile.effectiveStrictSandbox { out.append("the strict sandbox") }
-        let spec = OpenShellSandboxSpec(policyYAML: profile.networkPolicy, workdirs: [], strictSandbox: false, sentry: "off")
-        if spec.filesystemPolicy != nil { out.append("an OpenShell filesystem_policy") }
-        if spec.landlock != nil { out.append("OpenShell landlock settings") }
-        if spec.process != nil { out.append("OpenShell process rules") }
-        if profile.effectiveKernelSentry != .off { out.append("the kernel sentry (\(profile.effectiveKernelSentry.rawValue))") }
-        return out
+        // The strict sandbox and the OpenShell spec are staged
+        // (writeSandboxFiles); the sentry's modules aren't yet.
+        guard profile.effectiveKernelSentry != .off else { return [] }
+        return ["the kernel sentry (\(profile.effectiveKernelSentry.rawValue))"]
     }
 
     /// A VM taken back (adoptRunning) whose workspace asks for a protection
@@ -47,8 +41,6 @@ extension Daemon {
         let reason = "\(missing.joined(separator: ", ")) not staged on this server: the guest runs without it"
         FileHandle.standardError.write(Data("bromure-ac daemon: WARNING: '\(profile.name)' was taken back running UNPROTECTED: \(reason)\n".utf8))
         var data: [String: AnyJSON] = ["filesystem": .string("failed"), "action": .string("degraded"), "reason": .string(reason)]
-        if missing.contains(where: { $0.hasPrefix("an OpenShell") || $0.hasPrefix("OpenShell") }) { data["requested_filesystem"] = .bool(true) }
-        if profile.effectiveStrictSandbox { data["strict_applied"] = .bool(false) }
         if profile.effectiveKernelSentry != .off {
             data["sentry"] = .string("unavailable")
             data["sentry_reason"] = .string("not staged on this server")

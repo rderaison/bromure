@@ -1095,7 +1095,7 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
-        // TEMPORARY, until the guest sandbox is staged (DaemonSandboxGuard.swift).
+        // TEMPORARY, until the sentry's modules are staged (DaemonSandboxGuard.swift).
         try await refuseUnenforceableSandbox(rec)
         do {
             try await launchVM(&rec, restoreFrom: restoreFrom)
