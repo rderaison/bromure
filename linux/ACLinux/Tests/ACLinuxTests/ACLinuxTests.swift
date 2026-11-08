@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import CACLinuxShims
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import Testing
@@ -97,22 +98,34 @@ struct ChildProcessTests {
         ChildProcess.reapPauseForTesting.withLockedValue { $0 = 0.05 }
         defer { ChildProcess.reapPauseForTesting.withLockedValue { $0 = nil } }
         for _ in 0..<20 {
-            // Alive for 50 ms: the hammer's first signal always lands while it
-            // runs, however late its task starts (with /bin/true, a loaded
-            // machine could start it after the exit: `sent` stayed 0).
+            // The hammer spins on a thread of its own, started (and spinning)
+            // before the child is: its first signal lands while the child
+            // runs, however loaded the machine (a task could wait past the
+            // child's whole life for a pool thread: `sent` stayed 0).
             let p = try ChildProcess(name: "sleep", executable: "/bin/sleep", arguments: ["0.05"], logPath: nil)
-            try p.start()
-            let hammer = Task.detached { () -> (sent: Int, missed: Int) in
+            let result = NIOLockedValueBox<(sent: Int, missed: Int)?>(nil)
+            let spinning = DispatchSemaphore(value: 0)
+            Thread {
+                spinning.signal()
                 var sent = 0, missed = 0
+                while !p.isRunning && p.exitStatus == nil {}          // until it's started
                 while p.exitStatus == nil {
                     // SIGCONT is harmless to sleep, a zombie, or anyone else.
                     let attempted = p.isRunning
                     if p.signal(SIGCONT) { sent += 1 } else if attempted && p.exitStatus == nil { missed += 1 }
                 }
-                return (sent, missed)
-            }
+                result.withLockedValue { $0 = (sent, missed) }
+            }.start()
+            spinning.wait()
+            try p.start()
             #expect(await p.waitForExit() == 0)
-            let r = await hammer.value
+            var got: (sent: Int, missed: Int)?
+            for _ in 0..<500 {
+                got = result.withLockedValue { $0 }
+                if got != nil { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let r = try #require(got, "the hammer ended")
             #expect(r.missed == 0, "kill() found no process \(r.missed) times before the exit was recorded")
             #expect(r.sent > 0)
             #expect(!p.signal(SIGCONT))
