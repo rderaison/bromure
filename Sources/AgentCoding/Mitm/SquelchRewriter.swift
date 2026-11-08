@@ -1,5 +1,9 @@
-import CryptoKit
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// Applies `Squelch` to an AI request: finds the shell command each tool
 /// result answers, trims that result, and rewrites the request in place —

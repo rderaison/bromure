@@ -1,5 +1,9 @@
-import CryptoKit
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 
 /// The workspaces' Squelch settings as the proxy reads them, kept current
 /// from every save of the profile list (`ACAppDelegate.profiles`): an edit
