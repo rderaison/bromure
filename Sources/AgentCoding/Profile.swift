@@ -4226,7 +4226,9 @@ public final class ProfileStore {
         // written, like any new VM's disks: keep the same 1 GB floor.
         // Before anything is written, so a refusal leaves no half-made
         // profile behind.
+        #if canImport(SandboxEngine)
         try EphemeralDisk.checkDiskSpace(at: rootDir.path)
+        #endif
 
         // First, write the new profile.json + encrypted secrets blob to
         // the new dir. Doing this before the data clones means a clone
