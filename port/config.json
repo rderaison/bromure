@@ -67,6 +67,7 @@
     "Sources/AgentCoding/GuestSandboxStatus.swift",
     "Sources/AgentCoding/GuestURLGate.swift",
     "Sources/AgentCoding/HomeImageReader.swift",
+    "Sources/AgentCoding/HomeImageSizing.swift",
     "Sources/AgentCoding/Inference/AskArgsNormalizer.swift",
     "Sources/AgentCoding/Inference/CatalogStore.swift",
     "Sources/AgentCoding/Inference/EngineKey.swift",

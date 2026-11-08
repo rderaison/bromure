@@ -123,6 +123,9 @@ extension Daemon {
             "hasHome": .bool(FileManager.default.fileExists(atPath: dir + "/home.img")),
             "homeIsImage": true,
             "isRunning": .bool(live[p.id.uuidString.lowercased()] != nil),
+            // What a home made here now gets (no image yet / erased): this
+            // host's free space and setting, not the client's.
+            "defaultHomeGB": .number(Double(newHomeDefaultGB())),
         ]
         if let m = try? FileManager.default.attributesOfItem(atPath: dir + "/home.img")[.modificationDate] as? Date {
             body["homeModified"] = .string(ISO8601DateFormatter().string(from: m))

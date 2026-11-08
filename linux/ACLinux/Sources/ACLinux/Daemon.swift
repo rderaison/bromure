@@ -16,9 +16,10 @@ public struct DaemonConfig: Sendable {
     public var imageDir: String
     /// bromure-agentd.py, staged into each VM's meta share.
     public var agentdPath: String
-    /// A new VM's home image, GiB (sparse: costs nothing up front). macOS:
-    /// SessionDisk.defaultHomeImageGB. Env: BROMURE_AC_HOME_GB.
-    public var homeImageGB = 16
+    /// A new VM's home image, GiB, when set (macOS: `vm.homeImageGB`); else
+    /// it is scaled to the free space where the VMs live (HomeImageSizing).
+    /// Env: BROMURE_AC_HOME_GB.
+    public var homeImageOverrideGB: Int?
     /// One of several users' daemons behind the multi-user gateway
     /// (BROMURE_AC_MULTIUSER=1): Firecracker VMs only (vhost-vsock's CIDs and
     /// ports are host-wide), and guests can't reach the host's own addresses.
@@ -50,7 +51,7 @@ public struct DaemonConfig: Sendable {
             imageDir: env["BROMURE_AC_IMAGE"] ?? data + "/bromure-ac/image-amd64",
             agentdPath: env["BROMURE_AGENTD"] ?? data + "/bromure-ac/vm-setup/bromure-agentd.py")
             .with { c in
-                if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageGB = min(1024, max(8, gb)) }
+                if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageOverrideGB = gb }
                 c.multiUser = env["BROMURE_AC_MULTIUSER"] == "1"
                 c.gatewayUser = env["BROMURE_AC_GATEWAY_USER"].flatMap { $0.isEmpty ? nil : $0 }
                 c.controlSocketOverride = env["BROMURE_AC_CONTROL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
@@ -405,6 +406,7 @@ public actor Daemon {
         if let r = machineRoute(req, path) { return r }
         switch (req.method, path) {
         case ("GET", "/health"): return health()
+        case ("GET", "/storage/defaults"): return storageDefaults()
         case ("GET", "/state"):
             // Only the fat client stamps its polls: it is connected, and can
             // show consent prompts (RemoteConsent.route).
@@ -476,6 +478,14 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/health"): h=ec3227f904b323b7 @f127f8ab
     func health() -> ControlResponse {
         ControlResponse(200, ["status": "ok", "service": "bromure-ac-automation", "debugEnabled": false])
+    }
+
+    /// `GET /storage/defaults`: the sizes a workspace made here gets when it
+    /// has none of its own, for a fat client's new-workspace editor (this
+    /// host's free space and setting, not the client's).
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/storage/defaults"): h=9332e5415b80ee6d @f127f8ab
+    func storageDefaults() -> ControlResponse {
+        ControlResponse(200, ["homeImageGB": .number(Double(newHomeDefaultGB()))])
     }
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
@@ -1263,7 +1273,9 @@ public actor Daemon {
         // `home.mode` ext4, mkfs's the blank disk on first boot (label
         // bromure-home) and mounts it over /home/ubuntu, as on macOS.
         let home = dir + "/home.img"
-        let target = Self.homeImageTargetBytes(gb: rec.homeGB, defaultGB: config.homeImageGB)
+        let target = Self.homeImageTargetBytes(gb: rec.homeGB,
+                                               defaultGB: Self.resolvedHomeImageGB(override: config.homeImageOverrideGB,
+                                                                                   freeBytes: Self.freeBytes(near: dir)))
         try Self.ensureHomeImage(atPath: home, bytes: target)
         // A size change lands at a boot (agentd's resize2fs grows the mounted ext4).
         let homeNote = try Self.growHomeImageIfNeeded(atPath: home, target: target, setting: rec.homeGB)
@@ -1757,18 +1769,48 @@ public actor Daemon {
     }
 
     /// The home image's guest-visible size: the VM's own setting, else the
-    /// daemon-wide default (BROMURE_AC_HOME_GB), 8–1024 GiB.
+    /// default for the free space where it lives (resolvedHomeImageGB),
+    /// 8–1024 GiB.
     // partial: no legacy-home migration size (Linux homes start on ext4)
-    // @port SessionDisk.var homeImageTargetBytes h=fa34eac9bb8da5e5 @25ad3a88
+    // @port SessionDisk.var homeImageTargetBytes h=d3a08ca727957c14 @7d72a296
     static func homeImageTargetBytes(gb: Int?, defaultGB: Int) -> UInt64 {
         UInt64(min(1024, max(8, gb ?? defaultGB))) << 30
     }
 
+    /// A new home's size, GiB: the daemon's setting (BROMURE_AC_HOME_GB)
+    /// when set, else scaled to `freeBytes` (nil = unknown, the full default).
+    // @port SessionDisk.static resolvedHomeImageGB(freeBytes: UInt64?) h=55629d74848e1a35 @7d72a296
+    static func resolvedHomeImageGB(override: Int?, freeBytes: UInt64?) -> Int {
+        min(1024, max(8, override ?? HomeImageSizing.scaledGB(freeBytes: freeBytes)))
+    }
+
+    /// What a new home is made here now (a workspace with no size of its
+    /// own): the setting, else this host's free space where the VMs live.
+    /// What a fat client's new-workspace editor shows (GET /storage/defaults).
+    // @port SessionDisk.static newHomeDefaultGB() h=4fcd82eae3b316f0 @7d72a296
+    func newHomeDefaultGB() -> Int {
+        Self.resolvedHomeImageGB(override: config.homeImageOverrideGB, freeBytes: Self.freeBytes(near: config.stateDir + "/vms"))
+    }
+
+    /// Free space where `path` is, or at its nearest existing parent (a new
+    /// VM's directory doesn't exist yet).
+    // @port SessionDisk.static freeBytes(near: URL) h=ab739f8f43ae5569 @7d72a296
+    static func freeBytes(near path: String) -> UInt64? {
+        var dir = URL(fileURLWithPath: path)
+        while !FileManager.default.fileExists(atPath: dir.path), dir.pathComponents.count > 1 {
+            dir = dir.deletingLastPathComponent()
+        }
+        return EphemeralDisk.freeBytes(at: dir.path)
+    }
+
     /// Grows an existing home image to `target` (never shrinks; it stays
-    /// sparse; agentd runs resize2fs after mounting). Returns what it did,
-    /// for the log: a grow that doesn't happen says why.
+    /// sparse; agentd runs resize2fs after mounting) when the VM has a size
+    /// of its own (`setting`): the default, free-space scaled or set, only
+    /// sizes a new home; a home made 8 GB on a full disk would otherwise grow
+    /// at whichever boot found more room. Returns what it did, for the log:
+    /// a grow that doesn't happen says why.
     // partial: no ProfileStore change notice, and no home checkpoints to purge after a grow
-    // @port SessionDisk.growHomeImageIfNeeded() h=2e3adcbd5eaa9db6 @b41d9876
+    // @port SessionDisk.growHomeImageIfNeeded() h=d288b72a68027d0d @7d72a296
     static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?,
                                       floor: UInt64 = EphemeralDisk.minimumFreeBytes) throws -> String {
         let gib = { (b: UInt64) in "\(b >> 30) GiB" }
@@ -1777,6 +1819,9 @@ public actor Daemon {
         let size = UInt64(st.st_size)
         guard size < target else {
             return "home image \(gib(size)) (setting \(setting.map { "\($0) GB" } ?? "default"), target \(gib(target))) — nothing to grow"
+        }
+        guard setting != nil else {
+            return "home image \(gib(size)) (default size, kept: the default only sizes a new home) — nothing to grow"
         }
         try EphemeralDisk.checkDiskSpace(at: (path as NSString).deletingLastPathComponent, minimumFreeBytes: floor)
         let fd = open(path, O_WRONLY | O_CLOEXEC)
