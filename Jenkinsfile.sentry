@@ -54,11 +54,12 @@ pipeline {
             description: 'Space-separated kernels to rebuild even if published, e.g. 6.8.0-142-generic.')
         string(name: 'KERNEL_PATTERN', defaultValue: '^linux-headers-6\\.8\\.0-[0-9]+-generic$',
             description: 'ERE over linux-headers package names to build for.')
-        // Off until the agent can run linux/amd64 containers (an amd64 agent, or
-        // binfmt/QEMU on the DinD daemon) and the catalog binds the arch (see the
-        // Build modules stage).
+        // Needs an agent that can run linux/amd64 containers (an amd64 agent, or
+        // binfmt/QEMU on the DinD daemon). The amd64 catalog is a catalog of its
+        // own, sentry/<hash>/amd64/catalog.json, whose module statements name
+        // the arch (see the Build modules and Publish stages).
         booleanParam(name: 'BUILD_AMD64', defaultValue: false,
-            description: 'Also build amd64 modules (Linux/KVM hosts). Archived as build artifacts, not published.')
+            description: 'Also build and publish amd64 modules (Linux/KVM hosts), to sentry/<hash>/amd64/.')
     }
 
     environment {
@@ -174,12 +175,12 @@ pipeline {
                     done < sentry-ci/sources
                 '''
                 // amd64 (the Linux/KVM host's guests). Same source, same scripts,
-                // the other platform; ci-build.sh reads the arch from dpkg and
-                // looks up sentry/<hash>/amd64/catalog.json. Kept OUT of
-                // sentry-ci/out-* so the Publish stage never sees them: kernel
-                // names are the same on both arches (6.8.0-NNN-generic) and a
-                // module's signature covers source, kernel, sha256 and size but
-                // not the arch, so amd64 modules wait for a catalog that binds it.
+                // the other platform; ci-build.sh reads the arch from dpkg, looks
+                // up sentry/<hash>/amd64/catalog.json and records "arch": "amd64"
+                // in its manifest. Kept OUT of sentry-ci/out-* (the arm64 tree the
+                // Publish stage's first step and its gate read): kernel names are
+                // the same on both arches (6.8.0-NNN-generic), so amd64 modules
+                // are a catalog of their own, published by the step after it.
                 script {
                     if (params.BUILD_AMD64) {
                         sh '''
@@ -270,6 +271,44 @@ EOF
                                 bromure-sentry-publisher ./scripts/publish-sentry-modules.sh "out-$label"
                         done < sentry-ci/sources
                     '''
+                    // amd64 (BUILD_AMD64): its own catalog, sentry/<hash>/amd64/,
+                    // each out dir's manifest naming the arch for the publish
+                    // script (which skips an out dir with nothing new whose
+                    // published catalog still verifies). A step of its own, after
+                    // the arm64 one: that step's gate ends it early on a day
+                    // arm64 has nothing new.
+                    script {
+                        if (params.BUILD_AMD64) {
+                            sh '''
+                                set -eu
+                                export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                                ls -d sentry-ci/amd64/out-* >/dev/null 2>&1 || { echo "No amd64 outputs."; exit 0; }
+                                rm -rf sentry-ci/pub-amd64
+                                mkdir -p sentry-ci/pub-amd64/tools sentry-ci/pub-amd64/scripts sentry-ci/pub-amd64/amd64
+                                cp tools/package.json tools/package-lock.json tools/spaces-put.mjs \
+                                   tools/make-sentry-catalog.mjs sentry-ci/pub-amd64/tools/
+                                cp scripts/publish-sentry-modules.sh sentry-ci/pub-amd64/scripts/
+                                cp -R sentry-ci/amd64/out-* sentry-ci/pub-amd64/amd64/
+                                # The arm64 step's publisher Dockerfile, when it got that far;
+                                # else the same one, written here.
+                                printf '%s\n' \
+                                    'FROM node:22-bookworm-slim' \
+                                    'RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*' \
+                                    'WORKDIR /work' \
+                                    'COPY tools/package.json tools/package-lock.json tools/' \
+                                    'RUN cd tools && (npx --yes @socketsecurity/cli npm ci --silent || npx --yes @socketsecurity/cli npm install --silent)' \
+                                    'COPY . .' > sentry-ci/pub-amd64/Dockerfile
+                                docker build -q -t bromure-sentry-publisher-amd64 sentry-ci/pub-amd64
+                                for out in sentry-ci/amd64/out-*; do
+                                    docker run --rm \
+                                        -e DO_SPACES_KEY -e DO_SPACES_SECRET -e SPARKLE_PRIVATE_KEY \
+                                        -e DO_SPACES_ENDPOINT -e DO_SPACES_REGION -e DO_SPACES_BUCKET \
+                                        -e DO_SPACES_PUBLIC_BASE -e DRY_RUN="${DRY_RUN:-false}" \
+                                        bromure-sentry-publisher-amd64 ./scripts/publish-sentry-modules.sh "amd64/$(basename "$out")"
+                                done
+                            '''
+                        }
+                    }
                 }
             }
         }
@@ -288,7 +327,7 @@ EOF
                         currentBuild.result = 'UNSTABLE'
                     }
                 }
-                archiveArtifacts artifacts: 'sentry-ci/out-*/manifest.json, sentry-ci/out-*/catalog.json, sentry-ci/out-*/modules/*.txt',
+                archiveArtifacts artifacts: 'sentry-ci/out-*/manifest.json, sentry-ci/out-*/catalog.json, sentry-ci/out-*/modules/*.txt, sentry-ci/amd64/out-*/manifest.json, sentry-ci/amd64/out-*/catalog.json',
                                  allowEmptyArchive: true
             }
         }

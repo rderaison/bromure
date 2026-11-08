@@ -9,6 +9,11 @@
 #   sentry/<sourceHash>/<kernel>/bromure_sentry-<kernel>-<sha12>.ko.sig
 #       the module's own signature (Sparkle key, domain-separated statement)
 #
+# for arm64 (the out dir's manifest.json "arch"; what every shipped macOS
+# app reads). Another arch's modules (amd64: a Linux/KVM server's guests)
+# are a catalog of their own under sentry/<sourceHash>/<arch>/, the same
+# layout below it: kernel names are the same on both arches.
+#
 # Additive only: kernels already in the published catalog stay (a rebuilt
 # kernel gets a new sha-named object, never an overwrite), and nothing is ever
 # deleted — an app release in the field keeps finding every module its source
@@ -43,16 +48,24 @@ LINK=$(find "$OUT" -type l -print -quit)
 json() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const v=process.argv[2].split(".").reduce((o,k)=>o?.[k],j);process.stdout.write(Array.isArray(v)?v.join(" "):String(v??""))' "$1" "$2"; }
 
 HASH=$(json "$OUT/manifest.json" sourceHash)
+ARCH=$(json "$OUT/manifest.json" arch)
+ARCH="${ARCH:-arm64}"
+case "$ARCH" in
+    arm64) PREFIX="sentry/$HASH/" ;;
+    amd64) PREFIX="sentry/$HASH/$ARCH/" ;;
+    *) echo "ERROR: unsupported arch '$ARCH' in $OUT/manifest.json"; exit 1 ;;
+esac
 BUILT=$(json "$OUT/manifest.json" built)
 FAILED=$(json "$OUT/manifest.json" failed)
-echo "source $HASH — built: ${BUILT:-none}; failed: ${FAILED:-none}"
+echo "source $HASH ($ARCH) — built: ${BUILT:-none}; failed: ${FAILED:-none}"
 
 if [ -z "$BUILT" ]; then
     # Nothing new — unless the published catalog lost its module signatures
     # (a bucket write can strip them without breaking the catalog signature,
     # and apps then refuse the catalog): re-sign and republish it.
     if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --verify "$OUT/previous-catalog.json" \
-            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" >/dev/null 2>&1; then
+            --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" \
+            --arch "$ARCH" >/dev/null 2>&1; then
         echo "nothing new built, but the published catalog doesn't verify: republishing it."
     else
         echo "nothing new to publish."
@@ -71,11 +84,11 @@ PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
 if enabled "$PRESIGNED"; then
     node tools/make-sentry-catalog.mjs --verify "$CATALOG" --source-hash "$HASH" --modules "$OUT/modules" \
-        --public-key "$SENTRY_CATALOG_PUBLIC_KEY"
+        --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --arch "$ARCH"
 else
     SIGN=()
     enabled "$DRY_RUN" && [ -z "${SPARKLE_PRIVATE_KEY:-}" ] && SIGN=(--allow-unsigned)
-    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
+    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" --arch "$ARCH" \
         ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$CATALOG" ${SIGN[@]+"${SIGN[@]}"}
 fi
 
@@ -97,11 +110,11 @@ for k in $BUILT; do
 done
 
 if enabled "$DRY_RUN"; then
-    echo "DRY_RUN: would upload the catalog → sentry/$HASH/catalog.json"
+    echo "DRY_RUN: would upload the catalog → ${PREFIX}catalog.json"
     cat "$CATALOG"
     exit 0
 fi
-put "$CATALOG" "sentry/$HASH/catalog.json" application/json "public, max-age=60, must-revalidate"
+put "$CATALOG" "${PREFIX}catalog.json" application/json "public, max-age=60, must-revalidate"
 
 # --- Smoke test: origin, then the CDN clients actually use -----------------
 SIGNED_AT=$(json "$CATALOG" signature.signedAt)
@@ -109,12 +122,12 @@ signed_at_of() { curl -fsSL -H 'Cache-Control: no-cache' "$1" 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).signature.signedAt)}catch{}})' || true; }
 
 ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
-[ "$(signed_at_of "$ORIGIN_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] \
+[ "$(signed_at_of "$ORIGIN_BASE/${PREFIX}catalog.json")" = "$SIGNED_AT" ] \
     || { echo "ERROR: origin doesn't serve the new catalog"; exit 1; }
 
 OK=""
 for i in $(seq 1 40); do   # × 15 s = 10 min (60 s TTL at the edge)
-    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
+    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/${PREFIX}catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
     echo "  CDN not propagated yet, attempt $i/40 — retrying in 15s…"
     sleep 15
 done

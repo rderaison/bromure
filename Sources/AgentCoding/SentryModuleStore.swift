@@ -39,8 +39,12 @@ public struct SentryModuleCatalog: Codable, Equatable, Sendable {
 
     /// tools/make-sentry-catalog.mjs `moduleSigningPayload`, byte for byte.
     public static func moduleSigningPayload(sourceHash: String, _ m: Module) -> Data {
-        Data([moduleMagic, "sourceHash=\(sourceHash)", "kernel=\(m.kernel)",
-              "sha256=\(m.sha256.lowercased())", "bytes=\(m.bytes)"].joined(separator: "\n").utf8)
+        var lines = [moduleMagic, "sourceHash=\(sourceHash)", "kernel=\(m.kernel)",
+                     "sha256=\(m.sha256.lowercased())", "bytes=\(m.bytes)"]
+        // An amd64 module (sentry/<hash>/amd64/) binds its arch too: kernel
+        // names are the same on both arches. arm64 statements are unchanged.
+        if m.path.hasPrefix(SentryModuleArch.amd64.prefix(sourceHash)) { lines.append("arch=amd64") }
+        return Data(lines.joined(separator: "\n").utf8)
     }
 
     public func isModuleSignatureValid(_ m: Module, publicKeyBase64: String) -> Bool {

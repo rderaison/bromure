@@ -114,6 +114,48 @@ struct SentryModuleStoreTests {
         #expect(!c.isWellFormed(for: String(repeating: "b", count: 64)))
     }
 
+    /// Signed by tools/make-sentry-catalog.mjs --arch amd64 with a throwaway
+    /// key (its public half below; the private half was discarded).
+    static let nodeSignedAmd64 = #"""
+{
+  "formatVersion": 1,
+  "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "modules": [
+    {
+      "kernel": "6.8.0-147-generic",
+      "path": "sentry/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/amd64/6.8.0-147-generic/bromure_sentry-6.8.0-147-generic-e85a6aa159db.ko",
+      "sha256": "e85a6aa159dba435e651fa049151c149878ecff6915898ae737431c4a1848d32",
+      "bytes": 12,
+      "builtAt": "2026-11-08T20:21:51.863Z",
+      "signature": "llamF+1skVLlSWjUR7MeAQhb5KgXbSnwJ+NEMdTKQubZhUZuA6oDxy5JS1UC2qnn7I57NCsKX8JDnL0ezxRxAw=="
+    }
+  ],
+  "signature": {
+    "signedAt": "2026-11-08T20:21:51.864Z",
+    "edSignature": "d1AaXodSYMe8Py/mlqamkdRVMVPuQhUSYujk+Dp8ypVC6/n0g/C6Zzp38afcexDp5jd0WM0HpzI1cKNNOvHzBA=="
+  }
+}
+"""#
+    static let amd64PublicKey = "S4m2BuIQLBCuPtr+aRNDTplw0ADHbYeFrSHKAKHnYjU="
+
+    /// An amd64 module's own signature names its arch (the Node signer and
+    /// the Swift verifier build the same statement); moved into the arm64
+    /// tree, it no longer verifies. arm64 statements are unchanged (the
+    /// fixture above still verifies).
+    @Test("An amd64 module's signature binds its arch, across Node and Swift")
+    func amd64SignatureBindsTheArch() throws {
+        let c = try JSONDecoder().decode(SentryModuleCatalog.self, from: Data(Self.nodeSignedAmd64.utf8))
+        #expect(c.isSignatureValid(publicKeyBase64: Self.amd64PublicKey))
+        #expect(c.isWellFormed(for: Self.hash, arch: .amd64))
+        let m = try #require(c.modules.first)
+        #expect(c.isModuleSignatureValid(m, publicKeyBase64: Self.amd64PublicKey))
+        var moved = m
+        moved.path = m.path.replacingOccurrences(of: "/amd64/", with: "/")
+        #expect(!c.isModuleSignatureValid(moved, publicKeyBase64: Self.amd64PublicKey), "the arch is in the statement")
+        #expect(String(decoding: SentryModuleCatalog.moduleSigningPayload(sourceHash: Self.hash, m), as: UTF8.self)
+                    .hasSuffix("\narch=amd64"))
+    }
+
     /// amd64 guests (a Linux/KVM server's) report the same kernel releases
     /// as arm64 ones: their modules are a catalog of their own under
     /// `sentry/<hash>/amd64/`, and neither catalog may name the other's tree.
