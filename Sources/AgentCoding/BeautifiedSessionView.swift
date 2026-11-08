@@ -1330,6 +1330,30 @@ final class BeautifiedSessionModel: ObservableObject {
         return max(0, count(joined) - count(held))
     }
 
+    enum QueuedVerdict: Equatable { case keep, remove, lost }
+
+    /// A queued row the transcript shows no sign of, settled by time.
+    /// `noTurnSince`: the agent took no turn and wrote nothing since it was
+    /// queued.
+    /// - Handed straight to the agent's own queue: never typed again, so it
+    ///   leaves `deliveredShownFor` after it went (the strip hides it then
+    ///   too), or once the agent has been idle 20 s.
+    /// - Typed in by Bromure (`isDelivered`): it may have been lost on the way
+    ///   in, and only an idle agent tells -- after 20 s idle with no turn since
+    ///   it goes back on hold (`lost`), else it leaves. Never earlier: past its
+    ///   30 s the strip stops showing it, but it stays queued until then, or
+    ///   a lost one had no way back (Finding: "Expired delivered message can
+    ///   be deleted before lost-delivery recovery").
+    /// - Anything else: it leaves once the agent has been idle 20 s.
+    nonisolated static func settle(_ q: QueuedMessage, now: Date, idleSince: Date?,
+                                   noTurnSince: Bool) -> QueuedVerdict {
+        let idleLong = idleSince.map { now.timeIntervalSince($0) > 20 } ?? false
+        if q.deliveredExpired(at: now), !q.isDelivered { return .remove }
+        guard idleLong, now.timeIntervalSince(q.queuedAt) > 20 || q.deliveredExpired(at: now) else { return .keep }
+        if q.isDelivered, noTurnSince { return .lost }
+        return .remove
+    }
+
     /// Drop queued messages the transcript now carries; deliver held ones
     /// once the agent is idle.
     private func reconcileQueued() {
@@ -1383,29 +1407,13 @@ final class BeautifiedSessionModel: ObservableObject {
             // mid-turn `queued_command`): any record written since it was
             // queued that carries the text — bar Claude's own queue log.
             if deliveredInRaw(q) { return true }
-            // Delivered a while ago and still on the strip: the agent has
-            // it, so the row goes whatever the transcript shows -- unless
-            // Bromure typed it, the agent is idle and took no turn since:
-            // that one was lost on the way in and goes back on hold (below).
-            if q.deliveredExpired(at: now) {
-                if let idle = idleSince, now.timeIntervalSince(idle) > 20,
-                   q.isDelivered, turns.count <= q.baseline, !transcriptGrew(since: q) {
-                    lost.insert(q.id); return false
-                }
-                return true
+            // No sign of it in the transcript: settled by time (`settle`).
+            switch Self.settle(q, now: now, idleSince: idleSince,
+                               noTurnSince: turns.count <= q.baseline && !transcriptGrew(since: q)) {
+            case .keep: return false
+            case .remove: return true
+            case .lost: lost.insert(q.id); return false
             }
-            // Idle a while and still not in the transcript: the agent never
-            // took it (cleared, interrupted) — stop showing it. Unless
-            // Bromure typed it and the agent took NO turn since: then it
-            // was lost on the way in, and it goes back on hold.
-            if let idle = idleSince, now.timeIntervalSince(idle) > 20,
-               now.timeIntervalSince(q.queuedAt) > 20 {
-                if q.isDelivered, turns.count <= q.baseline, !transcriptGrew(since: q) {
-                    lost.insert(q.id); return false
-                }
-                return true
-            }
-            return false
           }
           for i in queued.indices where lost.contains(queued[i].id) {
               queued[i].delivered = nil
