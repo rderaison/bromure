@@ -35,10 +35,15 @@ actor PIIDetector {
         return FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.onnx").path) ? dir : nil
     }
 
-    /// The bundled model, else a downloaded one in Application Support (dev
-    /// builds run outside an app bundle).
+    /// BROMURE_PII_MODEL_DIR when set (where an install without an app
+    /// bundle put the model: the Linux user service), else the bundled
+    /// model, else a downloaded one in Application Support (dev builds run
+    /// outside an app bundle).
     var modelDirectory: URL {
-        Self.bundledDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let dir = ProcessInfo.processInfo.environment["BROMURE_PII_MODEL_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir, isDirectory: true)
+        }
+        return Self.bundledDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BromureAC/Models/\(Self.dirName)", isDirectory: true)
     }
 
