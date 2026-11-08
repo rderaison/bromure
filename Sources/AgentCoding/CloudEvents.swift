@@ -209,9 +209,9 @@ public final class BACEventEmitter: @unchecked Sendable {
         #endif
         await SecurityTimeline.shared.record(profileID: profileID,
                                              eventType: eventType, eventData: eventData)
-        #if os(macOS)
         // OpenShell policy advisor: every firewall denial is evidence for the
-        // agent (`/v1/denials`) and may become a drafted proposal.
+        // agent (`/v1/denials`) and may become a drafted proposal. On every
+        // platform: the Linux server's advisor answers the same agents.
         if eventType == "egress.firewall", case .string(let action)? = eventData["action"], action == "deny" {
             func s(_ k: String) -> String? { if case .string(let v)? = eventData[k] { return v }; return nil }
             var port = 0
@@ -221,6 +221,7 @@ public final class BACEventEmitter: @unchecked Sendable {
                 port: port, method: s("method"), path: s("path"), reason: s("reason") ?? "no matching network policy",
                 ip: s("ip") ?? s("dst_ip"), exe: s("exe"))
         }
+        #if os(macOS)
         // Network lineage: every host decision about a flow (switch L4, MITM
         // L7, binary identity) joins the flow the sentry reports.
         // An event without an action decides nothing (never a guessed allow).
