@@ -253,6 +253,7 @@
     "Sources/SandboxEngine/OpenShellPolicy+YAML.swift",
     "Sources/SandboxEngine/OpenShellPolicy.swift",
     "Sources/SandboxEngine/OpenShellSandboxSpec.swift",
+    "Sources/SandboxEngine/OpenShellWebSocket.swift",
     "Sources/SandboxEngine/PinnedSigningKey.swift",
     "Sources/SandboxEngine/Profile.swift",
     "Sources/SandboxEngine/ProfilePrefs.swift",

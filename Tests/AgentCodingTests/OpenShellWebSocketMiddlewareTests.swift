@@ -1,8 +1,11 @@
-import Compression
 import Foundation
 import Testing
 import SandboxEngine
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 @Suite("OpenShell WebSocket text gating + middleware")
 struct OpenShellWebSocketMiddlewareTests {
@@ -57,11 +60,8 @@ struct OpenShellWebSocketMiddlewareTests {
     @Test("A compressed text message is inflated before it's judged")
     func compressed() throws {
         let text = Data("please inflate me please inflate me".utf8)
-        var raw = Data(count: 512)
-        let n = raw.withUnsafeMutableBytes { dst in text.withUnsafeBytes { src in
-            compression_encode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, 512,
-                                      src.bindMemory(to: UInt8.self).baseAddress!, text.count, nil, COMPRESSION_ZLIB) } }
-        let deflated = raw.prefix(n)
+        // Raw DEFLATE, the platform's codec (Compression.framework / zlib).
+        let deflated = try #require(NPMRegistryTransforms.deflateRaw(text))
         // A masked text frame with RSV1 set.
         let mask: [UInt8] = [9, 8, 7, 6]
         var f = Data([0xC1, 0x80 | UInt8(deflated.count)]) + Data(mask)
@@ -199,7 +199,7 @@ struct OpenShellWebSocketMiddlewareTests {
             """)
         }
         let req = Data("POST /x HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc".utf8)
-        let out = String(decoding: HTTPMitmConnection.replacingBody(of: req, with: Data("hello".utf8)), as: UTF8.self)
+        let out = String(decoding: ProxyPolicy.replacingBody(of: req, with: Data("hello".utf8)), as: UTF8.self)
         #expect(out.hasSuffix("Content-Length: 5\r\n\r\nhello"))
         #expect(!out.contains("Content-Length: 3"))
     }

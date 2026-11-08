@@ -42,6 +42,8 @@ let package = Package(
         .target(
             name: "SandboxEngine",
             dependencies: [
+                // zlib, for OpenShellWebSocket's permessage-deflate (Linux/).
+                "CACLinuxShims",
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],

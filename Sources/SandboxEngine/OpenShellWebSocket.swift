@@ -1,4 +1,3 @@
-import Compression
 import Foundation
 
 // MARK: - WebSocket client-message inspection (port of openshell-supervisor-
@@ -85,19 +84,13 @@ public enum OpenShellWebSocket {
         var input = payload
         input.append(contentsOf: [0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff])
         let cap = maxTextMessageBytes + 1
-        var out = Data(count: cap)
-        let n = out.withUnsafeMutableBytes { dst in
-            input.withUnsafeBytes { src in
-                compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, cap,
-                                          src.bindMemory(to: UInt8.self).baseAddress!, input.count,
-                                          nil, COMPRESSION_ZLIB)
-            }
-        }
+        let out = decodeRawDeflate(input, cap: cap)
+        let n = out.count
         if n == 0, !payload.isEmpty, payload != Data([0x00]), payload != Data([0x02, 0x00]) {
             return .failure(.init("websocket permessage-deflate decompression failed"))
         }
         if n >= cap { return .failure(.init("websocket text message exceeds \(maxTextMessageBytes) byte limit")) }
-        return .success(out.prefix(n))
+        return .success(out)
     }
 
     // MARK: client stream
