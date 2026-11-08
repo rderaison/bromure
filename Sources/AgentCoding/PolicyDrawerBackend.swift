@@ -221,10 +221,3 @@ final class RemotePolicyDrawerBackend: PolicyDrawerBackend {
         return try? dec.decode(Profile.self, from: data)
     }
 }
-
-/// A value an async task hands back to a thread that waits on a semaphore
-/// (the automation server's request thread).
-final class SendableBox<T>: @unchecked Sendable {
-    var value: T
-    init(_ value: T) { self.value = value }
-}
