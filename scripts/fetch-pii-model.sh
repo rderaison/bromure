@@ -28,14 +28,25 @@ vocab.txt|vocab.txt|0fbe6b50061feabb9be68af471e9aa6df07a4bc428bdca4b0eff1fcd3612
 config.json|config.json|003b84bbcd489f5e782fe5cad8f3249c3653ec880089abb1ccc398a0d895e3e6"
 
 CACHE_DIR="${BROMURE_PII_CACHE:-$HOME/Library/Caches/io.bromure.build/pii-rampart}/$REV"
+
+# SHA-256 of a file: shasum (macOS, Perl) or sha256sum (coreutils). Checked
+# before anything is downloaded.
+if command -v shasum >/dev/null 2>&1; then
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+elif command -v sha256sum >/dev/null 2>&1; then
+    sha256() { sha256sum "$1" | awk '{print $1}'; }
+else
+    echo "fetch-pii-model: neither shasum nor sha256sum is installed" >&2
+    exit 1
+fi
 mkdir -p "$CACHE_DIR"
 
 while IFS='|' read -r name remote sha; do
     cached="$CACHE_DIR/$name"
-    if [ ! -f "$cached" ] || [ "$(shasum -a 256 "$cached" | awk '{print $1}')" != "$sha" ]; then
+    if [ ! -f "$cached" ] || [ "$(sha256 "$cached")" != "$sha" ]; then
         echo "fetch-pii-model: downloading ${remote}…" >&2
         curl -fsSL "$BASE/$remote" -o "$cached.part"
-        got="$(shasum -a 256 "$cached.part" | awk '{print $1}')"
+        got="$(sha256 "$cached.part")"
         if [ "$got" != "$sha" ]; then
             echo "fetch-pii-model: SHA-256 mismatch for $remote" >&2
             echo "  got  $got" >&2
@@ -49,8 +60,17 @@ done <<< "$FILES"
 
 if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
     mkdir -p "$1"
-    while IFS='|' read -r name _ _; do
-        cp "$CACHE_DIR/$name" "$1/$name"
+    # Each copy checked where it landed: the cache may be writable by
+    # someone else between its check and the copy.
+    while IFS='|' read -r name _ sha; do
+        cp "$CACHE_DIR/$name" "$1/$name.part"
+        got="$(sha256 "$1/$name.part")"
+        if [ "$got" != "$sha" ]; then
+            echo "fetch-pii-model: SHA-256 mismatch for the copy of $name in $1" >&2
+            rm -f "$1/$name.part"
+            exit 1
+        fi
+        mv "$1/$name.part" "$1/$name"
     done <<< "$FILES"
 fi
 echo "$CACHE_DIR"
