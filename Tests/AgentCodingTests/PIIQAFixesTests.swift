@@ -193,4 +193,20 @@ struct PIIQAFixesTests {
         for _ in 0..<4096 { _ = r.feed(piece) }
         #expect(Date().timeIntervalSince(t) < 5)
     }
+
+    // MARK: AI hosts
+
+    @Test("An AI host matches itself and its subdomains, never a name that only contains it")
+    func aiHostsOnLabelBoundaries() {
+        for h in ["api.anthropic.com", "anthropic.com", "API.OpenAI.com", "chatgpt.com", "generativelanguage.googleapis.com",
+                  "api.x.ai", "x.ai", "api.moonshot.ai", "api.kimi.ai", "cli-chat-proxy.grok.com", "api.groq.com",
+                  "bromure.llm", "api.anthropic.com.", "api.openai.com:443"] {
+            #expect(TraceLevel.isAIHost(h), "\(h)")
+        }
+        for h in ["relax.ai", "google.com.evil.net", "notanthropic.com", "anthropic.com.attacker.example", "x.ai.example",
+                  "openai.community", "mychatgpt.com", "", ".", "[::1]:443", "10.0.0.1"] {
+            #expect(!TraceLevel.isAIHost(h), "\(h)")
+        }
+        #expect(TraceLevel.aiDetails.capturesBodyForHost("api.anthropic.com") && !TraceLevel.aiDetails.capturesBodyForHost("relax.ai"))
+    }
 }

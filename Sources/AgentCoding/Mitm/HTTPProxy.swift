@@ -2195,7 +2195,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         host, reqPath, outcome.total, body.count, outcome.body.count, ms,
                         outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
                 }
-            } else if encoded, TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) {
+            } else if encoded, TraceLevel.isAIHost(host) {
                 FileHandle.standardError.write(Data(
                     "[pii] \(host) \(reqPath): compressed request body — not scanned\n".utf8))
             }
@@ -2597,7 +2597,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // Streaming to or from a model provider keeps the tab "working".
         let beatPID = profileID
-        let isModelHost = TraceLevel.aiHosts.contains { host.lowercased().contains($0) }
+        let isModelHost = TraceLevel.isAIHost(host)
         let beat = ActivityBeat(fire: isModelHost ? { Self.liveActivity?(beatPID) } : nil)
         if let g = activeGuard {
             FileHandle.standardError.write(Data(
@@ -2930,10 +2930,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     /// An AI provider host (the hosts the conversation scans apply to).
-    static func isAIHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return TraceLevel.aiHosts.contains { h.contains($0) }
-    }
+    static func isAIHost(_ host: String) -> Bool { TraceLevel.isAIHost(host) }
 
     enum RequestBodyDecoding: Equatable {
         /// No (or `identity`) Content-Encoding — the body is already plain.
