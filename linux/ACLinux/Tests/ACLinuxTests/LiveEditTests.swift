@@ -68,6 +68,30 @@ extension DaemonGlobalSuites {
             #expect(!files.contains("REAL") && files.contains("export ANTHROPIC_API_KEY='\(fake)'"))
         }
 
+        /// The agents' own config files are staged as macOS stages them: a
+        /// Codex on a local engine gets its provider naming the model; moved
+        /// off it, a restage takes the file away (the meta share outlives it).
+        @Test func theAgentsConfigFilesAreStagedAndRestaged() throws {
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let meta = URL(fileURLWithPath: dir + "/meta", isDirectory: true)
+            try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
+            let store = ProfileStore(rootDir: URL(fileURLWithPath: dir + "/profiles", isDirectory: true))
+            var p = Profile(name: "cx", tool: .codex, authMode: .local)
+            p.activeModelID = "served/model-a"
+            p.localEngineURL = "http://10.0.0.9:8000/v1"
+            try Daemon.writeCredentialFiles(p, plan: nil, registration: false, meta: meta, kubeYAML: nil, store: store,
+                                            seedStandIns: { _, _ in })
+            let codex = meta.appendingPathComponent("codex-local.toml")
+            let toml = try String(contentsOf: codex, encoding: .utf8)
+            #expect(toml.contains("model = \"served/model-a\"") && toml.contains("base_url = \"https://bromure.llm/v1\""), "\(toml)")
+            #expect(FileManager.default.fileExists(atPath: meta.appendingPathComponent(SessionDisk.kimiApprovalsMetaFile).path))
+            p.tool = .claude
+            p.authMode = .token
+            try Daemon.writeCredentialFiles(p, plan: nil, registration: false, meta: meta, kubeYAML: nil, store: store,
+                                            seedStandIns: { _, _ in })
+            #expect(!FileManager.default.fileExists(atPath: codex.path), "not local any more: gone")
+        }
+
         /// Every file under `dir`, as text.
         static func tree(_ dir: URL) -> String {
             let fm = FileManager.default

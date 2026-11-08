@@ -49,6 +49,7 @@
     "Sources/AgentCoding/FatClientTypes.swift",
     "Sources/AgentCoding/FirewallRuleActions.swift",
     "Sources/AgentCoding/FolderUpload.swift",
+    "Sources/AgentCoding/GuestAgentConfigs.swift",
     "Sources/AgentCoding/GuestCommandEncoding.swift",
     "Sources/AgentCoding/GuestEnv.swift",
     "Sources/AgentCoding/GuestExecError.swift",

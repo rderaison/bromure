@@ -146,6 +146,11 @@ extension Daemon {
         }
     }
 
+    /// The meta-share files writeAgentConfigs may write.
+    // @port-skip linux-only: the Linux meta share's restage (macOS writes a fresh share each time)
+    static let agentConfigFiles = ["codex-local.toml", "grok-local.toml", "kimi.toml", "omp-model", "omp-models.yml",
+                                   "omp-config.yml", SessionDisk.ompEnvUnsetMetaFile, SessionDisk.kimiApprovalsMetaFile]
+
     /// writeCredentialFiles over a given store (testable); `seedStandIns`
     /// adds the subscription CLIs' stand-in files to the seed's files/.
     // @port-skip linux-only: writeCredentialFiles' body
@@ -158,6 +163,12 @@ extension Daemon {
         // The agents' MCP configs (the built-ins and the workspace's own
         // servers, their tokens as stand-ins), as macOS writes them.
         try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
+        // Each agent's own config files (Codex's and Grok's local providers,
+        // Kimi's block, omp's model and settings), as macOS stages them. The
+        // meta share outlives a restage here (macOS writes a fresh one), so
+        // what a previous staging wrote and this one doesn't goes first.
+        for name in Self.agentConfigFiles { try? FileManager.default.removeItem(at: meta.appendingPathComponent(name)) }
+        try SessionDisk.writeAgentConfigs(into: meta, profile: profile, tokenPlan: plan)
         if !registration {
             seedStandIns(profile, seed.appendingPathComponent("files", isDirectory: true))
         }
