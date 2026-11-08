@@ -744,7 +744,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //    Under an OpenShell policy the read is strict (OpenShell's framing
         //    rules), the request's authority must name this tunnel's endpoint,
         //    and an inspected route forwards the canonical request-target.
-        let openShellMode = guardrailsProvider()?.egressPolicy?.openShell
+        // One snapshot of the policy for the read and the head checks: a policy
+        // applied mid-read must not judge a lenient read as an OpenShell one.
+        let headPolicy = guardrailsProvider()?.egressPolicy
+        let openShellMode = headPolicy?.openShell
         var (guestRequest, bodyFile): (Data, URL?)
         do {
             (guestRequest, bodyFile) = try readRequestSpooling(
@@ -754,7 +757,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                                host: host, port: port)
             return
         }
-        if let answer = ProxyPolicy.openShellHeadAnswer(&guestRequest, policy: guardrailsProvider()?.egressPolicy,
+        if let answer = ProxyPolicy.openShellHeadAnswer(&guestRequest, policy: headPolicy,
                                                         profileID: profileID, host: host, port: port,
                                                         cleartext: cleartext, scheme: flowScheme,
                                                         identity: binaryIdentity) {
