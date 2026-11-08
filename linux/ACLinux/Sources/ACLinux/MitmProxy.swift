@@ -885,11 +885,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             return
         }
         buf.writeBuffer(&b)
-        switch HTTPRequestFraming.complete(Data(buf.readableBytesView)) {
+        // Under an OpenShell policy the read is strict (OpenShell's framing
+        // rules, as macOS's readRequestSpooling): a violation is a 400 that
+        // says why, before any policy step.
+        let strict = proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil
+        switch HTTPRequestFraming.complete(Data(buf.readableBytesView), strict: strict) {
         case .needMore:
             if buf.readableBytes > MitmProxy.maxBody { reply(context, Self.simple(413, "Payload Too Large")) }
         case .invalid:
             reply(context, Self.simple(400, "Bad Request"))
+        case .rejected(let why):
+            reply(context, ProxyPolicy.beforePolicyAnswer(status: 400, error: "invalid_http_request", detail: why,
+                                                          host: host, port: port, profileID: profileID,
+                                                          scheme: tls ? "https" : "http"))
         case .complete(let request, let extra):
             started = true
             if !extra.isEmpty {

@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import SandboxEngine
 
 /// HTTP/1.1 framing for the Linux proxy (MitmProxy): when a buffered request
 /// is whole, header edits, a response's status and body. Raw bytes in and
@@ -9,23 +10,51 @@ enum HTTPRequestFraming {
     enum Framing: Equatable {
         case needMore
         case invalid
+        /// Refused under OpenShell's framing rules (a 400 naming why).
+        case rejected(String)
         /// The request (a chunked body re-framed with a Content-Length), and
         /// the bytes after it.
         case complete(Data, extra: Data)
     }
 
     /// Whether `buf` starts with a whole request: its head, then a
-    /// Content-Length body, a chunked one (decoded), or none.
-    // @port-skip linux-only: proxy request framing
-    static func complete(_ buf: Data) -> Framing {
-        guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else { return .needMore }
+    /// Content-Length body, a chunked one (decoded), or none. `strict` (the
+    /// workspace has an OpenShell policy): OpenShell's framing rules, as
+    /// macOS's readRequestSpooling applies them: the head validated and its
+    /// body length derived by OpenShellHTTP.parseHead (header block at most
+    /// maxHeaderBytes), a chunk-size line at most maxChunkLineBytes and
+    /// valid UTF-8, trailers within maxHeaderBytes and maxTrailerFields.
+    // @port-skip linux-only: proxy request framing (macOS: readRequestSpooling's strict mode)
+    static func complete(_ buf: Data, strict: Bool = false) -> Framing {
+        guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else {
+            if strict, buf.count > OpenShellHTTP.maxHeaderBytes {
+                return .rejected("HTTP request headers exceed \(OpenShellHTTP.maxHeaderBytes) bytes")
+            }
+            return .needMore
+        }
         let headEnd = end.upperBound
         let head = String(decoding: buf[buf.startIndex..<end.lowerBound], as: UTF8.self)
         let headers = Self.headers(head)
-        if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
-            switch dechunk(buf[headEnd...]) {
+        var chunked = headers["transfer-encoding"]?.lowercased().contains("chunked") == true
+        var strictLength: Int?
+        if strict {
+            do {
+                switch try OpenShellHTTP.parseHead(Data(buf[buf.startIndex..<headEnd])).bodyLength {
+                case .none: chunked = false; strictLength = 0
+                case .contentLength(let n): chunked = false; strictLength = n
+                case .chunked: chunked = true
+                }
+            } catch let e as OpenShellHTTP.Rejection {
+                return .rejected(e.reason)
+            } catch {
+                return .rejected("HTTP request head can't be read")
+            }
+        }
+        if chunked {
+            switch dechunk(buf[headEnd...], strict: strict) {
             case .needMore: return .needMore
             case .invalid: return .invalid
+            case .rejected(let why): return .rejected(why)
             case .complete(let body, let rest):
                 let h = replacingHeaders(Data(buf[buf.startIndex..<headEnd]), drop: ["transfer-encoding", "content-length"],
                                          add: "Content-Length: \(body.count)")
@@ -33,7 +62,9 @@ enum HTTPRequestFraming {
             }
         }
         let length: Int
-        if let cl = headers["content-length"] {
+        if let n = strictLength {
+            length = n
+        } else if let cl = headers["content-length"] {
             guard let n = Int(cl.trimmingCharacters(in: .whitespaces)), n >= 0 else { return .invalid }
             length = n
         } else {
@@ -57,7 +88,7 @@ enum HTTPRequestFraming {
         return out
     }
 
-    private enum Chunks { case needMore, invalid, complete(Data, Data) }
+    private enum Chunks { case needMore, invalid, rejected(String), complete(Data, Data) }
 
     /// A chunked body decoded, or nil when it isn't complete (cut short of
     /// its last chunk) or its framing is broken.
@@ -68,25 +99,49 @@ enum HTTPRequestFraming {
     }
 
     // @port-skip linux-only: proxy request framing
-    private static func dechunk(_ s: Data.SubSequence) -> Chunks {
+    private static func dechunk(_ s: Data.SubSequence, strict: Bool = false) -> Chunks {
         var body = Data()
         var i = s.startIndex
         let crlf = Data("\r\n".utf8)
         while true {
-            guard let eol = s[i...].range(of: crlf) else { return .needMore }
+            guard let eol = s[i...].range(of: crlf) else {
+                if strict, s.distance(from: i, to: s.endIndex) > OpenShellHTTP.maxChunkLineBytes {
+                    return .rejected("Chunk-size line exceeds limit")
+                }
+                return .needMore
+            }
+            if strict, String(data: Data(s[i..<eol.lowerBound]), encoding: .utf8) == nil {
+                return .rejected("Invalid UTF-8 in chunk-size line")
+            }
             let sizeText = String(decoding: s[i..<eol.lowerBound], as: UTF8.self)
                 .split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
             // Hex digits only (no sign), and a size Int can hold.
             guard !sizeText.isEmpty, sizeText.allSatisfy(\.isHexDigit),
-                  let size = Int(sizeText, radix: 16) else { return .invalid }
+                  let size = Int(sizeText, radix: 16) else {
+                return strict ? .rejected("Invalid chunk size token: \"\(sizeText)\"") : .invalid
+            }
             i = eol.upperBound
             if size == 0 {
-                // Trailers, then the empty line.
+                // Trailers, then the empty line (bounded under OpenShell's rules).
+                var fields = 0, bytes = 0
                 while true {
-                    guard let e = s[i...].range(of: crlf) else { return .needMore }
+                    guard let e = s[i...].range(of: crlf) else {
+                        if strict, bytes + s.distance(from: i, to: s.endIndex) > OpenShellHTTP.maxHeaderBytes {
+                            return .rejected("Chunk trailers exceed \(OpenShellHTTP.maxHeaderBytes) bytes")
+                        }
+                        return .needMore
+                    }
                     let empty = e.lowerBound == i
+                    bytes += s.distance(from: i, to: e.upperBound)
                     i = e.upperBound
                     if empty { return .complete(body, Data(s[i...])) }
+                    fields += 1
+                    if strict, bytes > OpenShellHTTP.maxHeaderBytes {
+                        return .rejected("Chunk trailers exceed \(OpenShellHTTP.maxHeaderBytes) bytes")
+                    }
+                    if strict, fields > OpenShellHTTP.maxTrailerFields {
+                        return .rejected("Chunk trailers exceed \(OpenShellHTTP.maxTrailerFields) fields")
+                    }
                 }
             }
             // Bounded by what's here before any arithmetic: a size near

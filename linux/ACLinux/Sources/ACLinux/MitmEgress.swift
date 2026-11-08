@@ -455,7 +455,6 @@ extension RequestReader {
     /// may rewrite the body), the guardrails, then compromise detection and
     /// strict credential mode.
     /// The guest's answer, or nil to go on with `request`.
-    // partial: OpenShell's strict framing limits (chunk-line, header and trailer sizes) aren't applied; the Linux framer re-frames every body with a Content-Length
     // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                              host: String, port: Int, tls: Bool, session: UInt64,
