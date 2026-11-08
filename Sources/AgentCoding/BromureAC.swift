@@ -1392,6 +1392,8 @@ final class RunningSession {
     /// `vm ls` / the API / SSH can show tabs (incl. worktree metadata) even
     /// while the session is detached.
     var tabs: [GuestTab] = []
+    /// Tab lists stored here from the guest's roster (debug: `roster-state`).
+    var tabListsApplied = 0
     /// Each tab's agent status (working / done / needs you), by window index —
     /// kept here, not only on a pane's tab model, so a session with no local
     /// window (driven from a fat client) still reports it in `/state`.
@@ -5100,6 +5102,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          "deviceCode": s.deviceCode ?? "",
                                          "succeeded": s.succeeded]
                     }
+                    return out
+                case "roster-state":
+                    // E2E 34.10: a sandboxed workspace whose tabs.txt listed a
+                    // tab the host never showed. Where the roster stops on the
+                    // way in: the poll, its reads, the session they land in.
+                    let key = (params["profile"] as? String ?? "").lowercased()
+                    guard let profile = self.profiles.first(where: {
+                        $0.name.lowercased() == key || $0.id.uuidString.lowercased() == key })
+                    else { return ["error": "profile required"] }
+                    var out: [String: Any] = ["ok": true, "profileID": profile.id.uuidString]
+                    guard let s = self.runningSessions[profile.id] else {
+                        out["session"] = false
+                        return out
+                    }
+                    let vm = s.sandbox
+                    out["session"] = true
+                    out["sessionTabs"] = s.tabs.map(\.index)
+                    out["tabListsApplied"] = s.tabListsApplied
+                    out["sandboxState"] = String(describing: vm.state)
+                    out["polling"] = vm.isPollingOutbox
+                    out["outbox"] = vm.polledOutboxPath ?? ""
+                    out["rosterReads"] = vm.rosterReads
+                    out["lastRosterCount"] = vm.lastRosterCount
+                    out["rosterReadFailures"] = vm.rosterReadFailures
+                    out["callbackWired"] = vm.onTabList != nil
+                    out["pane"] = self.pane(for: profile.id) != nil
                     return out
                 case "sign-in-sim", "sign-in-sim-state", "loopback-sim":
                     // E2E hooks exercising the in-session sign-in path: a
@@ -16322,6 +16350,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
                 self.runningSessions[pid]?.tabs = tabs
+                self.runningSessions[pid]?.tabListsApplied += 1
                 self.pane(for: pid)?.applyTabList(tabs)
                 // Keep the grid membership in sync even when the grid isn't the
                 // active stage — closing a tab in the workspace must prune its

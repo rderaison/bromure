@@ -4882,8 +4882,14 @@ for n, c in enumerate(calls, 1):
               };
               const st = await api("GET", "/state").catch(() => ({}));
               const vm = (st.vms || []).find((v) => v.name === NAME);
+              const vms = await api("GET", "/vms").catch(() => ({}));
+              const vmsLine = (list) => JSON.stringify((list || []).map((v) =>
+                `${v.name}:${v.state}:${((v.tabs) || []).map((t) => t.index).join(",") || "-"}`));
+              const roster = await dbg("roster-state", { profile: NAME }).catch((e) => ({ error: e.message }));
               throw new Error(
                 `the host never listed tab ${win}\n` +
+                `  ${NAME} in /state: ${vm ? "yes" : "NO"}; /state vms: ${vmsLine(st.vms)}; /vms: ${vmsLine(vms.vms)}\n` +
+                `  roster-state: ${JSON.stringify(roster)}\n` +
                 `  host tabs: ${JSON.stringify(((vm && vm.tabs) || []).map((t) => t.index))}\n` +
                 `  tmux in the sandbox: ${sx(`${T} list-windows -t bromure: -F '#{window_index} #{pane_current_command}'`).trim().replace(/\n/g, " | ")}\n` +
                 `  outbox tabs.txt: ${read("tabs.txt", 10).replace(/\n/g, " | ")}\n` +

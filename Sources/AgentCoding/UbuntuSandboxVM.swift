@@ -131,6 +131,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// of truth, so the host mirrors this directly as the tab bar; there's no
     /// per-process liveness reconciliation.
     public var onTabList: (([GuestTab]) -> Void)?
+    /// How many times the outbox poll has read tabs.txt, and how many tabs
+    /// the last read held (-1: never read). Debug only (`roster-state`): a
+    /// sandboxed workspace whose roster the host never listed (E2E 34.10).
+    var rosterReads = 0
+    var lastRosterCount = -1
+    /// Reads of a changed tabs.txt that returned nothing (unreadable, too big).
+    var rosterReadFailures = 0
+    /// The outbox poll is running, and on which folder (debug).
+    var isPollingOutbox: Bool { outboxPollTask != nil }
+    var polledOutboxPath: String? { sessionDisk?.outboxDirectory?.path }
 
     /// Called ~every 2s with the guest's container list (from `docker ps -a`,
     /// running + stopped). Empty when docker is absent / the daemon is down.
@@ -1360,7 +1370,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 lastTabsMTime = mtime
                 if let raw = VM.boundedText(tabsFile) {
                     let roster = VM.parseRoster(raw)
-                    events.append { $0.onTabList?(roster) }
+                    events.append { vm in
+                        vm.rosterReads += 1
+                        vm.lastRosterCount = roster.count
+                        vm.onTabList?(roster)
+                    }
+                } else {
+                    events.append { $0.rosterReadFailures += 1 }
                 }
             }
 
