@@ -792,7 +792,7 @@ public actor Daemon {
         }
     }
 
-    // partial: no attach (a server has no pane), docker, fusion, routing, checkpoints, revert or type yet
+    // partial: no attach (a server has no pane), fusion, routing, checkpoints, revert or type yet
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
@@ -810,6 +810,7 @@ public actor Daemon {
         case ("POST", "file"): return await guestFileRoute(rec, body)
         case ("POST", "reboot"): return await rebootRoute(rec, body)
         case ("POST", "model"): return await setModelRoute(rec, body)
+        case ("POST", "docker"): return dockerRoute(rec, body)
         default: return .error(405, "Method not allowed")
         }
     }

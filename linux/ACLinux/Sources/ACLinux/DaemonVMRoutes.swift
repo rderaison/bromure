@@ -71,3 +71,49 @@ extension Daemon {
         return ControlResponse(200, ["ok": true, "model": .string(resolved?.id ?? modelID), "repo": .string(resolved?.repo ?? modelID)])
     }
 }
+
+extension Daemon {
+    /// `POST /vms/<id>/docker {"action", ...}`: a Docker dashboard verb for
+    /// the workspace's guest, validated host-side (DockerGuestVerbs) and
+    /// sent as the outbox command agentd runs; "watch" toggles the guest's
+    /// expensive dashboard polling. 409 when the VM isn't running or the
+    /// action is refused.
+    // @port ACAppDelegate.automationDockerCommand(idOrName: String, doc: [String:Any]) h=816fd9b4c7ecc817 @843e00a9
+    func dockerRoute(_ rec: VMRecord, _ body: JSONValue) -> ControlResponse {
+        guard live[rec.id] != nil else {
+            return ControlResponse(409, ["ok": false, "error": .string("VM not running: \(rec.name)")])
+        }
+        switch DockerGuestVerbs.automationAction((body.foundationObject as? [String: Any]) ?? [:]) {
+        case .send(let verb):
+            guard sendGuestCommand(verb, vmID: rec.id) else {
+                return ControlResponse(500, ["ok": false, "error": "couldn't write to the workspace's outbox"])
+            }
+        case .watch(let on):
+            setDockerWatch(on, vmID: rec.id)
+        case .refused(let error):
+            return ControlResponse(409, ["ok": false, "error": .string(error)])
+        }
+        return ControlResponse(200, ["ok": true])
+    }
+
+    /// A command line for agentd: a `cmd-<uuid>.txt` file in the outbox,
+    /// written whole (agentd only ever sees a complete file).
+    // @port ACAppDelegate.sendGuestCommand(_: String, profileID: Profile.ID) h=0d3070fd580c2d69 @843e00a9
+    @discardableResult
+    func sendGuestCommand(_ command: String, vmID: String) -> Bool {
+        let file = vmDir(vmID) + "/outbox/cmd-\(UUID().uuidString).txt"
+        return (try? (command + "\n").write(toFile: file, atomically: true, encoding: .utf8)) != nil
+    }
+
+    /// The guest's Docker dashboard polling (CPU/mem, images) on or off:
+    /// the `.docker-watch` marker in the outbox, created atomically.
+    // @port ACAppDelegate.setDockerWatch(_: Bool, profileID: Profile.ID) h=3b7141c2fabe19b6 @843e00a9
+    func setDockerWatch(_ on: Bool, vmID: String) {
+        let marker = vmDir(vmID) + "/outbox/.docker-watch"
+        if on {
+            try? Data().write(to: URL(fileURLWithPath: marker), options: .atomic)
+        } else {
+            try? FileManager.default.removeItem(atPath: marker)
+        }
+    }
+}
