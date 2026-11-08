@@ -349,7 +349,7 @@ public actor Daemon {
             return await state()
         case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"):
             return await answerPrompt(String(p.dropFirst("/prompts/".count).dropLast("/answer".count)), req.body)
-        case ("GET", "/state/subscribe"): return stateSubscribe()
+        case ("GET", "/state/subscribe"): return stateSubscribe(delta: req.headers["x-bromure-state-delta"] == "1")
         case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
             return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
         case ("POST", "/agent-sessions/start"): return await agentSessionCommand(nil, "start", req.body)
@@ -418,41 +418,98 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
     func state() async -> ControlResponse { ControlResponse(200, await stateBody()) }
 
-    /// `GET /state/subscribe`: the octet-stream header, then a `/state`
-    /// frame `[u32be len][u8 flag][json]` (len counts flag + json; flag 0,
-    /// never compressed) whenever it changes (a running VM's uptime ticking
-    /// doesn't count; frames still carry it), checked every 0.5 s, and at
-    /// least every 15 s (a client resubscribes after 45 s of silence). Ends
-    /// when a write fails; the client half-closing (the SSH bridge forwards
-    /// its EOF) doesn't end it.
-    // partial: no gzip frames (flag 1), and no delta frames (flag 2): a client that asks for them gets whole ones, which it reads as before
+    /// `GET /state/subscribe`: the octet-stream header, then `/state`
+    /// frames `[u32be len][u8 flag][payload]` (len counts flag + payload;
+    /// flag bit 0: raw-DEFLATE compressed, when that's smaller; bit 1: a
+    /// delta) whenever it changes (a running VM's uptime ticking doesn't
+    /// count; frames still carry it), checked every 0.5 s, and a whole one
+    /// at least every 15 s (a client resubscribes after 45 s of silence). A
+    /// client that merges sections (`x-bromure-state-delta: 1`) gets, after
+    /// the first whole frame, only the sections that changed
+    /// (`{"set": {section: value}, "unset": [section]}`); an older one the
+    /// whole state each time. Ends when a write fails; the client
+    /// half-closing (the SSH bridge forwards its EOF) doesn't end it.
+    // partial: one producer per subscriber (macOS shares one build among them), and no generation/epoch stamps in the deltas (none in Linux's /state)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
     // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
-    func stateSubscribe() -> ControlResponse {
+    func stateSubscribe(delta: Bool = false) -> ControlResponse {
         let me = WeakDaemon(self)
         return .streaming { client in
             let enc = JSONEncoder()
             enc.outputFormatting = [.sortedKeys]
-            var last = Data()
+            var sections: [String: Data] = [:]
             var lastSent = ContinuousClock.now - .seconds(60)
+            var started = false
             while !Task.isCancelled {
                 guard let d = me.daemon else { return }
                 // A held push stream is a connected fat client.
                 PendingPromptBroker.recordFatClientContact()
                 let body = await d.stateBody()
-                guard let json = try? enc.encode(body), let key = try? enc.encode(Self.withoutUptime(body)) else { return }
-                if key != last || ContinuousClock.now - lastSent >= .seconds(15) {
-                    var frame = ByteBuffer()
-                    frame.writeInteger(UInt32(json.count + 1))
-                    frame.writeInteger(UInt8(0))
-                    frame.writeBytes(json)
-                    do { try await client.write(frame) } catch { return }
-                    last = key
+                let now = Self.comparableSections(body, enc)
+                let (set, unset) = Self.changedSections(from: sections, to: now)
+                let keepalive = ContinuousClock.now - lastSent >= .seconds(15)
+                if !started || keepalive || !set.isEmpty || !unset.isEmpty {
+                    let frame: Data?
+                    if delta, started, !keepalive {
+                        frame = Self.deltaFrame(snapshot: body, set: set, unset: unset, enc)
+                    } else {
+                        frame = (try? enc.encode(body)).map { Self.frame($0, delta: false) }
+                    }
+                    guard let frame else { return }
+                    do { try await client.write(ByteBuffer(bytes: frame)) } catch { return }
+                    sections = now
                     lastSent = .now
+                    started = true
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
+    }
+
+    /// Frame: [len:u32be][flag:u8][payload], len covering flag and payload.
+    /// Flag bit 0: compressed (raw DEFLATE, what macOS's `.zlib` writes),
+    /// when that's smaller. Bit 1: a delta, else the whole state.
+    // @port ACAutomationServer.static frame(_: Data, delta: Bool) h=e9607edbb7f0d532 @30634ab2
+    static func frame(_ json: Data, delta: Bool) -> Data {
+        var payload = json
+        var flag: UInt8 = delta ? 2 : 0
+        if let z = NPMRegistryTransforms.deflateRaw(json), z.count < json.count {
+            payload = z; flag |= 1
+        }
+        var lenBE = UInt32(payload.count + 1).bigEndian
+        var out = Data(bytes: &lenBE, count: 4)
+        out.append(flag)
+        out.append(payload)
+        return out
+    }
+
+    /// Each top-level section as it's compared: its JSON, the VMs' uptime
+    /// left out (withoutUptime).
+    // @port-skip linux-only: comparableSections over JSONValue, compared as encoded bytes
+    static func comparableSections(_ state: JSONValue, _ enc: JSONEncoder) -> [String: Data] {
+        guard case .object(let o) = withoutUptime(state) else { return [:] }
+        var out: [String: Data] = [:]
+        for (k, v) in o { out[k] = (try? enc.encode(v)) ?? Data() }
+        return out
+    }
+
+    // @port ACAutomationServer.static changedSections(from: [String:NSObject], to: [String:NSObject]) h=09fad2eb9a7300de @30634ab2
+    static func changedSections(from old: [String: Data], to new: [String: Data]) -> (set: [String], unset: [String]) {
+        let set = new.compactMap { k, v in old[k] == v ? nil : k }.sorted()
+        let unset = old.keys.filter { new[$0] == nil }.sorted()
+        return (set, unset)
+    }
+
+    /// What changed, with the stamps that move on every build (none in
+    /// Linux's /state yet).
+    // @port ACAutomationServer.static deltaFrame(snapshot: [String:Any], set: [String], unset: [String]) h=9fdc0f7b359c0c64 @30634ab2
+    static func deltaFrame(snapshot: JSONValue, set: [String], unset: [String], _ enc: JSONEncoder) -> Data? {
+        guard case .object(let o) = snapshot else { return nil }
+        var values: [String: JSONValue] = [:]
+        for k in set { values[k] = o[k] }
+        for k in ["generation", "epoch"] { if let v = o[k] { values[k] = v } }
+        let delta: JSONValue = ["set": .object(values), "unset": .array(unset.map(JSONValue.string))]
+        return (try? enc.encode(delta)).map { frame($0, delta: true) }
     }
 
     /// A VM's `/state` / `/vms` entry: the record, and for a running VM what
