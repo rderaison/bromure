@@ -2121,15 +2121,10 @@ final class ACAutomationServer {
     private static func presentConsent(clientFD a: Int32, prompt: String,
                                        choices: [String], timeout: TimeInterval,
                                        stillAsked: () -> Bool = { true }) -> Int? {
-        var s = "\u{1b}[2J\u{1b}[H"                                 // clear, home
-        s += "\u{1b}[1;33m🔒 Bromure — approval required\u{1b}[0m\r\n\r\n"
-        s += prompt.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n"
-        for (i, c) in choices.enumerated() { s += "  \u{1b}[1m\(i + 1)\u{1b}[0m) \(c)\r\n" }
-        s += "\r\nChoice [1-\(choices.count)]  (Enter or timeout = deny): "
-        writeFrame(a, 0, Array(s.utf8))
+        writeScreen(a, PumpConsentScreen.prompt(prompt, choices: choices))
 
         let deadline = Date().addingTimeInterval(timeout)
-        var inbuf = [UInt8](); inbuf.reserveCapacity(256)
+        var keys = PumpConsentScreen.Keys(choices: choices.count)
         var buf = [UInt8](repeating: 0, count: 1024)
         var choice: Int? = nil
         readLoop: while true {
@@ -2142,36 +2137,15 @@ final class ACAutomationServer {
             if n < 0 { break }                                      // error → deny
             let r = Darwin.read(a, &buf, buf.count)
             if r <= 0 { break }                                     // client closed → deny
-            inbuf.append(contentsOf: buf[0..<r])
-            while inbuf.count >= 5 {
-                let ftype = inbuf[0]
-                let flen = (Int(inbuf[1]) << 24) | (Int(inbuf[2]) << 16)
-                         | (Int(inbuf[3]) << 8) | Int(inbuf[4])
-                if inbuf.count < 5 + flen { break }                 // partial frame; wait for more
-                let payload = Array(inbuf[5 ..< 5 + flen])
-                inbuf.removeFirst(5 + flen)
-                if ftype == 3 { break readLoop }                    // stdin EOF → deny
-                guard ftype == 0 else { continue }                  // ignore resize (1) etc.
-                for ch in payload {
-                    if ch == 0x0d || ch == 0x0a { break readLoop }  // Enter → deny
-                    if ch >= 0x31, ch <= 0x39 {                     // '1'..'9'
-                        let d = Int(ch - 0x30)
-                        if d >= 1, d <= choices.count { choice = d - 1; break readLoop }
-                    }
-                }
-            }
+            if case .answered(let c) = keys.feed(buf[0..<r]) { choice = c; break readLoop }
         }
-        writeFrame(a, 0, Array("\u{1b}[2J\u{1b}[H".utf8))           // clear; caller repaints tmux next
+        writeScreen(a, PumpConsentScreen.clear)                    // clear; caller repaints tmux next
         return choice
     }
 
-    /// Write one pty-protocol frame ([type:u8][len:u32-BE][payload]) to `fd`.
-    private static func writeFrame(_ fd: Int32, _ type: UInt8, _ payload: [UInt8]) {
-        var out: [UInt8] = [type,
-            UInt8((UInt32(payload.count) >> 24) & 0xff), UInt8((UInt32(payload.count) >> 16) & 0xff),
-            UInt8((UInt32(payload.count) >> 8) & 0xff),  UInt8(UInt32(payload.count) & 0xff)]
-        out.append(contentsOf: payload)
-        _ = out.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, out.count) }
+    /// Write `bytes` (one or more pty-protocol frames) to `fd`, once.
+    private static func writeScreen(_ fd: Int32, _ bytes: [UInt8]) {
+        _ = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, bytes.count) }
     }
 
     /// Interactive pty session: dequeue a guest shell connection, tell the

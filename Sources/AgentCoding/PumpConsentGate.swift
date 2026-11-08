@@ -110,3 +110,65 @@ extension ACAutomationServer {
         }
     }
 }
+
+extension ACAutomationServer {
+    /// What the user's terminal shows for a consent prompt, and how their
+    /// keystrokes answer it. The interactive attach is a framed pty protocol
+    /// ([type:u8][len:u32-BE][payload]; type 0=data, 1=resize, 2=exit,
+    /// 3=stdin-EOF), so the screen goes out as type-0 frames and the client's
+    /// framed keystrokes are decoded — raw bytes wouldn't render.
+    enum PumpConsentScreen {
+        /// The prompt, cleared in place (no nested alt screen), as one frame.
+        static func prompt(_ prompt: String, choices: [String]) -> [UInt8] {
+            var s = "\u{1b}[2J\u{1b}[H"                                 // clear, home
+            s += "\u{1b}[1;33m🔒 Bromure — approval required\u{1b}[0m\r\n\r\n"
+            s += prompt.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n"
+            for (i, c) in choices.enumerated() { s += "  \u{1b}[1m\(i + 1)\u{1b}[0m) \(c)\r\n" }
+            s += "\r\nChoice [1-\(choices.count)]  (Enter or timeout = deny): "
+            return frame(0, Array(s.utf8))
+        }
+
+        /// Clears the prompt away (the caller repaints tmux next), as one frame.
+        static let clear = frame(0, Array("\u{1b}[2J\u{1b}[H".utf8))
+
+        /// One pty-protocol frame: [type:u8][len:u32-BE][payload].
+        static func frame(_ type: UInt8, _ payload: [UInt8]) -> [UInt8] {
+            var out: [UInt8] = [type,
+                UInt8((UInt32(payload.count) >> 24) & 0xff), UInt8((UInt32(payload.count) >> 16) & 0xff),
+                UInt8((UInt32(payload.count) >> 8) & 0xff),  UInt8(UInt32(payload.count) & 0xff)]
+            out.append(contentsOf: payload)
+            return out
+        }
+
+        /// The client's framed keystrokes, as they arrive, until they answer:
+        /// a digit in range is that choice; Enter or stdin EOF is a deny.
+        struct Keys {
+            enum Outcome: Equatable { case pending, answered(Int?) }
+            let choices: Int
+            private var inbuf: [UInt8] = []
+            init(choices: Int) { self.choices = choices; inbuf.reserveCapacity(256) }
+
+            mutating func feed(_ bytes: some Collection<UInt8>) -> Outcome {
+                inbuf.append(contentsOf: bytes)
+                while inbuf.count >= 5 {
+                    let ftype = inbuf[0]
+                    let flen = (Int(inbuf[1]) << 24) | (Int(inbuf[2]) << 16)
+                             | (Int(inbuf[3]) << 8) | Int(inbuf[4])
+                    if inbuf.count < 5 + flen { break }                 // partial frame; wait for more
+                    let payload = Array(inbuf[5 ..< 5 + flen])
+                    inbuf.removeFirst(5 + flen)
+                    if ftype == 3 { return .answered(nil) }             // stdin EOF → deny
+                    guard ftype == 0 else { continue }                  // ignore resize (1) etc.
+                    for ch in payload {
+                        if ch == 0x0d || ch == 0x0a { return .answered(nil) }  // Enter → deny
+                        if ch >= 0x31, ch <= 0x39 {                     // '1'..'9'
+                            let d = Int(ch - 0x30)
+                            if d >= 1, d <= choices { return .answered(d - 1) }
+                        }
+                    }
+                }
+                return .pending
+            }
+        }
+    }
+}
