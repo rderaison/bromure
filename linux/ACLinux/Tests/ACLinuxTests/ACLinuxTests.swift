@@ -895,9 +895,9 @@ struct HomeSeedTests {
             try "x".write(to: d.appendingPathComponent(f), atomically: true, encoding: .utf8)
         }
         try HomeSeed.prepareOutboxDirectory(d, forRestore: true)
-        #expect(try fm.contentsOfDirectory(atPath: d.path) == ["agentd.log"])
+        #expect(try fm.contentsOfDirectory(atPath: d.path).sorted() == ["agent", "agentd.log", "urls"])
         try HomeSeed.prepareOutboxDirectory(d, forRestore: false)
-        #expect(try fm.contentsOfDirectory(atPath: d.path).isEmpty)
+        #expect(try fm.contentsOfDirectory(atPath: d.path).sorted() == ["agent", "urls"], "emptied, then its folders made again")
     }
 }
 

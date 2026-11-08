@@ -139,8 +139,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// RunningSession.agentStatus).
     private var agentStatus: [UUID: [Int: AgentStatus]] = [:]
 
-    /// The guest's hook reports, `agent-status-<window>.txt` in the outbox
-    /// (one-shot: read, then removed): line 1 the signal, line 2 the hook's
+    /// The guest's hook reports, `agent-status-<window>.txt` in the outbox or
+    /// its hooks' folder (one-shot: read, then removed): line 1 the signal, line 2 the hook's
     /// conversation, which may move the report to its own tab (Codex's
     /// shared server). macOS: UbuntuSandboxVM's outbox poll + onAgentStatus.
     // @port-skip linux-only: the outbox poll of UbuntuSandboxVM.startOutboxPolling for agent-status files, on the host
@@ -149,10 +149,12 @@ final class LinuxSessionHost: AgentSessionHost {
         let fm = FileManager.default
         for id in Self.running.withLockedValue({ $0 }) {
             let outbox = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/"
-            let names = (try? fm.contentsOfDirectory(atPath: outbox)) ?? []
-            for name in names where name.hasPrefix("agent-status-") && name.hasSuffix(".txt") {
-                let raw = GuestOutbox.read(outbox + name)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                try? fm.removeItem(atPath: outbox + name)
+            let files = HomeSeed.outboxFolders(outbox, SessionDisk.outboxAgentFolder).flatMap { dir in
+                ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).map { (dir, $0) }
+            }
+            for (dir, name) in files where name.hasPrefix("agent-status-") && name.hasSuffix(".txt") {
+                let raw = GuestOutbox.read(dir + name)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                try? fm.removeItem(atPath: dir + name)
                 guard let index = Int(name.dropFirst("agent-status-".count).dropLast(".txt".count)), !raw.isEmpty,
                       let status = AgentStatus(signal: raw) else { continue }
                 let lines = raw.split(whereSeparator: \.isNewline)

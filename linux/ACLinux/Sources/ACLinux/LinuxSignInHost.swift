@@ -106,20 +106,22 @@ extension LinuxSessionHost: ProxySignInHost {
         }
     }
 
-    /// The guests' URL relay (`url-*.txt` in the outbox, from bromure-open):
-    /// at most 8 a tick, 8 KiB each, http(s) only, consumed as read (macOS:
-    /// UbuntuSandboxVM's outbox poll).
+    /// The guests' URL relay (`url-*.txt` in the outbox or its relay folder,
+    /// from bromure-open): at most 8 a tick, 8 KiB each, http(s) only,
+    /// consumed as read (macOS: UbuntuSandboxVM's outbox poll).
     // @port-skip linux-only: the url-*.txt half of UbuntuSandboxVM.startOutboxPolling, on the host
     func readGuestURLs() {
         let fm = FileManager.default
         for id in Self.running.withLockedValue({ $0 }) {
             let outbox = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/"
-            let names = ((try? fm.contentsOfDirectory(atPath: outbox)) ?? [])
-                .filter { $0.hasPrefix("url-") && $0.hasSuffix(".txt") }.sorted()
-            for name in names.prefix(8) {
-                let raw = GuestOutbox.read(outbox + name, limit: 8 << 10)?
+            let paths = HomeSeed.outboxFolders(outbox, SessionDisk.outboxURLRelayFolder).flatMap { dir in
+                ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
+                    .filter { $0.hasPrefix("url-") && $0.hasSuffix(".txt") }.map { (name: $0, path: dir + $0) }
+            }.sorted { $0.name < $1.name }.map(\.path)
+            for path in paths.prefix(8) {
+                let raw = GuestOutbox.read(path, limit: 8 << 10)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                try? fm.removeItem(atPath: outbox + name)
+                try? fm.removeItem(atPath: path)
                 guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
                       ["http", "https"].contains(scheme) else { continue }
                 guestOpenedURL(url, profileID: id)

@@ -55,6 +55,8 @@ enum SessionDisk {
     static let switchboardMCPVsockPort = GuestPorts.switchboardMCPVsockPort
     static let switchboardMCPShimGuestPath = GuestMetaPaths.switchboardMCPShimGuestPath
     static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
+    static let outboxURLRelayFolder = GuestOutboxPaths.urlRelayFolder
+    static let outboxAgentFolder = GuestOutboxPaths.agentFolder
 }
 
 

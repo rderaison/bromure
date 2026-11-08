@@ -119,13 +119,45 @@ enum HomeSeed {
     /// The outbox: world-writable (the guest's uids write to it through plain
     /// DAC), reused in place; emptied on a fresh boot, kept on a restore minus
     /// the one-shot event files. The mode is set with chmod after mkdir, so
-    /// the umask can't narrow it.
+    /// the umask can't narrow it. Then the folders a sandboxed agent may write
+    /// to (bromure-sandboxd), and nowhere else in the outbox, where agentd's
+    /// own signals live: the URL relay's (bromure-open, xdg-open, $BROWSER)
+    /// and the agents' hooks' (status, tool calls).
     // partial: the path comes from the daemon's VM directory, not a profile directory
-    // @port SessionDisk.prepareOutboxDirectory(forRestore: Bool) h=b3a6d4f2b0328c55 @25ad3a88
+    // @port SessionDisk.prepareOutboxDirectory(forRestore: Bool) h=270a60d84e487f06 @e81ff085
     static func prepareOutboxDirectory(_ dir: URL, forRestore: Bool) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         guard chmod(dir.path, 0o777) == 0 else { throw MachineError.io("chmod \(dir.path)", errno) }
         if forRestore { purgeStaleEvents(in: dir) } else { clearContents(of: dir) }
+        for name in [SessionDisk.outboxURLRelayFolder, SessionDisk.outboxAgentFolder] {
+            makeWritableFolder(dir.appendingPathComponent(name).path)
+        }
+    }
+
+    /// `path` as a real folder, mode 0777: anything else there (a file, or a
+    /// symlink the guest left on a restored outbox) is removed first, and
+    /// the mode is set through a descriptor that won't follow a link, so
+    /// nothing outside the outbox is ever made world-writable.
+    // @port-skip linux-only: the 0777 folder macOS's createDirectory(attributes:) makes, without following a guest's link
+    static func makeWritableFolder(_ path: String) {
+        var st = stat()
+        if lstat(path, &st) == 0, st.st_mode & S_IFMT != S_IFDIR { unlink(path) }
+        _ = mkdir(path, 0o777)
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        _ = fchmod(fd, 0o777)
+        close(fd)
+    }
+
+    /// The folders of `outbox` the host polls for `kind`: the outbox itself,
+    /// and the named folder when it is a real one (never through a symlink
+    /// the guest put there, which could point at the host's own folders).
+    // @port-skip linux-only: UbuntuSandboxVM's real-folder check (attributesOfItem's .typeDirectory), on the host's outbox path
+    static func outboxFolders(_ outbox: String, _ folder: String) -> [String] {
+        let base = outbox.hasSuffix("/") ? outbox : outbox + "/"
+        var st = stat()
+        guard lstat(base + folder, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return [base] }
+        return [base, base + folder + "/"]
     }
 
     // @port SessionDisk.purgeStaleEvents(in: URL) h=b67a06cfe2cd3954 @25ad3a88
