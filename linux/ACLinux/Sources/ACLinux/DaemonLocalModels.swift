@@ -212,8 +212,15 @@ final class InferenceBridgeListener: @unchecked Sendable {
                     if WorkspaceQuarantine.shared.contains(profileID) {
                         return guest.eventLoop.makeFailedFuture(ChannelError.inputClosed)
                     }
+                    // Registered, then checked again (a quarantine that started in
+                    // between ran its cuts first); a cut closes on the loop's
+                    // next turn, never under the initializer.
                     let cut = WorkspaceQuarantine.shared.onQuarantine(profileID, runNow: false) { [weak guest] in
-                        guest?.close(promise: nil)
+                        guest?.eventLoop.execute { guest?.close(promise: nil) }
+                    }
+                    if WorkspaceQuarantine.shared.contains(profileID) {
+                        WorkspaceQuarantine.shared.remove(cut, for: profileID)
+                        return guest.eventLoop.makeFailedFuture(ChannelError.inputClosed)
                     }
                     guest.closeFuture.whenComplete { _ in WorkspaceQuarantine.shared.remove(cut, for: profileID) }
                 }

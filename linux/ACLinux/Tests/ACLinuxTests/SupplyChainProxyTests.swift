@@ -465,6 +465,31 @@ struct SupplyChainProxyTests {
         #expect(registry.requests.withLockedValue { $0 }.isEmpty, "nothing went up")
     }
 
+    /// A CONNECT during a quarantine is refused (403) before any tunnel,
+    /// a `tls: skip` splice included (it never reaches RequestReader).
+    @Test func aQuarantinedWorkspaceOpensNoTunnel() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        WorkspaceQuarantine.shared.set(true, for: pid)
+        defer { WorkspaceQuarantine.shared.set(false, for: pid) }
+        var sv: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &sv) == 0)
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let ch = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .channelInitializer { $0.pipeline.addHandler(ConnectHandler(proxy: proxy, profileID: pid)) }
+            .withConnectedSocket(sv[1]).get()
+        defer { ch.close(promise: nil); Glibc.close(sv[0]) }
+        let req = "CONNECT skip.example:443 HTTP/1.1\r\nHost: skip.example:443\r\n\r\n"
+        _ = req.utf8CString.withUnsafeBufferPointer { Glibc.send(sv[0], $0.baseAddress, $0.count - 1, Int32(MSG_NOSIGNAL)) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = recv(sv[0], &buf, buf.count, 0)
+        let reply = String(decoding: buf[0..<max(0, n)], as: UTF8.self)
+        #expect(reply.hasPrefix("HTTP/1.1 403 ") && reply.contains("quarantined"), "\(reply.prefix(200))")
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()

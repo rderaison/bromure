@@ -1643,6 +1643,9 @@ public actor Daemon {
                 // with start's refresh, once the session engine (and its
                 // cluster engine) is up: until then they fail closed. start
                 // then rewrites its kubeconfig.
+                // Quarantined before the restart: cut again before any of its
+                // listeners serves (or it's attached).
+                let reask = readoptQuarantine(rec)
                 if let profile = adoptedProfile {
                     await setUpWorkspaceCredentials(profile, meta: vmDir(rec.id) + "/meta")
                     if rec.registration != true { sw.egress.govern(MAC(InterimSwitch.mac(rec.mac)), .init(profile)) }
@@ -1676,8 +1679,6 @@ public actor Daemon {
                     startLocalEngineIfNeeded(for: staged)
                     lastStagedProfiles[rec.id] = staged
                 }
-                // Quarantined before the restart: cut again before it's attached.
-                let reask = readoptQuarantine(rec)
                 sw.attach(l.port, mac: rec.mac)
                 await allowLoadBalancerClaims(rec)
                 if let lease = rec.lease { sw.dhcp.assign(mac: InterimSwitch.mac(rec.mac), ip: InterimSwitch.ipv4(lease)) }

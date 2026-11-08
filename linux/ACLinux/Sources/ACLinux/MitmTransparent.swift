@@ -17,7 +17,7 @@ extension MitmProxy {
     /// non-TLS / unparseable flows are spliced raw (fail open); everything
     /// else is MiTM'd through the workspace's policy chain. Takes ownership
     /// of `appFD`.
-    // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=08650ec6e3bd951c @79b2d8c0
+    // @port MitmEngine.acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int) h=e9960ebbadd1638d @45a144c8
     func acceptTransparentFlow(appFD: Int32, profileID: UUID, destIP: String, destPort: Int, srcPort: Int = 0) {
         // Off the event loops, on a thread of its own: the peeks block on the
         // socket, and a pool would let a few hundred idle guest connections
@@ -279,7 +279,10 @@ extension MitmProxy {
         // would hit whoever has the number by then. (The one failure before
         // it, BaseSocket's ignoreSIGPIPE, can't happen on Linux.)
         guard let ch = try? bootstrap.withConnectedSocket(appFD).wait() else { return }
-        if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent", identity: identity) {
+        // Tracked (a quarantine's cutAll reaches it from now), then checked:
+        // one that started since the flow arrived is seen.
+        if !trackForFirewall(ch, profileID: profileID, host: host, port: port, route: "transparent", identity: identity)
+            || WorkspaceQuarantine.shared.contains(profileID) {
             ch.close(promise: nil)
         }
     }

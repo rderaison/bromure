@@ -138,8 +138,10 @@ extension LinuxSessionHost: ProxySignInHost {
     /// a previous guest left reaches its replacement (a restore keeps only
     /// what that same guest wrote before its snapshot).
     // partial: a page that isn't a sign-in's is dropped (a macOS server opens it on its own screen)
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=189f593db064bc13 @f127f8ab
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=26c1142c88dc3aa6 @45a144c8
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
+        // A quarantined workspace opens nothing, a sign-in's page included.
+        if WorkspaceQuarantine.shared.refusesURLOpen(url, for: pid) { return }
         // The registration machine's login: its page goes to the client.
         if let reg = registration, reg.scratchProfile.id == pid, !reg.finished {
             registrationOpenedURL(url, state: reg)

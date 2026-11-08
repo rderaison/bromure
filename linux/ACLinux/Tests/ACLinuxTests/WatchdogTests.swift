@@ -90,6 +90,22 @@ extension DaemonGlobalSuites {
             await Self.tearDown(d, dir, prior)
         }
 
+        /// A VM's stop clears its quarantine mark (finishStop's
+        /// clearWorkspaceProxyState), so a later daemon restart doesn't
+        /// re-quarantine a healthy VM.
+        @Test func aStopClearsTheQuarantineMark() async throws {
+            let prior = ProfileStore.defaultRootDir
+            let (d, dir, p, vm, _) = try await Self.setUp("quarantine")
+            Daemon.watchdogAnswerForTesting.withLockedValue { $0 = { _ in 1 } }
+            Self.trip(p.id)
+            _ = await Self.calls(vm, 2)
+            let mark = Daemon.quarantineMark(await d.vmDir(p.id.uuidString.lowercased()))
+            #expect(FileManager.default.fileExists(atPath: mark), "kept quarantined: marked")
+            await d.clearWorkspaceProxyState(p.id)
+            #expect(!FileManager.default.fileExists(atPath: mark), "the stop clears it")
+            await Self.tearDown(d, dir, prior)
+        }
+
         @Test func shutDownNeverResumes() async throws {
             let prior = ProfileStore.defaultRootDir
             let (d, dir, p, vm, _) = try await Self.setUp("quarantine")

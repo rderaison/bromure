@@ -671,6 +671,12 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 guard parts.count >= 3 else { return reject(context, 400, "Bad Request") }
                 if parts[0] == "CONNECT" {
                     let (host, port) = Self.split(String(parts[1]), defaultPort: 443)
+                    // A quarantined workspace opens no tunnel (a `tls: skip`
+                    // splice included, which never reaches RequestReader).
+                    if WorkspaceQuarantine.shared.contains(profileID) {
+                        return answer(context, String(decoding: RequestReader.simple(403, "Forbidden", body: WorkspaceQuarantine.refusal + "\n"),
+                                                      as: UTF8.self))
+                    }
                     buf.moveReaderIndex(forwardBy: end.upperBound - buf.readerIndex)
                     // Connection-layer egress verdict for the cooperative-proxy
                     // path (macOS: HTTPMitmConnection.run): a deny is the
@@ -702,7 +708,10 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                             ProxyPolicy.reportAllowed(policy: proxy.guardrailsConfig(for: profileID)?.egressPolicy,
                                                       profileID: profileID, host: host, port: port)
                             guard proxy.trackForFirewall(context.channel, profileID: profileID,
-                                                         host: host, port: port, route: "proxy") else {
+                                                         host: host, port: port, route: "proxy"),
+                                  // Tracked (cutAll reaches it from now), then
+                                  // checked: a quarantine since the CONNECT is seen.
+                                  !WorkspaceQuarantine.shared.contains(profileID) else {
                                 phase = .handedOff
                                 context.close(promise: nil)
                                 return
@@ -882,8 +891,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     func handlerAdded(context: ChannelHandlerContext) {
         let channel = context.channel
+        // Closed on the loop's next turn: never inside a channel initializer.
         quarantineCut = WorkspaceQuarantine.shared.onQuarantine(profileID, runNow: false) { [weak channel] in
-            channel?.close(promise: nil)
+            channel?.eventLoop.execute { channel?.close(promise: nil) }
         }
     }
 
