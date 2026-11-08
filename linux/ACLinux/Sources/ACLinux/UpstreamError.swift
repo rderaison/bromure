@@ -50,7 +50,7 @@ enum UpstreamFailure: Equatable {
 /// The guest's explanation of an upstream failure: macOS's reasons, word
 /// for word, and its body; never the library's own text (it names host
 /// paths and internals). The trust advice is this host's (no keychain).
-// @port describeUpstreamError(_: Error, host: String, allowInsecureHint: Bool) h=3647aca7e26d9782 @8e2543eb
+// @port describeUpstreamError(_: Error, host: String, dialerFailure: String?, allowInsecureHint: Bool) h=067aa323ec4ca2d3 @f127f8ab
 func describeUpstreamError(_ error: Error, host: String) -> (isTrust: Bool, reason: String, body: String) {
     let kind = UpstreamFailure(error)
     let reason: String

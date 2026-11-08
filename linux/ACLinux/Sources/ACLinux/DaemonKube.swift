@@ -24,7 +24,7 @@ extension Daemon {
     }
 
     /// The clusters, registries, connectors and their status.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/k8s"): h=dde246cbd63efa97 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/k8s"): h=dde246cbd63efa97 @f127f8ab
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListKubeClusters h=0c729e20e2122b7f @32a528c5
     func kubeList() async -> ControlResponse {
         let snap = await MainActor.run { SessionStores.shared?.kube.snapshot() ?? ["clusters": [], "status": [:]] }
@@ -40,7 +40,7 @@ extension Daemon {
                                                           "status": snap["status"] ?? [:]]) ?? .object([:]))
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/k8s"): h=f99ca82a9e3186a6 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/k8s"): h=f99ca82a9e3186a6 @f127f8ab
     func kubeCreate(_ doc: [String: Any]) async -> ControlResponse {
         var doc = doc
         if doc["action"] == nil { doc["action"] = "create" }
@@ -49,7 +49,7 @@ extension Daemon {
     }
 
     /// `POST /k8s/{id}/{action}` (fat-client cluster verbs).
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/k8s/"): h=ecf14d0915d2df82 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/k8s/"): h=ecf14d0915d2df82 @f127f8ab
     func kubeCommand(_ method: String, _ path: String, _ doc: [String: Any]) async -> ControlResponse {
         guard method == "POST" || method == "DELETE" else { return .error(405, "Method not allowed") }
         let rest = String(path.dropFirst("/k8s/".count))
@@ -67,7 +67,7 @@ extension Daemon {
         return ControlResponse((result["ok"] as? Bool) == true ? 200 : 400, JSONValue(foundation: result) ?? .object([:]))
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/registries"): h=a2c8ce826a1eaa9a @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/registries"): h=a2c8ce826a1eaa9a @f127f8ab
     func registryCreate(_ doc: [String: Any]) async -> ControlResponse {
         var doc = doc
         if doc["action"] == nil { doc["action"] = "create" }
@@ -75,7 +75,7 @@ extension Daemon {
         return ControlResponse((result["ok"] as? Bool) == true ? 200 : 400, JSONValue(foundation: result) ?? .object([:]))
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/registries/"): h=52a7426dba2a3e85 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/registries/"): h=52a7426dba2a3e85 @f127f8ab
     func registryCommand(_ method: String, _ path: String, _ doc: [String: Any]) async -> ControlResponse {
         guard method == "POST" || method == "DELETE" else { return .error(405, "Method not allowed") }
         let rest = String(path.dropFirst("/registries/".count))

@@ -473,14 +473,14 @@ public actor Daemon {
         }
     }
 
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/health"): h=ec3227f904b323b7 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/health"): h=ec3227f904b323b7 @f127f8ab
     func health() -> ControlResponse {
         ControlResponse(200, ["status": "ok", "service": "bromure-ac-automation", "debugEnabled": false])
     }
 
     /// `/state`: the macOS snapshot's always-present keys this host can fill
     /// (`version`, `build`, `vms`, `workspaces`, the subnet) plus `hostKind`.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/state"): h=adfaa737ba44087f @f127f8ab
     func state() async -> ControlResponse { ControlResponse(200, await cachedStateBody()) }
 
     /// `GET /state/subscribe`: the octet-stream header, then `/state`
@@ -496,7 +496,7 @@ public actor Daemon {
     /// is subscribed (StateFeed); each subscriber only sends. Ends when a
     /// write fails; the client half-closing (the SSH bridge forwards its
     /// EOF) doesn't end it.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/state/subscribe"): h=97279e9d002810bf @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/state/subscribe"): h=1f85f15c8df15ffd @f127f8ab
     // @port ACAutomationServer.handleStateSubscribe(fd: Int32, delta: Bool) h=44de718c89922303 @30634ab2
     func stateSubscribe(delta: Bool = false) -> ControlResponse {
         let me = WeakDaemon(self)
@@ -725,7 +725,7 @@ public actor Daemon {
     }
 
     // partial: entries lack fusion fields (no fusion on Linux)
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("GET", "/vms"): h=b80678b83121852e @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/vms"): h=b80678b83121852e @f127f8ab
     func listVMs() -> ControlResponse {
         let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
         guard case .array(let more) = machines else { return ControlResponse(200, ["vms": .array(records.map(vmEntry))]) }
@@ -787,7 +787,7 @@ public actor Daemon {
     /// `POST /vms`: create and start a VM, detached. Body: `name?`,
     /// `machine?` (q35|microvm), `memoryGB?`, `cpus?`. 201 `{id, shortId, name, detached}`.
     // partial: no profile, tool, auth, apiKey, mounts or rm; takes name/machine/memoryGB/cpus; always detached
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @f127f8ab
     /// `id`: a workspace Profile's (POST /profiles), else a new one; `boot`
     /// false only registers it (stopped).
     func createVM(_ body: JSONValue, id fixedID: String? = nil, boot: Bool = true,
@@ -839,7 +839,7 @@ public actor Daemon {
     }
 
     // partial: no attach (a server has no pane); fusion is refused (no Fusion in the Linux proxy)
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @f127f8ab
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
         let sub = parts.count > 1 ? parts[1] : ""

@@ -167,7 +167,7 @@ extension Daemon {
     /// `POST /models/{download,cancel,discard,remove}`: the built-in
     /// engine's model files. Refused: that engine is macOS-only.
     // partial: refused (the built-in MLX engine is macOS-only)
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case ("POST", let p) where p.hasPrefix("/models/"): h=35249da0c5fa92e9 @7dd92fdf
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/models/"): h=35249da0c5fa92e9 @f127f8ab
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onModelAction h=17a44a9c542ea547 @7057d502
     func modelAction(_ path: String, _ body: JSONValue) -> ControlResponse {
         let action = String(path.dropFirst("/models/".count))
