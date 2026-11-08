@@ -1,5 +1,12 @@
-import CryptoKit
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // URLSession off Apple platforms
+#endif
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto   // swift-crypto: the same API off Apple platforms
+#endif
 import SandboxEngine
 
 /// The kernel sentry module catalog published by Jenkinsfile.sentry at
@@ -151,7 +158,7 @@ public final class SentryModuleStore: @unchecked Sendable {
     private var catalogAcceptedAt: [String: Date] = [:]
 
     public init(root: URL? = nil, base: URL? = nil, requireSignature: Bool? = nil,
-                publicKeyBase64: String = ImageCatalogStore.pinnedPublicKeyBase64,
+                publicKeyBase64: String = PinnedSigningKey.publicKeyBase64,
                 session: URLSession = .shared) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BromureAC", isDirectory: true)

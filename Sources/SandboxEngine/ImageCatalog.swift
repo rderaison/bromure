@@ -396,15 +396,8 @@ public final class ImageCatalogStore: @unchecked Sendable {
     // MARK: - Signature verification
 
     /// The ed25519 public key catalog signatures verify against — the
-    /// same Sparkle key that signs app updates. Read from Info.plist
-    /// (SUPublicEDKey) when running from an app bundle; the constant
-    /// covers bare-binary contexts (swift build output, unit tests) and
-    /// MUST match Sources/Browser/Info.plist and
-    /// Sources/AgentCoding/Info.plist (they carry the same key).
-    public static var pinnedPublicKeyBase64: String {
-        (Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String)
-            ?? "G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8="
-    }
+    /// same Sparkle key that signs app updates (PinnedSigningKey.swift).
+    public static var pinnedPublicKeyBase64: String { PinnedSigningKey.publicKeyBase64 }
 
     /// True when `catalog` carries a signature that verifies against
     /// `publicKeyBase64` over the canonical payload built with `magic`.
