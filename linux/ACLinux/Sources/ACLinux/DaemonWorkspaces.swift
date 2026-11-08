@@ -8,7 +8,6 @@ extension Daemon {
     /// `?storage=1`: its disk sizes; else the compact describe), a workspace's
     /// firewall (`POST …/firewall`, `…/firewall-edit`), and `POST
     /// /agent-sessions/folders`; nil for any other path.
-    // partial: no advisor proposals or OpenShell/sandbox-path decisions yet (501)
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=59e55ae73cdc6185 @f127f8ab
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
@@ -56,7 +55,8 @@ extension Daemon {
             case "policy":
                 r = ProfileSubRoutes.policyRevisionsRoute(directory: profileStore.profileDirectory(for: prof), method: method, sub: sub)
             case "proposals", "openshell-allow", "sandbox-path":
-                return .error(501, "The OpenShell advisor isn't on this server yet")
+                r = await Self.advisorSubRoute(prof.id, method: method, sub: sub,
+                                               body: body.foundationObject as? [String: Any] ?? [:])
             default:
                 return .error(404, "Unknown profile resource")
             }

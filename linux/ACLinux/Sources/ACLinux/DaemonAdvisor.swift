@@ -1,0 +1,124 @@
+import Foundation
+import SandboxEngine
+
+// The OpenShell policy advisor on a Linux server (macOS: the app delegate's
+// wireOpenShellAdvisor): its per-workspace mode and effective policy, the
+// credential scopes for its risk check, how an approved rule is applied
+// (into the workspace's policy, saved through the editor's path, applied
+// live), and how approved system packages are installed in the guest.
+extension Daemon {
+    // partial: no organization-boundary change notice (the Linux daemon reads the boundary at each launch)
+    // @port ACAppDelegate.wireOpenShellAdvisor(_: MitmEngine) h=0c8bae1b66803f62 @2134fc7a
+    func wireOpenShellAdvisor() {
+        guard let mitm else { return }
+        let advisor = OpenShellAdvisor.shared
+        let modes = OpenShellAdvisorModeCache.shared
+        advisor.modeProvider = { modes.mode(for: $0) }
+        advisor.policyProvider = { [weak mitm] in mitm?.guardrailsConfig(for: $0)?.egressPolicy?.openShell }
+        advisor.credentialScopesProvider = { [weak mitm] pid in
+            mitm?.swapper.entries(for: pid).compactMap { $0.host } ?? []
+        }
+        advisor.applyApproved = { pid, proposal in
+            await MainActor.run { () -> String? in
+                guard let host = LinuxSessionHost.shared,
+                      let existing = host.profiles.first(where: { $0.id == pid }) else { return "workspace not found" }
+                var updated = existing
+                do {
+                    updated.networkPolicy = try OpenShellPolicy.insertingRules(proposal.yaml, into: existing.networkPolicy)
+                    if let result = OpenShellGovernance.shared.check(policyYAML: updated.networkPolicy,
+                                                                      providerRules: updated.openShellProviderRules),
+                       !result.passed {
+                        return "outside the organization boundary — \(result.summary)"
+                    }
+                    try host.persistEditedProfile(&updated, editing: existing, generateSSH: false, policySource: "advisor")
+                } catch {
+                    return "\(error)"
+                }
+                host.applyLiveEditToRunningSession(updated)
+                return nil
+            }
+        }
+        // System packages on request: an approved package is installed by
+        // the guest's root supervisor (agentd → sandboxd), never by the agent.
+        advisor.systemPackagesProvider = { modes.systemPackagesOn($0) }
+        advisor.enforceBinariesProvider = { [weak mitm] in
+            mitm?.guardrailsConfig(for: $0)?.egressPolicy?.enforceBinaries == true
+        }
+        let me = WeakDaemon(self)
+        advisor.installPackages = { pid, _, packages in
+            guard let shell = await me.daemon?.liveShell(of: pid) else { return (1, "the workspace isn't running") }
+            do {
+                // No reply deadline: the guest answers only once apt has
+                // finished or been stopped, so a failure shown is never one
+                // still running.
+                let reply = try await shell.request(["apt_install": ["packages": packages], "timeout": 2000])
+                return (reply["exit_code"] as? Int ?? 1, reply["output"] as? String ?? "")
+            } catch {
+                return (1, "\(error)")
+            }
+        }
+        Self.refreshWatchdogModes()
+    }
+
+    /// Add a path to a workspace's OpenShell `filesystem_policy` (the
+    /// Sandbox drawer's Files tab) and save it through the editor's path.
+    /// Landlock is set when the sandboxed session starts and only narrows,
+    /// so it applies at the next start. Returns an error message, or nil.
+    // @port ACAppDelegate.addSandboxPath(profileID: UUID, path: String, readWrite: Bool) h=0806678fe617e603 @2765424f
+    @MainActor static func addSandboxPath(profileID: UUID, path: String, readWrite: Bool) -> String? {
+        guard let host = LinuxSessionHost.shared,
+              let existing = host.profiles.first(where: { $0.id == profileID }) else { return "workspace not found" }
+        var updated = existing
+        do {
+            updated.networkPolicy = try OpenShellPolicy.addingFilesystemPath(path, readWrite: readWrite,
+                                                                              to: existing.networkPolicy)
+            guard updated.networkPolicy != existing.networkPolicy else { return nil }
+            try host.persistEditedProfile(&updated, editing: existing, generateSSH: false, policySource: "drawer")
+        } catch {
+            return "\(error)"
+        }
+        host.applyLiveEditToRunningSession(updated)
+        return nil
+    }
+
+    /// `/profiles/<id>/proposals…` and the Sandbox drawer's decisions
+    /// (`openshell-allow`, `sandbox-path`), answered by the shared handlers
+    /// on a dispatch thread as macOS's server thread runs them (they wait on
+    /// the advisor, up to 30 s), never on the daemon's own executor.
+    // @port-skip linux-only: the proposals / sandbox-decision handler closures of wireAutomationCallbacks, off the actor
+    nonisolated static func advisorSubRoute(_ pid: UUID, method: String, sub: [String],
+                                            body: [String: Any]) async -> (status: Int, body: [String: Any]) {
+        await withCheckedContinuation { c in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let r: (status: Int, body: [String: Any])
+                if sub[0] == "proposals" {
+                    r = ProfileSubRoutes.advisorProposalsRoute(profileID: pid, method: method, sub: sub, body: body)
+                } else if method == "POST", sub.count == 1 {
+                    r = ProfileSubRoutes.sandboxDecisionRoute(profileID: pid, sub[0], body: body,
+                        allow: { pid, host, port, exe in
+                            await OpenShellAdvisor.shared.allow(profileID: pid, host: host, port: port, exe: exe)
+                        },
+                        addPath: { pid, path, rw in
+                            // On the main actor (the editor's save path), waited
+                            // for here: this is a dispatch thread, not the main one.
+                            let box = SendableBox<String?>("unavailable")
+                            let done = DispatchSemaphore(value: 0)
+                            Task { @MainActor in
+                                box.value = Self.addSandboxPath(profileID: pid, path: path, readWrite: rw)
+                                done.signal()
+                            }
+                            done.wait()
+                            return box.value
+                        })
+                } else {
+                    r = (405, ["error": "POST only"])
+                }
+                c.resume(returning: r)
+            }
+        }
+    }
+
+    /// A running workspace's guest shell, or nil.
+    // @port-skip linux-only: the daemon's live VMs by workspace
+    func liveShell(of pid: UUID) -> GuestShell? { live[pid.uuidString.lowercased()]?.shell }
+}

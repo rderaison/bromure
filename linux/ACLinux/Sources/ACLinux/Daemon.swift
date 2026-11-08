@@ -254,6 +254,7 @@ public actor Daemon {
         await d.wireCompromiseHandler()
         await d.wireWatchdog()
         await d.wireSentryModules()
+        await d.wireOpenShellAdvisor()
         refreshSquelchSettings()
         wireSquelchLedger()
         // The shared code's secrets (the enrollment's token and leaf key)
