@@ -61,7 +61,7 @@ extension DaemonGlobalSuites {
             try FileManager.default.createDirectory(at: meta, withIntermediateDirectories: true)
             try Daemon.writeCredentialFiles(p, plan: plan, registration: false, meta: meta, kubeYAML: nil,
                                             store: ProfileStore(rootDir: URL(fileURLWithPath: dir + "/profiles", isDirectory: true)),
-                                            seedCodex: { _, _ in })
+                                            seedStandIns: { _, _ in })
             let spec = try String(contentsOf: meta.appendingPathComponent("home-seed/claude-settings.spec.json"), encoding: .utf8)
             #expect(spec.contains("\"approvedApiKeySuffix\" : \"\(fake.suffix(20))\""), "\(spec)")
             let files = Self.tree(meta)

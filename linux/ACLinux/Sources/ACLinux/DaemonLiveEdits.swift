@@ -92,7 +92,7 @@ extension Daemon {
 
     /// The credential half: the policies, the plan and swap map, and the
     /// guest's files, as the launch stages them, with the map merged.
-    // partial: no PII model download, fusion, 1Password error prompt, or grok/kimi stand-in files (not on Linux yet)
+    // partial: no PII model download, fusion, or 1Password error prompt (not on Linux yet)
     // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=12a93ff58499be07 @0e28fd20
     @discardableResult
     func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {
@@ -130,22 +130,27 @@ extension Daemon {
 
     /// The workspace's credential files in its meta share, as a launch and
     /// a live refresh write them: the home seed (the managed dotfiles with
-    /// the plan's fakes, the kubeconfig, Codex's stand-in, the manifest and
+    /// the plan's fakes, the kubeconfig, Codex's, Grok's and Kimi's
+    /// stand-ins, the manifest and
     /// Claude's spec, its key pre-approved), the agents' MCP configs, and
     /// api_key.env (the plan's fakes under their variables).
     // @port-skip linux-only: the home-seed and meta-share steps of ACAppDelegate.launch / pushLiveCredentials on the Linux meta share
     func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
                               meta: URL, kubeYAML: String?) throws {
         try Self.writeCredentialFiles(profile, plan: plan, registration: registration, meta: meta, kubeYAML: kubeYAML,
-                                      store: profileStore) { seedCodexAuthFile(for: $0, homeRoot: $1) }
+                                      store: profileStore) { profile, files in
+            seedCodexAuthFile(for: profile, homeRoot: files)
+            seedGrokAuthFile(for: profile, homeRoot: files)
+            seedKimiAuthFile(for: profile, homeRoot: files)
+        }
     }
 
-    /// writeCredentialFiles over a given store (testable); `seedCodex` adds
-    /// Codex's stand-in to the seed's files/.
+    /// writeCredentialFiles over a given store (testable); `seedStandIns`
+    /// adds the subscription CLIs' stand-in files to the seed's files/.
     // @port-skip linux-only: writeCredentialFiles' body
     static func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
                                      meta: URL, kubeYAML: String?, store: ProfileStore,
-                                     seedCodex: (Profile, URL) -> Void) throws {
+                                     seedStandIns: (Profile, URL) -> Void) throws {
         let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
         try store.writeHomeSeedFiles(for: profile, into: seed, terminalDefaults: .fallback, tokenPlan: plan,
                                      kubeconfigYAML: kubeYAML)
@@ -153,7 +158,7 @@ extension Daemon {
         // servers, their tokens as stand-ins), as macOS writes them.
         try SessionDisk.writeMCPConfigs(into: meta, profile: profile, tokenPlan: plan)
         if !registration {
-            seedCodex(profile, seed.appendingPathComponent("files", isDirectory: true))
+            seedStandIns(profile, seed.appendingPathComponent("files", isDirectory: true))
         }
         try store.finalizeHomeSeed(for: profile, seedDir: seed,
                                    anthropicEnvKey: plan?.fakeForAnthropic() ?? plan?.claudeSubscriptionBogusKey,

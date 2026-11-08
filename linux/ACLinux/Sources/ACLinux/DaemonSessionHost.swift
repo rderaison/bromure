@@ -148,6 +148,27 @@ extension Daemon {
         try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
     }
 
+    /// Grok subscription mode: the stand-in `~/.grok/auth.json` in the home
+    /// seed's `files/` (SubscriptionStandInFiles.seedGrok). No-op unless the
+    /// workspace runs Grok on a subscription with a stored login.
+    // @port ACAppDelegate.seedGrokAuthFile(for: Profile, homeRoot: URL?) h=75fb1b3064604e02 @645bad15
+    func seedGrokAuthFile(for profile: Profile, homeRoot: URL) {
+        guard let mitm, profile.allToolSpecs.contains(where: { $0.tool == .grok && $0.authMode == .subscription }),
+              mitm.grokStore.record(for: profile.id) != nil else { return }
+        SubscriptionStandInFiles.seedGrok(store: mitm.grokStore, profileID: profile.id, homeRoot: homeRoot)
+    }
+
+    /// Kimi subscription mode: the stand-in credentials (and the managed
+    /// config.toml, if captured) in the home seed's `files/`
+    /// (SubscriptionStandInFiles.seedKimi).
+    // partial: a Kimi record without its managed config isn't provisioned on Linux (macOS's KimiProvisioner at launch): the guest gets the credentials, no default_model
+    // @port ACAppDelegate.seedKimiAuthFile(for: Profile, homeRoot: URL?) h=3793d09178fcc611 @645bad15
+    func seedKimiAuthFile(for profile: Profile, homeRoot: URL) {
+        guard let mitm, profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
+              mitm.kimiStore.record(for: profile.id) != nil else { return }
+        SubscriptionStandInFiles.seedKimi(store: mitm.kimiStore, profileID: profile.id, homeRoot: homeRoot)
+    }
+
     /// Pull `chatgpt_account_id` out of a Codex id-token JWT (best effort).
     // @port ACAppDelegate.static codexAccountID(fromIDToken: String) h=feb12e2521f81dfb @dd7ba30d
     static func codexAccountID(fromIDToken jwt: String) -> String? {

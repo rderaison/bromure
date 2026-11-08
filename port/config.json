@@ -151,6 +151,7 @@
     "Sources/AgentCoding/Mitm/SubscriptionAuthRewrite.swift",
     "Sources/AgentCoding/Mitm/SubscriptionFakeMint.swift",
     "Sources/AgentCoding/Mitm/SubscriptionProviders.swift",
+    "Sources/AgentCoding/Mitm/SubscriptionStandInFiles.swift",
     "Sources/AgentCoding/Mitm/SubscriptionStoreFile.swift",
     "Sources/AgentCoding/Mitm/SupplyChainConsentBroker.swift",
     "Sources/AgentCoding/Mitm/SupplyChainEnforcer.swift",
