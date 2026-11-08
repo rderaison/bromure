@@ -164,7 +164,7 @@ extension Daemon {
     /// Keep quarantined (resumed, network still cut), or Release (network
     /// back, resumed, then a fresh window). No answer in 180 s keeps it
     /// quarantined. Alert mode only records (the watchdog's own event).
-    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=4c03e5e37ebfb6c3 @b91fddfb
+    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=8a916fc950a690a3 @4bd8405e
     func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) async {
         guard mode == .quarantine else { return }
         await quarantineAndAsk(pid, signals: signals)

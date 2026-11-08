@@ -192,7 +192,7 @@ final class InferenceBridgeListener: @unchecked Sendable {
     let fdStoreName: String
     private let channel: Channel
 
-    // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=9e4a1c3a6305393e @b91fddfb
+    // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=4004f778aeb28137 @4bd8405e
     init(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.vsockPort)
         self.fdStoreName = fdStoreName

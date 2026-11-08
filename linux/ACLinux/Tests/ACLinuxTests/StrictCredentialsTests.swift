@@ -222,12 +222,17 @@ struct StrictCredentialsTests {
         // build proxies too, so the one registered in is re-read).
         let bogus = "sk-" + "ant-api03-" + String(repeating: "bOgUs", count: 12)
         #expect(refused(bogus, a), "unknown: unmanaged")
+        // The placeholder check reads the providers' live proxy: the latest
+        // made, held weakly, so another suite's proxy made later (and gone)
+        // leaves none. This one is made the live one again, and the check
+        // tried again if another suite swaps in meanwhile (the parallel run).
         var exempt = false
-        for _ in 0..<5 where !exempt {
-            guard let store = SubscriptionProviders.claude?()?.0 else { break }
-            store.registerBogusKey(bogus, for: a)
+        for _ in 0..<50 where !exempt {
+            proxy.becomeLiveForTesting()
+            proxy.claudeStore.registerBogusKey(bogus, for: a)
             exempt = !refused(bogus, a)
-            store.unregisterBogusKeys(for: a)
+            proxy.claudeStore.unregisterBogusKeys(for: a)
+            if !exempt { Thread.sleep(forTimeInterval: 0.02) }
         }
         #expect(exempt, "a placeholder Bromure handed the guest isn't unmanaged")
         // Cleared (the VM stopped): off, and its approvals gone.

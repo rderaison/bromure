@@ -112,7 +112,7 @@ extension MitmProxy {
                     }
                 }
                 if shouldSplice {
-                    spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
+                    spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort, profileID: profileID)
                 } else {
                     serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: false,
                                      identity: identity)
@@ -169,7 +169,7 @@ extension MitmProxy {
                         "[firewall] ✗ deny uninspectable tcp \(destIP):\(destPort) — strict credentials (\(profileID.uuidString.prefix(8)))")
                     close(appFD); return
                 }
-                spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort)
+                spliceRaw(appFD: appFD, destIP: destIP, destPort: destPort, profileID: profileID)
                 return
             }
             serveTransparent(appFD: appFD, profileID: profileID, host: host, port: destPort, tls: true,
@@ -259,6 +259,9 @@ extension MitmProxy {
     // @port-skip linux-only: makeConnection + runTransparentTLS / runTransparentHTTP on NIO
     func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool,
                           identity: OpenShellPolicy.BinaryIdentity? = nil) {
+        // A quarantine since the entry's checks (the first-byte wait, the
+        // attestor) is seen before anything else.
+        if WorkspaceQuarantine.shared.contains(profileID) { close(appFD); return }
         // The leaf first: until withConnectedSocket takes `appFD`, a failure
         // is ours to close.
         let context: NIOSSLContext?
@@ -292,14 +295,26 @@ extension MitmProxy {
     /// reaches its real endpoint (macOS: MitmPassthrough.splice). Closes both
     /// when either side ends.
     // @port-skip linux-only: MitmPassthrough.splice(appFD:destIP:destPort:) on NIO
-    func spliceRaw(appFD: Int32, destIP: String, destPort: Int) {
+    func spliceRaw(appFD: Int32, destIP: String, destPort: Int, profileID: UUID? = nil) {
         // The relay is in the pipeline from the channel's first read: the
         // bytes the peeks left in the socket (a ClientHello) are held, not lost.
         let glue = ByteGlue(peer: nil)
         let bootstrap = ClientBootstrap(group: group).channelInitializer { ch in ch.pipeline.addHandler(glue) }
         guard let ip = OpenShellPolicy.IPAddress(destIP) else { close(appFD); return }
+        // The entry's checks were seconds ago (the first-byte wait, the
+        // attestor): a quarantine since then is seen before anything dials.
+        if let profileID, WorkspaceQuarantine.shared.contains(profileID) { close(appFD); return }
         // Past here NIO owns `appFD` (serveTransparent): never closed here.
         guard let ch = try? bootstrap.withConnectedSocket(appFD).wait() else { return }
+        if let profileID {
+            // A quarantine cuts the splice (the channel, never a raw fd that
+            // could be reused); registered, then checked again.
+            let cut = WorkspaceQuarantine.shared.onQuarantine(profileID, runNow: false) { [weak ch] in
+                ch?.eventLoop.execute { ch?.close(promise: nil) }
+            }
+            ch.closeFuture.whenComplete { _ in WorkspaceQuarantine.shared.remove(cut, for: profileID) }
+            if WorkspaceQuarantine.shared.contains(profileID) { ch.close(promise: nil); return }
+        }
         ch.eventLoop.execute { [self] in splice(ch, to: [ip], port: destPort, pending: ByteBuffer(), glue: glue) }
     }
 

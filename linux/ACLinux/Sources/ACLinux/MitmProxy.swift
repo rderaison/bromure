@@ -229,6 +229,12 @@ final class MitmProxy: @unchecked Sendable {
         _ = Self.providersWired
     }
 
+    /// Tests: this proxy is the providers' live one again (the latest made
+    /// is, held weakly: one made later by another suite, then gone, leaves
+    /// none). A daemon has one proxy.
+    // @port-skip linux-only: tests
+    func becomeLiveForTesting() { wireProviders() }
+
     // @port-skip linux-only: MitmEngine.register's provider wiring
     private struct WeakProxy: @unchecked Sendable { weak var proxy: MitmProxy? }
     private static let current = NIOLockedValueBox(WeakProxy())

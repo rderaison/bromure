@@ -498,6 +498,32 @@ struct SupplyChainProxyTests {
         #expect(ConnectHandler.split("[2001:DB8::1]:8443", defaultPort: 443) == ("2001:db8::1", 8443))
     }
 
+    /// A transparent flow whose workspace was quarantined after the entry's
+    /// checks (the first-byte wait): neither the raw splice nor the
+    /// intercepting path dials; the guest's socket is closed.
+    @Test func aLateQuarantineStopsATransparentFlow() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        WorkspaceQuarantine.shared.set(true, for: pid)
+        defer { WorkspaceQuarantine.shared.set(false, for: pid) }
+        for splice in [true, false] {
+            var sv: [Int32] = [-1, -1]
+            #expect(socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &sv) == 0)
+            var tv = timeval(tv_sec: 5, tv_usec: 0)
+            setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            if splice {
+                proxy.spliceRaw(appFD: sv[1], destIP: "203.0.113.9", destPort: 443, profileID: pid)
+            } else {
+                proxy.serveTransparent(appFD: sv[1], profileID: pid, host: "example.com", port: 80, tls: false)
+            }
+            var b: UInt8 = 0
+            #expect(recv(sv[0], &b, 1, 0) == 0, "closed (\(splice ? "splice" : "intercepted"))")
+            Glibc.close(sv[0])
+        }
+    }
+
     /// A Depi tarball nothing strips streams (not held whole under the cap).
     @Test func aDepiTarballNothingStripsStreams() async throws {
         let dir = try shortTempDir()
