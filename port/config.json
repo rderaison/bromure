@@ -9,6 +9,7 @@
     "Sources/AgentCoding/AWSSSOResolver.swift",
     "Sources/AgentCoding/ActivitySummary.swift",
     "Sources/AgentCoding/AgentDelegation.swift",
+    "Sources/AgentCoding/AgentInterrupt.swift",
     "Sources/AgentCoding/AgentLabels.swift",
     "Sources/AgentCoding/AgentScreen.swift",
     "Sources/AgentCoding/AgentSessionEngine.swift",

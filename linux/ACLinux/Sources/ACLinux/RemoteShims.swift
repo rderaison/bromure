@@ -82,3 +82,15 @@ enum FDGuard {
     @discardableResult
     static func close(_ fd: Int32, _ owner: String) -> Int32 { fdClose(fd) }
 }
+
+/// TranscriptSearchIndex (macOS: a Mac's own searchable copy of every
+/// session's conversation, for its sidebar search and previews; macOS-only).
+/// A Linux server keeps none (a fat client searches its own mirror), so a
+/// session leaving the store has no saved copy to forget.
+// @port-skip linux-only: stand-in for TranscriptSearchIndex (macOS-only: the app's sidebar search)
+@MainActor
+final class TranscriptSearchIndex {
+    static let shared = TranscriptSearchIndex()
+    // @port-skip linux-only: stand-in (nothing is saved on Linux)
+    func forget(_ id: UUID) {}
+}
