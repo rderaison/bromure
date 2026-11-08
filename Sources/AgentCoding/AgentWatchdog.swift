@@ -61,6 +61,16 @@ public final class AgentWatchdog: @unchecked Sendable {
         lock.lock(); states[profileID] = nil; lock.unlock()
     }
 
+    /// A quarantine already in force (re-applied after a restart): no new
+    /// trip until it's released.
+    public func markTripped(profileID: UUID) {
+        lock.lock()
+        var s = states[profileID] ?? State()
+        s.tripped = true
+        states[profileID] = s
+        lock.unlock()
+    }
+
     /// Release a quarantine: the session starts a fresh window.
     public func release(profileID: UUID) {
         lock.lock()
