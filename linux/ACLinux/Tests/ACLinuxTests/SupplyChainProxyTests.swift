@@ -356,6 +356,46 @@ struct SupplyChainProxyTests {
         #expect(reply.contains("X-Bromure-Block: depi-auth"), "\(reply.prefix(400))")
     }
 
+    /// Under an OpenShell policy a request goes only to its own destination:
+    /// Depi's re-route is refused (macOS's pinned dialer has nothing else).
+    @Test func depiIsRefusedUnderAnOpenShellPolicy() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.setSupplyChainPolicy(SupplyChainPolicy(packageFilter: .depi, depiAPIKey: "depi-test-key"), for: pid)
+        var req = Data("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n".utf8)
+        guard case .routed = RequestReader.depiRoute(&req, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                     method: "GET", path: "/demo") else { Issue.record("not routed"); return }
+        let yaml = "version: 1\nnetwork_policies:\n  only:\n    endpoints:\n      - host: registry.npmjs.org\n        port: 443\n"
+        proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [],
+                                                   egressPolicy: EgressPolicy(openShell: try OpenShellPolicy.parse(yaml))), for: pid)
+        var again = Data("GET /demo HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n".utf8)
+        guard case .refused(let reply) = RequestReader.depiRoute(&again, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                                 method: "GET", path: "/demo") else { Issue.record("not refused"); return }
+        #expect(String(decoding: reply, as: UTF8.self).hasPrefix("HTTP/1.1 502 ") && !String(decoding: again, as: UTF8.self).contains("depi-test-key"))
+    }
+
+    /// A Depi tarball nothing strips streams (not held whole under the cap).
+    @Test func aDepiTarballNothingStripsStreams() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.setSupplyChainPolicy(SupplyChainPolicy(ageGateEnabled: false, packageFilter: .depi, depiAPIKey: "depi-test-key"), for: pid)
+        let tgz = Data("GET /demo/-/demo-1.0.0.tgz HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n".utf8)
+        guard case .none = await RequestReader.supplyChainStep(tgz, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                               method: "GET", path: "/demo/-/demo-1.0.0.tgz", depiKey: "depi-test-key") else {
+            Issue.record("a Depi tarball is read whole"); return
+        }
+        // A packument still is (Depi's 401 is answered there).
+        let meta = Data("GET /-/whoami HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n".utf8)
+        guard case .rewrite = await RequestReader.supplyChainStep(meta, proxy: proxy, profileID: pid, host: "registry.npmjs.org",
+                                                                  method: "GET", path: "/-/whoami", depiKey: "depi-test-key") else {
+            Issue.record("Depi's other traffic not read whole"); return
+        }
+    }
+
     /// A key without Depi chosen as the filter: not re-routed.
     @Test func aDepiKeyAloneDoesntReRoute() async throws {
         let (proxy, pid, registry, dir) = try Self.setUp(SupplyChainPolicy(ageGateEnabled: false, packageFilter: .socketDev,

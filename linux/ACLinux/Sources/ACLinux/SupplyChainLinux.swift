@@ -30,8 +30,10 @@ extension RequestReader {
                                     path: path, depiKey: depiKey)
         // Depi-routed traffic goes through a read-whole reply so a 401 can be
         // swapped for a self-explanatory error before any byte reaches the
-        // guest (driveTLS's buffered relay for it).
+        // guest (driveTLS's buffered relay for it); a tarball nothing strips
+        // streams, as before the re-route (not held under the 64 MiB cap).
         if case .none = plan, let depiKey {
+            if case .artifact? = SupplyChainRegistry.classify(host: host, path: path) { return plan }
             return .rewrite(request: request, { raw in
                 SupplyChainProxy.depiResponseGate(raw: raw, apiKey: depiKey, profileID: profileID, path: path) ?? raw
             }, done: {})
@@ -45,16 +47,32 @@ extension RequestReader {
     /// replaced: the key never enters the VM); one addressed to Depi only
     /// needs the key. The key when re-routed (`request` rewritten), else nil;
     /// a partly configured Depi says why it didn't re-route.
+    /// What the re-route decided.
+    enum DepiRoute {
+        case none
+        /// Re-routed with this key (`request` rewritten).
+        case routed(String)
+        /// Refused: under an OpenShell policy a request goes nowhere but its
+        /// own pinned destination (macOS's dialer has nothing else to dial).
+        case refused(Data)
+    }
+
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's Depi re-route, on the Linux request chain
     static func depiRoute(_ request: inout Data, proxy: MitmProxy, profileID: UUID, host: String,
-                          method: String, path: String) -> String? {
+                          method: String, path: String) -> DepiRoute {
         let scPolicy = proxy.supplyChainPolicy(for: profileID)
+        if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host),
+           proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil {
+            SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — an OpenShell policy pins every request to its own destination")
+            return .refused(RequestReader.simple(502, "Bad Gateway",
+                body: "Bromure: Depi's re-route is refused under this workspace's OpenShell policy (requests go only to their own destination).\n"))
+        }
         if let p = scPolicy, p.depiActive, DepiRegistry.shouldRoute(host: host) {
             // Depi's name as the Host (macOS's URLSession sends the URL's).
             request = HTTPRequestFraming.replacingHeaders(DepiRegistry.authorize(rawRequest: request, apiKey: p.depiAPIKey),
                                                           drop: ["host"], add: "Host: \(DepiRegistry.host)")
             SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) → https://\(DepiRegistry.host)")
-            return p.depiAPIKey
+            return .routed(p.depiAPIKey)
         } else if DepiRegistry.shouldRoute(host: host),
                   scPolicy?.packageFilter == .depi || !(scPolicy?.depiAPIKey ?? "").isEmpty {
             let why = scPolicy == nil ? "no supply-chain policy on this workspace"
@@ -62,7 +80,7 @@ extension RequestReader {
                 : "no Depi API key entered"
             SupplyChainLog.shared.record("[depi] \(method) \(host)\(path) NOT re-routed — \(why)")
         }
-        return nil
+        return .none
     }
 
     // @port-skip linux-only: see supplyChainStep

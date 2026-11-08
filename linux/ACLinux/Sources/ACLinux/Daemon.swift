@@ -973,6 +973,19 @@ public actor Daemon {
         // trusted for the session (macOS: MitmEngine.unregister's clearMap).
         mitm?.swapper.clearMap(for: pid)
         InferenceRepairProxy.shared.setExternalEngine(pid, nil)
+        // "Allow for the rest of the session" ends with the session, for every
+        // consent broker, and the imported-key approvals and host-agent keys
+        // with it (macOS: MitmEngine.unregister).
+        mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
+        mitm?.sshAgent.clearHostAgentKeys(for: pid)
+        if let mitm {
+            await mitm.consent.revokeAll(profileID: pid)
+            await mitm.consent.clearProfileName(for: pid)
+            await mitm.guardrailsBroker.revokeAll(profileID: pid)
+            await mitm.guardrailsBroker.clearProfileName(for: pid)
+            await mitm.supplyChainBroker.revokeAll(profileID: pid)
+            await mitm.supplyChainBroker.clearProfileName(for: pid)
+        }
     }
 
     // @port-skip linux-only: Linux daemon VM lifecycle

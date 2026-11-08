@@ -19,7 +19,10 @@ extension Daemon {
             FileHandle.standardError.write(Data("bromure-ac daemon: supply chain: couldn't save the allowlist for \(p.name): \(error)\n".utf8))
             return false
         }
-        mitm?.setSupplyChainPolicy(p.supplyChain, for: profileID)
+        // A running workspace's proxy takes it now; a stopped one's at launch.
+        if live.keys.contains(where: { UUID(uuidString: $0) == profileID }) {
+            mitm?.setSupplyChainPolicy(p.supplyChain, for: profileID)
+        }
         return true
     }
 

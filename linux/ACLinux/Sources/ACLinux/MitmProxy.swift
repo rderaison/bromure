@@ -964,7 +964,12 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // whole and rewritten (macOS: driveTLS's supply-chain block).
         var supplyChain: SupplyChainRewrite?
         // Depi's re-route: redialled to Depi with the workspace's key.
-        let depiKey = depiRoute(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path)
+        var depiKey: String?
+        switch depiRoute(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path) {
+        case .none: break
+        case .routed(let key): depiKey = key
+        case .refused(let reply): return .answer(reply)
+        }
         let dial = depiKey.map { _ in (host: DepiRegistry.host, port: DepiRegistry.port) }
         switch await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
                                      depiKey: depiKey) {
