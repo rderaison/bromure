@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Depi secure-registry integration: host recognition, Bearer-key
 /// injection, the auth-failure response the guest's npm sees, and

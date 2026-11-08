@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Pure-logic coverage for `OSVClient.Severity`: the CVSS v3.1 base-
 /// score calculator, the OSV→severity mapping (including the recent

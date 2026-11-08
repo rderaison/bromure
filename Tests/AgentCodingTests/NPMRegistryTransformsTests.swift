@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Coverage for the npm-registry metadata age-gate
 /// (`NPMRegistryTransforms.filterMetadata`) and the tarball

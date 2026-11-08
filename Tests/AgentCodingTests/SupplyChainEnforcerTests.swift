@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// `SupplyChainRegistry.classify(host:path:)` maps an intercepted
 /// (host, path) onto a `RequestKind` — metadata vs. artifact vs.

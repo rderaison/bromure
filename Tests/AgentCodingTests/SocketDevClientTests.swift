@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Issue #43: with a socket.dev key, every Python package asked "Bromure
 /// couldn't reach socket.dev to vet pypi six@1.17.0…" — the per-package
