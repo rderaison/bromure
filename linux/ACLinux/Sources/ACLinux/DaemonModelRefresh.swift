@@ -30,7 +30,7 @@ extension Daemon {
     /// global Models settings, a login), then restart those agents in place.
     /// A workspace moving onto Bedrock gets its AWS credentials on the host
     /// with the restage (pushLiveCredentials pushes them every time).
-    // partial: no fusion re-judge (no fusion on Linux) and no applyRouting (Local/Hybrid rerouting isn't on Linux yet)
+    // partial: no fusion re-judge (no fusion on Linux)
     // @port ACAppDelegate.refreshModelsForRunningWorkspaces() h=c64dcbdbe066ff8d @bd69274f
     func refreshModelsForRunningWorkspaces() async {
         for rec in registry.records where live[rec.id] != nil && rec.kube == nil && !rec.managed && rec.registration != true {
@@ -44,6 +44,7 @@ extension Daemon {
             if tools.isEmpty {
                 // No agent to restart, but the engine may still have moved.
                 if LiveModelRefresh.engineRegistrationChanged(from: prior, to: fresh) {
+                    applyRouting(staged: fresh)
                     startLocalEngineIfNeeded(for: fresh)
                     lastStagedProfiles[rec.id] = fresh
                 }
@@ -53,6 +54,7 @@ extension Daemon {
             // Swap map, env, config files, home seed, the AWS credentials,
             // and lastStagedProfiles.
             await scheduleLiveRestage(rec.id).value
+            applyRouting(staged: fresh)
             startLocalEngineIfNeeded(for: fresh)
             guard let now = lastStagedProfiles[rec.id], prior != now else { continue }
             let restart = LiveModelRefresh.agentsNeedingRestart(from: prior, to: now)

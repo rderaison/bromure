@@ -1766,14 +1766,6 @@ struct InstructionPresetTests {
 
 @Suite("Local models")
 struct LocalModelTests {
-    @Test("the local-inference sentinel goes to the repair proxy in clear; other hosts as asked")
-    func sentinelRoute() {
-        let local = MitmProxy.route(host: "Bromure.LLM", port: 443, tls: true)
-        #expect(local.local && !local.tls && local.host == "127.0.0.1" && local.port == InferenceService.repairProxyPort)
-        let cloud = MitmProxy.route(host: "api.anthropic.com", port: 443, tls: true)
-        #expect(!cloud.local && cloud.tls && cloud.host == "api.anthropic.com" && cloud.port == 443)
-    }
-
     @Test("proxy.env (macOS's builder, shared): local-model agents get the engine's env; others none")
     func proxyEnvLines() {
         var p = Profile(name: "local", tool: .claude, authMode: .local)

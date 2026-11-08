@@ -50,12 +50,12 @@ final class WSPromptGuard: @unchecked Sendable {
     /// (compressed) pipe: not a model provider's (WSContentGuard
     /// .isModelSocket), or neither prompt injection nor PII protection on.
     // @port-skip linux-only: WSContentGuard.make, without Squelch
-    static func make(proxy: MitmProxy, profileID: UUID, host: String) -> WSPromptGuard? {
+    static func make(proxy: MitmProxy, profileID: UUID, host: String, local: Bool) -> WSPromptGuard? {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this
         // machine (a custom server elsewhere): the conversation leaves it then.
         guard TraceLevel.isAIHost(h), !h.contains("huggingface.co"),
-              h != InferenceService.localMitmHost || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil
+              !local || PIIEngineScope.offMacEngineHost(profileID: profileID) != nil
         else { return nil }
         let piOn = proxy.promptInjectionPolicy(for: profileID)?.isActive ?? false
         let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false

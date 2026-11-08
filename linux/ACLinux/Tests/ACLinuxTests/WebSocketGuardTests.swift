@@ -73,7 +73,7 @@ extension DaemonGlobalSuites {
         @Test func aPoisonedTurnIsRefusedAndABenignOneGoesUpAsItCame() async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir, pid) }
-            let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com"))
+            let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false))
             let rig = Rig(g)
             let bad = WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned), masked: true)
             try rig.feed(bad)
@@ -94,7 +94,7 @@ extension DaemonGlobalSuites {
         @Test func aFragmentedTurnIsReassembledAndAPingPasses() async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir, pid) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             let payload = Self.turn(Self.poisoned)
             let cut = payload.count / 2
             var first = WSFrame.encode(opcode: WSFrame.text, payload: payload.prefix(cut), masked: true)
@@ -114,7 +114,7 @@ extension DaemonGlobalSuites {
         func aReservedBitEndsTheConnection(opcode: UInt8) async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir, pid) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             var f = WSFrame.encode(opcode: opcode, payload: opcode == WSFrame.text ? Self.turn(Self.benign) : Data(), masked: true)
             f[f.startIndex] |= 0x40                                // RSV1
             try rig.feed(f + WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.benign), masked: true))
@@ -128,7 +128,7 @@ extension DaemonGlobalSuites {
         @Test func aBlockedTextResentGoesOutRedactedInANewFrame() async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir, pid) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             try rig.feed(WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned), masked: true))
             #expect(await rig.until { rig.guest.withLockedValue { $0 }.count == 1 }, "blocked first")
             let again = WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned), masked: true)
@@ -146,7 +146,7 @@ extension DaemonGlobalSuites {
             let (proxy, pid, dir) = try Self.proxy(.ask)
             defer { Self.cleanup(dir, pid) }
             ConsentPrompt.chooseForTesting.withLockedValue { $0 = { _ in answer } }   // 1: allow, 0: block
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             let f = WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned), masked: true)
             try rig.feed(f)
             if answer == 1 {
@@ -159,7 +159,7 @@ extension DaemonGlobalSuites {
         @Test func logModeSendsOnAndRecords() async throws {
             let (proxy, pid, dir) = try Self.proxy(.log)
             defer { Self.cleanup(dir) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             let before = SupplyChainLog.shared.snapshot().last?.id ?? 0   // ids grow; the ring is capped
             // Content of its own: the scanner records a given file once.
             let f = WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned + "\n<!-- \(UUID()) -->\n"), masked: true)
@@ -177,7 +177,7 @@ extension DaemonGlobalSuites {
             ConsentPrompt.chooseForTesting.withLockedValue { $0 = { _ in
                 var it = gate.stream.makeAsyncIterator(); _ = await it.next(); return 0
             } }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             try rig.feed(WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned), masked: true))
             // 5 MiB more behind the scan: past the cap, the guest isn't read.
             let big = Data(repeating: 0x61, count: 5 << 20)
@@ -196,7 +196,7 @@ extension DaemonGlobalSuites {
         @Test func aContinuationWithoutAStartEndsTheConnection() async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             var f = WSFrame.encode(opcode: 0x0, payload: Data("x".utf8), masked: true)
             f[f.startIndex] = 0x80                                 // FIN, continuation
             try rig.feed(f)
@@ -207,7 +207,7 @@ extension DaemonGlobalSuites {
         @Test func aMessageTooLargeToScanIsRecorded() async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             let before = SupplyChainLog.shared.snapshot().last?.id ?? 0   // ids grow; the ring is capped
             let huge = Data(repeating: 0x20, count: WSMessageAssembler.maxMessage + 1)
             try rig.feed(WSFrame.encode(opcode: WSFrame.text, payload: huge, masked: true))
@@ -220,7 +220,7 @@ extension DaemonGlobalSuites {
         func longerLengthsAreRead(size: Int) async throws {
             let (proxy, pid, dir) = try Self.proxy(.block)
             defer { Self.cleanup(dir) }
-            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com")))
+            let rig = Rig(try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false)))
             let pad = String(repeating: "x", count: size)
             let bad = WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(Self.poisoned + pad), masked: true)
             try rig.feed(bad)
@@ -293,7 +293,7 @@ extension DaemonGlobalSuites {
                 var trace: RequestReader.Trace?
                 let plan = await RequestReader.rewrite(upgrade, proxy: proxy, profileID: pid, host: "chatgpt.com", port: 443,
                                                        tls: true, session: proxy.strictSession(of: pid), trace: &trace)
-                guard case .forward(let out, _, _, let isUpgrade, _, let ws, _, _, _) = plan else { Issue.record("\(plan)"); continue }
+                guard case .forward(let out, _, _, let isUpgrade, _, let ws, _, _, _, _) = plan else { Issue.record("\(plan)"); continue }
                 let s = String(decoding: out, as: UTF8.self).lowercased()
                 #expect(isUpgrade && (ws != nil) == on)
                 #expect(s.contains("sec-websocket-extensions") != on, "on: \(on): \(s)")

@@ -53,7 +53,7 @@ struct WebSocketPIITests {
     @Test func aTurnGoesUpWithAStandIn() async throws {
         let (proxy, pid, dir) = try PIIProxyTests.proxy()
         defer { PIIProxyTests.cleanup(dir, pid) }
-        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com"))
+        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false))
         #expect(g.restoresReplies)
         guard case .forward(let out?) = await g.client(Self.turn()) else { Issue.record("not rewritten"); return }
         let sent = String(decoding: out, as: UTF8.self)
@@ -62,7 +62,7 @@ struct WebSocketPIITests {
         guard case .forward(nil) = await g.client(Data(#"{"type":"session.update"}"#.utf8)) else { Issue.record("changed"); return }
         // Neither engine on: no guard, the socket stays a pipe.
         proxy.setPIIPolicy(PIIPolicy(enabled: false), for: pid)
-        #expect(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com") == nil)
+        #expect(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false) == nil)
     }
 
     /// The server side restores: a stand-in split across two deltas comes
@@ -148,7 +148,7 @@ struct WebSocketPIITests {
     @Test func aSkippedScanNamesTheEnginesOn() throws {
         let (proxy, pid, dir) = try PIIProxyTests.proxy()
         defer { PIIProxyTests.cleanup(dir, pid) }
-        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com"))
+        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false))
         #expect(g.engines == ["pii"])
         proxy.setPromptInjectionPolicy(PromptInjectionPolicy(detectSourceInjection: true, onDetection: .block), for: pid)
         #expect(g.engines == ["prompt_injection", "pii"])

@@ -796,7 +796,7 @@ public actor Daemon {
         }
     }
 
-    // partial: no attach (a server has no pane), fusion or routing yet
+    // partial: no attach (a server has no pane); fusion is refused (no Fusion in the Linux proxy)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @7dd92fdf
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
@@ -821,6 +821,8 @@ public actor Daemon {
         case ("POST", "model"): return await setModelRoute(rec, body)
         case ("POST", "docker"): return dockerRoute(rec, body)
         case ("POST", "type"): return await typeRoute(rec, body)
+        case ("POST", "routing"): return await routingRoute(rec, body)
+        case ("POST", "fusion"): return fusionRoute(rec)
         case ("GET", "checkpoints"): return checkpointsRoute(rec)
         case ("POST", "revert"): return revertRoute(rec, body)
         default: return .error(405, "Method not allowed")
@@ -1316,6 +1318,7 @@ public actor Daemon {
         l.attest = await serveAttestor(rec, profile: staged, udsPath: qc.firecrackerVsockPath, stored: nil,
                                        restoring: restoreFrom != nil)
         if let staged, rec.registration != true {
+            applyRouting(staged: staged)
             startLocalEngineIfNeeded(for: staged)
             lastStagedProfiles[rec.id] = staged
         }
@@ -1499,6 +1502,7 @@ public actor Daemon {
                                                stored: storedNet.removeValue(forKey: "attest-" + rec.shortId),
                                                restoring: true)
                 if let staged = adoptedProfile {
+                    applyRouting(staged: staged)
                     startLocalEngineIfNeeded(for: staged)
                     lastStagedProfiles[rec.id] = staged
                 }

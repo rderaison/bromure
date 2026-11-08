@@ -42,10 +42,23 @@ extension MitmProxy {
     func checkDestination(host: String, port: Int, profileID: UUID? = nil,
                           identity: OpenShellPolicy.BinaryIdentity? = nil,
                           on loop: EventLoop) -> EventLoopFuture<[IPAddress]> {
+        // A host the workspace's routing serves on this machine isn't looked
+        // up (nor its provider told, offline or DNS-filtered): its turn is
+        // dialled to the engine. An upgrade to it, dialled for real, is
+        // checked then (connectUpstream, no pinned addresses).
+        if servedLocally(host: host, port: port, profileID: profileID) { return loop.makeSucceededFuture([]) }
         let egress = profileID.flatMap { guardrailsConfig(for: $0)?.egressPolicy }
-        let future = Self.checkDestination(host: host, port: port, hostAddresses: blocksHostAddresses,
+        var future = Self.checkDestination(host: host, port: port, hostAddresses: blocksHostAddresses,
                                            openShell: egress?.openShell, identity: identity,
                                            enforceBinaries: egress?.enforceBinaries ?? false, on: loop)
+        // No policy to judge it by: a name with no answer yet isn't refused
+        // here but at the dial, as macOS fails it lazily (the request may be
+        // one answered on this machine).
+        if egress == nil {
+            future = future.flatMapError { e in
+                e is ProxyDestinationUnresolved ? loop.makeSucceededFuture([]) : loop.makeFailedFuture(e)
+            }
+        }
         guard let profileID else { return future }
         return future.flatMapErrorThrowing { e in
             if let d = e as? ProxyDestinationDenied {

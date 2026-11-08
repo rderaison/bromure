@@ -56,7 +56,11 @@ extension Daemon {
         let steps = Self.liveSteps(from: force ? nil : liveApplied[rec.id], to: new)
         // The local model's route: a host-side remap (the guest calls
         // bromure.llm either way), no restage.
-        if steps.routing { startLocalEngineIfNeeded(for: await stagedProfile(new)) }
+        if steps.routing {
+            let staged = await stagedProfile(new)
+            applyRouting(staged: staged)
+            startLocalEngineIfNeeded(for: staged)
+        }
         // The SSH key's "ask before use" gate is the host agent's.
         if steps.sshGate { mitm.sshAgent.setKeys(Self.loadAgentKeys(for: new, store: profileStore), for: new.id) }
         // Applied only once all of it is: a restage that failed is done

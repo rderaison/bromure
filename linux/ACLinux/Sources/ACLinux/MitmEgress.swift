@@ -86,6 +86,7 @@ extension MitmProxy {
         clearPIIPolicy(for: profileID)
         clearSupplyChainPolicy(for: profileID)
         clearGuardrailsConfig(for: profileID)
+        clearRouting(for: profileID)
     }
 
     /// Register `channel` (a proxied connection to `host:port`) with the
@@ -325,9 +326,10 @@ extension RequestReader {
     /// coding it can). A detector model still loading
     /// answers "retry" (503). The answer, or nil to go on.
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's PII step, on the Linux request chain
+    /// `local`: the request's plan serves it on this machine (the sentinel,
+    /// or a cloud host routed local): no swap, unless that engine is elsewhere.
     static func piiSwap(_ request: inout Data, proxy: MitmProxy, profileID: UUID, host: String, method: String,
-                        path: String) async -> (answer: Data?, vault: PIIVault?) {
-        let local = host.lowercased() == InferenceService.localMitmHost
+                        path: String, local: Bool) async -> (answer: Data?, vault: PIIVault?) {
         let offMachineEngine = local ? PIIEngineScope.offMacEngineHost(profileID: profileID) : nil
         guard !local || offMachineEngine != nil,
               let pii = proxy.piiPolicy(for: profileID), pii.isActive,

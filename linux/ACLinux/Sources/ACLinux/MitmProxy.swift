@@ -35,6 +35,8 @@ final class MitmProxy: @unchecked Sendable {
     let ca: BromureCA
     let caNIO: NIOSSLCertificate
     let swapper: TokenSwapper
+    /// Each workspace's model routing (MitmRouting.swift).
+    let routingContexts = NIOLockedValueBox<[UUID: LLMRoutingContext]>([:])
     /// The token swaps' and the kube client certificates' consent (macOS:
     /// MitmEngine's one ConsentBroker).
     let consent: ConsentBroker
@@ -418,14 +420,14 @@ final class MitmProxy: @unchecked Sendable {
         return ctx
     }
 
-    /// Where a request to `host:port` goes: the local-inference sentinel
-    /// (`bromure.llm`, what agents on a local model call) to the repair proxy
-    /// on loopback, in clear (it fronts the workspace's external engine);
-    /// anything else as asked.
-    // partial: the sentinel only (no Local/Hybrid rerouting of real cloud hosts on Linux yet)
-    // @port LLMRouting.static decide(host: String, port: Int, context: LLMRoutingContext, sessionKey: String, localHost: String, localPort: Int, now: Double) h=35267377ff44b00e @d85ba771
-    static func route(host: String, port: Int, tls: Bool) -> (host: String, port: Int, tls: Bool, local: Bool) {
-        guard host.lowercased() == InferenceService.localMitmHost else { return (host, port, tls, false) }
+    /// Where a request to `host:port` goes: what the on-host engine serves
+    /// (the local-inference sentinel, `bromure.llm`, always; a real cloud LLM
+    /// host when the workspace's routing sends it there: LLMRouting.decide)
+    /// to the repair proxy on loopback, in clear (it fronts the workspace's
+    /// engine); anything else as asked.
+    // @port-skip linux-only: the dial half of HTTPProxy's routing step (LLMRouting.decide, shared)
+    func route(host: String, port: Int, tls: Bool, profileID: UUID?) -> (host: String, port: Int, tls: Bool, local: Bool) {
+        guard servedLocally(host: host, port: port, profileID: profileID) else { return (host, port, tls, false) }
         return (InferenceService.engineHost, InferenceService.repairProxyPort, false, true)
     }
 
@@ -435,9 +437,12 @@ final class MitmProxy: @unchecked Sendable {
     /// `profileID`'s kubeconfig pins for that endpoint, which may also give
     /// the client certificate presented.
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
+    /// `local`: the request's routing, decided once by its plan (nil: decide here).
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
-                         pinned: [IPAddress]? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
-        let routed = Self.route(host: host, port: port, tls: requestedTLS)
+                         pinned: [IPAddress]? = nil, local: Bool? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
+        let routed: (host: String, port: Int, tls: Bool, local: Bool) = local.map {
+            $0 ? (InferenceService.engineHost, InferenceService.repairProxyPort, false, true) : (host, port, requestedTLS, false)
+        } ?? route(host: host, port: port, tls: requestedTLS, profileID: profileID)
         if routed.local {
             guard let to = try? SocketAddress(ipAddress: routed.host, port: routed.port) else {
                 return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: port))
@@ -457,7 +462,8 @@ final class MitmProxy: @unchecked Sendable {
         // route's address authorization too): a CONNECT's, made before the
         // tunnel was confirmed, or made here (plain HTTP, transparent).
         // Either way the dial uses exactly the addresses it passed.
-        let checked = pinned.map { loop.makeSucceededFuture($0) }
+        // No pinned addresses (a name the CONNECT left to the dial): checked now.
+        let checked = pinned.flatMap { $0.isEmpty ? nil : loop.makeSucceededFuture($0) }
             ?? checkDestination(host: host, port: port, profileID: profileID, on: loop)
         return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
@@ -903,7 +909,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case answer(Data)
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
                      mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
-                     supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil)
+                     supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil,
+                     local: Bool = false)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -935,6 +942,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let line = head.prefix { $0 != "\r" && $0 != "\n" }.split(separator: " ")
         let method = line.first.map(String.init) ?? ""
         let path = line.count > 1 ? String(line[1]) : "/"
+        // A local agent's non-LLM cloud calls (strictly-local routing): an
+        // empty 200, never sent (macOS: HTTPProxy's short-circuit).
+        if let answer = proxy.localShortCircuit(host: host, path: path, profileID: profileID) { return .answer(answer) }
         var upgrade = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) != nil
         // Only a WebSocket upgrade is offered: another protocol (h2c above
         // all) would carry every later request past the per-request policy.
@@ -950,6 +960,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             case .none: break
             }
         }
+        // Where this request goes, decided once: the PII step, the WebSocket
+        // guard, the engine's auth and the dial all follow it (a routing
+        // change between them can't split a request). An upgrade to a
+        // rerouted cloud host is dialled for real, PII-guarded, as macOS
+        // (its WebSocket path has no routing step); the sentinel is local.
+        let local = host.lowercased() == InferenceService.localMitmHost
+            || (!upgrade && proxy.servedLocally(host: host, port: port, profileID: profileID))
         var injected = SubscriptionAuthRewrite.Injected()
         // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace
         // (our own stand-ins aren't leaks).
@@ -996,7 +1013,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         }
         // PII protection: stand-ins for personal data before it leaves; the
         // relay restores the reply (macOS: driveTLS's PII step).
-        let pii = await piiSwap(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path)
+        let pii = await piiSwap(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
+                                local: local)
         if let answer = pii.answer { return .answer(answer) }
         // An imported kubeconfig's client certificate flagged for approval:
         // asked before it's presented (macOS asks at the server's challenge,
@@ -1067,7 +1085,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // and both legs carry plain frames (macOS: WSHandshake, then
         // WSTransformRelay). Otherwise the socket stays an opaque pipe.
         var ws: WSPromptGuard?
-        if upgrade, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host) {
+        if upgrade, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local) {
             ws = g
             req = WSHandshake.strippingExtensions(req).request
         }
@@ -1083,8 +1101,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
             return .answer(response)
         }
+        // A turn the on-host engine serves: the engine's key, not the cloud
+        // auth (macOS: relayUpstream's local swap).
+        if dial == nil, local {
+            out = MitmProxy.engineAuth(out, profileID: profileID)
+        }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
-                        supplyChain: supplyChain, dial: dial)
+                        supplyChain: supplyChain, dial: dial, local: local && dial == nil)
+
     }
 
     /// The guest drained: the upstream may be read again (ResponseRelay
@@ -1101,11 +1125,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case .answer(let reply):
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
-        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial):
+        case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial, let local):
             // Where it's dialed: the guest's destination, or Depi (TLS, its
             // own name: nothing the guest pinned) for a re-routed request.
             proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
-                                  profileID: profileID, pinned: dial == nil ? pinned : nil,
+                                  profileID: profileID, pinned: dial == nil ? pinned : nil, local: local,
                                   on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):

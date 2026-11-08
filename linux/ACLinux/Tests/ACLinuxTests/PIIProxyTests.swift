@@ -45,7 +45,7 @@ struct PIIProxyTests {
         defer { Self.cleanup(dir, pid) }
         var req = Self.request()
         let r = await RequestReader.piiSwap(&req, proxy: proxy, profileID: pid, host: "api.anthropic.com",
-                                            method: "POST", path: "/v1/messages")
+                                            method: "POST", path: "/v1/messages", local: false)
         #expect(r.answer == nil)
         let vault = try #require(r.vault, "a vault to restore the reply with")
         let sent = String(decoding: Self.body(req), as: UTF8.self)
@@ -95,7 +95,8 @@ struct PIIProxyTests {
         var req = Self.request(host: host, extraHeaders: kind == "coded" ? "Content-Encoding: gzip\r\n" : "")
         let before = req
         let r = await RequestReader.piiSwap(&req, proxy: proxy, profileID: pid, host: host,
-                                            method: kind == "get" ? "GET" : "POST", path: "/v1/messages")
+                                            method: kind == "get" ? "GET" : "POST", path: "/v1/messages",
+                                            local: kind == "sentinel")
         #expect(r.answer == nil && r.vault == nil && req == before)
     }
 
@@ -105,7 +106,7 @@ struct PIIProxyTests {
         defer { Self.cleanup(dir, pid) }
         var req = Self.request(extraHeaders: "Content-Encoding: identity\r\n")
         let r = await RequestReader.piiSwap(&req, proxy: proxy, profileID: pid, host: "api.anthropic.com",
-                                            method: "POST", path: "/v1/messages")
+                                            method: "POST", path: "/v1/messages", local: false)
         #expect(r.vault != nil && !String(decoding: Self.body(req), as: UTF8.self).contains(Self.email))
     }
 

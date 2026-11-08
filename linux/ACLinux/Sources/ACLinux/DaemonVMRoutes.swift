@@ -50,7 +50,6 @@ extension Daemon {
     /// `POST /vms/<id>/model {"modelID"}`: the workspace's active local
     /// model switched (saved, and the engine re-pointed); its agents keep
     /// their environment and pick the new model up on their next request.
-    // partial: no routing step (Local/Hybrid rerouting isn't on Linux yet)
     // @port ACAppDelegate.automationSetModel(idOrName: String, modelID: String) h=2ce6aa845ea9130e @9ece43f6
     func setModelRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         let modelID = body["modelID"]?.stringValue ?? ""
@@ -67,7 +66,9 @@ extension Daemon {
         do { try profileStore.update(profile) } catch {
             return ControlResponse(409, ["ok": false, "error": .string("couldn't save: \(error.localizedDescription)")])
         }
-        startLocalEngineIfNeeded(for: await stagedProfile(profile))
+        let staged = await stagedProfile(profile)
+        applyRouting(staged: staged)
+        startLocalEngineIfNeeded(for: staged)
         return ControlResponse(200, ["ok": true, "model": .string(resolved?.id ?? modelID), "repo": .string(resolved?.repo ?? modelID)])
     }
 }
