@@ -115,6 +115,8 @@ final class RemoteAccessServer {
         case badKey(String)
         case noAuthMethods
         case unreadableKeys(String)
+        case noSuchKey(String)
+        case ambiguousKey(String, Int)
         var errorDescription: String? {
             switch self {
             case .keygenFailed(let m): return "Couldn't generate host key: \(m)"
@@ -122,6 +124,8 @@ final class RemoteAccessServer {
             case .badKey(let m):       return "Not a valid public key: \(m)"
             case .noAuthMethods:       return "At least one of password / public-key auth must be enabled."
             case .unreadableKeys(let p): return "\(p) can't be read (it isn't UTF-8 text): fix or remove it first."
+            case .noSuchKey(let s):    return "No authorized key matches \"\(s)\"."
+            case .ambiguousKey(let s, let n): return "\"\(s)\" matches \(n) authorized keys: give its number or more of its fingerprint."
             }
         }
     }
@@ -404,10 +408,25 @@ final class RemoteAccessServer {
         guard !authKeysUnreadable else { throw RemoteError.unreadableKeys(paths.authKeys.path) }
         var keys = listAuthorizedKeys()
         let sel = selector.trimmingCharacters(in: .whitespaces)
-        if let idx = Int(sel), idx >= 1, idx <= keys.count {
+        // One key, by its number in the list or its fingerprint (whole, or a
+        // part that names only it). Anything else removes nothing: a number
+        // past the list or a short part matching several keys used to remove
+        // every key whose fingerprint held it, and report success.
+        if let idx = Int(sel) {
+            guard idx >= 1, idx <= keys.count else { throw RemoteError.noSuchKey(sel) }
             keys.remove(at: idx - 1)
         } else {
-            keys.removeAll { $0.fingerprint == sel || $0.fingerprint.contains(sel) }
+            // Every copy of the key it names (a hand-edited file may hold one twice).
+            let named: String
+            if !sel.isEmpty, keys.contains(where: { $0.fingerprint == sel }) {
+                named = sel
+            } else {
+                let hits = sel.isEmpty ? [] : Set(keys.map(\.fingerprint).filter { $0.contains(sel) })
+                guard let only = hits.first else { throw RemoteError.noSuchKey(sel) }
+                guard hits.count == 1 else { throw RemoteError.ambiguousKey(sel, hits.count) }
+                named = only
+            }
+            keys.removeAll { $0.fingerprint == named }
         }
         let body = keys.map(\.line).joined(separator: "\n")
         try (body.isEmpty ? "" : body + "\n").write(to: paths.authKeys, atomically: true, encoding: .utf8)
