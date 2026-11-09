@@ -56,4 +56,21 @@ struct HostTrailingDotTests {
         #expect(TokenSwapper.hostMatchesScope(host: "k8s.example.", port: 6443, scope: "k8s.example:6443"))
         #expect(!TokenSwapper.hostMatchesScope(host: "github.com.evil.", scope: "github.com"))
     }
+
+    /// The transparent :80 path peeks the Host before any decision; the
+    /// advisor check compares it to `policy.local` as is.
+    @Test func thePeekedPlainHTTPHost() {
+        func peek(_ request: String) -> String? {
+            var fds: [Int32] = [0, 0]
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { Issue.record("socketpair"); return nil }
+            defer { close(fds[0]); close(fds[1]) }
+            let bytes = Array(request.utf8)
+            _ = bytes.withUnsafeBytes { write(fds[1], $0.baseAddress, bytes.count) }
+            return MitmEngine.peekHTTPHost(fd: fds[0])
+        }
+        #expect(peek("GET /v1/policy HTTP/1.1\r\nHost: Policy.Local.\r\n\r\n") == OpenShellAdvisor.host)
+        #expect(peek("GET http://policy.local.:80/v1/policy HTTP/1.1\r\nHost: x\r\n\r\n") == OpenShellAdvisor.host)
+        #expect(peek("GET / HTTP/1.1\r\nHost: registry.npmjs.org..:80\r\n\r\n") == "registry.npmjs.org")
+        #expect(peek("GET / HTTP/1.1\r\nHost: .\r\n\r\n") == nil)
+    }
 }
