@@ -6,10 +6,16 @@ import Foundation
 struct StreamingSHA256 {
     private var hasher = SHA256()
 
-    // @port-skip linux-only: see StreamingSHA256
+    // partial: swift-crypto's SHA256 (macOS: CC_SHA256_Init)
+    // @port StreamingSHA256.init() h=6c48063b29b6eb5e @c22a41ae
+    init() {}
+
+    // partial: swift-crypto's SHA256 (macOS: CC_SHA256_Update)
+    // @port StreamingSHA256.update(_: Data) h=5ac57a71d7c1067b @c22a41ae
     mutating func update(_ chunk: Data) { hasher.update(data: chunk) }
 
-    // @port-skip linux-only: see StreamingSHA256
+    // partial: swift-crypto's SHA256 (macOS: CC_SHA256_Final)
+    // @port StreamingSHA256.hexDigest() h=1835d62448b87afb @c22a41ae
     mutating func hexDigest() -> String {
         hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
