@@ -931,18 +931,6 @@ final class AgentSessionStore {
         }
     }
 
-    #if os(macOS)
-    /// The Codex conversations (rollout uuids) the sessions on `profileID`
-    /// other than `besides` own — never another session's to resume.
-    func codexConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
-        conversationsClaimed(tool: .codex, profileID: profileID, besides: besides)
-    }
-
-    /// The same for Grok (its session folders' uuids).
-    func grokConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
-        conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
-    }
-
     /// Which conversation a chat for `s` may read — one rule for the app's own
     /// chat and the fat client's: the session's own, never the folder's newest
     /// (an archived session's, a second session's live one).
@@ -967,9 +955,21 @@ final class AgentSessionStore {
     func conversationsClaimed(tool: Profile.Tool, profileID: UUID, besides: UUID?) -> [String] {
         sessions.compactMap { o in
             guard o.id != besides, o.profileID == profileID, o.tool == tool, !o.isDeleted,
-                  let id = o.agentTranscriptID, AgentSessionEngine.isTranscriptID(id) else { return nil }
+                  let id = o.agentTranscriptID, AgentSessionLocator.isConversationUUID(id) else { return nil }
             return id.lowercased()
         }
+    }
+
+    #if os(macOS)
+    /// The Codex conversations (rollout uuids) the sessions on `profileID`
+    /// other than `besides` own — never another session's to resume.
+    func codexConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
+        conversationsClaimed(tool: .codex, profileID: profileID, besides: besides)
+    }
+
+    /// The same for Grok (its session folders' uuids).
+    func grokConversationsClaimed(profileID: UUID, besides: UUID?) -> [String] {
+        conversationsClaimed(tool: .grok, profileID: profileID, besides: besides)
     }
 
     /// The window a hook's status report belongs to: the one it was filed
