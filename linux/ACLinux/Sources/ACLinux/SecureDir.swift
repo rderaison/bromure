@@ -1,7 +1,8 @@
 import Foundation
 
 /// Directories a Linux server's processes trust: opened without following a
-/// link, owned by this user (root's by root), and writable by nobody else,
+/// link, owned by this user (root's by root), and writable by nobody else
+/// (one of ours that is, from an earlier daemon's umask, is made 0700),
 /// each step from a directory fd so nothing can be swapped in between. The
 /// runtime dir's fallback is under /tmp (`/tmp/bromure-ac-<uid>/bromure-ac`),
 /// where another local user could create the parent first.
@@ -46,8 +47,13 @@ enum SecureDir {
         guard fstat(fd, &st) == 0 else { throw Untrusted(path: path, why: String(cString: strerror(errno))) }
         guard (st.st_mode & S_IFMT) == S_IFDIR else { throw Untrusted(path: path, why: "not a directory") }
         guard st.st_uid == getuid() else { throw Untrusted(path: path, why: "owned by uid \(st.st_uid), not this user") }
-        guard st.st_mode & 0o022 == 0 else {
-            throw Untrusted(path: path, why: "writable by its group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))")
+        // Ours but group- or other-writable (made by an earlier daemon under
+        // a 0002 umask): taken back to 0700 through this fd rather than refused.
+        if st.st_mode & 0o022 != 0 {
+            guard fchmod(fd, 0o700) == 0 else {
+                throw Untrusted(path: path, why: "writable by its group or others (mode \(String(st.st_mode & 0o7777, radix: 8))) and can't be made 0700: \(String(cString: strerror(errno)))")
+            }
+            FileHandle.standardError.write(Data("bromure-ac: \(path) was mode \(String(st.st_mode & 0o7777, radix: 8)); made 0700\n".utf8))
         }
     }
 

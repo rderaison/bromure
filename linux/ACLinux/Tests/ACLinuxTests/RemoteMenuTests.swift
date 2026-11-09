@@ -59,21 +59,27 @@ struct RemoteMenuTests {
         let ok = try SecureDir.runtime(dir + "/rt/bromure-ac", create: true)
         close(ok)
         #expect((try FileManager.default.attributesOfItem(atPath: dir + "/rt")[.posixPermissions] as? Int) == 0o700)
-        // A parent others can write.
+        // A parent of ours others can write (an earlier daemon's umask): made 0700, not refused.
         try FileManager.default.createDirectory(atPath: dir + "/open", withIntermediateDirectories: true)
         chmod(dir + "/open", 0o777)
-        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/open/bromure-ac", create: true) }
+        close(try SecureDir.runtime(dir + "/open/bromure-ac", create: true))
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/open")[.posixPermissions] as? Int) == 0o700)
+        chmod(dir + "/open/bromure-ac", 0o775)
+        close(try SecureDir.runtime(dir + "/open/bromure-ac", create: false))
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/open/bromure-ac")[.posixPermissions] as? Int) == 0o700)
+        // One owned by someone else is refused: /tmp itself (root's).
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime("/tmp/bromure-ac-test-nonexistent", create: false) }
         // A link where the runtime dir should be.
         try FileManager.default.createDirectory(atPath: dir + "/elsewhere", withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try FileManager.default.createSymbolicLink(atPath: dir + "/rt/linked", withDestinationPath: dir + "/elsewhere")
         #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/rt/linked", create: false) }
-        // The daemon won't start on the open one.
-        let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/open/bromure-ac",
+        // The daemon won't start on a runtime dir that is a link.
+        let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/rt/linked",
                                   imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
         await #expect(throws: SecureDir.Untrusted.self) { _ = try await Daemon.start(config) }
         // Nor will an edit be scratched there.
-        #expect(throws: (any Error).self) { _ = try EditorScratch.create(contents: Data(), in: dir + "/open/bromure-ac/editor") }
+        #expect(throws: (any Error).self) { _ = try EditorScratch.create(contents: Data(), in: dir + "/rt/linked/editor") }
     }
 
     @Test func hostListsSplitOnCommasAndWhitespace() {
