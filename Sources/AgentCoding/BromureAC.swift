@@ -14278,12 +14278,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// still reads after a restart drops the clients' caches. NOT a session
     /// the task was handed to (`assignment`): that conversation is mostly
     /// the session's other work; such a task reports through its delivery.
-    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
-        if let archived = TaskTranscriptArchive.load(task.id) { return archived }
-        if let sid = task.sessionID, let s = agentSessionStore.session(sid),
-           let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty {
-            return String(decoding: data, as: UTF8.self)
+    ///
+    /// `forArchive` (the Done archive, which every later read takes first):
+    /// the guest's full transcript before the session copy -- that copy is a
+    /// cache seeded from a tail plus a live tail, and can lack the start of
+    /// a long conversation; archived, the loss would be permanent. The
+    /// session copy is then only the fallback when no full read answers.
+    func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
+        for source in TaskTranscriptArchive.readOrder(forArchive: forArchive) {
+            let text: String?
+            switch source {
+            case .archive: text = TaskTranscriptArchive.load(task.id)
+            case .session: text = await taskSessionTranscript(task)
+            case .guest: text = await fullTaskTranscript(task)
+            }
+            if let text, !text.isEmpty { return text }
         }
+        return nil
+    }
+
+    /// The host's copy of the task's own session (cache + live tail).
+    private func taskSessionTranscript(_ task: CodingTask) async -> String? {
+        guard let sid = task.sessionID, let s = agentSessionStore.session(sid),
+              let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The task's whole transcript file: the guest by session id (Kimi) or
+    /// branch, else the home image when the workspace is off (Claude).
+    private func fullTaskTranscript(_ task: CodingTask) async -> String? {
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
         // Kimi: the session's own journal by id, when the task's session

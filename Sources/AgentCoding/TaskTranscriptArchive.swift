@@ -10,6 +10,18 @@ import Foundation
 /// (`fetchTaskTranscriptRaw`), with the guest/ext4 lookups as the fallback
 /// for cards that predate archiving.
 enum TaskTranscriptArchive {
+    /// Where a finished task's transcript is read from.
+    enum Source: Equatable { case archive, session, guest }
+
+    /// The lookup order. On demand: the archive, then the task session's
+    /// host copy (it outlives the worktree), then the guest/ext4 file. For
+    /// the archive itself: the full file first -- the session copy may be a
+    /// tail-seeded cache missing the conversation's start, and an archive is
+    /// read first forever after -- and the session copy only as a fallback.
+    static func readOrder(forArchive: Bool) -> [Source] {
+        forArchive ? [.guest, .session] : [.archive, .session, .guest]
+    }
+
     /// Overridable for tests (a temp dir); nil = the real location.
     nonisolated(unsafe) static var directoryOverride: URL?
 
