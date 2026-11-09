@@ -41,6 +41,8 @@ step "ACLinux: unit tests";     swift test  --package-path "$ROOT/linux/ACLinux"
 # its KVM suite stays disabled.
 step "remote menu: __remote-menu on a pty and over the embedded SSH server (no VM, loopback)"
 "$ROOT/linux/remote-menu/e2e.sh" "$ROOT/linux/ACLinux/.build/debug/bromure-ac"
+step "CLI: workspaces / trace / remote key against a private daemon (no VM, no network)"
+"$ROOT/linux/cli-e2e/e2e.sh" "$ROOT/linux/ACLinux/.build/debug/bromure-ac"
 step "ACLinux: KVM integration"
 # Until the kvm udev rule makes /dev/kvm this user's, it is kvm-group only:
 # run as this user with the kvm group added (not as root).

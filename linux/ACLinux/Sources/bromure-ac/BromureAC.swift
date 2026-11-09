@@ -11,7 +11,39 @@ import Foundation
 struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
-        subcommands: [Daemon.self, VM.self, Image.self, Remote.self, Account.self, Cloud.self, Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command])
+        subcommands: [Daemon.self, VM.self, Workspaces.self, Trace.self, Image.self, Remote.self, Account.self, Cloud.self,
+                      Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command])
+
+    // @port-skip linux-only: the entry point; tells the library the group `workspaces ports` reports help for
+    static func main() async {
+        CLICommandsEntry.workspacesGroup = Workspaces.self
+        await main(nil)
+    }
+}
+
+/// macOS's `workspaces` group (Profiles): the ported commands
+/// (CLICommandsEntry) with this CLI's own run/kill/exec. `vm` stays this
+/// CLI's VM group (macOS aliases `workspaces` as `vm`).
+// @port-skip linux-only: macOS's Profiles group lists the structs directly
+struct Workspaces: AsyncParsableCommand {
+    static let configuration: CommandConfiguration = {
+        let w = CLICommandsEntry.workspaces
+        return CommandConfiguration(
+            commandName: "workspaces",
+            abstract: "Manage workspaces — list (live + off), boot, exec, and lifecycle.",
+            subcommands: [w.list, w.create, w.edit, VM.Run.self, VM.Kill.self, w.reboot, VM.Exec.self, w.attach,
+                          w.describe, w.remove, w.sshKeygen, w.ports, w.fsck, w.fusion],
+            defaultSubcommand: w.ports)
+    }()
+}
+
+/// macOS's `trace` group.
+// @port-skip linux-only: macOS's Trace group lists the structs directly
+struct Trace: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "trace",
+        abstract: "Inspect the MITM session traces (requests, token swaps, leaks).",
+        subcommands: CLICommandsEntry.trace)
 }
 
 // @port-skip linux-only: the daemon entry point (macOS runs as an app)
@@ -117,9 +149,12 @@ extension VM {
         @Option(name: .customLong("memory-gb"), help: "RAM in GiB.") var memoryGB: Double?
         @Option(help: "vCPUs.") var cpus = 2
         @Option(name: .customLong("home-gb"), help: "Home image size in GiB (8-1024; default: the daemon's).") var homeGB: Int?
+        @Flag(name: [.customShort("d"), .long],
+              help: "Detached: boot and return without attaching your terminal (docker-style).")
+        var detach = false
 
-        // partial: always detached (no terminal handed over); --memory-gb may be fractional
-        // @port VMRun.run() h=b33df8507728b8d7 @f127f8ab
+        // partial: detached (-d, or no terminal on stdin AND stdout: `ID=$(… vm run …)`) prints the bare id for scripts; --memory-gb may be fractional
+        // @port VMRun.run() h=b33df8507728b8d7 @dd6d27ed
         func run() async throws {
             var body: [String: JSONValue] = ["machine": .string(machine), "cpus": .number(Double(cpus)),
                                              "detach": true, "rm": .bool(rm)]
@@ -127,8 +162,8 @@ extension VM {
                 body["profile"] = .string(workspace)                  // start an existing workspace
             } else if name != nil || tool != nil || auth != nil {    // create a throwaway on-the-fly
                 if let name { body["name"] = .string(name) }
-                if let tool = try Self.choice(tool, Profile.Tool.self, option: "--tool") { body["tool"] = .string(tool) }
-                if let auth = try Self.choice(auth, Profile.AuthMode.self, option: "--auth") { body["auth"] = .string(auth) }
+                if let tool = try validatedCLIChoice(tool, Profile.Tool.self, option: "--tool") { body["tool"] = .string(tool) }
+                if let auth = try validatedCLIChoice(auth, Profile.AuthMode.self, option: "--auth") { body["auth"] = .string(auth) }
                 let key = VMRunAPIKey.resolve(flag: apiKey, environment: ProcessInfo.processInfo.environment) {
                     String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)
                 }
@@ -140,33 +175,38 @@ extension VM {
             }
             if let memoryGB { body["memoryGB"] = .number(memoryGB) }
             if let homeGB { body["homeGB"] = .number(Double(homeGB)) }
-            if !volume.isEmpty { body["mounts"] = .array(volume.map { .string(Self.absoluteHostPath($0)) }) }
+            if !volume.isEmpty { body["mounts"] = .array(volume.map { .string(absoluteHostPath($0)) }) }
             let r = try client().request("POST", "/vms", body: .object(body))
             try check(r, "run")
-            print(r.json["id"]?.stringValue ?? "")
-        }
-
-        /// An option's value checked against the enum's raw values.
-        // @port validatedCLIChoice(_: String?, _: E.Type, option: String) h=29846ce46367174f @f127f8ab
-        static func choice<E: RawRepresentable & CaseIterable>(_ raw: String?, _ type: E.Type, option: String) throws -> String?
-            where E.RawValue == String {
-            guard let raw else { return nil }
-            guard E(rawValue: raw) != nil else {
-                let valid = E.allCases.map(\.rawValue).joined(separator: " | ")
-                throw ValidationError("Invalid \(option) “\(raw)” — expected one of: \(valid).")
+            let id = r.json["id"]?.stringValue ?? ""
+            // -d, or no terminal to hand over (piped/scripted) → boot-and-return.
+            if detach || isatty(STDIN_FILENO) == 0 || isatty(STDOUT_FILENO) == 0 {
+                print(id)
+                return
             }
-            return raw
+            // Default (docker-style): hand the terminal to the VM's tmux session,
+            // once the guest agent has it up (on a fresh boot it isn't yet).
+            let name = r.json["name"]?.stringValue ?? "?"
+            FileHandle.standardError.write(Data(
+                "Started VM \(name) (\(id.prefix(12))). Attaching… (Ctrl-b d to detach, leaves it running)\n".utf8))
+            let c = try client()
+            Self.waitForTmux(client: c, vm: id)
+            try InteractiveExec.run(client: c, vm: id, command: "tmux attach -t bromure")
         }
 
-        /// A host path as the daemon takes it: `~` expanded, relative to the cwd, standardized.
-        // @port absoluteHostPath(_: String) h=a1469f3e4a0ba7df @f127f8ab
-        static func absoluteHostPath(_ raw: String) -> String {
-            let expanded = (raw as NSString).expandingTildeInPath
-            let absolute = expanded.hasPrefix("/")
-                ? expanded
-                : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
-            return (absolute as NSString).standardizingPath
+        /// Poll the guest until its `bromure` tmux session exists (or give up):
+        /// `tmux attach` to a missing session exits at once.
+        // @port VMRun.static waitForTmux(client: ControlClient, vm: String) h=205c83e91401386d @dd6d27ed
+        static func waitForTmux(client: ControlClient, vm: String) {
+            for _ in 0..<100 {   // up to ~20s
+                let resp = try? client.request(
+                    "POST", "/vms/\(ControlClient.encodeSegment(vm))/exec",
+                    body: ["command": "tmux has-session -t bromure", "timeout": 5])
+                if resp?.status == 200, (resp?.json["exitCode"]?.numberValue ?? 1) == 0 { return }
+                usleep(200_000)
+            }
         }
+
     }
 
     // @port-skip linux-only: lists /vms (macOS's `ls` lists workspaces + VMs; no workspaces on Linux yet)
@@ -550,32 +590,18 @@ struct Cloud: AsyncParsableCommand {
 struct Remote: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Remote access for the Bromure apps (an SSH server, port 2222 by default).",
-        subcommands: [Status.self, Enable.self, Disable.self, Code.self, AddKey.self, RmKey.self],
+        subcommands: [Status.self, Enable.self, Disable.self, RemoteKeyEntry.command, Code.self, AddKey.self, RmKey.self],
         defaultSubcommand: Status.self)
 
-    // @port-skip linux-only: CLI plumbing
-    static func show(_ j: JSONValue) {
-        func s(_ k: String) -> String {
-            switch j[k] { case .bool(let b)?: return b ? "yes" : "no"
-                          case .number(let n)?: return String(Int(n))
-                          default: return j[k]?.stringValue ?? "-" }
-        }
-        print("enabled: \(s("enabled"))   running: \(s("running"))   port: \(s("port"))   bind: \(s("bindAddress"))")
-        print("password auth: \(s("passwordAuth")) (account password: \(s("allowAccountPassword")), else one-time codes)   public-key auth: \(s("pubkeyAuth"))")
-        print("host key: \(s("fingerprint"))")
-        print("connect: \(s("connect"))")
-        // authorized_keys couldn't be read (macOS's CLI: the same warning).
-        if let problem = j["authorizedKeysProblem"]?.stringValue, !problem.isEmpty { print("warning: \(problem)") }
-        if case .array(let keys)? = j["authorizedKeys"], !keys.isEmpty {
-            print("authorized keys:")
-            for k in keys { print("  \(k["fingerprint"]?.stringValue ?? "?")  \(k["comment"]?.stringValue ?? "")") }
-        }
-    }
+    /// The status lines (macOS's printRemoteStatus, in the library).
+    // @port-skip linux-only: JSONValue to the ported printRemoteStatus
+    static func show(_ j: JSONValue) { printRemoteStatus(j.foundationObject as? [String: Any] ?? [:]) }
 
     struct Status: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Show the server's state, host key and enrolled keys.")
         @Flag(help: "JSON output.") var json = false
-        // @port-skip linux-only: CLI
+        // partial: --json; the daemon is a service (no autostart)
+        // @port RemoteStatus.run() h=dbb6eb1258fd0e04 @dd6d27ed
         func run() async throws {
             let r = try client().request("GET", "/remote")
             try check(r, "status")
@@ -591,7 +617,8 @@ struct Remote: AsyncParsableCommand {
         @Flag(help: "Refuse public-key logins.") var noPubkey = false
         @Flag(help: "Also accept this account's password (PAM) for password logins; by default only one-time codes (`remote code`).")
         var allowAccountPassword = false
-        // @port-skip linux-only: CLI
+        // partial: --no-password/--no-pubkey and --allow-account-password (password logins take one-time codes unless that is set)
+        // @port RemoteEnable.run() h=a7ea5443730baf61 @dd6d27ed
         func run() async throws {
             var body: [String: JSONValue] = ["enabled": true, "passwordAuth": .bool(!noPassword), "pubkeyAuth": .bool(!noPubkey),
                                              "allowAccountPassword": .bool(allowAccountPassword)]
@@ -605,7 +632,8 @@ struct Remote: AsyncParsableCommand {
 
     struct Disable: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Stop the SSH server.")
-        // @port-skip linux-only: CLI
+        // partial: the daemon is a service (no "already off" when it isn't running: an error)
+        // @port RemoteDisable.run() h=7b54a470c0ccd25e @dd6d27ed
         func run() async throws {
             let r = try client().request("POST", "/remote", body: ["enabled": false])
             try check(r, "disable")

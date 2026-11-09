@@ -947,6 +947,38 @@
     {
       "path": "Sources/SandboxEngine/AlpinePackageProxy.swift",
       "reason": "image bake: the server bake uses signed plain-HTTP apk (setup.sh no-proxy path)"
+    },
+    {
+      "id": "VMAttachWindow.run()",
+      "reason": "screen-only: the native terminal view's attach (libghostty surfaces)"
+    },
+    {
+      "id": "VMAttachWindow.remoteClient(hostID: UUID)",
+      "reason": "screen-only: the native terminal view's attach (libghostty surfaces)"
+    },
+    {
+      "id": "VMAttachWindow.static scratchCommand(session: String, cwd: String)",
+      "reason": "screen-only: the native terminal view's attach (libghostty surfaces)"
+    },
+    {
+      "id": "VMAttachWindow.attachLoop(client: ControlClient)",
+      "reason": "screen-only: the native terminal view's attach (libghostty surfaces)"
+    },
+    {
+      "id": "FatClientPost.run()",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "id": "FatClientAuthProbe.run()",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "id": "InteractiveExec.static sendFrame(_: Int32, _: UInt8, _: [UInt8])",
+      "reason": "Linux's InteractiveExec calls the shared PTYFrame directly"
+    },
+    {
+      "id": "InteractiveExec.static resizePayload(cols: Int, rows: Int)",
+      "reason": "Linux's InteractiveExec calls the shared PTYFrame directly"
     }
   ],
   "skipInheriting": [

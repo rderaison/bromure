@@ -56,7 +56,7 @@ struct SSHKey: AsyncParsableCommand {
         func run() async throws {
             // Read here, as the calling user: a shared server's daemon can't
             // see this account's /home.
-            let path = VM.Run.absoluteHostPath(file)
+            let path = absoluteHostPath(file)
             guard let bytes = FileManager.default.contents(atPath: path) else { throw ValidationError("can't read \(path)") }
             var body: [String: JSONValue] = ["path": .string(path), "keyData": .string(bytes.base64EncodedString()),
                                              "requireApproval": .bool(approve)]

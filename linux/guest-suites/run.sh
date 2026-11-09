@@ -49,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT
 for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/bromure-ac/control.sock" ] && break; sleep 0.1; done
-ID=$(cli vm run --name gs --cpus 8 --memory-gb 8) || { log "vm run failed"; cat "$OUT/daemon.log"; exit 1; }
+ID=$(cli vm run -d --name gs --cpus 8 --memory-gb 8) || { log "vm run failed"; cat "$OUT/daemon.log"; exit 1; }
 log "VM $ID up"
 
 # Stage: the repo layout, and the drop layout the suites' ROOT expects (vm-setup + tests + sentry

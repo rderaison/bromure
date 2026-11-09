@@ -93,7 +93,7 @@ passt_pid() { for p in $(procs); do [[ $(comm_of $p) == passt* ]] && echo $p; do
 # kill signal.
 start_unit -p KillSignal=SIGWINCH || { echo "systemd-run failed"; exit 1; }
 [ "$(prop ActiveState)" = active ] && pass "unit active after READY" || fail "unit not active"
-cli vm run --name uk >/dev/null && cli vm exec uk -- true || fail "vm run/exec"
+cli vm run -d --name uk >/dev/null && cli vm exec uk -- true || fail "vm run/exec"
 cli vm exec uk -- sh -c "nohup python3 -c \"
 import socket, time
 s = socket.create_connection(('$LAN', $PORT), timeout=5); s.settimeout(5)
