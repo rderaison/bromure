@@ -54,10 +54,13 @@ struct ImageInstallTests {
         let up = try BinaryUpstream(body: body)
         defer { up.stop() }
         let store = ImageCatalogStore(distribution: .agentCodingAmd64(imageVersion: "201"), supportDir: URL(fileURLWithPath: dir))
-        #expect(await store.refresh(from: URL(string: "http://127.0.0.1:\(up.port)/c.json")!) == nil)
-        #expect(store.lastRefreshRejected, "fetched, then refused for its signature")
+        guard case .refused = await store.refreshOutcome(from: URL(string: "http://127.0.0.1:\(up.port)/c.json")!) else {
+            Issue.record("an unsigned catalog wasn't refused"); return
+        }
+        guard case .unavailable = await store.refreshOutcome(from: URL(string: "http://127.0.0.1:9/c.json")!) else {
+            Issue.record("unreachable isn't a refusal"); return
+        }
         #expect(await store.refresh(from: URL(string: "http://127.0.0.1:9/c.json")!) == nil)
-        #expect(!store.lastRefreshRejected, "unreachable isn't a rejection")
         #expect(ImageFetchError.signatureInvalid.localizedDescription == "The image catalog's signature didn't verify.")
         #expect(ImageInstall.isDownloadSideFailure(ImageFetchError.signatureInvalid), "a local bake still remedies it")
     }

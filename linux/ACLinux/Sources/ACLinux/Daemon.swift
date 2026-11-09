@@ -32,6 +32,65 @@ public struct DaemonConfig: Sendable {
         return configuredImageDir
     }
 
+    /// The image to boot, once it's safe to: this user's own, or one whose
+    /// dir and boot files (disk, kernel, initrd, cmdline; a link's target)
+    /// only root or this user can have written. A shared dir someone else made, or anyone may
+    /// write, could hold a planted image: refused, never booted.
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    func bootableImageDir() throws -> String {
+        let dir = imageDir
+        if let why = Self.imageTrustProblem(dir) { throw ImageUntrusted(dir: dir, why: why) }
+        return dir
+    }
+
+    /// Why `dir`'s image isn't safe to boot, or nil.
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    static func imageTrustProblem(_ dir: String, uid: uid_t = getuid()) -> String? {
+        for path in [dir] + ["base.img", "vmlinuz", "initrd.img", "cmdline"].map({ dir + "/" + $0 }) {
+            // What boots is what a link points to: that's what's checked.
+            var st = stat()
+            guard stat(path, &st) == 0 else { continue }   // missing: the boot says so
+            if st.st_uid != 0, st.st_uid != uid { return "\(path) belongs to uid \(st.st_uid)" }
+            if st.st_mode & 0o002 != 0 { return "\(path) is world-writable" }
+            if st.st_mode & 0o020 != 0, !privateGroup(gid: st.st_gid, owner: st.st_uid) {
+                return "\(path) is writable by group \(st.st_gid)"
+            }
+        }
+        return nil
+    }
+
+    /// Whether `gid` is `owner`'s own group (a user private group: their
+    /// primary group, with no other members), where group-writable is
+    /// only the owner (Ubuntu's umask 002 makes files so).
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    static func privateGroup(gid: gid_t, owner: uid_t) -> Bool {
+        guard let pw = getpwuid(owner), pw.pointee.pw_gid == gid, let gr = getgrgid(gid) else { return false }
+        let name = String(cString: pw.pointee.pw_name)
+        var members: [String] = []
+        var m = gr.pointee.gr_mem
+        while let p = m?.pointee { members.append(String(cString: p)); m = m?.advanced(by: 1) }
+        return members.allSatisfy { $0 == name }
+    }
+
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    struct ImageUntrusted: Error, CustomStringConvertible {
+        let dir: String, why: String
+        // @port-skip linux-only: see ImageUntrusted
+        var description: String {
+            "the guest image in \(dir) isn't safe to boot (\(why)): install your own with `bromure-ac image install`"
+        }
+    }
+
+    /// A user's own image dir in their state dir, 0700 even when an older
+    /// daemon made it with the default mode. Any other dir is left as it is.
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    func secureOwnImageDir() {
+        let dir = stateDir + "/image"
+        var st = stat()
+        guard lstat(dir, &st) == 0, st.st_mode & S_IFMT == S_IFDIR, st.st_uid == getuid(), st.st_mode & 0o777 != 0o700 else { return }
+        chmod(dir, 0o700)
+    }
+
     /// Whether `dir` holds an image (its disk and stamp).
     // @port-skip linux-only: Linux daemon configuration
     static func hasImage(_ dir: String) -> Bool {
@@ -314,6 +373,7 @@ public actor Daemon {
         if let warning = Self.configHomeWarning(stateDir: config.stateDir) { FileHandle.standardError.write(Data(warning.utf8)) }
         // A bake cut short after its disk went live: its boot files and stamp.
         InterimBake.finishPromotionIfIdle(imageDir: config.userImageDir)
+        config.secureOwnImageDir()
         let stored = FDStore.take()
         let adoptedPasst = PasstUplink.Adopted.fromStore(stored)
         // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM,
@@ -1748,7 +1808,7 @@ public actor Daemon {
     func machineConfig(_ rec: VMRecord) throws -> MachineConfig {
         let dir = vmDir(rec.id), run = config.runtimeDir + "/vms/" + rec.shortId
         // The system disk: a sparse raw copy of the base (Firecracker has no qcow2).
-        var qc = try MachineConfig(name: "bromure-\(rec.shortId)", bakedImage: config.imageDir,
+        var qc = try MachineConfig(name: "bromure-\(rec.shortId)", bakedImage: try config.bootableImageDir(),
                                    overlay: dir + "/disk.raw", vsockCID: rec.cid, runDirectory: run)
         qc.cpus = rec.cpus
         qc.memoryMiB = rec.memoryMiB

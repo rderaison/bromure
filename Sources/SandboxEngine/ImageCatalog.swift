@@ -373,12 +373,15 @@ public final class ImageCatalogStore: @unchecked Sendable {
     private let cacheURL: URL
     private let lock = NSLock()
     private var cachedRemote: ImageCatalog?
-    private var rejected = false
 
-    /// Whether the last `refresh` fetched a catalog and refused it: a
-    /// signature missing or not verifying, or a rollback to an older one
-    /// (not a network failure).
-    public var lastRefreshRejected: Bool { lock.lock(); defer { lock.unlock() }; return rejected }
+    /// What a refresh got: the catalog, nothing (unreachable, an HTTP error,
+    /// unparsable), or a catalog it refused (its signature missing or not
+    /// verifying, or a rollback to an older one).
+    public enum RefreshOutcome: Sendable {
+        case fetched(ImageCatalog)
+        case unavailable
+        case refused
+    }
 
     /// The manifest URL actually in effect for this channel (override-aware).
     public var refreshURL: URL {
@@ -464,15 +467,21 @@ public final class ImageCatalogStore: @unchecked Sendable {
     @discardableResult
     public func refresh(from url: URL? = nil,
                         session: URLSession = .shared) async -> ImageCatalog? {
+        if case .fetched(let catalog) = await refreshOutcome(from: url, session: session) { return catalog }
+        return nil
+    }
+
+    /// `refresh`, saying why there's no catalog.
+    public func refreshOutcome(from url: URL? = nil,
+                               session: URLSession = .shared) async -> RefreshOutcome {
         var request = URLRequest(url: url ?? refreshURL)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        setRejected(false)
         do {
             let (data, resp) = try await session.data(for: request)
             // Non-HTTP responses (file:// via the override base) have no
             // status to check — reaching here means the read succeeded.
             if let http = resp as? HTTPURLResponse,
-               !(200..<300).contains(http.statusCode) { return nil }
+               !(200..<300).contains(http.statusCode) { return .unavailable }
             let parsed = try ImageCatalog.parse(data)
             // Production catalogs MUST carry a valid signature: the
             // postinstall commands run as root in every user's base
@@ -482,7 +491,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
             // (local pipeline tests) skips this; a missing signature is
             // as fatal as a bad one so it can't be stripped.
             if Self.overrideBase == nil {
-                guard isSignatureValid(parsed) else { setRejected(true); return nil }
+                guard isSignatureValid(parsed) else { return .refused }
                 // Rollback guard: never adopt a catalog signed earlier
                 // than one already adopted — replaying an old, validly
                 // signed catalog could reintroduce a retired image or
@@ -490,19 +499,16 @@ public final class ImageCatalogStore: @unchecked Sendable {
                 if let prev = remote()?.signature?.signedAt,
                    let fresh = parsed.signature?.signedAt,
                    fresh < prev {
-                    setRejected(true)
-                    return nil
+                    return .refused
                 }
             }
             adoptRemote(parsed)
             try? data.write(to: cacheURL, options: .atomic)
-            return parsed
+            return .fetched(parsed)
         } catch {
-            return nil
+            return .unavailable
         }
     }
-
-    private func setRejected(_ v: Bool) { lock.lock(); rejected = v; lock.unlock() }
 
     /// Absolute URL for a catalog-relative artifact path.
     public static func artifactURL(for path: String,

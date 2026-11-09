@@ -44,8 +44,9 @@ public enum ImageInstall {
         for attempt in 1...3 {
             if attempt > 1 { progress("Retrying download (attempt \(attempt)/3)…") }
             progress("Fetching image catalog…")
-            guard let catalog = await store.refresh(), let image = catalog.image else {
-                if store.lastRefreshRejected {
+            let outcome = await store.refreshOutcome()
+            guard case .fetched(let catalog) = outcome, let image = catalog.image else {
+                if case .refused = outcome {
                     // Loud: a tampered or replayed catalog, not a network hiccup.
                     progress("REFUSED: the image catalog's signature didn't verify (\(store.refreshURL.absoluteString))")
                     FileHandle.standardError.write(Data("bromure-ac: REFUSED the image catalog at \(store.refreshURL.absoluteString): its signature didn't verify (missing, invalid, or older than one already adopted)\n".utf8))

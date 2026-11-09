@@ -125,4 +125,44 @@ struct ImageStepsTests {
         #expect(c.imageDir == dir + "/state/image", "their own, once it's there")
         #expect(Daemon.mayWriteImage(c.userImageDir) && !Daemon.mayWriteImage(dir + "/shared"))
     }
+
+    /// A configured image someone else could have planted isn't booted:
+    /// only root's or this user's, nothing group- or world-writable, no
+    /// link to a file that isn't; this user's own image always is.
+    @Test func anImageOthersMayWriteIsntBooted() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fm = FileManager.default
+        let img = dir + "/shared"
+        try fm.createDirectory(atPath: img, withIntermediateDirectories: true)
+        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline", "base.version"] { fm.createFile(atPath: img + "/" + f, contents: Data("x".utf8)) }
+        chmod(img, 0o755)
+        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline"] { chmod(img + "/" + f, 0o644) }
+        #expect(DaemonConfig.imageTrustProblem(img) == nil, "this user's, not writable by others")
+        #expect(DaemonConfig.imageTrustProblem(img, uid: getuid() &+ 1) != nil, "another user's dir")
+        chmod(img + "/vmlinuz", 0o666)
+        #expect(DaemonConfig.imageTrustProblem(img)?.contains("vmlinuz") == true, "a world-writable kernel")
+        chmod(img + "/vmlinuz", 0o644)
+        chmod(img, 0o777)
+        #expect(DaemonConfig.imageTrustProblem(img) != nil, "a world-writable dir")
+        chmod(img, 0o775)
+        var st = stat()
+        #expect(stat(img, &st) == 0)
+        #expect((DaemonConfig.imageTrustProblem(img) == nil) == DaemonConfig.privateGroup(gid: st.st_gid, owner: getuid()),
+                "group-writable: only for the owner's private group")
+        chmod(img, 0o755)
+        // A link is judged by what it points to.
+        try fm.removeItem(atPath: img + "/initrd.img")
+        fm.createFile(atPath: dir + "/elsewhere", contents: Data("x".utf8))
+        chmod(dir + "/elsewhere", 0o644)
+        try fm.createSymbolicLink(atPath: img + "/initrd.img", withDestinationPath: dir + "/elsewhere")
+        #expect(DaemonConfig.imageTrustProblem(img) == nil, "a link to a trusted file")
+        chmod(dir + "/elsewhere", 0o666)
+        #expect(DaemonConfig.imageTrustProblem(img)?.contains("initrd.img") == true, "a link to a world-writable file")
+        let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: img, agentdPath: "")
+        #expect(throws: (any Error).self) { _ = try c.bootableImageDir() }
+        if let e = try? { () throws -> Error? in do { _ = try c.bootableImageDir(); return nil } catch { return error } }() {
+            #expect("\(e)".contains("bromure-ac image install"))
+        }
+    }
 }

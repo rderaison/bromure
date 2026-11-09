@@ -67,6 +67,8 @@ extension Daemon {
         guard !steps.isEmpty else { return }
         // Installed into this user's own image (the shared one is copied
         // there first): asked only when that's possible.
+        guard (try? config.bootableImageDir()) != nil else { return }   // refused at boot, said there
+        config.secureOwnImageDir()
         guard Self.mayWriteImage(config.userImageDir) else {
             FileHandle.standardError.write(Data("bromure-ac daemon: [image] \(steps.count) newly published step(s) not offered: \(config.userImageDir) isn't writable\n".utf8))
             return
@@ -109,7 +111,12 @@ extension Daemon {
         let env = ProcessInfo.processInfo.environment
         // From the image in use into this user's own (the same dir unless
         // that's the shared, read-only one).
-        let source = config.imageDir, target = config.userImageDir
+        let target = config.userImageDir
+        let source: String
+        do { source = try config.bootableImageDir() } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: [image] the recommended packages weren't installed: \(error)\n".utf8))
+            return
+        }
         let stamp = (try? String(contentsOfFile: source + "/base.version", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var o = InterimBake.Options(outputDir: target,
