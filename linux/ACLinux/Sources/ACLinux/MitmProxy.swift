@@ -353,6 +353,24 @@ final class MitmProxy: @unchecked Sendable {
         promptInjectionPolicies.withLockedValue { $0[profileID] = nil }
     }
 
+    /// A WebSocket's trace record at its close (macOS: emitWebSocketTrace's
+    /// call), its transcript rendered here, on the connection's loop.
+    // @port-skip linux-only: the Linux proxy's call into TraceEmitter.emitWebSocket
+    func emitWebSocketTrace(_ t: RequestReader.Trace, _ ws: WSTraceSession) {
+        guard let store = traces.withLockedValue({ $0 }) else { return }
+        let latency = Date().timeIntervalSince(t.start) * 1000
+        let transcript = ws.transcript
+        let clientBytes = t.request.count + ws.clientBytes, upstreamBytes = ws.handshake.count + ws.upstreamBytes
+        let streamed = ws.tap?.streamedAnyEvents ?? false
+        Task {
+            TraceEmitter.emitWebSocket(
+                session: t.session, store: store, profileID: t.profileID, host: t.host, port: t.port,
+                preSwapRequest: t.request, handshakeResponse: ws.handshake, transcript: transcript,
+                clientBytes: clientBytes, upstreamBytes: upstreamBytes, statusCode: 101,
+                swaps: t.swaps, leaks: t.leaks, latencyMs: latency, skipLLMExtract: streamed)
+        }
+    }
+
     /// One request's trace record (macOS: HTTPMitmConnection.emitTrace),
     /// off the event loop. A parsed conversation gets the prompt-injection
     /// log scan when the workspace's policy is on with "log but continue"
@@ -911,6 +929,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var b = unwrapInboundIn(data)
         if started {
             if upgraded, let upstream {
+                relay?.wsTrace?.client(Data(b.readableBytesView))
                 if wsGate != nil {
                     gateToUpstream(Data(b.readableBytesView), guest: context.channel, upstream: upstream)
                     return
@@ -1290,6 +1309,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
+                                // The guest's bytes held until the switch are its first frames.
+                                for p in self.pending { relay?.wsTrace?.client(Data(p.readableBytesView)) }
                                 if let wsPolicy {
                                     // Keyed on the plan alone: a rewrite with
                                     // no rule still goes through the gate.
@@ -1488,6 +1509,9 @@ final class ResponseRelay: ChannelInboundHandler {
     /// A switched upgrade's response head (its negotiated extensions), set
     /// before onSwitched.
     private(set) var upgradeResponseHead: Data?
+    /// A switched WebSocket's trace (WebSocketTraceLinux.swift): set with
+    /// the 101 when the request is traced; the guest's side feeds it too.
+    private(set) var wsTrace: WSTraceSession?
     /// The upstream drained: the guest may be read again, if nothing else
     /// holds it (RequestReader.readGuestIfAllowed).
     var onUpstreamWritable: (() -> Void)?
@@ -1729,6 +1753,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 return
             }
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
+            wsTrace?.upstream(Data(b.readableBytesView))
             keepForLearning(b.readableBytesView)
             relayed = true
             if let wsServer {
@@ -1773,6 +1798,12 @@ final class ResponseRelay: ChannelInboundHandler {
             // Switched: the head as it is, then the stream both ways.
             noteStatus(head0)
             upgradeResponseHead = head0
+            if let trace {
+                wsTrace = WSTraceSession(handshake: head0, host: host, path: HTTPFrames.parseRequestLine(trace.request).1,
+                                         profileID: trace.profileID,
+                                         captureBody: trace.session.level.capturesBodyForHost(host))
+                wsTrace?.upstream(rest)
+            }
             var early = rest
             if let ws {
                 if let ext = WSHandshake.extensions(inResponse: head0) {
@@ -2143,8 +2174,13 @@ final class ResponseRelay: ChannelInboundHandler {
             guest.write(guest.allocator.buffer(bytes: tail), promise: nil)
         }
         if let proxy, let trace {
-            proxy.emitTrace(trace, response: traceTruncated ? traceCopy : HTTPRequestFraming.dechunkedResponse(traceCopy),
-                            wireBytes: traceWire, truncated: traceTruncated)
+            if let wsTrace {
+                // A WebSocket: its handshake and messages (macOS: emitWebSocketTrace).
+                proxy.emitWebSocketTrace(trace, wsTrace)
+            } else {
+                proxy.emitTrace(trace, response: traceTruncated ? traceCopy : HTTPRequestFraming.dechunkedResponse(traceCopy),
+                                wireBytes: traceWire, truncated: traceTruncated)
+            }
         }
         guest.writeAndFlush(guest.allocator.buffer(capacity: 0)).whenComplete { _ in self.guest.close(promise: nil) }
     }

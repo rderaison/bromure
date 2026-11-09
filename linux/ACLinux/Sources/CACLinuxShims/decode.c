@@ -126,3 +126,43 @@ int acl_deflate_raw(const uint8_t *in, size_t n, uint8_t **out, size_t *out_len)
     *out = buf; *out_len = len;
     return 0;
 }
+
+struct acl_ws_inflater { z_stream s; };
+
+acl_ws_inflater *acl_ws_inflater_new(void) {
+    acl_ws_inflater *z = calloc(1, sizeof *z);
+    if (!z) return NULL;
+    if (inflateInit2(&z->s, -15) != Z_OK) { free(z); return NULL; }
+    return z;
+}
+
+void acl_ws_inflater_free(acl_ws_inflater *z) {
+    if (!z) return;
+    inflateEnd(&z->s);
+    free(z);
+}
+
+int acl_ws_inflater_reset(acl_ws_inflater *z) { return inflateReset(&z->s) == Z_OK ? 0 : -1; }
+
+int acl_ws_inflate(acl_ws_inflater *z, const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len) {
+    *out = NULL; *out_len = 0;
+    if (n > UINT_MAX) return -2;
+    uint8_t *buf = NULL; size_t have = 0, len = 0;
+    z->s.next_in = (Bytef *)in; z->s.avail_in = (uInt)n;
+    int rc = 0;
+    for (;;) {
+        int g = room(&buf, &have, len, cap + 1);
+        if (g != 0) { rc = g; break; }
+        z->s.next_out = buf + len; z->s.avail_out = (uInt)(have - len);
+        int r = inflate(&z->s, Z_SYNC_FLUSH);
+        len = have - z->s.avail_out;
+        if (r == Z_STREAM_END) { inflateReset(&z->s); break; }           // a final block: the stream starts over
+        if (r == Z_BUF_ERROR && z->s.avail_in == 0) break;               // all of it in, nothing more to give
+        if (r != Z_OK && r != Z_BUF_ERROR) { rc = -1; break; }           // corrupt
+        if (z->s.avail_in == 0 && z->s.avail_out > 0) break;             // drained
+    }
+    if (rc == 0 && len > cap) rc = -2;
+    if (rc != 0) { free(buf); return rc; }
+    *out = buf; *out_len = len;
+    return 0;
+}

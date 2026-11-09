@@ -1,4 +1,6 @@
+#if canImport(Compression)
 import Compression
+#endif
 import Foundation
 
 /// RFC 6455 frame parser. Feed it raw bytes (plaintext, post-TLS) as
@@ -98,6 +100,7 @@ final class WSFrameDecoder {
     }
 }
 
+#if !BROMURE_LINUX
 /// Inflater for RFC 7692 permessage-deflate. Apple's `COMPRESSION_ZLIB`
 /// is RFC 1951 raw-DEFLATE (no zlib container) which matches what
 /// permessage-deflate actually puts on the wire. RFC 7692 §7.2.2
@@ -192,6 +195,7 @@ final class WSInflater {
         return ok ? output : nil
     }
 }
+#endif
 
 /// Parsed parameters from a `Sec-WebSocket-Extensions` response
 /// header. Only present when the server confirmed permessage-deflate

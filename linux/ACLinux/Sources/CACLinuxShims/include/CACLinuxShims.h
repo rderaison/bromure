@@ -98,5 +98,14 @@ int acl_inflate(const uint8_t *in, size_t n, int window_bits, size_t cap, uint8_
    -3 truncated; -1 corrupt; -2 past `cap`. */
 int acl_inflate_raw_message(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
 int acl_brotli_decode(const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
+/* A permessage-deflate inflater (RFC 7692) kept across messages: its LZ77
+   window carries over (context takeover) until reset. acl_ws_inflate
+   decodes all of one message's bytes (the caller appends 00 00 FF FF):
+   0 and a malloc'd buffer; -1 corrupt; -2 past `cap`. */
+typedef struct acl_ws_inflater acl_ws_inflater;
+acl_ws_inflater *acl_ws_inflater_new(void);
+void acl_ws_inflater_free(acl_ws_inflater *z);
+int acl_ws_inflater_reset(acl_ws_inflater *z);
+int acl_ws_inflate(acl_ws_inflater *z, const uint8_t *in, size_t n, size_t cap, uint8_t **out, size_t *out_len);
 /* Raw deflate (no zlib or gzip wrapper) of all of `in`, malloc'ed into *out. */
 int acl_deflate_raw(const uint8_t *in, size_t n, uint8_t **out, size_t *out_len);
