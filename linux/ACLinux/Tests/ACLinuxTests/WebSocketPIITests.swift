@@ -92,6 +92,28 @@ struct WebSocketPIITests {
         #expect(Self.text(end) == "bye \(Self.email)" && end.suffix(close.count) == close)
     }
 
+    /// PII protection turned on mid-socket (macOS: the guard always owns its
+    /// restorer): messages before it pass as they are, the ones after are
+    /// restored; the restorer is asked for at each message until there is one.
+    @Test func protectionTurnedOnMidSocketRestoresFromThen() throws {
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let vault = PIIVault(secret: Data(repeating: 9, count: 32))
+        let s = vault.learn(Self.email, label: .email).surrogate
+        let on = NIOLockedValueBox(false), asked = NIOLockedValueBox(0)
+        let server = WSServerSide(loop: loop, write: { _ in }, makeRestorer: {
+            asked.withLockedValue { $0 += 1 }
+            return on.withLockedValue { $0 } ? WSServerRestorer(vault: vault) : nil
+        })
+        let before = try loop.submit { server.feed(Self.deltas("was \(s)").reduce(Data(), +)) }.wait() ?? Data()
+        #expect(Self.text(before) == "was \(s)", "off: as it came")
+        on.withLockedValue { $0 = true }
+        let after = try loop.submit { server.feed(Self.deltas("to \(s) ok").reduce(Data(), +)) }.wait() ?? Data()
+        #expect(Self.text(after) == "to \(Self.email) ok", "on: restored")
+        let n = asked.withLockedValue { $0 }
+        _ = try loop.submit { server.feed(Self.deltas("more").reduce(Data(), +)) }.wait()
+        #expect(asked.withLockedValue { $0 } == n, "kept once made")
+    }
+
     /// Restoring, a message too large to hold goes through fragment by
     /// fragment: an event waits for its last fragment, not just the next
     /// frame boundary.
@@ -144,14 +166,13 @@ struct WebSocketPIITests {
         #expect(Self.text(out + tail) == "bye \(Self.email)")
     }
 
-    /// A skipped scan names the engines that are on.
-    @Test func aSkippedScanNamesTheEnginesOn() throws {
+    /// The guard keeps the upgrade's path, which a skipped scan and the PII
+    /// log name (macOS: g.path; its engines are always pii + prompt_injection).
+    @Test func theGuardKeepsTheUpgradesPath() throws {
         let (proxy, pid, dir) = try PIIProxyTests.proxy()
         defer { PIIProxyTests.cleanup(dir, pid) }
-        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", local: false))
-        #expect(g.engines == ["pii"])
-        proxy.setPromptInjectionPolicy(PromptInjectionPolicy(detectSourceInjection: true, onDetection: .block), for: pid)
-        #expect(g.engines == ["prompt_injection", "pii"])
+        let g = try #require(WSPromptGuard.make(proxy: proxy, profileID: pid, host: "chatgpt.com", path: "/backend-api/codex/responses", local: false))
+        #expect(g.path == "/backend-api/codex/responses")
     }
 
     /// The whole path: the upstream sees only the stand-in and sends it back

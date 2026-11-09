@@ -301,6 +301,9 @@ public actor Daemon {
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
+            // Every profile write says so (ProfileWrites.write / edit): the
+            // private set follows, as macOS's profiles.didSet.
+            ProfileWrites.onChange = { [weak d] in Task { await d?.refreshStreamingNow() } }
             await MainActor.run {
                 mitm.setUpTraceStore(rootDir: root)
                 // Its uploader while enrolled (macOS: the engine's start).
@@ -1120,6 +1123,10 @@ public actor Daemon {
     /// `partOfReboot`: the reboot's own boot (its relaunch, the reboot route,
     /// a boot remedy), the one start a rebooting VM takes.
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false) async -> ControlResponse {
+        // A workspace made private (a clone of a private one, a save just
+        // now) is in the private set before its VM can emit anything. First:
+        // the checks below and the starting mark take one actor step.
+        if !rec.managed, rec.registration != true { await refreshStreamingNow() }
         if let refusal = Self.startRefusal(rec, repairing: repairMarks, rescued: hasRescue(for: rec.id),
                                            rebooting: rebooting.contains(rec.id) && !partOfReboot) { return refusal }
         // A workspace marked compromised boots only once the mark is gone

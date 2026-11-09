@@ -1,3 +1,4 @@
+import NIOConcurrencyHelpers
 import Foundation
 
 /// The detailed HTTP logs to bromure.io (BACTraceUploader, shared) and the
@@ -14,11 +15,24 @@ extension Daemon {
         applyStreamingState(store: store, privateIDs: privateIDs, enrolled: BACEnrollmentStore.load() != nil)
     }
 
+    /// The private set last handed to the emitter and the uploader (tests).
+    static let streamingPrivateIDs = NIOLockedValueBox<Set<UUID>>([])
+
+    /// Now, from the daemon: its trace store's uploader and the emitter
+    /// updated before the caller goes on (a VM about to boot, a clone just
+    /// made).
+    // @port-skip linux-only: refreshStreamingState from the daemon's actor
+    func refreshStreamingNow() async {
+        let store = mitm?.traces.withLockedValue { $0 }
+        await MainActor.run { Self.refreshStreamingState(store: store) }
+    }
+
     /// refreshStreamingState over given state (testable).
     // @port-skip linux-only: refreshStreamingState's body over given state
     @MainActor static func applyStreamingState(store: TraceStore?, privateIDs: Set<UUID>, enrolled: Bool,
                                                makeUploader: () -> BACTraceUploader = { BACTraceUploader() }) {
         BACEventEmitter.shared.setPrivateProfiles(privateIDs)
+        streamingPrivateIDs.withLockedValue { $0 = privateIDs }
         guard let store else { return }
         if enrolled {
             if let up = store.uploader as? BACTraceUploader {

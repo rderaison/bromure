@@ -19,16 +19,34 @@ enum ProfileWrites {
         return try body()
     }
 
+    /// After a write that can add or change a workspace: what macOS's
+    /// profiles.didSet does that a server needs (the private-mode set kept
+    /// out of bromure.io: Daemon.refreshStreamingState). Set by the daemon.
+    nonisolated(unsafe) static var onChange: (@Sendable () -> Void)?
+
+    /// A write under the lock (a new workspace saved, one changed), then
+    /// the change said (onChange): every daemon write goes through here or
+    /// `edit`, as macOS's go through its profiles array.
+    // @port-skip linux-only: the daemon's one funnel for profile writes (macOS: ACAppDelegate.profiles.didSet)
+    @discardableResult
+    static func write<T>(_ body: () throws -> T) rethrows -> T {
+        let r = try locked(body)
+        onChange?()
+        return r
+    }
+
     /// The stored workspace `id` (secrets merged), changed by `change` and
     /// saved when it says so (false: nothing to write). nil when there is no
     /// such workspace; the saved copy otherwise (the stored one when unchanged).
     // @port-skip linux-only: macOS serializes these on the main actor
     @discardableResult
     static func edit(_ id: UUID, store: ProfileStore, _ change: (inout Profile) throws -> Bool) throws -> Profile? {
-        try locked {
+        let saved: Profile? = try locked {
             guard var p = store.loadAll().first(where: { $0.id == id }) else { return nil }
             guard try change(&p) else { return p }
             return try store.update(p)
         }
+        onChange?()
+        return saved
     }
 }

@@ -18,7 +18,7 @@ extension Daemon {
         let store = profileStore
         var clone: Profile
         do {
-            clone = try store.duplicate(base, named: "\(base.name) ⌁ \(runSlug)")
+            clone = try ProfileWrites.write { try store.duplicate(base, named: "\(base.name) ⌁ \(runSlug)") }
         } catch {
             BACDebug.log("automation", "workspace clone failed: \(error)")
             return nil
@@ -27,8 +27,12 @@ extension Daemon {
         // mid-run) must not boot itself at the next start.
         if clone.bootAtStartup {
             clone.bootAtStartup = false
-            try? store.save(clone)
+            let c = clone
+            _ = try? ProfileWrites.write { try store.save(c) }
         }
+        // A private base's clone is private: kept out of bromure.io before
+        // anything of it can emit.
+        await refreshStreamingNow()
         let cloneKey = clone.id.uuidString.lowercased()
         let src = vmDir(key), dst = vmDir(cloneKey)
         func undo(_ why: String) -> Profile? {

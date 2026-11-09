@@ -20,7 +20,7 @@ extension Daemon {
         var p = store.newProfileFromTemplate(name: rec.name)
         p.id = uuid
         p.createdAt = rec.createdAt
-        return try? store.save(p)
+        return try? ProfileWrites.write { try store.save(p) }
     }
 
     /// The Profile `rec` has, never one made for it: a sign-in VM's (the

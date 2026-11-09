@@ -1232,7 +1232,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                                              conversation: wsConversation)
             squelchLearnOnPump = true
         }
-        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, local: local,
+        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, path: path, local: local,
                                                                  conversation: wsConversation) {
             ws = g
             req = WSHandshake.strippingExtensions(req).request
@@ -1812,15 +1812,18 @@ final class ResponseRelay: ChannelInboundHandler {
                     // An extension in use anyway (one it wasn't offered): frames
                     // that can't be read, so the opaque pipe, and said so
                     // (macOS: driveTLS's fallback to the pump).
-                    ProxyPolicy.recordScanSkipped(host: ws.host, path: "", engines: ws.engines,
+                    ProxyPolicy.recordScanSkipped(host: ws.host, path: ws.path, engines: ["pii", "prompt_injection"],
                                                   reason: "WebSocket extension \(ext) in use", profileID: ws.profileID)
                 } else {
                     let guest = self.guest
                     let pid = ws.profileID
                     let server = WSServerSide(loop: context.eventLoop,
                                               write: { [weak self] in self?.wsTrace?.toGuest($0); guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
-                                              restorer: ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil,
-                                              learn: ws.squelchLearns ? { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) } : nil)
+                                              // Decided per message, as macOS's guard: PII
+                                              // protection or Squelch turned on mid-socket
+                                              // applies from the next message.
+                                              makeRestorer: { ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil },
+                                              learn: { if ws.squelchLearns { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) } })
                     wsServer = server
                     guard let read = server.feed(rest) else { context.close(promise: nil); return }
                     early = read

@@ -35,6 +35,22 @@ extension DaemonGlobalSuites {
             return (p, vm)
         }
 
+        /// A private workspace's clone is private too: in the set handed to
+        /// the event emitter and the HTTP-log uploader by the time the clone
+        /// exists (before its VM could emit anything).
+        @Test func aPrivateWorkspacesCloneIsKeptOutOfTheCloud() async throws {
+            let prior = ProfileStore.defaultRootDir
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { ProfileStore.defaultRootDir = prior; try? FileManager.default.removeItem(atPath: dir) }
+            ProfileStore.defaultRootDir = URL(fileURLWithPath: dir + "/state/profiles", isDirectory: true)
+            let (base, _) = try await Self.base(d, dir)
+            _ = try ProfileWrites.edit(base.id, store: ProfileStore()) { $0.privateMode = true; return true }
+            let clone = try #require(await d.cloneWorkspace(base.id, runSlug: "private-run", cloner: Self.copier))
+            #expect(ProfileStore().loadAll().first { $0.id == clone.id }?.privateMode == true)
+            let ids = Daemon.streamingPrivateIDs.withLockedValue { $0 }
+            #expect(ids.contains(clone.id) && ids.contains(base.id), "\(ids)")
+        }
+
         @Test func aCloneCarriesTheImagesAndGoesWithTheRun() async throws {
             let prior = ProfileStore.defaultRootDir
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()

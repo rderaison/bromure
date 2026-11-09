@@ -24,16 +24,19 @@ final class WSPromptGuard: @unchecked Sendable {
     let proxy: MitmProxy
     let profileID: UUID
     let host: String
+    /// The upgrade's path, as the records say it.
+    let path: String
     /// The agent's conversation (the upgrade's session key), for Squelch's ledger.
     let conversation: String?
     private let vaultBox = NIOLockedValueBox<PIIVault?>(nil)
 
     // partial: the vault opened at first use (`vault`), the policies read from the proxy when used
     // @port WSContentGuard.init(host: String, path: String, profileID: UUID, vault: PIIVault, piiPolicy: @escaping@Sendable()->PIIPolicy?, injectionPolicy: @escaping@Sendable()->PromptInjectionPolicy?) h=07b25e3fa8b48463 @ca94b963
-    init(proxy: MitmProxy, profileID: UUID, host: String, conversation: String? = nil) {
+    init(proxy: MitmProxy, profileID: UUID, host: String, path: String = "", conversation: String? = nil) {
         self.proxy = proxy
         self.profileID = profileID
         self.host = host
+        self.path = path
         self.conversation = conversation
     }
 
@@ -56,7 +59,7 @@ final class WSPromptGuard: @unchecked Sendable {
     // partial: isModelSocket's rule inline; nil also when none of Squelch, prompt injection or PII is on
     // @port WSContentGuard.static make(host: String, path: String, profileID: UUID, conversation: String?) h=a1a63b41db12b434 @ca94b963
     // @port WSContentGuard.static isModelSocket(host: String, profileID: UUID) h=bb587db4c24e9a39 @ca94b963
-    static func make(proxy: MitmProxy, profileID: UUID, host: String, local: Bool,
+    static func make(proxy: MitmProxy, profileID: UUID, host: String, path: String = "", local: Bool,
                      conversation: String? = nil) -> WSPromptGuard? {
         let h = host.lowercased()
         // The local-inference sentinel only when its engine is off this
@@ -68,7 +71,7 @@ final class WSPromptGuard: @unchecked Sendable {
         let piiOn = proxy.piiPolicy(for: profileID)?.isActive ?? false
         let squelchOn = SquelchSettings.policy(for: profileID)?.enabled ?? false
         guard piOn || piiOn || squelchOn else { return nil }
-        return WSPromptGuard(proxy: proxy, profileID: profileID, host: host, conversation: conversation)
+        return WSPromptGuard(proxy: proxy, profileID: profileID, host: host, path: path, conversation: conversation)
     }
 
     /// The model's messages teach Squelch the calls it makes (what a chained
@@ -81,13 +84,6 @@ final class WSPromptGuard: @unchecked Sendable {
     /// anything): PII protection on when the socket opened.
     // @port-skip linux-only: see WSPromptGuard
     var restoresReplies: Bool { proxy.piiPolicy(for: profileID)?.isActive ?? false }
-
-    /// The engines on, as a skipped scan records them.
-    // @port-skip linux-only: see WSPromptGuard
-    var engines: [String] {
-        [proxy.promptInjectionPolicy(for: profileID)?.isActive == true ? "prompt_injection" : nil,
-         restoresReplies ? "pii" : nil].compactMap { $0 }
-    }
 
     // @port WSContentGuard.client(_: Data) h=997bea6ecc9bf0a1 @ca94b963
     func client(_ payload: Data) async -> Verdict {
@@ -147,8 +143,8 @@ final class WSPromptGuard: @unchecked Sendable {
         }
         if outcome.total > 0 || ms > 250 || outcome.partial {
             FileHandle.standardError.write(Data(String(
-                format: "[pii] %@ (WebSocket %@): %d new value(s) swapped, %d → %d bytes, %.0f ms%@\n",
-                host, type ?? "message", outcome.total, payload.count, outcome.body.count, ms,
+                format: "[pii] %@ %@ (WebSocket %@): %d new value(s) swapped, %d → %d bytes, %.0f ms%@\n",
+                host, path, type ?? "message", outcome.total, payload.count, outcome.body.count, ms,
                 outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
         }
         return .forward(outcome.body == payload && !redacted ? nil : outcome.body)
@@ -243,7 +239,7 @@ final class WSClientFilter {
         if reader.failed { return broken("a frame past \(WSFrameReader.maxFrame >> 20) MiB") }
         if assembler.oversized > oversizedReported {
             oversizedReported = assembler.oversized
-            ProxyPolicy.recordScanSkipped(host: guard_.host, path: "", engines: guard_.engines,
+            ProxyPolicy.recordScanSkipped(host: guard_.host, path: guard_.path, engines: ["pii", "prompt_injection"],
                                           reason: "WebSocket message too large to scan", profileID: guard_.profileID)
         }
     }
@@ -315,12 +311,16 @@ final class WSClientFilter {
 final class WSServerSide: @unchecked Sendable {
     private let loop: EventLoop
     private let write: (Data) -> Void
-    private let restorer: WSServerRestorer?
+    private var restorer: WSServerRestorer?
+    /// Asked at each message until it gives one (PII protection turned on
+    /// mid-socket: the stand-ins the client side swaps in from then on are
+    /// restored), which is then kept (macOS: the guard always owns one).
+    private let makeRestorer: (() -> WSServerRestorer?)?
     /// Each whole text message the model sends, for Squelch's call registry.
     private let learn: ((Data) -> Void)?
     /// Messages read whole (to restore PII, or to learn from them).
     // @port-skip linux-only: see WSServerSide
-    private var wholeMessages: Bool { restorer != nil || learn != nil }
+    private var wholeMessages: Bool { restorer != nil || makeRestorer != nil || learn != nil }
     private let reader = WSFrameReader()
     private var assembler = WSMessageAssembler()
     /// The header of the frame being read, while it's incomplete.
@@ -341,7 +341,8 @@ final class WSServerSide: @unchecked Sendable {
 
     // @port-skip linux-only: see WSServerSide
     init(loop: EventLoop, write: @escaping (Data) -> Void, restorer: WSServerRestorer? = nil,
-         learn: ((Data) -> Void)? = nil) {
+         makeRestorer: (() -> WSServerRestorer?)? = nil, learn: ((Data) -> Void)? = nil) {
+        self.makeRestorer = makeRestorer
         self.loop = loop
         self.write = write
         self.restorer = restorer
@@ -355,7 +356,7 @@ final class WSServerSide: @unchecked Sendable {
     // @port WSContentGuard.server(_: Data) h=9b3577ca8807adf4 @ca94b963
     // @port WSTransformRelay.static upstreamToClient(upstream: Endpoint, client: Endpoint, guard: WSContentGuard, inject: InjectQueue, onChunk: (Data)->Void, onOut: (Data)->Void) h=d042ab20170b3103 @ca94b963
     func feed(_ bytes: Data) -> Data? {
-        if wholeMessages { return feedRestoring(bytes, restorer) }
+        if wholeMessages { return feedRestoring(bytes) }
         var out = Data()
         var i = bytes.startIndex
         while i < bytes.endIndex {
@@ -391,7 +392,7 @@ final class WSServerSide: @unchecked Sendable {
     /// one is held until its last fragment), so an injected event may go
     /// between any two of them.
     // @port-skip linux-only: see WSServerSide
-    private func feedRestoring(_ bytes: Data, _ restorer: WSServerRestorer?) -> Data? {
+    private func feedRestoring(_ bytes: Data) -> Data? {
         reader.feed(bytes)
         var out = Data()
         while let f = reader.next() {
@@ -409,6 +410,7 @@ final class WSServerSide: @unchecked Sendable {
                 passingThrough = !f.fin
             case .complete(let op, let payload, let raw):
                 if op == WSFrame.text, f.rsv == 0 { learn?(payload) }
+                if restorer == nil, let makeRestorer { restorer = makeRestorer() }
                 if f.rsv == 0, let restored = restorer?.restore(payload) {
                     for p in restored { out.append(WSFrame.encode(opcode: op, payload: p, masked: false)) }
                 } else {

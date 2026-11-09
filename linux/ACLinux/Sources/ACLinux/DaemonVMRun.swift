@@ -124,7 +124,8 @@ extension Daemon {
         do {
             if minted {
                 _ = mount(&profile)
-                saved = try store.save(profile)
+                let p = profile
+                saved = try ProfileWrites.write { try store.save(p) }
             } else {
                 guard let s = try ProfileWrites.edit(profile.id, store: store, mount) else {
                     return .failure(VMRunRefusal(response: .error(404, "No workspace '\(ref ?? profile.name)'", ["notFound": .bool(true)])))
