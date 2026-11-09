@@ -91,6 +91,7 @@ extension Daemon {
         if P2PIdentity.current() != nil { await MainActor.run { LinuxAccountKeys.shared.start() } }
         let s = RemoteSettings.load(remoteSettingsPath)
         LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
+        defer { Task { await self.refreshP2PServing() } }
         guard s.enabled else { return }
         do {
             try await MainActor.run { try RemoteAccessServer.shared.start(s.serverConfig) }
@@ -275,6 +276,8 @@ extension Daemon {
                 if enabled { try RemoteAccessServer.shared.start(cfg) } else { RemoteAccessServer.shared.stop() }
             }
         } catch { return .error(400, "\(error)") }
+        // The broker follows the front door (and a port change).
+        await refreshP2PServing()
         return await remoteStatus()
     }
 

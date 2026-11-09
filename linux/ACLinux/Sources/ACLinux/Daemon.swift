@@ -108,6 +108,9 @@ public struct DaemonConfig: Sendable {
     /// (fromEnvironment's default; BROMURE_MODELS_FETCH=0 or a config made
     /// in code, as tests' are: never).
     public var fetchesModels = false
+    /// The multi-user gateway's P2P ingress (bromure-gw-p2p.socket), where
+    /// a user's P2P broker hands its connections (BROMURE_GATEWAY_P2P_SOCKET).
+    public var gatewayP2PSocket = "/run/bromure-ac/p2p.sock"
 
     // @port-skip linux-only: Linux daemon configuration
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
@@ -132,6 +135,7 @@ public struct DaemonConfig: Sendable {
                 if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageOverrideGB = gb }
                 c.multiUser = env["BROMURE_AC_MULTIUSER"] == "1"
                 c.fetchesModels = env["BROMURE_MODELS_FETCH"] != "0"
+                if let p = env["BROMURE_GATEWAY_P2P_SOCKET"], !p.isEmpty { c.gatewayP2PSocket = p }
                 c.gatewayUser = env["BROMURE_AC_GATEWAY_USER"].flatMap { $0.isEmpty ? nil : $0 }
                 c.controlSocketOverride = env["BROMURE_AC_CONTROL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
                 c.sentryCatalog = SentryCatalogSource.fromEnvironment(env)
@@ -2355,6 +2359,7 @@ public actor Daemon {
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }
+        P2PBroker.shared.stopServing()
         mitm?.terminateAllSSHAgents()
         sw.stop()
         await passt.close()

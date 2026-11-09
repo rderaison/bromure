@@ -83,6 +83,42 @@ struct GatewayP2PIngressTests {
         #expect(Self.firstBytes(dir + "/p2p.sock").hasPrefix("SSH-2.0-"), "pinned to this user: the banner")
     }
 
+    /// A user's P2P ingress port (what their broker announces) reaches the
+    /// gateway's pinned listener as that user: the banner once the account
+    /// exists, nothing before.
+    @Test func aUsersIngressPortReachesTheGatewayAsThatUser() async throws {
+        guard getuid() != 0 else { return }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/sock", withIntermediateDirectories: true)
+        let router = GatewayRouter(socketDir: dir + "/sock")
+        let server = await MainActor.run { () -> RemoteAccessServer in
+            let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: dir + "/remote", isDirectory: true)))
+            s.accountRouter = router
+            s.accountPin = GatewayP2PIngress.pin(router: router)
+            return s
+        }
+        try await MainActor.run { try server.start(.init(port: 0, bindAddress: "", passwordAuth: false, pubkeyAuth: true,
+                                                          unixSocketPath: dir + "/p2p.sock")) }
+        defer { Task { @MainActor in server.stop() } }
+        let forwarder = P2PIngressForwarder()
+        let port = try #require(forwarder.ensure(gatewaySocket: dir + "/p2p.sock"))
+        #expect(forwarder.ensure(gatewaySocket: dir + "/p2p.sock") == port, "one ingress per daemon")
+        #expect(Self.firstTCPBytes(port).isEmpty, "no account yet: closed before the banner")
+        let mine = try await GatewayKeyAccessTests.daemon(dir + "/sock", Self.me, GatewayKeyAccessTests.Keys([]))
+        defer { Task { await mine.close() } }
+        #expect(Self.firstTCPBytes(port).hasPrefix("SSH-2.0-"))
+    }
+
+    static func firstTCPBytes(_ port: Int) -> String {
+        guard let fd = P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 2) else { return "" }
+        defer { close(fd) }
+        var tv = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var buf = [UInt8](repeating: 0, count: 64)
+        let n = read(fd, &buf, buf.count)
+        return n > 0 ? String(decoding: buf[0..<n], as: UTF8.self) : ""
+    }
+
     /// What the server says first on a new connection to `path` (2 s at most).
     static func firstBytes(_ path: String) -> String {
         let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)

@@ -164,6 +164,7 @@ extension Daemon {
         switch result {
         case .success(let r):
             await MainActor.run { LinuxAccountKeys.shared.start() }
+            await refreshP2PServing()
             var o: [String: JSONValue] = ["ok": .bool(true), "deviceId": .string(r.record.deviceId)]
             if let s = r.record.orgSlug { o["org"] = .string(s) }
             return ControlResponse(200, .object(o))
@@ -187,6 +188,7 @@ extension Daemon {
             // macOS (P2PIdentity falls back to it): the pulls go on under it.
             if P2PIdentity.current() != nil { LinuxAccountKeys.shared.start() } else { LinuxAccountKeys.shared.signedOut() }
         }
+        await refreshP2PServing()
         return ControlResponse(200, ["ok": .bool(true)])
     }
 

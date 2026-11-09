@@ -55,6 +55,7 @@
     "Sources/AgentCoding/Ext4/Ext4Writer.swift",
     "Sources/AgentCoding/FatClient.swift",
     "Sources/AgentCoding/FatClientTypes.swift",
+    "Sources/AgentCoding/FatForward.swift",
     "Sources/AgentCoding/FirewallRuleActions.swift",
     "Sources/AgentCoding/FolderUpload.swift",
     "Sources/AgentCoding/GitConfigParse.swift",
@@ -201,9 +202,20 @@
     "Sources/AgentCoding/OpenShellGovernance.swift",
     "Sources/AgentCoding/OpenShellProviderLayer.swift",
     "Sources/AgentCoding/P2P/ControlPlaneClient.swift",
+    "Sources/AgentCoding/P2P/DeviceChannel.swift",
     "Sources/AgentCoding/P2P/DeviceIdentity.swift",
+    "Sources/AgentCoding/P2P/P2PBroker.swift",
+    "Sources/AgentCoding/P2P/P2PCandidate.swift",
     "Sources/AgentCoding/P2P/P2PEnroll.swift",
     "Sources/AgentCoding/P2P/P2PIdentity.swift",
+    "Sources/AgentCoding/P2P/P2PSignaling.swift",
+    "Sources/AgentCoding/P2P/P2PTransport.swift",
+    "Sources/AgentCoding/P2P/PortMap.swift",
+    "Sources/AgentCoding/P2P/RelayARQ.swift",
+    "Sources/AgentCoding/P2P/STUN.swift",
+    "Sources/AgentCoding/P2P/TurnRelayTransport.swift",
+    "Sources/AgentCoding/P2P/TurnTCP.swift",
+    "Sources/AgentCoding/P2P/TurnUDP.swift",
     "Sources/AgentCoding/PendingPromptBroker.swift",
     "Sources/AgentCoding/PlanStreamHub.swift",
     "Sources/AgentCoding/PlanStreamProtocol.swift",
@@ -345,10 +357,6 @@
     },
     {
       "path": "Sources/AgentCoding/FatClientTunnelHelper.swift",
-      "reason": "fat-client client side (the Mac is the client)"
-    },
-    {
-      "path": "Sources/AgentCoding/FatForward.swift",
       "reason": "fat-client client side (the Mac is the client)"
     },
     {
