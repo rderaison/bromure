@@ -567,8 +567,9 @@ final class LinuxKubeHost: KubeEngineHost {
                                             scripts: m.scripts.compactMap { n, u in u.map { (n, $0) } },
                                             resume: m.restoreSavedState && !repairAttempted,
                                             folders: m.folders, rescueFor: rescueTargets[m.record.id])
-        // The console from here on is this boot's (serial.log is appended).
-        let console = await daemon.serialLog(id: id)
+        // The console: each Firecracker starts a fresh serial.log (the last
+        // one kept as serial.prev.log), so this boot's lines start at 0.
+        let console = await daemon.serialLog(id: id).map { (path: $0.path, offset: UInt64(0)) }
         if let why = await daemon.startKubeMachineVM(id: id) {
             throw KubeClusterEngine.KubeError.message("\(m.record.name): \(why)")
         }

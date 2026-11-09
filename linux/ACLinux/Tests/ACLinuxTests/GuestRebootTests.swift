@@ -31,6 +31,12 @@ struct GuestRebootTests {
         // Only the tail counts: a line far back is a previous boot's.
         let old = try log("[ 1.0] reboot: Power down\n" + String(repeating: "console noise\n", count: 1000))
         #expect(!Daemon.kernelSaidPowerDown(serialLog: old))
-        for p in [restart, off, halted, both, none, old] { try? FileManager.default.removeItem(atPath: (p as NSString).deletingLastPathComponent) }
+        // An adopted VM's log read from where this daemon took it back: an
+        // earlier boot's last word (appended by an older daemon) isn't this one's.
+        let earlier = "[ 9.0] reboot: Power down\n"
+        let adopted = try log(earlier + "Ubuntu 24.04.5 LTS rb ttyS0\n")
+        #expect(Daemon.kernelSaidPowerDown(serialLog: adopted), "the whole log says it")
+        #expect(!Daemon.kernelSaidPowerDown(serialLog: adopted, from: UInt64(earlier.utf8.count)), "not past adoption")
+        for p in [restart, off, halted, both, none, old, adopted] { try? FileManager.default.removeItem(atPath: (p as NSString).deletingLastPathComponent) }
     }
 }

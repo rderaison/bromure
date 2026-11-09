@@ -10,7 +10,9 @@ extension Daemon {
     /// Reads every running VM's reboot intent (the guest's marker, consumed).
     // @port-skip linux-only: the reboot-intent half of UbuntuSandboxVM.startOutboxPolling, on the host
     func readGuestRebootIntents() {
-        for id in live.keys {
+        // Not a VM that is stopping or being suspended: its snapshot is being
+        // written, and a suspend's end isn't a reboot.
+        for id in live.keys where stopping[id] == nil && !explicitStops.contains(id) {
             let marker = vmDir(id) + "/outbox/reboot-intent"
             guard FileManager.default.fileExists(atPath: marker) else { continue }
             try? FileManager.default.removeItem(atPath: marker)
@@ -52,11 +54,13 @@ extension Daemon {
     /// Whether the guest kernel's last reboot line on the serial console (its
     /// tail, this boot's end) is "Restarting system" rather than "Power down".
     // @port-skip linux-only: Firecracker exits on a guest reset (VZ restarts the guest in place)
-    static func kernelSaidRestart(serialLog: String) -> Bool {
+    static func kernelSaidRestart(serialLog: String, from start: UInt64 = 0) -> Bool {
         guard let h = FileHandle(forReadingAtPath: serialLog) else { return false }
         defer { try? h.close() }
         let size = (try? h.seekToEnd()) ?? 0
-        try? h.seek(toOffset: size > 8192 ? size - 8192 : 0)
+        // This boot's tail only: never before `start` (an adopted VM's log
+        // may hold earlier boots').
+        try? h.seek(toOffset: max(start, size > 8192 ? size - 8192 : 0))
         let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
         guard let last = tail.range(of: "reboot: ", options: .backwards) else { return false }
         return tail[last.upperBound...].hasPrefix("Restarting system")
@@ -69,7 +73,8 @@ extension Daemon {
     // @port-skip linux-only: Firecracker keeps a powered-off guest's VM up (VZ stops it)
     func endPoweredOffGuests() async {
         for (id, l) in live where !starting.contains(id) && stopping[id] == nil && !rebooting.contains(id) {
-            guard let log = l.config.serialLog, Self.kernelSaidPowerDown(serialLog: log),
+            guard !explicitStops.contains(id), let log = l.config.serialLog,
+                  Self.kernelSaidPowerDown(serialLog: log, from: serialLogStart[id] ?? 0),
                   let rec = registry.find(id) else { continue }
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': its guest powered off; ending the VM\n".utf8))
             _ = await deleteVM(rec, action: "kill")
@@ -79,11 +84,13 @@ extension Daemon {
     /// Whether the kernel's last reboot line on the console is a power-off
     /// ("Power down", or the halt it falls back to without ACPI).
     // @port-skip linux-only: see endPoweredOffGuests
-    static func kernelSaidPowerDown(serialLog: String) -> Bool {
+    static func kernelSaidPowerDown(serialLog: String, from start: UInt64 = 0) -> Bool {
         guard let h = FileHandle(forReadingAtPath: serialLog) else { return false }
         defer { try? h.close() }
         let size = (try? h.seekToEnd()) ?? 0
-        try? h.seek(toOffset: size > 8192 ? size - 8192 : 0)
+        // This boot's tail only: never before `start` (an adopted VM's log
+        // may hold earlier boots').
+        try? h.seek(toOffset: max(start, size > 8192 ? size - 8192 : 0))
         let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
         guard let last = tail.range(of: "reboot: ", options: .backwards) else { return false }
         // "Power down", or (no ACPI power-off: Firecracker on x86) "Power off

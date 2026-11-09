@@ -353,6 +353,11 @@ struct DaemonTests {
         #expect(try await api.request("POST", "/profiles", ["name": "atboot", "bootAtStartup": true]).status == 201)
         #expect(try await api.request("POST", "/profiles", ["name": "notboot"]).status == 201)
         kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit()
+        // Once per login (the runtime dir's marker): this start was in the
+        // same login, so a new one is had by clearing it.
+        let marker = w.root + "/run/bromure-ac/booted-at-login"
+        #expect(FileManager.default.fileExists(atPath: marker), "the first start marked the login")
+        try? FileManager.default.removeItem(atPath: marker)
         daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         var state = ""
@@ -364,6 +369,11 @@ struct DaemonTests {
         #expect(state == "running", "booted with the daemon")
         #expect(try w.vm("notboot")?["state"]?.stringValue == "stopped", "the other one left off")
         _ = try? w.cli("vm", "kill", "--force", "atboot")
+        // The daemon restarting in the same login doesn't boot it again.
+        kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit()
+        daemon = try await w.startDaemon()
+        try await Task.sleep(for: .seconds(5))
+        #expect(try w.vm("atboot")?["state"]?.stringValue == "stopped", "a restart in the same login leaves it off")
     }
 
     @Test("a guest that reboots itself boots again: its reboot intent, then Firecracker's exit, then a cold boot")
@@ -401,6 +411,19 @@ struct DaemonTests {
         #expect(state.contains("stopped"), "off after the guest's poweroff: \(state)")
         try await Task.sleep(for: .seconds(10))
         #expect(try w.cli("vm", "ls").1.contains("stopped"), "and not booted again")
+        // A user's stop that races a reboot (its intent read, then the stop)
+        // leaves it off: the stop wins.
+        #expect(try w.cli("vm", "start", "rb").0 == 0)
+        var third = ""
+        for _ in 0..<240 { third = bootID(); if third.count >= 32 { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(third.count >= 32, "booted again for the race")
+        let id = try #require(w.vm("rb")?["id"]?.stringValue)
+        #expect(FileManager.default.createFile(atPath: w.root + "/state/bromure-ac/vms/\(id)/outbox/reboot-intent", contents: Data()))
+        try await Task.sleep(for: .seconds(2))
+        #expect(try w.cli("vm", "kill", "rb").0 == 0)
+        try await Task.sleep(for: .seconds(10))
+        let after = (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? ""
+        #expect(try w.vm("rb")?["state"]?.stringValue == "stopped", "the user's stop won; daemon log:\n\(after.suffix(2000))")
         _ = try? w.cli("vm", "kill", "--force", "rb")
     }
 

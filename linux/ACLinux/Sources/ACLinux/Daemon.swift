@@ -153,6 +153,13 @@ public actor Daemon {
     var guestRebootIntents: Set<String> = []
     /// Stopped after such a reboot: relaunched once their stop is done.
     var pendingGuestRelaunch: Set<String> = []
+    /// Stops the daemon asked for (a client's shutdown, kill, suspend; the
+    /// daemon's own end): never taken for a guest's reboot, even when the
+    /// guest's own exit got there first (macOS: session.stopping).
+    var explicitStops: Set<String> = []
+    /// An adopted VM's serial log size when this daemon took it back: what
+    /// came before is an earlier boot's (logs were once appended across boots).
+    var serialLogStart: [String: UInt64] = [:]
     /// VMs being resumed from a snapshot: a failure leaves them suspended.
     private var restoring: Set<String> = []
     /// The sign-in VMs' Profiles (never saved), by VM id.
@@ -977,6 +984,7 @@ public actor Daemon {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': suspend refused: \(why)\n".utf8))
             return .error(409, why)
         }
+        explicitStops.insert(rec.id)
         let dir = snapshotDir(rec.id)
         try? FileManager.default.removeItem(atPath: dir)
         do {
@@ -987,7 +995,7 @@ public actor Daemon {
         } catch {
             // A VM the snapshot ended (a refusal past the rings' stop) is
             // stopped: no half state is kept.
-            if live[rec.id] == nil { try? FileManager.default.removeItem(atPath: dir) }
+            if live[rec.id] == nil { try? FileManager.default.removeItem(atPath: dir) } else { explicitStops.remove(rec.id) }
             return .error(500, "Suspend failed: \(error)")
         }
         await vmStopped(rec.id, await l.machine.waitUntilStopped())
@@ -1034,9 +1042,17 @@ public actor Daemon {
             if let pid = UUID(uuidString: rec.id) { await dropAbandonedEphemeral(pid) }
             return ControlResponse(200, ["status": "stopped"])
         }
+        // Already ending (its guest's own exit got there first): the user's
+        // stop still wins over a reboot's relaunch.
+        if let t = stopping[rec.id] {
+            explicitStops.insert(rec.id)
+            await t.value
+            return ControlResponse(200, ["status": "stopped"])
+        }
         guard let l = live[rec.id] else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
+        explicitStops.insert(rec.id)
         switch action {
         case "kill":
             await vmStopped(rec.id, await l.machine.kill())
@@ -1653,6 +1669,10 @@ public actor Daemon {
                 }
                 var l = Live(machine: machine, port: port, shell: shell, config: qc, vsock: vsock, browser: browser,
                              storedNet: storeName)
+                // Its console from here on (an older daemon appended across boots).
+                if let serial = qc.serialLog, let size = (try? FileManager.default.attributesOfItem(atPath: serial))?[.size] as? UInt64 {
+                    serialLogStart[rec.id] = size
+                }
                 // The workspace's credentials, before its proxy listener accepts
                 // a connection (they were the previous daemon's): its swap map
                 // (minted credentials and their AWS keys, so a minted key never
@@ -1968,8 +1988,16 @@ public actor Daemon {
         stopping[id] = t
         await t.value
         stopping[id] = nil
-        // Its guest rebooted itself: it boots again (DaemonGuestReboot).
-        if pendingGuestRelaunch.remove(id) != nil { Task { await self.relaunchAfterGuestReboot(id) } }
+        // Its guest rebooted itself: it boots again (DaemonGuestReboot),
+        // unless a stop was asked for meanwhile.
+        let explicit = explicitStops.remove(id) != nil
+        if pendingGuestRelaunch.remove(id) != nil {
+            if !explicit { Task { await self.relaunchAfterGuestReboot(id) } } else {
+                // Stopped for good after all: a `--rm` workspace goes now.
+                rebooting.remove(id)
+                if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
+            }
+        }
     }
 
     // @port-skip linux-only: Linux daemon VM lifecycle
@@ -1987,8 +2015,9 @@ public actor Daemon {
         // outbox share's virtiofsd going first as the guest resets.
         let guestSide: Bool
         switch info.reason { case .guestShutdown, .virtiofsdExited: guestSide = true; default: guestSide = false }
-        let guestRebooted = guestSide && (guestRebootIntents.remove(id) != nil || markerLeft
-            || l.config.serialLog.map(Self.kernelSaidRestart(serialLog:)) == true)
+        let from = serialLogStart.removeValue(forKey: id) ?? 0
+        let guestRebooted = !explicitStops.contains(id) && guestSide && (guestRebootIntents.remove(id) != nil || markerLeft
+            || l.config.serialLog.map { Self.kernelSaidRestart(serialLog: $0, from: from) } == true)
         guestRebootIntents.remove(id)
         if guestRebooted {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)' stopped as its guest rebooted (\(info.reason)): booting it again\n".utf8))
@@ -2085,6 +2114,7 @@ public actor Daemon {
         unwireWatchdog()
         // Squelch's numbers written out (macOS: quit's flush).
         SquelchLedger.shared.flush()
+        for id in live.keys { explicitStops.insert(id) }
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }
