@@ -1,13 +1,12 @@
 # `run_as_user` and the virtiofs shares on a Linux host: options
 
-**Status: options only, for a decision. Nothing here is implemented.**
+**Status: decided, option 6 (2026-11-09).** The user doesn't need shared folders with `run_as_user`. So on a Linux host the daemon refuses to start a workspace whose OpenShell policy sets `run_as_user` (other than the workspace user, `ubuntu` or uid 1000) and that also has shared folders. The start is a 409 that names the run_as user and gives both fixes: remove `run_as_user` from the policy, or remove the shared folders. The refusal is `Daemon.runAsUserBlockedByShares`, in DaemonSandboxGuard.swift (the same launch guard as the sentry and missing-script refusals). A VM taken back running in that state keeps running. Its guest's own status still carries the supervisor's warning that the run_as user can't write the shares.
 
-**Today's behaviour on a Linux host.** The workload starts, and cannot create in or edit uid-1000 files on a user share. The supervisor's own write probe (`check_workdir_access` in bromure-sandboxd) catches this at launch. It puts a warning in the guest status ("run_as uid N cannot write <workdir> -- the agent will start and then fail to save files there"), which reaches the daemon log and the timeline's `sandbox.status`. `test_boot.sh` asserts that warning, and asserts no warning where the workload can write. So nothing fails silently, but this is a warning rather than option 6's refusal.
+Not covered: a policy edit that adds `run_as_user` to a running workspace with shared folders isn't refused. Its guest keeps the supervisor's warning ("run_as uid N cannot write <workdir>"), and its next start is refused.
 
-**What option 1 needs on top of this table** (found while preparing it). virtiofsd's owner mapping is fixed when the share starts, so the host must know the run_as uid at boot. Today the guest picks it: `ensure_user` runs `useradd --system`, so the uid is the first free system uid (999 on today's image, but not guaranteed), under any name the policy gives. Option 1 therefore also needs:
-- a uid contract between sandboxd and the host;
-- the daemon reading run_as from the policy at launch;
-- a live policy change of run_as taking effect only at the next VM restart, since a share's virtiofsd can't be remapped in place.
+`test_boot.sh` checks Linux's behaviour when the guest suites set `BROMURE_HOST_OS=linux` (linux/guest-suites/run.sh). There, the run_as user can't edit or create files in a virtiofs workdir, and a write that works is a FAIL: the refusal would be stale. On the Mac the same checks still require the writes to succeed. Both expected-failures.tsv entries are gone.
+
+The options below are kept for the record.
 
 ## The problem
 

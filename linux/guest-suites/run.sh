@@ -4,6 +4,8 @@
 # the baked amd64 image: test_sentry -> test_boot (all configs) -> test_sandbox -> test_net_flow
 # -> test_strict -> test_lockdown --raise (last: raising lockdown is one-way for the boot).
 #
+# The suites run with BROMURE_HOST_OS=linux: what differs on a Linux host (test_boot's run_as
+# user on a virtiofs share, which the daemon refuses before boot) is checked as Linux behaves.
 # The VM is a throwaway: a private daemon (its own XDG dirs), one Firecracker VM with the ext4 home disk.
 # The suites expect the repo layout plus the drop's `patched/` copies, so both are staged into the
 # VM's meta share and copied to /opt/repo; the guest gets the kernel headers (test_sentry builds
@@ -73,7 +75,7 @@ declare -A RC SECS
 for s in "${SUITES[@]}"; do
   args=""; [ "$s" = test_lockdown ] && args="--raise"
   t=$(date +%s)
-  cli vm exec --timeout 1800 gs -- bash -c "cd /opt/repo/scripts/openshell-guest && bash tests/$s.sh $args 2>&1; echo \"SUITE_RC=\$?\"" > "$OUT/$s.log" 2>&1
+  cli vm exec --timeout 1800 gs -- bash -c "cd /opt/repo/scripts/openshell-guest && BROMURE_HOST_OS=linux bash tests/$s.sh $args 2>&1; echo \"SUITE_RC=\$?\"" > "$OUT/$s.log" 2>&1
   RC[$s]=$(sed -n 's/^SUITE_RC=//p' "$OUT/$s.log" | tail -1); RC[$s]=${RC[$s]:-none}
   SECS[$s]=$(( $(date +%s) - t ))
   log "$s: rc ${RC[$s]} in ${SECS[$s]}s"

@@ -37,6 +37,11 @@
 # it exercised the policy plumbing and none of the above.
 #
 # Run: tests/test_boot.sh
+#
+# On a guest of a LINUX host, run it with BROMURE_HOST_OS=linux
+# (linux/guest-suites/run.sh sets it): there a run_as user can't write a
+# virtiofs share, and the daemon refuses that case before boot
+# (linux/VIRTIOFS_DAC.md). Without it the Mac's behaviour is required.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -990,15 +995,49 @@ import json;print(json.dumps((json.load(open('$WORK/run/status.json')).get('addi
         else
             bad "the sandbox could not read $wd/host.txt: $(sandbox_sh "cat '$wd/host.txt'" 2>&1 | tail -1)"
         fi
+        #    On a Linux host a separate run_as user can't write a virtiofs
+        #    share (its files stay the workspace user's), so the daemon
+        #    refuses that combination before boot (linux/VIRTIOFS_DAC.md,
+        #    option 6). Here, past the daemon, the attempts must still fail:
+        #    a write that now works means the refusal is stale.
+        local linux_dac=no
+        if [ "${BROMURE_HOST_OS:-}" = linux ] && [ -n "$runas" ] && [ "$runas" != "$(id -u)" ] \
+           && [ "$(findmnt -no FSTYPE --target "$wd" 2>/dev/null)" = virtiofs ]; then
+            linux_dac=yes
+        fi
         if sandbox_sh "printf 'appended by the sandbox\n' >> '$wd/host.txt'" >/dev/null 2>&1 \
            && grep -q "appended by the sandbox" "$wd/host.txt" 2>/dev/null; then
-            ok "the sandbox can EDIT a host-created file, and the edit is visible outside"
+            if [ "$linux_dac" = yes ]; then
+                bad "uid $runas edited a host-created file in $wd on a Linux host: the daemon's run_as + shared folders refusal is stale (linux/VIRTIOFS_DAC.md)"
+            else
+                ok "the sandbox can EDIT a host-created file, and the edit is visible outside"
+            fi
+        elif [ "$linux_dac" = yes ]; then
+            local why
+            why=$(sandbox_sh "printf x >> '$wd/host.txt'" 2>&1 | tail -1)
+            if printf '%s' "$why" | grep -q 'Permission denied'; then
+                ok "uid $runas can't edit a host-created file in $wd (permission denied), as on any Linux host (the daemon refuses this case before boot)"
+            else
+                bad "uid $runas's edit in $wd failed, but not with a permission error: $why"
+            fi
         else
             bad "the sandbox could not append to $wd/host.txt: $(sandbox_sh "printf x >> '$wd/host.txt'" 2>&1 | tail -1)"
         fi
         if sandbox_sh "echo made-in-the-sandbox > '$wd/guest.txt'" >/dev/null 2>&1 \
            && [ -f "$wd/guest.txt" ]; then
-            ok "the sandbox can CREATE a file in the share (owner outside: uid $(stat -c '%u' "$wd/guest.txt"))"
+            if [ "$linux_dac" = yes ]; then
+                bad "uid $runas created a file in $wd on a Linux host: the daemon's run_as + shared folders refusal is stale (linux/VIRTIOFS_DAC.md)"
+            else
+                ok "the sandbox can CREATE a file in the share (owner outside: uid $(stat -c '%u' "$wd/guest.txt"))"
+            fi
+        elif [ "$linux_dac" = yes ]; then
+            local why
+            why=$(sandbox_sh "echo x > '$wd/guest.txt'" 2>&1 | tail -1)
+            if printf '%s' "$why" | grep -q 'Permission denied'; then
+                ok "uid $runas can't create a file in $wd (permission denied), as on any Linux host (the daemon refuses this case before boot)"
+            else
+                bad "uid $runas's create in $wd failed, but not with a permission error: $why"
+            fi
         else
             bad "the sandbox could not create a file in $wd: $(sandbox_sh "echo x > '$wd/guest.txt'" 2>&1 | tail -1)"
         fi
