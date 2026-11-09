@@ -40,8 +40,36 @@ struct DaemonTests {
         }
         var socket: String { root + "/run/bromure-ac/control.sock" }
 
+        /// The world gone: first every process of ours still running in it
+        /// (a daemon that crashed or wasn't stopped leaves its VMs -- they
+        /// outlive it by design -- holding their deleted disks open), then
+        /// its directory.
+        func destroy() {
+            let mine = getuid(), mark = root + "/"
+            for _ in 0..<2 {
+                for entry in (try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? [] {
+                    guard let pid = Int32(entry), pid != getpid() else { continue }
+                    var st = stat()
+                    guard stat("/proc/\(entry)", &st) == 0, st.st_uid == mine else { continue }
+                    // Plain reads: a /proc file can change or go while read.
+                    let fd = open("/proc/\(entry)/cmdline", O_RDONLY | O_CLOEXEC)
+                    guard fd >= 0 else { continue }
+                    var buf = [UInt8](repeating: 0, count: 8192)
+                    let n = read(fd, &buf, buf.count)
+                    close(fd)
+                    guard n > 0, String(decoding: buf[0..<n].map { $0 == 0 ? 0x20 : $0 }, as: UTF8.self).contains(mark) else { continue }
+                    kill(pid, SIGKILL)
+                }
+                usleep(200_000)
+            }
+            try? FileManager.default.removeItem(atPath: root)
+        }
+
         init() throws {
-            root = "/tmp/acl-dm-\(UUID().uuidString.prefix(6))"
+            // BROMURE_TEST_WORLD_DIR: somewhere other than /tmp (a VM's disks
+            // are GBs; /tmp may be a small tmpfs with a user quota).
+            let base = ProcessInfo.processInfo.environment["BROMURE_TEST_WORLD_DIR"] ?? "/tmp"
+            root = base + "/acl-dm-\(UUID().uuidString.prefix(6))"
             try FileManager.default.createDirectory(atPath: root + "/run", withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
         }
@@ -116,7 +144,7 @@ struct DaemonTests {
     @Test("run, ls, exec, exec -i, suspend/resume, kill; a SIGKILLed daemon's Firecracker is ended by the next one (no fd store outside systemd); SIGTERM ends everything")
     func lifecycle() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         var daemon = try await w.startDaemon()
 
         let (rc, id, err) = try w.cli("vm", "run", "--name", "dm1")
@@ -227,7 +255,7 @@ struct DaemonTests {
         // HomeSizingTests), which depends on this host.
         var w = try World()
         w.extraEnv["BROMURE_AC_HOME_GB"] = "16"
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
 
@@ -310,7 +338,7 @@ struct DaemonTests {
     @Test("each VM has its own machine-id, not the base image's, and keeps it across kill/start")
     func machineID() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
 
@@ -347,7 +375,7 @@ struct DaemonTests {
     @Test("a workspace set to boot at login starts with the daemon; one that isn't stays off")
     func bootAtStartup() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         var daemon = try await w.startDaemon()
         let api = FirecrackerAPI(socketPath: w.socket)
         #expect(try await api.request("POST", "/profiles", ["name": "atboot", "bootAtStartup": true]).status == 201)
@@ -379,7 +407,7 @@ struct DaemonTests {
     @Test("a guest that reboots itself boots again: its reboot intent, then Firecracker's exit, then a cold boot")
     func guestReboot() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         #expect(try w.cli("vm", "run", "--name", "rb").0 == 0)
@@ -436,7 +464,7 @@ struct DaemonTests {
     @Test("a stop sent while the reboot route shuts the VM down wins: it stays off")
     func aStopDuringARebootWins() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         #expect(try w.cli("vm", "run", "--name", "rr").0 == 0)
@@ -468,7 +496,7 @@ struct DaemonTests {
     @Test("a boot that dies on a filesystem error is offered Repair, then Reset once a repair didn't help; Reset boots it clean")
     func bootFailureRemedy() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         let ran = try w.cli("vm", "run", "--name", "bf")
@@ -518,6 +546,14 @@ struct DaemonTests {
         }
         let log = { (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? "" }
         #expect(try await answer("Repair Disk"), "offered a repair; daemon log:\n\(log().suffix(3000))")
+        // A user's start while the remedy has the disk (stopping it, then
+        // fsck) is refused: none boots it before the repair has run.
+        var startedEarly = false
+        for _ in 0..<60 where !log().contains("native fsck on") {
+            if (try? w.cli("vm", "start", "bf"))?.0 == 0, !log().contains("native fsck on") { startedEarly = true }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        #expect(!startedEarly, "a start landed before the repair; daemon log:\n\(log().suffix(3000))")
         // A repair (the disk is clean) doesn't change that: the next boot fails the same way.
         #expect(try await answer("Reset System Disk"), "then a reset; daemon log:\n\(log().suffix(3000))")
         // The reset re-clones the system disk: the boot is clean, the failure gone.
@@ -541,7 +577,7 @@ struct DaemonTests {
     @Test("workspaces are Profiles: POST /profiles makes one from the template with its VM registered (stopped); GET lists it")
     func profiles() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         let api = FirecrackerAPI(socketPath: w.socket)
@@ -582,7 +618,7 @@ struct DaemonTests {
     @Test("vm run -v: the host folder is ~/<basename> in the guest, both ways; --rm deletes the workspace when it stops; a workspace runs again by name")
     func runMountsAndRm() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         let proj = w.root + "/host/proj"
@@ -642,7 +678,7 @@ struct DaemonTests {
         // A vault of the test's own, its key in a file there (never sealed
         // with the user's systemd credentials).
         w.extraEnv["BROMURE_VAULT_KEY_SOURCE"] = "file"
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         let keyDir = w.root + "/keys"
@@ -683,7 +719,7 @@ struct DaemonTests {
     @Test("POST /sessions/<workspace>/tab: agentd opens and closes the tab (tmux windows, read back from tabs.txt)")
     func tabs() async throws {
         let w = try World()
-        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        defer { w.destroy() }
         let daemon = try await w.startDaemon()
         defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
         let api = FirecrackerAPI(socketPath: w.socket)

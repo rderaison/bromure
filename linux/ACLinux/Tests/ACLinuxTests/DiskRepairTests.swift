@@ -155,6 +155,10 @@ struct RepairMarksTests {
     @Test func aStartDuringARepairIsRefusedAndAllowedAfter() {
         let marks = RepairMarks(), rec = Self.stopped()
         #expect(Daemon.startRefusal(rec, repairing: marks) == nil, "a stopped machine starts")
+        // Between a reboot's stop and its boot (a boot remedy's too): only the
+        // reboot's own start (start's partOfReboot) boots it.
+        let rebooting = Daemon.startRefusal(rec, repairing: marks, rebooting: true)
+        #expect(rebooting?.status == 409 && rebooting?.body["error"]?.stringValue?.contains("rebooting") == true)
         #expect(marks.insert(rec.id))
         let r = Daemon.startRefusal(rec, repairing: marks)
         #expect(r?.status == 409 && r?.body["error"]?.stringValue?.contains("disks repaired") == true)

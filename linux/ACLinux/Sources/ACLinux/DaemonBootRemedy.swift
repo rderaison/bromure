@@ -96,6 +96,12 @@ extension Daemon {
         guard live[id] != nil, pendingBootRemedies[id] == nil, let rec = registry.find(id) else { return }
         pendingBootRemedies[id] = remedy
         if remedy == .repairDisk { bootRepairAttempted.insert(id) }
+        // The disk held from before the stop until the remedy is done (macOS:
+        // whileHoldingDisk): a start in between -- the record says stopped as
+        // soon as the kill's teardown is done -- is refused as for a repair.
+        guard repairMarks.insert(id) else { return }
+        var marked = true
+        defer { if marked { repairMarks.remove(id) } }
         rebooting.insert(id)
         defer { rebooting.remove(id); stopsDuringReboot.remove(id); pendingBootRemedies[id] = nil }
         try? FileManager.default.removeItem(atPath: snapshotDir(id))
@@ -103,15 +109,19 @@ extension Daemon {
         for _ in 0..<200 where live[id] != nil || stopping[id] != nil {
             try? await Task.sleep(for: .milliseconds(100))
         }
-        // The disk held while the remedy works on it (macOS: whileHoldingDisk):
-        // a start meanwhile is refused as for a repair.
-        guard repairMarks.insert(id) else { return }
-        await repairMarks.whileMarked(id) { await executeBootRemedy(remedy, id: id) }
+        // Never on a disk a VM still has open (or one being started).
+        guard live[id] == nil, stopping[id] == nil, !starting.contains(id) else {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)' didn't stop for its disk remedy; none run\n".utf8))
+            return
+        }
+        await executeBootRemedy(remedy, id: id)
+        repairMarks.remove(id)
+        marked = false
         // A stop asked meanwhile leaves the workspace off (a `--rm` one goes).
         if await stoppedDuringReboot(id) { return }
         guard var now = registry.find(id), live[id] == nil else { return }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
-        let started = await start(now)
+        let started = await start(now, partOfReboot: true)
         if await stoppedDuringReboot(id) { return }
         if started.status >= 300 {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(now.name)' didn't boot after its disk remedy: \(started.body["error"]?.stringValue ?? "HTTP \(started.status)")\n".utf8))

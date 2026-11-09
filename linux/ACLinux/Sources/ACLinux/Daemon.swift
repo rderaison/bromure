@@ -1090,9 +1090,11 @@ public actor Daemon {
 
     /// Why `rec` may not be started now, or nil: not stopped or suspended, a
     /// QEMU machine, or a cluster machine whose disks the host is repairing
-    /// (marked, or a rescue for it still on record: `rescued`).
+    /// (marked, or a rescue for it still on record: `rescued`), or one a
+    /// reboot is between its stop and its boot (`rebooting`: the reboot boots
+    /// it itself; a disk remedy may be working on it).
     // @port-skip linux-only: start's guards (testable)
-    static func startRefusal(_ rec: VMRecord, repairing: RepairMarks, rescued: Bool = false) -> ControlResponse? {
+    static func startRefusal(_ rec: VMRecord, repairing: RepairMarks, rescued: Bool = false, rebooting: Bool = false) -> ControlResponse? {
         guard rec.state == .stopped || rec.state == .suspended else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
         }
@@ -1102,14 +1104,20 @@ public actor Daemon {
         guard !repairing.contains(rec.id), !rescued else {
             return .error(409, "'\(rec.name)' is having its disks repaired; start it once that's done")
         }
+        guard !rebooting else {
+            return .error(409, "'\(rec.name)' is rebooting: it boots again by itself")
+        }
         return nil
     }
 
     /// `POST /vms/{id}/start` (Linux): boot a stopped VM again, on its own
     /// overlay and home image.
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
-    func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false) async -> ControlResponse {
-        if let refusal = Self.startRefusal(rec, repairing: repairMarks, rescued: hasRescue(for: rec.id)) { return refusal }
+    /// `partOfReboot`: the reboot's own boot (its relaunch, the reboot route,
+    /// a boot remedy), the one start a rebooting VM takes.
+    func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false) async -> ControlResponse {
+        if let refusal = Self.startRefusal(rec, repairing: repairMarks, rescued: hasRescue(for: rec.id),
+                                           rebooting: rebooting.contains(rec.id) && !partOfReboot) { return refusal }
         // A workspace marked compromised boots only once the mark is gone
         // (macOS: launch's compromised-disk check).
         if !rec.managed, let p = existingProfile(for: rec), Self.isCompromised(p, store: profileStore) {

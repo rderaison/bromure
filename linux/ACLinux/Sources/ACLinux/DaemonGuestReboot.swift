@@ -45,7 +45,7 @@ extension Daemon {
         if await stoppedDuringReboot(id) { return }
         guard var now = registry.find(id), live[id] == nil else { return }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
-        let started = await start(now)
+        let started = await start(now, partOfReboot: true)
         if await stoppedDuringReboot(id) { return }
         guard started.status >= 300 else { return }
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(now.name)' didn't boot again after its guest rebooted: \(started.body["error"]?.stringValue ?? "HTTP \(started.status)")\n".utf8))

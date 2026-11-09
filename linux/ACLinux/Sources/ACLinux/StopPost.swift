@@ -51,7 +51,7 @@ public enum StopPost {
         guard shouldSweep(facts) else { return "stop-post: \(what): a restart follows; leaving the VMs for it to re-adopt" }
         let procs = "/sys/fs/cgroup" + own.cgroup + "/cgroup.procs"
         func others() -> [Int32] {
-            ((try? String(contentsOfFile: procs, encoding: .utf8)) ?? "").split(separator: "\n")
+            (ProcFS.text(procs) ?? "").split(separator: "\n")
                 .compactMap { Int32($0) }.filter { $0 != getpid() }
         }
         let first = others()

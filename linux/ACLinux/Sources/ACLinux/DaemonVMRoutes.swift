@@ -44,7 +44,7 @@ extension Daemon {
         if await stoppedDuringReboot(rec.id) { return ControlResponse(409, ["ok": false, "error": "stopped during the reboot"]) }
         guard var now = registry.find(rec.id) else { return ControlResponse(409, ["ok": false, "error": "the VM is gone"]) }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
-        let started = await start(now)
+        let started = await start(now, partOfReboot: true)
         if await stoppedDuringReboot(rec.id) { return ControlResponse(409, ["ok": false, "error": "stopped during the reboot"]) }
         rebooting.remove(rec.id)
         let up = started.status < 300
