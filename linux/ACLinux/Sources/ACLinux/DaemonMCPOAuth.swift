@@ -54,8 +54,54 @@ enum MCPOAuthBroker {
     /// address too) or unspecified; a private, CGNAT or ULA address only
     /// when the workspace's own egress policy allows that destination (an
     /// in-house identity provider). Tests on loopback swap it.
-    nonisolated(unsafe) static var endpointRefusal: @Sendable (URL, EndpointPolicy) async -> String? = { url, policy in
-        await checkEndpoint(url, policy)
+    nonisolated(unsafe) static var endpointCheck: @Sendable (URL, EndpointPolicy) async -> EndpointCheck = { url, policy in
+        await endpointAddresses(url, policy)
+    }
+
+    enum RefreshOutcome: Sendable { case refreshed(MCPOAuthState), failed }
+
+    /// The refreshes under way, one per server and refresh token.
+    // @port-skip linux-only: single-flight refreshes (macOS refreshes in its one launch path)
+    final class Flights: @unchecked Sendable {
+        private let running = NIOLockedValueBox<[String: Task<RefreshOutcome, Never>]>([:])
+        /// The refresh under way for `key`, or a new one running `work`.
+        // @port-skip linux-only: see Flights
+        func flight(_ key: String, _ work: @escaping @Sendable () async -> RefreshOutcome) -> Task<RefreshOutcome, Never> {
+            running.withLockedValue { all in
+                if let t = all[key] { return t }
+                let t = Task { [running] in
+                    let r = await work()
+                    running.withLockedValue { _ = $0.removeValue(forKey: key) }
+                    return r
+                }
+                all[key] = t
+                return t
+            }
+        }
+        // @port-skip linux-only: see Flights
+        var count: Int { running.withLockedValue { $0.count } }
+    }
+    static let flights = Flights()
+
+    /// What a refresh may connect to.
+    enum EndpointCheck: Sendable, Equatable {
+        /// A single-user server: as macOS, the name as URLSession looks it up.
+        case unchecked
+        /// Only these addresses, checked (the name isn't looked up again).
+        case pinned([OpenShellPolicy.IPAddress])
+        case refused(String)
+    }
+
+    /// How a pinned request is sent (tests answer it themselves).
+    nonisolated(unsafe) static var pinnedSend: @Sendable (URLRequest, OpenShellPolicy.IPAddress) async throws -> (HTTPURLResponse, Data) = { req, ip in
+        try await PinnedHTTPS.send(req, to: ip)
+    }
+
+    /// Why the daemon won't POST to `url`, or nil (endpointAddresses' verdict).
+    // @port-skip linux-only: a shared server's check on a user-supplied endpoint
+    static func checkEndpoint(_ url: URL, _ policy: EndpointPolicy, timeout: Duration = .seconds(5)) async -> String? {
+        if case .refused(let why) = await endpointAddresses(url, policy, timeout: timeout) { return why }
+        return nil
     }
 
     /// `work`'s result, or nil once `timeout` passes first: one continuation
@@ -86,24 +132,24 @@ enum MCPOAuthBroker {
     nonisolated(unsafe) static var resolver: @Sendable (String, Int) -> [OpenShellPolicy.IPAddress] = { MitmProxy.resolve($0, port: $1) }
 
     // @port-skip linux-only: a shared server's check on a user-supplied endpoint
-    static func checkEndpoint(_ url: URL, _ policy: EndpointPolicy, timeout: Duration = .seconds(5)) async -> String? {
-        guard policy.multiUser else { return nil }
-        guard url.scheme?.lowercased() == "https" else { return "the token endpoint isn't https" }
-        guard let host = url.host, !host.isEmpty else { return "the token endpoint has no host" }
+    static func endpointAddresses(_ url: URL, _ policy: EndpointPolicy, timeout: Duration = .seconds(5)) async -> EndpointCheck {
+        guard policy.multiUser else { return .unchecked }
+        guard url.scheme?.lowercased() == "https" else { return .refused("the token endpoint isn't https") }
+        guard let host = url.host, !host.isEmpty else { return .refused("the token endpoint has no host") }
         let port = url.port ?? 443
         let resolve = resolver
         let ips = await firstOf(timeout: timeout, { await SecureDir.offPool { resolve(host, port) } }) ?? []
-        guard !ips.isEmpty else { return "the token endpoint's host doesn't resolve (or took over \(timeout))" }
+        guard !ips.isEmpty else { return .refused("the token endpoint's host doesn't resolve (or took over \(timeout))") }
         for ip in ips {
             if OpenShellPolicy.isAlwaysBlocked(ip) || MitmProxy.v4(ip).map({ OpenShellPolicy.isAlwaysBlocked(.v4($0)) }) == true {
-                return "the token endpoint resolves to a loopback, link-local or unspecified address (\(ip))"
+                return .refused("the token endpoint resolves to a loopback, link-local or unspecified address (\(ip))")
             }
         }
         // What the MITM refuses every workspace on a multi-user server, public
         // answers too: this server's own addresses (another user's service may
         // listen there) and every account's LAN pool.
         if let why = MitmProxy.destinationDenial(host: host, resolved: ips, hostAddresses: true, hostOwn: hostOwn) {
-            return "the token endpoint: \(why)"
+            return .refused("the token endpoint: \(why)")
         }
         // No binary identity here (the daemon's own request): neither check
         // enforces the policy's binaries.
@@ -114,10 +160,10 @@ enum MCPOAuthBroker {
             if egress.verdict(ip: v4, hostnames: [host], proto: .tcp, port: UInt16(clamping: port)) == .deny
                 || MitmProxy.openShellDenial(egress.openShell, host: host, port: port, resolved: [ip],
                                             identity: nil, enforceBinaries: false) != nil {
-                return "the token endpoint resolves to a private address (\(ip)) the workspace's egress policy doesn't allow"
+                return .refused("the token endpoint resolves to a private address (\(ip)) the workspace's egress policy doesn't allow")
             }
         }
-        return nil
+        return .pinned(ips)
     }
 
     // @port MCPOAuthBroker.static refresh(state: MCPOAuthState) h=4a873148d744f90e @55adf953
@@ -126,7 +172,8 @@ enum MCPOAuthBroker {
               let tokenURL = URL(string: state.tokenEndpoint) else {
             throw BrokerError.refreshFailed("No refresh token or invalid token endpoint")
         }
-        if let why = await endpointRefusal(tokenURL, policy) { throw BrokerError.refreshFailed(why) }
+        let check = await endpointCheck(tokenURL, policy)
+        if case .refused(let why) = check { throw BrokerError.refreshFailed(why) }
         var body = [
             "grant_type=refresh_token",
             "refresh_token=\(formEncode(refreshToken))",
@@ -140,7 +187,20 @@ enum MCPOAuthBroker {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(body.joined(separator: "&").utf8)
         request.timeoutInterval = 10
-        let (data, response) = try await session.data(for: request)
+        let data: Data, response: URLResponse
+        switch check {
+        case .pinned(let ips):
+            // Only to an address that was checked; the first that answers.
+            var last: Error = BrokerError.refreshFailed("no address to connect to")
+            var got: (HTTPURLResponse, Data)?
+            for ip in ips {
+                do { got = try await pinnedSend(request, ip); break } catch { last = error }
+            }
+            guard let got else { throw last }
+            (response, data) = got
+        default:
+            (data, response) = try await session.data(for: request)
+        }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw BrokerError.refreshFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
@@ -178,7 +238,7 @@ extension Daemon {
     /// in the staged copy only, as on macOS.
     // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=11cb4a0e133dab98 @4237c02e
     static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false,
-                                        keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) -> Void)? = nil) async -> Profile {
+                                        keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void)? = nil) async -> Profile {
         var profile = profile
         let policy = MCPOAuthBroker.EndpointPolicy(multiUser: multiUser, egress: profile.resolvedEgressPolicy)
         for i in profile.mcpServers.indices {
@@ -187,26 +247,34 @@ extension Daemon {
                   let oauth = profile.mcpServers[i].oauthState else { continue }
             guard !oauth.accessToken.isEmpty else { continue }
             var use = oauth
-            if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60, oauth.refreshToken != nil {
+            if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60, let refreshToken = oauth.refreshToken {
                 let old = oauth, name = profile.mcpServers[i].name, ws = profile.name
                 let serverID = profile.mcpServers[i].id, profileID = profile.id
-                // The refreshed state is saved (macOS: persistRefreshedMCPOAuth),
-                // even one that comes after this boot stopped waiting: it spent
-                // the stored refresh token on a rotating server.
-                let refreshed = await MCPOAuthBroker.firstOf(timeout: .seconds(10), { () async -> MCPOAuthState? in
-                    do { return try await MCPOAuthBroker.refresh(state: old, policy: policy) }
-                    catch {
+                // One refresh per server and refresh token: a launch, a live
+                // push or a relaunch meanwhile waits for the one under way
+                // (spending the token twice gets a rotating server's grant
+                // revoked). It saves its own result (macOS:
+                // persistRefreshedMCPOAuth), even one after this wait: it
+                // spent the stored token.
+                let flight = MCPOAuthBroker.flights.flight("\(serverID)|\(refreshToken)") {
+                    do {
+                        let refreshed = try await MCPOAuthBroker.refresh(state: old, policy: policy)
+                        await keep?(refreshed, old, serverID, profileID)
+                        return .refreshed(refreshed)
+                    } catch {
                         // Said, never silent (no token in the message).
                         FileHandle.standardError.write(Data(
                             "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh failed, the old token kept: \(error)\n".utf8))
-                        return nil
+                        return .failed
                     }
-                }, late: { late in keep?(late, old, serverID, profileID) })
-                if let refreshed {
+                }
+                switch await MCPOAuthBroker.firstOf(timeout: .seconds(10), { await flight.value }) {
+                case .refreshed(let refreshed)?:
                     use = refreshed
                     profile.mcpServers[i].oauthState = refreshed
-                    keep?(refreshed, old, serverID, profileID)
-                } else {
+                case .failed?:
+                    break
+                case nil:
                     FileHandle.standardError.write(Data(
                         "bromure-ac daemon: '\(ws)': MCP server '\(name)': no refreshed token within 10 s, the old one kept\n".utf8))
                 }

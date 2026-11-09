@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import NIOConcurrencyHelpers
 import SandboxEngine
 import Testing
@@ -65,9 +68,9 @@ struct MCPOAuthTests {
     /// The loopback endpoints below: only the endpoint check is relaxed (the
     /// transport, with its no-redirect rule, stays the daemon's).
     static func onLoopback<T>(_ body: () async throws -> T) async rethrows -> T {
-        let prior = MCPOAuthBroker.endpointRefusal
-        MCPOAuthBroker.endpointRefusal = { _, _ in nil }
-        defer { MCPOAuthBroker.endpointRefusal = prior }
+        let prior = MCPOAuthBroker.endpointCheck
+        MCPOAuthBroker.endpointCheck = { _, _ in .unchecked }
+        defer { MCPOAuthBroker.endpointCheck = prior }
         return try await body()
     }
 
@@ -234,6 +237,73 @@ struct MCPOAuthTests {
         var reauthorized = p
         reauthorized.mcpServers[0].oauthState?.refreshToken = "FROM-A-NEW-AUTHORIZATION"
         #expect(!ProfileStore.mergeRefreshedMCPOAuth(k.0, from: k.1, serverID: k.2, into: &reauthorized), "a re-authorization wins")
+    } }
+
+    /// DNS rebinding: the request goes to an address that was checked; the
+    /// name isn't looked up a second time (a later answer, say 127.0.0.1,
+    /// never reaches the connect).
+    @Test func theRefreshConnectsOnlyToACheckedAddress() async throws {
+        let priorR = MCPOAuthBroker.resolver, priorS = MCPOAuthBroker.pinnedSend, priorH = MCPOAuthBroker.hostOwn
+        let lookups = NIOLockedValueBox(0), dialed = NIOLockedValueBox<[String]>([])
+        MCPOAuthBroker.resolver = { _, _ in
+            let n = lookups.withLockedValue { $0 += 1; return $0 }
+            return [OpenShellPolicy.IPAddress(n == 1 ? "93.184.216.34" : "127.0.0.1")!]
+        }
+        MCPOAuthBroker.hostOwn = { _ in false }
+        MCPOAuthBroker.pinnedSend = { req, ip in
+            dialed.withLockedValue { $0.append("\(ip)") }
+            let r = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return (r, Data(#"{"access_token":"PINNED"}"#.utf8))
+        }
+        defer { MCPOAuthBroker.resolver = priorR; MCPOAuthBroker.pinnedSend = priorS; MCPOAuthBroker.hostOwn = priorH }
+        let state = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "https://idp.example/token",
+                                  accessToken: "A", refreshToken: "R")
+        let out = try await MCPOAuthBroker.refresh(state: state, policy: .init(multiUser: true, egress: .allowAll))
+        #expect(out.accessToken == "PINNED")
+        #expect(dialed.withLockedValue { $0 } == ["93.184.216.34"], "the checked answer, not a second one")
+        #expect(lookups.withLockedValue { $0 } == 1, "looked up once")
+    }
+
+    /// The pinned request itself: TCP to the given address, the URL's name
+    /// as the TLS server name and what the certificate must match.
+    @Test func aPinnedRequestVerifiesTheNameAtTheGivenAddress() async throws {
+        let ca = try TestCA("pinned test CA")
+        let server = try MTLSServer(host: "127.0.0.1", leaf: try ca.leaf("token.test", dns: ["token.test"], client: false), clientCA: nil,
+                                    reply: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{\"access_token\":\"T\"}")
+        defer { server.stop() }
+        var req = URLRequest(url: URL(string: "https://token.test:\(server.port)/token")!)
+        req.httpMethod = "POST"
+        req.httpBody = Data("grant_type=refresh_token".utf8)
+        let lo = OpenShellPolicy.IPAddress("127.0.0.1")!
+        let (resp, body) = try await PinnedHTTPS.send(req, to: lo, extraRoots: [ca.nio], timeout: 5)
+        #expect(resp.statusCode == 200 && String(decoding: body, as: UTF8.self).contains("access_token"))
+        #expect(server.lastRequest.value.hasPrefix("POST /token HTTP/1.1"), "\(server.lastRequest.value.prefix(60))")
+        // Another name at that address: the certificate doesn't match it.
+        var wrong = req
+        wrong.url = URL(string: "https://other.test:\(server.port)/token")!
+        await #expect(throws: (any Error).self) { _ = try await PinnedHTTPS.send(wrong, to: lo, extraRoots: [ca.nio], timeout: 5) }
+        // Nor without the test CA (the system's roots only).
+        await #expect(throws: (any Error).self) { _ = try await PinnedHTTPS.send(req, to: lo, timeout: 5) }
+    }
+
+    /// One refresh per server and refresh token: concurrent stagings wait for
+    /// the one under way, which saves its result once.
+    @Test func concurrentStagingsShareOneRefresh() async throws { try await Self.onLoopback {
+        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"ONCE","refresh_token":"NEXT","expires_in":3600}"#)
+        defer { ep.stop() }
+        let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                accessToken: "OLD", refreshToken: "SINGLE-\(UUID().uuidString)", expiresAt: Date().addingTimeInterval(5))
+        var p = Profile(name: "flight", tool: .claude, authMode: .token)
+        p.mcpServers = [Self.server("s", oauth: old)]
+        let kept = NIOLockedValueBox(0)
+        let keep: @Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void = { _, _, _, _ in kept.withLockedValue { $0 += 1 } }
+        async let a = Daemon.populateMCPBearerTokens(p, keep: keep)
+        async let b = Daemon.populateMCPBearerTokens(p, keep: keep)
+        let (ra, rb) = await (a, b)
+        #expect(ra.mcpServers[0].bearerToken == "ONCE" && rb.mcpServers[0].bearerToken == "ONCE")
+        #expect(ep.requests.withLockedValue { $0.count } == 1, "one request to the token endpoint")
+        #expect(kept.withLockedValue { $0 } == 1, "saved once")
+        #expect(MCPOAuthBroker.flights.count == 0, "nothing left in flight")
     } }
 
     /// A redirect from the token endpoint isn't followed.

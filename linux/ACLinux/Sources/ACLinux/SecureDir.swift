@@ -60,35 +60,62 @@ enum SecureDir {
             guard fchmod(fd, 0o700) == 0 else {
                 throw Untrusted(path: path, why: "writable by its group (mode \(mode)) and can't be made 0700: \(String(cString: strerror(errno)))")
             }
-            try audit(fd, path, owner: owner, depth: 0)
+            do {
+                try audit(fd, path, owner: owner, depth: 0)
+            } catch {
+                // Its mode back: the next start finds it as it was, and checks again.
+                _ = fchmod(fd, st.st_mode & 0o7777)
+                throw error
+            }
             FileHandle.standardError.write(Data("bromure-ac: \(path) was mode \(mode); made 0700 (its entries checked)\n".utf8))
         }
     }
 
-    /// Every entry of directory `fd`: this user's and not a link; the
-    /// entries under ssh-agents/ and vms/ (and theirs) too.
+    /// Every entry of directory `fd` (made 0700 by the caller, so nothing can
+    /// be added meanwhile): this user's, not a link, and no longer writable
+    /// by its group or others; every subdirectory, locked the same way
+    /// before its own entries are checked (an fd to it someone kept open
+    /// can't plant anything after that).
     // @port-skip linux-only: see SecureDir
     static func audit(_ fd: Int32, _ path: String, owner: uid_t, depth: Int) throws {
-        guard depth < 8 else { throw Untrusted(path: path, why: "nested too deep to check") }
+        guard depth < 16 else { throw Untrusted(path: path, why: "nested too deep to check") }
         let dup = Glibc.dup(fd)
         guard dup >= 0, let d = fdopendir(dup) else {
             if dup >= 0 { close(dup) }
             throw Untrusted(path: path, why: "can't list it to check its entries")
         }
         defer { closedir(d) }
-        while let e = readdir(d) {
+        while true {
+            errno = 0
+            guard let e = readdir(d) else {
+                if errno != 0 { throw Untrusted(path: path, why: "listing it failed: \(String(cString: strerror(errno)))") }
+                break
+            }
             let name = withUnsafePointer(to: e.pointee.d_name) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
             if name == "." || name == ".." { continue }
-            var st = stat()
-            guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { continue }   // gone meanwhile
             let entry = path + "/" + name
-            guard (st.st_mode & S_IFMT) != S_IFLNK else { throw Untrusted(path: entry, why: "a symbolic link, in a directory others could write") }
+            var st = stat()
+            guard fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else {
+                if errno == ENOENT { continue }   // gone meanwhile
+                throw Untrusted(path: entry, why: String(cString: strerror(errno)))
+            }
+            let kind = st.st_mode & S_IFMT
+            guard kind != S_IFLNK else { throw Untrusted(path: entry, why: "a symbolic link, in a directory others could write") }
             guard st.st_uid == owner else { throw Untrusted(path: entry, why: "owned by uid \(st.st_uid), in a directory others could write") }
-            if (st.st_mode & S_IFMT) == S_IFDIR, depth > 0 || name == "ssh-agents" || name == "vms" {
+            if kind == S_IFDIR {
                 let sub = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 guard sub >= 0 else { throw Untrusted(path: entry, why: String(cString: strerror(errno))) }
                 defer { close(sub) }
+                // Owner-only, as the daemon makes its own (0700).
+                if st.st_mode & 0o077 != 0, fchmod(sub, st.st_mode & 0o7700) != 0 {
+                    throw Untrusted(path: entry, why: "writable by its group or others and can't be fixed: \(String(cString: strerror(errno)))")
+                }
                 try audit(sub, entry, owner: owner, depth: depth + 1)
+            } else if st.st_mode & 0o022 != 0 {
+                // Its directory is ours alone now: the name can't be swapped.
+                if fchmodat(fd, name, st.st_mode & 0o7755, 0) != 0 {
+                    throw Untrusted(path: entry, why: "writable by its group or others and can't be fixed: \(String(cString: strerror(errno)))")
+                }
             }
         }
     }

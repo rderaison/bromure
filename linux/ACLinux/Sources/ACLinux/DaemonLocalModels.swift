@@ -31,8 +31,10 @@ extension Daemon {
     /// relaunches): a refresh token may be good for one use.
     func stagedProfile(_ raw: Profile, mcpTokens: Bool = false) async -> Profile {
         let store = profileStore
+        // Saved on the main actor, where a client's profile PUT loads, merges
+        // and writes too: the two can't interleave.
         let raw = mcpTokens ? await Self.populateMCPBearerTokens(raw, multiUser: config.multiUser, keep: { new, old, server, pid in
-            Self.keepRefreshedMCPOAuth(new, from: old, serverID: server, profileID: pid, store: store)
+            await MainActor.run { Self.keepRefreshedMCPOAuth(new, from: old, serverID: server, profileID: pid, store: store) }
         }) : raw
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {

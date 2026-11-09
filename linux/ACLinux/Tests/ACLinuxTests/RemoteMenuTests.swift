@@ -73,9 +73,15 @@ struct RemoteMenuTests {
         #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp")[.posixPermissions] as? Int) == 0o700)
         #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp/bromure-ac")[.posixPermissions] as? Int) == 0o700)
         #expect(FileManager.default.fileExists(atPath: dir + "/grp/bromure-ac/vms/a1/serial.log"), "nothing wiped")
-        // A planted link (deep in vms/) in one its group could write: refused.
+        // Nested dirs made under the old umask are locked too.
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp/bromure-ac/vms")[.posixPermissions] as? Int).map { $0 & 0o022 } == 0)
+        // A planted link (deep in vms/) in one its group could write: refused,
+        // and refused again on a retry (its mode is put back, not left 0700).
         try FileManager.default.createSymbolicLink(atPath: dir + "/grp/bromure-ac/vms/a1/fc.sock", withDestinationPath: "/tmp/elsewhere")
         chmod(dir + "/grp/bromure-ac", 0o770)
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/grp/bromure-ac", create: false) }
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp/bromure-ac")[.posixPermissions] as? Int) == 0o770,
+                "its mode put back")
         #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/grp/bromure-ac", create: false) }
         // A planted entry of someone else's: refused (another uid stands in
         // for the stranger, since this test can't make files owned by one).
