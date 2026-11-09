@@ -203,7 +203,7 @@ public enum LANRoute {
     /// The default route's interface and gateway, from /proc/net/route.
     // @port-skip linux-only: multi-user LAN pools
     public static func defaultRoute() -> (interface: String, gateway: UInt32)? {
-        guard let text = try? String(contentsOfFile: "/proc/net/route", encoding: .utf8) else { return nil }
+        guard let text = ProcFS.text("/proc/net/route") else { return nil }
         for line in text.split(separator: "\n").dropFirst() {
             let f = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
             guard f.count > 2, f[1] == "00000000", let gw = UInt32(f[2], radix: 16) else { continue }

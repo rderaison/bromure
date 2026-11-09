@@ -61,7 +61,7 @@ public enum FDStore {
     /// The pid a pidfd refers to (`Pid:` in its fdinfo); nil once it exited.
     // @port-skip linux-only: systemd fd store
     public static func pid(ofPidfd fd: Int32) -> Int32? {
-        guard let info = try? String(contentsOfFile: "/proc/self/fdinfo/\(fd)", encoding: .utf8),
+        guard let info = ProcFS.text("/proc/self/fdinfo/\(fd)"),
               let line = info.split(separator: "\n").first(where: { $0.hasPrefix("Pid:") }),
               let pid = Int32(line.dropFirst(4).trimmingCharacters(in: .whitespaces)), pid > 0 else { return nil }
         return pid

@@ -116,8 +116,8 @@ final class WorkspaceSSHAgent: Sendable {
         func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
         var processes: [(pid: pid_t, argv: [String])] = []
         for entry in (try? FileManager.default.contentsOfDirectory(atPath: "/proc")) ?? [] {
-            guard let pid = pid_t(entry), let raw = FileManager.default.contents(atPath: "/proc/\(entry)/cmdline") else { continue }
-            processes.append((pid, raw.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }))
+            guard let pid = pid_t(entry), let argv = ProcFS.argv(pid) else { continue }
+            processes.append((pid, argv))
         }
         let found = orphans(processes, alive: alive)
         for o in found {

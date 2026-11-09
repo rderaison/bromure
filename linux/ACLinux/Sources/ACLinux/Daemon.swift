@@ -1867,10 +1867,10 @@ public actor Daemon {
             // Checked again with the pidfd open: it pins this process (a pid
             // recycled since the first look can't be the one signalled).
             guard stat("/proc/\(pid)", &st) == 0, st.st_uid == me,
-                  let c = try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8),
+                  let c = ProcFS.text("/proc/\(pid)/comm"),
                   c.trimmingCharacters(in: .newlines) == comm,
-                  let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { continue }
-            guard matches(cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }) else { continue }
+                  let argv = ProcFS.argv(pid) else { continue }
+            guard matches(argv) else { continue }
             if acl_pidfd_send_signal(fd, SIGKILL) != 0 || !waitExit(pidfd: fd, timeout: timeout) { allGone = false }
         }
         return allGone
@@ -1879,7 +1879,7 @@ public actor Daemon {
     /// /proc/<pid>/stat's starttime (field 22), nil if there's no such process.
     // @port-skip linux-only: Linux process identity
     static func processStartTime(_ pid: Int32) -> UInt64? {
-        guard let st = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+        guard let st = ProcFS.text("/proc/\(pid)/stat"),
               let close = st.lastIndex(of: ")") else { return nil }
         let fields = st[st.index(after: close)...].split(separator: " ")
         return fields.count > 19 ? UInt64(fields[19]) : nil       // fields[0] is field 3 (state)
@@ -1890,8 +1890,7 @@ public actor Daemon {
     // @port-skip linux-only: Linux process identity
     static func isOurVM(_ rec: VMRecord) -> Bool {
         guard let pid = rec.pid, let start = rec.pidStart, processStartTime(pid) == start,
-              let cmd = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline") else { return false }
-        let args = cmd.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+              let args = ProcFS.argv(pid) else { return false }
         return zip(args, args.dropFirst()).contains { $0 == "--id" && $1 == "bromure-\(rec.shortId)" }
     }
 

@@ -39,7 +39,7 @@ public enum StopPost {
     // @port-skip linux-only: stop-post sweep
     public static func run(environment: [String: String] = ProcessInfo.processInfo.environment,
                            grace: Duration = .seconds(10)) async -> String {
-        guard let cg = try? String(contentsOfFile: "/proc/self/cgroup", encoding: .utf8), let own = ownUnit(cg) else {
+        guard let cg = ProcFS.text("/proc/self/cgroup"), let own = ownUnit(cg) else {
             return "stop-post: not in a service cgroup; nothing to do"
         }
         let systemctl = ["/usr/bin/systemctl", "/bin/systemctl"].first { FileManager.default.isExecutableFile(atPath: $0) }
