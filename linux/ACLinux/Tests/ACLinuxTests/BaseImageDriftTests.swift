@@ -31,20 +31,44 @@ struct BaseImageStampTests {
         #expect(Daemon.baseVersion("dev", isNewerThan: "201"), "not numbers: any other stamp")
     }
 
-    @Test("a promotion cut short after its disk went live is finished; one before it isn't touched")
+    @Test("a promotion cut short after its disk went live is finished; one for another disk, or before it, isn't")
     func rollForward() throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         func put(_ f: String, _ s: String) throws { try s.write(toFile: dir + "/" + f, atomically: true, encoding: .utf8) }
         func get(_ f: String) -> String? { try? String(contentsOfFile: dir + "/" + f, encoding: .utf8) }
-        try put("base.img", "new disk")
-        for f in InterimBake.promotedFiles { try put(f, "old"); try put(f + ".new", "new") }
-        // Before the disk's rename: a partial disk beside them; left alone.
-        try put("base.img.partial", "scratch")
+        func stage() throws { for f in InterimBake.promotedFiles { try put(f + ".new", "new") } }
+        let marker = InterimBake.promotionMarker
+        try put("base.img", "old disk")
+        for f in InterimBake.promotedFiles { try put(f, "old") }
+
+        // A failed bake killed between its cleanup's deletes (or a stale
+        // partial deleted by hand): its set names a disk that isn't base.img.
+        try put("base.img.partial", "failed bake's disk")
+        try stage()
+        try put(marker, try #require(InterimBake.diskIdentity(dir + "/base.img.partial")))
+        try FileManager.default.removeItem(atPath: dir + "/base.img.partial")
+        #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
+        for f in InterimBake.promotedFiles {
+            #expect(get(f) == "old", "the old disk keeps its \(f)")
+            #expect(!FileManager.default.fileExists(atPath: dir + "/" + f + ".new"), "the failed bake's set is discarded")
+        }
+        #expect(!FileManager.default.fileExists(atPath: dir + "/" + marker))
+
+        // A set with no marker (cut short while staging): discarded.
+        try stage()
+        #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
+        #expect(get("base.version") == "old" && get("vmlinuz.new") == nil)
+
+        // Before the disk's rename: a partial beside the set; left alone.
+        try put("base.img.partial", "new disk")
+        try stage()
+        try put(marker, try #require(InterimBake.diskIdentity(dir + "/base.img.partial")))
         #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
         #expect(get("base.version") == "old" && get("vmlinuz.new") == "new")
-        try FileManager.default.removeItem(atPath: dir + "/base.img.partial")
-        // After it: rolled forward, the stamp with the rest.
+
+        // After it (the rename carries the identity): rolled forward.
+        #expect(rename(dir + "/base.img.partial", dir + "/base.img") == 0)
         try FileManager.default.removeItem(atPath: dir + "/vmlinuz.new")   // done before the crash
         try put("vmlinuz", "new")
         #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
@@ -52,6 +76,7 @@ struct BaseImageStampTests {
             #expect(get(f) == "new", "\(f)")
             #expect(!FileManager.default.fileExists(atPath: dir + "/" + f + ".new"))
         }
+        #expect(!FileManager.default.fileExists(atPath: dir + "/" + marker), "the marker goes last")
         InterimBake.finishPromotionIfIdle(imageDir: dir)   // nothing left: a no-op
     }
 }

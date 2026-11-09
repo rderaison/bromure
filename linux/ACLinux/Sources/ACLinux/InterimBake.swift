@@ -98,9 +98,13 @@ public enum InterimBake {
         let lock = open(o.outputDir + "/.bake.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
         guard lock >= 0 else { throw MachineError.io("open \(o.outputDir)/.bake.lock", errno) }
         defer { Glibc.close(lock) }
-        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
-            throw BakeError.staging("another bake is running into \(o.outputDir)")
+        // A daemon's start holds it a moment (finishPromotionIfIdle): waited for.
+        var locked = false
+        for _ in 0..<50 {
+            if flock(lock, LOCK_EX | LOCK_NB) == 0 { locked = true; break }
+            try await Task.sleep(for: .milliseconds(200))
         }
+        guard locked else { throw BakeError.staging("another bake is running into \(o.outputDir)") }
         // The stamp on disk before this bake, for the next revision: a
         // rebuild at the same major bumps 201 → 201.1; a new major writes fresh.
         // A promotion a crash cut short (its disk live): finished first, or
@@ -146,8 +150,10 @@ public enum InterimBake {
         var promoted = false
         defer {
             if !promoted {
+                // The .new set first: without it, nothing can roll forward
+                // over the old disk, whatever happens to the partial.
+                discardPromotion(imageDir: o.outputDir)
                 try? fm.removeItem(atPath: partial)
-                for f in promotedFiles { try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new") }
             }
         }
 
@@ -239,10 +245,15 @@ public enum InterimBake {
         // Which catalog steps the image has, as macOS records a local build.
         try ImageState.encoded(BaseImageState(imageUUID: nil, version: newStamp, appliedStepUUIDs: steps))
             .write(to: URL(fileURLWithPath: work + "/out/image-state.json"))
+        discardPromotion(imageDir: o.outputDir)
         for f in promotedFiles {
-            try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new")
             try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f + ".new")
         }
+        // Which disk the set belongs to: the partial's identity, which the
+        // rename carries over to base.img. Written last, so a set without it
+        // is incomplete (never rolled forward).
+        guard let identity = diskIdentity(partial) else { throw MachineError.io("stat \(partial)", errno) }
+        try identity.write(toFile: o.outputDir + "/" + promotionMarker, atomically: true, encoding: .utf8)
         guard rename(partial, finalImage) == 0 else { throw MachineError.io("rename \(partial)", errno) }
         promoted = true
         // From here the new disk is live: the rest rolls forward (here, or
@@ -382,21 +393,50 @@ public enum InterimBake {
     /// the disk's rename: the boot files, then the stamp and image state.
     static let promotedFiles = ["vmlinuz", "initrd.img", "kernel-release", "cmdline", "base.version", "image-state.json"]
 
-    /// Finishes a promotion whose disk is live (no base.img.partial left)
-    /// but whose `.new` files aren't all in place: renames them over, in
-    /// order, the stamp last. Nil when done (or nothing to do), else the
-    /// file that couldn't be renamed. A bake (holding the dir's lock)
-    /// interrupted before its disk's rename has a partial disk beside its
-    /// `.new` files: those aren't touched (the next bake clears them).
+    /// The `.new` set's marker: the identity of the disk it belongs to.
+    static let promotionMarker = "promotion.new"
+
+    /// A disk's identity (device, inode, size, mtime): what a rename keeps.
+    // @port-skip linux-only: the bake's roll-forward
+    static func diskIdentity(_ path: String) -> String? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        return "\(st.st_dev) \(st.st_ino) \(st.st_size) \(st.st_mtim.tv_sec) \(st.st_mtim.tv_nsec)\n"
+    }
+
+    /// The `.new` set and its marker, gone.
+    // @port-skip linux-only: the bake's roll-forward
+    static func discardPromotion(imageDir dir: String) {
+        for f in promotedFiles { try? FileManager.default.removeItem(atPath: dir + "/" + f + ".new") }
+        try? FileManager.default.removeItem(atPath: dir + "/" + promotionMarker)
+    }
+
+    /// Finishes a promotion whose disk is live but whose `.new` files
+    /// aren't all in place: renames them over, in order, the stamp last,
+    /// then its marker. Only when base.img is the disk the marker names: a
+    /// set without it, or for another disk (a failed bake's, its partial
+    /// gone), is discarded, never rolled over the live image. A partial
+    /// beside the set is a bake under way or cut short before its disk's
+    /// rename: left for the next bake. Nil when done (or nothing to do),
+    /// else the file that couldn't be renamed.
     // @port-skip linux-only: the bake's roll-forward
     @discardableResult
     public static func finishPromotion(imageDir dir: String) -> String? {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: dir + "/base.img.partial") else { return nil }
+        let marker = dir + "/" + promotionMarker
+        let pending = promotedFiles.contains { fm.fileExists(atPath: dir + "/" + $0 + ".new") }
+        guard pending || fm.fileExists(atPath: marker) else { return nil }
+        guard let want = try? String(contentsOfFile: marker, encoding: .utf8),
+              want == diskIdentity(dir + "/base.img") else {
+            discardPromotion(imageDir: dir)
+            return nil
+        }
         for f in promotedFiles where fm.fileExists(atPath: dir + "/" + f + ".new") {
             // ENOENT: another finisher (the bake, a daemon start) got there first.
             guard rename(dir + "/" + f + ".new", dir + "/" + f) == 0 || errno == ENOENT else { return f }
         }
+        try? fm.removeItem(atPath: marker)
         return nil
     }
 
