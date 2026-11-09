@@ -1964,28 +1964,43 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// `Upgrade` are required by RFC 6455 — but in practice either is
     /// enough to know we should *not* hand this to URLSession.
     ///
-    /// The `Connection: Upgrade` half is deliberately protocol-agnostic:
-    /// `kubectl exec` upgrades to `SPDY/3.1` (and newer kubectl to
-    /// `v5.channel.k8s.io` over WebSocket). Both must reach the raw pump,
-    /// so do NOT tighten this to require the `websocket` token.
+    /// Only the protocols the raw pump is for: `websocket` (agent transports,
+    /// and newer kubectl's `v5.channel.k8s.io`) and `SPDY/3.1` (`kubectl
+    /// exec` / `attach` / `port-forward` against older API servers). Any
+    /// other upgrade -- h2c above all -- isn't pumped: after the 101 every
+    /// later request on the connection would pass unseen by the per-request
+    /// policy (web rules, the PII and leak scans, credential handling). Such
+    /// a request goes on as plain HTTP/1.1 instead, its Upgrade headers
+    /// dropped like any hop-by-hop header.
     private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
         guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
                                      encoding: .isoLatin1) else {
             return false
         }
-        var sawUpgrade = false
-        var sawConnectionUpgrade = false
-        for line in headerStr.split(separator: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("upgrade:") && lower.contains("websocket") {
-                sawUpgrade = true
-            }
-            if lower.hasPrefix("connection:") && lower.contains("upgrade") {
-                sawConnectionUpgrade = true
-            }
+        return Self.pumpedUpgrade(headerBlock: headerStr)
+    }
+
+    /// True when the header block (a request's, or a 101's) has exactly one
+    /// `Upgrade` header and every protocol it names is one the raw pump
+    /// carries (`websocket`, `SPDY/3.1`). The whole block is sent upstream
+    /// as it is, so `websocket, h2c`, a second Upgrade line, or a folded
+    /// continuation line (which an upstream joins to the header above)
+    /// would still offer h2c: none of them is pumped.
+    static func pumpedUpgrade(headerBlock: String) -> Bool {
+        var protocols: [String]?
+        for (i, line) in headerBlock.split(separator: "\r\n", omittingEmptySubsequences: false).enumerated() where i > 0 {
+            if line.first == " " || line.first == "\t" { return false }   // obs-fold
+            // A bare CR or LF, or a NUL: a lenient upstream may split there.
+            if line.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) { return false }
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { continue }
+            guard protocols == nil else { return false }                   // a second Upgrade header
+            protocols = line[line.index(after: colon)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         }
-        return sawUpgrade || sawConnectionUpgrade
+        guard let protocols, !protocols.isEmpty else { return false }
+        return protocols.allSatisfy { $0 == "websocket" || $0 == "spdy/3.1" }
     }
 
     /// Result of the WebSocket-upgrade fast-path. Populated whether
@@ -2140,6 +2155,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
             earlyFrames = respHeaders.subdata(in: end.upperBound..<respHeaders.endIndex)
             respHeaders = respHeaders.subdata(in: respHeaders.startIndex..<end.upperBound)
             upstreamBytes = respHeaders.count
+        }
+        // The upstream switched to a protocol the pump isn't for (an h2c
+        // answer to an offer we never forward, by a server that ignores the
+        // request's Upgrade): not relayed, nothing pumped.
+        if statusCode == 101,
+           let end = respHeaders.range(of: Data("\r\n\r\n".utf8)),
+           !Self.pumpedUpgrade(headerBlock: String(decoding: respHeaders.subdata(in: respHeaders.startIndex..<end.lowerBound),
+                                                   as: UTF8.self)) {
+            FileHandle.standardError.write(Data("[mitm] \(host): refused a 101 to a protocol other than websocket or SPDY/3.1\n".utf8))
+            try? serverTLS.write(Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return WebSocketResult(handshakeResponse: respHeaders, transcript: nil, clientBytes: clientBytes,
+                                   upstreamBytes: upstreamBytes, statusCode: 502)
         }
         try serverTLS.write(respHeaders)
 
@@ -3280,7 +3307,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade":
+             "proxy-connection", "keep-alive", "te", "upgrade", "http2-settings":
             continue
         case "accept-encoding":
             // Only codings we can undo (see mitmSanitizedAcceptEncoding).
@@ -3627,7 +3654,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         // reaches the upstream (or shows up in logs there).
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade", "x-bromure-insecure":
+             "proxy-connection", "keep-alive", "te", "upgrade", "http2-settings", "x-bromure-insecure":
             continue
         case "authorization", "x-api-key":
             if local && !keepGuestKey { continue }   // replaced below for the local engine
