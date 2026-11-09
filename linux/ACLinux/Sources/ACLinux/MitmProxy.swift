@@ -1050,7 +1050,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             let head = Data(buf.readableBytesView[buf.readerIndex..<headEnd.upperBound])
             // Body framing an upstream could read otherwise than this proxy:
             // refused before any body is read or streamed.
-            if let why = HTTPRequestFraming.headFramingProblem(String(decoding: head.dropLast(4), as: UTF8.self)) {
+            // OpenShell's byte-level head checks too (bare LF, folds, space
+            // before a colon, control bytes, invalid UTF-8): an upstream
+            // parsing the head otherwise than this proxy would frame it so.
+            let parsedHead: String? = { do { _ = try OpenShellHTTP.parseHead(head); return nil }
+                                        catch let e as OpenShellHTTP.Rejection { return e.reason }
+                                        catch { return "the request head can't be read" } }()
+            if let why = parsedHead ?? HTTPRequestFraming.headFramingProblem(String(decoding: head.dropLast(4), as: UTF8.self)) {
                 reply(context, ProxyPolicy.beforePolicyAnswer(status: 400, error: "invalid_http_request", detail: why,
                                                               host: host, port: port, profileID: profileID,
                                                               scheme: tls ? "https" : "http"))
@@ -1214,7 +1220,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// macOS's order: the subscription swaps (5c–5e), the token map's, then
     /// the 5f sign-in capture on what would go out.
     // partial: the Linux request chain on NIO, its steps in MitmEgress, MitmMCPAuth, MitmInsecure, SupplyChainLinux and DaemonSquelch; subscription auth before the token swap; no Fusion yet
-    // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) h=5e2bbc915c7addaa @003f61e7
+    // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) h=6a58d8d477c0e920 @81c0b354
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
                         session: UInt64, trace: inout Trace?,
                         identity: OpenShellPolicy.BinaryIdentity? = nil, spooled: Bool = false) async -> Plan {
@@ -1479,15 +1485,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // refused is answered here (macOS: driveTLS's AWSResigner step). Not
         // an insecure request: re-signing would put the real key's signature
         // in front of an unvalidated upstream.
-        // A streamed body (5z) isn't here to hash: the request is signed
-        // UNSIGNED-PAYLOAD (S3 and the other SigV4 services accept it over
-        // TLS), and keeps its own framing, which the resigner drops.
+        // A streamed body (5z) isn't here to hash (macOS 435df2af): S3 keeps
+        // the SDK's own hash, else UNSIGNED-PAYLOAD; any other service is
+        // refused (its Action may sit past what was read). It keeps its own
+        // framing, which the resigner drops.
         let streamedFraming = spooled ? streamedBodyFraming(out) : nil
-        if spooled, SubscriptionAuthRewrite.headerValue("x-amz-content-sha256",
-                                                        inHeaderSection: SubscriptionAuthRewrite.rawHeaderSection(of: out) ?? "") != nil {
-            out = HTTPRequestFraming.replacingHeaders(out, drop: ["x-amz-content-sha256"], add: "X-Amz-Content-SHA256: UNSIGNED-PAYLOAD")
-        }
-        switch insecure ? .unchanged : await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
+        switch insecure ? .unchanged : await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID,
+                                                                       bodyComplete: !spooled) {
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .unchanged: h=7ae83a8a6eda7f57 @003f61e7
         case .unchanged: break
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .resigned(let bytes): h=ef2b34394ac16b57 @003f61e7

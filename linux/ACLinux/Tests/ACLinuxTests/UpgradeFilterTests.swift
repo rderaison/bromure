@@ -273,3 +273,61 @@ struct ProxySmugglingTests {
         #expect(got.hasPrefix("HTTP/1.1 502"), "a websocket request switched to SPDY: \(got.prefix(80))")
     }
 }
+
+/// A streamed body's AWS request (macOS 435df2af): S3 is signed with the
+/// SDK's own hash of the whole object (else UNSIGNED-PAYLOAD) and keeps its
+/// framing; any other service is refused, never signed.
+@Suite("Proxy: streamed AWS bodies")
+struct StreamedAWSTests {
+    static let sha = String(repeating: "ab", count: 32)
+
+    static func plan(host: String, sha: String) async throws -> RequestReader.Plan {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.awsCreds.setCredentials(AWSCredentials(accessKeyID: "AKIAPRIMARY", secretAccessKey: "primarySecret",
+                                                     region: "us-east-1"), for: pid)
+        let service = host.hasPrefix("sts") ? "sts" : "s3"
+        let head = "PUT /bucket/big.bin HTTP/1.1\r\nHost: \(host)\r\n"
+            + "Authorization: AWS4-HMAC-SHA256 Credential=AKIAPRIMARY/20261105/us-east-1/\(service)/aws4_request, "
+            + "SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=00\r\n"
+            + "X-Amz-Date: 20261105T000000Z\r\nX-Amz-Content-SHA256: \(sha)\r\nContent-Length: \(9 << 20)\r\n\r\n"
+        var trace: RequestReader.Trace?
+        return await RequestReader.rewrite(Data(head.utf8), proxy: proxy, profileID: pid, host: host, port: 443, tls: true,
+                                           session: proxy.strictSession(of: pid), trace: &trace, spooled: true)
+    }
+
+    @Test func s3KeepsTheSDKsHashAndItsLength() async throws {
+        guard case .forward(let out, _, _, _, _, _, _, _, _, _, _, _, _) = try await Self.plan(host: "s3.us-east-1.amazonaws.com", sha: Self.sha) else {
+            Issue.record("not forwarded"); return
+        }
+        let head = String(decoding: out, as: UTF8.self)
+        #expect(head.contains("X-Amz-Content-SHA256: \(Self.sha)"), "\(head)")
+        #expect(head.contains("Content-Length: \(9 << 20)\r\n"), "its own length, not the head's")
+        #expect(head.contains("Signature=") && !head.contains("Signature=00"))
+    }
+
+    @Test func anotherServiceIsRefusedUnsigned() async throws {
+        guard case .answer(let reply) = try await Self.plan(host: "sts.amazonaws.com", sha: Self.sha) else {
+            Issue.record("an STS call past the inline cap was signed"); return
+        }
+        #expect(String(decoding: reply, as: UTF8.self).hasPrefix("HTTP/1.1 413"))
+    }
+}
+
+@Suite("Proxy: request heads read as OpenShell reads them")
+struct HeadByteCheckTests {
+    @Test func aHeadAnUpstreamCouldSplitOtherwiseIsRefused() throws {
+        let (rig, ip) = try PipelineTests.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        for (bad, name) in [("X-A: 1\nX-B: 2\r\n", "a bare LF"), ("X-A: 1\r\n folded\r\n", "an obs-fold"),
+                            ("X-A : 1\r\n", "space before the colon"), ("X-A: 1\u{0}\r\n", "a NUL"),
+                            ("Content-Length:\u{301} 4\r\n", "a combining mark after the colon")] {
+            let out = try PipelineTests.talk(rig.path(), "GET http://\(h)/x HTTP/1.1\r\nHost: \(h)\r\n\(bad)\r\n", ms: 600)
+            #expect(out.hasPrefix("HTTP/1.1 400"), "\(name): \(out.prefix(80))")
+        }
+        #expect(up.received.withLockedValue { $0 }.isEmpty, "none went upstream")
+    }
+}

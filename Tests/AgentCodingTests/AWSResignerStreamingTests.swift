@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// S3 uploads with a checksum go out aws-chunked. The SDKs' default,
 /// `STREAMING-UNSIGNED-PAYLOAD-TRAILER`, signs only the seed request, so

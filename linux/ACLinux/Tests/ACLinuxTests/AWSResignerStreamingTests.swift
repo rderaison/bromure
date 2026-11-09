@@ -1,0 +1,1 @@
+../../../../Tests/AgentCodingTests/AWSResignerStreamingTests.swift
