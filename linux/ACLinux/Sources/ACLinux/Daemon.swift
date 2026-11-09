@@ -310,6 +310,7 @@ public actor Daemon {
         if passt.adopted { FileHandle.standardError.write(Data("bromure-ac daemon: took back passt (pid \(passt.pid ?? 0)) from the fd store\n".utf8)) }
         let d = Daemon(config: config, passt: passt)
         await d.wireCompromiseHandler()
+        await d.wireBridgeAbort()
         await d.wireWatchdog()
         await d.wireSentryModules()
         await d.wireOpenShellAdvisor()

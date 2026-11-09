@@ -67,6 +67,13 @@ final class MitmProxy: @unchecked Sendable {
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).
     let guardrailsConfigs = NIOLockedValueBox<[UUID: GuardrailsConfig]>([:])
+    /// Asks a workspace's agentd to reset the bridged client socket whose
+    /// loopback port is given (the preamble's sport), calling back once done
+    /// (macOS: EgressConnectionRegistry.guestAbort, by vsock port there).
+    let bridgeAbort = NIOLockedValueBox<(@Sendable (UUID, Int, @escaping @Sendable () -> Void) -> Void)?>(nil)
+    /// How long a cut waits for agentd's reset before closing anyway
+    /// (macOS: HTTPMitmConnection.abortGrace).
+    static let abortGrace: TimeAmount = .milliseconds(1500)
     /// Each workspace's current session: a stop (clearGuardrailsConfig)
     /// starts the next. What a reply from an older one would teach strict
     /// mode's guard is dropped, and so is its compromise event
@@ -764,7 +771,8 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                             ProxyPolicy.reportAllowed(policy: proxy.guardrailsConfig(for: profileID)?.egressPolicy,
                                                       profileID: profileID, host: host, port: port)
                             guard proxy.trackForFirewall(context.channel, profileID: profileID,
-                                                         host: host, port: port, route: "proxy"),
+                                                         host: host, port: port, route: "proxy",
+                                                         clientSport: claim?.sport),
                                   // Tracked (cutAll reaches it from now), then
                                   // checked: a quarantine since the CONNECT is seen.
                                   !WorkspaceQuarantine.shared.contains(profileID) else {
@@ -804,7 +812,8 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 }
                 ProxyPolicy.reportAllowed(policy: policy, profileID: profileID, host: host, port: port)
                 guard proxy.trackForFirewall(context.channel, profileID: profileID,
-                                             host: host, port: port, route: "proxy") else {
+                                             host: host, port: port, route: "proxy",
+                                             clientSport: claim?.sport) else {
                     phase = .handedOff
                     context.close(promise: nil)
                     return

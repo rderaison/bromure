@@ -96,13 +96,22 @@ extension MitmProxy {
     /// caller closes it). macOS: HTTPMitmConnection.trackedForFirewall.
     // partial: a cut closes the channel (no reset of agentd's bridge socket yet)
     // @port HTTPMitmConnection.trackedForFirewall(host: String, port: Int, route: String, _: ()asyncthrows->Void) h=b8fef0983a3ca0b5 @003f61e7
+    /// `clientSport`: a proxied connection's client port, from agentd's
+    /// preamble. A cut asks agentd to RESET that client socket first (its
+    /// bridge would otherwise close it gracefully, and the client drain what
+    /// is buffered and report a short transfer, curl rc=18), then closes
+    /// once agentd confirms or after `abortGrace` (macOS: cutForFirewall).
     func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String,
-                          identity: OpenShellPolicy.BinaryIdentity? = nil) -> Bool {
+                          identity: OpenShellPolicy.BinaryIdentity? = nil, clientSport: Int? = nil) -> Bool {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy
+        let abort = clientSport.flatMap { sport in bridgeAbort.withLockedValue { $0 }.map { (sport, $0) } }
         let token = EgressConnectionRegistry.shared.register(
             profileID: profileID, host: host, port: port, route: route,
             rule: ProxyPolicy.trackedRule(policy: policy, host: host, port: port), identity: identity) { [weak channel] in
-                channel?.close(promise: nil)
+                guard let channel else { return }
+                guard let (sport, guestAbort) = abort else { channel.close(promise: nil); return }
+                guestAbort(profileID, sport) { channel.close(promise: nil) }
+                channel.eventLoop.scheduleTask(in: MitmProxy.abortGrace) { channel.close(promise: nil) }
             }
         channel.closeFuture.whenComplete { _ in EgressConnectionRegistry.shared.unregister(token) }
         return !ProxyPolicy.deniedOnceTracked(policy: guardrailsConfig(for: profileID)?.egressPolicy,

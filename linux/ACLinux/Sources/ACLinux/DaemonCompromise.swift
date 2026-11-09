@@ -55,6 +55,21 @@ extension Daemon {
         return .object(o)
     }
 
+    /// The firewall's proxy-route cut, to the guest: agentd resets the
+    /// bridged client socket by its port (macOS: installFirewallGuestAbort,
+    /// by vsock port there; Firecracker's vsock doesn't give the host the
+    /// guest's).
+    // @port-skip linux-only: ACAppDelegate.installFirewallGuestAbort's guest request, by the client's port
+    func wireBridgeAbort() {
+        mitm?.bridgeAbort.withLockedValue { $0 = { [weak self] pid, sport, done in
+            Task {
+                defer { done() }
+                _ = try? await self?.liveShell(of: pid)?.request(
+                    ["bridge_abort": ["client_sport": sport], "timeout": 5], wait: .seconds(2), deadline: .seconds(5))
+            }
+        } }
+    }
+
     /// Hands the proxy's compromise events to handleCompromise (macOS:
     /// engine.swapper.setCompromiseHandler at launch).
     // @port-skip linux-only: the daemon's share of ACAppDelegate's compromise handler wiring
