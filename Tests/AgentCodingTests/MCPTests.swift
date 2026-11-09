@@ -190,15 +190,57 @@ struct MCPOAuthRefreshPersistTests {
         #expect(!ProfileStore.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: p.mcpServers[0].id, into: &p))
     }
 
-    @Test("launch-time refresh saves its result and hands it over without a shared var")
-    func launchPathKeepsIt() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let ac = try String(contentsOf: root.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
-        let start = try #require(ac.range(of: "private func populateMCPBearerTokens(in profile: inout Profile) {"))
-        let body = String(ac[start.upperBound...].prefix(2500))
-        #expect(body.contains("keepRefreshedMCPOAuth(refreshed, from: old"))
-        #expect(body.contains("box.collect()"))
-        #expect(!body.contains("oauth = refreshed\n                    } catch"))
+    @Test("the refresh box: a result delivered before the waiter collects is the waiter's")
+    func boxDeliveredInTime() {
+        let box = MCPRefreshBox()
+        let r = Self.oauth("at2", "rt2")
+        #expect(!box.deliver(r))             // not late: the waiter uses it (and saves it)
+        #expect(box.collect() == r)
+    }
+
+    @Test("the refresh box: a result after the waiter gave up is late, kept by the task")
+    func boxDeliveredLate() {
+        let box = MCPRefreshBox()
+        #expect(box.collect() == nil)        // the 10 s wait timed out: stale token this boot
+        #expect(box.deliver(Self.oauth("at2", "rt2")))   // late: the task saves it itself
+        #expect(box.collect() == nil)        // never handed to the waiter afterwards
+    }
+
+    @Test("the refresh box: a failed refresh hands over nothing")
+    func boxFailed() {
+        let box = MCPRefreshBox()
+        #expect(!box.deliver(nil))
+        #expect(box.collect() == nil)
+    }
+
+    @Test("an open editor's save keeps an OAuth state the launch refreshed, unless the editor changed it")
+    func editorKeepsRefreshed() {
+        let opened = Self.workspace()
+        var current = opened                 // the app's copy after keepRefreshedMCPOAuth
+        current.mcpServers[0].oauthState = Self.oauth("a-at2", "a-rt2")
+
+        var draft = opened
+        draft.memoryGB = 8
+        draft.adoptAppEdits(from: current, opened: opened)
+        #expect(draft.mcpServers[0].oauthState?.refreshToken == "a-rt2")
+        #expect(draft.mcpServers[1].oauthState?.refreshToken == "b-rt1")
+        #expect(draft.memoryGB == 8)
+
+        var reauth = opened                  // Authorize in the editor
+        reauth.mcpServers[0].oauthState = Self.oauth("a-mine", "a-mine-rt", client: "c9")
+        reauth.adoptAppEdits(from: current, opened: opened)
+        #expect(reauth.mcpServers[0].oauthState?.refreshToken == "a-mine-rt")
+
+        var signedOut = opened               // Sign out in the editor
+        signedOut.mcpServers[0].oauthState = nil
+        signedOut.adoptAppEdits(from: current, opened: opened)
+        #expect(signedOut.mcpServers[0].oauthState == nil)
+
+        var added = opened                   // a server added in the editor: untouched
+        added.mcpServers.append(MCPServer(name: "c", transport: .http, url: "https://c.example/mcp",
+                                          oauthState: Self.oauth("c-at", "c-rt")))
+        added.adoptAppEdits(from: current, opened: opened)
+        #expect(added.mcpServers[2].oauthState?.refreshToken == "c-rt")
     }
 }
 

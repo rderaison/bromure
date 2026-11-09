@@ -17585,7 +17585,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 /// One MCP OAuth refresh's result, handed from the refreshing task to the
 /// thread waiting on it. `collect` (the waiter, after its wait) takes it if
 /// it's there; a `deliver` after that is late, and the task keeps it itself.
-private final class MCPRefreshBox: @unchecked Sendable {
+final class MCPRefreshBox: @unchecked Sendable {
     private let lock = NSLock()
     private var result: MCPOAuthState?
     private var collected = false
