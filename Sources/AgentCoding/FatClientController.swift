@@ -272,7 +272,12 @@ final class RemoteHostController {
     private var lastUptimes: [Profile.ID: Int] = [:]
     /// Boot dates a second sample agreed with (`bootTime`'s `confirmed`).
     private var bootConfirmed = Set<Profile.ID>()
+    /// Guest links (`guestLinks`) already handled here, by id.
+    private var handledGuestLinks: Set<String> = []
 #if os(macOS)
+    /// Guest links being asked about as sheets, so a later poll can take one
+    /// down when another client handled it (its id left /state).
+    private var openGuestLinks: [String: (alert: NSAlert, window: NSWindow)] = [:]
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
     /// Decision prompts we're currently showing as sheets, so a later poll can
@@ -582,6 +587,69 @@ final class RemoteHostController {
 #else
         UIApplication.shared.open(url)
 #endif
+    }
+
+    /// Pages a workspace's guest opened on a server with no screen of its
+    /// own (a Linux server's `guestLinks`): its user's clients open them,
+    /// by the same GuestURLGate disposition a Mac applies to its own
+    /// guests' pages. A local or private host is refused, an agent's
+    /// sign-in page opens, any other page opens only once the user says so
+    /// (the Mac's own sheet: Cancel the default, at most 3 waiting, none
+    /// without a window). Each one handled is told back
+    /// (`/guest-links/<id>/done`), so the user's other clients drop it.
+    /// iOS opens sign-in pages only and leaves the rest to a Mac.
+    private func applyGuestLinks(_ links: [[String: Any]]?) {
+        let rows = links ?? []
+        let current = Set(rows.compactMap { $0["id"] as? String })
+        handledGuestLinks.formIntersection(current)
+#if os(macOS)
+        for (id, open) in openGuestLinks where !current.contains(id) {
+            openGuestLinks[id] = nil
+            open.window.endSheet(open.alert.window, returnCode: .abort)
+        }
+#endif
+        for row in rows {
+            guard let id = row["id"] as? String, !handledGuestLinks.contains(id),
+                  let s = row["url"] as? String, let url = URL(string: s) else { continue }
+            switch GuestURLGate.disposition(for: url) {
+            case .refuse:
+                handledGuestLinks.insert(id)
+                FatClientLog.log("guest link: refused a page with a local/private host: \(url.host ?? "?")")
+                guestLinkDone(id)
+            case .open:
+                handledGuestLinks.insert(id)
+#if os(macOS)
+                NSWorkspace.shared.open(url)
+#else
+                UIApplication.shared.open(url)
+#endif
+                guestLinkDone(id)
+            case .ask:
+#if os(macOS)
+                handledGuestLinks.insert(id)
+                guard openGuestLinks.count < 3, let window = promptWindow() else {
+                    FatClientLog.log("guest link: did not open (no window to ask in, or asks pending): \(url.host ?? "?")")
+                    continue
+                }
+                let alert = ACAppDelegate.guestURLOpenAlert(url, workspace: row["workspace"] as? String)
+                openGuestLinks[id] = (alert, window)
+                alert.beginSheetModal(for: window) { [weak self] response in
+                    self?.openGuestLinks[id] = nil
+                    // Taken down: another client handled it.
+                    guard response != .abort else { return }
+                    if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
+                    self?.guestLinkDone(id)
+                }
+#else
+                continue
+#endif
+            }
+        }
+    }
+
+    /// A guest link handled here: the server drops it for every client.
+    private func guestLinkDone(_ id: String) {
+        send("POST", "/guest-links/\(ControlClient.encodeSegment(id))/done", then: false)
     }
 
     /// Shared-folder paths per running VM (feeds the remote file browser's
@@ -1083,6 +1151,7 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
+        applyGuestLinks(snapshot["guestLinks"] as? [[String: Any]])
         applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
                                   ended: snapshot["registrationEnded"] as? [String: Any],
                                   endedList: snapshot["registrationsEnded"] as? [[String: Any]])

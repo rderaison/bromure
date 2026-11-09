@@ -3573,6 +3573,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         guestURLAsksPending += 1
+        let alert = guestURLOpenAlert(url, workspace: workspace)
+        alert.beginSheetModal(for: window) { response in
+            guestURLAsksPending -= 1
+            if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    /// The "Open a Page from the Workspace?" alert: Cancel first (the
+    /// default), "Open in Browser" second. A fat client asks with the same
+    /// one for a page a remote workspace opened (FatClientController).
+    static func guestURLOpenAlert(_ url: URL, workspace: String?) -> NSAlert {
         let shown = url.absoluteString.count > 400 ? String(url.absoluteString.prefix(400)) + "…" : url.absoluteString
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -3587,10 +3598,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Cancel is the default: Return doesn't open it.
         alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Open in Browser", comment: "guest URL open prompt"))
-        alert.beginSheetModal(for: window) { response in
-            guestURLAsksPending -= 1
-            if response == .alertSecondButtonReturn { NSWorkspace.shared.open(url) }
-        }
+        return alert
     }
 
     /// Per-profile shell bridges (vsock 5800), created for every session —

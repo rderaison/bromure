@@ -990,11 +990,15 @@
     },
     {
       "id": "ACAppDelegate.static openGuestRelayedURL(_: URL, workspace: String?)",
-      "reason": "screen-only: a macOS server opens a guest's page on its own screen (no relay to a fat client); a headless server has none (LinuxSignInHost.guestOpenedURL logs it; sign-in pages go to the client)"
+      "reason": "screen-only: a macOS server opens a guest's page on its own screen (no relay to a fat client); a headless server has none (LinuxSignInHost.guestOpenedURL relays it to the user's clients, GuestLinkRelay; the fat client applies this same disposition)"
     },
     {
       "id": "ACAppDelegate.static askBeforeOpeningGuestURL(_: URL, workspace: String?)",
       "reason": "screen-only: the open-this-page sheet on the server's screen"
+    },
+    {
+      "id": "ACAppDelegate.static guestURLOpenAlert(_: URL, workspace: String?)",
+      "reason": "screen-only: the open-this-page alert, shown on a Mac (the server's screen, or a fat client's for a Linux server's guestLinks)"
     },
     {
       "id": "ACAppDelegate.static consentGrantControls(_: ConsentBroker, profileID: UUID)",
