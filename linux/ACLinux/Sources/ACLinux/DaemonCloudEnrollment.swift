@@ -29,6 +29,8 @@ extension Daemon {
         } else {
             BACEventEmitter.shared.reset()
         }
+        // The HTTP-log uploader follows (macOS: refreshStreamingState).
+        refreshStreamingState(store: LinuxSessionHost.shared?.daemon?.mitm?.traces.withLockedValue { $0 })
     }
 
     /// `GET /cloud`: the enrollment state.

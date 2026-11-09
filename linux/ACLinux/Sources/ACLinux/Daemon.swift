@@ -301,7 +301,11 @@ public actor Daemon {
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
-            await MainActor.run { mitm.setUpTraceStore(rootDir: root) }
+            await MainActor.run {
+                mitm.setUpTraceStore(rootDir: root)
+                // Its uploader while enrolled (macOS: the engine's start).
+                Self.refreshStreamingState(store: mitm.traces.withLockedValue { $0 })
+            }
             // What a VM mints is saved with its workspace: the next boot's
             // swap map has it (macOS: credentialMinter.sink).
             // A Bedrock engine without a pasted key: the repair proxy signs its

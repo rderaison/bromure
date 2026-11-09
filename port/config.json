@@ -108,6 +108,7 @@
     "Sources/AgentCoding/Mitm/AWSCredentialServer.swift",
     "Sources/AgentCoding/Mitm/AWSHosts.swift",
     "Sources/AgentCoding/Mitm/AWSResigner.swift",
+    "Sources/AgentCoding/Mitm/BACTraceUploader.swift",
     "Sources/AgentCoding/Mitm/BromureBlockLog.swift",
     "Sources/AgentCoding/Mitm/BromureCA.swift",
     "Sources/AgentCoding/Mitm/CertCache.swift",

@@ -108,6 +108,8 @@ extension LinuxSessionHost: ProfileEditHost {
     /// applyLiveEditToRunningSession's).
     // @port-skip linux-only: no app surfaces to refresh on a server
     func profilesDidChange(saved: Profile?, editing: Profile?) {
+        // Private mode, as macOS's profiles.didSet: what is sent to bromure.io.
+        Daemon.refreshStreamingState(store: daemon?.mitm?.traces.withLockedValue { $0 })
         // A running workspace's only: a stopped one's comes with its launch
         // (and a stop clears it).
         guard let saved, LinuxSessionHost.running.withLockedValue({ $0.contains(saved.id) }) else { return }

@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// Unit coverage for the pure TraceRecord → TraceEvent conversion the
 /// AC HTTP-log uploader does before shipping to session_events: URL
