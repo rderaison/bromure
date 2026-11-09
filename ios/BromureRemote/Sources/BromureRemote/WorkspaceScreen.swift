@@ -385,9 +385,18 @@ private struct TerminalsPane: View {
     /// toggles so re-opening the reader shows the conversation instantly instead
     /// of the slow "Loading transcript…" while it re-tails the guest jsonl.
     @State private var transcripts = TranscriptStore()
-    final class TranscriptStore {
+    @MainActor final class TranscriptStore {
         var items: [Int: [TranscriptItem]] = [:]
         var everLoaded: Set<Int> = []
+        /// The incremental reader per window: a remount continues from
+        /// what's held instead of re-reading the file.
+        private var feeds: [Int: TranscriptFeed] = [:]
+        func feed(_ window: Int) -> TranscriptFeed {
+            if let f = feeds[window] { return f }
+            let f = TranscriptFeed()
+            feeds[window] = f
+            return f
+        }
     }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
@@ -873,6 +882,11 @@ private struct TranscriptReaderView: View {
     @State private var showFileImporter = false
     @State private var uploading = false
     @State private var uploadError: String?
+    /// How much of the held conversation is laid out (TranscriptWindow).
+    @State private var renderLimit = TranscriptWindow.step
+    @State private var renderChars = TranscriptWindow.charStep
+    @State private var loadingEarlier = false
+    @FocusState private var composing: Bool
 
     var body: some View {
         // Transcript fills; the composer is pinned beneath it and the WHOLE stack
@@ -922,7 +936,17 @@ private struct TranscriptReaderView: View {
                     .font(.system(size: 15))
                     .lineLimit(1...8)
                     .frame(minHeight: 24)
+                    .focused($composing)
                 HStack(spacing: 18) {
+                    if composing {
+                        // Put the keyboard away (Return makes a new line).
+                        Button { composing = false } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityLabel("Hide Keyboard")
+                    }
                     Spacer()
                     attachButton
                     Button(action: send) {
@@ -998,9 +1022,17 @@ private struct TranscriptReaderView: View {
             unavailable("No transcript",
                         "No agent session was found for this terminal yet — send a message to get started.")
         } else {
-            TailFollowingScroll(changeKey: items.count) {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    TranscriptRowsView(items: answeredItems)
+            let all = answeredItems
+            let shown = TranscriptWindow.visible(all, limit: renderLimit, chars: renderChars)
+            TailFollowingScroll(
+                changeKey: items.count,
+                earlier: TranscriptWindow.earlier(
+                    all: all, shown: shown, feed: store.feed(window), loading: loadingEarlier,
+                    widen: { renderLimit += TranscriptWindow.step; renderChars += TranscriptWindow.charStep },
+                    load: { await loadEarlier() })
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    TranscriptRowsView(items: shown, working: working && openQuestions.isEmpty)
                         // A picture the agent shows (display MCP) is read off its machine.
                         .environment(\.displayFileReader, DisplayFileReader.chunked { op in
                             try? await controller.guestFileOp(profileID, op: op)
@@ -1180,27 +1212,38 @@ private struct TranscriptReaderView: View {
         }
     }
 
+    /// The guest command for one read of this tab's transcript.
+    private var chunkCommand: TranscriptFeed.Command? {
+        guard let cwd = guestCwd, !cwd.isEmpty else { return nil }
+        let since = since, agent = agent
+        return { known, offset, bytes, earlier in
+            CodingTaskEngine.transcriptChunkCommand(guestCwd: cwd, since: since, agent: agent,
+                                                    knownPath: known, knownOffset: offset,
+                                                    bytes: bytes, earlier: earlier)
+        }
+    }
+
+    private func exec(_ cmd: String) async -> String? {
+        try? await controller.guestExec(profileID, command: cmd, timeout: 20)
+    }
+
     private func poll() async {
         FatClientLog.log("reader win=\(window) poll start cwd=\(guestCwd ?? "nil") "
             + "agent=\(agent ?? "?")")
-        guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
-                                                               agent: agent)
-        else {
+        guard let cmd = chunkCommand else {
             FatClientLog.log("reader win=\(window) no cwd/cmd → loaded")
             loaded = true; store.everLoaded.insert(window); return
         }
+        let feed = store.feed(window)
         var first = true
         while !Task.isCancelled {
-            if first { FatClientLog.log("reader win=\(window) guestExec…") }
-            let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+            let read = await feed.refresh(agent: agent, command: cmd, exec: exec)
             if first {
-                FatClientLog.log("reader win=\(window) guestExec \(raw == nil ? "FAILED/timeout" : "OK \(raw!.count) chars")")
+                FatClientLog.log("reader win=\(window) read \(read == nil ? "FAILED/timeout" : "OK \(read!.count) items")")
             }
-            if let raw {
-                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
-                items = parsed
-                store.items[window] = parsed          // survive a reader remount
+            if let read, read != items {
+                items = read
+                store.items[window] = read          // survive a reader remount
             }
             loaded = true
             store.everLoaded.insert(window)
@@ -1211,16 +1254,33 @@ private struct TranscriptReaderView: View {
 
     /// One immediate transcript refresh — used right after sending a message or
     /// answering a question so the reader reflects it without waiting out the
-    /// 2 s poll (the "nothing happens until I toggle" complaint: a toggle just
-    /// forced this same fresh read).
+    /// 2 s poll.
     private func refreshNow() async {
-        guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
-                                                               agent: agent),
-              let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+        guard let cmd = chunkCommand,
+              let read = await store.feed(window).refresh(agent: agent, command: cmd, exec: exec)
         else { return }
-        let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
-        await MainActor.run { items = parsed; store.items[window] = parsed }
+        if read != items { items = read; store.items[window] = read }
+    }
+
+    /// Earlier conversation from the file, put in front.
+    private func loadEarlier() async {
+        guard let cmd = chunkCommand, !loadingEarlier else { return }
+        loadingEarlier = true
+        defer { loadingEarlier = false }
+        let feed = store.feed(window)
+        if await feed.loadEarlier(agent: agent, command: cmd, exec: exec) {
+            items = feed.items
+            store.items[window] = feed.items
+        }
+    }
+
+    /// The agent is at work in this tab: its current step (or "Thinking…")
+    /// shows live, as on the desktop.
+    private var working: Bool {
+        guard let s = controller.sessionStore.sessions.first(where: {
+            $0.profileID == profileID && $0.windowIndex == window && !$0.hasEnded
+        }) else { return false }
+        return SessionHome.bucket(for: s, in: controller.listModel) == .working
     }
 }
 
@@ -1390,18 +1450,29 @@ enum ComposerOutcome: Equatable, CustomStringConvertible {
 
 // MARK: - A transcript that follows its tail
 
+/// The "earlier" control at a transcript's top: widen the rows on show,
+/// or fetch the conversation before what's held.
+struct TailEarlier {
+    let label: String
+    let loading: Bool
+    /// The first row on show: kept where it is once rows land above it.
+    let anchor: Int?
+    let action: @MainActor () async -> Void
+}
+
 /// A chat's scroll view that stays on the latest message -- the iOS twin of
-/// the desktop's `TailFollow` (BeautifiedSessionView). Jumping to the last
-/// row lands on ESTIMATED row heights; as the lazy rows get measured the
-/// end moves, short of the view (stuck mid-chat) or past it (a blank
-/// screen until you scroll). So once sent to the tail it keeps following
-/// it through that drift -- re-snapping whenever the end-of-content marker
-/// isn't at the bottom edge -- until the user drags it away; scrolling
-/// back down to the end picks the tail up again. New turns only pull the
-/// view down while it follows, never while you read above.
+/// the desktop's `TailFollow` (BeautifiedSessionView). The rows are EAGER
+/// (the desktop's fix: a lazy stack left the view blank once a row -- a
+/// long answer -- outgrew the viewport, and its estimated heights sent
+/// the tail past the end), so callers bound what they hand it with
+/// `TranscriptWindow`. Once at the tail it keeps following through layout
+/// drift until the user drags it away; scrolling back down to the end
+/// picks the tail up again. New turns only pull the view down while it
+/// follows, never while you read above.
 struct TailFollowingScroll<Content: View>: View {
     /// Changes when rows arrive (the item count).
     let changeKey: Int
+    var earlier: TailEarlier? = nil
     @ViewBuilder let content: () -> Content
 
     /// A reference: flipping it must not re-render the transcript.
@@ -1422,19 +1493,23 @@ struct TailFollowingScroll<Content: View>: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // Not lazy: the end marker must always be realized, or its
-                // position stops reporting exactly when it matters (the
-                // view scrolled past the end).
                 VStack(spacing: 0) {
+                    if let earlier { earlierButton(earlier, proxy) }
                     content()
                     Color.clear.frame(height: 1).id(Self.tailID)
                         .onGeometryChange(for: CGFloat.self, of: { $0.frame(in: .named(Self.space)).minY }) { y in
                             tailMoved(y, proxy)
                         }
                 }
+                // A short chat sits at the bottom by FILLING the viewport, not
+                // by the scroll anchor (which draws it low but hit-tests it
+                // top-aligned -- the desktop's dead-buttons bug).
+                .frame(maxWidth: .infinity, minHeight: max(0, viewport), alignment: .bottom)
             }
             .coordinateSpace(name: Self.space)
-            .defaultScrollAnchor(.bottom)
+            // The opening offset only: anchoring every size change to the
+            // bottom fought the follower (and a reader above).
+            .modifier(InitialBottomAnchor())
             // A drag on the conversation puts the keyboard away -- and with
             // it back come the bars that step aside while typing.
             .scrollDismissesKeyboard(.interactively)
@@ -1460,6 +1535,29 @@ struct TailFollowingScroll<Content: View>: View {
         }
     }
 
+    private func earlierButton(_ e: TailEarlier, _ proxy: ScrollViewProxy) -> some View {
+        Button {
+            follow.sticky = false
+            follow.lastUserScroll = Date()
+            Task { @MainActor in
+                await e.action()
+                // Keep the reading position: the first row stays put.
+                if let a = e.anchor { DispatchQueue.main.async { proxy.scrollTo(a, anchor: .top) } }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if e.loading { ProgressView().controlSize(.small) }
+                Label(e.label, systemImage: "arrow.up.circle")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .disabled(e.loading)
+    }
+
     /// The end marker sits at the bottom edge (within the content's padding).
     private func atBottom(_ y: CGFloat?) -> Bool {
         guard let y, viewport > 0 else { return false }
@@ -1482,5 +1580,155 @@ struct TailFollowingScroll<Content: View>: View {
         guard Date().timeIntervalSince(follow.lastSnap) > 0.15 else { return }
         follow.lastSnap = Date()
         DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+    }
+}
+
+/// Opens at the bottom; on iOS 18+ only the opening offset is anchored.
+private struct InitialBottomAnchor: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, visionOS 2.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
+    }
+}
+
+// MARK: - What a transcript lays out
+
+/// The newest rows, bounded by count and by text -- the desktop's render
+/// window (`BeautifiedSessionView.renderWindow`): eager rows stay cheap
+/// because only a few screens of text are laid out; "Show earlier
+/// messages" widens it.
+enum TranscriptWindow {
+    static let step = 200
+    static let charStep = 30_000
+
+    static func visible(_ items: [TranscriptItem], limit: Int, chars: Int) -> [TranscriptItem] {
+        var n = 0, total = 0
+        for item in items.reversed() {
+            if n >= limit || (n >= 2 && total >= chars) { break }
+            n += 1
+            total += min(item.approximateLength, 6_000)
+        }
+        return Array(items.suffix(n))
+    }
+
+    /// The control above the rows: more of what's held, else earlier
+    /// conversation from the file; nil when it's all on show.
+    @MainActor
+    static func earlier(all: [TranscriptItem], shown: [TranscriptItem], feed: TranscriptFeed,
+                        loading: Bool, widen: @escaping @MainActor () -> Void,
+                        load: @escaping @MainActor () async -> Void) -> TailEarlier? {
+        let hidden = all.count - shown.count
+        guard hidden > 0 || feed.canLoadEarlier else { return nil }
+        let label = loading
+            ? NSLocalizedString("Loading earlier conversation…", comment: "beautified history")
+            : hidden > 0
+            ? NSLocalizedString("Show earlier messages", comment: "beautified history")
+            : NSLocalizedString("Load earlier conversation", comment: "beautified history")
+        return TailEarlier(label: label, loading: loading, anchor: shown.first?.id) {
+            if hidden > 0 { widen() } else { await load(); widen() }
+        }
+    }
+}
+
+// MARK: - A transcript read incrementally
+
+/// One transcript file read the way the desktop's chat reads it
+/// (`CodingTaskEngine.transcriptChunkCommand`): a first window from the
+/// end, then only the bytes appended since, and earlier history on
+/// demand. The old reader re-tailed the last 300 KB every poll -- which
+/// tool output fills, so a phone showed only the last few messages and
+/// had no way to reach the rest.
+@MainActor
+final class TranscriptFeed {
+    static let windowBytes = 1_000_000
+
+    private var path: String?
+    private var data = Data()
+    private var base = 0
+    private var end = 0
+    private var pq = Data()
+    private var generation = 0
+    private(set) var items: [TranscriptItem] = []
+    var canLoadEarlier: Bool { path != nil && base > 0 }
+
+    /// Builds the guest command: known path, offset, window bytes, earlier.
+    typealias Command = (String?, Int, Int, Bool) -> String?
+    typealias Exec = (String) async -> String?
+
+    private struct Fetch { let path: String; let pq: Data; let start: Int; let end: Int; let chunk: Data }
+
+    /// Header = 5 lines (path, pending question, size, start, end), then
+    /// the bytes. nil for empty output (no transcript file).
+    private static func parse(_ raw: String) -> Fetch? {
+        let d = Data(raw.utf8)
+        var cuts: [Int] = []
+        var i = d.startIndex
+        while cuts.count < 5, i < d.endIndex, let nl = d[i...].firstIndex(of: 0x0A) {
+            cuts.append(nl)
+            i = nl + 1
+        }
+        guard cuts.count == 5 else { return nil }
+        func field(_ k: Int) -> Data { Data(d[(k == 0 ? d.startIndex : cuts[k - 1] + 1)..<cuts[k]]) }
+        func int(_ k: Int) -> Int? { Int(String(decoding: field(k), as: UTF8.self).trimmingCharacters(in: .whitespaces)) }
+        let path = String(decoding: field(0), as: UTF8.self)
+        guard !path.isEmpty, let start = int(3), let end = int(4) else { return nil }
+        return Fetch(path: path, pq: field(1), start: start, end: end, chunk: Data(d[(cuts[4] + 1)...]))
+    }
+
+    /// The new bytes since the last read. nil when the read failed (keep
+    /// what's on show); otherwise the conversation.
+    func refresh(agent: String?, command: Command, exec: Exec) async -> [TranscriptItem]? {
+        let knownPath = path, knownEnd = end
+        guard let cmd = command(knownPath, knownEnd, Self.windowBytes, false), let raw = await exec(cmd) else { return nil }
+        // Another read (a send's refresh beside the poll) landed meanwhile:
+        // this one's bytes are already held, or would be appended twice.
+        guard path == knownPath, end == knownEnd else { return items }
+        var changed = false
+        if let f = Self.parse(raw) {
+            if f.pq != pq { pq = f.pq; changed = true }
+            if path == f.path, f.start == end {
+                if !f.chunk.isEmpty { data.append(f.chunk); end = f.end; changed = true }
+            } else {
+                // First read, another file, or too far behind: start over.
+                path = f.path; data = f.chunk; base = f.start; end = f.end
+                changed = true
+            }
+        } else if path != nil || !items.isEmpty {
+            path = nil; data = Data(); pq = Data(); base = 0; end = 0
+            changed = true
+        }
+        if changed { await reparse(agent: agent) }
+        return items
+    }
+
+    /// The conversation before what's held, put in front. False when
+    /// nothing came (or the history moved meanwhile).
+    @discardableResult
+    func loadEarlier(agent: String?, command: Command, exec: Exec) async -> Bool {
+        guard let held = path, base > 0, let cmd = command(held, base, Self.windowBytes, true),
+              let raw = await exec(cmd), let f = Self.parse(raw),
+              f.path == path, f.end == base, !f.chunk.isEmpty
+        else { return false }
+        data = f.chunk + data
+        base = f.start
+        await reparse(agent: agent)
+        return true
+    }
+
+    private func reparse(agent: String?) async {
+        generation &+= 1
+        let gen = generation
+        var input = data
+        if !pq.isEmpty { input.append(0x0A); input.append(pq); input.append(0x0A) }
+        let parsed = await Task.detached(priority: .userInitiated) {
+            AgentTranscript.parse(input, agent: agent)
+        }.value
+        // A later read parsed newer history meanwhile: it wins.
+        guard gen == generation else { return }
+        TranscriptMarkdownCache.prewarm(parsed)
+        items = parsed
     }
 }

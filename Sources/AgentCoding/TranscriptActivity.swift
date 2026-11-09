@@ -1039,10 +1039,17 @@ struct ActivityGroupView: View {
 /// A transcript as rows: messages on their own, activity folded.
 struct TranscriptRowsView: View {
     let items: [TranscriptItem]
+    /// The agent is at work: its run in progress shows the current step
+    /// live, or a "Thinking…" line follows the last row (the desktop chat's
+    /// live cue).
+    var working = false
     /// Long messages of yours opened in full (item ids).
     @State private var expanded: Set<Int> = []
     var body: some View {
         let layout = TranscriptRow.layout(items, expanded: expanded)
+        let liveRun: Int? = working ? layout.rows.last.flatMap { r -> Int? in
+            if case .activity = r { return r.id } else { return nil }
+        } : nil
         ForEach(layout.rows) { row in
             switch row {
             case .item(let item):
@@ -1059,9 +1066,20 @@ struct TranscriptRowsView: View {
                 } else {
                     TranscriptItemView(item: item).replyCopyMenu(layout.replies[item.id]).id(row.id)
                 }
-            case .activity(let run): ActivityGroupView(items: run).id(row.id)
+            case .activity(let run): ActivityGroupView(items: run, live: row.id == liveRun).id(row.id)
             case .changes(let c, _): TurnChangesView(changes: c).id(row.id)
             }
+        }
+        if working, liveRun == nil {
+            HStack(spacing: 7) {
+                ProgressView().controlSize(.mini)
+                Text(NSLocalizedString("Thinking…", comment: "activity line"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.primary.opacity(0.04)))
         }
     }
 }

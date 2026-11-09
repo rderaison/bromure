@@ -705,6 +705,16 @@ struct MobileRoomScreen: View {
                         .lineLimit(1...6)
                         .focused($composing)
                         .padding(.bottom, 4)
+                    if composing {
+                        // Put the keyboard away (Return makes a new line).
+                        Button { composing = false } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 30, height: 30)
+                        }
+                        .accessibilityLabel("Hide Keyboard")
+                    }
                     Button(action: send) {
                         ZStack {
                             if let uploadProgress {
@@ -1124,6 +1134,19 @@ struct RoomCellView: View {
 @MainActor
 enum RoomTranscriptCache {
     static var items: [UUID: [TranscriptItem]] = [:]
+    /// The incremental reader per session (see TranscriptFeed).
+    /// The most recently used few: each holds its conversation's bytes.
+    private static var feeds: [UUID: TranscriptFeed] = [:]
+    private static var order: [UUID] = []
+    static func feed(_ id: UUID) -> TranscriptFeed {
+        order.removeAll { $0 == id }
+        order.append(id)
+        if let f = feeds[id] { return f }
+        let f = TranscriptFeed()
+        feeds[id] = f
+        while order.count > 12 { feeds.removeValue(forKey: order.removeFirst()) }
+        return f
+    }
 }
 
 /// A live session's conversation, tailed from its own tmux window's
@@ -1134,8 +1157,13 @@ struct RoomTranscriptView: View {
     let session: AgentSession
     @State private var items: [TranscriptItem] = []
     @State private var loaded = false
+    @State private var command: TranscriptFeed.Command?
+    @State private var renderLimit = TranscriptWindow.step
+    @State private var renderChars = TranscriptWindow.charStep
+    @State private var loadingEarlier = false
 
     private var window: Int { session.windowIndex ?? 0 }
+    private var working: Bool { SessionHome.bucket(for: session, in: controller.listModel) == .working }
 
     var body: some View {
         Group {
@@ -1148,9 +1176,17 @@ struct RoomTranscriptView: View {
             } else {
                 // Stays on the latest message through row measuring, until
                 // you scroll up to read (see TailFollowingScroll).
-                TailFollowingScroll(changeKey: items.count) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        TranscriptRowsView(items: items)
+                let shown = TranscriptWindow.visible(items, limit: renderLimit, chars: renderChars)
+                TailFollowingScroll(
+                    changeKey: items.count,
+                    earlier: TranscriptWindow.earlier(
+                        all: items, shown: shown, feed: RoomTranscriptCache.feed(session.id),
+                        loading: loadingEarlier,
+                        widen: { renderLimit += TranscriptWindow.step; renderChars += TranscriptWindow.charStep },
+                        load: { await loadEarlier() })
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        TranscriptRowsView(items: shown, working: working)
                             // A picture the agent shows (display MCP) is read off its machine.
                             .environment(\.displayFileReader, DisplayFileReader.chunked { op in
                                 try? await controller.guestFileOp(session.profileID, op: op)
@@ -1176,24 +1212,42 @@ struct RoomTranscriptView: View {
     /// moves both); the transcript itself every 2 s.
     private func poll() async {
         let agent = session.tool.rawValue
-        var cmd: String?
+        let feed = RoomTranscriptCache.feed(session.id)
         var tick = 0
         while !Task.isCancelled {
-            if cmd == nil || tick % 5 == 0,
+            if command == nil || tick % 5 == 0,
                let probe = AgentSessionLocator.parseFloorProbe(try? await controller.guestExec(
                    session.profileID, command: AgentSessionLocator.floorProbeCommand(window: window), timeout: 8)) {
-                cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: probe.cwd, since: probe.since,
-                                                             agent: agent, pinnedWindow: window)
+                let w = window
+                command = { known, offset, bytes, earlier in
+                    CodingTaskEngine.transcriptChunkCommand(guestCwd: probe.cwd, since: probe.since,
+                                                            agent: agent, pinnedWindow: w,
+                                                            knownPath: known, knownOffset: offset,
+                                                            bytes: bytes, earlier: earlier)
+                }
             }
-            if let cmd, let raw = try? await controller.guestExec(session.profileID, command: cmd, timeout: 15) {
-                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
-                TranscriptMarkdownCache.prewarm(parsed)
-                if parsed != items { items = parsed }
+            if let command, let read = await feed.refresh(agent: agent, command: command, exec: exec) {
+                if read != items { items = read }
                 RoomTranscriptCache.items[session.id] = items
             }
             loaded = true
             tick += 1
             try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    private func exec(_ cmd: String) async -> String? {
+        try? await controller.guestExec(session.profileID, command: cmd, timeout: 20)
+    }
+
+    private func loadEarlier() async {
+        guard let command, !loadingEarlier else { return }
+        loadingEarlier = true
+        defer { loadingEarlier = false }
+        let feed = RoomTranscriptCache.feed(session.id)
+        if await feed.loadEarlier(agent: session.tool.rawValue, command: command, exec: exec) {
+            items = feed.items
+            RoomTranscriptCache.items[session.id] = items
         }
     }
 }
