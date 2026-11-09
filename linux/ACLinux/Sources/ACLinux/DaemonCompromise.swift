@@ -61,11 +61,12 @@ extension Daemon {
     /// guest's).
     // @port-skip linux-only: ACAppDelegate.installFirewallGuestAbort's guest request, by the client's port
     func wireBridgeAbort() {
-        mitm?.bridgeAbort.withLockedValue { $0 = { [weak self] pid, sport, done in
+        mitm?.bridgeAbort.withLockedValue { $0 = { [weak self] pid, sport, peer, done in
             Task {
                 defer { done() }
                 _ = try? await self?.liveShell(of: pid)?.request(
-                    ["bridge_abort": ["client_sport": sport], "timeout": 5], wait: .seconds(2), deadline: .seconds(5))
+                    ["bridge_abort": ["client_sport": sport, "client_peer": peer], "timeout": 5],
+                    wait: .seconds(2), deadline: .seconds(5))
             }
         } }
     }

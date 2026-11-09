@@ -1768,7 +1768,8 @@ def _shell_handle_connection(vsock_sock, replenish_fn):
         if isinstance(abort, dict):
             try:
                 if "client_sport" in abort:
-                    resp = _bridge_abort(int(abort.get("client_sport", -1)), by_client=True)
+                    resp = _bridge_abort((str(abort.get("client_peer", "")),
+                                          int(abort.get("client_sport", -1))), by_client=True)
                 else:
                     resp = _bridge_abort(int(abort.get("port", -1)))
             except (TypeError, ValueError):
@@ -2172,10 +2173,12 @@ class _BridgeConn(object):
 # connection's source port), so the host can abort one: {"bridge_abort":
 # {"port": N}} on the shell channel.
 _BRIDGES = {}
-# The same bridges by their client's loopback source port (the `sport` the
-# BROMURE-CLIENT preamble names): a host whose vsock doesn't tell it the
-# guest's source port (Firecracker's hybrid vsock, the Linux daemon) names the
-# connection by that instead: {"bridge_abort": {"client_sport": N}}.
+# The same bridges by their client's address and source port (the `peer` and
+# `sport` the BROMURE-CLIENT preamble names; docker-network clients share the
+# bridge, so the port alone isn't unique): a host whose vsock doesn't tell it
+# the guest's source port (Firecracker's hybrid vsock, the Linux daemon) names
+# the connection by those instead: {"bridge_abort": {"client_sport": N,
+# "client_peer": "<ip>"}}.
 _BRIDGES_BY_CLIENT = {}
 _BRIDGES_LOCK = threading.Lock()
 
@@ -2228,7 +2231,8 @@ def _bridge_pump(src, dst, conn=None, to_client=False):
 def _bridge_abort(port, by_client=False):
     """Reset the client side of the bridge whose vsock port is `port` (the
     host's firewall cut that connection): RST, not FIN. `by_client`: `port` is
-    the client's loopback source port (the preamble's sport) instead."""
+    the client's (address, source port) instead (the preamble's peer and
+    sport)."""
     with _BRIDGES_LOCK:
         conn = (_BRIDGES_BY_CLIENT if by_client else _BRIDGES).get(port)
     if conn is None:
@@ -2329,7 +2333,8 @@ def _bridge(client, vsock_port, label, preamble=None):
     client_port = None
     if preamble:
         try:
-            client_port = int(client.getpeername()[1])
+            peer = client.getpeername()
+            client_port = (str(peer[0]), int(peer[1]))
         except (OSError, IndexError, TypeError, ValueError):
             client_port = None
     if client_port is not None:

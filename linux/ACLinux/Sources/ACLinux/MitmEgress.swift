@@ -104,15 +104,18 @@ extension MitmProxy {
     // @port HTTPMitmConnection.cutForFirewall() h=99ceec5a7698d6fc @003f61e7
     // @port HTTPMitmConnection.shutdownAfterAbort() h=88927f3ebfd1a483 @003f61e7
     func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String,
-                          identity: OpenShellPolicy.BinaryIdentity? = nil, clientSport: Int? = nil) -> Bool {
+                          identity: OpenShellPolicy.BinaryIdentity? = nil, clientSport: Int? = nil,
+                          clientPeer: String? = nil) -> Bool {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy
-        let abort = clientSport.flatMap { sport in bridgeAbort.withLockedValue { $0 }.map { (sport, $0) } }
+        let abort = clientSport.flatMap { sport in
+            clientPeer.flatMap { peer in bridgeAbort.withLockedValue { $0 }.map { (sport, peer, $0) } }
+        }
         let token = EgressConnectionRegistry.shared.register(
             profileID: profileID, host: host, port: port, route: route,
             rule: ProxyPolicy.trackedRule(policy: policy, host: host, port: port), identity: identity) { [weak channel] in
                 guard let channel else { return }
-                guard let (sport, guestAbort) = abort else { channel.close(promise: nil); return }
-                guestAbort(profileID, sport) { channel.close(promise: nil) }
+                guard let (sport, peer, guestAbort) = abort else { channel.close(promise: nil); return }
+                guestAbort(profileID, sport, peer) { channel.close(promise: nil) }
                 channel.eventLoop.scheduleTask(in: MitmProxy.abortGrace) { channel.close(promise: nil) }
             }
         channel.closeFuture.whenComplete { _ in EgressConnectionRegistry.shared.unregister(token) }

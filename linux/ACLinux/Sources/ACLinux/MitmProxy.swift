@@ -70,7 +70,7 @@ final class MitmProxy: @unchecked Sendable {
     /// Asks a workspace's agentd to reset the bridged client socket whose
     /// loopback port is given (the preamble's sport), calling back once done
     /// (macOS: EgressConnectionRegistry.guestAbort, by vsock port there).
-    let bridgeAbort = NIOLockedValueBox<(@Sendable (UUID, Int, @escaping @Sendable () -> Void) -> Void)?>(nil)
+    let bridgeAbort = NIOLockedValueBox<(@Sendable (UUID, Int, String, @escaping @Sendable () -> Void) -> Void)?>(nil)
     /// How long a cut waits for agentd's reset before closing anyway
     /// (macOS: HTTPMitmConnection.abortGrace).
     static let abortGrace: TimeAmount = .milliseconds(1500)
@@ -687,6 +687,9 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
     /// kernel sentry's loopback flow to the process chain (macOS: drive's
     /// NetworkLineage.noteClaimant / noteProxied).
     private var claim: NetworkLineage.Claim?
+    /// The bridge's client address (the preamble's `peer`), with its port
+    /// what names the connection for agentd's reset.
+    private var clientPeer: String?
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(proxy: MitmProxy, profileID: UUID) {
@@ -722,6 +725,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                     buf.moveReaderIndex(forwardBy: nl - buf.readerIndex + 1)
                     if let sport = Self.preambleSport(line) {
                         claim = NetworkLineage.shared.noteClaimant(profileID: profileID, sport: sport)
+                        clientPeer = Self.preamblePeer(line)
                     }
                 }
                 phase = .request
@@ -774,7 +778,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                                                       profileID: profileID, host: host, port: port)
                             guard proxy.trackForFirewall(context.channel, profileID: profileID,
                                                          host: host, port: port, route: "proxy",
-                                                         clientSport: claim?.sport),
+                                                         clientSport: claim?.sport, clientPeer: clientPeer),
                                   // Tracked (cutAll reaches it from now), then
                                   // checked: a quarantine since the CONNECT is seen.
                                   !WorkspaceQuarantine.shared.contains(profileID) else {
@@ -815,7 +819,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 ProxyPolicy.reportAllowed(policy: policy, profileID: profileID, host: host, port: port)
                 guard proxy.trackForFirewall(context.channel, profileID: profileID,
                                              host: host, port: port, route: "proxy",
-                                             clientSport: claim?.sport) else {
+                                             clientSport: claim?.sport, clientPeer: clientPeer) else {
                     phase = .handedOff
                     context.close(promise: nil)
                     return
@@ -892,6 +896,12 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
         return nil
     }
 
+    /// The preamble's `peer=<ip>`.
+    // @port-skip linux-only: the preamble's peer, for agentd's reset
+    static func preamblePeer(_ line: String) -> String? {
+        line.split(separator: " ").first { $0.hasPrefix("peer=") }.map { String($0.dropFirst(5)) }
+    }
+
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     static func split(_ target: String, defaultPort: Int) -> (String, Int) {
         // The host every decision then sees: lowercased, a fully qualified
@@ -963,6 +973,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// strict framing reads the request whole.
     private var streaming = false
     private var streamLeft: Int?
+    /// A streamed chunked body, decoded and framed again as it goes.
+    private var chunks: HTTPRequestFraming.ChunkStream?
     static let inlineCap = 8 << 20
     /// This connection's cut at its workspace's quarantine (WorkspaceQuarantine).
     private var quarantineCut: UUID?
@@ -1036,6 +1048,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let strict = proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil
         if !strict, let headEnd = buf.readableBytesView.firstRange(of: Array("\r\n\r\n".utf8)) {
             let head = Data(buf.readableBytesView[buf.readerIndex..<headEnd.upperBound])
+            // Body framing an upstream could read otherwise than this proxy:
+            // refused before any body is read or streamed.
+            if let why = HTTPRequestFraming.headFramingProblem(String(decoding: head.dropLast(4), as: UTF8.self)) {
+                reply(context, ProxyPolicy.beforePolicyAnswer(status: 400, error: "invalid_http_request", detail: why,
+                                                              host: host, port: port, profileID: profileID,
+                                                              scheme: tls ? "https" : "http"))
+                return
+            }
             let decision = Self.streamsBody(head, buffered: buf.readableBytes - head.count)
             if decision.stream {
                 startStreaming(context, head: head, length: decision.length)
@@ -1098,6 +1118,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         started = true
         streaming = true
         streamLeft = length
+        if length == nil { chunks = HTTPRequestFraming.ChunkStream() }
         buf.moveReaderIndex(forwardBy: head.count)
         if buf.readableBytes > 0 {
             pending.append(buf)
@@ -1127,7 +1148,20 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     // @port-skip linux-only: relayUpstream's upload of a spooled body, on NIO
     private func forwardStreamed(_ b: ByteBuffer, to upstream: Channel, guest: Channel) {
         var b = b
-        if let left = streamLeft {
+        if chunks != nil {
+            // Chunked: decoded and framed again; nothing past the last chunk
+            // goes, and broken framing ends both sides.
+            guard chunks?.isDone == false else { return }
+            let out = chunks!.feed(Data(b.readableBytesView))
+            if chunks!.isBroken {
+                FileHandle.standardError.write(Data("[mitm] a streamed chunked body to \(host) is malformed: closed\n".utf8))
+                upstream.close(promise: nil)
+                guest.close(promise: nil)
+                return
+            }
+            guard !out.isEmpty else { return }
+            b = upstream.allocator.buffer(bytes: out)
+        } else if let left = streamLeft {
             guard left > 0 else { return }
             if b.readableBytes > left { b = b.getSlice(at: b.readerIndex, length: left) ?? b }
             streamLeft = left - b.readableBytes
@@ -1219,7 +1253,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // steps below read frames: an SPDY stream is an opaque pipe.
         var webSocket = false
         if upgrade, ResponseRelay.pumpedUpgrade(headerBlock: head) {
-            webSocket = !(SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) ?? "").lowercased().contains("spdy")
+            webSocket = ResponseRelay.upgradeToken(head) == "websocket"
         } else if upgrade || SubscriptionAuthRewrite.headerValue("http2-settings", inHeaderSection: head) != nil {
             req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings", "connection"], add: nil)
             upgrade = false
@@ -1235,7 +1269,10 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // The guest's `X-bromure-insecure: yes`, where the workspace allows
         // it: no upstream certificate validation, and so no real credential
         // on this request (MitmInsecure.swift).
-        let insecure = insecureBypass(req, proxy: proxy, profileID: profileID, host: host)
+        // Not on an upgrade: its upstream is always validated (macOS's
+        // handleWebSocketUpgrade), so OpenShell's WebSocket credential
+        // rewrite never puts a real secret in front of an unverified server.
+        let insecure = !upgrade && insecureBypass(req, proxy: proxy, profileID: profileID, host: host)
         var injected = SubscriptionAuthRewrite.Injected()
         // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace and
         // the log (our own stand-ins aren't leaks).
@@ -1442,11 +1479,23 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // refused is answered here (macOS: driveTLS's AWSResigner step). Not
         // an insecure request: re-signing would put the real key's signature
         // in front of an unvalidated upstream.
+        // A streamed body (5z) isn't here to hash: the request is signed
+        // UNSIGNED-PAYLOAD (S3 and the other SigV4 services accept it over
+        // TLS), and keeps its own framing, which the resigner drops.
+        let streamedFraming = spooled ? streamedBodyFraming(out) : nil
+        if spooled, SubscriptionAuthRewrite.headerValue("x-amz-content-sha256",
+                                                        inHeaderSection: SubscriptionAuthRewrite.rawHeaderSection(of: out) ?? "") != nil {
+            out = HTTPRequestFraming.replacingHeaders(out, drop: ["x-amz-content-sha256"], add: "X-Amz-Content-SHA256: UNSIGNED-PAYLOAD")
+        }
         switch insecure ? .unchanged : await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .unchanged: h=7ae83a8a6eda7f57 @003f61e7
         case .unchanged: break
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .resigned(let bytes): h=ef2b34394ac16b57 @003f61e7
-        case .resigned(let bytes): out = framedLikeURLSession(bytes, host: host)
+        case .resigned(let bytes):
+            out = streamedFraming.map {
+                HTTPRequestFraming.replacingHeaders(bytes, drop: ["host", "content-length", "transfer-encoding", "connection"],
+                                                    add: "Host: \(host)\r\n\($0)\r\nConnection: close")
+            } ?? framedLikeURLSession(bytes, host: host)
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .denied(let response): h=8293f31bc4d27bcf @003f61e7
         case .denied(let response): return .answer(response)
         // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .failed(let reason, let response): h=41ab3da9fe0a5276 @003f61e7
@@ -1507,6 +1556,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                               // An HTTP/1.0 guest gets a restored body up to the close, not chunks.
                                               guestHTTP11: !Self.isHTTP10(req))
                     relay.onUpstreamWritable = { [weak self] in self?.readGuestIfAllowed(channel) }
+                    if upgrade { relay.requestedUpgrade = ResponseRelay.upgradeToken(SubscriptionAuthRewrite.rawHeaderSection(of: req) ?? "") }
                     // The upgrade's held bytes follow the 101; anything else's are dropped.
                     relay.onSwitched = { [weak self, weak relay] switched, server in
                         let responseHead = relay?.upgradeResponseHead ?? Data()
@@ -1682,6 +1732,16 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                                                    add: "Host: \(host)\r\nContent-Length: \(body)\r\nConnection: close")
     }
 
+    /// A streamed request's body framing header, as the guest sent it (its
+    /// Content-Length, or chunked), for a head the resigner rebuilt.
+    // @port-skip linux-only: the 5z head's framing kept through AWS re-signing
+    static func streamedBodyFraming(_ raw: Data) -> String? {
+        let head = SubscriptionAuthRewrite.rawHeaderSection(of: raw) ?? ""
+        if let cl = SubscriptionAuthRewrite.headerValue("content-length", inHeaderSection: head) { return "Content-Length: \(cl)" }
+        if SubscriptionAuthRewrite.headerValue("transfer-encoding", inHeaderSection: head) != nil { return "Transfer-Encoding: chunked" }
+        return nil
+    }
+
     /// An absolute-form request line (`GET http://h/p HTTP/1.1`) in origin
     /// form, as the origin expects it; anything else as it is.
     // @port-skip linux-only: proxy request-line handling
@@ -1711,6 +1771,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 /// carrying a live subscription token tells the store (noteUnauthorized).
 // @port-skip linux-only: HTTPMitmConnection's response relay on NIO
 final class ResponseRelay: ChannelInboundHandler {
+    /// The protocol the request's upgrade named: the 101 must switch to it.
+    var requestedUpgrade: String?
     /// The switched model socket's activity beat (set at the switch).
     var beat: ActivityBeat?
     typealias InboundIn = ByteBuffer
@@ -2022,8 +2084,8 @@ final class ResponseRelay: ChannelInboundHandler {
         // Upgrade), or one nothing asked for: refused, not relayed (macOS:
         // handleWebSocketUpgrade's 502).
         if Self.status(head0) == 101,
-           !upgrade || !Self.pumpedUpgrade(headerBlock: String(decoding: head0, as: UTF8.self)
-                                                .components(separatedBy: "\r\n\r\n")[0]) {
+           !upgrade || requestedUpgrade == nil
+            || Self.upgradeToken(String(decoding: head0, as: UTF8.self).components(separatedBy: "\r\n\r\n")[0]) != requestedUpgrade {
             FileHandle.standardError.write(Data("[mitm] \(host): refused a 101 to a protocol other than websocket or SPDY/3.1\n".utf8))
             headDone = true
             relayed = true
@@ -2269,7 +2331,7 @@ final class ResponseRelay: ChannelInboundHandler {
     /// so `websocket, h2c`, a second Upgrade line, or a folded continuation
     /// line (which an upstream joins to the header above) would still offer
     /// h2c: none of them is pumped.
-    // @port HTTPMitmConnection.static pumpedUpgrade(headerBlock: String) h=b8d8d008b8ed3751 @003f61e7
+    // @port HTTPMitmConnection.static pumpedUpgrade(headerBlock: String) h=031a5782274474c1 @a6507010
     // partial: the request half: the rule alone (the Connection header doesn't decide it)
     // @port HTTPMitmConnection.isWebSocketUpgrade(rawRequest: Data) h=b7521939c43dc0ee @003f61e7
     static func pumpedUpgrade(headerBlock: String) -> Bool {
@@ -2284,8 +2346,18 @@ final class ResponseRelay: ChannelInboundHandler {
             protocols = line[line.index(after: colon)...].split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         }
-        guard let protocols, !protocols.isEmpty else { return false }
-        return protocols.allSatisfy { $0 == "websocket" || $0 == "spdy/3.1" }
+        // One protocol only: with two on offer ("websocket, SPDY/3.1") the
+        // relay can't know which the upstream will pick before its 101.
+        guard let protocols, protocols.count == 1 else { return false }
+        return protocols[0] == "websocket" || protocols[0] == "spdy/3.1"
+    }
+
+    /// The one protocol a pumped upgrade's header block names, lowercased.
+    // @port-skip linux-only: the 101's protocol held to the request's
+    static func upgradeToken(_ headerBlock: String) -> String? {
+        guard pumpedUpgrade(headerBlock: headerBlock) else { return nil }
+        return SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: headerBlock)?
+            .trimmingCharacters(in: .whitespaces).lowercased()
     }
 
     /// The switched protocol is WebSocket (its frames can be read), not an

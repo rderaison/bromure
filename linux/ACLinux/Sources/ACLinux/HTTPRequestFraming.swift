@@ -278,3 +278,99 @@ struct ClientHelloInfo: Equatable {
         return .hello(info)
     }
 }
+
+extension HTTPRequestFraming {
+    /// Why a request head's body framing is refused, or nil: a
+    /// Content-Length beside a Transfer-Encoding, more than one
+    /// Content-Length, one that isn't a length, or a Transfer-Encoding that
+    /// isn't exactly `chunked` (`xchunked`, `gzip, chunked`). Checked before
+    /// a body is read or streamed: an upstream reading the framing otherwise
+    /// than the proxy would see a second request the policy never did.
+    // @port-skip linux-only: the Linux proxy's request-smuggling refusals ahead of its framing
+    static func headFramingProblem(_ head: String) -> String? {
+        var lengths: [String] = [], encodings: [String] = []
+        for line in head.split(separator: "\r\n", omittingEmptySubsequences: false).dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if name == "content-length" { lengths.append(value) }
+            if name == "transfer-encoding" { encodings.append(value) }
+        }
+        if !lengths.isEmpty, !encodings.isEmpty { return "Content-Length and Transfer-Encoding together" }
+        if lengths.count > 1 { return "more than one Content-Length" }
+        if let cl = lengths.first, !(cl.allSatisfy(\.isASCII) && !cl.isEmpty && cl.allSatisfy(\.isNumber)) {
+            return "a Content-Length that isn't a length"
+        }
+        if encodings.count > 1 { return "more than one Transfer-Encoding" }
+        if let te = encodings.first, te.lowercased() != "chunked" { return "a Transfer-Encoding other than chunked" }
+        return nil
+    }
+
+    /// A chunked request body decoded as it arrives and framed again for the
+    /// upstream (macOS's readRequestSpooling de-chunks, then sends a real
+    /// Content-Length; a streamed body is re-chunked here instead): chunk
+    /// extensions stripped and trailers dropped, as macOS does; nothing past
+    /// the last chunk is ever forwarded.
+    // @port-skip linux-only: readRequestSpooling's de-chunk, streamed
+    struct ChunkStream {
+        enum State { case size, data(Int), dataCRLF, trailers, done, broken }
+        private(set) var state = State.size
+        private var buf = Data()
+        static let maxLine = 4096
+
+        /// The upstream's bytes for `bytes` (data chunks re-framed, then the
+        /// last chunk once it's seen).
+        // @port-skip linux-only: see ChunkStream
+        mutating func feed(_ bytes: Data) -> Data {
+            buf.append(bytes)
+            var out = Data()
+            func reframed(_ d: Data) { out.append(Data(String(d.count, radix: 16).utf8) + Data("\r\n".utf8) + d + Data("\r\n".utf8)) }
+            loop: while true {
+                switch state {
+                case .done, .broken:
+                    buf.removeAll()
+                    break loop
+                case .size:
+                    guard let eol = buf.range(of: Data("\r\n".utf8)) else {
+                        if buf.count > Self.maxLine { state = .broken }
+                        break loop
+                    }
+                    let line = String(decoding: buf[buf.startIndex..<eol.lowerBound], as: UTF8.self)
+                    buf.removeSubrange(buf.startIndex..<eol.upperBound)
+                    let hex = line.split(separator: ";", omittingEmptySubsequences: false).first
+                        .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+                    guard !hex.isEmpty, hex.allSatisfy(\.isHexDigit), let n = Int(hex, radix: 16) else { state = .broken; break loop }
+                    state = n == 0 ? .trailers : .data(n)
+                case .data(let left):
+                    guard !buf.isEmpty else { break loop }
+                    let take = min(left, buf.count)
+                    reframed(buf.prefix(take))
+                    buf.removeSubrange(buf.startIndex..<buf.startIndex + take)
+                    state = take == left ? .dataCRLF : .data(left - take)
+                case .dataCRLF:
+                    guard buf.count >= 2 else { break loop }
+                    guard buf.prefix(2) == Data("\r\n".utf8) else { state = .broken; break loop }
+                    buf.removeFirst(2)
+                    state = .size
+                case .trailers:
+                    guard let eol = buf.range(of: Data("\r\n".utf8)) else {
+                        if buf.count > Self.maxLine { state = .broken }
+                        break loop
+                    }
+                    let empty = eol.lowerBound == buf.startIndex
+                    buf.removeSubrange(buf.startIndex..<eol.upperBound)
+                    if empty {
+                        out.append(Data("0\r\n\r\n".utf8))
+                        state = .done
+                    }
+                }
+            }
+            return out
+        }
+
+        // @port-skip linux-only: see ChunkStream
+        var isDone: Bool { if case .done = state { return true }; return false }
+        // @port-skip linux-only: see ChunkStream
+        var isBroken: Bool { if case .broken = state { return true }; return false }
+    }
+}

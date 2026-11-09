@@ -278,19 +278,29 @@ final class LinuxSessionHost: AgentSessionHost {
     static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
     /// Each workspace's pending "done" after its model traffic went quiet.
     private var thinkingClearTasks: [UUID: Task<Void, Never>] = [:]
+    /// When each workspace's tabs were last marked from its traffic: a busy
+    /// stream re-reads the roster at most once a second (the clear still
+    /// moves with every signal).
+    private var lastActivityMark: [UUID: Date] = [:]
 
     /// Model traffic from a workspace (a request to a model host, a model
     /// WebSocket streaming): its hook-less agent tabs are working, and done
     /// once it's been quiet for 4 s.
+    // partial: the roster re-read at most once a second per workspace (the outbox file, not a pane's model)
     // @port ACAppDelegate.noteAgentActivity(_: Profile.ID) h=919b14292ee9f216 @4237c02e
     func noteAgentActivity(_ id: UUID) {
-        setNonClaudeAgentTabs(id, .working)
+        let now = Date()
+        if now.timeIntervalSince(lastActivityMark[id] ?? .distantPast) >= 1 {
+            lastActivityMark[id] = now
+            setNonClaudeAgentTabs(id, .working)
+        }
         thinkingClearTasks[id]?.cancel()
         thinkingClearTasks[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
             self?.setNonClaudeAgentTabs(id, .done)   // only tabs still .working
             self?.thinkingClearTasks[id] = nil
+            self?.lastActivityMark[id] = nil
         }
     }
 

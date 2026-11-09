@@ -71,7 +71,8 @@ struct UpgradeFilterTests {
         func ok(_ headers: String) -> Bool { ResponseRelay.pumpedUpgrade(headerBlock: "GET / HTTP/1.1\r\nHost: h\r\n" + headers) }
         #expect(ok("Upgrade: websocket"))
         #expect(ok("Upgrade: SPDY/3.1"))
-        #expect(ok("upgrade:  WebSocket , spdy/3.1"))
+        #expect(ok("upgrade:  WebSocket "))
+        #expect(!ok("Upgrade: websocket, SPDY/3.1"), "one protocol only (macOS 9a0bb746)")
         #expect(!ok("Upgrade: h2c"))
         #expect(!ok("Upgrade: websocket, h2c"))
         #expect(!ok("Upgrade: websocket\r\nUpgrade: websocket"), "a second Upgrade header")
@@ -185,5 +186,90 @@ final class CountingUpstream: @unchecked Sendable {
                     string: "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), promise: nil)
             }
         }
+    }
+}
+
+/// Request smuggling around the streamed path: the framing is checked before
+/// any body is read or streamed, and a streamed chunked body stops at its
+/// last chunk.
+@Suite("Proxy: framing and smuggling", .serialized)
+struct ProxySmugglingTests {
+    @Test func ambiguousFramingIsRefusedBeforeAnyBody() throws {
+        let (rig, ip) = try PipelineTests.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        for (framing, name) in [("Content-Length: 4\r\nTransfer-Encoding: chunked\r\n", "CL+TE"),
+                                ("Content-Length: 4\r\nContent-Length: 40\r\n", "duplicate CL"),
+                                ("Transfer-Encoding: xchunked\r\n", "xchunked"),
+                                ("Transfer-Encoding: gzip, chunked\r\n", "a coding before chunked"),
+                                ("Content-Length: +4\r\n", "a signed length")] {
+            let out = try PipelineTests.talk(rig.path(), "POST http://\(h)/x HTTP/1.1\r\nHost: \(h)\r\n\(framing)\r\n0\r\n\r\n", ms: 600)
+            #expect(out.hasPrefix("HTTP/1.1 400"), "\(name): \(out.prefix(80))")
+        }
+        #expect(up.received.withLockedValue { $0 }.isEmpty, "none of them went upstream")
+    }
+
+    @Test func aRequestAfterAStreamedBodysLastChunkNeverLeaves() throws {
+        let (rig, ip) = try PipelineTests.rig(); defer { rig.stop() }
+        let up = try RawUpstream(host: ip, reply: "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+        defer { up.stop() }
+        let h = "\(ip):\(up.port)"
+        // Past the 8 MiB inline cap: streamed, chunk by chunk.
+        let chunk = String(repeating: "a", count: 1 << 20)
+        var body = ""
+        for _ in 0..<9 { body += String(1 << 20, radix: 16) + ";ext=1\r\n" + chunk + "\r\n" }
+        body += "0\r\nX-Trailer: t\r\n\r\n"
+        let smuggled = "GET http://\(h)/smuggled HTTP/1.1\r\nHost: \(h)\r\n\r\n"
+        _ = try PipelineTests.talk(rig.path(), "PUT http://\(h)/blob HTTP/1.1\r\nHost: \(h)\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                   + body + smuggled, ms: 2500)
+        let seen = up.received.withLockedValue { $0 }
+        #expect(seen.contains("PUT /blob"), "the upload went up")
+        #expect(!seen.contains("/smuggled"), "nothing after the last chunk")
+        #expect(!seen.contains("ext=1") && !seen.contains("X-Trailer"), "extensions and trailers aren't passed on")
+        #expect(seen.hasSuffix("0\r\n\r\n"), "the body ends at its own last chunk")
+    }
+
+    @Test("the streamed de-chunker: chunks framed again across reads, extensions and trailers dropped, nothing after the end, broken framing seen")
+    func chunkStream() {
+        var c = HTTPRequestFraming.ChunkStream()
+        var out = c.feed(Data("5;x=y\r\nhel".utf8))
+        out += c.feed(Data("lo\r\n3\r\nabc\r\n0\r\nT: 1\r\n".utf8))
+        #expect(!c.isDone)
+        out += c.feed(Data("\r\nGET /smuggled HTTP/1.1\r\n\r\n".utf8))
+        #expect(c.isDone)
+        #expect(String(decoding: out, as: UTF8.self) == "3\r\nhel\r\n2\r\nlo\r\n3\r\nabc\r\n0\r\n\r\n")
+        #expect(c.feed(Data("more".utf8)).isEmpty, "nothing after the end")
+        var bad = HTTPRequestFraming.ChunkStream()
+        _ = bad.feed(Data("zz\r\n".utf8))
+        #expect(bad.isBroken)
+        var noCRLF = HTTPRequestFraming.ChunkStream()
+        _ = noCRLF.feed(Data("1\r\naXY".utf8))
+        #expect(noCRLF.isBroken, "a chunk not followed by CRLF")
+    }
+
+    @Test func insecureIsIgnoredOnAnUpgradeAndA101MustNameTheRequestedProtocol() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
+        let pid = UUID()
+        proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [], allowInsecureBypass: true), for: pid)
+        var trace: RequestReader.Trace?
+        let req = "GET /ws HTTP/1.1\r\nHost: ws.example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+            + "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-bromure-insecure: yes\r\n\r\n"
+        guard case .forward(let out, _, _, let upgrade, _, _, _, _, _, _, _, _, let insecure) =
+                await RequestReader.rewrite(Data(req.utf8), proxy: proxy, profileID: pid, host: "ws.example.test", port: 443,
+                                            tls: true, session: proxy.strictSession(of: pid), trace: &trace) else {
+            Issue.record("not forwarded"); return
+        }
+        #expect(upgrade && !insecure, "an upgrade is always validated")
+        #expect(!String(decoding: out, as: UTF8.self).lowercased().contains("x-bromure-insecure"))
+
+        let (rig, ip) = try PipelineTests.rig(); defer { rig.stop() }
+        let spdy = try RawUpstream(host: ip, reply: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: SPDY/3.1\r\nConnection: Upgrade\r\n\r\n")
+        defer { spdy.stop() }
+        let h = "\(ip):\(spdy.port)"
+        let got = try PipelineTests.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                                         + "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", ms: 800)
+        #expect(got.hasPrefix("HTTP/1.1 502"), "a websocket request switched to SPDY: \(got.prefix(80))")
     }
 }
