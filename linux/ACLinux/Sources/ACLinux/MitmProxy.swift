@@ -929,7 +929,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var b = unwrapInboundIn(data)
         if started {
             if upgraded, let upstream {
-                relay?.wsTrace?.client(Data(b.readableBytesView))
+                relay?.wsTrace?.client(b)
                 if wsGate != nil {
                     gateToUpstream(Data(b.readableBytesView), guest: context.channel, upstream: upstream)
                     return
@@ -1310,7 +1310,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                             if switched {
                                 self.upgraded = true
                                 // The guest's bytes held until the switch are its first frames.
-                                for p in self.pending { relay?.wsTrace?.client(Data(p.readableBytesView)) }
+                                for p in self.pending { relay?.wsTrace?.client(p) }
                                 if let wsPolicy {
                                     // Keyed on the plan alone: a rewrite with
                                     // no rule still goes through the gate.
@@ -1762,7 +1762,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 wsTrace?.toGuest(out)
                 if !out.isEmpty { guest.write(guest.allocator.buffer(bytes: out), promise: nil) }
             } else {
-                wsTrace?.toGuest(Data(b.readableBytesView))
+                wsTrace?.toGuest(b)
                 guest.write(b, promise: nil)
             }
             holdIfGuestFull(context)
@@ -2170,6 +2170,7 @@ final class ResponseRelay: ChannelInboundHandler {
         // restorer holds still reaches the client.
         if let wsServer {
             let tail = wsServer.finishAtClose()
+            wsTrace?.toGuest(tail)
             if !tail.isEmpty { guest.write(guest.allocator.buffer(bytes: tail), promise: nil) }
         }
         // A restored body read up to the close: what's held, and the last

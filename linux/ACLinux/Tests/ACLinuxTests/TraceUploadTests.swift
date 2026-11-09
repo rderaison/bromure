@@ -42,5 +42,20 @@ struct TraceUploadTests {
         Daemon.applyStreamingState(store: store, privateIDs: [mine], enrolled: true, makeUploader: { up })
         #expect(up.queuedProfileIDs() == [other])
     }
+
+    /// A burst of profile writes makes one refresh (not a full store read on
+    /// the main actor per write).
+    @Test func aBurstOfWritesRefreshesOnce() async throws {
+        let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let before = Daemon.streamingRefreshCount.withLockedValue { $0 }
+        for _ in 0..<50 { d.refreshStreamingSoon() }
+        for _ in 0..<100 where Daemon.streamingRefreshCount.withLockedValue({ $0 }) == before { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(100))
+        let n = Daemon.streamingRefreshCount.withLockedValue { $0 } - before
+        // Other suites refresh too (a VM start): a bound, not an exact count.
+        #expect(n >= 1 && n < 10, "\(n) refreshes for 50 writes")
+        await d.shutdown()
+    }
 }
 

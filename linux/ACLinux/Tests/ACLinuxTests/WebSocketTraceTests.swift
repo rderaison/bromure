@@ -103,5 +103,17 @@ struct WebSocketTraceTests {
         let req = String(decoding: store.loadBody(for: full, kind: .request) ?? Data(), as: UTF8.self)
         #expect(!req.contains("brm-fake"), "auth headers redacted: \(req)")
     }
+
+    /// A socket faster than its trace: past the queue's cap the bytes are
+    /// dropped and counted, and the transcript says where it has a gap.
+    @Test func aTraceThatFallsBehindSaysSo() async {
+        let ws = WSTraceSession(handshake: Data(), host: "api.example.com", path: "/", profileID: UUID(),
+                                captureBody: true, maxQueued: 16)
+        ws.toGuest(Self.frame(0x1, Data("small".utf8)))
+        ws.toGuest(Self.frame(0x1, Data(repeating: 0x61, count: 64)))   // past the cap
+        let t: Data? = await withCheckedContinuation { c in ws.finish { t, _ in c.resume(returning: t) } }
+        let text = t.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        #expect(text.contains("small") && text.contains("66 bytes of this WebSocket not traced"), "\(text)")
+    }
 }
 

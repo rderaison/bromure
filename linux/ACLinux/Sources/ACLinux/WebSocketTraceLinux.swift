@@ -1,3 +1,5 @@
+import NIOConcurrencyHelpers
+import NIOCore
 import Foundation
 
 /// A switched WebSocket's trace on the Linux proxy (macOS:
@@ -18,10 +20,22 @@ final class WSTraceSession: @unchecked Sendable {
     private(set) var clientBytes = 0
     private(set) var upstreamBytes = 0
     private let work = DispatchQueue(label: "io.bromure.ac.ws-trace", qos: .utility)
+    /// Bytes handed to `work` and not yet read: past `maxQueued` (a socket
+    /// faster than its trace) they're dropped and counted, and the
+    /// transcript says where it has a gap.
+    private let queued = NIOLockedValueBox(0)
+    private let dropped = NIOLockedValueBox(0)
+    private let maxQueued: Int
+
+    /// Whether the messages are read at all (bodies captured): else only
+    /// byte counts, and nothing is copied.
+    // @port-skip linux-only: see WSTraceSession
+    var captures: Bool { u2c != nil }
 
     // @port-skip linux-only: see WSTraceSession
-    init(handshake: Data, host: String, path: String, profileID: UUID, captureBody: Bool) {
+    init(handshake: Data, host: String, path: String, profileID: UUID, captureBody: Bool, maxQueued: Int = 64 << 20) {
         self.handshake = handshake
+        self.maxQueued = maxQueued
         let deflate = WSDeflateParams.parse(handshakeResponse: handshake)
         // Only a body-capturing trace reads the messages (and the realtime
         // tap with them): elsewhere the per-frame work is wasted.
@@ -43,7 +57,14 @@ final class WSTraceSession: @unchecked Sendable {
     func client(_ bytes: Data) {
         clientBytes += bytes.count
         guard let c2u, !bytes.isEmpty else { return }
-        work.async { c2u.feed(bytes) }
+        enqueue(bytes) { c2u.feed(bytes) }
+    }
+
+    /// The guest's bytes as NIO read them: copied only when captured.
+    // @port-skip linux-only: see WSTraceSession
+    func client(_ buffer: ByteBuffer) {
+        guard captures else { clientBytes += buffer.readableBytes; return }
+        client(Data(buffer.readableBytesView))
     }
 
     /// The upstream's bytes after its 101, counted as they came.
@@ -55,16 +76,44 @@ final class WSTraceSession: @unchecked Sendable {
     // @port-skip linux-only: see WSTraceSession
     func toGuest(_ bytes: Data) {
         guard let u2c, !bytes.isEmpty else { return }
-        work.async { u2c.feed(bytes) }
+        enqueue(bytes) { u2c.feed(bytes) }
+    }
+
+    /// What went to the guest as NIO holds it: copied only when captured.
+    // @port-skip linux-only: see WSTraceSession
+    func toGuest(_ buffer: ByteBuffer) {
+        guard captures, buffer.readableBytes > 0 else { return }
+        toGuest(Data(buffer.readableBytesView))
+    }
+
+    /// `feed` on the queue, unless too much already waits there.
+    // @port-skip linux-only: see WSTraceSession
+    private func enqueue(_ bytes: Data, _ feed: @escaping @Sendable () -> Void) {
+        let n = bytes.count
+        let room = queued.withLockedValue { q -> Bool in
+            guard q + n <= self.maxQueued else { return false }
+            q += n
+            return true
+        }
+        guard room else { dropped.withLockedValue { $0 += n }; return }
+        work.async { [queued] in
+            feed()
+            queued.withLockedValue { $0 -= n }
+        }
     }
 
     /// Both directions as one text (nil without body capture), once every
     /// byte fed so far is read: on the session's queue.
     // @port-skip linux-only: see WSTraceSession
     func finish(_ done: @escaping @Sendable (Data?, Bool) -> Void) {
-        let c2u = c2u, u2c = u2c, tap = tap
+        let c2u = c2u, u2c = u2c, tap = tap, dropped = dropped
         work.async {
-            let transcript = (c2u != nil && u2c != nil) ? WSTranscriptRenderer.render(c2u: c2u!, u2c: u2c!) : nil
+            var transcript = (c2u != nil && u2c != nil) ? WSTranscriptRenderer.render(c2u: c2u!, u2c: u2c!) : nil
+            let gap = dropped.withLockedValue { $0 }
+            if gap > 0 {
+                // The trace fell behind the socket: what it didn't read is said.
+                transcript?.append(Data("\n[\(gap) bytes of this WebSocket not traced: the trace fell behind]\n".utf8))
+            }
             done(transcript, tap?.streamedAnyEvents ?? false)
         }
     }
