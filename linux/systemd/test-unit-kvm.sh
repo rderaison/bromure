@@ -80,7 +80,7 @@ start_unit() {
     -p Restart=on-failure -p RestartSec=2 -p FileDescriptorStoreMax=64 \
     -p ExecStopPost="$BIN stop-post" \
     --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=XDG_STATE_HOME="$XDG_STATE_HOME" \
-    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=XDG_CONFIG_HOME="$XDG_CONFIG_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" --setenv=BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ --setenv=BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/ \
+    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=XDG_CONFIG_HOME="$XDG_CONFIG_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" --setenv=BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ --setenv=BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/ --setenv=BROMURE_MODELS_FETCH=0 \
     --setenv=BROMURE_AGENTD="$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" \
     "$BIN" daemon
 }

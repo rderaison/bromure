@@ -72,6 +72,9 @@ final class MitmProxy: @unchecked Sendable {
     let fusionConfigs = NIOLockedValueBox<[UUID: Fusion.Config]>([:])
     /// Fusion's leg refusals already logged (workspace | leg).
     let fusionRefusalsLogged = NIOLockedValueBox<Set<String>>([])
+    /// Told each workspace's policies as they're applied (the daemon's
+    /// detector-model fetch); nil in tests, which never fetch.
+    let onWorkspacePolicies = NIOLockedValueBox<(@Sendable (Profile) -> Void)?>(nil)
     /// Asks a workspace's agentd to reset the bridged client socket whose
     /// loopback port is given (the preamble's sport), calling back once done
     /// (macOS: EgressConnectionRegistry.guestAbort, by vsock port there).

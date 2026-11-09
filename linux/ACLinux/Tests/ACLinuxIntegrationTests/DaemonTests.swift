@@ -38,6 +38,7 @@ struct DaemonTests {
             // Sentry modules from a dead local port, never the published CDN.
             e["BROMURE_SENTRY_CATALOG_BASE"] = "http://127.0.0.1:9/"
             e["BROMURE_IMAGE_CATALOG_BASE"] = "http://127.0.0.1:9/"
+            e["BROMURE_MODELS_FETCH"] = "0"
             e.removeValue(forKey: "NOTIFY_SOCKET")
             e.merge(extraEnv) { _, new in new }
             return e

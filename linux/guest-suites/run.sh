@@ -36,6 +36,7 @@ export BROMURE_AC_IMAGE=${BROMURE_AC_IMAGE:-${XDG_DATA_HOME:-$HOME/.local/share}
 # suites build the module in the guest; tests never reach real hosts).
 export BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/
 export BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/
+export BROMURE_MODELS_FETCH=0
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 T0=$(date +%s)
 log() { echo "[guest-suites $(date +%T)] $*"; }

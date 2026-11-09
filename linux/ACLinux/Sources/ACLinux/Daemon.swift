@@ -56,6 +56,10 @@ public struct DaemonConfig: Sendable {
     /// catalog, unsigned accepted). nil: none (a config made in code, as
     /// tests' are: they never reach the CDN).
     public var sentryCatalog: SentryCatalogSource?
+    /// Whether a workspace's detector models are fetched when missing
+    /// (fromEnvironment's default; BROMURE_MODELS_FETCH=0 or a config made
+    /// in code, as tests' are: never).
+    public var fetchesModels = false
 
     // @port-skip linux-only: Linux daemon configuration
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
@@ -79,6 +83,7 @@ public struct DaemonConfig: Sendable {
             .with { c in
                 if let gb = env["BROMURE_AC_HOME_GB"].flatMap(Int.init) { c.homeImageOverrideGB = gb }
                 c.multiUser = env["BROMURE_AC_MULTIUSER"] == "1"
+                c.fetchesModels = env["BROMURE_MODELS_FETCH"] != "0"
                 c.gatewayUser = env["BROMURE_AC_GATEWAY_USER"].flatMap { $0.isEmpty ? nil : $0 }
                 c.controlSocketOverride = env["BROMURE_AC_CONTROL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
                 c.sentryCatalog = SentryCatalogSource.fromEnvironment(env)
@@ -343,6 +348,11 @@ public actor Daemon {
         await d.wireCloudEnrollment()
         await d.installLiveModelRefresh()
         if let mitm = d.mitm { await d.wireSupplyChainOverrides(mitm.supplyChainBroker) }
+        // A workspace's detectors' models, fetched when missing, as its
+        // policies are applied (PromptInjectionModelsLinux.swift).
+        if config.fetchesModels, let mitm = d.mitm {
+            mitm.onWorkspacePolicies.withLockedValue { $0 = { Daemon.fetchDetectorModels(for: $0) } }
+        }
         if let mitm = d.mitm {
             let root = URL(fileURLWithPath: config.stateDir + "/traces", isDirectory: true)
             // Every profile write says so (ProfileWrites.write / edit): the

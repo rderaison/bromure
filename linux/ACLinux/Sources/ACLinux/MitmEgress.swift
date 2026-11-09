@@ -70,6 +70,7 @@ extension MitmProxy {
         setPIIPolicy(profile.pii, for: profile.id)
         setSupplyChainPolicy(profile.supplyChain, for: profile.id)
         setGuardrailsConfig(GuardrailsConfig.make(for: profile), for: profile.id)
+        onWorkspacePolicies.withLockedValue { $0 }?(profile)
         let (broker, piBroker, scBroker, name, pid) = (guardrailsBroker, promptInjectionBroker, supplyChainBroker,
                                                        profile.name, profile.id)
         Task.detached {

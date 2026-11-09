@@ -1,5 +1,10 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Locates + downloads the local detector models for prompt-injection /
 /// rules-file detection. Mirrors `FaceSwapEngine`'s "fetch to Application
@@ -298,10 +303,11 @@ public enum PromptInjectionModels {
         }
     }
 
+#if canImport(AppKit)
     /// One modal alert at a time — two detectors enabling at once would
     /// otherwise stack identical disk-full dialogs.
     @MainActor private static var diskAlertVisible = false
-    @MainActor private static func presentDiskFullAlert(_ detail: String) {
+    @MainActor static func presentDiskFullAlert(_ detail: String) {
         guard !diskAlertVisible else { return }
         diskAlertVisible = true
         defer { diskAlertVisible = false }
@@ -313,6 +319,7 @@ public enum PromptInjectionModels {
         alert.alertStyle = .critical
         alert.runModal()
     }
+#endif
 
     enum Err: LocalizedError {
         case http(Int, String)

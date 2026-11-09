@@ -43,6 +43,7 @@
     "Sources/AgentCoding/DelegationMCPCatalog.swift",
     "Sources/AgentCoding/DelegationMCPServer.swift",
     "Sources/AgentCoding/DelegationRelayClient.swift",
+    "Sources/AgentCoding/DiskSpace.swift",
     "Sources/AgentCoding/DisplayRequest.swift",
     "Sources/AgentCoding/DockerGuestVerbs.swift",
     "Sources/AgentCoding/EncodedRowMemo.swift",
@@ -152,6 +153,7 @@
     "Sources/AgentCoding/Mitm/PromptInjectionCloudEvent.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionConsentBroker.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionModelPins.swift",
+    "Sources/AgentCoding/Mitm/PromptInjectionModels.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionPolicy.swift",
     "Sources/AgentCoding/Mitm/PromptInjectionRedactions.swift",
     "Sources/AgentCoding/Mitm/ProxyPolicy.swift",
@@ -796,6 +798,10 @@
     {
       "path": "Sources/AgentCoding/KubeDashboard.swift",
       "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/CloudflareTunnel.swift",
+      "reason": "the client runs the quick tunnel (decided 2026-11-09): macOS's VM dashboard starts cloudflared on whichever Mac shows it, with the guest's address as origin -- a fat client's reaches a remote server's guest through its own utun tunnel -- so a Linux server needs none and downloads none. An iPad/iOS client has no tunnel either way, as with a remote Mac server today; server-side tunnels would be a new feature for both platforms"
     },
     {
       "path": "Sources/AgentCoding/KubeLANAnnouncer.swift",

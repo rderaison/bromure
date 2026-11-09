@@ -11,6 +11,7 @@ trap cleanup EXIT
 export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state XDG_DATA_HOME=$W/data XDG_CONFIG_HOME=$W/config
 export BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/
 export BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/
+export BROMURE_MODELS_FETCH=0
 unset BROMURE_AC_API_KEY BROMURE_AC_CONTROL_SOCKET
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 "$BIN" daemon > "$W/daemon.log" 2>&1 & DPID=$!
