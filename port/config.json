@@ -835,10 +835,6 @@
       "reason": "ui"
     },
     {
-      "path": "Sources/AgentCoding/GuestLiveness.swift",
-      "reason": "ui"
-    },
-    {
       "path": "Sources/AgentCoding/FleetAdmission.swift",
       "reason": "ui"
     },
