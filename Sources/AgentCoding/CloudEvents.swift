@@ -157,14 +157,20 @@ public final class BACEventEmitter: @unchecked Sendable {
     private var privateProfileIDs: Set<UUID> = []
 
     public func setPrivateProfiles(_ ids: Set<UUID>) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         privateProfileIDs = ids
+        let up = uploader
+        lock.unlock()
+        // What a workspace turned private had already queued goes too.
+        up?.setPrivateProfiles(ids)
     }
 
     public func ensureUploader() {
         lock.lock(); defer { lock.unlock() }
         if uploader == nil {
-            uploader = BACCloudUploader()
+            let up = BACCloudUploader()
+            up.setPrivateProfiles(privateProfileIDs)
+            uploader = up
         }
     }
 
