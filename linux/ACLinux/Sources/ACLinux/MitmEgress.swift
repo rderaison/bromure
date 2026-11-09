@@ -94,13 +94,15 @@ extension MitmProxy {
     /// closes it mid-transfer; unregistered when it closes. False: a policy
     /// swap that landed before the registration denies it already (the
     /// caller closes it). macOS: HTTPMitmConnection.trackedForFirewall.
-    // partial: a cut closes the channel (no reset of agentd's bridge socket yet)
-    // @port HTTPMitmConnection.trackedForFirewall(host: String, port: Int, route: String, _: ()asyncthrows->Void) h=b8fef0983a3ca0b5 @003f61e7
     /// `clientSport`: a proxied connection's client port, from agentd's
     /// preamble. A cut asks agentd to RESET that client socket first (its
     /// bridge would otherwise close it gracefully, and the client drain what
     /// is buffered and report a short transfer, curl rc=18), then closes
     /// once agentd confirms or after `abortGrace` (macOS: cutForFirewall).
+    // partial: agentd's reset by the client's port (no vsock source port on Firecracker); the host side closes the NIO channel
+    // @port HTTPMitmConnection.trackedForFirewall(host: String, port: Int, route: String, _: ()asyncthrows->Void) h=b8fef0983a3ca0b5 @003f61e7
+    // @port HTTPMitmConnection.cutForFirewall() h=99ceec5a7698d6fc @003f61e7
+    // @port HTTPMitmConnection.shutdownAfterAbort() h=88927f3ebfd1a483 @003f61e7
     func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String,
                           identity: OpenShellPolicy.BinaryIdentity? = nil, clientSport: Int? = nil) -> Bool {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy

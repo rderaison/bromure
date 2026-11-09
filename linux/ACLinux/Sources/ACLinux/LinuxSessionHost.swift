@@ -273,6 +273,60 @@ final class LinuxSessionHost: AgentSessionHost {
         }
     }
 
+    /// Agents that report their own status through hooks; the others get it
+    /// from the proxy's model traffic (macOS: ACAppDelegate.hookDrivenAgents).
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
+    /// Each workspace's pending "done" after its model traffic went quiet.
+    private var thinkingClearTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// Model traffic from a workspace (a request to a model host, a model
+    /// WebSocket streaming): its hook-less agent tabs are working, and done
+    /// once it's been quiet for 4 s.
+    // @port ACAppDelegate.noteAgentActivity(_: Profile.ID) h=919b14292ee9f216 @4237c02e
+    func noteAgentActivity(_ id: UUID) {
+        setNonClaudeAgentTabs(id, .working)
+        thinkingClearTasks[id]?.cancel()
+        thinkingClearTasks[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.setNonClaudeAgentTabs(id, .done)   // only tabs still .working
+            self?.thinkingClearTasks[id] = nil
+        }
+    }
+
+    /// `status` on every hook-less agent tab of the workspace; a .done only
+    /// on tabs still .working, which ends their turn (the card counts from
+    /// now: no hook says so, and no reply to count).
+    // @port ACAppDelegate.setNonClaudeAgentTabs(_: Profile.ID, _: AgentStatus) h=31ecc716d933f315 @4237c02e
+    private func setNonClaudeAgentTabs(_ id: UUID, _ status: AgentStatus) {
+        guard let model = tabsModel(for: id) else { return }
+        let store = SessionStores.shared?.sessions
+        for (tab, kind) in agentTabs(id, model) where !Self.hookDrivenAgents.contains(kind) {
+            let current = agentStatus[id]?[tab.index] ?? tab.agentStatus
+            if status == .done && current != .working { continue }
+            if status == .done, let s = store?.session(profileID: id, windowIndex: tab.index) {
+                store?.noteActive(s.id)
+            }
+            agentStatus[id, default: [:]][tab.index] = status
+            tab.agentStatus = status
+        }
+    }
+
+    /// The workspace's agent tabs with the tool each runs: its session's
+    /// tool, else what the tab's labels name.
+    // partial: no pane, so no agentHints (the tab labels are the fallback)
+    // @port ACAppDelegate.agentTabs(of: SessionPane) h=9153af1f4d7d5d0d @4237c02e
+    private func agentTabs(_ id: UUID, _ model: TabsModel) -> [(TabsModel.Tab, String)] {
+        var sessionTools: [Int: String] = [:]
+        for s in SessionStores.shared?.sessions.sessions ?? [] where s.profileID == id && !s.hasEnded {
+            if let w = s.windowIndex { sessionTools[w] = s.tool.rawValue }
+        }
+        return model.tabs.compactMap { tab in
+            (sessionTools[tab.index] ?? AgentLabel.agentKind(forLabel: tab.label)
+                ?? AgentLabel.agentKind(forLabel: tab.shownLabel)).map { (tab, $0) }
+        }
+    }
+
     /// The hook statuses, for /state's tabs (macOS's automationVMList).
     // @port-skip linux-only: daemon /state plumbing
     func tabStatuses() -> [UUID: [Int: String]] { agentStatus.mapValues { $0.mapValues(\.rawValue) } }

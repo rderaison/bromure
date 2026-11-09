@@ -74,6 +74,8 @@ final class MitmProxy: @unchecked Sendable {
     /// How long a cut waits for agentd's reset before closing anyway
     /// (macOS: HTTPMitmConnection.abortGrace).
     static let abortGrace: TimeAmount = .milliseconds(1500)
+    /// A workspace's model socket streaming (macOS: HTTPMitmConnection.liveActivity).
+    static let liveActivity = NIOLockedValueBox<(@Sendable (UUID) -> Void)?>(nil)
     /// Each workspace's current session: a stop (clearGuardrailsConfig)
     /// starts the next. What a reply from an older one would teach strict
     /// mode's guard is dropped, and so is its compromise event
@@ -949,6 +951,9 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     private var wsGate: OpenShellWebSocket.ClientStream?
     /// The filter's say on reading the guest: false while it holds too much.
     private var filterWantsGuest = true
+    /// A model provider's switched socket keeps its agent "working"
+    /// (ActivityBeat), from the guest's frames and the server's.
+    private var beat: ActivityBeat?
     static let maxHeld = 1 << 20
     /// A streamed upload (macOS: driveTLS's 5z, a body past the 8 MiB
     /// inline cap, e.g. a docker layer PUT): its head goes through the
@@ -1001,6 +1006,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             }
             if upgraded, let upstream {
                 relay?.wsTrace?.client(b)
+                beat?.tick(Data(b.readableBytesView.prefix(64)))
                 if wsGate != nil {
                     gateToUpstream(Data(b.readableBytesView), guest: context.channel, upstream: upstream)
                     return
@@ -1509,6 +1515,12 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                             self.awaitingUpgrade = false
                             if switched {
                                 self.upgraded = true
+                                if TraceLevel.isAIHost(host) {
+                                    let pid = self.profileID
+                                    let beat = ActivityBeat(fire: { MitmProxy.liveActivity.withLockedValue { $0 }?(pid) })
+                                    self.beat = beat
+                                    relay?.beat = beat
+                                }
                                 // The guest's bytes held until the switch are its first frames.
                                 for p in self.pending { relay?.wsTrace?.client(p) }
                                 if let wsPolicy {
@@ -1699,6 +1711,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
 /// carrying a live subscription token tells the store (noteUnauthorized).
 // @port-skip linux-only: HTTPMitmConnection's response relay on NIO
 final class ResponseRelay: ChannelInboundHandler {
+    /// The switched model socket's activity beat (set at the switch).
+    var beat: ActivityBeat?
     typealias InboundIn = ByteBuffer
     let guest: Channel
     let profileID: UUID
@@ -1963,6 +1977,7 @@ final class ResponseRelay: ChannelInboundHandler {
             }
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
             wsTrace?.upstream(count: b.readableBytes)
+            beat?.tick(Data(b.readableBytesView.prefix(64)))
             keepForLearning(b.readableBytesView)
             relayed = true
             if let wsServer {
@@ -2494,3 +2509,38 @@ final class ResponseRelay: ChannelInboundHandler {
 /// proxy enforces for each workspace (macOS: MitmEngine).
 // @port-skip linux-only: the daemon's proxy as SwitchEgressReport's GuardrailsConfigSource
 extension MitmProxy: GuardrailsConfigSource {}
+
+/// A model provider's WebSocket streaming keeps its agent "working": a
+/// chunk of relayed frames (not a lone ping or pong, a socket kept alive
+/// while idle) fires at most every 2 s (macOS: HTTPMitmConnection.ActivityBeat).
+// @port-skip linux-only: container of ActivityBeat's port
+final class ActivityBeat: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date.distantPast
+    private let fire: (() -> Void)?
+    // @port HTTPMitmConnection.ActivityBeat.init(fire: (()->Void)?) h=9c4f972ac6e67150 @003f61e7
+    init(fire: (() -> Void)?) { self.fire = fire }
+
+    // @port HTTPMitmConnection.ActivityBeat.tick(_: Data) h=377802138fca3f06 @003f61e7
+    func tick(_ chunk: Data) {
+        guard fire != nil, !Self.isKeepAlive(chunk) else { return }
+        tick()
+    }
+
+    // @port HTTPMitmConnection.ActivityBeat.static isKeepAlive(_: Data) h=0b7b95527ed05916 @003f61e7
+    static func isKeepAlive(_ chunk: Data) -> Bool {
+        guard let first = chunk.first, chunk.count < 64 else { return false }
+        let opcode = first & 0x0F
+        return opcode == 0x9 || opcode == 0xA
+    }
+
+    // @port HTTPMitmConnection.ActivityBeat.tick() h=20062c8039a2c771 @003f61e7
+    func tick() {
+        guard let fire else { return }
+        lock.lock()
+        let due = Date().timeIntervalSince(last) >= 2
+        if due { last = Date() }
+        lock.unlock()
+        if due { fire() }
+    }
+}

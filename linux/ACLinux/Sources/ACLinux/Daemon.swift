@@ -330,6 +330,15 @@ public actor Daemon {
             ProfileWrites.onChange = { [weak d] in d?.refreshStreamingSoon() }
             await MainActor.run {
                 mitm.setUpTraceStore(rootDir: root)
+                // The proxy's model-host traffic drives hook-less agents'
+                // status (macOS: traceStore.onConversationActivity and
+                // HTTPMitmConnection.liveActivity → noteAgentActivity).
+                mitm.traces.withLockedValue { $0 }?.onConversationActivity = { pid in
+                    LinuxSessionHost.shared?.noteAgentActivity(pid)
+                }
+                MitmProxy.liveActivity.withLockedValue { $0 = { pid in
+                    Task { @MainActor in LinuxSessionHost.shared?.noteAgentActivity(pid) }
+                } }
                 // Its uploader while enrolled (macOS: the engine's start).
                 Self.refreshStreamingState(store: mitm.traces.withLockedValue { $0 })
             }
