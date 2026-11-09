@@ -30,7 +30,12 @@ public final class OCSFExporter: @unchecked Sendable {
     private var lastPrunedDay: String?
 
     /// Where the settings are read (tests: a suite of their own).
-    var defaults: UserDefaults = .standard
+    var defaults: UserDefaults {
+        get { defaultsLock.lock(); defer { defaultsLock.unlock() }; return _defaults }
+        set { defaultsLock.lock(); _defaults = newValue; defaultsLock.unlock() }
+    }
+    private let defaultsLock = NSLock()
+    private var _defaults: UserDefaults = .standard
 
     public var isEnabled: Bool { defaults.bool(forKey: Self.enabledKey) }
 

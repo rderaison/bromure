@@ -18,9 +18,10 @@ extension Daemon {
             LinuxSessionHost.shared = host
             // Security Timeline rows (and the OCSF export) carry the
             // workspace's name: the session list's, which every reconcile
-            // takes from the store (a rename too), else the store's now.
+            // takes from the store (a rename too). As macOS, from memory
+            // only: never a store read per event.
             SecurityTimeline.shared.workspaceName = { [weak host] id in
-                host?.listModel.profileRows.first { $0.id == id }?.name ?? host?.profile(for: id)?.name
+                host?.listModel.profileRows.first { $0.id == id }?.name
             }
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
             // The coding board and the scheduled automations (macOS: the app
