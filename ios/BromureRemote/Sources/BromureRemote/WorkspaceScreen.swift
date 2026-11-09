@@ -397,6 +397,13 @@ private struct TerminalsPane: View {
             feeds[window] = f
             return f
         }
+        /// Forget a window that closed: its feed holds the conversation's
+        /// bytes, and tmux reuses the index for the next window.
+        func drop(_ window: Int) {
+            feeds[window] = nil
+            items[window] = nil
+            everLoaded.remove(window)
+        }
     }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
@@ -736,8 +743,7 @@ private struct TerminalsPane: View {
                 // next new-window takes), and these caches are index-keyed — a
                 // reused index must not inherit the previous occupant's rich-mode
                 // transcript or auto-reader state.
-                transcripts.items[w] = nil
-                transcripts.everLoaded.remove(w)
+                transcripts.drop(w)
                 transcriptPresent.remove(w)
             }
             mounted.removeAll { !live.contains($0) }
@@ -838,6 +844,8 @@ private struct TerminalsPane: View {
                 controller.closeTab(profileID, index: closing)
                 store.map[closing]?.stop()
                 store.map[closing] = nil
+                transcripts.drop(closing)
+                transcriptPresent.remove(closing)
             } label: { Label("Close", systemImage: "xmark") }
         }
     }
@@ -1633,102 +1641,3 @@ enum TranscriptWindow {
     }
 }
 
-// MARK: - A transcript read incrementally
-
-/// One transcript file read the way the desktop's chat reads it
-/// (`CodingTaskEngine.transcriptChunkCommand`): a first window from the
-/// end, then only the bytes appended since, and earlier history on
-/// demand. The old reader re-tailed the last 300 KB every poll -- which
-/// tool output fills, so a phone showed only the last few messages and
-/// had no way to reach the rest.
-@MainActor
-final class TranscriptFeed {
-    static let windowBytes = 1_000_000
-
-    private var path: String?
-    private var data = Data()
-    private var base = 0
-    private var end = 0
-    private var pq = Data()
-    private var generation = 0
-    private(set) var items: [TranscriptItem] = []
-    var canLoadEarlier: Bool { path != nil && base > 0 }
-
-    /// Builds the guest command: known path, offset, window bytes, earlier.
-    typealias Command = (String?, Int, Int, Bool) -> String?
-    typealias Exec = (String) async -> String?
-
-    private struct Fetch { let path: String; let pq: Data; let start: Int; let end: Int; let chunk: Data }
-
-    /// Header = 5 lines (path, pending question, size, start, end), then
-    /// the bytes. nil for empty output (no transcript file).
-    private static func parse(_ raw: String) -> Fetch? {
-        let d = Data(raw.utf8)
-        var cuts: [Int] = []
-        var i = d.startIndex
-        while cuts.count < 5, i < d.endIndex, let nl = d[i...].firstIndex(of: 0x0A) {
-            cuts.append(nl)
-            i = nl + 1
-        }
-        guard cuts.count == 5 else { return nil }
-        func field(_ k: Int) -> Data { Data(d[(k == 0 ? d.startIndex : cuts[k - 1] + 1)..<cuts[k]]) }
-        func int(_ k: Int) -> Int? { Int(String(decoding: field(k), as: UTF8.self).trimmingCharacters(in: .whitespaces)) }
-        let path = String(decoding: field(0), as: UTF8.self)
-        guard !path.isEmpty, let start = int(3), let end = int(4) else { return nil }
-        return Fetch(path: path, pq: field(1), start: start, end: end, chunk: Data(d[(cuts[4] + 1)...]))
-    }
-
-    /// The new bytes since the last read. nil when the read failed (keep
-    /// what's on show); otherwise the conversation.
-    func refresh(agent: String?, command: Command, exec: Exec) async -> [TranscriptItem]? {
-        let knownPath = path, knownEnd = end
-        guard let cmd = command(knownPath, knownEnd, Self.windowBytes, false), let raw = await exec(cmd) else { return nil }
-        // Another read (a send's refresh beside the poll) landed meanwhile:
-        // this one's bytes are already held, or would be appended twice.
-        guard path == knownPath, end == knownEnd else { return items }
-        var changed = false
-        if let f = Self.parse(raw) {
-            if f.pq != pq { pq = f.pq; changed = true }
-            if path == f.path, f.start == end {
-                if !f.chunk.isEmpty { data.append(f.chunk); end = f.end; changed = true }
-            } else {
-                // First read, another file, or too far behind: start over.
-                path = f.path; data = f.chunk; base = f.start; end = f.end
-                changed = true
-            }
-        } else if path != nil || !items.isEmpty {
-            path = nil; data = Data(); pq = Data(); base = 0; end = 0
-            changed = true
-        }
-        if changed { await reparse(agent: agent) }
-        return items
-    }
-
-    /// The conversation before what's held, put in front. False when
-    /// nothing came (or the history moved meanwhile).
-    @discardableResult
-    func loadEarlier(agent: String?, command: Command, exec: Exec) async -> Bool {
-        guard let held = path, base > 0, let cmd = command(held, base, Self.windowBytes, true),
-              let raw = await exec(cmd), let f = Self.parse(raw),
-              f.path == path, f.end == base, !f.chunk.isEmpty
-        else { return false }
-        data = f.chunk + data
-        base = f.start
-        await reparse(agent: agent)
-        return true
-    }
-
-    private func reparse(agent: String?) async {
-        generation &+= 1
-        let gen = generation
-        var input = data
-        if !pq.isEmpty { input.append(0x0A); input.append(pq); input.append(0x0A) }
-        let parsed = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(input, agent: agent)
-        }.value
-        // A later read parsed newer history meanwhile: it wins.
-        guard gen == generation else { return }
-        TranscriptMarkdownCache.prewarm(parsed)
-        items = parsed
-    }
-}
