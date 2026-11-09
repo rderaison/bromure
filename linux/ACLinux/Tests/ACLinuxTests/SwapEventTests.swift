@@ -29,7 +29,7 @@ struct SwapEventTests {
         let req = Data("GET /v1/things?x=1 HTTP/1.1\r\nHost: api.example.test\r\nAuthorization: Bearer \(fake)\r\n\r\n".utf8)
         let plan = await RequestReader.rewrite(req, proxy: proxy, profileID: pid, host: "api.example.test", port: 443,
                                                tls: true, session: proxy.strictSession(of: pid), trace: &trace)
-        guard case .forward(let out, _, _, _, _, _, _, _, _, _, _, _) = plan else { Issue.record("\(plan)"); return }
+        guard case .forward(let out, _, _, _, _, _, _, _, _, _, _, _, _) = plan else { Issue.record("\(plan)"); return }
         #expect(String(decoding: out, as: UTF8.self).contains("the-real-value-for-the-test"))
         var rows: [SecurityTimeline.Event] = []
         for _ in 0..<300 {

@@ -157,9 +157,9 @@ enum HTTPRequestFraming {
     }
 
     /// `raw` (a head, or a head and body) with the `drop` headers removed and
-    /// `add` after the start line.
+    /// `add` (if any) after the start line.
     // @port-skip linux-only: proxy header edits
-    static func replacingHeaders(_ raw: Data, drop: Set<String>, add: String) -> Data {
+    static func replacingHeaders(_ raw: Data, drop: Set<String>, add: String?) -> Data {
         guard let end = raw.range(of: Data("\r\n\r\n".utf8)) else { return raw }
         // Latin-1 both ways: a header's bytes go back as they came.
         let head = String(data: raw[raw.startIndex..<end.lowerBound], encoding: .isoLatin1) ?? ""
@@ -169,7 +169,7 @@ enum HTTPRequestFraming {
             guard let colon = l.firstIndex(of: ":") else { return false }
             return drop.contains(l[..<colon].trimmingCharacters(in: .whitespaces).lowercased())
         }
-        let out = ([start, add] + lines).joined(separator: "\r\n") + "\r\n\r\n"
+        let out = ([start] + (add.map { [$0] } ?? []) + lines).joined(separator: "\r\n") + "\r\n\r\n"
         return (out.data(using: .isoLatin1) ?? Data(out.utf8)) + raw[end.upperBound...]
     }
 

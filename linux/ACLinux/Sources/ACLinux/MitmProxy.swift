@@ -130,6 +130,8 @@ final class MitmProxy: @unchecked Sendable {
     private let leaves = NIOLockedValueBox<(map: [String: (NIOSSLContext, UInt64)], tick: UInt64)>(([:], 0))
     static let leafCapacity = 1024
     private let upstreamContext: NIOSSLContext
+    /// The same, validating nothing: an insecure request's (MitmInsecure.swift).
+    private let insecureUpstreamContext: NIOSSLContext
     /// Tests: every upstream connection goes here instead (SNI kept), trusting `extraRoots`.
     var routeAllTo: (host: String, port: Int)?
     /// The read-whole budget this proxy's package replies share (the
@@ -214,6 +216,9 @@ final class MitmProxy: @unchecked Sendable {
         cfg.certificateVerification = .fullVerification
         if !extraRoots.isEmpty { cfg.additionalTrustRoots = [.certificates(extraRoots)] }
         upstreamContext = try NIOSSLContext(configuration: cfg)
+        var insecureCfg = cfg
+        insecureCfg.certificateVerification = .none
+        insecureUpstreamContext = try NIOSSLContext(configuration: insecureCfg)
         wireProviders()
     }
 
@@ -387,6 +392,7 @@ final class MitmProxy: @unchecked Sendable {
                 session: t.session, store: store, profileID: t.profileID, host: t.host, port: t.port,
                 preSwapRequest: t.request, upstreamResponse: response, upstreamWireBytes: wireBytes,
                 responseTruncated: truncated, swaps: t.swaps, leaks: t.leaks, latencyMs: latency,
+                servedBy: t.servedBy,
                 onConversation: { [weak self] conv in self?.logPromptInjection(in: conv, host: t.host, profileID: t.profileID) })
         }
     }
@@ -489,7 +495,8 @@ final class MitmProxy: @unchecked Sendable {
     /// `local`: the request's routing, decided once by its plan (nil: decide here).
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
                          pinned: [IPAddress]? = nil, local: Bool? = nil,
-                         identity: OpenShellPolicy.BinaryIdentity? = nil, on loop: EventLoop) -> EventLoopFuture<Channel> {
+                         identity: OpenShellPolicy.BinaryIdentity? = nil, insecure: Bool = false,
+                         on loop: EventLoop) -> EventLoopFuture<Channel> {
         let routed: (host: String, port: Int, tls: Bool, local: Bool) = local.map {
             $0 ? (InferenceService.engineHost, InferenceService.repairProxyPort, false, true) : (host, port, requestedTLS, false)
         } ?? route(host: host, port: port, tls: requestedTLS, profileID: profileID)
@@ -504,8 +511,20 @@ final class MitmProxy: @unchecked Sendable {
             return loop.makeFailedFuture(ProxyDestinationDenied(
                 host: host, port: port, reason: "e2e mode with no test upstream: no real host is dialed"))
         }
-        let ctx = profileID.flatMap { kubeTrust.endpoint(for: host, port: port, profileID: $0) }?.context
-            ?? upstreamContext
+        // An insecure request (X-bromure-insecure, allowed): no validation of
+        // this upstream's certificate, for this connection only.
+        let endpoint = insecure ? nil : profileID.flatMap { kubeTrust.endpoint(for: host, port: port, profileID: $0) }
+        let ctx = insecure ? insecureUpstreamContext : endpoint?.context ?? upstreamContext
+        // A client certificate the proxy presents for the guest: on the
+        // Security Timeline once the handshake with it succeeded (macOS:
+        // emitClientCertEvent; NIOSSL can't say whether the server asked).
+        let presented: (Channel) -> Channel = { ch in
+            if routed.tls, let id = endpoint?.identity, let pid = profileID {
+                BACEventEmitter.shared.emitDetached(profileID: pid, eventType: "credential.client_cert",
+                                                    eventData: Self.clientCertEventData(id, host: host, port: port))
+            }
+            return ch
+        }
         // Only to the addresses that passed the check, in order: the name is
         // never looked up again (a rebinding answer can't slip in between).
         // One destination check per connection, the workspace's (its OpenShell
@@ -517,7 +536,7 @@ final class MitmProxy: @unchecked Sendable {
             ?? checkDestination(host: host, port: port, profileID: profileID, identity: identity, on: loop)
         return checked.flatMap { [self] resolved in
             if let r = routeAllTo, let to = try? SocketAddress.makeAddressResolvingHost(r.host, port: r.port) {
-                return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop)
+                return dial(host: host, to: [to], tls: routed.tls, ctx: ctx, on: loop).map(presented)
             }
             if refusesRealUpstreams {
                 FileHandle.standardError.write(Data("[mitm] ✗ e2e mode: the test upstream isn't usable: refused \(host):\(port)\n".utf8))
@@ -525,7 +544,7 @@ final class MitmProxy: @unchecked Sendable {
                     host: host, port: port, reason: "e2e mode: the test upstream isn't usable, so no real host is dialed"))
             }
             let addrs = resolved.compactMap { try? SocketAddress(ipAddress: "\($0)", port: port) }
-            return dial(host: host, to: addrs, tls: routed.tls, ctx: ctx, on: loop)
+            return dial(host: host, to: addrs, tls: routed.tls, ctx: ctx, on: loop).map(presented)
         }
     }
 
@@ -652,6 +671,11 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
         case hello(host: String, port: Int, addresses: [MitmProxy.IPAddress])
     }
     private var phase = Phase.preamble
+    /// The bridge's preamble claim (its client's source port), counted when
+    /// the line arrived: the proxied target is recorded under it, tying the
+    /// kernel sentry's loopback flow to the process chain (macOS: drive's
+    /// NetworkLineage.noteClaimant / noteProxied).
+    private var claim: NetworkLineage.Claim?
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
     init(proxy: MitmProxy, profileID: UUID) {
@@ -682,7 +706,11 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                         if buf.readableBytes > 512 { context.close(promise: nil) }
                         return
                     }
+                    let line = String(decoding: buf.readableBytesView[buf.readerIndex..<nl], as: UTF8.self)
                     buf.moveReaderIndex(forwardBy: nl - buf.readerIndex + 1)
+                    if let sport = Self.preambleSport(line) {
+                        claim = NetworkLineage.shared.noteClaimant(profileID: profileID, sport: sport)
+                    }
                 }
                 phase = .request
             case .request:
@@ -695,6 +723,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                 guard parts.count >= 3 else { return reject(context, 400, "Bad Request") }
                 if parts[0] == "CONNECT" {
                     let (host, port) = Self.split(String(parts[1]), defaultPort: 443)
+                    if let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
                     // A quarantined workspace opens no tunnel (a `tls: skip`
                     // splice included, which never reaches RequestReader).
                     if WorkspaceQuarantine.shared.contains(profileID) {
@@ -762,6 +791,7 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
                       let rawHost = url.host else { return reject(context, 405, "Method Not Allowed") }
                 let host = EgressPolicy.normalizedHost(rawHost)   // as every decision sees it
                 let port = url.port ?? 80
+                if let claim { NetworkLineage.shared.noteProxied(profileID: profileID, claim: claim, host: host, port: port) }
                 let policy = proxy.guardrailsConfig(for: profileID)?.egressPolicy
                 if host.lowercased() != OpenShellAdvisor.host,
                    ProxyPolicy.egressVerdict(policy: policy, profileID: profileID, host: host, port: port,
@@ -835,6 +865,17 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
         context.writeAndFlush(wrapOutboundOut(context.channel.allocator.buffer(
             string: "HTTP/1.1 \(status) \(reason)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")))
             .whenComplete { _ in context.close(promise: nil) }
+    }
+
+    /// The client port a `BROMURE-CLIENT 1 sport=<n> …` line names, when
+    /// well formed (macOS: stripClientPreamble's parse).
+    // partial: the line's parse (the bytes are consumed by the handler, not here)
+    // @port HTTPMitmConnection.static stripClientPreamble(_: inoutData) h=223c2f727a7cb008 @285807ef
+    static func preambleSport(_ line: String) -> Int? {
+        for field in line.split(separator: " ") where field.hasPrefix("sport=") {
+            if let n = Int(field.dropFirst(6)), (1...65535).contains(n) { return n }
+        }
+        return nil
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1009,7 +1050,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         case forward(Data, SubscriptionAuthRewrite.Injected, capture: SignInCapture?, upgrade: Bool,
                      mint: CredentialMint.Kind? = nil, ws: WSPromptGuard? = nil, pii: PIIVault? = nil,
                      supplyChain: SupplyChainRewrite? = nil, dial: (host: String, port: Int)? = nil,
-                     local: Bool = false, wsPolicy: ProxyPolicy.WebSocketPolicy? = nil, squelchLearn: Bool = false)
+                     local: Bool = false, wsPolicy: ProxyPolicy.WebSocketPolicy? = nil, squelchLearn: Bool = false,
+                     insecure: Bool = false)
     }
 
     /// What a traced request's record is made of, besides its response.
@@ -1024,6 +1066,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var request: Data
         var swaps: [SwapRecord] = []
         var leaks: [LeakEntry] = []
+        /// Which backend served the turn (LLMRouting's marker), if routed.
+        var servedBy: String?
     }
 
     /// The request as it goes upstream, or the host's own answer, in
@@ -1046,6 +1090,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let line = head.prefix { $0 != "\r" && $0 != "\n" }.split(separator: " ")
         let method = line.first.map(String.init) ?? ""
         let path = line.count > 1 ? String(line[1]) : "/"
+        // A brokered MCP server's OAuth discovery: not found (macOS: 4a).
+        if let answer = mcpDiscoveryAnswer(path: path, host: host, profileID: profileID, proxy: proxy) { return .answer(answer) }
         // A local agent's non-LLM cloud calls (strictly-local routing): an
         // empty 200, never sent (macOS: HTTPProxy's short-circuit).
         if let answer = proxy.localShortCircuit(host: host, path: path, profileID: profileID) { return .answer(answer) }
@@ -1057,18 +1103,24 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             return .answer(RequestReader.simple(400, "Bad Request",
                 body: "Bromure: a WebSocket upgrade to a package registry is refused (its requests go through the supply-chain checks).\n"))
         }
-        // Only a WebSocket upgrade is offered: another protocol (h2c above
-        // all) would carry every later request past the per-request policy.
-        // Every other token goes, across every Upgrade header; none left, and
-        // the request is served as plain HTTP/1.1.
+        // Only a WebSocket upgrade, or else SPDY/3.1 (kubectl exec, attach,
+        // port-forward against an API server), is offered: another protocol
+        // (h2c above all) would carry every later request past the
+        // per-request policy. Every other token goes, across every Upgrade
+        // header; none left, and the request is served as plain HTTP/1.1.
+        // The WebSocket steps below read frames: an SPDY stream is an opaque
+        // pipe (counted, not parsed).
+        var webSocket = false
         if upgrade {
-            switch ResponseRelay.websocketOnly(head) {
-            case .some(true):
-                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings"], add: "Upgrade: websocket")
-            case .some(false):
+            switch ResponseRelay.upgradeFilter(head) {
+            case .keep(let token):
+                webSocket = token == "websocket"
+            case .replace(let token):
+                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings"], add: "Upgrade: \(token)")
+                webSocket = token == "websocket"
+            case .strip:
                 req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings", "connection"], add: "Connection: close")
                 upgrade = false
-            case .none: break
             }
         }
         // Where this request goes, decided once: the PII step, the WebSocket
@@ -1078,22 +1130,50 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // (its WebSocket path has no routing step); the sentinel is local.
         let local = host.lowercased() == InferenceService.localMitmHost
             || (!upgrade && proxy.servedLocally(host: host, port: port, profileID: profileID))
+        if trace != nil, !upgrade { trace?.servedBy = proxy.servedByMarker(host: host, port: port, profileID: profileID) }
+        // The guest's `X-bromure-insecure: yes`, where the workspace allows
+        // it: no upstream certificate validation, and so no real credential
+        // on this request (MitmInsecure.swift).
+        let insecure = insecureBypass(req, proxy: proxy, profileID: profileID, host: host)
         var injected = SubscriptionAuthRewrite.Injected()
-        // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace
-        // (our own stand-ins aren't leaks).
-        if trace != nil {
-            trace?.leaks = SubscriptionAuthRewrite.filterStandInLeaks(
-                proxy.swapper.detectLeaks(in: req, profileID: profileID), request: req, host: host, profileID: profileID)
-        }
-        if tls {
+        // Pre-swap: unswapped Bearer / x-api-key tokens, for the trace and
+        // the log (our own stand-ins aren't leaks).
+        let leaks = SubscriptionAuthRewrite.filterStandInLeaks(
+            proxy.swapper.detectLeaks(in: req, profileID: profileID), request: req, host: host, profileID: profileID)
+        trace?.leaks = leaks
+        if tls, !insecure {
             switch await SubscriptionAuthRewrite.apply(rawRequest: req, host: host, method: method, path: path,
                                                        profileID: profileID, spooledBody: false) {
             case .answer(let reply): return .answer(reply)
             case .forward(let r, let i): req = r; injected = i
             }
         }
-        let swapped = await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID)
+        let placeholderBody = resolvesPlaceholderBody(req, proxy: proxy, profileID: profileID, host: host, port: port, path: path)
+        let swapped = insecure ? SwapResult(modified: req, swaps: [])
+            : await proxy.swapper.swap(rawRequest: req, host: host, port: port, profileID: profileID,
+                                       placeholderBody: placeholderBody)
         req = swapped.modified
+        // macOS's log lines: each swap (previews only), then each leak.
+        for sw in swapped.swaps {
+            FileHandle.standardError.write(Data("[mitm] swapped \(sw.fakePreview) → \(sw.realPreview) on \(sw.host)\n".utf8))
+        }
+        for leak in leaks {
+            FileHandle.standardError.write(Data(
+                "[mitm] LEAK \(leak.header)=\(leak.valuePreview) on \(host) (\(leak.suspicion.rawValue))\n".utf8))
+        }
+        // An OpenShell placeholder still there where it would have been
+        // resolved: its credential isn't bound to this host or path, and
+        // OpenShell refuses the request rather than forward it; so does Bromure.
+        if !insecure, let unresolved = unresolvedPlaceholder(in: req, checkBody: placeholderBody,
+                                                            known: proxy.swapper.entries(for: profileID).map(\.fake)) {
+            let variable = String(unresolved.dropFirst(TokenSwapper.openShellPlaceholderPrefix.count))
+            return .answer(ProxyPolicy.beforePolicyAnswer(
+                status: 403, error: "credential_endpoint_mismatch",
+                detail: "the credential for \(variable) is not bound to \(host)\(path.split(separator: "?").first.map(String.init) ?? "")",
+                host: host, port: port, profileID: profileID, scheme: tls ? "https" : "http"))
+        }
+        // The brokered MCP server's real bearer (macOS: 5b, after the swap).
+        if !insecure { req = injectingMCPBearer(req, host: host, profileID: profileID, proxy: proxy) }
         trace?.swaps = swapped.swaps
         // The supply-chain policy: a package fetch refused, or its reply read
         // whole and rewritten (macOS: driveTLS's supply-chain block).
@@ -1164,7 +1244,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var capture: SignInCapture?
         // This proxy's own captures (macOS reads them through the provider,
         // which answers for the one engine; here the proxy is at hand).
-        if tls, let c = proxy.captures.capture(for: profileID),
+        if tls, !insecure, let c = proxy.captures.capture(for: profileID),
            let bodyStart = req.range(of: Data("\r\n\r\n".utf8)) {
             let body = req.subdata(in: bodyStart.upperBound..<req.count)
             // An ended sign-in's late exchange (this capture spent, or any
@@ -1202,7 +1282,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // over the content scan below: policy enforcement is never traded
         // for scanning.
         var wsPolicy: ProxyPolicy.WebSocketPolicy?
-        if upgrade {
+        if upgrade, webSocket {
             switch ProxyPolicy.webSocketPlan(req, policy: proxy.guardrailsConfig(for: profileID)?.egressPolicy,
                                              entries: proxy.swapper.entries(for: profileID), host: host, port: port,
                                              reqPath: path, identity: identity) {
@@ -1226,22 +1306,29 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // OpenShell rewrites, the model's messages read for the calls a
         // chained turn's bare results are matched with (macOS: squelchOnPump).
         var squelchLearnOnPump = false
-        if wsPolicy != nil, squelchApplies(host: host, profileID: profileID, local: local) {
+        if wsPolicy != nil, !insecure, squelchApplies(host: host, profileID: profileID, local: local) {
             let then = wsPolicy?.messageTransform
             wsPolicy?.messageTransform = squelchingTransform(then: then, profileID: profileID,
                                                              conversation: wsConversation)
             squelchLearnOnPump = true
         }
-        if upgrade, wsPolicy == nil, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, path: path, local: local,
+        if upgrade, webSocket, wsPolicy == nil, !insecure, let g = WSPromptGuard.make(proxy: proxy, profileID: profileID, host: host, path: path, local: local,
                                                                  conversation: wsConversation) {
             ws = g
             req = WSHandshake.strippingExtensions(req).request
         }
+        // Our own control header never reaches the upstream (macOS:
+        // relayUpstream's header copy).
         var out = upgrade ? req : closing(req)
+        if SubscriptionAuthRewrite.headerValue("x-bromure-insecure", inHeaderSection: SubscriptionAuthRewrite.rawHeaderSection(of: out) ?? "") != nil {
+            out = HTTPRequestFraming.replacingHeaders(out, drop: ["x-bromure-insecure"], add: nil)
+        }
         // An AWS request (SigV4 with the guest's fake keys) re-signed with the
         // real ones, last, over the headers as they go out; a use the user
-        // refused is answered here (macOS: driveTLS's AWSResigner step).
-        switch await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
+        // refused is answered here (macOS: driveTLS's AWSResigner step). Not
+        // an insecure request: re-signing would put the real key's signature
+        // in front of an unvalidated upstream.
+        switch insecure ? .unchanged : await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
         case .unchanged: break
         case .resigned(let bytes): out = framedLikeURLSession(bytes, host: host)
         case .denied(let response): return .answer(response)
@@ -1260,7 +1347,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         TraceEmitter.emitSwapEvents(swapped.swaps, host: host, path: path, profileID: profileID)
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
                         supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy,
-                        squelchLearn: squelchLearnOnPump)
+                        squelchLearn: squelchLearnOnPump, insecure: insecure)
 
     }
 
@@ -1279,17 +1366,17 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             write(reply, to: channel, close: true)
             if let trace { proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
         case .forward(let req, let injected, let capture, let upgrade, let mint, let ws, let pii, let supplyChain, let dial, let local,
-                      let wsPolicy, let squelchLearn):
+                      let wsPolicy, let squelchLearn, let insecure):
             // Where it's dialed: the guest's destination, or Depi (TLS, its
             // own name: nothing the guest pinned) for a re-routed request.
             proxy.connectUpstream(host: dial?.host ?? host, port: dial?.port ?? port, tls: dial != nil || tls,
                                   profileID: profileID, pinned: dial == nil ? pinned : nil, local: local,
-                                  identity: identity, on: channel.eventLoop).whenComplete { r in
+                                  identity: identity, insecure: insecure && dial == nil, on: channel.eventLoop).whenComplete { r in
                 switch r {
                 case .failure(let e):
                     let reply = (e as? ProxyDestinationDenied).map {
                         MitmProxy.destinationDeniedResponse(host: $0.host, port: $0.port, reason: $0.reason)
-                    } ?? MitmProxy.upstreamErrorResponse(e, host: host)
+                    } ?? self.proxy.upstreamErrorResponse(e, host: host, profileID: self.profileID)
                     self.write(reply, to: channel, close: true)
                     if let trace { self.proxy.emitTrace(trace, response: reply, wireBytes: reply.count, truncated: false) }
                 case .success(let up):
@@ -1801,9 +1888,11 @@ final class ResponseRelay: ChannelInboundHandler {
             noteStatus(head0)
             upgradeResponseHead = head0
             if let trace {
+                // An opaque stream (SPDY) is counted, never parsed as frames.
                 wsTrace = WSTraceSession(handshake: head0, host: host, path: HTTPFrames.parseRequestLine(trace.request).1,
                                          profileID: trace.profileID,
-                                         captureBody: trace.session.level.capturesBodyForHost(host))
+                                         captureBody: trace.session.level.capturesBodyForHost(host)
+                                            && Self.switchedToWebSocket(head0))
                 wsTrace?.upstream(count: rest.count)
             }
             var early = rest
@@ -2015,11 +2104,19 @@ final class ResponseRelay: ChannelInboundHandler {
         context.fireChannelWritabilityChanged()
     }
 
-    /// An upgrade request's tokens over every Upgrade header: nil when the
-    /// only one is `websocket` (nothing to change), true when websocket is
-    /// among others (the others go), false when it isn't there at all.
-    // @port-skip linux-only: the Linux proxy's upgrade policy
-    static func websocketOnly(_ head: String) -> Bool? {
+    /// What an upgrade request may offer: WebSocket if it's among the
+    /// tokens (over every Upgrade header), else SPDY/3.1; nothing else.
+    enum UpgradeFilter: Equatable {
+        /// Only the allowed protocol is there: nothing to change.
+        case keep(String)
+        /// It's there among others: the others go.
+        case replace(String)
+        /// Neither: every token goes (plain HTTP/1.1).
+        case strip
+    }
+
+    // @port-skip linux-only: the Linux proxy's upgrade policy (macOS pumps any upgrade outside OpenShell mode; being aligned to this rule)
+    static func upgradeFilter(_ head: String) -> UpgradeFilter {
         let tokens = head.components(separatedBy: "\r\n").dropFirst().compactMap { line -> [String]? in
             guard let colon = line.firstIndex(of: ":"),
                   line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { return nil }
@@ -2027,9 +2124,22 @@ final class ResponseRelay: ChannelInboundHandler {
                 $0.trimmingCharacters(in: .whitespaces).lowercased()
             }
         }.flatMap { $0 }
-        let ws = tokens.filter { $0 == "websocket" || $0.hasPrefix("websocket/") }
-        if ws.isEmpty { return false }
-        return ws.count == tokens.count ? nil : true
+        for (allowed, matches) in [("websocket", { (t: String) in t == "websocket" || t.hasPrefix("websocket/") }),
+                                   ("SPDY/3.1", { (t: String) in t == "spdy/3.1" })] {
+            let hits = tokens.filter(matches)
+            if hits.isEmpty { continue }
+            return hits.count == tokens.count ? .keep(allowed.lowercased()) : .replace(allowed)
+        }
+        return .strip
+    }
+
+    /// The switched protocol is WebSocket (its frames can be read), not an
+    /// opaque stream (SPDY).
+    // @port-skip linux-only: the Linux proxy's upgrade policy
+    static func switchedToWebSocket(_ responseHead: Data) -> Bool {
+        let head = String(decoding: responseHead, as: UTF8.self)
+        guard let v = SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) else { return true }
+        return v.lowercased().contains("websocket")
     }
 
     /// A response head's status code.
@@ -2161,7 +2271,8 @@ final class ResponseRelay: ChannelInboundHandler {
         // Gone before a byte of its response: the guest is told why, as
         // macOS answers a lost connection, not left with a bare close.
         if !relayed {
-            let reply = MitmProxy.upstreamErrorResponse(failure ?? ChannelError.eof, host: host)
+            let reply = proxy?.upstreamErrorResponse(failure ?? ChannelError.eof, host: host, profileID: profileID)
+                ?? MitmProxy.upstreamErrorResponse(failure ?? ChannelError.eof, host: host)
             if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: 0, truncated: false) }
             guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in self.guest.close(promise: nil) }
             return

@@ -32,6 +32,16 @@ extension MitmProxy {
     /// Whether a request to `host` is served by the on-host engine: the
     /// sentinel always; a real cloud LLM host when the workspace routes it
     /// there (LLMRouting.decide).
+    /// The trace's served-by marker for a request to `host` (macOS:
+    /// driveTLS's `servedByMarker`, LLMRouting.decide's), nil off the
+    /// routing or for a host it doesn't route.
+    // @port-skip linux-only: HTTPProxy's servedByMarker, as a question
+    func servedByMarker(host: String, port: Int, profileID: UUID?) -> String? {
+        guard let ctx = routingContext(for: profileID), LLMRouting.isLLMHost(host) else { return nil }
+        return LLMRouting.decide(host: host, port: port, context: ctx, sessionKey: profileID?.uuidString ?? "",
+                                 now: Date().timeIntervalSince1970).servedBy
+    }
+
     // @port-skip linux-only: HTTPProxy's `routedBackend == .local`, as a question
     func servedLocally(host: String, port: Int, profileID: UUID?) -> Bool {
         if host.lowercased() == InferenceService.localMitmHost { return true }
