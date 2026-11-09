@@ -365,6 +365,9 @@ struct Image: AsyncParsableCommand {
         @Option(name: .customLong("ubuntu-mirror"), help: "Ubuntu mirror. Default: setup.sh's for the arch.") var ubuntuMirror: String?
         @Flag(name: .customLong("no-agent-clis"), help: "Leave out the image catalog's postinstall steps (Claude Code, Codex, Grok…).")
         var noAgentCLIs = false
+        @Option(name: .long,
+                help: "A shell script to run as root inside the image after Bromure's setup (traced; log in the daemon's state dir, base-image-customize.log). Default: the one set in the daemon's defaults (image.customizeScript.enabled/.path), if any.")
+        var customizeScript: String?
         @Option(name: .customLong("alpine-releases"), help: "Alpine netboot releases URL (HTTPS). Default: dl-cdn's.")
         var alpineReleases: String?
         @Flag(help: "Echo the installer's serial console.") var verbose = false
@@ -405,6 +408,17 @@ struct Image: AsyncParsableCommand {
                 _ = await store.refresh()
                 o.postinstallSteps = store.effective().sortedSteps
             }
+            if let path = customizeScript {
+                guard let text = try? String(contentsOfFile: (path as NSString).expandingTildeInPath, encoding: .utf8) else {
+                    throw ValidationError("Can't read the customize script at \(path).")
+                }
+                o.customizeScript = text
+            } else {
+                let saved = BaseImageCustomize.load()
+                o.customizeScript = saved.script
+                if let problem = saved.problem { FileHandle.standardError.write(Data("[bake] \(problem)\n".utf8)) }
+            }
+            o.customizeLogPath = InterimBake.customizeLogPath
             if let alpineReleases { o.alpineReleasesBase = alpineReleases }
             let verbose = verbose
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },

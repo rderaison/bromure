@@ -1482,6 +1482,18 @@
     {
       "id": "UbuntuImageManager.runProvisioner(environment: InstallerEnvironment, stage: String, runLabel: String, setupShare: URL?, targetDisk: URL?, script: String, scriptArgs: String, extraShares: [(tag:String,url:URL,readOnly:Bool)], successMarker: String, failureMarker: String, markerTimeout: TimeInterval, hardTimeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void) / stdoutPipe.fileHandleForReading.readabilityHandler",
       "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.CustomizeFailureFlag.set()",
+      "reason": "the flag carries the guest's customize-failure line across macOS's output thread; the Linux bake reads it from the installer's failure line (InterimBake.customizeFailure)"
+    },
+    {
+      "id": "UbuntuImageManager.CustomizeFailureFlag.reset()",
+      "reason": "the flag carries the guest's customize-failure line across macOS's output thread; the Linux bake reads it from the installer's failure line (InterimBake.customizeFailure)"
+    },
+    {
+      "id": "UbuntuImageManager.CustomizeFailureFlag.var isSet",
+      "reason": "the flag carries the guest's customize-failure line across macOS's output thread; the Linux bake reads it from the installer's failure line (InterimBake.customizeFailure)"
     }
   ],
   "skipInheriting": [

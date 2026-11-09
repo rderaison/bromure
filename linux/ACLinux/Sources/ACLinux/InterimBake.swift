@@ -53,6 +53,12 @@ public enum InterimBake {
         /// Codex, Grok, …), applied after setup.sh as macOS's
         /// createBaseImage(postinstallSteps:) does. Empty: none.
         public var postinstallSteps: [PostinstallStep] = []
+        /// The user's customize script, run as root in the image after the
+        /// steps (macOS: UbuntuImageManager.customizeScript). nil: none.
+        public var customizeScript: String?
+        /// Where the customize run's output is kept (the whole postinstall
+        /// phase), when there's a script.
+        public var customizeLogPath: String?
         public var postinstallTimeout: Duration = .seconds(1800)
         // @port-skip linux-only: interim bake options
         public init(outputDir: String, cacheDir: String, vmSetupDir: String, imageVersion: String) {
@@ -115,6 +121,8 @@ public enum InterimBake {
         try stageSetup(from: o.vmSetupDir, to: setup, alpineRepoBase: o.alpineCDN)
         let postinstall = work + "/postinstall"
         let steps = try stagePostinstall(o.postinstallSteps, to: postinstall)
+        if let script = o.customizeScript { try stageCustomize(script, to: postinstall) }
+        let runsPostinstall = !steps.isEmpty || o.customizeScript != nil
         let partial = o.outputDir + "/base.img.partial"
         try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
 
@@ -132,7 +140,7 @@ public enum InterimBake {
         // Root in the installer reads and writes as the bake's user.
         c.shares = [.init(tag: "setup", hostPath: setup, readOnly: true, guestOwner: nil),
                     .init(tag: "out", hostPath: work + "/out", guestOwner: nil)]
-        if !steps.isEmpty { c.shares.append(.init(tag: "postinstall", hostPath: postinstall, readOnly: true, guestOwner: nil)) }
+        if runsPostinstall { c.shares.append(.init(tag: "postinstall", hostPath: postinstall, readOnly: true, guestOwner: nil)) }
         c.serialLog = work + "/firecracker-stderr.log"
         c.macAddress = "52:54:00:ba:4e:01"
         // The network the daemon's VMs have: passt behind the interim switch
@@ -147,8 +155,10 @@ public enum InterimBake {
         var toGuest: [Int32] = [-1, -1], fromGuest: [Int32] = [-1, -1]
         guard acl_pipe_cloexec(&toGuest) == 0, acl_pipe_cloexec(&fromGuest) == 0 else { throw MachineError.io("pipe", errno) }
         c.consolePipes = (input: toGuest[0], output: fromGuest[1])
-        let console = SerialConsole(readFD: fromGuest[0], writeFD: toGuest[1], log: work + "/serial.log", output: output)
-        defer { console.close() }
+        let customizeLog = CustomizeLog(path: o.customizeScript != nil ? o.customizeLogPath : nil)
+        let console = SerialConsole(readFD: fromGuest[0], writeFD: toGuest[1], log: work + "/serial.log",
+                                    output: { customizeLog.write($0); output($0) })
+        defer { console.close(); customizeLog.close() }
         let vm = FirecrackerMachine(config: c)
         progress("Starting the installer VM…")
         do { try await vm.start() } catch { await passt.close(); throw error }
@@ -156,12 +166,13 @@ public enum InterimBake {
         // 4-5. The console dialogue.
         var tSetup = ContinuousClock.now
         do {
-            tSetup = try await runInstaller(console, o, postinstallSteps: steps.count, progress: progress)
+            tSetup = try await runInstaller(console, o, postinstallSteps: steps.count, progress: progress,
+                                            postinstallStarts: { customizeLog.start() })
         } catch {
             await vm.kill()
             await passt.close()
             try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log.failed")
-            throw error
+            throw customizeFailure(error, o)
         }
         let setupTime = ContinuousClock.now - tSetup
         progress("Shutting down the installer…")
@@ -215,7 +226,8 @@ public enum InterimBake {
     /// Returns when setup.sh started.
     // @port-skip linux-only: interim stand-in for UbuntuImageManager.runProvisioner's dialogue (VZ-bound on macOS)
     static func runInstaller(_ con: SerialConsole, _ o: Options, postinstallSteps: Int = 0,
-                             progress: @Sendable (String) -> Void) async throws -> ContinuousClock.Instant {
+                             progress: @Sendable (String) -> Void,
+                             postinstallStarts: () -> Void = {}) async throws -> ContinuousClock.Instant {
         let prompt = "localhost:~#"
         progress("Installer: waiting for the prompt…")
         try await con.buffer.wait(for: "localhost login:", timeout: 180, failures: ["Kernel panic"])
@@ -256,12 +268,19 @@ public enum InterimBake {
         con.send("\(mirror)ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/setup.sh \(o.displayScale)")
         try await con.buffer.wait(for: "SANDBOX_SETUP_DONE", timeout: o.setupTimeout.seconds,
                                   failures: ["SANDBOX_SETUP_FAILED:", "Kernel panic", "Internal error: Oops"])
-        if postinstallSteps > 0 {
+        if postinstallSteps > 0 || o.customizeScript != nil {
             // macOS runs postinstall.sh in a second installer boot on the
             // finished disk; the same installer is still up here.
             progress("Installer: installing the agent CLIs (\(postinstallSteps) catalog step(s))…")
+            if o.customizeScript != nil, let log = o.customizeLogPath {
+                progress("Your customize script runs after the recommended packages (log: \(log))")
+            }
+            postinstallStarts()
             con.send("sh /tmp/setup/postinstall.sh")
-            try await con.buffer.wait(for: "SANDBOX_POSTINSTALL_DONE", timeout: o.postinstallTimeout.seconds,
+            // A customize script compiling a toolchain can take a while
+            // (macOS: 90 minutes for the phase with one, else 20).
+            let timeout = o.customizeScript == nil ? o.postinstallTimeout : max(o.postinstallTimeout, .seconds(90 * 60))
+            try await con.buffer.wait(for: "SANDBOX_POSTINSTALL_DONE", timeout: timeout.seconds,
                                       failures: ["SANDBOX_POSTINSTALL_FAILED:", "Kernel panic", "Internal error: Oops"])
         }
         progress("Installer: copying the kernel and initrd out…")
@@ -314,6 +333,44 @@ public enum InterimBake {
                 atomically: true, encoding: .utf8)
         }
         return ordered.map(\.uuid)
+    }
+
+    /// Where the last customize run's output is kept (the whole postinstall
+    /// phase, the script's `bash -x` trace included): the daemon's state
+    /// dir, the XDG home for logs (macOS: ~/Library/Logs/BromureAC).
+    // @port UbuntuImageManager.static var customizeLogURL h=c75adbd0980e1172 @84e171b8
+    public static var customizeLogPath: String {
+        DaemonConfig.fromEnvironment().stateDir + "/base-image-customize.log"
+    }
+
+    /// The step file for the user's script: traced (`set -x`, each line
+    /// tagged), so the log shows every command it ran; named so
+    /// postinstall.sh runs it last and only once.
+    static let customizeStepName = "9999-customize.sh"
+    // @port UbuntuImageManager.static customizeStep(_: String) h=f9234cd17d64ecf3 @84e171b8
+    static func customizeStep(_ script: String) -> String {
+        "# Your customize script\nexport PS4='+ [customize] '\nset -x\n" + script + "\n"
+    }
+
+    /// `script` as the last step file (macOS: runPostinstall's customize half).
+    // partial: the customize half of runPostinstall's staging
+    // @port-skip linux-only: see stagePostinstall
+    static func stageCustomize(_ script: String, to dir: String) throws {
+        let stepsDir = dir + "/steps"
+        try FileManager.default.createDirectory(atPath: stepsDir, withIntermediateDirectories: true)
+        try customizeStep(script).write(toFile: stepsDir + "/" + customizeStepName, atomically: true, encoding: .utf8)
+    }
+
+    /// The installer's failure as the user's script's when it was theirs
+    /// (postinstall.sh names the step: "… attempt(s): Your customize
+    /// script"), so it doesn't read as Bromure's installer breaking.
+    // @port-skip linux-only: runPostinstall's customize-failure mapping (CustomizeFailureFlag on macOS)
+    static func customizeFailure(_ error: Error, _ o: Options) -> Error {
+        guard o.customizeScript != nil, case BakeError.installerReportedFailure(let line) = error,
+              line.contains("attempt(s): Your customize script") else { return error }
+        // As macOS abbreviates it (corelibs Foundation has no abbreviatingWithTildeInPath).
+        let log = o.customizeLogPath ?? "the bake log", home = NSHomeDirectory()
+        return BakeError.customizeScriptFailed(log: log.hasPrefix(home + "/") ? "~" + log.dropFirst(home.count) : log)
     }
 
     // @port-skip linux-only: the Linux bake fetches Alpine's netboot kernel itself
@@ -380,6 +437,7 @@ public enum BakeError: Error, CustomStringConvertible {
     case installerTimeout(String)
     case noGuestNetwork
     case staging(String)
+    case customizeScriptFailed(log: String)
     case serial(String)
 
     // @port-skip linux-only: interim bake errors
@@ -388,6 +446,7 @@ public enum BakeError: Error, CustomStringConvertible {
         case .downloadFailed(let s): return "download failed: HTTP \(s)"
         case .checksumInvalid(let m): return "checksum mismatch: \(m)"
         case .installerReportedFailure(let m): return "installer failed: \(m)"
+        case .customizeScriptFailed(let log): return "Your customize script failed — the current image is kept. See \(log)"
         case .installerTimeout(let m): return "installer timed out waiting for \(m)"
         case .noGuestNetwork: return "the installer VM got no network"
         case .staging(let m): return "staging vm-setup: \(m)"
@@ -502,5 +561,39 @@ extension Duration {
     var seconds: TimeInterval {
         let c = components
         return TimeInterval(c.seconds) + TimeInterval(c.attoseconds) / 1e18
+    }
+}
+
+/// The customize run's log: the serial output from the start of the
+/// postinstall phase on (macOS: runPostinstall's log handle on
+/// customizeLogURL, the whole phase kept). No path: nothing kept.
+// @port-skip linux-only: the log half of runPostinstall's customize run
+final class CustomizeLog: Sendable {
+    private let path: String?
+    private let handle = NIOLockedValueBox<FileHandle?>(nil)
+
+    // @port-skip linux-only: see CustomizeLog
+    init(path: String?) { self.path = path }
+
+    /// Truncates the log to a header and keeps what follows.
+    // @port-skip linux-only: see CustomizeLog
+    func start() {
+        guard let path else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        fm.createFile(atPath: path, contents: Data("Base image customize run — \(Date())\n".utf8))
+        let h = FileHandle(forWritingAtPath: path)
+        _ = try? h?.seekToEnd()
+        handle.withLockedValue { $0 = h }
+    }
+
+    // @port-skip linux-only: see CustomizeLog
+    func write(_ data: Data) {
+        handle.withLockedValue { try? $0?.write(contentsOf: data) }
+    }
+
+    // @port-skip linux-only: see CustomizeLog
+    func close() {
+        handle.withLockedValue { try? $0?.close(); $0 = nil }
     }
 }
