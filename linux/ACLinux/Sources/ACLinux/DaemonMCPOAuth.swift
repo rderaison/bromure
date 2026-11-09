@@ -36,31 +36,68 @@ enum MCPOAuthBroker {
         }
     }
 
-    /// Why the daemon won't POST to `url`, or nil: on a shared server the
-    /// token endpoint is the user's (their PUT) and the daemon's request
-    /// goes out past the MITM policy, so only https to public addresses.
-    /// Tests on loopback swap it.
-    nonisolated(unsafe) static var endpointRefusal: (URL) -> String? = publicHTTPSRefusal
+    /// Whose endpoint rules a refresh follows.
+    // @port-skip linux-only: a shared server's check on a user-supplied endpoint
+    struct EndpointPolicy: Sendable {
+        /// A multi-user server: the endpoint is checked (single-user: none, as macOS).
+        var multiUser: Bool
+        /// The workspace's own egress policy, which decides a private address.
+        var egress: EgressPolicy
+        static let singleUser = EndpointPolicy(multiUser: false, egress: .allowAll)
+    }
+
+    /// Why the daemon won't POST to `url`, or nil. A single-user server
+    /// checks nothing (as macOS). On a multi-user one the token endpoint is
+    /// the user's (their PUT) and the daemon's request goes out past the
+    /// MITM: https only; never loopback, link-local (the cloud metadata
+    /// address too) or unspecified; a private, CGNAT or ULA address only
+    /// when the workspace's own egress policy allows that destination (an
+    /// in-house identity provider). Tests on loopback swap it.
+    nonisolated(unsafe) static var endpointRefusal: @Sendable (URL, EndpointPolicy) async -> String? = { url, policy in
+        await checkEndpoint(url, policy)
+    }
+
+    /// Resolution off the cooperative pool, given up after `timeout`.
+    nonisolated(unsafe) static var resolver: @Sendable (String, Int) -> [OpenShellPolicy.IPAddress] = { MitmProxy.resolve($0, port: $1) }
 
     // @port-skip linux-only: a shared server's check on a user-supplied endpoint
-    static func publicHTTPSRefusal(_ url: URL) -> String? {
+    static func checkEndpoint(_ url: URL, _ policy: EndpointPolicy, timeout: Duration = .seconds(5)) async -> String? {
+        guard policy.multiUser else { return nil }
         guard url.scheme?.lowercased() == "https" else { return "the token endpoint isn't https" }
         guard let host = url.host, !host.isEmpty else { return "the token endpoint has no host" }
-        let ips = MitmProxy.resolve(host, port: url.port ?? 443)
-        guard !ips.isEmpty else { return "the token endpoint's host doesn't resolve" }
-        if let bad = ips.first(where: { OpenShellPolicy.isInternal($0) }) {
-            return "the token endpoint resolves to a local or private address (\(bad))"
+        let port = url.port ?? 443
+        let resolve = resolver
+        let ips: [OpenShellPolicy.IPAddress] = await withTaskGroup(of: [OpenShellPolicy.IPAddress]?.self) { g in
+            g.addTask { await SecureDir.offPool { resolve(host, port) } }
+            g.addTask { try? await Task.sleep(for: timeout); return nil }
+            let first = await g.next() ?? nil
+            g.cancelAll()
+            return first ?? []
+        }
+        guard !ips.isEmpty else { return "the token endpoint's host doesn't resolve (or took over \(timeout))" }
+        for ip in ips {
+            if OpenShellPolicy.isAlwaysBlocked(ip) || MitmProxy.v4(ip).map({ OpenShellPolicy.isAlwaysBlocked(.v4($0)) }) == true {
+                return "the token endpoint resolves to a loopback, link-local or unspecified address (\(ip))"
+            }
+        }
+        for ip in ips where OpenShellPolicy.isInternal(ip) {
+            let v4: UInt32? = { if case .v4(let v) = ip { return v } else { return MitmProxy.v4(ip) } }()
+            if policy.egress.verdict(ip: v4, hostnames: [host], proto: .tcp, port: UInt16(clamping: port)) == .deny
+                || MitmProxy.openShellDenial(policy.egress.openShell, host: host, port: port, resolved: [ip],
+                                            identity: nil, enforceBinaries: false) != nil {
+                return "the token endpoint resolves to a private address (\(ip)) the workspace's egress policy doesn't allow"
+            }
         }
         return nil
     }
 
     // @port MCPOAuthBroker.static refresh(state: MCPOAuthState) h=4a873148d744f90e @55adf953
-    static func refresh(state: MCPOAuthState) async throws -> MCPOAuthState {
+    static func refresh(state: MCPOAuthState, policy: EndpointPolicy = .singleUser) async throws -> MCPOAuthState {
         guard let refreshToken = state.refreshToken,
               let tokenURL = URL(string: state.tokenEndpoint) else {
             throw BrokerError.refreshFailed("No refresh token or invalid token endpoint")
         }
-        if let why = endpointRefusal(tokenURL) { throw BrokerError.refreshFailed(why) }
+        if let why = await endpointRefusal(tokenURL, policy) { throw BrokerError.refreshFailed(why) }
         var body = [
             "grant_type=refresh_token",
             "refresh_token=\(formEncode(refreshToken))",
@@ -111,18 +148,34 @@ extension Daemon {
     /// when the refresh fails or takes over 10 s). The refreshed state lives
     /// in the staged copy only, as on macOS.
     // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=049de67ef199bfa8 @4bd8405e
-    static func populateMCPBearerTokens(_ profile: Profile) async -> Profile {
+    static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false) async -> Profile {
         var profile = profile
+        let policy = MCPOAuthBroker.EndpointPolicy(multiUser: multiUser, egress: profile.resolvedEgressPolicy)
         for i in profile.mcpServers.indices {
             guard profile.mcpServers[i].enabled,
                   profile.mcpServers[i].transport == .http,
                   var oauth = profile.mcpServers[i].oauthState else { continue }
             guard !oauth.accessToken.isEmpty else { continue }
             if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60, oauth.refreshToken != nil {
-                let current = oauth
+                let current = oauth, name = profile.mcpServers[i].name, ws = profile.name
                 oauth = await withTaskGroup(of: MCPOAuthState?.self) { g in
-                    g.addTask { try? await MCPOAuthBroker.refresh(state: current) }
-                    g.addTask { try? await Task.sleep(for: .seconds(10)); return nil }
+                    g.addTask {
+                        do { return try await MCPOAuthBroker.refresh(state: current, policy: policy) }
+                        catch {
+                            // Said, never silent (no token in the message).
+                            FileHandle.standardError.write(Data(
+                                "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh failed, the old token kept: \(error)\n".utf8))
+                            return nil
+                        }
+                    }
+                    g.addTask {
+                        try? await Task.sleep(for: .seconds(10))
+                        if !Task.isCancelled {
+                            FileHandle.standardError.write(Data(
+                                "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh took over 10 s, the old token kept\n".utf8))
+                        }
+                        return nil
+                    }
                     let first = await g.next() ?? nil
                     g.cancelAll()
                     return first ?? current

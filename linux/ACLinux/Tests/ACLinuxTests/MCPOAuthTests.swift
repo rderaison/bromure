@@ -1,5 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
+import SandboxEngine
 import Testing
 @testable import ACLinux
 
@@ -65,7 +66,7 @@ struct MCPOAuthTests {
     /// transport, with its no-redirect rule, stays the daemon's).
     static func onLoopback<T>(_ body: () async throws -> T) async rethrows -> T {
         let prior = MCPOAuthBroker.endpointRefusal
-        MCPOAuthBroker.endpointRefusal = { _ in nil }
+        MCPOAuthBroker.endpointRefusal = { _, _ in nil }
         defer { MCPOAuthBroker.endpointRefusal = prior }
         return try await body()
     }
@@ -135,20 +136,52 @@ struct MCPOAuthTests {
         #expect(out.mcpServers[0].oauthState?.refreshToken == "R")
     } }
 
-    /// The token endpoint came from the user's PUT and the daemon's POST
-    /// goes out past the MITM policy: https to public addresses only.
-    @Test func onlyAPublicHTTPSTokenEndpointIsUsed() async throws {
-        for url in ["http://auth.example/token", "https://127.0.0.1/token", "https://10.1.2.3/token",
-                    "https://192.168.1.1/token", "https://169.254.169.254/latest", "https://[::1]/token",
-                    "https://localhost/token", "https://[fe80::1]/token", "https:///token"] {
-            #expect(MCPOAuthBroker.publicHTTPSRefusal(URL(string: url)!) != nil, "\(url)")
+    /// A single-user server checks nothing (as macOS). On a multi-user one
+    /// the endpoint is the user's and the POST goes out past the MITM: https,
+    /// never loopback / link-local / unspecified, and a private address only
+    /// when the workspace's own egress policy allows it. Names resolve through
+    /// a stub: nothing is looked up for real.
+    @Test func theTokenEndpointRulesFollowTheServerAndTheWorkspace() async throws {
+        let prior = MCPOAuthBroker.resolver
+        MCPOAuthBroker.resolver = { host, _ in
+            switch host {
+            case "idp.corp": return [OpenShellPolicy.IPAddress("10.2.3.4")!]
+            case "split.example": return [OpenShellPolicy.IPAddress("93.184.216.34")!, OpenShellPolicy.IPAddress("fd00::1")!]
+            case "public.example": return [OpenShellPolicy.IPAddress("93.184.216.34")!]
+            case "meta.example": return [OpenShellPolicy.IPAddress("169.254.169.254")!]
+            default: return OpenShellPolicy.IPAddress(host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))).map { [$0] } ?? []
+            }
         }
-        // And refresh refuses before any request.
+        defer { MCPOAuthBroker.resolver = prior }
+        func refusal(_ url: String, multi: Bool = true, egress: EgressPolicy = .allowAll) async -> String? {
+            await MCPOAuthBroker.checkEndpoint(URL(string: url)!, .init(multiUser: multi, egress: egress))
+        }
+        // Single-user: no check, as macOS.
+        #expect(await refusal("http://127.0.0.1/token", multi: false) == nil)
+        // Multi-user: always refused.
+        for url in ["http://public.example/token", "https://127.0.0.1/token", "https://meta.example/latest",
+                    "https://169.254.169.254/latest", "https://[::1]/token", "https://[fe80::1]/token",
+                    "https://0.0.0.0/token", "https://unresolvable.example/token", "https:///token"] {
+            #expect(await refusal(url) != nil, "\(url)")
+        }
+        #expect(await refusal("https://public.example/token") == nil)
+        // Private (an in-house IdP; a ULA next to a public A): as the workspace's egress policy says.
+        #expect(await refusal("https://idp.corp/token") == nil, "default allow lets the workspace reach it")
+        let closed = try EgressPolicy.parse("allow tcp public.example:443\ndefault deny")
+        #expect(await refusal("https://idp.corp/token", egress: closed) != nil)
+        #expect(await refusal("https://split.example/token", egress: closed) != nil)
+        let opened = try EgressPolicy.parse("allow tcp idp.corp:443\ndefault deny")
+        #expect(await refusal("https://idp.corp/token", egress: opened) == nil)
+        let denied = try EgressPolicy.parse("deny any 10.0.0.0/8\ndefault allow")
+        #expect(await refusal("https://idp.corp/token", egress: denied) != nil)
+        // And a refusal sends nothing.
         let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"X"}"#)
         defer { ep.stop() }
         let state = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
                                   accessToken: "A", refreshToken: "R")
-        await #expect(throws: MCPOAuthBroker.BrokerError.self) { _ = try await MCPOAuthBroker.refresh(state: state) }
+        await #expect(throws: MCPOAuthBroker.BrokerError.self) {
+            _ = try await MCPOAuthBroker.refresh(state: state, policy: .init(multiUser: true, egress: .allowAll))
+        }
         #expect(ep.requests.withLockedValue { $0 }.isEmpty, "nothing was sent")
     }
 

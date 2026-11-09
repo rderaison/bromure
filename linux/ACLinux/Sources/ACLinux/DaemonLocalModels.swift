@@ -30,7 +30,7 @@ extension Daemon {
     /// where macOS does it (the launch, the live credential push; a reboot
     /// relaunches): a refresh token may be good for one use.
     func stagedProfile(_ raw: Profile, mcpTokens: Bool = false) async -> Profile {
-        let raw = mcpTokens ? await Self.populateMCPBearerTokens(raw) : raw
+        let raw = mcpTokens ? await Self.populateMCPBearerTokens(raw, multiUser: config.multiUser) : raw
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {
             raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
