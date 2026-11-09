@@ -15,9 +15,14 @@ nonisolated(unsafe) var gWinchPipe: Int32 = -1
 /// raw mode (restored on exit), SIGWINCH forwarded as resize frames.
 // @port-skip linux-only: the namespace; run carries the @port line
 public enum InteractiveExec {
-    // partial: no overlay trigger, view/window, guiConsent or sizePassive (no host terminal views on Linux); a stream that ends without an exit frame is an error (exit 1) rather than a silent 0
+    // partial: no view/window, guiConsent or sizePassive (no host terminal views on Linux); a stream that ends without an exit frame is an error (exit 1) rather than a silent 0
     // @port InteractiveExec.static run(client: ControlClient, vm: String, command: String, view: String?, window: Int?, guiConsent: Bool, sizePassive: Bool, overlayTrigger: UInt8?, onOverlay: (()->[UInt8])?) h=817622aa69512a47 @94eb37f3
-    public static func run(client: ControlClient, vm: String, command: String) throws {
+    /// `overlayTrigger`: a lone byte (the remote menu's Ctrl-]) caught here,
+    /// never framed to the guest, that calls `onOverlay`; its non-empty
+    /// return is written to the guest (Ctrl-b d to detach), an empty one
+    /// repaints by re-sending the size. Twice in one read is one literal byte.
+    public static func run(client: ControlClient, vm: String, command: String,
+                           overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
         func size() -> (Int, Int) {
             var ws = winsize()
             _ = ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws)
@@ -67,6 +72,21 @@ public enum InteractiveExec {
             }
             if fds[0].revents != 0 {
                 let r = read(stdinFD, &rbuf, rbuf.count)
+                if r > 0, let trigger = overlayTrigger, let onOverlay {
+                    if r == 1, rbuf[0] == trigger {
+                        let forward = onOverlay()
+                        if forward.isEmpty {
+                            let (c, rows) = size()
+                            PTYFrame.send(fd, PTYFrame.resize, PTYFrame.resizePayload(cols: c, rows: rows))
+                        } else {
+                            PTYFrame.send(fd, PTYFrame.data, forward)
+                        }
+                        continue
+                    }
+                    if r == 2, rbuf[0] == trigger, rbuf[1] == trigger {
+                        PTYFrame.send(fd, PTYFrame.data, [trigger]); continue
+                    }
+                }
                 if r > 0 { PTYFrame.send(fd, PTYFrame.data, Array(rbuf[0..<r])) }
                 else if !(r < 0 && errno == EINTR) { PTYFrame.send(fd, PTYFrame.eof, []); stdinFD = -1 }
             }
@@ -108,5 +128,14 @@ public enum ControlClientIO {
             off += n
         }
         return true
+    }
+}
+
+extension InteractiveExec {
+    /// The remote menu's attach: the same pump over its client's socket.
+    // @port-skip linux-only: RemoteMenuClient's entry to run (macOS's menu passes the CLI's ControlClient)
+    static func run(client: RemoteMenuClient, vm: String, command: String,
+                    overlayTrigger: UInt8? = nil, onOverlay: (() -> [UInt8])? = nil) throws {
+        try run(client: client.control, vm: vm, command: command, overlayTrigger: overlayTrigger, onOverlay: onOverlay)
     }
 }

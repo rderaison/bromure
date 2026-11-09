@@ -1359,6 +1359,10 @@ struct Exec: ParsableCommand {
 /// Set by the SIGWINCH handler; drained in the poll loop to forward a resize.
 private nonisolated(unsafe) var gWinchPending: Int32 = 0
 
+/// The control-socket client the remote menu (RemoteMenu.swift, shared with
+/// the Linux server) drives: on macOS, the CLI's own.
+typealias RemoteMenuClient = ControlClient
+
 /// Drives an interactive pty `exec`: opens a raw stream to the agent, puts the
 /// local terminal in raw mode, and pumps the framed pty protocol (data / resize
 /// / exit) until the remote command exits.

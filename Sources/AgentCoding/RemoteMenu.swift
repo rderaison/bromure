@@ -28,7 +28,7 @@ struct RemoteMenu: ParsableCommand {
 
 final class RemoteMenuApp {
     private let tui = TUI()
-    private let client = ControlClient()
+    private let client = RemoteMenuClient()
 
     /// The magic-keychord trigger byte (default Ctrl-] = 0x1D). Caught host-side
     /// by `InteractiveExec` while attached, so it never reaches the guest tmux.

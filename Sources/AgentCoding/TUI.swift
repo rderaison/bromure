@@ -54,7 +54,7 @@ final class TUI {
 
     func write(_ s: String) {
         let bytes = Array(s.utf8)
-        bytes.withUnsafeBytes { _ = Darwin.write(STDOUT_FILENO, $0.baseAddress, bytes.count) }
+        bytes.withUnsafeBytes { _ = LibC.write(STDOUT_FILENO, $0.baseAddress, bytes.count) }
     }
 
     func clear() { write("\u{1B}[2J\u{1B}[H") }
@@ -86,7 +86,7 @@ final class TUI {
     func readKey() -> Key {
         var b: UInt8 = 0
         while true {
-            let n = Darwin.read(STDIN_FILENO, &b, 1)
+            let n = LibC.read(STDIN_FILENO, &b, 1)
             if n <= 0 { return .escape }       // EOF / disconnect → treat as escape
             switch b {
             case 0x0D, 0x0A: return .enter
@@ -95,10 +95,10 @@ final class TUI {
             case 0x1B:
                 // Possibly an escape sequence (arrows). Peek ahead non-greedily.
                 var b1: UInt8 = 0
-                if Darwin.read(STDIN_FILENO, &b1, 1) <= 0 { return .escape }
+                if LibC.read(STDIN_FILENO, &b1, 1) <= 0 { return .escape }
                 guard b1 == 0x5B || b1 == 0x4F else { return .escape }  // '[' or 'O'
                 var b2: UInt8 = 0
-                if Darwin.read(STDIN_FILENO, &b2, 1) <= 0 { return .escape }
+                if LibC.read(STDIN_FILENO, &b2, 1) <= 0 { return .escape }
                 switch b2 {
                 case 0x41: return .up
                 case 0x42: return .down

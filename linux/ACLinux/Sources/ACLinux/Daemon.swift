@@ -449,6 +449,8 @@ public actor Daemon {
         case ("GET", "/state/subscribe"): return stateSubscribe(delta: req.headers["x-bromure-state-delta"] == "1")
         case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/tab"):
             return tabCommand(String(p.dropFirst("/sessions/".count).dropLast("/tab".count)), req.body)
+        case ("POST", let p) where p.hasPrefix("/sessions/") && p.hasSuffix("/worktree"):
+            return await worktreeCommand(String(p.dropFirst("/sessions/".count).dropLast("/worktree".count)), req.body)
         case ("POST", "/agent-sessions/start"): return await agentSessionCommand(nil, "start", req.body)
         case ("POST", "/agent-sessions/switchboard"): return await agentSessionCommand(nil, "switchboard", req.body)
         case ("POST", "/agent-sessions/folders"): return await workspaceRoute(req.method, req.path, req.body)!

@@ -827,6 +827,21 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     // MARK: PTY child
 
+    #if os(Linux)
+    /// The Linux server's counterpart of the passthrough above: the menu
+    /// drives the daemon this SSH server runs in (its own control socket,
+    /// named outright), with that daemon's state and data dirs.
+    // @port-skip linux-only: the menu's environment on the Linux server
+    static func serverMenuEnvironment(controlSocketPath: String) -> [String] {
+        let inherited = ProcessInfo.processInfo.environment
+        return ["XDG_RUNTIME_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME"].compactMap { k in inherited[k].map { "\(k)=\($0)" } }
+            + ["BROMURE_AC_CONTROL_SOCKET=\(controlSocketPath)"]
+    }
+    #else
+    /// Nothing more on macOS: the menu finds the app's socket itself.
+    static func serverMenuEnvironment(controlSocketPath: String) -> [String] { [] }
+    #endif
+
     private func startMenu(context: ChannelHandlerContext, wantReply: Bool) {
         guard !started else { return }
         started = true
@@ -847,6 +862,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
                     "BROMURE_AC_NO_REMOTE"] {
             if let v = inherited[key] { env.append("\(key)=\(v)") }
         }
+        env += Self.serverMenuEnvironment(controlSocketPath: controlSocketPath)
         let (pid, masterFD) = PTYSpawn.spawn(path: menuExe,
                                              argv: [menuExe, "__remote-menu"],
                                              env: env, win: &win)

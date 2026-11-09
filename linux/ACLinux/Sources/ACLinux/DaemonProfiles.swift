@@ -140,4 +140,20 @@ extension Daemon {
         }
         return ControlResponse(200, ["ok": true])
     }
+
+    /// POST /sessions/<workspace>/worktree {"action", "args"}: a worktree
+    /// command queued for the guest (LinuxSessionHost.automationWorktreeCommand,
+    /// as macOS's onWorktreeCommand). The remote menu's worktree actions use it.
+    /// 400 for an unknown or stopped workspace, or a bad action.
+    // @port-skip linux-only: route glue (macOS: the /worktree branch of ACAutomationServer.handleSessionRoute)
+    func worktreeCommand(_ key: String, _ body: JSONValue) async -> ControlResponse {
+        let action = body["action"]?.stringValue ?? ""
+        var args: [String] = []
+        if case .array(let a)? = body["args"] { args = a.compactMap(\.stringValue) }
+        let ok = await MainActor.run {
+            LinuxSessionHost.shared?.automationWorktreeCommand(profileNameOrID: key, action: action, args: args) ?? false
+        }
+        return ok ? ControlResponse(200, ["ok": true])
+            : ControlResponse(400, ["ok": false, "error": "unknown session or bad action"])
+    }
 }
