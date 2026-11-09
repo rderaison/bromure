@@ -1105,19 +1105,24 @@ final class HTTPMitmConnection: @unchecked Sendable {
                 let body = upstream.range(of: Data("\r\n\r\n".utf8))
                     .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
                 var reply = await capture.handle(status, body)
-                var refused = false
+                var refused = false, pollError = false
                 // A token reply the host didn't keep -- the sign-in ended as it
                 // landed, its store refused the write, a reply it couldn't read --
                 // is never the guest's to have: it carries the real credential.
                 // Only a reply that isn't one (a pending device-code poll, the
-                // provider's error) goes on.
+                // provider's error) goes on; a poll's error a lenient provider
+                // sends as a 200 goes on rebuilt from its allowed fields.
                 if reply == nil, status == 200 {
-                    refused = true
-                    reply = SignInCapture.notKeptReply
+                    reply = SignInCapture.pollErrorReply(body)
+                    pollError = reply != nil
+                    if reply == nil {
+                        refused = true
+                        reply = SignInCapture.notKeptReply
+                    }
                 }
                 try tls.write(reply ?? upstream)
                 FileHandle.standardError.write(Data(
-                    "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(refused ? "not kept, refused to the guest" : reply == nil ? "passed through" : "kept on the host")\n".utf8))
+                    "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(refused ? "not kept, refused to the guest" : pollError ? "a poll's error, passed on rebuilt" : reply == nil ? "passed through" : "kept on the host")\n".utf8))
                 return
             }
         }

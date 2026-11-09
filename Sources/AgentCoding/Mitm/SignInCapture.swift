@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(SandboxEngine)
+import SandboxEngine
+#endif
 
 // MARK: - Sign-in capture at the proxy
 //
@@ -56,6 +59,34 @@ struct SignInCapture: Sendable {
             "error": "bromure_not_kept",
             "error_description": "Bromure didn't keep this sign-in. Start it again from the session's sign-in card.",
         ])
+    }
+
+    /// The errors a device-code token poll answers while it's still pending
+    /// or once it's over (RFC 8628 3.5). A lenient provider may send them
+    /// with a 200.
+    static let pollErrors: Set<String> = ["authorization_pending", "slow_down", "expired_token", "access_denied"]
+
+    /// For a 200 the host kept nothing from: the guest's reply when it is
+    /// plainly a device-code poll's error, rebuilt from its allowed fields
+    /// alone (never the provider's bytes or headers); nil for anything else
+    /// -- a token, any other field, a body that can't be read -- which is
+    /// answered `notKeptReply`.
+    static func pollErrorReply(_ body: Data) -> Data? {
+        guard body.count <= 4096,
+              let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let error = json["error"] as? String, pollErrors.contains(error),
+              Set(json.keys).isSubset(of: ["error", "error_description", "error_uri", "interval"]) else { return nil }
+        var out: [String: Any] = ["error": error]
+        for key in ["error_description", "error_uri"] {
+            guard let v = json[key] else { continue }
+            guard let s = v as? String else { return nil }
+            out[key] = s
+        }
+        if let v = json["interval"] {
+            guard let n = v as? NSNumber, !n.isJSONBoolean else { return nil }
+            out["interval"] = n.intValue
+        }
+        return response(status: 200, reason: "OK", json: out)
     }
 
     /// The marker an ended sign-in leaves on its endpoint.

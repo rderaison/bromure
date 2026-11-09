@@ -2097,17 +2097,22 @@ final class ResponseRelay: ChannelInboundHandler {
                 let kept = encoded ? nil : await capture.handle(status, body)
                 // A successful exchange the host didn't keep never reaches
                 // the guest: its real tokens would. (A pending device-code
-                // poll or an error isn't a 200, and passes through.)
+                // poll or an error isn't a 200, and passes through; a poll's
+                // error a lenient provider sends as a 200 goes on rebuilt
+                // from its allowed fields, as macOS does.)
                 let reply: Data
+                var pollError = false
                 if let kept {
                     reply = kept
                 } else if status == 200 {
-                    reply = SignInCapture.notKeptReply
+                    let rebuilt = encoded ? nil : SignInCapture.pollErrorReply(body)
+                    pollError = rebuilt != nil
+                    reply = rebuilt ?? SignInCapture.notKeptReply
                 } else {
                     reply = raw
                 }
                 FileHandle.standardError.write(Data(
-                    "[mitm] sign-in exchange → \(status), \(kept != nil ? "kept on the host" : status == 200 ? "NOT kept\(encoded ? " (encoded reply)" : ""): refused to the guest" : "passed through")\n".utf8))
+                    "[mitm] sign-in exchange → \(status), \(kept != nil ? "kept on the host" : pollError ? "a poll's error, passed on rebuilt" : status == 200 ? "NOT kept\(encoded ? " (encoded reply)" : ""): refused to the guest" : "passed through")\n".utf8))
                 guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in guest.close(promise: nil) }
                 // The trace keeps what the guest got, never the provider's
                 // reply (its real tokens).

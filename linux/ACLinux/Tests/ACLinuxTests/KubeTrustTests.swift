@@ -658,6 +658,57 @@ struct CredentialMintProxyTests {
         }
     }
 
+    /// A pending device-code poll a lenient provider answers with a 200
+    /// (Kimi's CLI accepts that): it goes on rebuilt from its allowed fields,
+    /// not refused as an unkept token; a 200 with anything else is refused.
+    @Test func aPollErrorSentAsA200GoesOnRebuilt() throws {
+        for (body, expectRebuilt) in [(#"{"error":"authorization_pending","interval":5}"#, true),
+                                      (#"{"error":"authorization_pending","access_token":"REAL-ACCESS"}"#, false)] {
+            let reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: s=1\r\n"
+                + "Content-Length: \(body.utf8.count)\r\n\r\n" + body
+            let rig = try Rig(host: "auth.kimi.com", reply: reply)
+            defer { rig.stop() }
+            rig.proxy.captures.arm(SignInCapture(profileID: rig.pid, hosts: ["auth.kimi.com"], pathPrefix: "/api/oauth/token",
+                                                 handle: { _, _ in nil }))
+            let out = try rig.request("auth.kimi.com:443", path: "/api/oauth/token", method: "POST",
+                                      body: "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=d",
+                                      headers: "Content-Type: application/x-www-form-urlencoded\r\n")
+            #expect(!out.contains("REAL-ACCESS"), "\(out.prefix(200))")
+            if expectRebuilt {
+                #expect(out.hasPrefix("HTTP/1.1 200") && out.contains("authorization_pending") && out.contains("5")
+                        && !out.lowercased().contains("set-cookie"), "\(out.prefix(200))")
+            } else {
+                #expect(out.contains("bromure_not_kept"), "\(out.prefix(200))")
+            }
+        }
+    }
+
+    /// SignInCapture.pollErrorReply on this Foundation (the shared
+    /// SignInCaptureFailClosedTests' cases; a JSON boolean told apart from a
+    /// number without CoreFoundation).
+    @Test func pollErrorRepliesAreRebuiltOnlyFromAllowedFields() throws {
+        func reply(_ s: String) -> Data? { SignInCapture.pollErrorReply(Data(s.utf8)) }
+        for ok in [#"{"error":"authorization_pending"}"#,
+                   #"{"error":"slow_down","error_description":"wait","interval":5}"#,
+                   #"{"error":"expired_token","error_uri":"https://x/e"}"#] {
+            let r = try #require(reply(ok), "\(ok)")
+            #expect(String(decoding: r, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+        }
+        for refused in [#"{"access_token":"a","token_type":"bearer"}"#,
+                        #"{"error":"authorization_pending","access_token":"a"}"#,
+                        #"{"error":null,"data":{"access":"x"}}"#,
+                        #"{"error":"other"}"#, #"{"error":""}"#,
+                        #"{"error":"slow_down","interval":true}"#,
+                        #"{"error":"slow_down","error_description":{"k":"v"}}"#,
+                        #"[{"error":"slow_down"}]"#, "error=authorization_pending", "not json", ""] {
+            #expect(reply(refused) == nil, "\(refused)")
+        }
+        let big = #"{"error":"slow_down","error_description":""# + String(repeating: "x", count: 5000) + #""}"#
+        #expect(reply(big) == nil)
+        let r = try #require(reply(#"{"error":"slow_down","interval":7}"#))
+        #expect(String(decoding: r, as: UTF8.self).contains("\"interval\":7"))
+    }
+
     @Test func aCallThatIssuesAnUnswappableCredentialIsRefusedBeforeItGoesOut() throws {
         let rig = try Rig(host: "iam.amazonaws.com", reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nno")
         defer { rig.stop() }
