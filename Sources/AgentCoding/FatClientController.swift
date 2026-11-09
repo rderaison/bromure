@@ -639,16 +639,15 @@ final class RemoteHostController {
                 // sheet queues this one behind it).
                 let openButton = alert.buttons.count > 1 ? alert.buttons[1] : nil
                 openButton?.isEnabled = false
-                var shown: NSObjectProtocol?
-                shown = NotificationCenter.default.addObserver(
+                let shown = ObserverToken()
+                shown.token = NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification, object: alert.window, queue: .main) { _ in
-                    if let shown { NotificationCenter.default.removeObserver(shown) }
-                    shown = nil
+                    shown.remove()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { openButton?.isEnabled = true }
                 }
                 openGuestLinks[id] = (alert, window)
                 alert.beginSheetModal(for: window) { [weak self] response in
-                    if let shown { NotificationCenter.default.removeObserver(shown) }
+                    shown.remove()
                     self?.openGuestLinks[id] = nil
                     // Taken down: another client handled it.
                     guard response != .abort else { return }
@@ -661,6 +660,18 @@ final class RemoteHostController {
             }
         }
     }
+
+#if os(macOS)
+    /// A notification observer's token, removed once (from the observer's
+    /// own block, or when the sheet ends first). Main queue only.
+    private final class ObserverToken: @unchecked Sendable {
+        var token: NSObjectProtocol?
+        func remove() {
+            if let token { NotificationCenter.default.removeObserver(token) }
+            token = nil
+        }
+    }
+#endif
 
     /// A guest link handled here: the server drops it for every client.
     private func guestLinkDone(_ id: String) {
