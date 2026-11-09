@@ -30,6 +30,9 @@ struct DaemonTests {
             // Its own data home: never the user's subscription logins,
             // model settings, engine key or secrets vault.
             e["XDG_DATA_HOME"] = root + "/data"
+            // Its own defaults (the workspace subnet's choice): never this
+            // user's ~/.config/bromure-ac.plist.
+            e["XDG_CONFIG_HOME"] = root + "/config"
             e["BROMURE_AC_IMAGE"] = Env.image
             e["BROMURE_AGENTD"] = Env.agentd
             // Sentry modules from a dead local port, never the published CDN.
@@ -156,6 +159,14 @@ struct DaemonTests {
         print("TIMING [daemon] first exec (boot included) \(ms(ContinuousClock.now - t0)): \(uname.prefix(60))")
         #expect(rc2 == 0 && uname.hasPrefix("Linux "), "exec: \(uname) \(err2)")   // the hostname (dm1) is checked in homeImage()
         #expect(try w.cli("vm", "exec", "dm1", "--", "sh", "-c", "exit 7").0 == 7, "exit status propagates")
+        // A fresh install's workspaces are on its private 172.16/12 /24 (as
+        // macOS AC's): the guest's lease and its default route say so.
+        let net = try w.cli("vm", "exec", "dm1", "--", "sh", "-c", "ip -4 -o addr show scope global; ip route show default").1
+        let addr = net.range(of: #"inet (172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+)\.[0-9]+/24"#, options: .regularExpression).map { String(net[$0]) }
+        #expect(addr != nil, "a 172.16/12 lease: \(net)")
+        if let a = addr, let prefix = a.split(separator: " ").last?.split(separator: ".").prefix(3).joined(separator: ".") {
+            #expect(net.contains("default via \(prefix).1"), "routed through the subnet's .1: \(net)")
+        }
         // exec -i without a terminal: stdin is framed to the guest pty, EOF
         // reaches it as an EOF frame, the exit status comes back.
         let t3 = ContinuousClock.now

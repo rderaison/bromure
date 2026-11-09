@@ -54,7 +54,7 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// When `egressSeen` was last pruned of expired entries.
     private var egressSeenPruned = Date.distantPast
     /// How many flows `egressSeen` holds (tests).
-    // @port-skip linux-only: tests (macOS: VMNetSwitch.egressSeenCount)
+    // @port VMNetSwitch.var egressSeenCount h=a474309d6731bac3 @49959cbb
     var egressSeenCount: Int { lock.withLock { egressSeen.count } }
     private var interception: Interception?
     /// Ports the agent watchdog cut off (macOS: quarantinedPorts).
@@ -110,6 +110,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// not a session port, never governed). A new policy re-decides open flows
     /// on their next packet, as macOS's setEgressPolicy does.
     // @port VMNetSwitch.setEgressPolicy(_: EgressPolicy?, forPortID: Int) h=45ab02e9346f46d0 @ac3ea65d
+    // partial: with the port's whole governance (interceptDisabled among it)
+    // @port VMNetSwitch.setInterceptDisabled(_: Bool, for: FileHandle) h=ea4622066a069cec @49959cbb
     func govern(_ mac: MAC, _ g: Governance?) {
         lock.withLock {
             governance[mac] = g
@@ -155,7 +157,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
         return (UInt16(f[f.startIndex + 12]) << 8 | UInt16(f[f.startIndex + 13])) != 0x0806
     }
 
-    // @port-skip linux-only: the Linux switch's egress firewall
+    // partial: the interceptor and its ports in one value
+    // @port VMNetSwitch.setInterceptor(_: VMNetTCPInterceptor?, ports: Set<UInt16>) h=3118b73b19e18a1d @49959cbb
     func setInterception(_ i: Interception?) { lock.withLock { interception = i } }
 
     /// The VM on `mac` was detached: its governance goes, and the interceptor
@@ -194,7 +197,8 @@ final class SwitchEgressFirewall: @unchecked Sendable {
     /// to forward it, `.consumed` when it was dropped by policy, answered, or
     /// diverted into the MITM. Only session ports are governed.
     // partial: a name the guest resolves itself (its own resolver, DoH, /etc/hosts) is unseen off the intercepted ports: there the verdict has only the snooped DNS (macOS has the same limit; :80/:443 are re-decided by the SNI / Host)
-    // @port-skip linux-only: the Data entry to decide (handleEgress's port)
+    // partial: the verdict decided with the frame (decide), keyed by the port's MAC
+    // @port VMNetSwitch.egressVerdict(portID: Int, ip: UInt32, hostnames: [String], proto: EgressPolicy.Proto, port: UInt16, now: Date) h=7b378c57cd05bd62 @49959cbb
     func handle(_ f: Data, from src: MAC) -> Action {
         f.withUnsafeBytes { raw -> Action in
             guard let base = raw.baseAddress else { return .pass }

@@ -1217,6 +1217,150 @@
     {
       "path": "Sources/AgentCoding/Ext4/Ext4Browser.swift",
       "reason": "screen-only: the ext4 disk-image browser window (File › Open ext4 Disk Image, an NSOpenPanel); no route reaches it, and a server's disk checks are the fsck route"
+    },
+    {
+      "path": "Sources/SandboxEngine/NetworkFilter.swift",
+      "reason": "vmnet's per-VM packet filter (VZ's file-handle attachment, a vmnet interface): AC on Linux filters at its switch (InterimSwitch's SwitchEgressFirewall)"
+    },
+    {
+      "path": "Sources/SandboxEngine/DHCPLeaseStore.swift",
+      "reason": "macOS's sqlite MAC→IP lease table for the vmnet switch's DHCP; on Linux a VM keeps its address through its VM record (InterimDHCP.lease(preferring:))"
+    },
+    {
+      "id": "VMNetSwitch.Port.init(id: Int, hostFD: Int32, vmFileHandle: FileHandle)",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.init()",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.startIfNeeded()",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.startVmnetLocked()",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.startVmnetReadCallback()",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.readVMLoop(_: Port)",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.drainVmnetToVMs()",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.handleFromVmnet(_: UnsafeMutablePointer<UInt8>, _: Int)",
+      "reason": "vmnet's receive path (Linux: the uplink's receiver in InterimSwitch.init)"
+    },
+    {
+      "id": "VMNetSwitch.writeToVmnet(_: UnsafeMutablePointer<UInt8>, _: Int)",
+      "reason": "vmnet plumbing (the shared vmnet interface, its read callbacks, VZ file handles); the Linux switch is InterimSwitch over passt"
+    },
+    {
+      "id": "VMNetSwitch.configure(ascendingSubnet: Bool, bridgePeers: Bool, pinnedOctet: UInt8?)",
+      "reason": "Bromure Web's subnet walk and isolation; AC on Linux bridges peers always (as AC's defaults)"
+    },
+    {
+      "id": "VMNetSwitch.setSubnetStrategy(_: SubnetStrategy)",
+      "reason": "Linux chooses the subnet before passt starts (Daemon.chooseWorkspaceGateway), from the same keys"
+    },
+    {
+      "id": "VMNetSwitch.enablePersistentLeases(at: URL)",
+      "reason": "a VM keeps its address through its VM record (InterimDHCP.lease(preferring:)), not a lease store"
+    },
+    {
+      "id": "VMNetSwitch.var subnet",
+      "reason": "the stand-in's settable subnet (SandboxEngine/Linux/VMNetSwitch.swift), set from the interim switch"
+    },
+    {
+      "id": "VMNetSwitch.chooseSubnetBase()",
+      "reason": "Daemon.chooseWorkspaceGateway (random 172.16/12, or the fixed 192.168.64)"
+    },
+    {
+      "id": "VMNetSwitch.chooseSubnetOctet()",
+      "reason": "the 192.168 octet walk: the Linux opt-out keeps the fixed 192.168.64 (its VMs' addresses)"
+    },
+    {
+      "id": "VMNetSwitch.static selectOctet(ascending: Bool, pinned: UInt8?, used: Set<UInt8>)",
+      "reason": "the 192.168 octet walk: the Linux opt-out keeps the fixed 192.168.64 (its VMs' addresses)"
+    },
+    {
+      "id": "VMNetSwitch.static rerollRandom172Base()",
+      "reason": "screen-only: the Settings › Resources Randomize action"
+    },
+    {
+      "id": "VMNetSwitch.static buildDHCPReply(replyType: UInt8, xid: UInt32, broadcast: Bool, clientMAC: [UInt8], yourIP: UInt32, serverIP: UInt32, mask: UInt32, lease: UInt32)",
+      "reason": "built inline in InterimDHCP.handle"
+    },
+    {
+      "id": "VMNetSwitch.static beBytes(_: UInt32)",
+      "reason": "InterimDHCP.handle's own byte packing"
+    },
+    {
+      "id": "VMNetSwitch.static checksum(_: [UInt8])",
+      "reason": "InterimDHCP.handle's own IP checksum"
+    },
+    {
+      "id": "VMNetSwitch.static udpChecksum(srcIP: UInt32, dstIP: UInt32, udp: [UInt8])",
+      "reason": "InterimDHCP.handle sends UDP without a checksum (0, allowed for IPv4)"
+    },
+    {
+      "id": "VMNetSwitch.setEgressObserver(_: EgressObserver?)",
+      "reason": "SwitchEgressFirewall.observer, a property"
+    },
+    {
+      "id": "VMNetSwitch.setEgressPolicy(_: EgressPolicy?, for: FileHandle)",
+      "reason": "the FileHandle overload; Linux keys ports by MAC (setEgressPolicy(forPortID:) is claimed)"
+    },
+    {
+      "id": "VMNetSwitch.injectIPToPort(_: Int, ipPacket: [UInt8])",
+      "reason": "SwitchEgressFirewall's inject closure, framed from the gateway's MAC in InterimSwitch.init"
+    },
+    {
+      "id": "VMNetSwitch.learn(_: UInt64, port: Int)",
+      "reason": "InterimSwitch's learned MAC map, kept inline by attach's reader"
+    },
+    {
+      "id": "VMNetSwitch.recordGuestMAC(_: UInt64, port: Int)",
+      "reason": "InterimSwitch's learned MAC map, kept inline by attach's reader"
+    },
+    {
+      "id": "VMNetSwitch.lookupPort(forMAC: UInt64)",
+      "reason": "InterimSwitch's learned MAC map, kept inline by attach's reader"
+    },
+    {
+      "id": "VMNetSwitch.portFD(_: Int)",
+      "reason": "file-descriptor ports (Linux: FramePort values)"
+    },
+    {
+      "id": "VMNetSwitch.peerPortFDs(except: Int?)",
+      "reason": "file-descriptor ports (Linux: FramePort values)"
+    },
+    {
+      "id": "VMNetSwitch.static mac(_: UnsafeMutablePointer<UInt8>, _: Int)",
+      "reason": "InterimSwitch.MAC(_:) from a frame's bytes"
+    },
+    {
+      "id": "VMNetSwitch.allowCDPPeer(browserMAC: String, clientMAC: String)",
+      "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
+    },
+    {
+      "id": "VMNetSwitch.clearCDPPeer(browserMAC: String)",
+      "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
+    },
+    {
+      "id": "VMNetSwitch.cdpPeerBlocked(_: UInt64, _: UInt64, _: UnsafeMutablePointer<UInt8>, _: Int)",
+      "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
+    },
+    {
+      "id": "VMNetSwitch.static isCDPForwarderFrame(_: UnsafeMutablePointer<UInt8>, _: Int)",
+      "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
     }
   ],
   "skipInheriting": [

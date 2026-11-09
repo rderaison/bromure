@@ -47,7 +47,8 @@ extension Daemon {
     static let guestProxyPort = 65534
 
     /// The VMs' subnet, kept off the proxy (macOS: SessionDisk.extraNoProxy).
-    static let vmSubnet = "192.168.64.0/24"
+    // @port-skip linux-only: the chosen workspace subnet (DaemonSubnet.swift)
+    static var vmSubnet: String { workspaceSubnet.withLockedValue { $0 } }
 
     /// `proxy.env`: macOS's cooperative-proxy lines and CA hints.
     // @port-skip linux-only: the proxy and CA lines of SessionDisk.prepareMetadataShare's proxy.env

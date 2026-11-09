@@ -97,6 +97,17 @@ public struct VMRegistry: Sendable {
     public let path: String
     public private(set) var records: [VMRecord] = []
 
+    /// Whether the registry at `path` holds any VM, read only: loading one
+    /// (init) settles the records and saves them, which only the daemon's
+    /// own registry may do (its re-adoption needs their pids).
+    // @port-skip linux-only: Linux daemon state persistence
+    public static func hasRecords(path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path) else { return false }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .secondsSince1970
+        return !((try? dec.decode([VMRecord].self, from: data)) ?? []).isEmpty
+    }
+
     /// Loads the registry. VMs recorded as running or starting are marked
     /// stopped unless `isAlive` says their Firecracker is still there (the daemon
     /// re-adopts those). Suspended ones stay suspended while their snapshot

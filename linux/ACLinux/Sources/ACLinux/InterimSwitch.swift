@@ -121,7 +121,8 @@ public final class InterimSwitch: Sendable {
     }
 
     /// Plugs a VM's stream port in.
-    // @port-skip linux-only: interim switch
+    // partial: a FramePort keyed by the VM's MAC (Firecracker's), its governance set apart (SwitchEgressFirewall.govern)
+    // @port VMNetSwitch.attachPort(profileID: UUID?, egressPolicy: EgressPolicy?, interceptDisabled: Bool) h=28c2a419fd42e82d @49959cbb
     public func attach(_ port: any FramePort, mac: String) {
         let m = MAC(Self.mac(mac))
         // Its own EUI-64 link-local: its, before it speaks (MACs are predictable).
@@ -165,7 +166,8 @@ public final class InterimSwitch: Sendable {
     /// delivered there (never waits: drops at that port's limit); broadcast
     /// and unknown unicast are flooded to the other ports. True: it goes to
     /// the uplink too.
-    // @port-skip linux-only: the bridgePeers half of VMNetSwitch's port read loop
+    // partial: the peer half (learned unicast, flooding); DHCP, the uplink and egress are attach's reader's
+    // @port VMNetSwitch.handleFromVM(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=f1d9cd473d63def1 @49959cbb
     func toPeers(_ f: Data, from: MAC) -> Bool {
         var f = f
         guard f.count >= 14 else { return true }
@@ -383,7 +385,8 @@ public final class InterimSwitch: Sendable {
         }
     }
 
-    // @port-skip linux-only: interim switch
+    // partial: keyed by the MAC; the lease goes with the port
+    // @port VMNetSwitch.detachPort(_: FileHandle, releaseLease: Bool) h=994dbe083b0c5416 @49959cbb
     public func detach(mac: String) {
         let m = MAC(Self.mac(mac))
         ports.withLockedValue { ps in
@@ -431,7 +434,8 @@ public final class InterimSwitch: Sendable {
 
     // @port-skip linux-only: interim switch
     static func ipv4(_ s: String) -> [UInt8] { s.split(separator: ".").compactMap { UInt8($0) } }
-    // @port-skip linux-only: interim switch
+    // partial: bytes, not a packed UInt64
+    // @port VMNetSwitch.static packMAC(_: String) h=3678cb91fc886d8d @49959cbb
     static func mac(_ s: String) -> [UInt8] { s.split(separator: ":").compactMap { UInt8($0, radix: 16) } }
 }
 
@@ -457,7 +461,8 @@ public final class InterimDHCP: Sendable {
     /// it's still free, as macOS's leaseIP prefers its lease store's: a
     /// cluster's nodes keep their addresses across cold starts (a moved
     /// control plane leaves k3s's certificates and node objects behind).
-    // @port-skip linux-only: interim DHCP
+    // partial: a MAC's last address comes from its VM record (preferring), not a lease store
+    // @port VMNetSwitch.leaseIP(for: UInt64) h=36b18fab9ee0fe9a @49959cbb
     public func lease(for mac: [UInt8], preferring: [UInt8]? = nil) -> [UInt8]? {
         leases.withLockedValue { l in
             if let ip = l.byMAC[mac] { return ip }
@@ -484,7 +489,7 @@ public final class InterimDHCP: Sendable {
     }
 
     /// The lease for `mac` as a dotted quad, if one was handed out.
-    // @port-skip linux-only: interim DHCP
+    // @port VMNetSwitch.leasedIP(forMAC: String) h=685de49bce6cad3f @49959cbb
     public func leasedIP(for mac: String) -> String? {
         leases.withLockedValue { $0.byMAC[InterimSwitch.mac(mac)] }.map { $0.map(String.init).joined(separator: ".") }
     }
@@ -500,7 +505,8 @@ public final class InterimDHCP: Sendable {
         }
     }
 
-    // @port-skip linux-only: interim DHCP
+    // partial: keyed by the colon form
+    // @port VMNetSwitch.releaseLease(_: UInt64) h=eee11c445317273d @49959cbb
     public func release(mac: String) {
         leases.withLockedValue { l in
             if let ip = l.byMAC.removeValue(forKey: InterimSwitch.mac(mac)) { l.byIP.removeValue(forKey: Self.u32(ip)) }
@@ -533,7 +539,9 @@ public final class InterimDHCP: Sendable {
     /// `port`: the MAC of the port it came from; a request for any other
     /// hardware address (its chaddr or its Ethernet source) gets no lease,
     /// so a guest can't take the pool or another VM's address.
-    // @port-skip linux-only: interim DHCP
+    // partial: the interim switch's one DHCP server: the frame parsed and the reply built here (no separate buildDHCPReply), broadcast replies
+    // @port VMNetSwitch.handleDHCP(_: Int, _: UnsafeMutablePointer<UInt8>, _: Int) h=045059d8096e1a29 @49959cbb
+    // @port VMNetSwitch.static isDHCPClientFrame(_: UnsafeMutablePointer<UInt8>, _: Int) h=ec55e332a75043e6 @49959cbb
     public func handle(_ f: Data, port: [UInt8]? = nil) -> Data? {
         let b = [UInt8](f)
         guard b.count >= 14 + 20 + 8 + 240, b[12] == 0x08, b[13] == 0x00, b[23] == 17 else { return nil }

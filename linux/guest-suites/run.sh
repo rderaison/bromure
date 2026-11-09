@@ -27,7 +27,7 @@ BIN=$ROOT/linux/ACLinux/.build/release/bromure-ac
 [ -x "$BIN" ] || { echo "build it first: swift build --package-path linux/ACLinux -c release --product bromure-ac"; exit 1; }
 OUT=${OUT:-$(mktemp -d /tmp/acl-gs-out.XXXXXX)}; mkdir -p "$OUT"
 W=$(mktemp -d /tmp/acl-gs.XXXXXX)          # short: it holds the daemon's sockets
-export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state
+export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state XDG_CONFIG_HOME=$W/config
 # A private data home too: no test daemon reads the user's subscription
 # logins, model settings, engine key or secrets vault (~/.local/share); the
 # image stays the user's (read only).

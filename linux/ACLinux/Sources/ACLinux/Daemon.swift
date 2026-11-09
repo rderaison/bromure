@@ -277,6 +277,11 @@ public actor Daemon {
         // flows it holds) is taken back rather than replaced.
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
         pc.useFDStore = true
+        // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM.
+        let hasVMs = VMRegistry.hasRecords(path: config.stateDir + "/vms.json")
+        pc.gateway = Self.chooseWorkspaceGateway(hasVMs: hasVMs)
+        pc.dnsForward = pc.gateway
+        Self.workspaceSubnet.withLockedValue { $0 = Self.subnetCIDR(gateway: pc.gateway) }
         let stored = FDStore.take()
         let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
         // The VMs' network ends (net-<short id>) and vsock listeners
@@ -348,7 +353,7 @@ public actor Daemon {
         self.config = config
         self.passt = passt
         self.sentryModules = Self.makeSentryModuleStore(stateDir: config.stateDir, source: config.sentryCatalog)
-        self.sw = InterimSwitch(uplink: passt)
+        self.sw = InterimSwitch(uplink: passt, gateway: passt.config.gateway, dns: passt.config.dnsForward ?? passt.config.gateway)
         if config.multiUser {
             // The host's own addresses and every user's LAN pool, granted
             // or published (LANPools: blocked before a first publish).
@@ -815,7 +820,8 @@ public actor Daemon {
             "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(compromisedRow)),
             "workspacesListed": true,
             "supportsPush": true,
-            "vmnetSubnet": "192.168.64.0/24", "vmnetGateway": "192.168.64.1",
+            "vmnetSubnet": .string(Self.workspaceSubnet.withLockedValue { $0 }),
+            "vmnetGateway": .string(passt.config.gateway),
             "uplink": ["kind": "passt", "mtu": .number(Double(passt.mtu))],
             "secretsKeySource": SecretsVault.masterKeySource.map { .string($0.rawValue) } ?? .null,
             "pendingPrompts": JSONValue(foundation: prompts) ?? .array([]),
