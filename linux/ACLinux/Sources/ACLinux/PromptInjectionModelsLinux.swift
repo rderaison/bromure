@@ -19,7 +19,8 @@ extension PromptInjectionModels {
 
     /// macOS's disk-full alert, with its words, asked through the user's
     /// fat client (a server has no screen); nobody connected: the log has it.
-    // @port-skip linux-only: macOS's disk-full alert through the fat client (claimed once the shared file is in)
+    // partial: through the fat client (PendingPromptBroker), not a modal on the server's screen
+    // @port PromptInjectionModels.static presentDiskFullAlert(_: String) h=18f6ad1f66a64f4d @4e8d6a79
     @MainActor static func presentDiskFullAlert(_ detail: String) async {
         guard !diskAlertAsked else { return }
         diskAlertAsked = true
