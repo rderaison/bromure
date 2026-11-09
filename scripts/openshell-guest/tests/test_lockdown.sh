@@ -70,9 +70,12 @@ import ctypes, os, struct
 libc = ctypes.CDLL('libc.so.6', use_errno=True)
 insns = struct.pack('<QQ', 0xb7, 0x95)  # mov r0,0 ; exit
 buf = ctypes.create_string_buffer(insns)
-log = ctypes.create_string_buffer(4096)
-attr = struct.pack('<IIQQIIi16sIII', 1, 2, ctypes.addressof(buf), 0, 0, 0, 0,
-                   b'GPL\\0'.ljust(16, b'\\0'), 0, 0, 0)
+lic = ctypes.create_string_buffer(b'GPL')
+# union bpf_attr for BPF_PROG_LOAD: prog_type, insn_cnt, insns, license (a
+# pointer: NULL made every load fail, whatever the lockdown), log_level,
+# log_size, log_buf, kern_version, prog_flags, prog_name.
+attr = struct.pack('<IIQQIIQII16s', 1, 2, ctypes.addressof(buf), ctypes.addressof(lic),
+                   0, 0, 0, 0, 0, b'lockdown_probe')
 a = ctypes.create_string_buffer(attr, 120)
 rc = libc.syscall({'aarch64': 280, 'x86_64': 321}[os.uname().machine], 5, a, 120)  # bpf
 raise SystemExit(0 if rc >= 0 else 1)
