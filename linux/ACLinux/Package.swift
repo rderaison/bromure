@@ -65,6 +65,8 @@ let package = Package(
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "NIOTLS", package: "swift-nio"),
+                // The remote menu (`__remote-menu`) is a shared ParsableCommand.
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             // Shared macOS sources (Sources/ACLinux/_shared) build with their
             // Linux stand-ins under this flag, in Swift 5 mode as the app
