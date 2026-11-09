@@ -61,6 +61,13 @@ final class RemoteAccessServer {
         var bindAddress: String = "0.0.0.0"
         var passwordAuth: Bool = true
         var pubkeyAuth: Bool = true
+        /// Listen on this Unix socket instead of bindAddress:port (the Linux
+        /// gateway's P2P ingress). nil: TCP, as ever.
+        var unixSocketPath: String? = nil
+        /// Listen on this already-bound socket (systemd's socket activation:
+        /// a socket made where this process can't make one). Before
+        /// unixSocketPath and bindAddress:port.
+        var boundSocketFD: Int32? = nil
     }
 
     private let paths: Paths
@@ -106,6 +113,13 @@ final class RemoteAccessServer {
     /// Several accounts behind this one server (the Linux multi-user gateway,
     /// see RemoteAccountRouter). nil: this process's own account, as ever.
     var accountRouter: RemoteAccountRouter?
+
+    /// The account each accepted connection is pinned to, decided from the
+    /// connection itself before anything is read from it (the Linux
+    /// gateway's P2P ingress: its peer's uid); a connection it gives no
+    /// account is closed before the SSH banner. nil: no pin, as ever.
+    typealias AccountPin = @Sendable (Channel) -> EventLoopFuture<String?>
+    var accountPin: AccountPin?
 
     init(paths: Paths = .default) { self.paths = paths }
 
@@ -168,6 +182,7 @@ final class RemoteAccessServer {
         let browserMCPResolver = self.browserMCPResolver
         let delegationMCPResolver = self.delegationMCPResolver
         let router = self.accountRouter
+        let accountPin = self.accountPin
 
         let g = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         // Shared across all connections: the per-source-IP password rate
@@ -190,8 +205,15 @@ final class RemoteAccessServer {
         // symmetric `transportProtectionSchemes`). So OpenSSH clients print a
         // "not using a post-quantum key exchange" warning. Revisit (offer
         // mlkem768x25519-sha256) once upstream adds PQ KEX.
-        let bootstrap = ServerBootstrap(group: g)
+        let setup = ConnectionSetup(authFactory: authFactory, hostKey: hostKey, exe: exe, user: user,
+                                    controlSocketPath: controlSocketPath, forwardResolver: forwardResolver,
+                                    udpForwardResolver: udpForwardResolver, browserMCPResolver: browserMCPResolver,
+                                    delegationMCPResolver: delegationMCPResolver, router: router)
+        var bootstrap = ServerBootstrap(group: g)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+        // TCP keepalive (below) is TCP's: a Unix socket's peer is local (a
+        // bound socket here is the gateway's Unix ingress).
+        if config.unixSocketPath == nil, config.boundSocketFD == nil { bootstrap = bootstrap
             // Reap dead peers. A fat client that vanishes without a FIN
             // (sleep, force-quit, network drop) used to leave its connection
             // ESTABLISHED forever — with the session child, its pty, and the
@@ -204,58 +226,91 @@ final class RemoteAccessServer {
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_KEEPALIVE), value: 1)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), tcpKeepIdle), value: 60)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 30)
-            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4) }
+        bootstrap = bootstrap
             .childChannelInitializer { channel in
-                // Per-connection delegate carrying this peer's IP for the
-                // rate limiter; the throttle state itself is shared.
-                let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
-                let delegate = authFactory.make(peerIP: peerIP)
-                let grant = delegate.grant
-                // What this connection's channels may hold together.
-                let budget = RemoteConnectionBudget()
-                return channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.addHandlers([
-                        NIOSSHHandler(
-                            role: .server(.init(
-                                hostKeys: [hostKey],
-                                userAuthDelegate: delegate,
-                                globalRequestDelegate: nil)),
-                            allocator: channel.allocator,
-                            inboundChildChannelInitializer: { childChannel, channelType in
-                                guard channelType == .session else {
-                                    return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.invalidChannelType)
-                                }
-                                guard budget.openChannel() else {
-                                    FatClientLog.log("srv: \(RemoteConnectionBudget.maxChannels) channels open on this connection: refusing another")
-                                    return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.tooManyChannels)
-                                }
-                                childChannel.closeFuture.whenComplete { _ in budget.closeChannel() }
-                                return childChannel.eventLoop.makeCompletedFuture {
-                                    try childChannel.pipeline.syncOperations.addHandler(
-                                        SSHPTYSessionHandler(menuExe: exe, user: user,
-                                                             controlSocketPath: controlSocketPath,
-                                                             forwardResolver: forwardResolver,
-                                                             udpForwardResolver: udpForwardResolver,
-                                                             browserMCPResolver: browserMCPResolver,
-                                                             delegationMCPResolver: delegationMCPResolver,
-                                                             grant: grant, router: router, budget: budget))
-                                }
-                            }),
-                        RemoteErrorHandler(),
-                    ])
+                // Pinned: the account first, from the connection alone (it
+                // runs before the channel reads anything); none, closed
+                // before the banner.
+                guard let accountPin else { return Self.initializeConnection(channel, pinnedAccount: nil, setup) }
+                return accountPin(channel).flatMap { pinned in
+                    guard let pinned else { return channel.eventLoop.makeFailedFuture(RemoteSSHError.noAccountPin) }
+                    return Self.initializeConnection(channel, pinnedAccount: pinned, setup)
                 }
             }
 
         do {
-            let ch = try bootstrap.bind(host: config.bindAddress, port: config.port).wait()
+            let ch = try (config.boundSocketFD.map { bootstrap.withBoundSocket(descriptor: $0) }
+                          ?? config.unixSocketPath.map { bootstrap.bind(unixDomainSocketPath: $0, cleanupExistingSocketFile: true) }
+                          ?? bootstrap.bind(host: config.bindAddress, port: config.port)).wait()
             self.group = g
             self.channel = ch
             self.current = config
             self.running = true
-            SupplyChainLog.shared.record("[remote] embedded SSH server listening on \(config.bindAddress):\(config.port).")
+            SupplyChainLog.shared.record("[remote] embedded SSH server listening on \(config.unixSocketPath ?? "\(config.bindAddress):\(config.port)").")
         } catch {
             try? g.syncShutdownGracefully()
             throw RemoteError.startFailed(Self.describeBindFailure(error, config: config))
+        }
+    }
+
+    /// What every accepted connection's pipeline is built from.
+    struct ConnectionSetup: @unchecked Sendable {
+        let authFactory: RemoteAuthDelegateFactory
+        let hostKey: NIOSSHPrivateKey
+        let exe: String, user: String, controlSocketPath: String
+        let forwardResolver: ForwardResolver?
+        let udpForwardResolver: UDPForwardResolver?
+        let browserMCPResolver: BrowserMCPResolver?
+        let delegationMCPResolver: StreamResolver?
+        let router: RemoteAccountRouter?
+    }
+
+    /// One accepted connection's SSH pipeline: its own auth delegate
+    /// (its peer's IP for the rate limiter, the account it's pinned to if
+    /// any), its channels' budget, the session handlers.
+    private static func initializeConnection(_ channel: Channel, pinnedAccount: String?,
+                                             _ setup: ConnectionSetup) -> EventLoopFuture<Void> {
+        let (hostKey, exe, user, controlSocketPath) = (setup.hostKey, setup.exe, setup.user, setup.controlSocketPath)
+        let (forwardResolver, udpForwardResolver) = (setup.forwardResolver, setup.udpForwardResolver)
+        let (browserMCPResolver, delegationMCPResolver, router) = (setup.browserMCPResolver, setup.delegationMCPResolver, setup.router)
+        // Per-connection delegate carrying this peer's IP for the
+        // rate limiter; the throttle state itself is shared.
+        let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
+        let delegate = setup.authFactory.make(peerIP: peerIP, pinnedAccount: pinnedAccount)
+        let grant = delegate.grant
+        // What this connection's channels may hold together.
+        let budget = RemoteConnectionBudget()
+        return channel.eventLoop.makeCompletedFuture {
+            try channel.pipeline.syncOperations.addHandlers([
+                NIOSSHHandler(
+                    role: .server(.init(
+                        hostKeys: [hostKey],
+                        userAuthDelegate: delegate,
+                        globalRequestDelegate: nil)),
+                    allocator: channel.allocator,
+                    inboundChildChannelInitializer: { childChannel, channelType in
+                        guard channelType == .session else {
+                            return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.invalidChannelType)
+                        }
+                        guard budget.openChannel() else {
+                            FatClientLog.log("srv: \(RemoteConnectionBudget.maxChannels) channels open on this connection: refusing another")
+                            return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.tooManyChannels)
+                        }
+                        childChannel.closeFuture.whenComplete { _ in budget.closeChannel() }
+                        return childChannel.eventLoop.makeCompletedFuture {
+                            try childChannel.pipeline.syncOperations.addHandler(
+                                SSHPTYSessionHandler(menuExe: exe, user: user,
+                                                     controlSocketPath: controlSocketPath,
+                                                     forwardResolver: forwardResolver,
+                                                     udpForwardResolver: udpForwardResolver,
+                                                     browserMCPResolver: browserMCPResolver,
+                                                     delegationMCPResolver: delegationMCPResolver,
+                                                     grant: grant, router: router, budget: budget))
+                        }
+                    }),
+                RemoteErrorHandler(),
+            ])
         }
     }
 

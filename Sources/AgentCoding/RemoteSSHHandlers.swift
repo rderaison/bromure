@@ -47,7 +47,7 @@ enum LibC {
     #endif
 }
 
-enum RemoteSSHError: Error { case invalidChannelType, tooManyChannels }
+enum RemoteSSHError: Error { case invalidChannelType, tooManyChannels, noAccountPin }
 
 /// What one SSH connection's session channels may hold together: how many
 /// are open, and the bytes they keep before an exec or shell opens their fd
@@ -193,11 +193,17 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
     private let peerIP: String
     /// Several accounts behind this server (see RemoteAccountRouter).
     private let router: RemoteAccountRouter?
+    /// The one account this connection may log in to, when the listener
+    /// knows it before the client says anything (RemoteAccessServer
+    /// .accountPin); any other user name fails. nil: the name decides.
+    private let pinnedAccount: String?
 
     init(username: String, allowPassword: Bool, allowPubkey: Bool,
          authorizedKeys: Set<NIOSSHPublicKey>, machineOnlyKeys: [NIOSSHPublicKey: String] = [:],
-         throttle: RemoteAuthThrottle, peerIP: String, router: RemoteAccountRouter? = nil) {
+         throttle: RemoteAuthThrottle, peerIP: String, router: RemoteAccountRouter? = nil,
+         pinnedAccount: String? = nil) {
         self.router = router
+        self.pinnedAccount = pinnedAccount
         self.username = username
         self.allowPassword = allowPassword
         self.allowPubkey = allowPubkey
@@ -223,6 +229,13 @@ final class RemoteAuthDelegate: NIOSSHServerUserAuthenticationDelegate, @uncheck
         // misconfiguration in security reviews. The P2P dialer's can't-know-
         // the-name problem is handled client-side (editable user field,
         // remembered per peer device).
+        // A pinned connection is that account's only: another name fails
+        // before any account is asked about.
+        if let pinnedAccount, request.username != pinnedAccount {
+            FatClientLog.log("srv-auth: user=\(request.username) on a connection pinned to another account → FAILURE")
+            responsePromise.succeed(.failure)
+            return
+        }
         if let router {
             routedRequest(request, router: router, responsePromise: responsePromise)
             return
@@ -361,11 +374,11 @@ final class RemoteAuthDelegateFactory: @unchecked Sendable {
         return authorizedKeys
     }
 
-    func make(peerIP: String) -> RemoteAuthDelegate {
+    func make(peerIP: String, pinnedAccount: String? = nil) -> RemoteAuthDelegate {
         lock.lock(); let keys = authorizedKeys; let machine = machineOnlyKeys; lock.unlock()
         return RemoteAuthDelegate(username: username, allowPassword: allowPassword,
                                   allowPubkey: allowPubkey, authorizedKeys: keys, machineOnlyKeys: machine,
-                                  throttle: throttle, peerIP: peerIP, router: router)
+                                  throttle: throttle, peerIP: peerIP, router: router, pinnedAccount: pinnedAccount)
     }
 }
 
