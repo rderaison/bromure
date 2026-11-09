@@ -161,7 +161,9 @@ public enum InterimBake {
         defer { console.close(); customizeLog.close() }
         let vm = FirecrackerMachine(config: c)
         progress("Starting the installer VM…")
-        do { try await vm.start() } catch { await passt.close(); throw error }
+        // A failed bake discards its scratch disk, as macOS's createBaseImage
+        // does: the live image is untouched.
+        do { try await vm.start() } catch { await passt.close(); try? fm.removeItem(atPath: partial); throw error }
 
         // 4-5. The console dialogue.
         var tSetup = ContinuousClock.now
@@ -172,6 +174,7 @@ public enum InterimBake {
             await vm.kill()
             await passt.close()
             try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log.failed")
+            try? fm.removeItem(atPath: partial)
             throw customizeFailure(error, o)
         }
         let setupTime = ContinuousClock.now - tSetup
