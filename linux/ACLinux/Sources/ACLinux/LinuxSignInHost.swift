@@ -139,7 +139,7 @@ extension LinuxSessionHost: ProxySignInHost {
     /// while its VM is live, and a launch empties it before that, so nothing
     /// a previous guest left reaches its replacement (a restore keeps only
     /// what that same guest wrote before its snapshot).
-    // partial: a page that isn't a sign-in's is dropped (a macOS server opens it on its own screen)
+    // partial: a page that isn't a sign-in's goes to the user's clients (GuestLinkRelay; a macOS server opens it on its own screen)
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=26c1142c88dc3aa6 @45a144c8
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
         // A quarantined workspace opens nothing, a sign-in's page included.
@@ -151,9 +151,12 @@ extension LinuxSessionHost: ProxySignInHost {
         }
         guard let signIn = proxySignIns[pid], !signIn.finished else {
             // Any other page: a macOS server shows it on its own screen; a
-            // Linux server has none (the agents' browsing rides the browser
-            // MCP relay to the client instead).
-            FileHandle.standardError.write(Data("bromure-ac daemon: guest page not opened (no browser here): \(url.host ?? "?")\n".utf8))
+            // Linux server has none, so it goes to the user's own clients
+            // (GuestLinkRelay; refused there when its host is local or private).
+            let name = ProfileStore().loadAll().first { $0.id == pid }?.name ?? pid.uuidString
+            if !GuestLinkRelay.shared.add(url, profileID: pid, workspace: name) {
+                FileHandle.standardError.write(Data("bromure-ac daemon: guest page not relayed (local/private host, or already waiting): \(url.host ?? "?")\n".utf8))
+            }
             return
         }
         guard GuestURLGate.opensInRealBrowser(url) else {

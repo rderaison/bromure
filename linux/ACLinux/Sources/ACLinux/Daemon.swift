@@ -511,6 +511,13 @@ public actor Daemon {
             // show consent prompts (RemoteConsent.route).
             if req.headers["x-bromure-console-idle-ms"] != nil { PendingPromptBroker.recordFatClientContact() }
             return await state()
+        case ("POST", let p) where p.hasPrefix("/guest-links/") && p.hasSuffix("/done"):
+            // A client handled a guest link (GuestLinkRelay).
+            guard let id = UUID(uuidString: String(p.dropFirst("/guest-links/".count).dropLast("/done".count))) else {
+                return .error(400, "a link id is required")
+            }
+            let found = await MainActor.run { GuestLinkRelay.shared.done(id) }
+            return found ? ControlResponse(200, ["ok": true]) : .error(404, "no such link")
         case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"):
             return await answerPrompt(String(p.dropFirst("/prompts/".count).dropLast("/answer".count)), req.body)
         case ("GET", "/state/subscribe"): return stateSubscribe(delta: req.headers["x-bromure-state-delta"] == "1")
@@ -811,6 +818,7 @@ public actor Daemon {
         let (prompts, sessionEntries, statuses) = await MainActor.run {
             for (id, roster) in rosters { LinuxSessionHost.shared?.updateRoster(id, roster) }
             return (PendingPromptBroker.shared.pendingList(), (SessionStores.shared?.stateEntries() ?? [:]).merging(SessionStores.shared?.boardStateEntries() ?? [:]) { a, _ in a }
+                .merging(GuestLinkRelay.shared.stateEntries()) { a, _ in a }
                 .merging([
                     "subscriptions": JSONValue(foundation: Daemon.subscriptionStatus(mitm: mitmProxy)) ?? .object([:]),
                     "securityTimeline": JSONValue(foundation: Daemon.securityTimelineRows()) ?? .array([]),
@@ -1415,6 +1423,8 @@ public actor Daemon {
         // Its swap map, and the destinations a compromise alert's "Allow"
         // trusted for the session (macOS: MitmEngine.unregister's clearMap).
         mitm?.swapper.clearMap(for: pid)
+        // Its guest's links waiting for a client go with it.
+        await MainActor.run { GuestLinkRelay.shared.clear(pid) }
         // Fusion starts disengaged with the next session (macOS: unregister).
         mitm?.clearFusionEngaged(for: pid)
         InferenceRepairProxy.shared.setExternalEngine(pid, nil)
