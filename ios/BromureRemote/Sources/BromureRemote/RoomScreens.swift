@@ -430,6 +430,15 @@ struct MobileRoomScreen: View {
         model.roomFocusCwd = s?.cwd
     }
 
+    /// The tab after choosing layout `l`: the Switchboard's stays (the
+    /// conversation on screen, and the composer's target, aren't the
+    /// focused session's); a page of sessions moves to the one holding the
+    /// focused session, so it stays on screen.
+    static func page(afterLayout l: RoomLayout, current: Int, focusedIndex: Int?) -> Int {
+        guard current != switchboardPage, let i = focusedIndex else { return current }
+        return i / l.size
+    }
+
     private func reveal(_ id: UUID) {
         if let i = members.firstIndex(where: { $0.id == id }) {
             withAnimation(.snappy) { page = i / layout.size }
@@ -994,8 +1003,8 @@ struct MobileRoomScreen: View {
                     ForEach(RoomLayout.all, id: \.self) { l in
                         Button {
                             Task { await controller.roomCommand(roomID, "layout", body: ["layout": l.string]) }
-                            // Keep the focused session on screen.
-                            if let f = focusedID, let i = members.firstIndex(where: { $0.id == f }) { page = i / l.size }
+                            page = Self.page(afterLayout: l, current: page,
+                                             focusedIndex: focusedID.flatMap { f in members.firstIndex { $0.id == f } })
                         } label: {
                             Label(String(format: NSLocalizedString("%d × %d grid", comment: "room layout"), l.cols, l.rows),
                                   systemImage: l == layout ? "checkmark" : Self.symbol(l))
