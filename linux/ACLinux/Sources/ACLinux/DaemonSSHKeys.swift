@@ -541,15 +541,20 @@ extension Daemon {
     func sshKeysRoute(_ prof: Profile, method: String, sub: [String], body: JSONValue) async -> ControlResponse {
         let store = profileStore
         let dir = store.profileDirectory(for: prof)
-        func saved(_ p: Profile) async -> ControlResponse {
-            // This route's field onto the stored copy as it is now.
-            do { _ = try ProfileWrites.edit(p.id, store: store) { $0.importedSSHKeys = p.importedSSHKeys; return true } } catch {
-                return .error(500, "Couldn't save '\(p.name)': \(error)")
+        /// `change` applied to the stored copy's keys as they are now, and
+        /// saved (ProfileWrites); false from it: no such key there.
+        func saved(_ change: (inout [ImportedSSHKey]) -> Bool) async -> ControlResponse {
+            var found = true
+            let after: Profile?
+            do { after = try ProfileWrites.edit(prof.id, store: store) { found = change(&$0.importedSSHKeys); return found } } catch {
+                return .error(500, "Couldn't save '\(prof.name)': \(error)")
             }
-            if let id = await runningVMID(of: p.id) { _ = scheduleLiveRefresh(id) }
-            return ControlResponse(200, ["ok": true, "keys": Self.sshKeyRows(p)])
+            guard let after else { return .error(404, "No workspace '\(prof.name)'") }
+            guard found else { return .error(404, "No such key") }
+            if let id = await runningVMID(of: prof.id) { _ = scheduleLiveRefresh(id) }
+            return ControlResponse(200, ["ok": true, "keys": Self.sshKeyRows(after)])
         }
-        var p = prof
+        let p = prof
         switch (method, sub.count > 1 ? sub[1] : "") {
         case ("GET", ""):
             return ControlResponse(200, ["keys": Self.sshKeyRows(p)])
@@ -577,8 +582,13 @@ extension Daemon {
                 guard !picked.isEmpty else {
                     return .error(404, want == nil ? "The agent holds no key this workspace hasn't got" : "The agent doesn't hold that key")
                 }
-                p.importedSSHKeys += picked.map { var k = $0; k.requireApproval = approve; return k }
-                return await saved(p)
+                let adding = picked.map { var k = $0; k.requireApproval = approve; return k }
+                return await saved { keys in
+                    // Not one added meanwhile.
+                    let now = Set(keys.compactMap { Self.sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText) })
+                    keys += adding.filter { Self.sshPublicKeyBlob(fromOpenSSHText: $0.publicKeyText).map { !now.contains($0) } ?? false }
+                    return true
+                }
             }
             guard let path = body["path"]?.stringValue, !path.isEmpty else { return .error(400, "path or hostAgentSocket required") }
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
@@ -595,6 +605,7 @@ extension Daemon {
             let label = body["label"]?.stringValue ?? ""
             let passphrase = body["passphrase"]?.stringValue
             let askpassDir = config.runtimeDir
+            let imported: ImportedSSHKey
             do {
                 // The file work off the actor; the passphrase into the vault
                 // here, on this task.
@@ -610,25 +621,34 @@ extension Daemon {
                     }
                 }
                 key.requireApproval = approve
-                p.importedSSHKeys.append(key)
+                imported = key
             } catch { return .error(400, "Couldn't import \(url.path): \(error)") }
-            let r = await saved(p)
-            if r.status != 200, let key = p.importedSSHKeys.last { Self.removeImportedSSHKey(key, for: p, profileDirectory: dir) }
+            let r = await saved { $0.append(imported); return true }
+            if r.status != 200 { Self.removeImportedSSHKey(imported, for: p, profileDirectory: dir) }
             return r
         case ("POST", let id):
             guard let i = p.importedSSHKeys.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else {
                 return .error(404, "No such key")
             }
             guard case .bool(let approve)? = body["requireApproval"] else { return .error(400, "requireApproval required") }
-            p.importedSSHKeys[i].requireApproval = approve
-            return await saved(p)
+            let keyID = p.importedSSHKeys[i].id
+            return await saved { keys in
+                guard let j = keys.firstIndex(where: { $0.id == keyID }) else { return false }
+                keys[j].requireApproval = approve
+                return true
+            }
         case ("DELETE", let id) where !id.isEmpty:
             guard let i = p.importedSSHKeys.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else {
                 return .error(404, "No such key")
             }
-            let key = p.importedSSHKeys.remove(at: i)
-            let r = await saved(p)
-            if r.status == 200 { Self.removeImportedSSHKey(key, for: p, profileDirectory: dir) }
+            let keyID = p.importedSSHKeys[i].id
+            var removed: ImportedSSHKey?
+            let r = await saved { keys in
+                guard let j = keys.firstIndex(where: { $0.id == keyID }) else { return false }
+                removed = keys.remove(at: j)
+                return true
+            }
+            if r.status == 200, let removed { Self.removeImportedSSHKey(removed, for: p, profileDirectory: dir) }
             return r
         default:
             return .error(405, "Method not allowed")

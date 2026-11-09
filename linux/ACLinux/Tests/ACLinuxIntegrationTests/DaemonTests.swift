@@ -433,6 +433,38 @@ struct DaemonTests {
         _ = try? w.cli("vm", "kill", "--force", "rb")
     }
 
+    @Test("a stop sent while the reboot route shuts the VM down wins: it stays off")
+    func aStopDuringARebootWins() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        #expect(try w.cli("vm", "run", "--name", "rr").0 == 0)
+        var up = false
+        for _ in 0..<240 where !up {
+            up = (try? w.cli("vm", "exec", "rr", "--", "true"))?.0 == 0
+            if !up { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        #expect(up, "booted")
+        let id = try #require(w.vm("rr")?["id"]?.stringValue)
+        // A unit whose stop takes 15 s: the guest's shutdown lasts that long.
+        let slow = try w.cli("vm", "exec", "rr", "--", "sudo", "systemd-run", "--unit=slowstop", "-p", "ExecStop=/bin/sleep 15", "/bin/sleep", "infinity")
+        #expect(slow.0 == 0, "\(slow.2)")
+        let socket = w.socket
+        // The reboot (its guest shutdown first), and a stop sent while it
+        // shuts down.
+        let reboot = Task { try await FirecrackerAPI(socketPath: socket).request("POST", "/vms/\(id)/reboot", ["mode": "soft"], timeout: .seconds(120)) }
+        try await Task.sleep(for: .seconds(2))
+        let (rc, _, err) = try w.cli("vm", "kill", "rr")
+        #expect(rc == 0, "the stop is taken: \(err)")
+        let r = try await reboot.value
+        #expect(r.status == 409, "the reboot says it was stopped: \(String(describing: r.body))")
+        try await Task.sleep(for: .seconds(5))
+        let log = (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? ""
+        #expect(try w.vm("rr")?["state"]?.stringValue == "stopped", "it stays off; daemon log:\n\(log.suffix(2000))")
+        _ = try? w.cli("vm", "kill", "--force", "rr")
+    }
+
     @Test("workspaces are Profiles: POST /profiles makes one from the template with its VM registered (stopped); GET lists it")
     func profiles() async throws {
         let w = try World()

@@ -31,8 +31,8 @@ extension Daemon {
         let name = existingProfile(for: rec)?.name ?? rec.name
         // A `--rm` workspace survives this stop: it boots again.
         rebooting.insert(rec.id)
-        defer { rebooting.remove(rec.id) }
-        let stopped = await deleteVM(rec, action: hard ? "kill" : "shutdown")
+        defer { rebooting.remove(rec.id); stopsDuringReboot.remove(rec.id) }
+        let stopped = await deleteVM(rec, action: hard ? "kill" : "shutdown", partOfReboot: true)
         guard stopped.status < 300 else { return ControlResponse(409, ["ok": false, "error": stopped.body["error"] ?? "couldn't stop it"]) }
         // The old session out of the way first: the next boot shares its
         // directories.

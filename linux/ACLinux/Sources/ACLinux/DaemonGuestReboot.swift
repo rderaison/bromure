@@ -37,7 +37,7 @@ extension Daemon {
     /// as a reboot (a `--rm` workspace survives it) until the boot is done.
     // @port ACAppDelegate.relaunchAfterGuestReboot(_: Profile.ID) h=a54abd48d1aae658 @4bd8405e
     func relaunchAfterGuestReboot(_ id: String) async {
-        defer { rebooting.remove(id) }
+        defer { rebooting.remove(id); stopsDuringReboot.remove(id) }
         for _ in 0..<200 where live[id] != nil || stopping[id] != nil {
             try? await Task.sleep(for: .milliseconds(100))
         }
@@ -59,8 +59,8 @@ extension Daemon {
     /// when one was asked (the caller then boots nothing).
     // @port-skip linux-only: a stop racing a relaunch (macOS: session.stopping cancels relaunchVM)
     func stoppedDuringReboot(_ id: String) async -> Bool {
-        guard explicitStops.remove(id) != nil else { return false }
-        if live[id] != nil, let rec = registry.find(id) { _ = await deleteVM(rec, action: "kill") }
+        guard stopsDuringReboot.remove(id) != nil else { return false }
+        if live[id] != nil, let rec = registry.find(id) { _ = await deleteVM(rec, action: "kill", partOfReboot: true) }
         rebooting.remove(id)
         if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
         return true

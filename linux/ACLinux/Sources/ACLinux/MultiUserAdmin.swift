@@ -23,7 +23,9 @@ public enum MultiUserAdmin {
 
     // @port-skip linux-only: admin
     public static func validName(_ n: String) -> Bool {
-        !n.isEmpty && n.count <= 32 && !n.hasPrefix("-") && n != "bromure" && n != "root"
+        // Not "sock": /run/bromure-ac/<name> is its runtime dir, and that one
+        // holds every user's control socket.
+        !n.isEmpty && n.count <= 32 && !n.hasPrefix("-") && n != "bromure" && n != "root" && n != "sock"
             && n.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-").contains($0) }
     }
 
@@ -62,6 +64,13 @@ public enum MultiUserAdmin {
         // systemd leaves the socket file behind; the gateway reads its
         // presence as "this account exists".
         unlink(socketDir + "/" + name + ".sock")
+        // Its runtime dir outlives a stop (RuntimeDirectoryPreserve=yes: the
+        // boot-at-startup marker, serial logs, editor files): gone with the
+        // daemon. systemd's own clean, else removed here (symlinks inside
+        // are removed, not followed).
+        try? await run(["/usr/bin/systemctl", "clean", "--what=runtime", "bromure-ac@\(name).service"])
+        let runtime = "/run/bromure-ac/" + name
+        if FileManager.default.fileExists(atPath: runtime) { try? FileManager.default.removeItem(atPath: runtime) }
         if purge { try? FileManager.default.removeItem(atPath: stateRoot + "/" + name) }
         if deleteAccount, getpwnam(name) != nil { try await run(["/usr/sbin/userdel", name]) }
         return "removed \(name)\(purge ? ", state deleted" : "")\(deleteAccount ? ", account deleted" : "")"

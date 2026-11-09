@@ -157,6 +157,10 @@ public actor Daemon {
     /// daemon's own end): never taken for a guest's reboot, even when the
     /// guest's own exit got there first (macOS: session.stopping).
     var explicitStops: Set<String> = []
+    /// Stops asked while a reboot was under way (the reboot route's, a
+    /// guest's relaunch): kept until that reboot looks (stoppedDuringReboot),
+    /// which vmStopped's own consuming of explicitStops can't take away.
+    var stopsDuringReboot: Set<String> = []
     /// An adopted VM's serial log size when this daemon took it back: what
     /// came before is an earlier boot's (logs were once appended across boots).
     var serialLogStart: [String: UInt64] = [:]
@@ -1030,8 +1034,11 @@ public actor Daemon {
     /// suspend refused for lack of disk space is a 409 saying so (the VM
     /// still runs).
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=3801d3e89fa37bfb @f127f8ab
-    func deleteVM(_ rec: VMRecord, action: String) async -> ControlResponse {
+    /// `partOfReboot`: the reboot's own stop (not one a client asked for).
+    func deleteVM(_ rec: VMRecord, action: String, partOfReboot: Bool = false) async -> ControlResponse {
         if action == "suspend" { return await suspend(rec) }
+        // Asked during a reboot: that reboot boots nothing (stoppedDuringReboot).
+        if rebooting.contains(rec.id), !partOfReboot { stopsDuringReboot.insert(rec.id) }
         // A suspended VM shut down: its saved state goes, it's stopped.
         if live[rec.id] == nil, rec.state == .suspended {
             try? FileManager.default.removeItem(atPath: snapshotDir(rec.id))
@@ -1054,7 +1061,6 @@ public actor Daemon {
         // Between a reboot's stop and its boot (or during that boot): it
         // stays off (the relaunch checks, stoppedDuringReboot).
         if live[rec.id] == nil, rebooting.contains(rec.id) {
-            explicitStops.insert(rec.id)
             return ControlResponse(200, ["status": "stopped"])
         }
         guard let l = live[rec.id] else {
@@ -2006,6 +2012,7 @@ public actor Daemon {
             if !explicit { Task { await self.relaunchAfterGuestReboot(id) } } else {
                 // Stopped for good after all: a `--rm` workspace goes now.
                 rebooting.remove(id)
+                stopsDuringReboot.remove(id)
                 if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
             }
         }

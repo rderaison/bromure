@@ -58,26 +58,50 @@ enum MCPOAuthBroker {
         await endpointAddresses(url, policy)
     }
 
-    /// A refresh's result; `savedFor`: the workspace its flight saved it in.
-    enum RefreshOutcome: Sendable { case refreshed(MCPOAuthState, savedFor: UUID), failed }
+    enum RefreshOutcome: Sendable { case refreshed(MCPOAuthState), failed }
 
     /// The refreshes under way, one per server and refresh token.
     // @port-skip linux-only: single-flight refreshes (macOS refreshes in its one launch path)
     final class Flights: @unchecked Sendable {
-        private let running = NIOLockedValueBox<[String: Task<RefreshOutcome, Never>]>([:])
+        /// How a workspace that joined saves the result.
+        typealias Keep = @Sendable (MCPOAuthState) async -> Void
+        private struct Entry { let task: Task<RefreshOutcome, Never>; var keeps: [UUID: Keep] }
+        private let running = NIOLockedValueBox<[String: Entry]>([:])
         /// Callers that joined one under way (tests).
         let joined = NIOLockedValueBox(0)
         /// The refresh under way for `key`, or a new one running `work`.
+        /// The flight itself saves the result for every workspace that
+        /// joined (`keep`: how `profileID` does; a clone shares the server
+        /// and its state), each once, whether or not it still waits -- and
+        /// before it leaves the table, so a staging after it reads the
+        /// saved state.
         // @port-skip linux-only: see Flights
-        func flight(_ key: String, _ work: @escaping @Sendable () async -> RefreshOutcome) -> Task<RefreshOutcome, Never> {
+        func flight(_ key: String, profileID: UUID, keep: Keep?,
+                    _ work: @escaping @Sendable () async -> RefreshOutcome) -> Task<RefreshOutcome, Never> {
             running.withLockedValue { all in
-                if let t = all[key] { joined.withLockedValue { $0 += 1 }; return t }
+                if var e = all[key] {
+                    joined.withLockedValue { $0 += 1 }
+                    if let keep, e.keeps[profileID] == nil { e.keeps[profileID] = keep; all[key] = e }
+                    return e.task
+                }
                 let t = Task { [running] in
                     let r = await work()
-                    running.withLockedValue { _ = $0.removeValue(forKey: key) }
+                    var saved = Set<UUID>()
+                    while true {
+                        // Those that joined and aren't saved yet; none left:
+                        // the flight is over.
+                        let pending: [UUID: Keep] = running.withLockedValue { all in
+                            guard case .refreshed = r else { all.removeValue(forKey: key); return [:] }
+                            let ks = (all[key]?.keeps ?? [:]).filter { !saved.contains($0.key) }
+                            if ks.isEmpty { all.removeValue(forKey: key) }
+                            return ks
+                        }
+                        guard !pending.isEmpty, case .refreshed(let state) = r else { break }
+                        for (pid, k) in pending { await k(state); saved.insert(pid) }
+                    }
                     return r
                 }
-                all[key] = t
+                all[key] = Entry(task: t, keeps: keep.map { [profileID: $0] } ?? [:])
                 return t
             }
         }
@@ -248,7 +272,8 @@ extension Daemon {
     // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=11cb4a0e133dab98 @4237c02e
     static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false,
                                         keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void)? = nil,
-                                        stored: (@Sendable (UUID, UUID) async -> MCPOAuthState?)? = nil) async -> Profile {
+                                        stored: (@Sendable (UUID, UUID) async -> MCPOAuthState?)? = nil,
+                                        flights: MCPOAuthBroker.Flights = MCPOAuthBroker.flights) async -> Profile {
         var profile = profile
         let policy = MCPOAuthBroker.EndpointPolicy(multiUser: multiUser, egress: profile.resolvedEgressPolicy)
         for i in profile.mcpServers.indices {
@@ -269,14 +294,14 @@ extension Daemon {
                 // One refresh per server and refresh token: a launch, a live
                 // push or a relaunch meanwhile waits for the one under way
                 // (spending the token twice gets a rotating server's grant
-                // revoked). It saves its own result (macOS:
-                // persistRefreshedMCPOAuth), even one after this wait: it
-                // spent the stored token.
-                let flight = MCPOAuthBroker.flights.flight("\(serverID)|\(refreshToken)") {
+                // revoked). The flight saves the result for every workspace
+                // that joined (macOS: persistRefreshedMCPOAuth), even after
+                // this wait: it spent the stored token.
+                let save: MCPOAuthBroker.Flights.Keep? = keep.map { keep in { await keep($0, old, serverID, profileID) } }
+                let flight = flights.flight("\(serverID)|\(refreshToken)", profileID: profileID, keep: save) {
                     do {
                         let refreshed = try await MCPOAuthBroker.refresh(state: old, policy: policy)
-                        await keep?(refreshed, old, serverID, profileID)
-                        return .refreshed(refreshed, savedFor: profileID)
+                        return .refreshed(refreshed)
                     } catch {
                         // Said, never silent (no token in the message).
                         FileHandle.standardError.write(Data(
@@ -285,10 +310,7 @@ extension Daemon {
                     }
                 }
                 switch await MCPOAuthBroker.firstOf(timeout: .seconds(10), { await flight.value }) {
-                case .refreshed(let refreshed, let savedFor)?:
-                    // A clone shares the server and its state: it keeps the
-                    // result too.
-                    if savedFor != profileID { await keep?(refreshed, old, serverID, profileID) }
+                case .refreshed(let refreshed)?:
                     use = refreshed
                     profile.mcpServers[i].oauthState = refreshed
                 case .failed?:

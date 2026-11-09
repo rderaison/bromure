@@ -323,9 +323,9 @@ struct MCPOAuthTests {
     @Test func concurrentStagingsShareOneRefresh() async throws { try await Self.onLoopback {
         // The reply held until the second staging has joined the first's
         // refresh (at most 10 s): the two overlap for sure.
-        let joinedBefore = MCPOAuthBroker.flights.joined.withLockedValue { $0 }
+        let flights = MCPOAuthBroker.Flights()
         let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"ONCE","refresh_token":"NEXT","expires_in":3600}"#) {
-            for _ in 0..<1000 where MCPOAuthBroker.flights.joined.withLockedValue({ $0 }) == joinedBefore { usleep(10_000) }
+            for _ in 0..<1000 where flights.joined.withLockedValue({ $0 }) == 0 { usleep(10_000) }
         }
         defer { ep.stop() }
         let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
@@ -334,14 +334,14 @@ struct MCPOAuthTests {
         p.mcpServers = [Self.server("s", oauth: old)]
         let kept = NIOLockedValueBox(0)
         let keep: @Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void = { _, _, _, _ in kept.withLockedValue { $0 += 1 } }
-        async let a = Daemon.populateMCPBearerTokens(p, keep: keep)
-        async let b = Daemon.populateMCPBearerTokens(p, keep: keep)
+        async let a = Daemon.populateMCPBearerTokens(p, keep: keep, flights: flights)
+        async let b = Daemon.populateMCPBearerTokens(p, keep: keep, flights: flights)
         let (ra, rb) = await (a, b)
         #expect(ra.mcpServers[0].bearerToken == "ONCE" && rb.mcpServers[0].bearerToken == "ONCE")
         #expect(ep.requests.withLockedValue { $0.count } == 1, "one request to the token endpoint")
         #expect(kept.withLockedValue { $0 } == 1, "saved once")
-        #expect(MCPOAuthBroker.flights.joined.withLockedValue { $0 } == joinedBefore + 1, "the second joined the first")
-        #expect(MCPOAuthBroker.flights.count == 0, "nothing left in flight")
+        #expect(flights.joined.withLockedValue { $0 } == 1, "the second joined the first")
+        #expect(flights.count == 0, "nothing left in flight")
     } }
 
     /// A staging that loaded its copy before a refresh was saved (and comes
@@ -365,9 +365,9 @@ struct MCPOAuthTests {
     /// A clone shares its source's servers and their state: both stagings
     /// share one refresh, and each workspace keeps its result.
     @Test func aCloneKeepsTheSharedRefresh() async throws { try await Self.onLoopback {
-        let joinedBefore = MCPOAuthBroker.flights.joined.withLockedValue { $0 }
+        let flights = MCPOAuthBroker.Flights()
         let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"BOTH","refresh_token":"NEXT","expires_in":3600}"#) {
-            for _ in 0..<1000 where MCPOAuthBroker.flights.joined.withLockedValue({ $0 }) == joinedBefore { usleep(10_000) }
+            for _ in 0..<1000 where flights.joined.withLockedValue({ $0 }) == 0 { usleep(10_000) }
         }
         defer { ep.stop() }
         let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
@@ -378,13 +378,39 @@ struct MCPOAuthTests {
         b.id = UUID(); b.name = "clone"
         let kept = NIOLockedValueBox<[UUID]>([])
         let keep: @Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void = { _, _, _, pid in kept.withLockedValue { $0.append(pid) } }
-        async let ra = Daemon.populateMCPBearerTokens(a, keep: keep)
-        async let rb = Daemon.populateMCPBearerTokens(b, keep: keep)
+        async let ra = Daemon.populateMCPBearerTokens(a, keep: keep, flights: flights)
+        async let rb = Daemon.populateMCPBearerTokens(b, keep: keep, flights: flights)
         let (oa, ob) = await (ra, rb)
         #expect(oa.mcpServers[0].bearerToken == "BOTH" && ob.mcpServers[0].bearerToken == "BOTH")
         #expect(ep.requests.withLockedValue { $0.count } == 1, "one refresh")
         #expect(Set(kept.withLockedValue { $0 }) == [a.id, b.id] && kept.withLockedValue { $0 }.count == 2, "kept by each workspace once")
     } }
+
+    /// The flight saves its result for every workspace that joined it, one
+    /// that gave up waiting too, and before it leaves the table.
+    @Test func theFlightSavesForEveryoneWhoJoined() async throws {
+        let flights = MCPOAuthBroker.Flights()
+        let gate = NIOLockedValueBox(false)
+        let saved = NIOLockedValueBox<[UUID: String]>([:])
+        let lead = UUID(), clone = UUID()
+        func keep(_ pid: UUID) -> MCPOAuthBroker.Flights.Keep {
+            { state in
+                #expect(flights.count == 1, "saved while the flight is still in the table")
+                saved.withLockedValue { $0[pid] = state.accessToken }
+            }
+        }
+        let work: @Sendable () async -> MCPOAuthBroker.RefreshOutcome = {
+            while !gate.withLockedValue({ $0 }) { try? await Task.sleep(for: .milliseconds(5)) }
+            return .refreshed(MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "https://x/t", accessToken: "FRESH"))
+        }
+        let t = flights.flight("k", profileID: lead, keep: keep(lead), work)
+        // The clone joins, then gives up on the result (it never awaits it).
+        _ = flights.flight("k", profileID: clone, keep: keep(clone)) { Issue.record("a second refresh"); return .failed }
+        gate.withLockedValue { $0 = true }
+        if case .refreshed = await t.value {} else { Issue.record("no refresh") }
+        #expect(saved.withLockedValue { $0 } == [lead: "FRESH", clone: "FRESH"], "both saved, once each")
+        #expect(flights.count == 0 && flights.joined.withLockedValue { $0 } == 1)
+    }
 
     /// A redirect from the token endpoint isn't followed.
     @Test func aRedirectIsNotFollowed() async throws { try await Self.onLoopback {

@@ -92,8 +92,8 @@ extension Daemon {
 
         // 2. `-v` mounts (host paths → ~/<basename> in the guest), capped at
         //    the base image's 8 fstab slots.
+        var added: [String] = []
         if case .array(let mounts) = body["mounts"] ?? .null, !mounts.isEmpty {
-            var paths = profile.folderPaths
             for m in mounts.compactMap(\.stringValue) {
                 let host = (m as NSString).expandingTildeInPath
                 // Hidden from a shared server's daemon: said, not skipped.
@@ -104,14 +104,32 @@ extension Daemon {
                     FileHandle.standardError.write(Data("[vm run] mount not found, skipping: \(host)\n".utf8))
                     continue
                 }
-                if !paths.contains(host) { paths.append(host) }
+                if !added.contains(host) { added.append(host) }
             }
-            profile.folderPaths = Array(paths.prefix(8))
+        }
+        func mount(_ p: inout Profile) -> Bool {
+            var paths = p.folderPaths
+            for host in added where !paths.contains(host) { paths.append(host) }
+            let capped = Array(paths.prefix(8))
+            guard capped != p.folderPaths else { return false }
+            p.folderPaths = capped
+            return true
         }
 
-        // 3. Persist.
+        // 3. Persist: a minted workspace whole; an existing one only its
+        //    mounts, onto the stored copy as it is now (ProfileWrites).
         let saved: Profile
-        do { saved = try store.save(profile) } catch {
+        do {
+            if minted {
+                _ = mount(&profile)
+                saved = try store.save(profile)
+            } else {
+                guard let s = try ProfileWrites.edit(profile.id, store: store, mount) else {
+                    return .failure(VMRunRefusal(response: .error(404, "No workspace '\(ref ?? profile.name)'", ["notFound": .bool(true)])))
+                }
+                saved = s
+            }
+        } catch {
             FileHandle.standardError.write(Data("[vm run] couldn't save profile: \(error)\n".utf8))
             return .failure(VMRunRefusal(response: .error(500, "Failed to create VM: couldn't save its workspace: \(error)")))
         }
