@@ -246,6 +246,9 @@ final class LinuxSessionHost: AgentSessionHost {
         let s = store.session(profileID: id, windowIndex: index)
         if Self.isReply(from: before, to: status), let s { store.noteReply(s.id) }
         if status == .working, let s, s.awaitingAnswer == true { _ = store.setAwaitingAnswer(s.id, false) }
+        // The phone's needs-input push (macOS: the detached session's path,
+        // from the recorded status).
+        reportPushTransition(id, index: index, from: before ?? .done, to: status)
         guard let tab = tabsModel(for: id)?.tabs.first(where: { $0.index == index }) else { return }
         tab.agentStatus = status
         // A finished tab may be an automation run (its transcript is saved,

@@ -210,6 +210,7 @@
     "Sources/AgentCoding/ProfileEdits.swift",
     "Sources/AgentCoding/ProfileSubRoutes.swift",
     "Sources/AgentCoding/PumpConsentGate.swift",
+    "Sources/AgentCoding/PushCrypto.swift",
     "Sources/AgentCoding/Registration.swift",
     "Sources/AgentCoding/RegistrationLaunch.swift",
     "Sources/AgentCoding/RemoteAccessServer.swift",
@@ -1117,6 +1118,10 @@
     {
       "id": "GuestLivenessStore.clear(_: Profile.ID)",
       "reason": "the Linux silent set is derived again each tick (a stopped VM drops out): nothing to clear"
+    },
+    {
+      "id": "ACAppDelegate.hostIdleSeconds()",
+      "reason": "no local keyboard or mouse on a server (IOKit HID idle): it is always unattended (LinuxSessionHost.unattendedIdleSeconds, in reportPushTransition)"
     }
   ],
   "skipInheriting": [
