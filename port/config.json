@@ -798,6 +798,10 @@
       "reason": "ui"
     },
     {
+      "path": "Sources/AgentCoding/KubeLANAnnouncer.swift",
+      "reason": "no bridged LAN tap on a Linux server (decided 2026-11-09): macOS puts its own MAC on the wire through a bridged vmnet tap and answers ARP and TCP in userspace; a Linux server publishes LAN pool addresses through bromure-lan instead (LANHelper: a /32 on the host interface, the kernel answering ARP; LANHelperClient is the daemon side)"
+    },
+    {
       "path": "Sources/AgentCoding/LayoutStats.swift",
       "reason": "ui"
     },
