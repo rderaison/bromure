@@ -1301,7 +1301,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let resignOutcome: AWSResigner.Outcome = insecure
             ? .unchanged
             : await awsResigner.resign(
-                rawRequest: swap.modified, host: host, profileID: profileID)
+                rawRequest: swap.modified, host: host, profileID: profileID,
+                bodyComplete: bodyFile == nil)
         switch resignOutcome {
         case .unchanged:
             toForward = swap.modified
