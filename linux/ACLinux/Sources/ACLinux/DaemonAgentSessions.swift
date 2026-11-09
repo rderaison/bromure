@@ -116,6 +116,7 @@ extension Daemon {
                     await me.readGuestRebootIntents()
                     // One powered off: its VM ended, as macOS's stops.
                     await me.endPoweredOffGuests()
+                    await me.clearBootFailuresOnRoster()
                 }
             }
         }

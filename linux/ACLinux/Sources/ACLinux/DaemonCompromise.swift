@@ -49,6 +49,9 @@ extension Daemon {
             o["squelch"] = .bool(profile.squelch.enabled)
             if let sum = SquelchLedger.shared.summary(profile.id), let v = JSONValue.encoding(sum) { o["squelchSummary"] = v }
         }
+        // Wedged at boot on filesystem errors (the decision prompt rides
+        // pendingPrompts; this lets clients badge the workspace row too).
+        if let failure = activeBootFailures[rec.id] { o["bootFailure"] = .string(failure) }
         return .object(o)
     }
 

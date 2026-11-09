@@ -149,6 +149,15 @@ public actor Daemon {
     /// Workspaces between a reboot's stop and its boot: a `--rm` one isn't
     /// deleted by that stop (macOS: rebootingProfiles).
     var rebooting: Set<String> = []
+    /// A workspace whose boot died on filesystem errors: the console's line
+    /// (DaemonBootRemedy; also in the workspace list as bootFailure).
+    var activeBootFailures: [String: String] = [:]
+    /// Those whose failure got a repair already (the next offer is a reset).
+    var bootRepairAttempted: Set<String> = []
+    /// A remedy chosen and under way.
+    var pendingBootRemedies: [String: BootRemedy] = [:]
+    /// When a workspace's watched cold boot began (its roster is newer).
+    var bootStartedAt: [String: Date] = [:]
     /// VMs whose guest said it's going down for a reboot (DaemonGuestReboot).
     var guestRebootIntents: Set<String> = []
     /// Stopped after such a reboot: relaunched once their stop is done.
@@ -1058,8 +1067,9 @@ public actor Daemon {
             if let now = registry.find(rec.id), now.state == .suspended { return await deleteVM(now, action: action, partOfReboot: partOfReboot) }
             return ControlResponse(200, ["status": "stopped"])
         }
-        // Between a reboot's stop and its boot (or during that boot): it
-        // stays off (the relaunch checks, stoppedDuringReboot).
+        // Between a reboot's stop and its boot (or during that boot; a boot
+        // remedy's too, its disk held meanwhile): it stays off (the relaunch
+        // checks, stoppedDuringReboot; macOS: whileHoldingDisk's stop).
         if live[rec.id] == nil, rebooting.contains(rec.id) {
             return ControlResponse(200, ["status": "stopped"])
         }
@@ -1577,6 +1587,13 @@ public actor Daemon {
             await teardown(l, mac: rec.mac)
             throw error
         }
+        // A workspace's cold boot: its console watched for a boot that dies
+        // on filesystem errors (DaemonBootRemedy; a cluster machine's has its
+        // own scan). The log starts fresh with each Firecracker.
+        if restoreFrom == nil, rec.registration != true, rec.kube == nil, rec.rescueFor == nil,
+           let serial = machine.config.serialLog {
+            startBootConsoleScan(id, console: (serial, 0))
+        }
         rec.state = .running
         if let restoreFrom {
             // The resumed guest sets its clock from this (agentd's resume
@@ -2020,6 +2037,9 @@ public actor Daemon {
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
+        // A boot failure ends with its session (macOS: handleSessionStopped).
+        activeBootFailures[id] = nil
+        bootStartedAt[id] = nil
         // Did the guest reboot itself? Read before the teardown takes its run
         // directory (the serial log): its reboot marker (also one it left
         // within a poll of halting), or the kernel's own last word on the

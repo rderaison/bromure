@@ -1080,6 +1080,14 @@
     {
       "id": "ACAppDelegate.promptRestartForChanges(items: [String], window: SessionPane)",
       "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
+    },
+    {
+      "id": "ACAppDelegate.repairSystemDiskAction(_: Profile.ID)",
+      "reason": "screen-only: the boot overlay's Repair Disk button (remote clients choose through the pending prompt: handleBootFilesystemFailure)"
+    },
+    {
+      "id": "ACAppDelegate.resetSystemDiskAfterBootFailure(_: Profile.ID)",
+      "reason": "screen-only: the boot overlay's Reset System Disk NSAlert (remote clients choose through the pending prompt: handleBootFilesystemFailure)"
     }
   ],
   "skipInheriting": [

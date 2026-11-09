@@ -465,6 +465,79 @@ struct DaemonTests {
         _ = try? w.cli("vm", "kill", "--force", "rr")
     }
 
+    @Test("a boot that dies on a filesystem error is offered Repair, then Reset once a repair didn't help; Reset boots it clean")
+    func bootFailureRemedy() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let ran = try w.cli("vm", "run", "--name", "bf")
+        #expect(ran.0 == 0, "vm run: \(ran.2); daemon log:\n\(((try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? "").prefix(6000))")
+        var up = false
+        for _ in 0..<240 where !up {
+            up = (try? w.cli("vm", "exec", "bf", "--", "true"))?.0 == 0
+            if !up { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        #expect(up, "the first boot answers")
+        // A boot that ends in emergency mode (as one whose fsck fails does):
+        // its console line ("You are in emergency mode", or sulogin's locked
+        // root account) is one the daemon watches for. Set on the system
+        // disk only, so a repair doesn't help and a reset does.
+        #expect(try w.cli("vm", "exec", "bf", "--", "sudo", "sh", "-c", "systemctl set-default emergency.target && sync").0 == 0)
+        _ = try? w.cli("vm", "exec", "bf", "--", "sudo", "systemctl", "reboot")
+        let id = try #require(w.vm("bf")?["id"]?.stringValue)
+        /// /state as the fat client polls it (a connected client: prompts are offered).
+        func state() -> JSONValue? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            p.arguments = ["-sS", "--max-time", "5", "--unix-socket", w.socket, "-H", "x-bromure-console-idle-ms: 0", "http://localhost/state"]
+            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return nil }
+            let d = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            return try? JSONDecoder().decode(JSONValue.self, from: d)
+        }
+        func row(_ st: JSONValue?) -> JSONValue? {
+            guard case .array(let rows)? = st?["workspaces"] else { return nil }
+            return rows.first { $0["id"]?.stringValue?.lowercased() == id.lowercased() }
+        }
+        /// The boot-failure prompt offering `button`, answered with it.
+        func answer(_ button: String) async throws -> Bool {
+            for _ in 0..<480 {
+                let st = state()
+                if case .array(let prompts)? = st?["pendingPrompts"],
+                   let p = prompts.first(where: { $0["title"]?.stringValue?.contains("can't boot") == true }),
+                   case .array(let buttons)? = p["buttons"], buttons.first?.stringValue == button,
+                   let pid = p["id"]?.stringValue {
+                    #expect(row(st)?["bootFailure"]?.stringValue?.isEmpty == false, "the row says it too")
+                    let api = FirecrackerAPI(socketPath: w.socket)
+                    return try await api.request("POST", "/prompts/\(pid)/answer", ["choice": 0]).status == 200
+                }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            return false
+        }
+        let log = { (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? "" }
+        #expect(try await answer("Repair Disk"), "offered a repair; daemon log:\n\(log().suffix(3000))")
+        // A repair (the disk is clean) doesn't change that: the next boot fails the same way.
+        #expect(try await answer("Reset System Disk"), "then a reset; daemon log:\n\(log().suffix(3000))")
+        // The reset re-clones the system disk: the boot is clean, the failure gone.
+        var clean = false
+        for _ in 0..<480 where !clean {
+            let out = (try? w.cli("vm", "exec", "bf", "--", "systemctl", "get-default"))?.1 ?? ""
+            clean = !out.isEmpty && !out.contains("emergency")
+            if !clean { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        #expect(clean, "booted on a fresh system disk; daemon log:\n\(log().suffix(3000))")
+        var cleared = false
+        for _ in 0..<40 where !cleared {
+            cleared = row(state())?["bootFailure"] == nil
+            if !cleared { try await Task.sleep(for: .milliseconds(500)) }
+        }
+        #expect(cleared, "the row's failure is gone")
+        #expect(log().contains("native fsck on") && log().contains("reset to base after boot failure"))
+        _ = try? w.cli("vm", "kill", "--force", "bf")
+    }
+
     @Test("workspaces are Profiles: POST /profiles makes one from the template with its VM registered (stopped); GET lists it")
     func profiles() async throws {
         let w = try World()
