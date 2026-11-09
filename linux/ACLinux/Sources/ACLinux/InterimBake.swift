@@ -86,7 +86,8 @@ public enum InterimBake {
 
     /// Runs the whole bake. `progress` gets one line per step, `output` the
     /// raw serial console.
-    // @port-skip linux-only: interim stand-in for UbuntuImageManager.createBaseImage
+    // partial: Firecracker's installer (Alpine netboot, one boot for setup.sh and postinstall.sh); no EFI vars; always a full build (init's force)
+    // @port UbuntuImageManager.createBaseImage(progress: @escaping(String)->Void, output: @escaping(String)->Void, force: Bool, postinstallSteps: [PostinstallStep]) h=a645adca91f3f760 @84e171b8
     public static func bake(_ o: Options, progress: @escaping @Sendable (String) -> Void = { _ in },
                             output: @escaping @Sendable (Data) -> Void = { _ in }) async throws -> Result {
         let fm = FileManager.default

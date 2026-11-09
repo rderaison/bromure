@@ -1494,6 +1494,78 @@
     {
       "id": "UbuntuImageManager.CustomizeFailureFlag.var isSet",
       "reason": "the flag carries the guest's customize-failure line across macOS's output thread; the Linux bake reads it from the installer's failure line (InterimBake.customizeFailure)"
+    },
+    {
+      "id": "VerifyImage.run()",
+      "reason": "prebuilt-image publishing and download (area H c, not now): the publish pipeline's boot check of the arm64 image; the Linux image is baked locally and booted by the KVM tests"
+    },
+    {
+      "id": "UbuntuImageManager.verifyImageBoots(diskURL: URL, timeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "prebuilt-image publishing and download (area H c, not now): the publish pipeline's boot check of the arm64 image; the Linux image is baked locally and booted by the KVM tests"
+    },
+    {
+      "id": "UbuntuImageManager.var baseImageNeedsUpdate",
+      "reason": "the GUI's launch check (inside !headless: offer a full update or new steps) and createBaseImage's non-forced skip; the Linux bake always builds, as init (force: true)"
+    },
+    {
+      "id": "ACAppDelegate.promptBaseImageUpdate(catalogVersion: String?)",
+      "reason": "the GUI's launch check (inside !headless: offer a full update or new steps) and createBaseImage's non-forced skip; the Linux bake always builds, as init (force: true)"
+    },
+    {
+      "id": "UbuntuImageManager.init(storageDir: URL?, setupDir: URL)",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.static var defaultStorageDirectory",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var baseDiskURL",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var versionStampURL",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var imageStateURL",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var hasBaseImage",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var installedImageVersion",
+      "reason": "the VZ image manager's layout; the Linux daemon's image is DaemonConfig.imageDir (base.img, base.version, image-state.json, the boot files)"
+    },
+    {
+      "id": "UbuntuImageManager.var baseImageStartsAgentItself",
+      "reason": "VZ: whether UbuntuSandboxVM still needs the bootstrap home share for an older image; every Linux image bakes the agent unit"
+    },
+    {
+      "id": "UbuntuImageManager.static runHost(tool: String, args: [String])",
+      "reason": "VZ-specific (area H d): the Linux bake is InterimBake on Firecracker; its errors are BakeError"
+    },
+    {
+      "id": "UbuntuImageError.var errorDescription",
+      "reason": "VZ-specific (area H d): the Linux bake is InterimBake on Firecracker; its errors are BakeError"
+    },
+    {
+      "id": "ACAppDelegate.buildBaseImageLocally(force: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "the GUI's setup/Rebuild Base Image local build (startInit); the Linux equivalent is `image bake` (Init.run's local path: the signed catalog's steps, else the baseline)"
+    },
+    {
+      "id": "ACAppDelegate.rebuildBaseImageAction(_: Any?)",
+      "reason": "ui: File → Rebuild Base Image (macOS menu); on Linux, `image bake`"
+    },
+    {
+      "id": "RebuildBaseImageWindow.static run()",
+      "reason": "ui: the Rebuild Base Image window (macOS-only); on Linux, `image bake --customize-script`"
+    },
+    {
+      "id": "ACAppDelegate.installBrowserImageIfRequested()",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client) (its debug/test install hook)"
     }
   ],
   "skipInheriting": [

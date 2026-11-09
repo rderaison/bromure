@@ -372,7 +372,8 @@ struct Image: AsyncParsableCommand {
         var alpineReleases: String?
         @Flag(help: "Echo the installer's serial console.") var verbose = false
 
-        // @port-skip linux-only: interim image bake CLI
+        // partial: a local build only (the prebuilt download is area H c); `image bake`, not `init`
+        // @port Init.run() h=6f7d8002583ccf31 @4237c02e
         func run() async throws {
             _ = acl_unblock_term_signals()
             let env = ProcessInfo.processInfo.environment
