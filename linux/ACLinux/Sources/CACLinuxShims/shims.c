@@ -110,6 +110,9 @@ void acl_secure_free(void *p, size_t len) {
 }
 
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/xattr.h>
+#endif
 #include <sys/un.h>
 
 int acl_sd_notify(const char *state) {
@@ -356,4 +359,14 @@ int acl_pam_check(const char *service, const char *user, const char *password) {
     if (pamh) end(pamh, r);
     dlclose(h);
     return r;
+}
+
+int acl_has_access_acl(const char *path) {
+#if defined(__linux__)
+    if (getxattr(path, "system.posix_acl_access", NULL, 0) >= 0) return 1;
+    return (errno == ENODATA || errno == ENOTSUP) ? 0 : -errno;
+#else
+    (void)path;
+    return 0;
+#endif
 }

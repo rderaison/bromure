@@ -45,6 +45,9 @@ int acl_set_nondumpable(void);
 
 /// pipe2(fds, O_CLOEXEC). Returns 0, or -errno.
 int acl_pipe_cloexec(int fds[2]);
+/// 1 if `path` (followed) carries a POSIX access ACL, 0 if not, -errno on
+/// another error (an image file's trust check).
+int acl_has_access_acl(const char *path);
 
 /// accept4(fd, NULL, NULL, SOCK_CLOEXEC): no spawned child inherits the
 /// connection. Returns the descriptor, or -errno.

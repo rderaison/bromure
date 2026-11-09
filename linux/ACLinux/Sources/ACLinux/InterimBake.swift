@@ -129,6 +129,10 @@ public enum InterimBake {
         let fm = FileManager.default
         let t0 = ContinuousClock.now
         try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Writable by this user alone whatever the umask (002 makes it
+        // group-writable): the daemon boots only an image no one else could
+        // have written (ImageTrust).
+        Self.clearSharedWrite(o.outputDir)
         try fm.createDirectory(atPath: o.cacheDir, withIntermediateDirectories: true)
         // One bake per output dir: two would share .work and the partial disk.
         let lock = open(o.outputDir + "/.bake.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
@@ -327,13 +331,14 @@ public enum InterimBake {
         discardPromotion(imageDir: o.outputDir)
         for f in promotedFiles {
             try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f + ".new")
+            chmod(o.outputDir + "/" + f + ".new", 0o644)
         }
         // Which disk the set belongs to: the partial's identity, which the
         // rename carries over to base.img. Written last, so a set without it
         // is incomplete (never rolled forward).
         guard let identity = diskIdentity(partial) else { throw MachineError.io("stat \(partial)", errno) }
         try identity.write(toFile: o.outputDir + "/" + promotionMarker, atomically: true, encoding: .utf8)
-        guard rename(partial, finalImage) == 0 else { throw MachineError.io("rename \(partial)", errno) }
+        guard chmod(partial, 0o644) == 0, rename(partial, finalImage) == 0 else { throw MachineError.io("rename \(partial)", errno) }
         promoted = true
         // From here the new disk is live: the rest rolls forward (here, or
         // at the next bake's or daemon's start: finishPromotion).
@@ -470,6 +475,16 @@ public enum InterimBake {
                 atomically: true, encoding: .utf8)
         }
         return ordered.map(\.uuid)
+    }
+
+    /// Group and other write cleared on `path` when it's this user's own
+    /// (not a link): what a bake writes into isn't writable by others.
+    // @port-skip linux-only: the bake's image permissions
+    @discardableResult
+    static func clearSharedWrite(_ path: String) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) == 0, st.st_mode & S_IFMT != S_IFLNK, st.st_uid == getuid(), st.st_mode & 0o022 != 0 else { return false }
+        return chmod(path, mode_t(st.st_mode & 0o7777 & ~0o022)) == 0
     }
 
     /// An amended image's applied steps: what it had, and the new ones

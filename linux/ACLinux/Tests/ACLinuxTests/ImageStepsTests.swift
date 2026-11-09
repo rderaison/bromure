@@ -146,7 +146,7 @@ struct ImageStepsTests {
         // A world-writable kernel: refused, with the fix (the file is ours).
         chmod(img + "/vmlinuz", 0o666)
         guard case .failure(let p) = ImageTrust.check(img) else { Issue.record("a world-writable kernel"); return }
-        #expect(p.path == img + "/vmlinuz" && p.fix == "chmod o-w \(img)/vmlinuz")
+        #expect(p.path == img + "/vmlinuz" && p.fix == "chmod go-w \(img)/vmlinuz")
         chmod(img + "/vmlinuz", 0o644)
         // A dir above it others may write (not sticky): refused.
         chmod(dir, 0o777)
@@ -168,30 +168,42 @@ struct ImageStepsTests {
         try fm.removeItem(atPath: dir + "/real/initrd")
         guard case .failure(let dangling) = ImageTrust.check(img) else { Issue.record("a dangling link"); return }
         #expect(dangling.why.contains("link to nothing"))
-        // The daemon's error names the fix when it's the user's own.
+        // Group-writable, the owner's private group or not: refused, and the
+        // daemon's error names the fix when it's the user's own.
         try fm.removeItem(atPath: img + "/initrd.img")
         fm.createFile(atPath: img + "/initrd.img", contents: Data("x".utf8))
         chmod(img + "/initrd.img", 0o664)
         let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: img, agentdPath: "")
-        do { _ = try c.checkedImage(); if !ImageTrust.privateGroup(gid: getgid(), owner: getuid()) { Issue.record("group-writable passed") } }
-        catch { #expect("\(error)".contains("fix: chmod g-w \(img)/initrd.img")) }
+        #expect(throws: (any Error).self) { _ = try c.checkedImage() }
+        do { _ = try c.checkedImage() } catch { #expect("\(error)".contains("fix: chmod go-w \(img)/initrd.img")) }
+        // No image dir at all: refused, not passed with unresolved paths.
+        guard case .failure(let none) = ImageTrust.check(dir + "/nowhere") else { Issue.record("a missing image dir"); return }
+        #expect(none.why.contains("can't be resolved"))
     }
 
-    /// A private group only where every user can be listed.
-    @Test func groupsArePrivateOnlyWithLocalUsers() throws {
+    /// A POSIX ACL (named users or groups, a mask) isn't trusted.
+    @Test func anACLIsRefused() throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        func ns(_ s: String) throws -> Bool {
-            try s.write(toFile: dir + "/ns", atomically: true, encoding: .utf8)
-            return ImageTrust.localUsersOnly(nsswitch: dir + "/ns")
-        }
-        #expect(try ns("passwd: files systemd\ngroup: files\n"))
-        #expect(try ns("passwd:\tcompat # comment\n"))
-        #expect(try !ns("passwd: files systemd sss\n"), "SSSD: users the scan can't list")
-        #expect(try !ns("passwd: files ldap\n"))
-        #expect(try !ns("group: files\n"), "no passwd line")
-        #expect(!ImageTrust.localUsersOnly(nsswitch: dir + "/none"))
-        #expect(!ImageTrust.privateGroup(gid: 0, owner: getuid()) || getuid() == 0, "not this user's primary group")
+        let img = dir + "/img"
+        try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true)
+        chmod(img, 0o755)
+        FileManager.default.createFile(atPath: img + "/base.img", contents: Data("x".utf8))
+        chmod(img + "/base.img", 0o644)
+        guard case .success = ImageTrust.check(img) else { Issue.record("no ACL"); return }
+        // A named-user entry for nobody (setfacl may not be installed: then skip).
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/setfacl")
+        p.arguments = ["-m", "u:nobody:rw", img + "/base.img"]
+        guard (try? p.run()) != nil else { return }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return }
+        guard case .failure(let acl) = ImageTrust.check(img) else { Issue.record("an ACL'd disk"); return }
+        // Its mask shows as the group's bits: refused for those, or the ACL.
+        #expect(acl.path == img + "/base.img" && (acl.why.contains("POSIX ACL") || acl.why.contains("writable by its group")), "\(acl)")
+        chmod(img + "/base.img", 0o644)   // the mask cleared, the named entry kept
+        guard case .failure(let still) = ImageTrust.check(img) else { Issue.record("an ACL with no write bits"); return }
+        #expect(still.why.contains("POSIX ACL") && still.fix == "setfacl -b \(img)/base.img")
     }
 
     /// An image that isn't safe to boot refuses a suspended workspace's
@@ -214,5 +226,35 @@ struct ImageStepsTests {
         #expect(resp.status == 409 && (resp.body["error"]?.stringValue ?? "").contains("isn't safe to boot"), "\(resp.status) \(resp.body)")
         #expect(FileManager.default.fileExists(atPath: snap + "/vm.snap"), "the saved state is kept")
         await d.shutdown()
+    }
+
+    /// A user's own image (umask 002 made it group-writable) is fixed at the
+    /// daemon's start, not refused: only <state>/image, only their files,
+    /// never through a link, never a configured dir.
+    @Test func theUsersOwnImageIsMadeTheirsAlone() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fm = FileManager.default
+        let own = dir + "/state/image", shared = dir + "/shared"
+        for d in [own, shared] { try fm.createDirectory(atPath: d, withIntermediateDirectories: true); chmod(d, 0o775) }
+        chmod(dir + "/state", 0o755)
+        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline", "kernel-release", "base.version"] {
+            fm.createFile(atPath: own + "/" + f, contents: Data("x".utf8)); chmod(own + "/" + f, 0o664)
+        }
+        fm.createFile(atPath: shared + "/base.img", contents: Data("x".utf8)); chmod(shared + "/base.img", 0o666)
+        fm.createFile(atPath: dir + "/target", contents: Data("x".utf8)); chmod(dir + "/target", 0o666)
+        try fm.createSymbolicLink(atPath: own + "/linked", withDestinationPath: dir + "/target")
+        let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: shared, agentdPath: "")
+        c.secureOwnImageDir()
+        func mode(_ p: String) -> mode_t { var st = stat(); _ = lstat(p, &st); return st.st_mode & 0o777 }
+        #expect(mode(own) == 0o700)
+        #expect(mode(own + "/vmlinuz") == 0o644 && mode(own + "/base.img") == 0o644)
+        #expect(mode(dir + "/target") == 0o666, "not through a link")
+        #expect(mode(shared) == 0o775 && mode(shared + "/base.img") == 0o666, "a configured dir is left as it is")
+        guard case .success = ImageTrust.check(own) else { Issue.record("their own image, fixed, boots"); return }
+        // What a bake writes into: this user's, cleared; another's or a link, not.
+        chmod(shared, 0o775)
+        #expect(InterimBake.clearSharedWrite(shared) && mode(shared) == 0o755)
+        #expect(!InterimBake.clearSharedWrite(own + "/linked"))
     }
 }

@@ -55,14 +55,26 @@ public struct DaemonConfig: Sendable {
         }
     }
 
-    /// A user's own image dir in their state dir, 0700 even when an older
-    /// daemon made it with the default mode. Any other dir is left as it is.
+    /// A user's own image dir in their state dir: 0700, and its files (this
+    /// user's, not links) writable by no one else, even when an older daemon
+    /// or bake made them under umask 002. Said in the log. Any other dir is
+    /// left as it is (a configured shared one included).
     // @port-skip linux-only: Linux daemon configuration (the per-user image)
     func secureOwnImageDir() {
         let dir = stateDir + "/image"
         var st = stat()
-        guard lstat(dir, &st) == 0, st.st_mode & S_IFMT == S_IFDIR, st.st_uid == getuid(), st.st_mode & 0o777 != 0o700 else { return }
-        chmod(dir, 0o700)
+        guard lstat(dir, &st) == 0, st.st_mode & S_IFMT == S_IFDIR, st.st_uid == getuid() else { return }
+        var changed: [String] = []
+        if st.st_mode & 0o777 != 0o700, chmod(dir, 0o700) == 0 { changed.append(dir) }
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
+            let path = dir + "/" + name
+            var f = stat()
+            guard lstat(path, &f) == 0, f.st_mode & S_IFMT == S_IFREG, f.st_uid == getuid() else { continue }
+            if InterimBake.clearSharedWrite(path) { changed.append(path) }
+        }
+        if !changed.isEmpty {
+            FileHandle.standardError.write(Data("bromure-ac daemon: made writable by this user only: \(changed.joined(separator: ", "))\n".utf8))
+        }
     }
 
     /// Whether `dir` holds an image (its disk and stamp).
@@ -1279,10 +1291,11 @@ public actor Daemon {
         // A suspended VM resumes from its snapshot while it still pairs with
         // its disks; otherwise `resume` refuses and `start` boots it fresh.
         var restoreFrom: String?
-        // An image that isn't safe to boot refuses the start before the
-        // saved state is looked at: it's kept, not dropped for a fresh boot.
-        do { _ = try config.checkedImage() } catch { return .error(409, "Can't start '\(rec.name)': \(error)") }
         if rec.state == .suspended {
+            // An image that isn't safe to boot refuses the start before the
+            // saved state is looked at: it's kept, not dropped for a fresh
+            // boot. (A fresh start is refused where its config is made.)
+            do { _ = try config.checkedImage() } catch { return .error(409, "Can't start '\(rec.name)': \(error)") }
             let dir = snapshotDir(rec.id)
             if let why = snapshotUsable(rec, dir) {
                 if resumeOnly { return .error(409, "Can't resume '\(rec.name)': \(why); start it instead") }
