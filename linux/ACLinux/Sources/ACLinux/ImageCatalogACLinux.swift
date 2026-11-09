@@ -22,6 +22,27 @@ extension ImageDistribution {
     }
 }
 
+extension ImageDistribution {
+    /// The amd64 image's channel (a Linux server's prebuilt Firecracker
+    /// image): `images/<major>/amd64/`, the same format and pinned key as
+    /// the arm64 channel, its own signing magic -- an arm64 catalog, validly
+    /// signed, isn't one here (macOS's magic is what keeps the Web and AC
+    /// channels apart the same way). Its steps' baseline is the bundled
+    /// img-catalog.json, as the arm64 channel's.
+    // @port-skip linux-only: the amd64 image channel (macOS publishes and installs arm64 only)
+    public static func agentCodingAmd64(imageVersion: String) -> ImageDistribution {
+        ImageDistribution(
+            catalogPrefix: "images/\(imageVersion)/amd64",
+            signingMagic: "bromure-img-catalog-amd64-v1",
+            cacheFileName: "img-catalog-amd64.json",
+            defaultSupportDirName: "BromureAC",
+            loadBaseline: {
+                ImageCatalog.loadBaseline(bundle: acResourceBundle, resource: "img-catalog")
+            }
+        )
+    }
+}
+
 /// The image's state sidecar, `image-state.json` next to the version stamp
 /// (macOS: UbuntuImageManager.imageStateURL, loadImageState and
 /// writeImageState).

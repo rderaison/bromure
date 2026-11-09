@@ -12,8 +12,28 @@ public struct DaemonConfig: Sendable {
     public var stateDir: String
     /// `$XDG_RUNTIME_DIR/bromure-ac`: control.sock and the VMs' sockets (short paths).
     public var runtimeDir: String
-    /// linux/bake's output: base.img, vmlinuz, initrd.img, cmdline.
-    public var imageDir: String
+    /// The configured image (BROMURE_AC_IMAGE; multi-user: the shared,
+    /// root-owned one): base.img, vmlinuz, initrd.img, cmdline.
+    public var configuredImageDir: String
+    /// The image the VMs boot: this user's own (`userImageDir`) once it has
+    /// one, else the configured one.
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    public var imageDir: String { Self.hasImage(userImageDir) ? userImageDir : configuredImageDir }
+    /// Where this user's image is installed, baked or amended: the
+    /// configured dir when this user may write it, else their own in the
+    /// state dir (a multi-user daemon's: per user, as its caches).
+    // @port-skip linux-only: Linux daemon configuration (the per-user image)
+    public var userImageDir: String {
+        var st = stat()
+        guard stat(configuredImageDir, &st) == 0, access(configuredImageDir, W_OK) != 0 else { return configuredImageDir }
+        return stateDir + "/image"
+    }
+
+    /// Whether `dir` holds an image (its disk and stamp).
+    // @port-skip linux-only: Linux daemon configuration
+    static func hasImage(_ dir: String) -> Bool {
+        FileManager.default.fileExists(atPath: dir + "/base.img") && FileManager.default.fileExists(atPath: dir + "/base.version")
+    }
     /// bromure-agentd.py, staged into each VM's meta share.
     public var agentdPath: String
     /// A new VM's home image, GiB, when set (macOS: `vm.homeImageGB`); else
@@ -41,7 +61,7 @@ public struct DaemonConfig: Sendable {
     public init(stateDir: String, runtimeDir: String, imageDir: String, agentdPath: String) {
         self.stateDir = stateDir
         self.runtimeDir = runtimeDir
-        self.imageDir = imageDir
+        self.configuredImageDir = imageDir
         self.agentdPath = agentdPath
     }
 
@@ -285,7 +305,7 @@ public actor Daemon {
         pc.useFDStore = true
         if let warning = Self.configHomeWarning(stateDir: config.stateDir) { FileHandle.standardError.write(Data(warning.utf8)) }
         // A bake cut short after its disk went live: its boot files and stamp.
-        InterimBake.finishPromotionIfIdle(imageDir: config.imageDir)
+        InterimBake.finishPromotionIfIdle(imageDir: config.userImageDir)
         let stored = FDStore.take()
         let adoptedPasst = PasstUplink.Adopted.fromStore(stored)
         // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM,

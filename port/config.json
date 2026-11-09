@@ -258,6 +258,7 @@
     "Sources/SandboxEngine/EphemeralDisk+Space.swift",
     "Sources/SandboxEngine/HostNetworkInfo.swift",
     "Sources/SandboxEngine/ImageCatalog.swift",
+    "Sources/SandboxEngine/ImageFetch.swift",
     "Sources/SandboxEngine/InitrdShim.swift",
     "Sources/SandboxEngine/InstallIdentity.swift",
     "Sources/SandboxEngine/JSONNumber.swift",
@@ -1369,60 +1370,44 @@
       "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
     },
     {
-      "path": "Sources/SandboxEngine/ImageFetch.swift",
-      "reason": "the prebuilt-image download's transfer, checksum and sparse gunzip (area H c, not now); its only callers are the download paths (downloadBaseImage, Provisioner.fetch, Bromure Web)"
-    },
-    {
-      "id": "UbuntuImageManager.static isDownloadSideFailure(_: Error)",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
-    },
-    {
-      "id": "UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
-    },
-    {
       "id": "UbuntuImageManager.static cloneFile(_: URL, to: URL)",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
-    },
-    {
-      "id": "UbuntuImageManager.fetchAndExpand(image: RemoteBaseImage, gz: URL, disk: URL, progress: @escaping(String)->Void)",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "APFS clonefile: the Linux amend copies with cp --reflink=auto --sparse=always (InterimBake), a download's disk is moved into place"
     },
     {
       "id": "UbuntuImageManager.var stockDiskURL",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "the stock.img checkpoint isn't on Linux yet (ImageInstall.download: each install downloads and runs every step)"
     },
     {
       "id": "UbuntuImageManager.var stockStateURL",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "the stock.img checkpoint isn't on Linux yet (ImageInstall.download: each install downloads and runs every step)"
     },
     {
       "id": "UbuntuImageManager.loadStockState()",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "the stock.img checkpoint isn't on Linux yet (ImageInstall.download: each install downloads and runs every step)"
     },
     {
       "id": "UbuntuImageManager.static stockMissingSteps(stock: BaseImageState?, imageUUID: String, steps: [PostinstallStep])",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "the stock.img checkpoint isn't on Linux yet (ImageInstall.download: each install downloads and runs every step)"
     },
     {
       "id": "UbuntuImageManager.var provisionerKernelURL",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "no published provisioner for amd64: the Linux postinstall boot is the Alpine netboot (InterimBake)"
     },
     {
       "id": "UbuntuImageManager.var provisionerInitrdURL",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "no published provisioner for amd64: the Linux postinstall boot is the Alpine netboot (InterimBake)"
     },
     {
       "id": "UbuntuImageManager.var provisionerShimmedInitrdURL",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "no published provisioner for amd64: the Linux postinstall boot is the Alpine netboot (InterimBake)"
     },
     {
       "id": "UbuntuImageManager.var hasProvisioner",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "no published provisioner for amd64: the Linux postinstall boot is the Alpine netboot (InterimBake)"
     },
     {
       "id": "Provisioner.static fetch(from: RemoteBaseImage, kernelDest: URL, initrdDest: URL, progress: @escaping(String)->Void)",
-      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+      "reason": "no published provisioner for amd64: the Linux postinstall boot is the Alpine netboot (InterimBake)"
     },
     {
       "id": "UbuntuImageManager.var efiVarsURL",

@@ -1,5 +1,10 @@
+#if canImport(CommonCrypto)
 import CommonCrypto
+#endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // MARK: - Prebuilt-image download plumbing (shared by every channel)
 //
@@ -118,20 +123,15 @@ public enum ImageFetch {
     public static func sha256Streaming(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        var ctx = CC_SHA256_CTX()
-        CC_SHA256_Init(&ctx)
+        var hasher = StreamingSHA256()
         while true {
             let chunk = try autoreleasepool {
                 try handle.read(upToCount: 4 * 1024 * 1024)
             }
             guard let chunk, !chunk.isEmpty else { break }
-            chunk.withUnsafeBytes {
-                _ = CC_SHA256_Update(&ctx, $0.baseAddress, CC_LONG($0.count))
-            }
+            hasher.update(chunk)
         }
-        var hash = [UInt8](repeating: 0, count: 32)
-        CC_SHA256_Final(&hash, &ctx)
-        return hash.map { String(format: "%02x", $0) }.joined()
+        return hasher.hexDigest()
     }
 
     /// Stream-gunzip a compressed raw disk to `dest`, skipping writes for
@@ -277,3 +277,25 @@ final class LargeFileDownloader: NSObject, URLSessionDownloadDelegate, @unchecke
         }
     }
 }
+
+#if canImport(CommonCrypto)
+/// SHA-256 over a file's chunks, as `sha256Streaming` reads them
+/// (CommonCrypto; the Linux build has its own over swift-crypto).
+struct StreamingSHA256 {
+    private var ctx = CC_SHA256_CTX()
+
+    init() { CC_SHA256_Init(&ctx) }
+
+    mutating func update(_ chunk: Data) {
+        chunk.withUnsafeBytes {
+            _ = CC_SHA256_Update(&ctx, $0.baseAddress, CC_LONG($0.count))
+        }
+    }
+
+    mutating func hexDigest() -> String {
+        var hash = [UInt8](repeating: 0, count: 32)
+        CC_SHA256_Final(&hash, &ctx)
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+}
+#endif

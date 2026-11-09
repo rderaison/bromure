@@ -65,9 +65,31 @@ public enum InterimBake {
         /// since) run on a copy of it, setup.sh doesn't run, no customize
         /// script, and the image's applied steps gain them.
         public var amend = false
-        /// The steps the image already has, when its image-state.json
-        /// doesn't say (an image that predates it). nil: that file's.
-        public var appliedBefore: [String]?
+        /// A downloaded image to finish instead of building one (macOS:
+        /// downloadBaseImage's postinstall boot): its expanded disk becomes
+        /// the scratch disk, setup.sh doesn't run, postinstall.sh always
+        /// does (every catalog step, then the customize script).
+        public var downloaded: Downloaded?
+        // @port-skip linux-only: see Options.downloaded
+        public struct Downloaded: Sendable {
+            /// The expanded disk, in the output dir (moved, not copied).
+            public var disk: String
+            public var imageUUID: String
+            public var version: String
+            // @port-skip linux-only: see Options.downloaded
+            public init(disk: String, imageUUID: String, version: String) {
+                self.disk = disk
+                self.imageUUID = imageUUID
+                self.version = version
+            }
+        }
+        /// The image an amend starts from, when not the output dir's own
+        /// (a multi-user daemon's first amend of the shared image: its copy
+        /// goes to the user's image dir). nil: the output dir's.
+        public var amendFrom: String?
+        /// The bundled catalog, for an image older than image-state.json
+        /// (its steps count as applied: Daemon.appliedPostinstallSteps).
+        public var baseline: ImageCatalog?
         // @port-skip linux-only: interim bake options
         public init(outputDir: String, cacheDir: String, vmSetupDir: String, imageVersion: String) {
             self.outputDir = outputDir
@@ -124,18 +146,28 @@ public enum InterimBake {
         // A promotion a crash cut short (its disk live): finished first, or
         // the stamp below would be the old one's.
         if !fm.fileExists(atPath: o.outputDir + "/base.img.partial") { _ = finishPromotion(imageDir: o.outputDir) }
-        let priorStamp = (try? String(contentsOfFile: o.outputDir + "/base.version", encoding: .utf8))?
+        // An amend's image is its source's (the output dir's, or the one it
+        // copies from).
+        let source = o.amend ? o.amendFrom ?? o.outputDir : o.outputDir
+        let priorStamp = (try? String(contentsOfFile: source + "/base.version", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        var priorApplied: [String] = []
         if o.amend {
-            guard !o.postinstallSteps.isEmpty else { throw BakeError.staging("no steps to amend the image with") }
-            guard fm.fileExists(atPath: o.outputDir + "/base.img"), priorStamp != nil else {
+            guard fm.fileExists(atPath: source + "/base.img"), priorStamp != nil else {
                 throw BakeError.staging("no base image to amend")
             }
+            // Read under the lock: what the image has now, not when the
+            // question was asked (it may have been rebuilt or amended since).
+            priorApplied = Daemon.appliedPostinstallSteps(imageDir: source, baseline: o.baseline ?? ImageCatalog(postinstall: []))
+            o.postinstallSteps.removeAll { priorApplied.contains($0.uuid) }
+            guard !o.postinstallSteps.isEmpty else { throw BakeError.staging("no steps to amend the image with") }
         }
         // An amend keeps the image's own major (macOS: applyPostinstallSteps'
         // bundledMajor): a dot revision, which the drift check offers.
-        let newStamp = nextStamp(priorStamp: priorStamp,
-                                 bundled: o.amend ? priorStamp.map(majorVersion(of:)) ?? o.imageVersion : o.imageVersion)
+        // A download's is the published image's major (macOS: the same).
+        let bundled = o.downloaded.map { majorVersion(of: $0.version) }
+            ?? (o.amend ? priorStamp.map(majorVersion(of:)) ?? o.imageVersion : o.imageVersion)
+        let newStamp = nextStamp(priorStamp: priorStamp, bundled: bundled)
         let work = o.outputDir + "/.work"
         try? fm.removeItem(atPath: work)
         try fm.createDirectory(atPath: work + "/out", withIntermediateDirectories: true)
@@ -165,16 +197,27 @@ public enum InterimBake {
         let postinstall = work + "/postinstall"
         let steps = try stagePostinstall(o.postinstallSteps, to: postinstall)
         if let script = o.customizeScript { try stageCustomize(script, to: postinstall) }
-        let runsPostinstall = !steps.isEmpty || o.customizeScript != nil
+        // A download's postinstall boot runs even with no steps: it also
+        // restores resolv.conf and checks the downloaded file system.
+        let runsPostinstall = !steps.isEmpty || o.customizeScript != nil || o.downloaded != nil
+        if runsPostinstall { try fm.createDirectory(atPath: postinstall + "/steps", withIntermediateDirectories: true) }
         let partial = o.outputDir + "/base.img.partial"
         // An amend's scratch disk is a copy of the live one (macOS: an APFS
         // clone; here a reflink where the filesystem has them, holes kept).
         let applied: [String]
-        if o.amend {
+        if let d = o.downloaded {
+            try? fm.removeItem(atPath: partial)
+            guard rename(d.disk, partial) == 0 else { throw MachineError.io("rename \(d.disk)", errno) }
+            progress(steps.isEmpty ? "Finalizing image…"
+                     : "Installing recommended packages (\(steps.count) step(s), ~2-5 min)…")
+            applied = steps
+        } else if o.amend {
             try? fm.removeItem(atPath: partial)
             progress("Installing recommended packages (\(steps.count) step(s))…")
-            try await ChildProcess.run("/usr/bin/cp", ["--reflink=auto", "--sparse=always", o.outputDir + "/base.img", partial])
-            applied = Self.amendedSteps(prior: o.appliedBefore ?? ImageState.load(imageDir: o.outputDir)?.appliedStepUUIDs ?? [], adding: steps)
+            try await ChildProcess.run("/usr/bin/cp", ["--reflink=auto", "--sparse=always", source + "/base.img", partial])
+            // Ours to write (a shared image's copy would keep its read-only mode).
+            guard chmod(partial, 0o644) == 0 else { throw MachineError.io("chmod \(partial)", errno) }
+            applied = Self.amendedSteps(prior: priorApplied, adding: steps)
         } else {
             try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
             applied = steps
@@ -277,7 +320,8 @@ public enum InterimBake {
             .write(toFile: work + "/out/cmdline", atomically: true, encoding: .utf8)
         try (newStamp + "\n").write(toFile: work + "/out/base.version", atomically: true, encoding: .utf8)
         // Which catalog steps the image has, as macOS records a local build.
-        try ImageState.encoded(BaseImageState(imageUUID: o.amend ? ImageState.load(imageDir: o.outputDir)?.imageUUID : nil,
+        try ImageState.encoded(BaseImageState(imageUUID: o.downloaded?.imageUUID
+                                                  ?? (o.amend ? ImageState.load(imageDir: source)?.imageUUID : nil),
                                               version: newStamp, appliedStepUUIDs: applied))
             .write(to: URL(fileURLWithPath: work + "/out/image-state.json"))
         discardPromotion(imageDir: o.outputDir)
@@ -350,16 +394,16 @@ public enum InterimBake {
         try await con.buffer.wait(for: "MOUNTS_OK", timeout: 60, failures: ["mount:"])
 
         let t = ContinuousClock.now
-        // An amend's disk is a finished image: postinstall.sh alone (macOS:
-        // runPostinstall's own installer boot).
-        if !o.amend {
+        // An amend's or a download's disk is a finished image:
+        // postinstall.sh alone (macOS: runPostinstall's own installer boot).
+        if !o.amend, o.downloaded == nil {
             progress("Installer: running setup.sh…")
             let mirror = o.ubuntuMirror.map { "UBUNTU_MIRROR='\($0)' " } ?? ""
             con.send("\(mirror)ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/setup.sh \(o.displayScale)")
             try await con.buffer.wait(for: "SANDBOX_SETUP_DONE", timeout: o.setupTimeout.seconds,
                                       failures: ["SANDBOX_SETUP_FAILED:", "Kernel panic", "Internal error: Oops"])
         }
-        if postinstallSteps > 0 || o.customizeScript != nil {
+        if postinstallSteps > 0 || o.customizeScript != nil || o.downloaded != nil {
             // macOS runs postinstall.sh in a second installer boot on the
             // finished disk; the same installer is still up here.
             progress("Installer: installing the agent CLIs (\(postinstallSteps) catalog step(s))…")

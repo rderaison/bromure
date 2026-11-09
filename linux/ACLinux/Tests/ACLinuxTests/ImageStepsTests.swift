@@ -81,4 +81,42 @@ struct ImageStepsTests {
         _ = Daemon.appliedPostinstallSteps(imageDir: dir, baseline: baseline)
         #expect(!FileManager.default.fileExists(atPath: dir + "/image-state.json"), "not written back")
     }
+
+    /// An amend runs only the accepted steps the image still lacks, read
+    /// under the bake's lock: none left is refused before anything is fetched.
+    @Test func anAmendSkipsStepsTheImageGotMeanwhile() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/out", withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: dir + "/out/base.img", contents: Data())
+        try "201.1\n".write(toFile: dir + "/out/base.version", atomically: true, encoding: .utf8)
+        ImageState.write(BaseImageState(imageUUID: nil, version: "201.1", appliedStepUUIDs: ["a"]), imageDir: dir + "/out")
+        var o = InterimBake.Options(outputDir: dir + "/out", cacheDir: dir + "/cache", vmSetupDir: dir + "/setup", imageVersion: "201")
+        o.amend = true
+        o.postinstallSteps = [Self.step("a", 1, "Claude Code")]
+        await #expect(throws: BakeError.self) { _ = try await InterimBake.bake(o) }
+        #expect(!FileManager.default.fileExists(atPath: dir + "/cache/alpine-vmlinuz-x86_64"), "nothing fetched")
+    }
+
+    /// A multi-user daemon's shared image is read-only: this user's image
+    /// is theirs, in the state dir, and boots once it's there.
+    @Test func aReadOnlySharedImageSendsInstallsToTheUsersOwn() throws {
+        let dir = try shortTempDir()
+        defer { chmod(dir + "/shared", 0o755); try? FileManager.default.removeItem(atPath: dir) }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: dir + "/shared", withIntermediateDirectories: true)
+        fm.createFile(atPath: dir + "/shared/base.img", contents: Data())
+        fm.createFile(atPath: dir + "/shared/base.version", contents: Data("201\n".utf8))
+        let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: dir + "/shared", agentdPath: "")
+        #expect(c.userImageDir == dir + "/shared" && c.imageDir == dir + "/shared", "writable: the configured one")
+        chmod(dir + "/shared", 0o555)
+        guard access(dir + "/shared", W_OK) != 0 else { return }   // root writes anyway
+        #expect(c.userImageDir == dir + "/state/image")
+        #expect(c.imageDir == dir + "/shared", "none of their own yet: the shared one")
+        try fm.createDirectory(atPath: dir + "/state/image", withIntermediateDirectories: true)
+        fm.createFile(atPath: dir + "/state/image/base.img", contents: Data())
+        fm.createFile(atPath: dir + "/state/image/base.version", contents: Data("201.1\n".utf8))
+        #expect(c.imageDir == dir + "/state/image", "their own, once it's there")
+        #expect(Daemon.mayWriteImage(c.userImageDir) && !Daemon.mayWriteImage(dir + "/shared"))
+    }
 }

@@ -348,13 +348,48 @@ extension VM {
 
 // @port-skip linux-only: Linux CLI group for the guest image (macOS: the app's Rebuild Base Image)
 struct Image: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Bake.self])
+    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Install.self, Bake.self])
+
+    /// `image install`: macOS's `init`. The prebuilt amd64 image when it's
+    /// published (the amd64 channel's signed catalog), else a local bake.
+    struct Install: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Install the amd64 guest image: download the prebuilt image (a local bake as fallback).")
+        @OptionGroup var bake: Bake
+        @Flag(name: .customLong("build-local"), help: "Skip the prebuilt-image download and bake locally (needs /dev/kvm and network).")
+        var buildLocal = false
+        @Flag(name: .customLong("download-only"),
+              help: ArgumentHelp("Fail when the download fails instead of falling back to a local bake.", visibility: .hidden))
+        var downloadOnly = false
+
+        // partial: no --fresh (no stock.img checkpoint: each install downloads); the fallback is the Firecracker bake
+        // @port Init.run() h=6f7d8002583ccf31 @d3ebbda2
+        func run() async throws {
+            _ = acl_unblock_term_signals()
+            let o = try await bake.options()
+            let verbose = bake.verbose
+            if buildLocal { return try await Bake.bake(o, verbose: verbose) }
+            let progress: @Sendable (String) -> Void = { FileHandle.standardError.write(Data("[install] \($0)\n".utf8)) }
+            let store = ImageCatalogStore(distribution: .agentCodingAmd64(imageVersion: o.imageVersion),
+                                          supportDir: URL(fileURLWithPath: o.outputDir))
+            do {
+                let r = try await ImageInstall.download(o, store: store, steps: !bake.noAgentCLIs, progress: progress,
+                                                        output: { if verbose { FileHandle.standardError.write($0) } })
+                Bake.report(r, o)
+            } catch where !downloadOnly && ImageInstall.isDownloadSideFailure(error) {
+                // Only the download's own failures: the postinstall boot's
+                // would fail the bake the same way.
+                progress("Prebuilt-image download unavailable (\(error.localizedDescription)) — building locally instead.")
+                try await Bake.bake(o, verbose: verbose)
+            }
+        }
+    }
 
     // @port-skip linux-only: interim image bake CLI
     struct Bake: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Bake the amd64 guest image under Firecracker/KVM from vm-setup (needs /dev/kvm and network).")
-        @Option(help: "Output directory. Default: the daemon's image directory.") var out: String?
+        @Option(help: "Output directory. Default: your image directory (the daemon's; with a shared read-only image, your own in its state directory).") var out: String?
         @Option(name: .customLong("vm-setup"), help: "vm-setup directory (setup.sh and the agents).")
         var vmSetup = "Sources/AgentCoding/Resources/vm-setup"
         @Option(name: .customLong("image-version"), help: "Stamp for base.version. Default: UbuntuImageManager.imageVersion from the repo.")
@@ -372,10 +407,16 @@ struct Image: AsyncParsableCommand {
         var alpineReleases: String?
         @Flag(help: "Echo the installer's serial console.") var verbose = false
 
-        // partial: a local build only (the prebuilt download is area H c); `image bake`, not `init`
-        // @port Init.run() h=6f7d8002583ccf31 @4237c02e
+        // @port-skip linux-only: the explicit local bake (macOS: init --build-local; `image install` is init)
         func run() async throws {
             _ = acl_unblock_term_signals()
+            try await Self.bake(try await options(), verbose: verbose)
+        }
+
+        /// The bake's options from the flags: the catalog's steps (unless
+        /// --no-agent-clis), the customize script.
+        // @port-skip linux-only: see Bake
+        func options() async throws -> InterimBake.Options {
             let env = ProcessInfo.processInfo.environment
             let home = env["HOME"] ?? NSHomeDirectory()
             let setup = (vmSetup as NSString).standardizingPath
@@ -393,7 +434,7 @@ struct Image: AsyncParsableCommand {
                 }
             }
             guard let version else { throw ValidationError("no --image-version and no UbuntuImageManager.swift next to vm-setup") }
-            var o = InterimBake.Options(outputDir: out ?? DaemonConfig.fromEnvironment().imageDir,
+            var o = InterimBake.Options(outputDir: out ?? DaemonConfig.fromEnvironment().userImageDir,
                                         cacheDir: cache ?? (env["XDG_CACHE_HOME"] ?? home + "/.cache") + "/bromure-ac/bake",
                                         vmSetupDir: setup, imageVersion: version)
             o.cpus = cpus
@@ -421,9 +462,18 @@ struct Image: AsyncParsableCommand {
             }
             o.customizeLogPath = InterimBake.customizeLogPath
             if let alpineReleases { o.alpineReleasesBase = alpineReleases }
-            let verbose = verbose
+            return o
+        }
+
+        // @port-skip linux-only: see Bake
+        static func bake(_ o: InterimBake.Options, verbose: Bool) async throws {
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },
                                                output: { if verbose { FileHandle.standardError.write($0) } })
+            report(r, o)
+        }
+
+        // @port-skip linux-only: see Bake
+        static func report(_ r: InterimBake.Result, _ o: InterimBake.Options) {
             func mib(_ b: UInt64) -> String { String(format: "%.0f MiB", Double(b) / 1_048_576) }
             func secs(_ d: Duration) -> String { String(format: "%.0f s", Double(d.components.seconds)) }
             print("baked \(o.outputDir): kernel \(r.kernelRelease), setup.sh \(secs(r.setup)), total \(secs(r.total)); "

@@ -65,6 +65,12 @@ extension Daemon {
         let steps = Self.postinstallStepsToOffer(catalog, installedStamp: stamp,
                                                  applied: Self.appliedPostinstallSteps(imageDir: dir, baseline: store.baseline))
         guard !steps.isEmpty else { return }
+        // Installed into this user's own image (the shared one is copied
+        // there first): asked only when that's possible.
+        guard Self.mayWriteImage(config.userImageDir) else {
+            FileHandle.standardError.write(Data("bromure-ac daemon: [image] \(steps.count) newly published step(s) not offered: \(config.userImageDir) isn't writable\n".utf8))
+            return
+        }
         let (title, message) = Self.newPostinstallStepsPromptParts(steps)
         while !Task.isCancelled {
             guard PendingPromptBroker.hasLiveListener() else {
@@ -87,25 +93,37 @@ extension Daemon {
         }
     }
 
+    /// Whether this user may write an image into `dir` (made if missing).
+    // @port-skip linux-only: the multi-user daemon's image dir
+    static func mayWriteImage(_ dir: String) -> Bool {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return access(dir, W_OK) == 0
+    }
+
     /// The accepted steps into base.img, in the background (macOS: an
     /// APFS clone amended and swapped in; workspaces keep running).
     // partial: no progress window (the daemon's log has the steps); remote access isn't paused (the image is promoted by rename)
     // @port ACAppDelegate.startPostinstall(_: [PostinstallStep]) h=f6ec1de66eb5007b @d3ebbda2
     func applyPostinstallSteps(_ steps: [PostinstallStep]) async {
         let env = ProcessInfo.processInfo.environment
-        let stamp = (try? String(contentsOfFile: config.imageDir + "/base.version", encoding: .utf8))?
+        // From the image in use into this user's own (the same dir unless
+        // that's the shared, read-only one).
+        let source = config.imageDir, target = config.userImageDir
+        let stamp = (try? String(contentsOfFile: source + "/base.version", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        var o = InterimBake.Options(outputDir: config.imageDir,
+        var o = InterimBake.Options(outputDir: target,
                                     cacheDir: (env["XDG_CACHE_HOME"] ?? NSHomeDirectory() + "/.cache") + "/bromure-ac/bake",
                                     vmSetupDir: setupDir.path, imageVersion: InterimBake.majorVersion(of: stamp))
         o.amend = true
+        // Those the user accepted; the bake keeps those the image still
+        // lacks, read under its lock.
         o.postinstallSteps = steps
-        o.appliedBefore = Self.appliedPostinstallSteps(imageDir: config.imageDir,
-                                                       baseline: ImageDistribution.agentCoding(imageVersion: o.imageVersion).loadBaseline())
+        o.amendFrom = source == target ? nil : source
+        o.baseline = ImageDistribution.agentCoding(imageVersion: o.imageVersion).loadBaseline()
         let log = { (line: String) in FileHandle.standardError.write(Data("bromure-ac daemon: [image] \(line)\n".utf8)) }
         do {
             _ = try await InterimBake.bake(o, progress: log)
-            let now = (try? String(contentsOfFile: config.imageDir + "/base.version", encoding: .utf8))?
+            let now = (try? String(contentsOfFile: target + "/base.version", encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? "?"
             log("Packages installed (base image now v\(now)).")
         } catch {
