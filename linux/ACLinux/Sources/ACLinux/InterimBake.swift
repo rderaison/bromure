@@ -60,6 +60,14 @@ public enum InterimBake {
         /// phase), when there's a script.
         public var customizeLogPath: String?
         public var postinstallTimeout: Duration = .seconds(1800)
+        /// Amend the live base.img instead of building one (macOS:
+        /// applyPostinstallSteps): `postinstallSteps` (the ones published
+        /// since) run on a copy of it, setup.sh doesn't run, no customize
+        /// script, and the image's applied steps gain them.
+        public var amend = false
+        /// The steps the image already has, when its image-state.json
+        /// doesn't say (an image that predates it). nil: that file's.
+        public var appliedBefore: [String]?
         // @port-skip linux-only: interim bake options
         public init(outputDir: String, cacheDir: String, vmSetupDir: String, imageVersion: String) {
             self.outputDir = outputDir
@@ -88,8 +96,14 @@ public enum InterimBake {
     /// raw serial console.
     // partial: Firecracker's installer (Alpine netboot, one boot for setup.sh and postinstall.sh); no EFI vars; always a full build (init's force)
     // @port UbuntuImageManager.createBaseImage(progress: @escaping(String)->Void, output: @escaping(String)->Void, force: Bool, postinstallSteps: [PostinstallStep]) h=a645adca91f3f760 @84e171b8
+    // partial: an amend (Options.amend) is a bake on a copy of the live disk: postinstall.sh in the Firecracker installer, promoted as a bake's is
+    // @port UbuntuImageManager.applyPostinstallSteps(_: [PostinstallStep], progress: @escaping(String)->Void, output: @escaping(String)->Void) h=6a3b25f95c4159bc @84e171b8
     public static func bake(_ o: Options, progress: @escaping @Sendable (String) -> Void = { _ in },
                             output: @escaping @Sendable (Data) -> Void = { _ in }) async throws -> Result {
+        // An amend runs the catalog's new steps only (macOS: runPostinstall
+        // with customize false).
+        var o = o
+        if o.amend { o.customizeScript = nil }
         let fm = FileManager.default
         let t0 = ContinuousClock.now
         try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true)
@@ -112,7 +126,16 @@ public enum InterimBake {
         if !fm.fileExists(atPath: o.outputDir + "/base.img.partial") { _ = finishPromotion(imageDir: o.outputDir) }
         let priorStamp = (try? String(contentsOfFile: o.outputDir + "/base.version", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let newStamp = nextStamp(priorStamp: priorStamp, bundled: o.imageVersion)
+        if o.amend {
+            guard !o.postinstallSteps.isEmpty else { throw BakeError.staging("no steps to amend the image with") }
+            guard fm.fileExists(atPath: o.outputDir + "/base.img"), priorStamp != nil else {
+                throw BakeError.staging("no base image to amend")
+            }
+        }
+        // An amend keeps the image's own major (macOS: applyPostinstallSteps'
+        // bundledMajor): a dot revision, which the drift check offers.
+        let newStamp = nextStamp(priorStamp: priorStamp,
+                                 bundled: o.amend ? priorStamp.map(majorVersion(of:)) ?? o.imageVersion : o.imageVersion)
         let work = o.outputDir + "/.work"
         try? fm.removeItem(atPath: work)
         try fm.createDirectory(atPath: work + "/out", withIntermediateDirectories: true)
@@ -144,7 +167,18 @@ public enum InterimBake {
         if let script = o.customizeScript { try stageCustomize(script, to: postinstall) }
         let runsPostinstall = !steps.isEmpty || o.customizeScript != nil
         let partial = o.outputDir + "/base.img.partial"
-        try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
+        // An amend's scratch disk is a copy of the live one (macOS: an APFS
+        // clone; here a reflink where the filesystem has them, holes kept).
+        let applied: [String]
+        if o.amend {
+            try? fm.removeItem(atPath: partial)
+            progress("Installing recommended packages (\(steps.count) step(s))…")
+            try await ChildProcess.run("/usr/bin/cp", ["--reflink=auto", "--sparse=always", o.outputDir + "/base.img", partial])
+            applied = Self.amendedSteps(prior: o.appliedBefore ?? ImageState.load(imageDir: o.outputDir)?.appliedStepUUIDs ?? [], adding: steps)
+        } else {
+            try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
+            applied = steps
+        }
         // A failed bake discards its scratch disk, as macOS's createBaseImage
         // does: the live image is untouched.
         var promoted = false
@@ -243,7 +277,8 @@ public enum InterimBake {
             .write(toFile: work + "/out/cmdline", atomically: true, encoding: .utf8)
         try (newStamp + "\n").write(toFile: work + "/out/base.version", atomically: true, encoding: .utf8)
         // Which catalog steps the image has, as macOS records a local build.
-        try ImageState.encoded(BaseImageState(imageUUID: nil, version: newStamp, appliedStepUUIDs: steps))
+        try ImageState.encoded(BaseImageState(imageUUID: o.amend ? ImageState.load(imageDir: o.outputDir)?.imageUUID : nil,
+                                              version: newStamp, appliedStepUUIDs: applied))
             .write(to: URL(fileURLWithPath: work + "/out/image-state.json"))
         discardPromotion(imageDir: o.outputDir)
         for f in promotedFiles {
@@ -314,12 +349,16 @@ public enum InterimBake {
         con.send("modprobe virtiofs && mkdir -p /tmp/setup /tmp/out && mount -t virtiofs setup /tmp/setup && mount -t virtiofs out /tmp/out && echo MOUNTS_\"OK\"")
         try await con.buffer.wait(for: "MOUNTS_OK", timeout: 60, failures: ["mount:"])
 
-        progress("Installer: running setup.sh…")
         let t = ContinuousClock.now
-        let mirror = o.ubuntuMirror.map { "UBUNTU_MIRROR='\($0)' " } ?? ""
-        con.send("\(mirror)ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/setup.sh \(o.displayScale)")
-        try await con.buffer.wait(for: "SANDBOX_SETUP_DONE", timeout: o.setupTimeout.seconds,
-                                  failures: ["SANDBOX_SETUP_FAILED:", "Kernel panic", "Internal error: Oops"])
+        // An amend's disk is a finished image: postinstall.sh alone (macOS:
+        // runPostinstall's own installer boot).
+        if !o.amend {
+            progress("Installer: running setup.sh…")
+            let mirror = o.ubuntuMirror.map { "UBUNTU_MIRROR='\($0)' " } ?? ""
+            con.send("\(mirror)ALPINE_REPO_BASE='\(o.alpineCDN)' sh /tmp/setup/setup.sh \(o.displayScale)")
+            try await con.buffer.wait(for: "SANDBOX_SETUP_DONE", timeout: o.setupTimeout.seconds,
+                                      failures: ["SANDBOX_SETUP_FAILED:", "Kernel panic", "Internal error: Oops"])
+        }
         if postinstallSteps > 0 || o.customizeScript != nil {
             // macOS runs postinstall.sh in a second installer boot on the
             // finished disk; the same installer is still up here.
@@ -387,6 +426,13 @@ public enum InterimBake {
                 atomically: true, encoding: .utf8)
         }
         return ordered.map(\.uuid)
+    }
+
+    /// An amended image's applied steps: what it had, and the new ones
+    /// (macOS: applyPostinstallSteps' union, sorted).
+    // @port-skip linux-only: see bake's amend (macOS: inline in applyPostinstallSteps)
+    static func amendedSteps(prior: [String], adding steps: [String]) -> [String] {
+        Set(prior).union(steps).sorted()
     }
 
     /// What a bake promotes beside base.img, staged as `<name>.new` before

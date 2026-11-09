@@ -370,6 +370,9 @@ public actor Daemon {
         await d.setUpRemoteAccess()
         // The workspaces set to boot at login, in the background.
         Task { await d.bootFlaggedWorkspacesAtStartup() }
+        // Catalog steps published since the image was built: offered once a
+        // client is there (DaemonImageSteps.swift).
+        Task { await d.offerNewPostinstallSteps() }
         return d
     }
 

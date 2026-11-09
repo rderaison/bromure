@@ -12,6 +12,7 @@ cleanup() { [ -n "$DPID" ] && kill "$DPID" 2>/dev/null; sleep 0.5; [ -n "$DPID" 
 trap cleanup EXIT
 export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state XDG_DATA_HOME=$W/data XDG_CONFIG_HOME=$W/config
 export BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/
+export BROMURE_IMAGE_CATALOG_BASE=http://127.0.0.1:9/
 mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 "$BIN" daemon > "$W/daemon.log" 2>&1 & DPID=$!
 SOCK=$XDG_RUNTIME_DIR/bromure-ac/control.sock
