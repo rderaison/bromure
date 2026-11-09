@@ -25,7 +25,8 @@ final class BrowserMCPBridge {
 
     /// Listens on `<udsPath>_5830`, or on `stored` (a restarted daemon's,
     /// from the fd store), and keeps the listener in the store as `fdStoreName`.
-    // @port-skip linux-only: Linux browser MCP bridge
+    // partial: listens on the hybrid vsock's <v.sock>_5830 (macOS: the VZ socket device); no browser of its own to serve from
+    // @port BrowserMCPVsockBridge.init(socketDevice: VZVirtioSocketDevice, server: BrowserMCPServer, profileID: UUID?) h=74542c36cb76379d @b91fddfb
     init(udsPath: String, fdStoreName: String, stored: Int32? = nil, profileID: UUID? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.port)
         self.profileID = profileID
@@ -50,7 +51,7 @@ final class BrowserMCPBridge {
 
     /// A quarantine: the client's channel and every agent, waiting or
     /// relayed, go (a later agent is refused at accept while it lasts).
-    // @port-skip linux-only: Linux browser MCP bridge
+    // @port BrowserMCPVsockBridge.dropForQuarantine() h=edba3d8f6739f122 @b91fddfb
     func dropAgents() {
         relay?.close()
         relay = nil
@@ -72,7 +73,8 @@ final class BrowserMCPBridge {
         }
     }
 
-    // @port-skip linux-only: Linux browser MCP bridge
+    // partial: an accepted hybrid-vsock fd; it waits for a client's channel (no local browser)
+    // @port BrowserMCPVsockBridge.adopt(_: VZVirtioSocketConnection) h=514c51f6513bee17 @b91fddfb
     private func adopt(_ fd: Int32) {
         if let profileID, WorkspaceQuarantine.shared.contains(profileID) {
             Glibc.close(fd)
@@ -95,7 +97,8 @@ final class BrowserMCPBridge {
 
     /// A fat client's `browser-mcp` channel (`fd`, now the bridge's): every
     /// agent, waiting or new, goes over it. A previous client's is closed.
-    // @port-skip linux-only: BrowserMCPVsockBridge.attachRemote without a local browser to take agents from
+    // partial: no local browser to take agents from
+    // @port BrowserMCPVsockBridge.attachRemote(fd: Int32) h=473fcb3a6bcbb9d3 @b91fddfb
     func attachRemote(fd: Int32) {
         relay?.close()
         let mux = RelayMux(remoteFd: fd) { [weak self] in self?.relay = nil }
@@ -106,7 +109,7 @@ final class BrowserMCPBridge {
 
     /// The VM is gone: no more agents, the client's channel and the waiting
     /// agents closed, the socket file removed.
-    // @port-skip linux-only: BrowserMCPVsockBridge.stop
+    // @port BrowserMCPVsockBridge.stop() h=7a678819812bbec6 @b91fddfb
     func stop() {
         if let quarantineCut, let profileID { WorkspaceQuarantine.shared.remove(quarantineCut, for: profileID) }
         acceptSource?.cancel()

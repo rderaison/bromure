@@ -1177,6 +1177,46 @@
     {
       "id": "WSTransformRelay.static flush(_: inoutData, to: Endpoint)",
       "reason": "macOS's socket relay plumbing (poll loops over file descriptors); the Linux proxy relays on NIO (WSClientFilter, WSServerSide)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.detachRemote()",
+      "reason": "falls back to the Mac's own browser; a server has none: its agents wait for the next client's channel (BrowserMCPBridge)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.rerouteForConsoleFlip()",
+      "reason": "screen-only: moves agents between the Mac's own browser and a fat client's as the console in use flips; a server has no local console"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.Connection.init(conn: VZVirtioSocketConnection, server: BrowserMCPServer, onClose: @escaping(Connection)->Void)",
+      "reason": "the Mac's own browser serving agents over a VZ socket connection; a server has none (every agent rides a fat client's browser-mcp channel: BrowserMCPBridge)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.Connection.start()",
+      "reason": "the Mac's own browser serving agents over a VZ socket connection; a server has none (every agent rides a fat client's browser-mcp channel: BrowserMCPBridge)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.Connection.cancel()",
+      "reason": "the Mac's own browser serving agents over a VZ socket connection; a server has none (every agent rides a fat client's browser-mcp channel: BrowserMCPBridge)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.Connection.readAvailable()",
+      "reason": "the Mac's own browser serving agents over a VZ socket connection; a server has none (every agent rides a fat client's browser-mcp channel: BrowserMCPBridge)"
+    },
+    {
+      "id": "BrowserMCPVsockBridge.Connection.writeLine(_: String)",
+      "reason": "the Mac's own browser serving agents over a VZ socket connection; a server has none (every agent rides a fat client's browser-mcp channel: BrowserMCPBridge)"
+    },
+    {
+      "id": "MCPListenerDelegate.init(onConnection: @escaping(VZVirtioSocketConnection)->Void)",
+      "reason": "VZ's socket listener delegate (Linux: Firecracker's hybrid vsock, BrowserMCPBridge.acceptAll)"
+    },
+    {
+      "id": "MCPListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice)",
+      "reason": "VZ's socket listener delegate (Linux: Firecracker's hybrid vsock, BrowserMCPBridge.acceptAll)"
+    },
+    {
+      "path": "Sources/AgentCoding/Ext4/Ext4Browser.swift",
+      "reason": "screen-only: the ext4 disk-image browser window (File › Open ext4 Disk Image, an NSOpenPanel); no route reaches it, and a server's disk checks are the fsck route"
     }
   ],
   "skipInheriting": [
