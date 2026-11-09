@@ -1,5 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
+import NIOPosix
 import NIOSSH
 
 /// The multi-user server's front door: one SSH listener for every Bromure
@@ -155,8 +157,51 @@ public struct GatewaySettings: Codable, Sendable {
     /// Enrollment codes (`bromure-ac admin code <user>`) as SSH passwords.
     public var codeLogin = true
     public var socketDir = "/run/bromure-ac/sock"
+    /// The P2P ingress (GatewayP2PIngress) when not systemd's socket
+    /// (bromure-gw-p2p.socket): a path to bind, "" for none.
+    public var p2pSocket: String?
     // @port-skip linux-only: multi-user gateway
     public init() {}
+}
+
+/// The gateway's P2P ingress: each user's P2P broker (that user's daemon)
+/// hands it the connections its own port and its TURN relay accept, over
+/// a Unix socket (bromure-gw-p2p.socket: /run/bromure-ac/p2p.sock, 0666, in
+/// root's 0755 dir). Each connection is pinned, before anything is read
+/// from it, to the account of the uid on its far end (SO_PEERCRED): it may
+/// log in there and nowhere else, whatever user name the client gives.
+/// Root, an unknown uid, or an account with no control socket: no pin, and
+/// the connection is closed before the SSH banner. The socket's mode is no
+/// gate; the pin is.
+// @port-skip linux-only: multi-user P2P ingress
+public enum GatewayP2PIngress {
+    /// The account a peer `uid` is pinned to, or nil.
+    // @port-skip linux-only: multi-user P2P ingress
+    static func account(uid: uid_t, router: GatewayRouter) -> String? {
+        guard uid != 0, let pw = getpwuid(uid) else { return nil }
+        let name = String(cString: pw.pointee.pw_name)
+        return router.socket(for: name) != nil ? name : nil
+    }
+
+    /// Each connection's pin: its peer's uid, read once from the socket.
+    // @port-skip linux-only: multi-user P2P ingress
+    static func pin(router: GatewayRouter) -> RemoteAccessServer.AccountPin {
+        { channel in
+            guard let options = channel as? SocketOptionProvider else { return channel.eventLoop.makeSucceededFuture(nil) }
+            let cred: EventLoopFuture<PeerCredentials> = options.unsafeGetSocketOption(level: SocketOptionLevel(SOL_SOCKET),
+                                                                                        name: SocketOptionName(SO_PEERCRED))
+            return cred.map { account(uid: $0.uid, router: router) }.recover { _ in nil }
+        }
+    }
+
+    /// `struct ucred` as SO_PEERCRED fills it (Glibc's module doesn't
+    /// export it: it's _GNU_SOURCE): pid, uid, gid.
+    // @port-skip linux-only: multi-user P2P ingress
+    struct PeerCredentials: Sendable {
+        var pid: Int32 = 0
+        var uid: UInt32 = 0
+        var gid: UInt32 = 0
+    }
 }
 
 /// Starts the gateway's SSH server from `<state>/gateway.json` (host key in
@@ -164,6 +209,7 @@ public struct GatewaySettings: Codable, Sendable {
 // @port-skip linux-only: multi-user gateway
 public enum GatewayMain {
     @MainActor private static var server: RemoteAccessServer?
+    @MainActor private static var ingress: RemoteAccessServer?
 
     // @port-skip linux-only: multi-user gateway
     @MainActor public static func start(stateDir state: String) throws -> String {
@@ -171,14 +217,29 @@ public enum GatewayMain {
                                                 attributes: [.posixPermissions: 0o700])
         let settings = (try? JSONDecoder().decode(GatewaySettings.self,
             from: Data(contentsOf: URL(fileURLWithPath: state + "/gateway.json")))) ?? GatewaySettings()
-        let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: state + "/remote", isDirectory: true)))
-        s.accountRouter = GatewayRouter(socketDir: settings.socketDir)
+        let paths = RemoteAccessServer.Paths(dir: URL(fileURLWithPath: state + "/remote", isDirectory: true))
+        let router = GatewayRouter(socketDir: settings.socketDir)
+        let s = RemoteAccessServer(paths: paths)
+        s.accountRouter = router
         try s.start(.init(port: settings.port, bindAddress: settings.bindAddress,
                           passwordAuth: settings.codeLogin, pubkeyAuth: true))
         server = s
-        return "\(settings.bindAddress):\(settings.port), accounts in \(settings.socketDir), host key \(s.hostKeyFingerprint() ?? "?")"
+        // The P2P ingress: the same host key and accounts, each connection
+        // pinned (the TCP listener above never is).
+        var p2p = "no P2P ingress"
+        let activated = FDStore.take()["p2p"]?.first
+        if activated != nil || settings.p2pSocket.map({ !$0.isEmpty }) == true {
+            let i = RemoteAccessServer(paths: paths)
+            i.accountRouter = router
+            i.accountPin = GatewayP2PIngress.pin(router: router)
+            try i.start(.init(port: 0, bindAddress: "", passwordAuth: settings.codeLogin, pubkeyAuth: true,
+                              unixSocketPath: activated == nil ? settings.p2pSocket : nil, boundSocketFD: activated))
+            ingress = i
+            p2p = "P2P ingress \(activated != nil ? "(socket-activated)" : settings.p2pSocket ?? "")"
+        }
+        return "\(settings.bindAddress):\(settings.port), \(p2p), accounts in \(settings.socketDir), host key \(s.hostKeyFingerprint() ?? "?")"
     }
 
     // @port-skip linux-only: multi-user gateway
-    @MainActor public static func stop() { server?.stop(); server = nil }
+    @MainActor public static func stop() { server?.stop(); server = nil; ingress?.stop(); ingress = nil }
 }

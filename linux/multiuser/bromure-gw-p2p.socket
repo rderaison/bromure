@@ -1,0 +1,20 @@
+# The multi-user gateway's P2P ingress: each user's P2P broker (that
+# user's bromure-ac@ daemon) hands the gateway its connections here. Open to
+# every local user on purpose: the gateway pins each connection to its
+# peer's uid (SO_PEERCRED) and lets it into that account only; root and
+# unknown uids are refused. Made by systemd, as root, in a root-owned dir:
+# no user can replace it.
+[Unit]
+Description=Bromure AC multi-user gateway P2P ingress
+
+[Socket]
+ListenStream=/run/bromure-ac/p2p.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0666
+DirectoryMode=0755
+FileDescriptorName=p2p
+Service=bromure-gw.service
+
+[Install]
+WantedBy=sockets.target

@@ -4,8 +4,9 @@
 # keeps that user's keys and codes and decides everything else.
 [Unit]
 Description=Bromure AC multi-user SSH gateway
-After=network-online.target
+After=network-online.target bromure-gw-p2p.socket
 Wants=network-online.target
+Requires=bromure-gw-p2p.socket
 
 [Service]
 Type=notify
@@ -13,6 +14,8 @@ NotifyAccess=main
 User=bromure
 Group=bromure
 ExecStart=/usr/local/lib/bromure-ac/bin/bromure-ac gateway
+# The P2P ingress (bromure-gw-p2p.socket), as fd "p2p".
+Sockets=bromure-gw-p2p.socket
 Restart=on-failure
 RestartSec=2
 StateDirectory=bromure-gw

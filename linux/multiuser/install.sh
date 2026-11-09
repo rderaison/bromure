@@ -90,10 +90,11 @@ case "$LANIF" in -*|.|..|*[!A-Za-z0-9_.:-]*) echo "install.sh: '$LANIF' isn't an
 [ ${#LANIF} -le 15 ] || { echo "install.sh: '$LANIF' is longer than 15 characters" >&2; exit 1; }
 [ -n "$LANIF" ] && { echo "net.ipv4.conf.$LANIF.arp_notify = 1" > /etc/sysctl.d/60-bromure-lan.conf; sysctl -q -p /etc/sysctl.d/60-bromure-lan.conf; }
 
-install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bromure-gw.service" "$HERE/bromure-lan.service" /etc/systemd/system/
+install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bromure-gw.service" "$HERE/bromure-gw-p2p.socket" "$HERE/bromure-lan.service" /etc/systemd/system/
 install -d -m 700 -o bromure -g bromure /var/lib/bromure-gw
 [ -e /var/lib/bromure-gw/gateway.json ] || { printf '{"port": %s, "bindAddress": "%s", "codeLogin": true, "socketDir": "/run/bromure-ac/sock"}\n' "$PORT" "$BIND" > /var/lib/bromure-gw/gateway.json; chown bromure:bromure /var/lib/bromure-gw/gateway.json; chmod 600 /var/lib/bromure-gw/gateway.json; }
 systemctl daemon-reload
+systemctl enable --now bromure-gw-p2p.socket
 systemctl enable --now bromure-gw.service bromure-lan.service
 systemctl restart bromure-gw.service bromure-lan.service
 echo "installed; gateway: $(systemctl is-active bromure-gw.service), LAN helper: $(systemctl is-active bromure-lan.service). Add users: bromure-ac admin add <name>; their LAN pools: bromure-ac admin pool add <name> <range>"
