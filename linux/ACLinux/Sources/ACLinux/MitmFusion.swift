@@ -257,8 +257,12 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     /// The dial under way, and whether the loader was stopped: after
-    /// stopLoading, nothing reaches the client.
-    private let loading = NIOLockedValueBox<(task: Task<Void, Never>?, stopped: Bool)>((nil, false))
+    /// stopLoading, nothing reaches the client. One recursive lock for both
+    /// and for each delivery, so a stop waits for a delivery under way and
+    /// a client stopping the loader from its callback doesn't deadlock.
+    private let lock = NSRecursiveLock()
+    private var dial: Task<Void, Never>?
+    private var stopped = false
 
     // @port-skip linux-only: see FusionPinnedProtocol
     override func startLoading() {
@@ -275,9 +279,10 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
                 do {
                     // No redirect followed, no proxy from the environment:
                     // a 3xx is the leg's answer, never another dial.
-                    let (response, data) = tls
+                    let (raw, data) = tls
                         ? try await PinnedHTTPS.send(req, to: ip, timeout: timeout)
                         : try await PinnedHTTPS.sendPlain(req, to: ip, timeout: timeout)
+                    let response = Self.unframed(raw)
                     self.deliver { client in
                         client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                         client.urlProtocol(self, didLoad: data)
@@ -292,11 +297,24 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
             }
             self.fail(last)
         }
-        let stopped = loading.withLockedValue { l -> Bool in
-            l.task = task
-            return l.stopped
+        lock.lock()
+        self.dial = task
+        let wasStopped = stopped
+        lock.unlock()
+        if wasStopped { task.cancel() }
+    }
+
+    /// The leg's response as the client gets it: its body arrives whole
+    /// (de-chunked), so the upstream's framing headers don't come along.
+    // @port-skip linux-only: see FusionPinnedProtocol
+    static func unframed(_ r: HTTPURLResponse) -> HTTPURLResponse {
+        var fields: [String: String] = [:]
+        for case (let k as String, let v as String) in r.allHeaderFields
+        where !["transfer-encoding", "content-length"].contains(k.lowercased()) {
+            fields[k] = v
         }
-        if stopped { task.cancel() }
+        return HTTPURLResponse(url: r.url ?? URL(string: "about:blank")!, statusCode: r.statusCode,
+                               httpVersion: "HTTP/1.1", headerFields: fields) ?? r
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
@@ -305,16 +323,19 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     /// The client's callbacks, unless the loader was stopped.
     // @port-skip linux-only: see FusionPinnedProtocol
     private func deliver(_ body: (any URLProtocolClient) -> Void) {
-        guard !loading.withLockedValue({ $0.stopped }), let client else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped, let client else { return }
         body(client)
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
     override func stopLoading() {
-        loading.withLockedValue { l -> Task<Void, Never>? in
-            l.stopped = true
-            return l.task
-        }?.cancel()
+        lock.lock()
+        stopped = true
+        let dial = self.dial
+        lock.unlock()
+        dial?.cancel()
     }
 }
 

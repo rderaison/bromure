@@ -79,35 +79,38 @@ enum PinnedHTTPS {
         result.futureResult.whenComplete { _ in deadline.cancel() }
         return try await withTaskCancellationHandler {
             let collector = ResponseCollector()
-            let channel: Channel
-            do {
-                channel = try await ClientBootstrap(group: loop)
-                    .connectTimeout(.milliseconds(Int64(total * 1000)))
-                    .channelInitializer { ch in
-                        ch.eventLoop.makeCompletedFuture {
-                            // Before the handshake starts: its failure reaches us.
-                            collector.onDone = { bytes, error in
-                                if let error { return finish(.failure(error)) }
-                                guard let parsed = NIOMTLSHTTPClient.parse(bytes, url: url) else { return finish(.failure(URLError(.badServerResponse))) }
-                                finish(.success(parsed))
-                            }
-                            if let tls {
-                                try ch.pipeline.syncOperations.addHandler(NIOSSLClientHandler(context: tls.context, serverHostname: tls.sni))
-                            }
-                            try ch.pipeline.syncOperations.addHandler(collector)
+            // Only the result is awaited, never the connect itself: a
+            // cancel (or the deadline) ends the call at once, and a
+            // connection that lands after that is closed.
+            ClientBootstrap(group: loop)
+                .connectTimeout(.milliseconds(Int64(total * 1000)))
+                .channelInitializer { ch in
+                    ch.eventLoop.makeCompletedFuture {
+                        // Before the handshake starts: its failure reaches us.
+                        collector.onDone = { bytes, error in
+                            if let error { return finish(.failure(error)) }
+                            guard let parsed = NIOMTLSHTTPClient.parse(bytes, url: url) else { return finish(.failure(URLError(.badServerResponse))) }
+                            finish(.success(parsed))
                         }
+                        if let tls {
+                            try ch.pipeline.syncOperations.addHandler(NIOSSLClientHandler(context: tls.context, serverHostname: tls.sni))
+                        }
+                        try ch.pipeline.syncOperations.addHandler(collector)
                     }
-                    .connect(to: target).get()
-            } catch {
-                if Task.isCancelled { throw CancellationError() }
-                finish(.failure(ConnectFailed(underlying: error)))
-                throw ConnectFailed(underlying: error)
-            }
-            // Already failed (cancelled, timed out) by now: closed at once.
-            result.futureResult.whenFailure { _ in channel.close(promise: nil) }
-            var buf = channel.allocator.buffer(capacity: head.count)
-            buf.writeBytes(head)
-            channel.writeAndFlush(buf).whenFailure { e in finish(.failure(e)) }
+                }
+                .connect(to: target)
+                .whenComplete { connected in
+                    switch connected {
+                    case .failure(let error):
+                        finish(.failure(ConnectFailed(underlying: error)))
+                    case .success(let channel):
+                        // Already over (cancelled, timed out): closed at once.
+                        result.futureResult.whenFailure { _ in channel.close(promise: nil) }
+                        var buf = channel.allocator.buffer(capacity: head.count)
+                        buf.writeBytes(head)
+                        channel.writeAndFlush(buf).whenFailure { e in finish(.failure(e)) }
+                    }
+                }
             return try await result.futureResult.get()
         } onCancel: {
             finish(.failure(CancellationError()))

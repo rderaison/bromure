@@ -169,6 +169,49 @@ extension DaemonGlobalSuites {
             #expect(silent.closed.withLockedValue { $0 } == 1, "the connection closed")
         }
 
+        /// A cancel ends a dial still connecting (the connect timeout is
+        /// the leg's, up to 600 s): a loopback listener whose backlog is
+        /// full, never accepting, so the kernel drops the next SYN.
+        @Test func aCancelEndsAConnectInFlight() async throws {
+            let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+            #expect(fd >= 0)
+            defer { close(fd) }
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) } }
+            #expect(listen(fd, 0) == 0)
+            _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+            let port = Int(UInt16(bigEndian: addr.sin_port))
+            // Fill the backlog (non-blocking connects that complete in the queue).
+            var fillers: [Int32] = []
+            defer { fillers.forEach { close($0) } }
+            for _ in 0..<4 {
+                let c = socket(AF_INET, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_NONBLOCK.rawValue), 0)
+                var a = addr
+                _ = withUnsafeMutablePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(c, $0, len) } }
+                fillers.append(c)
+            }
+            try await Task.sleep(for: .milliseconds(100))
+            let lo = try #require(OpenShellPolicy.IPAddress("127.0.0.1"))
+            let req = URLRequest(url: URL(string: "http://engine.example.test:\(port)/v1/chat")!)
+            let call = Task { try await PinnedHTTPS.sendPlain(req, to: lo, timeout: 60) }
+            try await Task.sleep(for: .milliseconds(300))
+            let t0 = ContinuousClock.now
+            call.cancel()
+            await #expect(throws: CancellationError.self) { _ = try await call.value }
+            #expect(ContinuousClock.now - t0 < .seconds(2), "ended at once, not at the connect's timeout")
+        }
+
+        @Test func aLegsReplyLosesItsFraming() throws {
+            let r = try #require(HTTPURLResponse(url: URL(string: "http://e.example.test/")!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                 headerFields: ["Transfer-Encoding": "chunked", "content-length": "9", "Content-Type": "application/json"]))
+            let u = FusionPinnedProtocol.unframed(r)
+            #expect(u.statusCode == 200 && u.value(forHTTPHeaderField: "Content-Type") == "application/json")
+            #expect(u.value(forHTTPHeaderField: "Transfer-Encoding") == nil && u.value(forHTTPHeaderField: "Content-Length") == nil)
+        }
+
         @Test func hostFieldBracketsAnIPv6Literal() {
             #expect(NIOMTLSHTTPClient.hostField("::1", port: 8080, defaultPort: 80) == "[::1]:8080")
             #expect(NIOMTLSHTTPClient.hostField("fe80::1", port: 443) == "[fe80::1]")

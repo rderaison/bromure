@@ -40,18 +40,21 @@ extension Daemon {
 
     /// Watches workspace `id`'s VM `machine` from its boot, resume or
     /// adoption: done once the guest's sandbox status arrives or the VM
-    /// goes. Only time it's strict and not paused (a compromise question
+    /// goes; looked at every 30 s while it isn't strict. Only time it's strict and not paused (a compromise question
     /// holding it) counts; a status not heard is asked for first. Overdue,
     /// it's shut down.
     // @port-skip linux-only: the strict-workspace status deadline (no macOS counterpart)
     func watchSandboxStatus(_ id: String, machine: FirecrackerMachine, every tick: Duration = .seconds(5),
+                            idle: Duration = .seconds(30),
                             clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         guard let pid = UUID(uuidString: id) else { return }
         Task { [weak self] in
             var counted: TimeInterval = 0
             var last = clock()
+            // Every `tick` while it's strict; every `idle` while it isn't.
+            var wait = tick
             while true {
-                try? await Task.sleep(for: tick)
+                try? await Task.sleep(for: wait)
                 guard let self, await self.live[id]?.machine === machine else { return }
                 if GuestSandboxStatusStore.shared.status(for: pid) != nil { return }
                 let now = clock()
@@ -59,6 +62,7 @@ extension Daemon {
                 last = now
                 let strict = await self.mitm?.guardrailsConfig(for: pid)?.egressPolicy?.enforceBinaries == true
                 let paused = await self.pauseHolds[id] != nil
+                wait = strict ? tick : idle
                 if strict, !paused, let bridge = Self.attestorBridges.withLockedValue({ $0[pid]?.bridge }), bridge.isConnected {
                     await bridge.askSandboxStatus()
                     if GuestSandboxStatusStore.shared.status(for: pid) != nil { return }
