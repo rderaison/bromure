@@ -14292,7 +14292,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case .session: text = await taskSessionTranscript(task)
             case .guest: text = await fullTaskTranscript(task)
             }
-            if let text, !text.isEmpty { return text }
+            guard let text, !text.isEmpty else { continue }
+            // The full read stops at its cap (the file's first 25 MB): the
+            // end -- where the final report is -- comes from the session
+            // copy's tail, joined where the two share records.
+            if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text),
+               let tail = await taskSessionTranscript(task),
+               let joined = SessionTranscriptCache.merge(history: Data(text.utf8),
+                                                         incoming: Data(tail.utf8), mode: .overlapOnly) {
+                return String(decoding: joined, as: UTF8.self)
+            }
+            return text
         }
         return nil
     }

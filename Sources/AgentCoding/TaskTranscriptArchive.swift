@@ -22,6 +22,15 @@ enum TaskTranscriptArchive {
         forArchive ? [.guest, .session] : [.archive, .session, .guest]
     }
 
+    /// The full read's cap (`head -c 25000000`, the ext4 read's limit).
+    static let fullReadCap = 25_000_000
+
+    /// A full read this long may have stopped at the cap, short of the
+    /// file's end (UTF-8 repair can drop a few bytes, hence the margin).
+    static func mayBeCapped(_ text: String) -> Bool {
+        text.utf8.count >= fullReadCap - 65_536
+    }
+
     /// Overridable for tests (a temp dir); nil = the real location.
     nonisolated(unsafe) static var directoryOverride: URL?
 
