@@ -277,13 +277,19 @@ public actor Daemon {
         // flows it holds) is taken back rather than replaced.
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
         pc.useFDStore = true
-        // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM.
-        let hasVMs = VMRegistry.hasRecords(path: config.stateDir + "/vms.json")
-        pc.gateway = Self.chooseWorkspaceGateway(hasVMs: hasVMs)
+        if let warning = Self.configHomeWarning(stateDir: config.stateDir) { FileHandle.standardError.write(Data(warning.utf8)) }
+        let stored = FDStore.take()
+        let adoptedPasst = PasstUplink.Adopted.fromStore(stored)
+        // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM,
+        // unless VMs already run on one (an adopted passt, running records).
+        let registryPath = config.stateDir + "/vms.json"
+        let chosen = Self.chooseWorkspaceGateway(hasVMs: VMRegistry.hasRecords(path: registryPath))
+        let inUse = adoptedPasst.flatMap { ProcFS.argv($0.pid).flatMap(Self.passtGateway(argv:)) }
+            ?? VMRegistry.runningGateway(path: registryPath)
+        pc.gateway = Self.gatewayToUse(chosen: chosen, inUse: inUse)
         pc.dnsForward = pc.gateway
         Self.workspaceSubnet.withLockedValue { $0 = Self.subnetCIDR(gateway: pc.gateway) }
-        let stored = FDStore.take()
-        let passt = try await PasstUplink.start(pc, adopting: PasstUplink.Adopted.fromStore(stored))
+        let passt = try await PasstUplink.start(pc, adopting: adoptedPasst)
         // The VMs' network ends (net-<short id>) and vsock listeners
         // (vsock-<short id>, bmcp-<short id>), for adoptRunning; control:
         // systemd's socket unit (multi-user), the daemon command's. Anything

@@ -58,7 +58,7 @@ if systemctl --user is-system-running >/dev/null 2>&1 || [ "$(systemctl --user i
   CI_STATE=$(mktemp -d /tmp/acl-ci-sd.XXXXXX)
   systemd-run --user --unit=bromure-ac-ci -p Type=notify -p NotifyAccess=main -p KillMode=process \
     --setenv=XDG_STATE_HOME="$CI_STATE" --setenv=XDG_RUNTIME_DIR="$CI_STATE/run" \
-    --setenv=XDG_DATA_HOME="$CI_STATE/data" \
+    --setenv=XDG_DATA_HOME="$CI_STATE/data" --setenv=XDG_CONFIG_HOME="$CI_STATE/config" \
     "$ROOT/linux/ACLinux/.build/release/bromure-ac" daemon
   [ "$(systemctl --user is-active bromure-ac-ci)" = active ] || { echo "not active after READY"; exit 1; }
   XDG_RUNTIME_DIR="$CI_STATE/run" "$ROOT/linux/ACLinux/.build/release/bromure-ac" vm ls >/dev/null

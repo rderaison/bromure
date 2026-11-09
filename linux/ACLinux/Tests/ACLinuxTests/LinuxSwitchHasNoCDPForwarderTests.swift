@@ -11,6 +11,8 @@ struct LinuxSwitchHasNoCDPForwarderTests {
     @Test func nothingOnTheSwitchListensOn9223() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/ACLinux")
+        // The daemon's own files only (one level): _shared/ is macOS's code,
+        // which names the port for macOS's own browser VM.
         let files = try FileManager.default.contentsOfDirectory(atPath: sources.path).filter { $0.hasSuffix(".swift") }
         #expect(!files.isEmpty)
         let port = try NSRegularExpression(pattern: "(^|[^0-9a-fA-F])9223([^0-9a-fA-F]|$)|cdpForwarder|allowCDPPeer")

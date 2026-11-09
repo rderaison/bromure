@@ -28,7 +28,9 @@ extension Daemon {
             if hasVMs {
                 defaults.set(false, forKey: useRandom172DefaultsKey)
                 FileHandle.standardError.write(Data(("bromure-ac daemon: workspaces stay on 192.168.64.0/24 (this install has VMs);"
-                    + " set \(useRandom172DefaultsKey) true in the daemon's defaults to move to a private 172.16/12 subnet\n").utf8))
+                    + " set \(useRandom172DefaultsKey) true in the daemon's defaults to move to a private 172.16/12 subnet."
+                    + " A k3s cluster made before keeps its 192.168.64 MetalLB range, node addresses and certificates:"
+                    + " recreate it after the move\n").utf8))
             } else {
                 defaults.set(true, forKey: useRandom172DefaultsKey)
             }
@@ -37,6 +39,37 @@ extension Daemon {
             ? VMNetSwitch.persistedRandom172Base(hostUsed: hostUsed, defaults: defaults)
             : 0xC0A8_4000
         return VMNetSwitch.ipString(base | 1)
+    }
+
+    /// The gateway to start on: the one VMs already run on (an adopted
+    /// passt's, running records'), else the chosen one. A change (an
+    /// opt-in, a re-roll because the host joined the saved /24) waits for a
+    /// start with nothing running, and is said (macOS's VMs end at quit; a
+    /// re-adopted one here would lose its lease).
+    // @port-skip linux-only: see chooseWorkspaceGateway
+    static func gatewayToUse(chosen: String, inUse: String?) -> String {
+        guard let inUse, inUse != chosen else { return chosen }
+        FileHandle.standardError.write(Data(("bromure-ac daemon: workspaces stay on \(subnetCIDR(gateway: inUse)) while VMs run on it;"
+            + " the move to \(subnetCIDR(gateway: chosen)) waits for a start with none running\n").utf8))
+        return inUse
+    }
+
+    /// A passt's gateway, from its command line (`-g <gateway>`).
+    // @port-skip linux-only: see chooseWorkspaceGateway
+    static func passtGateway(argv: [String]) -> String? {
+        zip(argv, argv.dropFirst()).first { $0.0 == "-g" || $0.0 == "--gateway" }?.1
+    }
+
+    /// Warning, when the daemon has a state dir of its own (a test's, CI's)
+    /// but this user's config home: its defaults (the subnet's choice) would
+    /// land in the user's ~/.config/bromure-ac.plist.
+    // @port-skip linux-only: the daemon's defaults location check
+    static func configHomeWarning(stateDir: String, env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        guard env["XDG_STATE_HOME"].map({ !$0.isEmpty }) == true, env["XDG_CONFIG_HOME"].map({ !$0.isEmpty }) != true else { return nil }
+        let home = env["HOME"] ?? NSHomeDirectory()
+        guard !stateDir.hasPrefix(home + "/") else { return nil }
+        return "bromure-ac daemon: WARNING: a state dir of its own (\(stateDir)) but this user's config home: its defaults"
+            + " (the workspace subnet's choice) go to \(home)/.config/bromure-ac.plist; set XDG_CONFIG_HOME for a test or CI daemon\n"
     }
 
     /// The `/24` a gateway (its .1) is on, as a CIDR.

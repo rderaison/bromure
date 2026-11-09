@@ -20,7 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 BIN=$ROOT/linux/ACLinux/.build/release/bromure-ac
 U=bromure-ac-kvmtest-$$
 W=$(mktemp -d /tmp/acl-uk.XXXXXX); chmod 755 "$W"
-export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state
+export XDG_RUNTIME_DIR=$W/run XDG_STATE_HOME=$W/state XDG_CONFIG_HOME=$W/config
 # A private data home too: no test daemon reads the user's subscription
 # logins, model settings, engine key or secrets vault (~/.local/share); the
 # image stays the user's (read only).
@@ -80,7 +80,7 @@ start_unit() {
     -p Restart=on-failure -p RestartSec=2 -p FileDescriptorStoreMax=64 \
     -p ExecStopPost="$BIN stop-post" \
     --setenv=HOME="$HOME" --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" --setenv=XDG_STATE_HOME="$XDG_STATE_HOME" \
-    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" --setenv=BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ \
+    --setenv=XDG_DATA_HOME="$XDG_DATA_HOME" --setenv=XDG_CONFIG_HOME="$XDG_CONFIG_HOME" --setenv=BROMURE_AC_IMAGE="$BROMURE_AC_IMAGE" --setenv=BROMURE_SENTRY_CATALOG_BASE=http://127.0.0.1:9/ \
     --setenv=BROMURE_AGENTD="$ROOT/Sources/AgentCoding/Resources/vm-setup/bromure-agentd.py" \
     "$BIN" daemon
 }

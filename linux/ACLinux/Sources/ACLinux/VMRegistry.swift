@@ -108,6 +108,21 @@ public struct VMRegistry: Sendable {
         return !((try? dec.decode([VMRecord].self, from: data)) ?? []).isEmpty
     }
 
+    /// The gateway (.1) of the /24 a running record's lease is on, read only:
+    /// the subnet VMs still run on across a daemon restart.
+    // @port-skip linux-only: Linux daemon state persistence
+    public static func runningGateway(path: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .secondsSince1970
+        let recs = (try? dec.decode([VMRecord].self, from: data)) ?? []
+        for r in recs where r.state == .running || r.state == .starting {
+            let p = (r.ip ?? "").split(separator: ".")
+            if p.count == 4 { return p[0..<3].joined(separator: ".") + ".1" }
+        }
+        return nil
+    }
+
     /// Loads the registry. VMs recorded as running or starting are marked
     /// stopped unless `isAlive` says their Firecracker is still there (the daemon
     /// re-adopts those). Suspended ones stay suspended while their snapshot
