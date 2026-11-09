@@ -2,6 +2,13 @@
 
 **Status: options only, for a decision. Nothing here is implemented.**
 
+**Today's behaviour on a Linux host.** The workload starts, and cannot create in or edit uid-1000 files on a user share. The supervisor's own write probe (`check_workdir_access` in bromure-sandboxd) catches this at launch. It puts a warning in the guest status ("run_as uid N cannot write <workdir> -- the agent will start and then fail to save files there"), which reaches the daemon log and the timeline's `sandbox.status`. `test_boot.sh` asserts that warning, and asserts no warning where the workload can write. So nothing fails silently, but this is a warning rather than option 6's refusal.
+
+**What option 1 needs on top of this table** (found while preparing it). virtiofsd's owner mapping is fixed when the share starts, so the host must know the run_as uid at boot. Today the guest picks it: `ensure_user` runs `useradd --system`, so the uid is the first free system uid (999 on today's image, but not guaranteed), under any name the policy gives. Option 1 therefore also needs:
+- a uid contract between sandboxd and the host;
+- the daemon reading run_as from the policy at launch;
+- a live policy change of run_as taking effect only at the next VM restart, since a share's virtiofsd can't be remapped in place.
+
 ## The problem
 
 With `run_as_user: sandbox`, the workload runs as uid 999 and the shares are owned by the workspace user (uid 1000). On a Linux host (virtiofsd 1.13.2, guest kernel 6.8.0-147) the workload cannot use them. `test_boot.sh` fails three checks in each of its two `run_as_user` configs: read, append, and create in a host-backed workdir on `/mnt/bromure-outbox`. With the home disk in place, nothing else in those configs fails.

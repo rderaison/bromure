@@ -1002,6 +1002,28 @@ import json;print(json.dumps((json.load(open('$WORK/run/status.json')).get('addi
         else
             bad "the sandbox could not create a file in $wd: $(sandbox_sh "echo x > '$wd/guest.txt'" 2>&1 | tail -1)"
         fi
+        #    Whichever way that went, the supervisor's own probe must have said
+        #    the same in its status: a warning naming the workdir when the
+        #    workload can't create there (a Linux host's virtiofs DAC,
+        #    linux/VIRTIOFS_DAC.md), and none when it can (no false alarm).
+        local warned=no
+        if sudo python3 -I -B -c "
+import json, sys
+d = json.load(open('$WORK/run/status.json'))
+sys.exit(0 if any('cannot write' in w and sys.argv[1] in w for w in d.get('warnings') or []) else 1)" "$wd"; then
+            warned=yes
+        fi
+        if [ -f "$wd/guest.txt" ]; then
+            if [ "$warned" = no ]; then
+                ok "the status raises no write warning for a workdir the workload can write"
+            else
+                bad "the status warns that uid $runas cannot write $wd, but the workload just created a file there"
+            fi
+        elif [ "$warned" = yes ]; then
+            ok "the status reports plainly that uid $runas cannot write $wd"
+        else
+            bad "the workload cannot create in $wd and the status says nothing about it"
+        fi
         # 8. The home. It must be the WORKSPACE user's home through the idmapped
         #    mount, because that is where Bromure seeds the agent's configuration:
         #    a workload with a home of its own starts unconfigured. See §1.12.
