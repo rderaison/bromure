@@ -25,6 +25,36 @@ struct SignInCaptureFailClosedTests {
         #expect(block.contains("reply = SignInCapture.notKeptReply"))
     }
 
+    @Test("a 200 poll error goes on rebuilt from its allowed fields; anything else is refused")
+    func pollErrorReply() throws {
+        func reply(_ s: String) -> Data? { SignInCapture.pollErrorReply(Data(s.utf8)) }
+        for ok in [#"{"error":"authorization_pending"}"#,
+                   #"{"error":"slow_down","error_description":"wait","interval":5}"#,
+                   #"{"error":"expired_token","error_uri":"https://x/e"}"#] {
+            let r = try #require(reply(ok), "\(ok)")
+            #expect(String(decoding: r, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+        }
+        for refused in [#"{"access_token":"a","token_type":"bearer"}"#,
+                        #"{"error":"authorization_pending","access_token":"a"}"#,
+                        #"{"error":null,"data":{"access":"x"}}"#,
+                        #"{"error":"authorization_pending","credential":"x"}"#,
+                        #"{"error":"authorization_pending","session":"x"}"#,
+                        #"{"error":"other"}"#,
+                        #"{"error":""}"#,
+                        #"{"error":"slow_down","interval":true}"#,
+                        #"{"error":"slow_down","error_description":{"k":"v"}}"#,
+                        #"[{"error":"slow_down"}]"#,
+                        "error=authorization_pending", "not json", ""] {
+            #expect(reply(refused) == nil, "\(refused)")
+        }
+        let big = #"{"error":"slow_down","error_description":""# + String(repeating: "x", count: 5000) + #""}"#
+        #expect(reply(big) == nil)
+        // The rebuilt reply carries only the allowed fields.
+        let r = try #require(reply(#"{"error":"slow_down","interval":7}"#))
+        let text = String(decoding: r, as: UTF8.self)
+        #expect(text.contains("slow_down") && text.contains("7") && !text.lowercased().contains("set-cookie"))
+    }
+
     @Test("an ended sign-in leaves a spent marker: its late exchange is refused before the provider, then it expires")
     func spentMarker() throws {
         let pid = UUID(), t0 = Date()
