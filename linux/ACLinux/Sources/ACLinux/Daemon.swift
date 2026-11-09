@@ -2017,7 +2017,8 @@ public actor Daemon {
     }
 
     /// Firecracker went away (any reason): unplug it, and record what it is now.
-    // @port-skip linux-only: Linux daemon VM lifecycle
+    // partial: one VM per workspace record (no earlier sandbox's late stop to tell apart); a reboot relaunches, an explicit stop wins
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onStopped h=63ea87a5b3a8e015 @4237c02e
     func vmStopped(_ id: String, _ info: FirecrackerMachine.StopInfo) async {
         // Both onStopped's Task and a stop route call this; the first does
         // the work, and every caller returns only once it is done (the
@@ -2042,7 +2043,8 @@ public actor Daemon {
         }
     }
 
-    // @port-skip linux-only: Linux daemon VM lifecycle
+    // partial: no windows, panes, status menu or activation policy on a server; a queued boot remedy runs through this stop (it ends in performBootRemedy)
+    // @port ACAppDelegate.handleSessionStopped(profileID: Profile.ID) h=772a84595772dbe3 @4237c02e
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         // A boot failure ends with its session (macOS: handleSessionStopped).

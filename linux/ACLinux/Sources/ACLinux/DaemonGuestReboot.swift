@@ -23,7 +23,8 @@ extension Daemon {
     /// The guest's going down for a reboot: its stop relaunches it. A saved
     /// state is stale across it, and the shell connections belong to the
     /// boot that is going away (macOS: onGuestReboot).
-    // @port-skip linux-only: the daemon side of UbuntuSandboxVM.onGuestReboot (macOS: VZ restarts the guest in place)
+    // partial: Firecracker exits on the reset (VZ restarts the guest in place), so its stop relaunches it
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onGuestReboot h=6ef2731571fc34e5 @4237c02e
     func noteGuestRebootIntent(_ id: String) {
         guard let l = live[id], guestRebootIntents.insert(id).inserted else { return }
         try? FileManager.default.removeItem(atPath: snapshotDir(id))
@@ -36,6 +37,8 @@ extension Daemon {
     /// The VM stopped after its guest rebooted: boot it again, cold, kept
     /// as a reboot (a `--rm` workspace survives it) until the boot is done.
     // @port ACAppDelegate.relaunchAfterGuestReboot(_: Profile.ID) h=a54abd48d1aae658 @4bd8405e
+    // partial: a cold start() after the stop's teardown (plan bridges, browser VM, ports); no pane, overlay or native terminals
+    // @port ACAppDelegate.relaunchVM(in: SessionPane) h=37bb04f7169e154d @4237c02e
     func relaunchAfterGuestReboot(_ id: String) async {
         defer { rebooting.remove(id); stopsDuringReboot.remove(id) }
         for _ in 0..<200 where live[id] != nil || stopping[id] != nil {

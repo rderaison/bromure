@@ -2083,7 +2083,7 @@ enum SessionHome {
         if s.hasEnded { return !(s.lastError ?? "").isEmpty && !s.isArchived ? .needsYou : .ended }
         let ws = workspaceState(of: s, in: model)
         guard ws == .running || ws == .booting else { return .asleep }
-        #if os(macOS)
+        #if os(macOS) || BROMURE_LINUX
         // Its guest has gone silent: nothing it last said about this agent can
         // still be trusted, "working" least of all.
         guard !GuestLivenessStore.shared.isUnresponsive(s.profileID) else { return .asleep }

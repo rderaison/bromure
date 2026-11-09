@@ -23,6 +23,8 @@ extension Daemon {
     /// shutdown, or at once) and booted fresh, as its workspace is saved now
     /// (an edit that needs a reboot takes effect), never resumed.
     // @port ACAppDelegate.rebootMachine(_: Profile.ID, force: Bool, remoteInitiated: Bool) h=ffe69fc7d5a5ac71 @9ece43f6
+    // @port ACAppDelegate.automationRebootVM(idOrName: String, mode: String) h=88def92c5001a3b7 @4237c02e
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRebootVM h=ce9c2e1d5f613661 @4237c02e
     func rebootRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         let hard = body["mode"]?.stringValue == "hard"
         guard live[rec.id] != nil else {

@@ -8,12 +8,23 @@ import Testing
 @testable import ACLinux
 import class SandboxEngine.VMNetSwitch
 
+/// The dirs shortTempDir made in this test process, removed when it exits
+/// (most tests don't remove theirs; they piled up in /tmp).
+private let shortTempDirs = NIOLockedValueBox<[String]>([])
+private let shortTempDirsCleanup: Void = {
+    atexit {
+        for d in shortTempDirs.withLockedValue({ $0 }) { try? FileManager.default.removeItem(atPath: d) }
+    }
+}()
+
 func shortTempDir() throws -> String {
     let d = "/tmp/acl-\(UUID().uuidString.prefix(8))"
     // 0700 whatever the umask: a daemon's runtime dir must sit in a
     // directory no one else can write (SecureDir).
     try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true,
                                             attributes: [.posixPermissions: 0o700])
+    _ = shortTempDirsCleanup
+    shortTempDirs.withLockedValue { $0.append(d) }
     return d
 }
 

@@ -1088,6 +1088,34 @@
     {
       "id": "ACAppDelegate.resetSystemDiskAfterBootFailure(_: Profile.ID)",
       "reason": "screen-only: the boot overlay's Reset System Disk NSAlert (remote clients choose through the pending prompt: handleBootFilesystemFailure)"
+    },
+    {
+      "id": "ACAppDelegate.restartProfile(_: Profile.ID, force: Bool?, confirm: Bool)",
+      "reason": "screen-only: the machine menu's Reboot (⌥ forces it, an NSAlert confirms); clients reboot through POST /vms/<id>/reboot (rebootRoute)"
+    },
+    {
+      "id": "ACAppDelegate.static confirmReboot(_: String, force: Bool)",
+      "reason": "screen-only: the reboot NSAlert (a fat client asks its own)"
+    },
+    {
+      "id": "ACAppDelegate.holdDiskForRelaunch(_: Profile.ID)",
+      "reason": "macOS's boot lease across the pane's relaunch; the Linux relaunch holds the workspace with `rebooting` and its disk with repair marks"
+    },
+    {
+      "id": "ACAppDelegate.armTerminateWatchdog(generation: UInt)",
+      "reason": "app-only: AppKit's quit drain; the daemon's stop is systemd's (TimeoutStopSec, stop-post)"
+    },
+    {
+      "id": "GuestLivenessStore.mark(_: Profile.ID, unresponsive: Bool, forceReboot: @escaping@MainActor()->Void)",
+      "reason": "screen-only: the banner's force-reboot action; on Linux DaemonLiveness sets the silent set each tick (LinuxSessionHost.unresponsive)"
+    },
+    {
+      "id": "GuestLivenessStore.forceReboot(of: Profile.ID)",
+      "reason": "screen-only: the banner's force-reboot action (clients reboot through the reboot route)"
+    },
+    {
+      "id": "GuestLivenessStore.clear(_: Profile.ID)",
+      "reason": "the Linux silent set is derived again each tick (a stopped VM drops out): nothing to clear"
     }
   ],
   "skipInheriting": [
