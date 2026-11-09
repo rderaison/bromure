@@ -94,7 +94,8 @@ extension MitmProxy {
     /// closes it mid-transfer; unregistered when it closes. False: a policy
     /// swap that landed before the registration denies it already (the
     /// caller closes it). macOS: HTTPMitmConnection.trackedForFirewall.
-    // @port-skip linux-only: trackedForFirewall on a NIO channel (macOS wraps the connection's life in a closure)
+    // partial: a cut closes the channel (no reset of agentd's bridge socket yet)
+    // @port HTTPMitmConnection.trackedForFirewall(host: String, port: Int, route: String, _: ()asyncthrows->Void) h=b8fef0983a3ca0b5 @003f61e7
     func trackForFirewall(_ channel: Channel, profileID: UUID, host: String, port: Int, route: String,
                           identity: OpenShellPolicy.BinaryIdentity? = nil) -> Bool {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy
@@ -374,7 +375,8 @@ extension RequestReader {
     /// Tests: the detectors' readiness (nil: the classifiers').
     static let detectorReadinessForTesting = NIOLockedValueBox<(source: ModelReadiness, rules: ModelReadiness)?>(nil)
 
-    // @port-skip linux-only: HTTPMitmConnection.driveTLS's prompt-injection step, on the Linux request chain
+    // partial: the warming answer is the plan's (ProxyPolicy.detectorWarmingResponse, shared); the trace follows the reply
+    // @port HTTPMitmConnection.answerWarming(_: [String], tls: MitmServerStream, request: Data, host: String, port: Int, t0: Date, leaks: [LeakEntry]) h=39802a1380805679 @003f61e7
     static func promptInjectionAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                                       host: String, path: String, trace: inout Trace?) async -> Data? {
         guard TraceLevel.isAIHost(host) else { return nil }
@@ -455,7 +457,8 @@ extension RequestReader {
     /// may rewrite the body), the guardrails, then compromise detection and
     /// strict credential mode.
     /// The guest's answer, or nil to go on with `request`.
-    // @port-skip linux-only: driveTLS's policy steps (ProxyPolicy, shared) in the Linux proxy's order
+    // partial: with the other policy steps (ProxyPolicy, shared) in the Linux proxy's order
+    // @port HTTPMitmConnection.applyOpenShellMiddleware(_: Data, host: String, port: Int, method: String, path: String, spooled: Bool, tls: MitmServerStream) h=7650fe8b8bb9ec1f @003f61e7
     static func policyAnswer(_ request: inout Data, proxy: MitmProxy, profileID: UUID,
                              host: String, port: Int, tls: Bool, session: UInt64,
                              identity: OpenShellPolicy.BinaryIdentity? = nil) async -> Data? {

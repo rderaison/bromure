@@ -198,7 +198,8 @@ extension RequestReader {
         case bodiless(Data)
     }
 
-    // @port-skip linux-only: relayUpstreamCollecting's normalization, on the Linux relay's raw reply
+    // partial: the collected reply's normalization, on the Linux relay's raw reply (read whole by ResponseRelay)
+    // @port relayUpstreamCollecting(rawRequest: Data, host: String, port: Int, session: URLSession, scheme: String) h=84308eeebd01a8df @003f61e7
     static func supplyChainPlain(_ final: Data, cleanClose: Bool, head isHead: Bool = false) -> SupplyChainReply? {
         guard let sep = final.range(of: Data("\r\n\r\n".utf8)),
               let head = String(data: final[final.startIndex..<sep.lowerBound], encoding: .isoLatin1) else { return nil }

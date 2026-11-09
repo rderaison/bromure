@@ -493,6 +493,8 @@ final class MitmProxy: @unchecked Sendable {
     /// the client certificate presented.
     // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
     /// `local`: the request's routing, decided once by its plan (nil: decide here).
+    // partial: emitted once a handshake made with the identity succeeded (NIOSSL can't say whether the server asked for it)
+    // @port HTTPMitmConnection.static emitClientCertEvent(_: ClientIdentityRegistry.Entry, host: String, port: Int, profileID: UUID) h=d0b7db658ef87141 @003f61e7
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
                          pinned: [IPAddress]? = nil, local: Bool? = nil,
                          identity: OpenShellPolicy.BinaryIdentity? = nil, insecure: Bool = false,
@@ -693,7 +695,8 @@ final class ConnectHandler: ChannelInboundHandler, RemovableChannelHandler {
         step(context)
     }
 
-    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    // partial: the CONNECT and forward-proxy phase as a NIO handler (the preamble read inline)
+    // @port HTTPMitmConnection.drive() h=7f3159458662d106 @003f61e7
     private func step(_ context: ChannelHandlerContext) {
         while true {
             switch phase {
@@ -1060,7 +1063,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// Whether a request's body is streamed (5z): a Content-Length past the
     /// inline cap, or a chunked body that grew past it; `length` is the
     /// declared one (nil: chunked).
-    // @port-skip linux-only: readRequestSpooling's inline cap, as a decision on the head
+    // partial: a body past the inline cap is streamed upstream as it arrives (no temp file); not under OpenShell's strict framing
+    // @port readRequestSpooling(via: MitmServerStream, inlineCap: Int, strict: Bool) h=61da3613f04a2f7c @003f61e7
     static func streamsBody(_ head: Data, buffered: Int) -> (stream: Bool, length: Int?) {
         let text = String(decoding: head, as: UTF8.self)
         if let te = SubscriptionAuthRewrite.headerValue("transfer-encoding", inHeaderSection: text),
@@ -1160,7 +1164,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// The request as it goes upstream, or the host's own answer, in
     /// macOS's order: the subscription swaps (5c–5e), the token map's, then
     /// the 5f sign-in capture on what would go out.
-    // @port-skip linux-only: the swap order of HTTPMitmConnection.driveTLS (5c–5f, then TokenSwapper)
+    // partial: the Linux request chain on NIO, its steps in MitmEgress, MitmMCPAuth, MitmInsecure, SupplyChainLinux and DaemonSquelch; subscription auth before the token swap; no Fusion yet
+    // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) h=5e2bbc915c7addaa @003f61e7
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
                         session: UInt64, trace: inout Trace?,
                         identity: OpenShellPolicy.BinaryIdentity? = nil, spooled: Bool = false) async -> Plan {
@@ -1274,8 +1279,11 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         let dial = depiKey.map { _ in (host: DepiRegistry.host, port: DepiRegistry.port) }
         switch spooled ? .none : await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method,
                                                         path: path, depiKey: depiKey) {
+        // @port-skip linux-only: a case of the Linux request chain's own steps (see rewrite's @port)
         case .none: break
+        // @port-skip linux-only: a case of the Linux request chain's own steps (see rewrite's @port)
         case .answer(let reply): return .answer(reply)
+        // @port-skip linux-only: a case of the Linux request chain's own steps (see rewrite's @port)
         case .rewrite(let forward, let rewrite, let done):
             req = Self.readWhole(forward)
             upgrade = false
@@ -1316,15 +1324,18 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // CredentialMint step). The reply is asked for uncompressed.
         var mint: CredentialMint.Kind?
         switch CredentialMint.classify(rawRequest: req, host: host) {
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .deny(let action)?: h=874cd336f92fc431 @003f61e7
         case .deny(let action)?:
             FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
             return .answer(CredentialMint.denial(action))
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .mint(let kind)?: h=d911a89e0b382939 @003f61e7
         case .mint(let kind)?:
             // Its reply is read whole and rewritten: not a streamed body's.
             if spooled { return .answer(CredentialMint.refusal("a streamed body")) }
             mint = kind
             req = Self.readWhole(req)
             upgrade = false
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case nil: h=100066d5d21b14d8 @003f61e7
         case nil:
             break
         }
@@ -1417,9 +1428,13 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // an insecure request: re-signing would put the real key's signature
         // in front of an unvalidated upstream.
         switch insecure ? .unchanged : await proxy.awsResigner.resign(rawRequest: out, host: host, profileID: profileID) {
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .unchanged: h=7ae83a8a6eda7f57 @003f61e7
         case .unchanged: break
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .resigned(let bytes): h=ef2b34394ac16b57 @003f61e7
         case .resigned(let bytes): out = framedLikeURLSession(bytes, host: host)
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .denied(let response): h=8293f31bc4d27bcf @003f61e7
         case .denied(let response): return .answer(response)
+        // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) / case .failed(let reason, let response): h=41ab3da9fe0a5276 @003f61e7
         case .failed(let reason, let response):
             FileHandle.standardError.write(Data("[mitm] AWS resign failed for \(host): \(reason)\n".utf8))
             return .answer(response)
@@ -1447,7 +1462,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         context.fireChannelWritabilityChanged()
     }
 
-    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    // partial: the upgrade's dial, held bytes and gates as NIO handlers (ResponseRelay switches, WSClientFilter / OpenShellWebSocket gate the guest's frames)
+    // @port HTTPMitmConnection.handleWebSocketUpgrade(serverTLS: MitmServerStream, rawRequest: Data, host: String, port: Int, cleartext: Bool, captureBody: Bool, messagePolicy: ((String)->OpenShellWebSocket.MessageVerdict)?, messageTransform: ((String)->OpenShellWebSocket.MessageTransform)?, onViolation: @escaping@Sendable(String,Bool)->Void, binaryPolicy: (()->OpenShellWebSocket.MessageVerdict)?, contentGuard: WSContentGuard?, squelchLearnFor: UUID?, onUpstreamMessage: (@Sendable(WSMessage)->Void)?) h=1f8ae9be73ba6ba7 @003f61e7
     private func send(_ plan: Plan, trace: Trace?, channel: Channel, host: String, port: Int, tls: Bool, session: UInt64) {
         switch plan {
         case .answer(let reply):
@@ -1895,7 +1911,8 @@ final class ResponseRelay: ChannelInboundHandler {
         }
     }
 
-    // @port-skip linux-only: NIO plumbing of the Linux proxy
+    // partial: the response relayed raw on NIO (no URLSession decoding: a body that has to be read is asked for identity); the 502 in UpstreamError / MitmInsecure
+    // @port relayUpstream(rawRequest: Data, host: String, port: Int, session: URLSession, tls: MitmServerStream, upstreamScheme: String, bodyFile: URL?, insecureBypassAllowed: Bool, profileID: UUID, responseRestorer: ((String)->PIIResponseRestorer)?) h=c40e22316695d646 @003f61e7
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
         if capture != nil || mint != nil || supplyChain != nil {
@@ -2126,8 +2143,9 @@ final class ResponseRelay: ChannelInboundHandler {
         }
 
         /// Queued (the budget isn't idle until it's handed to the guest).
-        // @port-skip linux-only: see SupplyChainJob
-        func start() {
+    // partial: the buffered relay's rewrite off the Linux relay's loop
+    // @port relayUpstreamBuffered(rawRequest: Data, host: String, port: Int, session: URLSession, tls: MitmServerStream, scheme: String, rewrite: (Data)->Data) h=1d63a33b9542d796 @003f61e7
+    func start() {
             budget.rewriting(true)
             ResponseRelay.supplyChainQueue.addOperation { self.step() }
         }
@@ -2228,6 +2246,8 @@ final class ResponseRelay: ChannelInboundHandler {
     /// line (which an upstream joins to the header above) would still offer
     /// h2c: none of them is pumped.
     // @port HTTPMitmConnection.static pumpedUpgrade(headerBlock: String) h=b8d8d008b8ed3751 @003f61e7
+    // partial: the request half: the rule alone (the Connection header doesn't decide it)
+    // @port HTTPMitmConnection.isWebSocketUpgrade(rawRequest: Data) h=b7521939c43dc0ee @003f61e7
     static func pumpedUpgrade(headerBlock: String) -> Bool {
         var protocols: [String]?
         for (i, line) in headerBlock.split(separator: "\r\n", omittingEmptySubsequences: false).enumerated() where i > 0 {

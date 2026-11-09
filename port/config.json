@@ -1566,6 +1566,406 @@
     {
       "id": "ACAppDelegate.installBrowserImageIfRequested()",
       "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client) (its debug/test install hook)"
+    },
+    {
+      "id": "HTTPMitmConnection.static shouldLogTokenInjection(_: String, now: Date, interval: TimeInterval)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static logTokenInjection(_: String, host: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static headerValue(_: String, inHeaderSection: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static rawHeaderSection(of: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static spliceHeaderSection(of: Data, newHeader: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static injectClaudeSubscriptionAuth(rawRequest: Data, access: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static bearerToken(inHeaderSection: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static replaceAuthorizationBearer(rawRequest: Data, token: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isClaudeHost(_: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isClaudeStandIn(_: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isCodexStandIn(_: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isGrokStandIn(_: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isKimiStandIn(_: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static standInRefreshToken(in: Data, matching: (String)->Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static subscriptionUnavailableReply(provider: String, rejected: Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static answerStandInRefresh(host: String, method: String, path: String, rawRequest: Data, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static urlQueryParam(_: String, inPath: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static redactSensitiveHeaders(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static parseRequestLine(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static parseStatusCode(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static bodyForTrace(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.connectDeniedResponse(host: String, port: Int)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.reportProxyAllowed(host: String, port: Int)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.egressVerdict(host: String, port: Int)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static replacingBody(of: Data, with: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static lowercasedHeaders(of: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static rewritingWebSocketExtensions(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static rewritingRequestTarget(_: Data, method: String, target: String, version: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.rejectBeforePolicy(tls: MitmServerStream, status: Int, error: String, detail: String, host: String, port: Int, method: String?, path: String?)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static bodyPrefix(of: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isSubscriptionPlaceholder(_: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static openShellDeniedBody(policy: String?, reason: String, method: String, path: String, host: String, port: Int, advisor: Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static emitSwapEvents(_: [SwapRecord], host: String, path: String, profileID: UUID, emit: (UUID,String,[String:AnyJSON])->Void)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static newToolResultSpans(in: Conversation)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isHarnessReminder(_: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static recordPIISwaps(_: PIIRewriter.Outcome, host: String, profileID: UUID, ms: Double)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static isAIHost(_: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static recordScanSkipped(host: String, path: String, engines: [String], reason: String, profileID: UUID, blocked: Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static warmingDetectors(injection: PromptInjectionPolicy, source: ModelReadiness, rules: ModelReadiness)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static detectorWarmingResponse(_: [String])",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static var detectorWarmingRetryAfter",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static undecodableBodyResponse(encoding: String, engines: [String])",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static recordInjectionRedacted(count: Int, host: String, profileID: UUID)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static injectionReasonPhrase(detector: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static injectionBlockResponse(detector: String, source: String, instructionsWithheld: Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static reasonPhrase(_: Int)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static denialEvent(_: GuardrailsConfig.Denial, host: String, port: Int, method: String, path: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static forceFullNpmPackument(_: Data)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static formActionValue(_: String)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "emitSupplyChainFetch(profileID: UUID, ecosystem: String, package: String, version: String?, kind: String, outcome: String, reasonKind: String?, reason: String?, overridable: Bool)",
+      "reason": "HTTPMitmConnection's forwarder to shared code (SubscriptionAuthRewrite, HTTPFrames, ProxyPolicy, ToolResultSpans, SupplyChainProxy, TraceLevel, TraceEmitter), which the Linux proxy calls directly"
+    },
+    {
+      "id": "HTTPMitmConnection.static var promptInjectionPolicyProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var piiPolicyProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var routingProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var credentialMinterProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var claudeSubscriptionProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var signInCaptureProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var codexSubscriptionProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var grokSubscriptionProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var kimiSubscriptionProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.var checkOtherDestinations",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.init(fd: Int32, profileID: UUID, certCache: CertCache, swapper: TokenSwapper, awsResigner: AWSResigner, traceStore: TraceStore, clientIdentities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry, consent: ConsentBroker, guardrailsBroker: GuardrailsConsentBroker, supplyChainBroker: SupplyChainConsentBroker, osvClient: OSVClient, socketClient: SocketDevClient, publishTimeCache: PublishTimeCache, sessionTraceProvider: @escaping@Sendable()->MitmEngine.SessionTrace?, guardrailsProvider: @escaping@Sendable()->GuardrailsConfig?, supplyChainProvider: @escaping@Sendable()->SupplyChainPolicy?)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.static claimedSport(parsed: Int?, peeked: Int?)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.static peekPreambleSport(fd: Int32, waitMs: Int32)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.run()",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.noteUpstreamSession(_: URLSession)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.closeFD()",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.static pumpDirection(readFD: Int32, readNB: ()throws->StreamReadOutcome, writeFD: Int32, writeNB: (Data)throws->Int, onChunk: (Data)->Void, gate: ((Data)->(forward:Data,stop:Bool))?, onGateStop: ()->Void)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.parseStatusCode(rawHeaders: Data)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.upstreamSession(for: String, port: Int, insecure: Bool)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.upstreamAddresses(host: String, port: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "parseHostPort(_: String)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "parseHTTPHostPort(_: String)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "readRawHTTPRequest(plainFD: Int32, maxBytes: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "readRawHTTPRequest(via: MitmServerStream, maxBytes: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "readUntilCompleteHTTP(maxBytes: Int, reader: (Int)throws->Data)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "WSByteCounters.addClient(_: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "WSByteCounters.addUpstream(_: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "readUntilDoubleCRLF(via: MitmClientStream, maxBytes: Int)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "writeAll(fd: Int32, bytes: [UInt8])",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "mitmSanitizedAcceptEncoding(_: String)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "mitmFetchesIdentity(_: URL)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.init(onHead: @escaping@Sendable(HTTPURLResponse)->Void, onChunk: @escaping@Sendable(Data)->Void, onComplete: @escaping@Sendable(Error?)->Void)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive: URLResponse, completionHandler: @escaping(URLSession.ResponseDisposition)->Void)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive: Data)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.static boundary(fromContentType: String)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.urlSession(_: URLSession, task: URLSessionTask, willPerformHTTPRedirection: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping(URLRequest?)->Void)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "StreamingRelayDelegate.urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError: Error?)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "RefusedUpstreamProtocol.static canInit(with: URLRequest)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "RefusedUpstreamProtocol.static canonicalRequest(for: URLRequest)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "RefusedUpstreamProtocol.startLoading()",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "RefusedUpstreamProtocol.stopLoading()",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didBecomeInvalidWithError: Error?)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, task: URLSessionTask, willPerformHTTPRedirection: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping(URLRequest?)->Void)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.init(identityRegistry: ClientIdentityRegistry, caRegistry: ClusterCATrustRegistry, consent: ConsentBroker, profileID: UUID, host: String, port: Int, insecure: Bool)",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didReceive: URLAuthenticationChallenge, completionHandler: @escaping(URLSession.AuthChallengeDisposition,",
+      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
+    },
+    {
+      "id": "HTTPMitmConnection.static extractOutputTokens(_: Data)",
+      "reason": "no caller on macOS"
+    },
+    {
+      "id": "HTTPMitmConnection.static var fusionEngagedProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.static var fusionConfigProvider",
+      "reason": "a provider hook MitmEngine sets on the macOS proxy; the Linux proxy reaches the same state through MitmProxy (wireProviders, SubscriptionProviders)"
+    },
+    {
+      "id": "HTTPMitmConnection.runTransparentTLS(host: String, port: Int)",
+      "reason": "the transparent flow's TLS / HTTP entry on SecureTransport; on Linux, MitmTransparent's serveTransparent hands the flow to the same RequestReader chain"
+    },
+    {
+      "id": "HTTPMitmConnection.runTransparentHTTP(host: String, port: Int)",
+      "reason": "the transparent flow's TLS / HTTP entry on SecureTransport; on Linux, MitmTransparent's serveTransparent hands the flow to the same RequestReader chain"
     }
   ],
   "skipInheriting": [

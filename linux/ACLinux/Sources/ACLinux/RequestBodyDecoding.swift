@@ -85,12 +85,16 @@ extension RequestReader {
         return (head.data(using: .isoLatin1) ?? Data(head.utf8)) + plain
     }
 
-    // @port-skip linux-only: zlib's inflate (macOS: Compression.framework's)
+    // partial: zlib's inflate (gzip, zlib and raw deflate by window bits) for Compression.framework's
+    // @port decompressBody(_: Data, encoding: String) h=01c546a9542be1af @003f61e7
+    // @port gunzipData(_: Data) h=cd2a28f4055e58f5 @003f61e7
+    // @port inflateData(_: Data, format: DeflateFormat) h=3fbc76787f0e72c3 @003f61e7
     static func inflated(_ data: Data, windowBits: Int32) -> Data? {
         decoded(data) { p, n, out, len in acl_inflate(p, n, windowBits, decodedBodyCap, out, len) }
     }
 
-    // @port-skip linux-only: libbrotlidec (macOS: Compression.framework's brotli)
+    // partial: libbrotlidec for Compression.framework's brotli
+    // @port brotliDecode(_: Data) h=66090b2457bc9e6c @003f61e7
     static func brotliDecoded(_ data: Data) -> Data? {
         decoded(data) { p, n, out, len in acl_brotli_decode(p, n, decodedBodyCap, out, len) }
     }
