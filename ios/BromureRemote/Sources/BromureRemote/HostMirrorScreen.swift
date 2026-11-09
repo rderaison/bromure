@@ -46,6 +46,10 @@ struct HostMirrorScreen: View {
     /// must survive the swap.
     @Binding private var focus: PadSelection?
     @State private var didRestoreFocus = false
+    /// The layout this stack is on screen in. RootView swaps it for the iPad
+    /// layout when this turns regular (an unfold), so a pop seen while it's
+    /// regular is that teardown, not the user going Back.
+    @Environment(\.horizontalSizeClass) private var stackSizeClass
     /// The Virtual Machines caret, shared with the iPad sidebar.
     @AppStorage("machines.vmExpanded") private var machinesExpanded = false
     /// The Native Machines caret, shared with the iPad sidebar.
@@ -81,6 +85,14 @@ struct HostMirrorScreen: View {
     private func publishFocus(_ f: PadSelection) {
         guard didRestoreFocus else { return }
         focus = f
+    }
+
+    /// A session just closed over an open room while this phone stack is on
+    /// screen: the user went Back to the room (not a teardown for the iPad
+    /// layout, which runs with a regular size class).
+    nonisolated static func backToRoom(closedSession: UUID?, openRoom: UUID?,
+                                       sizeClass: UserInterfaceSizeClass?) -> Bool {
+        closedSession != nil && openRoom != nil && sizeClass == .compact
     }
 
     /// Push the deep-linked workspace the moment the mirror knows it exists
@@ -166,11 +178,21 @@ struct HostMirrorScreen: View {
             restoreFocus()
             tryDeepLink()
         }
-        // Keep the shared focus in step with what this stack opens. Only
-        // openings: a fold to the iPad layout tears this stack down, popping
-        // its destinations to nil one by one, and publishing those pops would
-        // walk the focus back to nothing before the iPad reads it.
-        .onChange(of: openSessionID) { _, id in if let id { publishFocus(.session(id)) } }
+        // Keep the shared focus in step with what this stack opens. Openings,
+        // and one pop: Back from a session pushed over a room shows the room
+        // again, so the room is what's open. Other pops publish nothing: a
+        // switch to the iPad layout tears this stack down, popping its
+        // destinations to nil one by one, and publishing those would walk the
+        // focus back to nothing before the iPad reads it (that teardown runs
+        // with the size class already regular, so it's told apart).
+        .onChange(of: openSessionID) { old, id in
+            if let id {
+                publishFocus(.session(id))
+            } else if Self.backToRoom(closedSession: old, openRoom: openRoomID,
+                                      sizeClass: stackSizeClass), let room = openRoomID {
+                publishFocus(.room(room))
+            }
+        }
         .onChange(of: openRoomID) { _, id in
             if let id, openSessionID == nil { publishFocus(.room(id)) }
         }
