@@ -170,7 +170,8 @@ extension Daemon {
         let key = pid.uuidString.lowercased()
         let store = profileStore
         if let rec = registry.find(key), rec.registration == true || rec.rescueFor != nil || rec.managed { return }
-        guard live[key] == nil, !starting.contains(key), !rebooting.contains(key),
+        // A launch question up (the drift offer) has a start waiting on it.
+        guard live[key] == nil, !starting.contains(key), !rebooting.contains(key), !launchQuestions.isUp(pid),
               let p = store.loadAll().first(where: { $0.id == pid }), Self.takeEphemeral(p, store: store) else { return }
         let r = await deleteWorkspace(key)
         if r["ok"] as? Bool != true {

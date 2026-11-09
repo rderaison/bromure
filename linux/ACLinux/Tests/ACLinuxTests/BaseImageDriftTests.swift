@@ -15,6 +15,44 @@ struct BaseImageStampTests {
         #expect(InterimBake.nextStamp(priorStamp: "201.1", bundled: "201") == "201.2")
         #expect(InterimBake.nextStamp(priorStamp: "200.7", bundled: "201") == "201")
         #expect(InterimBake.nextStamp(priorStamp: "201.x", bundled: "201") == "201.1")
+        // A dotted --image-version: written, then bumped from.
+        #expect(InterimBake.nextStamp(priorStamp: "201", bundled: "201.3") == "201.3")
+        #expect(InterimBake.nextStamp(priorStamp: "201.3", bundled: "201.3") == "201.4")
+        #expect(InterimBake.nextStamp(priorStamp: "201.5", bundled: "201.3") == "201.6")
+    }
+
+    @Test("only a strictly newer base is an upgrade: by major, then revision, numerically")
+    func newer() {
+        #expect(Daemon.baseVersion("201.1", isNewerThan: "201"))
+        #expect(Daemon.baseVersion("201.10", isNewerThan: "201.9"))
+        #expect(Daemon.baseVersion("202", isNewerThan: "201.7"))
+        #expect(!Daemon.baseVersion("201", isNewerThan: "201.1"), "a downgrade")
+        #expect(!Daemon.baseVersion("201.1", isNewerThan: "201.1"))
+        #expect(Daemon.baseVersion("dev", isNewerThan: "201"), "not numbers: any other stamp")
+    }
+
+    @Test("a promotion cut short after its disk went live is finished; one before it isn't touched")
+    func rollForward() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        func put(_ f: String, _ s: String) throws { try s.write(toFile: dir + "/" + f, atomically: true, encoding: .utf8) }
+        func get(_ f: String) -> String? { try? String(contentsOfFile: dir + "/" + f, encoding: .utf8) }
+        try put("base.img", "new disk")
+        for f in InterimBake.promotedFiles { try put(f, "old"); try put(f + ".new", "new") }
+        // Before the disk's rename: a partial disk beside them; left alone.
+        try put("base.img.partial", "scratch")
+        #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
+        #expect(get("base.version") == "old" && get("vmlinuz.new") == "new")
+        try FileManager.default.removeItem(atPath: dir + "/base.img.partial")
+        // After it: rolled forward, the stamp with the rest.
+        try FileManager.default.removeItem(atPath: dir + "/vmlinuz.new")   // done before the crash
+        try put("vmlinuz", "new")
+        #expect(InterimBake.finishPromotion(imageDir: dir) == nil)
+        for f in InterimBake.promotedFiles {
+            #expect(get(f) == "new", "\(f)")
+            #expect(!FileManager.default.fileExists(atPath: dir + "/" + f + ".new"))
+        }
+        InterimBake.finishPromotionIfIdle(imageDir: dir)   // nothing left: a no-op
     }
 }
 
@@ -122,7 +160,8 @@ extension DaemonGlobalSuites {
 
         @Test func noOfferOnTheSameBaseOrWithoutADiskOrARecord() async throws {
             let prior = ProfileStore.defaultRootDir
-            for (recorded, current, disk) in [("201.1", "201.1", true), ("201", "201.1", false), (nil, "201.1", true)] as [(String?, String, Bool)] {
+            for (recorded, current, disk) in [("201.1", "201.1", true), ("201", "201.1", false), (nil, "201.1", true),
+                                              ("201.2", "201.1", true), ("201", "", true)] as [(String?, String, Bool)] {
                 let s = try await Self.setup(recorded: recorded, current: current)
                 if !disk { try FileManager.default.removeItem(atPath: s.disk) }
                 let asked = NIOLockedValueBox(0)
@@ -153,6 +192,28 @@ extension DaemonGlobalSuites {
             #expect(r.status == 409 && (r.body["error"]?.stringValue ?? "").contains("wasn't upgraded"), "\(r.body)")
             #expect(FileManager.default.fileExists(atPath: s.disk))
             await s.d.markStartingForTesting(s.rec.id, false)
+            await Self.teardown(s, prior: prior)
+        }
+
+        @Test func aRmWorkspaceWithItsQuestionUpIsntDropped() async throws {
+            let prior = ProfileStore.defaultRootDir
+            let s = try await Self.setup()
+            let store = ProfileStore()
+            store.markEphemeral(s.profile, owner: getpid())
+            let release = NIOLockedValueBox(false), entered = NIOLockedValueBox(false)
+            Daemon.driftAnswerForTesting.withLockedValue { $0 = { _ in
+                entered.withLockedValue { $0 = true }
+                while !release.withLockedValue({ $0 }) { try? await Task.sleep(for: .milliseconds(10)) }
+                return 1
+            } }
+            let first = Task { await s.d.start(s.rec) }
+            while !entered.withLockedValue({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+            // A second `vm run --rm` refused (the question is up) drops what it abandoned:
+            // not this one, whose start waits on the question.
+            await s.d.dropAbandonedEphemeral(s.profile.id)
+            #expect(store.loadAll().contains { $0.id == s.profile.id }, "kept while its question is up")
+            release.withLockedValue { $0 = true }
+            _ = await first.value
             await Self.teardown(s, prior: prior)
         }
 

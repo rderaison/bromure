@@ -31,21 +31,42 @@ extension Daemon {
         case diskInUse(upgradeSkipped: Bool)
     }
 
-    /// The base image on disk now (its version stamp), or nil when none.
+    /// The base image on disk now (its version stamp), or nil when none
+    /// (an empty stamp is none).
     // @port ACAppDelegate.readCurrentBaseVersion() h=d25ad68d47b75cd9 @4237c02e
     func readCurrentBaseVersion() -> String? {
-        try? String(contentsOfFile: config.imageDir + "/base.version", encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        (try? String(contentsOfFile: config.imageDir + "/base.version", encoding: .utf8))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// `current` is a later base than `recorded`: by major, then by
+    /// dot-revision, numerically; stamps that aren't numbers compare as
+    /// different (macOS's baseImageNeedsUpdate fallback). Linux only offers
+    /// a strictly newer base: an older one (a downgrade, install.sh copying
+    /// an older image) isn't an upgrade.
+    // @port-skip linux-only: the strictly-newer test of baseImageUpgradeOfferDue (macOS: any different stamp)
+    static func baseVersion(_ current: String, isNewerThan recorded: String) -> Bool {
+        func parts(_ s: String) -> (Int, Int)? {
+            let p = s.split(separator: ".", maxSplits: 1).map(String.init)
+            guard let major = p.first.flatMap({ Int($0) }) else { return nil }
+            guard p.count == 2 else { return (major, 0) }
+            guard let rev = Int(p[1]) else { return nil }
+            return (major, rev)
+        }
+        guard let c = parts(current), let r = parts(recorded) else { return current != recorded }
+        return c > r
     }
 
     /// The base on disk is newer than the one this workspace's disk was
     /// cloned from, and the user hasn't said "No" to this very base or
     /// "Remind me later" within the day: the upgrade offer is due.
+    // partial: a strictly newer base only (macOS: any other stamp)
     // @port ACAppDelegate.baseImageUpgradeOfferDue(_: Profile, current: String?) h=e733f1404194b42c @4237c02e
     func baseImageUpgradeOfferDue(_ profile: Profile, current: String?) -> Bool {
         guard FileManager.default.fileExists(atPath: vmDir(profile.id.uuidString.lowercased()) + "/disk.raw"),
               let recorded = profile.baseImageVersionAtClone,
-              let current, recorded != current else { return false }
+              let current, Self.baseVersion(current, isNewerThan: recorded) else { return false }
         if profile.baseImageUpgradeDeclinedFor == current { return false }
         if let until = profile.baseImageUpgradeRemindAfter, until > Date() { return false }
         return true

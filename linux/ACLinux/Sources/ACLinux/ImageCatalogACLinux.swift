@@ -37,10 +37,16 @@ enum ImageState {
     /// build that already promoted successfully.
     // @port UbuntuImageManager.writeImageState(_: BaseImageState) h=68070be3f001c6a3 @84e171b8
     static func write(_ state: BaseImageState, imageDir: String) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(state) {
+        if let data = try? encoded(state) {
             try? data.write(to: URL(fileURLWithPath: imageDir + "/image-state.json"), options: .atomic)
         }
+    }
+
+    /// The file's bytes (pretty-printed, sorted keys), as `write` writes them.
+    // @port-skip linux-only: see write
+    static func encoded(_ state: BaseImageState) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(state)
     }
 }

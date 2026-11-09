@@ -284,6 +284,8 @@ public actor Daemon {
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
         pc.useFDStore = true
         if let warning = Self.configHomeWarning(stateDir: config.stateDir) { FileHandle.standardError.write(Data(warning.utf8)) }
+        // A bake cut short after its disk went live: its boot files and stamp.
+        InterimBake.finishPromotionIfIdle(imageDir: config.imageDir)
         let stored = FDStore.take()
         let adoptedPasst = PasstUplink.Adopted.fromStore(stored)
         // The workspaces' subnet (DaemonSubnet.swift): chosen before any VM,
@@ -1635,18 +1637,25 @@ public actor Daemon {
         // The start clones the base into a missing system disk (a new
         // workspace's, a reset one's): which base that was is recorded on
         // the workspace, for the drift check (DaemonBaseImageDrift.swift).
+        // Recorded once the clone is there, even when the boot then fails:
+        // the disk is that base's either way.
         let clones = !FileManager.default.fileExists(atPath: machine.config.overlay)
         let baseVersion = clones ? readCurrentBaseVersion() : nil
+        let workspace = rec.registration != true && rec.kube == nil, overlay = machine.config.overlay
+        let stampClone = { [self] in
+            if let baseVersion, workspace, let pid = UUID(uuidString: id), FileManager.default.fileExists(atPath: overlay) {
+                stampBaseImageVersionAtClone(baseVersion, profileID: pid)
+            }
+        }
         do {
             try await machine.start()
         } catch {
+            stampClone()
             live[id] = nil
             await teardown(l, mac: rec.mac)
             throw error
         }
-        if let baseVersion, rec.registration != true, rec.kube == nil, let pid = UUID(uuidString: id) {
-            stampBaseImageVersionAtClone(baseVersion, profileID: pid)
-        }
+        stampClone()
         // A workspace's cold boot: its console watched for a boot that dies
         // on filesystem errors (DaemonBootRemedy; a cluster machine's has its
         // own scan). The log starts fresh with each Firecracker.

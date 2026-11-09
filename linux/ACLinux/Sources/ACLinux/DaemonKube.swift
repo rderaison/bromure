@@ -345,7 +345,7 @@ extension Daemon {
     func startKubeMachineVM(id: String) async -> String? {
         guard let rec = registry.find(id) else { return "no machine" }
         if live[id] != nil { return nil }
-        let r = await start(rec)
+        let r = await start(rec, unattended: true)
         return r.status == 200 ? nil : (r.body["error"]?.stringValue ?? "didn't start")
     }
 

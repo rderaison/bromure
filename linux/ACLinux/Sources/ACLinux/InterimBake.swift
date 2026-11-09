@@ -103,6 +103,9 @@ public enum InterimBake {
         }
         // The stamp on disk before this bake, for the next revision: a
         // rebuild at the same major bumps 201 → 201.1; a new major writes fresh.
+        // A promotion a crash cut short (its disk live): finished first, or
+        // the stamp below would be the old one's.
+        if !fm.fileExists(atPath: o.outputDir + "/base.img.partial") { _ = finishPromotion(imageDir: o.outputDir) }
         let priorStamp = (try? String(contentsOfFile: o.outputDir + "/base.version", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let newStamp = nextStamp(priorStamp: priorStamp, bundled: o.imageVersion)
@@ -144,7 +147,7 @@ public enum InterimBake {
         defer {
             if !promoted {
                 try? fm.removeItem(atPath: partial)
-                for f in ["vmlinuz", "initrd.img", "kernel-release", "cmdline"] { try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new") }
+                for f in promotedFiles { try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new") }
             }
         }
 
@@ -230,24 +233,23 @@ public enum InterimBake {
         // live image whole.
         // ia32_emulation=0 as setup.sh's GRUB line: no 32-bit syscall entry,
         // which the kernel sentry (64-bit wrappers only) doesn't watch.
-        let bootFiles = ["vmlinuz", "initrd.img", "kernel-release", "cmdline"]
         try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet ia32_emulation=0\n"
             .write(toFile: work + "/out/cmdline", atomically: true, encoding: .utf8)
-        for f in bootFiles {
+        try (newStamp + "\n").write(toFile: work + "/out/base.version", atomically: true, encoding: .utf8)
+        // Which catalog steps the image has, as macOS records a local build.
+        try ImageState.encoded(BaseImageState(imageUUID: nil, version: newStamp, appliedStepUUIDs: steps))
+            .write(to: URL(fileURLWithPath: work + "/out/image-state.json"))
+        for f in promotedFiles {
             try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new")
             try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f + ".new")
         }
         guard rename(partial, finalImage) == 0 else { throw MachineError.io("rename \(partial)", errno) }
         promoted = true
-        for f in bootFiles {
-            guard rename(o.outputDir + "/" + f + ".new", o.outputDir + "/" + f) == 0 else {
-                throw MachineError.io("rename \(f).new", errno)
-            }
+        // From here the new disk is live: the rest rolls forward (here, or
+        // at the next bake's or daemon's start: finishPromotion).
+        if let left = finishPromotion(imageDir: o.outputDir) {
+            throw MachineError.io("rename \(left).new (the next bake or daemon start finishes it)", errno)
         }
-        try (newStamp + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
-        // Which catalog steps the image has, as macOS records a local build.
-        ImageState.write(BaseImageState(imageUUID: nil, version: newStamp, appliedStepUUIDs: steps),
-                         imageDir: o.outputDir)
         try? fm.removeItem(atPath: o.outputDir + "/postinstall-steps")
         try? fm.removeItem(atPath: o.outputDir + "/bake.log")
         try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log")
@@ -376,6 +378,45 @@ public enum InterimBake {
         return ordered.map(\.uuid)
     }
 
+    /// What a bake promotes beside base.img, staged as `<name>.new` before
+    /// the disk's rename: the boot files, then the stamp and image state.
+    static let promotedFiles = ["vmlinuz", "initrd.img", "kernel-release", "cmdline", "base.version", "image-state.json"]
+
+    /// Finishes a promotion whose disk is live (no base.img.partial left)
+    /// but whose `.new` files aren't all in place: renames them over, in
+    /// order, the stamp last. Nil when done (or nothing to do), else the
+    /// file that couldn't be renamed. A bake (holding the dir's lock)
+    /// interrupted before its disk's rename has a partial disk beside its
+    /// `.new` files: those aren't touched (the next bake clears them).
+    // @port-skip linux-only: the bake's roll-forward
+    @discardableResult
+    public static func finishPromotion(imageDir dir: String) -> String? {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: dir + "/base.img.partial") else { return nil }
+        for f in promotedFiles where fm.fileExists(atPath: dir + "/" + f + ".new") {
+            // ENOENT: another finisher (the bake, a daemon start) got there first.
+            guard rename(dir + "/" + f + ".new", dir + "/" + f) == 0 || errno == ENOENT else { return f }
+        }
+        return nil
+    }
+
+    /// finishPromotion at a daemon's start, unless a bake holds the dir (it
+    /// finishes its own) or the dir isn't this user's to write.
+    // @port-skip linux-only: the bake's roll-forward
+    public static func finishPromotionIfIdle(imageDir dir: String) {
+        let lock = open(dir + "/.bake.lock", O_RDWR | O_CLOEXEC)
+        guard lock >= 0 else {
+            // No lock file: no bake ever ran here with the lock.
+            if errno == ENOENT, access(dir, W_OK) == 0 { finishPromotion(imageDir: dir) }
+            return
+        }
+        defer { Glibc.close(lock) }
+        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { return }
+        if let left = finishPromotion(imageDir: dir) {
+            FileHandle.standardError.write(Data("bromure-ac daemon: the image's last bake left \(left).new: couldn't rename it (\(String(cString: strerror(errno))))\n".utf8))
+        }
+    }
+
     /// The major component of a version stamp: everything before the first
     /// dot. "200" → "200", "200.3" → "200".
     // @port UbuntuImageManager.static majorVersion(of: String) h=70093b72eb8a901b @84e171b8
@@ -388,11 +429,15 @@ public enum InterimBake {
     /// recorded the prior stamp at clone time) detect drift and get offered
     /// a reset: 200 → 200.1 → 200.2 …; a different major, or no prior
     /// stamp, writes the bundled version fresh.
+    /// Linux: a dotted `--image-version` (201.3) bumps from there once the
+    /// stamp on disk has reached it (macOS's bundled version has no dot).
+    // partial: a dotted bundled version bumps too
     // @port UbuntuImageManager.static nextStamp(priorStamp: String?, bundled: String) h=d0a2eebb43a83c3a @84e171b8
     static func nextStamp(priorStamp: String?, bundled: String) -> String {
         guard let prior = priorStamp?.trimmingCharacters(in: .whitespacesAndNewlines),
               !prior.isEmpty,
-              majorVersion(of: prior) == bundled
+              majorVersion(of: prior) == majorVersion(of: bundled),
+              bundled == majorVersion(of: bundled) || !Daemon.baseVersion(bundled, isNewerThan: prior)
         else { return bundled }
         let rev: Int
         if let dot = prior.firstIndex(of: "."),
@@ -401,7 +446,7 @@ public enum InterimBake {
         } else {
             rev = 0
         }
-        return "\(bundled).\(rev + 1)"
+        return "\(majorVersion(of: bundled)).\(rev + 1)"
     }
 
     /// Where the last customize run's output is kept (the whole postinstall
