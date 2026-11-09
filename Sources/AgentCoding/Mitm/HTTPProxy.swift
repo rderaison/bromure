@@ -1999,8 +1999,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
             protocols = line[line.index(after: colon)...].split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         }
-        guard let protocols, !protocols.isEmpty else { return false }
-        return protocols.allSatisfy { $0 == "websocket" || $0 == "spdy/3.1" }
+        // One protocol only: with two on offer ("websocket, SPDY/3.1") the
+        // relay can't know which the upstream will pick before its 101.
+        guard let protocols, protocols.count == 1 else { return false }
+        return protocols[0] == "websocket" || protocols[0] == "spdy/3.1"
     }
 
     /// Result of the WebSocket-upgrade fast-path. Populated whether
