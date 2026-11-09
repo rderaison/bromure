@@ -2,6 +2,7 @@ import ACLinux
 import ArgumentParser
 import CACLinuxShims
 import Foundation
+import SandboxEngine
 
 // bromure-ac on Linux: the headless daemon and the CLI that talks to it over
 // $XDG_RUNTIME_DIR/bromure-ac/control.sock (macOS: the app + its control.sock).
@@ -394,8 +395,16 @@ struct Image: AsyncParsableCommand {
             o.cpus = cpus
             o.mtu = mtu
             o.ubuntuMirror = ubuntuMirror
-            // The catalog beside vm-setup (Resources/img-catalog.json).
-            if !noAgentCLIs { o.catalogPath = ((setup as NSString).deletingLastPathComponent as NSString).appendingPathComponent("img-catalog.json") }
+            // The steps from the freshest catalog we can get, as macOS's init
+            // builds locally: the signed remote one, else the bundled
+            // baseline. Its cache sits with the image (macOS: the storage dir).
+            if !noAgentCLIs {
+                try FileManager.default.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true)
+                let store = ImageCatalogStore(distribution: .agentCoding(imageVersion: version),
+                                              supportDir: URL(fileURLWithPath: o.outputDir))
+                _ = await store.refresh()
+                o.postinstallSteps = store.effective().sortedSteps
+            }
             if let alpineReleases { o.alpineReleasesBase = alpineReleases }
             let verbose = verbose
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },

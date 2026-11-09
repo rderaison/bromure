@@ -7,6 +7,7 @@ import NIOPosix
 import Testing
 @testable import ACLinux
 import class SandboxEngine.VMNetSwitch
+import struct SandboxEngine.ImageCatalog
 
 /// The dirs shortTempDir made in this test process, removed when it exits
 /// (most tests don't remove theirs; they piled up in /tmp).
@@ -1476,7 +1477,8 @@ struct BakePostinstallTests {
             .appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json").path
         let d = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: d) }
-        let uuids = try InterimBake.stagePostinstall(catalog: catalog, to: d)
+        let steps = try ImageCatalog.parse(Data(contentsOf: URL(fileURLWithPath: catalog))).postinstall
+        let uuids = try InterimBake.stagePostinstall(steps, to: d)
         let files = try FileManager.default.contentsOfDirectory(atPath: d + "/steps").sorted()
         #expect(files.count == uuids.count && !files.isEmpty)
         let claude = try #require(files.first { (try? String(contentsOfFile: d + "/steps/" + $0, encoding: .utf8))?

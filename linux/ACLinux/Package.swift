@@ -78,6 +78,7 @@ let package = Package(
             dependencies: [
                 "ACLinux",
                 "CACLinuxShims",
+                "SandboxEngine",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
         .testTarget(

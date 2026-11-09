@@ -5,6 +5,7 @@ import Foundation
 import FoundationNetworking
 #endif
 import NIOConcurrencyHelpers
+import SandboxEngine
 
 /// STAND-IN for UbuntuImageManager.createBaseImage on Linux: bakes the amd64
 /// guest image under Firecracker/KVM with the shared vm-setup scripts. The bake
@@ -48,10 +49,10 @@ public enum InterimBake {
             "https://dl-cdn.alpinelinux.org/alpine/v\(InterimBake.alpineVersion)/releases/\(InterimBake.alpineArch)"
         public var ubuntuMirror: String?
         public var setupTimeout: Duration = .seconds(2700)
-        /// The image catalog whose postinstall steps (the agent CLIs: Claude
-        /// Code, Codex, Grok, …) go into the image after setup.sh, as macOS's
-        /// applyPostinstallSteps does. nil: none.
-        public var catalogPath: String?
+        /// The catalog's postinstall steps (the agent CLIs: Claude Code,
+        /// Codex, Grok, …), applied after setup.sh as macOS's
+        /// createBaseImage(postinstallSteps:) does. Empty: none.
+        public var postinstallSteps: [PostinstallStep] = []
         public var postinstallTimeout: Duration = .seconds(1800)
         // @port-skip linux-only: interim bake options
         public init(outputDir: String, cacheDir: String, vmSetupDir: String, imageVersion: String) {
@@ -113,7 +114,7 @@ public enum InterimBake {
         let setup = work + "/setup"
         try stageSetup(from: o.vmSetupDir, to: setup, alpineRepoBase: o.alpineCDN)
         let postinstall = work + "/postinstall"
-        let steps = try o.catalogPath.map { try stagePostinstall(catalog: $0, to: postinstall) } ?? []
+        let steps = try stagePostinstall(o.postinstallSteps, to: postinstall)
         let partial = o.outputDir + "/base.img.partial"
         try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
 
@@ -194,10 +195,10 @@ public enum InterimBake {
         try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet ia32_emulation=0\n"
             .write(toFile: o.outputDir + "/cmdline", atomically: true, encoding: .utf8)
         try (o.imageVersion + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
-        // Which catalog steps the image has (macOS: BaseImageState's
-        // appliedStepUUIDs).
-        try (steps.joined(separator: "\n") + (steps.isEmpty ? "" : "\n"))
-            .write(toFile: o.outputDir + "/postinstall-steps", atomically: true, encoding: .utf8)
+        // Which catalog steps the image has, as macOS records a local build.
+        ImageState.write(BaseImageState(imageUUID: nil, version: o.imageVersion, appliedStepUUIDs: steps),
+                         imageDir: o.outputDir)
+        try? fm.removeItem(atPath: o.outputDir + "/postinstall-steps")
         try? fm.removeItem(atPath: o.outputDir + "/bake.log")
         try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log")
 
@@ -295,18 +296,17 @@ public enum InterimBake {
     }
 
     // @port UbuntuImageManager.downloadAlpineNetboot(progress: @escaping(String)->Void) h=896d7225fec08f0a @84e171b8
-    /// The catalog's postinstall steps as `steps/NNNN-<uuid8>.sh` (lexical
-    /// order is execution order; line 1 is the description postinstall.sh
-    /// echoes), exactly as UbuntuImageManager.runPostinstall writes them.
-    /// Returns the steps' uuids, in order.
-    // @port-skip linux-only: the staging half of UbuntuImageManager.runPostinstall (SandboxEngine's ImageCatalog isn't in this build)
-    static func stagePostinstall(catalog: String, to dir: String) throws -> [String] {
-        struct Step: Decodable { let uuid: String; let seq: Int; let description: String; let command: String }
-        struct Catalog: Decodable { let postinstall: [Step] }
-        let cat = try JSONDecoder().decode(Catalog.self, from: Data(contentsOf: URL(fileURLWithPath: catalog)))
+    /// The postinstall steps as `steps/NNNN-<uuid8>.sh` (lexical order is
+    /// execution order; line 1 is the description postinstall.sh echoes),
+    /// exactly as UbuntuImageManager.runPostinstall writes them. Returns
+    /// the steps' uuids, in order; none staged for none.
+    // partial: the staging half; the run is runInstaller's postinstall.sh (no customize script on Linux yet)
+    // @port UbuntuImageManager.runPostinstall(steps: [PostinstallStep], targetDisk: URL, environmentOverride: InstallerEnvironment?, customize: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void) h=200f100bc32062a1 @84e171b8
+    static func stagePostinstall(_ steps: [PostinstallStep], to dir: String) throws -> [String] {
+        guard !steps.isEmpty else { return [] }
         let stepsDir = dir + "/steps"
         try FileManager.default.createDirectory(atPath: stepsDir, withIntermediateDirectories: true)
-        let ordered = cat.postinstall.sorted { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }
+        let ordered = steps.sorted { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }
         for step in ordered {
             let title = step.description.replacingOccurrences(of: "\n", with: " ")
             try "# \(title)\nset -e\n\(step.command)\n".write(

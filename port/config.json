@@ -256,6 +256,7 @@
     "Sources/SandboxEngine/EgressPolicy.swift",
     "Sources/SandboxEngine/EphemeralDisk+Space.swift",
     "Sources/SandboxEngine/HostNetworkInfo.swift",
+    "Sources/SandboxEngine/ImageCatalog.swift",
     "Sources/SandboxEngine/InitrdShim.swift",
     "Sources/SandboxEngine/InstallIdentity.swift",
     "Sources/SandboxEngine/JSONNumber.swift",
@@ -1361,6 +1362,126 @@
     {
       "id": "VMNetSwitch.static isCDPForwarderFrame(_: UnsafeMutablePointer<UInt8>, _: Int)",
       "reason": "no browser VM on a Linux server's switch: agents reach the client's browser over browser-mcp (BrowserMCPBridge), and nothing on the switch listens on :9223 (LinuxSwitchHasNoCDPForwarder test); a Linux browser VM would bring the gate with it"
+    },
+    {
+      "path": "Sources/SandboxEngine/ImageFetch.swift",
+      "reason": "the prebuilt-image download's transfer, checksum and sparse gunzip (area H c, not now); its only callers are the download paths (downloadBaseImage, Provisioner.fetch, Bromure Web)"
+    },
+    {
+      "id": "UbuntuImageManager.static isDownloadSideFailure(_: Error)",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.static cloneFile(_: URL, to: URL)",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.fetchAndExpand(image: RemoteBaseImage, gz: URL, disk: URL, progress: @escaping(String)->Void)",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var stockDiskURL",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var stockStateURL",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.loadStockState()",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.static stockMissingSteps(stock: BaseImageState?, imageUUID: String, steps: [PostinstallStep])",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var provisionerKernelURL",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var provisionerInitrdURL",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var provisionerShimmedInitrdURL",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.var hasProvisioner",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "Provisioner.static fetch(from: RemoteBaseImage, kernelDest: URL, initrdDest: URL, progress: @escaping(String)->Void)",
+      "reason": "prebuilt-image download (area H c, not now): the signed catalog's image is the macOS arm64 disk and no amd64 Firecracker image is published; the Linux image is baked locally (InterimBake)"
+    },
+    {
+      "id": "UbuntuImageManager.applyPostinstallSteps(_: [PostinstallStep], progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "amending an installed image with newly published steps (area H b2, not now): macOS does it only in the GUI (promptNewPostinstallSteps, inside !headless); known gap: a Linux server's image only gets newly published steps when it's rebuilt (bake refreshes the signed catalog, as macOS's init)"
+    },
+    {
+      "id": "UbuntuImageManager.migrateLegacyImageStateIfNeeded()",
+      "reason": "image-state.json only gates the GUI's new-steps prompt (area H b2, not ported); no Linux image predates the Linux bake's catalog steps"
+    },
+    {
+      "id": "UbuntuImageManager.var efiVarsURL",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.runInstaller(targetDisk: URL, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.buildProvisioner(progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.runProvisioner(environment: InstallerEnvironment, stage: String, runLabel: String, setupShare: URL?, targetDisk: URL?, script: String, scriptArgs: String, extraShares: [(tag:String,url:URL,readOnly:Bool)], successMarker: String, failureMarker: String, markerTimeout: TimeInterval, hardTimeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void)",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.static forceStop(_: VZVirtualMachine)",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.static extractRawKernel(from: URL, to: URL)",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.static detectDisplayScale()",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.var alpineKernelURL",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.var alpineInitrdURL",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.var shimmedInitrdURL",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.static var releasesBase",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.runProvisioner(environment: InstallerEnvironment, stage: String, runLabel: String, setupShare: URL?, targetDisk: URL?, script: String, scriptArgs: String, extraShares: [(tag:String,url:URL,readOnly:Bool)], successMarker: String, failureMarker: String, markerTimeout: TimeInterval, hardTimeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void) / case .netboot:",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.runProvisioner(environment: InstallerEnvironment, stage: String, runLabel: String, setupShare: URL?, targetDisk: URL?, script: String, scriptArgs: String, extraShares: [(tag:String,url:URL,readOnly:Bool)], successMarker: String, failureMarker: String, markerTimeout: TimeInterval, hardTimeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void) / case .provisioner(let kernel, let initrd):",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
+    },
+    {
+      "id": "UbuntuImageManager.runProvisioner(environment: InstallerEnvironment, stage: String, runLabel: String, setupShare: URL?, targetDisk: URL?, script: String, scriptArgs: String, extraShares: [(tag:String,url:URL,readOnly:Bool)], successMarker: String, failureMarker: String, markerTimeout: TimeInterval, hardTimeout: TimeInterval, progress: @escaping(String)->Void, output: @escaping(String)->Void) / stdoutPipe.fileHandleForReading.readabilityHandler",
+      "reason": "VZ-specific bake (area H d): the Linux bake is InterimBake on Firecracker (its own installer dialogue, Alpine netboot cache and kernel extraction)"
     }
   ],
   "skipInheriting": [
