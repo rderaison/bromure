@@ -215,7 +215,8 @@ extension MitmProxy {
 
 /// Fusion's HTTP(S) legs to the addresses its run's checks passed, never a
 /// name looked up again (HTTPS through PinnedHTTPS: SNI and certificate on
-/// the name; plain HTTP to the address, Host the name). A request's own
+/// the name; plain HTTP to the address, Host the name; no redirect followed,
+/// no proxy from the environment). A request's own
 /// headers can't say which run it is (a session's are added after canInit),
 /// so each run has its own subclass, a slot of a small pool, registered on
 /// its session alone: a host:port the run didn't check isn't dialled.
@@ -255,6 +256,10 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     // @port-skip linux-only: see FusionPinnedProtocol
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    /// The dial under way, and whether the loader was stopped: after
+    /// stopLoading, nothing reaches the client.
+    private let loading = NIOLockedValueBox<(task: Task<Void, Never>?, stopped: Bool)>((nil, false))
+
     // @port-skip linux-only: see FusionPinnedProtocol
     override func startLoading() {
         let req = request
@@ -262,17 +267,22 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
         let tls = url.scheme?.lowercased() == "https"
         let port = url.port ?? (tls ? 443 : 80)
         let addresses = type(of: self).addresses(for: "\(host):\(port)")
-        Task {
+        let timeout = req.timeoutInterval > 0 ? req.timeoutInterval : 600
+        let task = Task {
             guard !addresses.isEmpty else { return self.fail(URLError(.cannotConnectToHost)) }
             var last: Error = URLError(.cannotConnectToHost)
             for ip in addresses {
                 do {
+                    // No redirect followed, no proxy from the environment:
+                    // a 3xx is the leg's answer, never another dial.
                     let (response, data) = tls
-                        ? try await PinnedHTTPS.send(req, to: ip, timeout: req.timeoutInterval > 0 ? req.timeoutInterval : 600)
-                        : try await Self.plainHTTP(req, to: ip, host: host, port: port)
-                    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                    self.client?.urlProtocol(self, didLoad: data)
-                    self.client?.urlProtocolDidFinishLoading(self)
+                        ? try await PinnedHTTPS.send(req, to: ip, timeout: timeout)
+                        : try await PinnedHTTPS.sendPlain(req, to: ip, timeout: timeout)
+                    self.deliver { client in
+                        client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                        client.urlProtocol(self, didLoad: data)
+                        client.urlProtocolDidFinishLoading(self)
+                    }
                     return
                 } catch let e as PinnedHTTPS.ConnectFailed {
                     last = e   // nothing sent: the next checked address
@@ -282,30 +292,30 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
             }
             self.fail(last)
         }
-    }
-
-    /// A plain-HTTP leg (a user's external engine on http) to the checked
-    /// address, its Host header the name.
-    // @port-skip linux-only: see FusionPinnedProtocol
-    static func plainHTTP(_ req: URLRequest, to ip: MitmProxy.IPAddress, host: String, port: Int) async throws -> (HTTPURLResponse, Data) {
-        guard let url = req.url, var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw URLError(.badURL) }
-        c.host = { if case .v6 = ip { return "[\(ip)]" } else { return "\(ip)" } }()
-        guard let pinnedURL = c.url else { throw URLError(.badURL) }
-        var pinned = req
-        pinned.url = pinnedURL
-        pinned.setValue(port == 80 ? host : "\(host):\(port)", forHTTPHeaderField: "Host")
-        let session = URLSession(configuration: .ephemeral)
-        defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(for: pinned)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        return (http, data)
+        let stopped = loading.withLockedValue { l -> Bool in
+            l.task = task
+            return l.stopped
+        }
+        if stopped { task.cancel() }
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
-    private func fail(_ error: Error) { client?.urlProtocol(self, didFailWithError: error) }
+    private func fail(_ error: Error) { deliver { $0.urlProtocol(self, didFailWithError: error) } }
+
+    /// The client's callbacks, unless the loader was stopped.
+    // @port-skip linux-only: see FusionPinnedProtocol
+    private func deliver(_ body: (any URLProtocolClient) -> Void) {
+        guard !loading.withLockedValue({ $0.stopped }), let client else { return }
+        body(client)
+    }
 
     // @port-skip linux-only: see FusionPinnedProtocol
-    override func stopLoading() {}
+    override func stopLoading() {
+        loading.withLockedValue { l -> Task<Void, Never>? in
+            l.stopped = true
+            return l.task
+        }?.cancel()
+    }
 }
 
 // @port-skip linux-only: a slot of FusionPinnedProtocol's pool

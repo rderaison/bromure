@@ -188,7 +188,7 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
 
     /// The request as it goes on the wire.
     // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
-    static func requestBytes(_ req: URLRequest, url: URL, host: String, port: Int) -> [UInt8]? {
+    static func requestBytes(_ req: URLRequest, url: URL, host: String, port: Int, defaultPort: Int = 443) -> [UInt8]? {
         let c = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var target = (c?.percentEncodedPath).flatMap { $0.isEmpty ? nil : $0 } ?? "/"
         if let q = c?.percentEncodedQuery { target += "?" + q }
@@ -198,7 +198,7 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
             return nil
         }
         let body = req.httpBody ?? Data()
-        var head = "\(req.httpMethod ?? "GET") \(target) HTTP/1.1\r\nHost: \(port == 443 ? host : "\(host):\(port)")\r\n"
+        var head = "\(req.httpMethod ?? "GET") \(target) HTTP/1.1\r\nHost: \(hostField(host, port: port, defaultPort: defaultPort))\r\n"
         for (k, v) in fields {
             switch k.lowercased() {
             case "host", "content-length", "connection", "transfer-encoding": continue
@@ -207,6 +207,14 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
         }
         head += "Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         return Array(head.utf8) + Array(body)
+    }
+
+    /// A Host header's value: an IPv6 literal bracketed, the port only when
+    /// it isn't the scheme's own.
+    // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
+    static func hostField(_ host: String, port: Int, defaultPort: Int = 443) -> String {
+        let name = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return port == defaultPort ? name : "\(name):\(port)"
     }
 
     /// A whole response: its HTTPURLResponse and body (chunked decoded).

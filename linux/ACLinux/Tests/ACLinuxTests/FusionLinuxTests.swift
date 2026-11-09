@@ -130,6 +130,52 @@ extension DaemonGlobalSuites {
             task.cancel(with: .normalClosure, reason: nil)
         }
 
+        /// A leg's 3xx is its answer: the place it points to (another
+        /// user's port, a metadata address) is never dialled.
+        @Test func aLegsRedirectIsntFollowed() async throws {
+            let ip = try #require(Daemon.primaryIPv4(), "a host address")
+            let elsewhere = try RawUpstream(host: "127.0.0.1", reply: "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret")
+            defer { elsewhere.stop() }
+            let engine = try RawUpstream(host: ip, reply: "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:\(elsewhere.port)/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            defer { engine.stop() }
+            let addr = try #require(OpenShellPolicy.IPAddress(ip))
+            let cls = try #require(FusionPinnedProtocol.acquire(["engine.example.test:\(engine.port)": [addr]]))
+            defer { cls.release() }
+            let session = URLSession(configuration: RequestReader.fusionSessionConfiguration(cls))
+            defer { session.finishTasksAndInvalidate() }
+            var req = URLRequest(url: URL(string: "http://engine.example.test:\(engine.port)/v1/chat")!)
+            req.timeoutInterval = 10
+            let (data, resp) = try await session.data(for: req)
+            #expect((resp as? HTTPURLResponse)?.statusCode == 302 && data.isEmpty)
+            #expect(engine.received.withLockedValue { $0 }.hasPrefix("GET /v1/chat HTTP/1.1\r\nHost: engine.example.test:\(engine.port)\r\n"))
+            #expect(elsewhere.received.withLockedValue { $0 }.isEmpty, "the redirect wasn't followed")
+        }
+
+        /// A stopped loader's dial goes: the connection closed, the call
+        /// cancelled.
+        @Test func aCancelledDialStops() async throws {
+            let ip = try #require(Daemon.primaryIPv4(), "a host address")
+            let silent = try RawUpstream(host: ip, reply: "")
+            defer { silent.stop() }
+            let addr = try #require(OpenShellPolicy.IPAddress(ip))
+            var req = URLRequest(url: URL(string: "http://engine.example.test:\(silent.port)/v1/chat")!)
+            req.httpMethod = "POST"
+            let call = Task { try await PinnedHTTPS.sendPlain(req, to: addr, timeout: 60) }
+            for _ in 0..<200 where silent.received.withLockedValue({ $0 }).isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+            #expect(!silent.received.withLockedValue { $0 }.isEmpty, "the request went")
+            call.cancel()
+            await #expect(throws: CancellationError.self) { _ = try await call.value }
+            for _ in 0..<200 where silent.closed.withLockedValue({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            #expect(silent.closed.withLockedValue { $0 } == 1, "the connection closed")
+        }
+
+        @Test func hostFieldBracketsAnIPv6Literal() {
+            #expect(NIOMTLSHTTPClient.hostField("::1", port: 8080, defaultPort: 80) == "[::1]:8080")
+            #expect(NIOMTLSHTTPClient.hostField("fe80::1", port: 443) == "[fe80::1]")
+            #expect(NIOMTLSHTTPClient.hostField("engine.example.test", port: 80, defaultPort: 80) == "engine.example.test")
+            #expect(NIOMTLSHTTPClient.hostField("engine.example.test", port: 443, defaultPort: 80) == "engine.example.test:443")
+        }
+
         @Test func eachRunHasItsOwnSlot() {
             var held: [FusionPinnedProtocol.Type] = []
             for i in 0..<FusionPinnedProtocol.slots.count {
