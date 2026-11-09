@@ -1670,6 +1670,9 @@ public actor Daemon {
             throw error
         }
         stampClone()
+        // A strict workspace's sandbox status, watched from its cold boot
+        // (DaemonSandboxStatusWatch.swift).
+        if restoreFrom == nil, rec.registration != true, rec.kube == nil { watchSandboxStatus(id, machine: machine) }
         // A workspace's cold boot: its console watched for a boot that dies
         // on filesystem errors (DaemonBootRemedy; a cluster machine's has its
         // own scan). The log starts fresh with each Firecracker.
