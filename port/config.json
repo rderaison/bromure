@@ -521,6 +521,434 @@
     {
       "path": "Sources/AgentCoding/Terminal/TerminalPaneHistory.swift",
       "reason": "ui"
+    },
+    {
+      "path": "Sources/BrowserBridges/CDPWheelInjector.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/CJKInputBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/CredentialBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/FaceSwapEngine.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/GestureBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/iCloudPasswordsBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/LinkSenderBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/MediaDevices.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/PasskeyProvider.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/PhishingAnalysisBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/PrecisionScrollBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/VirusTotalClient.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/WarpBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/WebcamBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/BaseImageManager.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/CloudTraceUploader.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ExtensionCache.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/HostNetworkWatcher.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/IKEv2Bridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/LinuxSandboxVM.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ManagedBundleCrypto.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ManagedProfileStore.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ManagedProfileSync.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/MTLSReloadBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/NetworkRefreshBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/OpenVPNBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ProfileManager.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/SandboxVM.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/VMAutoSuspend.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/SandboxEngine/WireGuardBridge.swift",
+      "reason": "browser product: the Bromure web browser (Agentic Coding does not use it)"
+    },
+    {
+      "path": "Sources/BrowserBridges/CDPBridge.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/BrowserBridges/FilePickerBridge.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/BrowserBridges/TabBridge.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/BrowserInstallProgress.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/FileTransferBridge.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/LinuxImageManager+Remote.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/LinuxImageManager.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ProfileDisk.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/TraceBridge.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/TraceStore.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/SandboxEngine/VMPool.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserCDP.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserDownloadsModel.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserImageInstaller.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserMCPServer.swift",
+      "reason": "workspace browser: the client holds it (BrowserMCPBridge relays to the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserMCPRelayClient.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientRemote.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/FatClientTypes.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/RemoteTraceStore.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/DelegationRelayClient.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/RequestLedger.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/PolicyDrawerBackend.swift",
+      "reason": "fat-client client side (the Mac is the client)"
+    },
+    {
+      "path": "Sources/AgentCoding/ConfigScan.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/AgentConfigScan.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/ConfigFileSanitize.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/DockerConfigImport.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/EnvFileImport.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/AgentDetection.swift",
+      "reason": "client side: scans and imports the user's own machine (the client runs it)"
+    },
+    {
+      "path": "Sources/AgentCoding/AgentSessions.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/AutomationHubPreview.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/BranchAlerts.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/BrowserPane.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/DisplayCards.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/DockerDashboard.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/FileExplorer.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/KubeDashboard.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/LayoutStats.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/MermaidFence.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/OnboardingSignIn.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/OpenShellPolicyEditor.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/PlatformShims.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/TranscriptActivity.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/TranscriptIndicators.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/TranscriptSearchIndex.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/SwitchboardThreads.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/SessionTimeline.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/MachineChat.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/SlashCommands.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/GuestLiveness.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/FleetAdmission.swift",
+      "reason": "ui"
+    },
+    {
+      "path": "Sources/AgentCoding/QuickTask.swift",
+      "reason": "screen-only (a headless server has no screen)"
+    },
+    {
+      "path": "Sources/AgentCoding/RepoWatchNotifier.swift",
+      "reason": "screen-only (a headless server has no screen)"
+    },
+    {
+      "path": "Sources/AgentCoding/ConsolePresence.swift",
+      "reason": "screen-only (a headless server has no screen)"
+    },
+    {
+      "path": "Sources/AgentCoding/MainThreadLagMonitor.swift",
+      "reason": "screen-only (a headless server has no screen)"
+    },
+    {
+      "path": "Sources/AgentCoding/LaunchRestore.swift",
+      "reason": "macos-app-lifecycle (the daemon keeps VMs across restarts; one daemon per user)"
+    },
+    {
+      "path": "Sources/AgentCoding/QuitDeadline.swift",
+      "reason": "macos-app-lifecycle (the daemon keeps VMs across restarts; one daemon per user)"
+    },
+    {
+      "path": "Sources/AgentCoding/QuitFlow.swift",
+      "reason": "macos-app-lifecycle (the daemon keeps VMs across restarts; one daemon per user)"
+    },
+    {
+      "path": "Sources/AgentCoding/WorkspaceLease.swift",
+      "reason": "macos-app-lifecycle (the daemon keeps VMs across restarts; one daemon per user)"
+    },
+    {
+      "path": "Sources/AgentCoding/BootLaunchAgent.swift",
+      "reason": "macos-app-lifecycle (the daemon keeps VMs across restarts; one daemon per user)"
+    },
+    {
+      "path": "Sources/AgentCoding/Mitm/TLSServerStream.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/Mitm/PassphraseKeychain.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/Mitm/BromureCA.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/LoopbackCallbackForwarder.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/VMStartGate.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/FileFacts.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/SandboxEngine/EphemeralDisk.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/SandboxEngine/LANTap.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/SandboxEngine/ShellBridge.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/SandboxEngine/PKCS12Builder.swift",
+      "reason": "vz-only: macOS mechanics; Linux has its own design (NIOSSL, Firecracker, LANHelper, GuestShell, fatclient forward)"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/ModelDownloadManager.swift",
+      "reason": "apple-gpu: MLX in-process engine (model downloads)"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/HubDownloader.swift",
+      "reason": "apple-gpu: MLX in-process engine (model downloads)"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/ModelDownloader.swift",
+      "reason": "apple-gpu: MLX in-process engine (model downloads)"
+    },
+    {
+      "path": "Sources/AgentCoding/Inference/ModelLaunchPlan.swift",
+      "reason": "apple-gpu: MLX in-process engine (model downloads)"
+    },
+    {
+      "path": "Sources/AgentCoding/DelegationShimStream.swift",
+      "reason": "sidecar target: the agent-host delegation shim (not the server)"
+    },
+    {
+      "path": "Sources/AgentCoding/DelegationShimCalls.swift",
+      "reason": "sidecar target: the agent-host delegation shim (not the server)"
+    },
+    {
+      "path": "Sources/AgentCoding/DelegationFallbacks.swift",
+      "reason": "sidecar target: the agent-host delegation shim (not the server)"
+    },
+    {
+      "path": "Sources/SandboxEngine/AlpinePackageProxy.swift",
+      "reason": "image bake: the server bake uses signed plain-HTTP apk (setup.sh no-proxy path)"
     }
   ],
   "skipInheriting": [
