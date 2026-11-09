@@ -13,10 +13,17 @@ extension OCSFExporter {
     /// directory is written as that user's daemon, under its permissions).
     // @port-skip linux-only: the export's default directory
     static func makeDefaultDirectory(stateDir: String) -> URL {
-        let dir = stateDir + "/ocsf"
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+        let dir = URL(fileURLWithPath: stateDir + "/ocsf", isDirectory: true)
+        makeDirectory(dir)
+        return dir
+    }
+
+    /// The export's directory, made 0700 if missing (also one deleted while
+    /// the daemon runs: record makes it again through here).
+    // @port-skip linux-only: the export's directory, 0700 (macOS: OCSFExporter.makeDirectory, the umask's)
+    static func makeDirectory(_ dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
-        return URL(fileURLWithPath: dir, isDirectory: true)
     }
 
     /// `<state>/ocsf` (macOS: Application Support/BromureAC/ocsf).

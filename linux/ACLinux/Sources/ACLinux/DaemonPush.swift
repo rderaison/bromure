@@ -30,8 +30,10 @@ extension LinuxSessionHost {
     /// almost at once.
     static let unattendedIdleSeconds: Double = 86_400
 
-    /// Tests: the push sent (nil: the control plane).
+    /// Tests: the push sent, past the gates (nil: the control plane).
     nonisolated(unsafe) static var pushSenderForTesting: ((PushAction, String, Data?) -> Void)?
+    /// The bromure.io enrollment (tests: a stand-in).
+    nonisolated(unsafe) static var enrollment: () -> (client: ControlPlaneClient, bearer: String)? = { ControlPlaneClient.current() }
 
     // partial: no HID idle on a server (unattendedIdleSeconds); Remote Access is the daemon's remote.json
     // @port ACAppDelegate.reportPushTransition(_: Profile.ID, index: Int, from: AgentStatus, to: AgentStatus) h=40fb93f9fcd1b2eb @4237c02e
@@ -42,9 +44,9 @@ extension LinuxSessionHost {
             ? Self.richPushPayload(profileName: profile(for: id)?.name ?? "Workspace",
                                    tabLabel: tabs[id]?.tabs.first(where: { $0.index == index })?.shownLabel ?? "")
             : nil
-        if let send = Self.pushSenderForTesting { send(action, key, rich); return }
         guard RemoteSettings.load(stateDir + "/remote.json").enabled,
-              let (client, bearer) = ControlPlaneClient.current() else { return }
+              let (client, bearer) = Self.enrollment() else { return }
+        if let send = Self.pushSenderForTesting { send(action, key, rich); return }
         let pid = id.uuidString
         Task {
             switch action {

@@ -34,13 +34,50 @@ extension DaemonGlobalSuites {
             #expect(PushCrypto.seal(rich, toPublicKeyHex: "zz") == nil, "a bad key: nothing sealed")
         }
 
+        /// A stand-in enrollment (its endpoint never dialled: the sender
+        /// seam takes the push past the gates).
+        static func enrolled() throws -> (client: ControlPlaneClient, bearer: String) {
+            (ControlPlaneClient(endpoint: try ControlPlaneEndpoint(base: "https://cp.invalid")), "test-bearer")
+        }
+
+        @Test func nothingGoesWithoutRemoteAccessOrEnrollment() async throws {
+            let (h, d, dir) = try await SessionListModelTests.host()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let id = UUID()
+            let sent = NIOLockedValueBox(0)
+            LinuxSessionHost.pushSenderForTesting = { _, k, _ in if k.contains(id.uuidString) { sent.withLockedValue { $0 += 1 } } }
+            let priorEnrollment = LinuxSessionHost.enrollment
+            defer { LinuxSessionHost.pushSenderForTesting = nil; LinuxSessionHost.enrollment = priorEnrollment }
+            let card = try Self.enrolled()
+            // No remote.json (Remote Access never turned on), though enrolled.
+            LinuxSessionHost.enrollment = { card }
+            h.reportPushTransition(id, index: 0, from: .working, to: .needsInput)
+            #expect(sent.withLockedValue { $0 } == 0, "Remote Access off: nothing")
+            // Remote Access on, not enrolled.
+            var on = RemoteSettings(); on.enabled = true
+            try JSONEncoder().encode(on).write(to: URL(fileURLWithPath: h.stateDir + "/remote.json"))
+            LinuxSessionHost.enrollment = { nil }
+            h.reportPushTransition(id, index: 0, from: .working, to: .needsInput)
+            #expect(sent.withLockedValue { $0 } == 0, "not enrolled: nothing")
+            // Both: it goes.
+            LinuxSessionHost.enrollment = { card }
+            h.reportPushTransition(id, index: 0, from: .working, to: .needsInput)
+            #expect(sent.withLockedValue { $0 } == 1)
+            await d.shutdown()
+        }
+
         @Test func aNeedsInputThenItsResolution() async throws {
             let (h, d, dir) = try await SessionListModelTests.host()
             defer { try? FileManager.default.removeItem(atPath: dir) }
             let id = UUID()
             let sent = NIOLockedValueBox<[(LinuxSessionHost.PushAction, String, Data?)]>([])
             LinuxSessionHost.pushSenderForTesting = { a, k, r in if k.contains(id.uuidString) { sent.withLockedValue { $0.append((a, k, r)) } } }
-            defer { LinuxSessionHost.pushSenderForTesting = nil }
+            let priorEnrollment = LinuxSessionHost.enrollment
+            let card = try Self.enrolled()
+            LinuxSessionHost.enrollment = { card }
+            var on = RemoteSettings(); on.enabled = true
+            try JSONEncoder().encode(on).write(to: URL(fileURLWithPath: h.stateDir + "/remote.json"))
+            defer { LinuxSessionHost.pushSenderForTesting = nil; LinuxSessionHost.enrollment = priorEnrollment }
             h.reportPushTransition(id, index: 2, from: .working, to: .needsInput)
             h.reportPushTransition(id, index: 2, from: .needsInput, to: .working)
             h.reportPushTransition(id, index: 2, from: .working, to: .done)

@@ -16,6 +16,12 @@ extension Daemon {
             SessionStores.shared = stores
             let host = LinuxSessionHost(daemon: me, stateDir: state)
             LinuxSessionHost.shared = host
+            // Security Timeline rows (and the OCSF export) carry the
+            // workspace's name: the session list's, which every reconcile
+            // takes from the store (a rename too), else the store's now.
+            SecurityTimeline.shared.workspaceName = { [weak host] id in
+                host?.listModel.profileRows.first { $0.id == id }?.name ?? host?.profile(for: id)?.name
+            }
             stores.engine = AgentSessionEngine(store: stores.sessions, delegate: host)
             // The coding board and the scheduled automations (macOS: the app
             // delegate's lazy engines, started at launch); the repository

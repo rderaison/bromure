@@ -29,16 +29,24 @@ public final class OCSFExporter: @unchecked Sendable {
     private let io = DispatchQueue(label: "io.bromure.ocsf-export", qos: .utility)
     private var lastPrunedDay: String?
 
-    public var isEnabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
+    /// Where the settings are read (tests: a suite of their own).
+    var defaults: UserDefaults = .standard
+
+    public var isEnabled: Bool { defaults.bool(forKey: Self.enabledKey) }
 
     public var directory: URL {
-        if let p = UserDefaults.standard.string(forKey: Self.directoryKey), !p.isEmpty {
+        if let p = defaults.string(forKey: Self.directoryKey), !p.isEmpty {
             return URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true)
         }
         return Self.defaultDirectory
     }
 
     #if !BROMURE_LINUX
+    /// The export's directory, made if missing.
+    static func makeDirectory(_ dir: URL) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
     /// Where the export goes unless a directory is set.
     static var defaultDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -50,17 +58,17 @@ public final class OCSFExporter: @unchecked Sendable {
     public func record(profileID: UUID, workspace: String?, eventType: String,
                        eventData: [String: AnyJSON], time: Date = Date()) {
         guard isEnabled else { return }
-        let version = UserDefaults.standard.string(forKey: Self.schemaVersionKey) ?? Self.currentSchema
+        let version = defaults.string(forKey: Self.schemaVersionKey) ?? Self.currentSchema
         guard var obj = Self.event(profileID: profileID, workspace: workspace, eventType: eventType,
                                    eventData: eventData, time: time) else { return }
         if version != Self.currentSchema { Self.downgrade(&obj, to: version) }
         guard let line = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
         let dir = directory
-        let retention = max(1, UserDefaults.standard.object(forKey: Self.retentionDaysKey) as? Int ?? 7)
+        let retention = max(1, defaults.object(forKey: Self.retentionDaysKey) as? Int ?? 7)
         io.async { [self] in
             let day = Self.dayString(time)
             let url = dir.appendingPathComponent("bromure-ocsf.\(day).jsonl")
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            Self.makeDirectory(dir)
             if !FileManager.default.fileExists(atPath: url.path) {
                 FileManager.default.createFile(atPath: url.path, contents: nil,
                                                attributes: [.posixPermissions: 0o600])
