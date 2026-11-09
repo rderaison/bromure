@@ -22,4 +22,25 @@ struct TraceUploadTests {
         Daemon.applyStreamingState(store: store, privateIDs: [], enrolled: false, makeUploader: make)
         #expect(store.uploader == nil, "an unenroll takes it down")
     }
+
+    /// A workspace turned private: what the uploader had buffered for it goes
+    /// (the shared purge), through the daemon's refresh.
+    @Test func turningPrivatePurgesWhatWasBuffered() throws {
+        let d = try shortTempDir()
+        let store = TraceStore(rootDir: URL(fileURLWithPath: d, isDirectory: true))
+        let up = BACTraceUploader(endpoint: URL(string: "https://upload.invalid/ac-http-ingest")!)
+        defer { up.shutdown() }
+        Daemon.applyStreamingState(store: store, privateIDs: [], enrolled: true, makeUploader: { up })
+        let mine = UUID(), other = UUID()
+        func rec(_ p: UUID) -> TraceRecord {
+            TraceRecord(sessionID: p, profileID: p, timestamp: Date(), host: "example.com", port: 443,
+                        method: "GET", path: "/", statusCode: 200, requestBytes: 1,
+                        responseBytes: 1, latencyMs: 1, swaps: [], leaks: [], bodyStored: false)
+        }
+        up.upload(rec(mine), requestBody: nil, responseBody: nil)
+        up.upload(rec(other), requestBody: nil, responseBody: nil)
+        Daemon.applyStreamingState(store: store, privateIDs: [mine], enrolled: true, makeUploader: { up })
+        #expect(up.queuedProfileIDs() == [other])
+    }
 }
+
