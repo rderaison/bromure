@@ -4191,6 +4191,45 @@ public final class ProfileStore {
         return try save(profile)
     }
 
+    /// Keep an MCP server's refreshed OAuth state (`MCPOAuthBroker.refresh`)
+    /// in the saved workspace. A server that rotates refresh tokens (OAuth
+    /// 2.1 for public clients) spends the old one on each refresh: a launch
+    /// that refreshed only its in-memory copy left the spent token stored,
+    /// and the next launch's refresh failed (invalid_grant) -- the agent got
+    /// an expired bearer until the user authorized again.
+    ///
+    /// Read-modify-write of the stored copy (profile.json + secrets.enc, as
+    /// whoever saved last wrote them), touching only that server's
+    /// `oauthState`, so edits saved since the caller's copy was loaded stay.
+    /// Written only while the stored state is still the one refreshed from
+    /// (same client and refresh token): a re-authorization saved meanwhile
+    /// wins. Returns whether it wrote.
+    @discardableResult
+    public func persistRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState,
+                                         serverID: UUID, profileID: UUID) throws -> Bool {
+        guard var stored = storedProfile(id: profileID) else { return false }
+        mergeSecrets(into: &stored, dir: profileDirectory(for: stored))
+        guard Self.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, into: &stored)
+        else { return false }
+        try update(stored)
+        return true
+    }
+
+    /// `profile`'s server `serverID` takes `refreshed` while its OAuth state
+    /// is still `old` (same client, same refresh token). Returns whether it
+    /// changed anything.
+    static func mergeRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState,
+                                       serverID: UUID, into profile: inout Profile) -> Bool {
+        guard let i = profile.mcpServers.firstIndex(where: { $0.id == serverID }),
+              let current = profile.mcpServers[i].oauthState,
+              current.clientID == old.clientID,
+              current.tokenEndpoint == old.tokenEndpoint,
+              current.refreshToken == old.refreshToken,
+              current != refreshed else { return false }
+        profile.mcpServers[i].oauthState = refreshed
+        return true
+    }
+
     /// Stamp a launch on a saved workspace; never recreates a deleted one.
     /// Returns what was written, minted credentials as stored.
     @discardableResult
