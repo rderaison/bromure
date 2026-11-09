@@ -122,6 +122,7 @@
     "Sources/AgentCoding/Mitm/DepiRegistry.swift",
     "Sources/AgentCoding/Mitm/EcosystemTransforms.swift",
     "Sources/AgentCoding/Mitm/EgressConnectionRegistry.swift",
+    "Sources/AgentCoding/Mitm/Fusion.swift",
     "Sources/AgentCoding/Mitm/GrokSubscriptionStore.swift",
     "Sources/AgentCoding/Mitm/GuardrailsConfig+Profile.swift",
     "Sources/AgentCoding/Mitm/GuardrailsConsentBroker.swift",

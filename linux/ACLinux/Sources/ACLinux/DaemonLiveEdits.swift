@@ -53,6 +53,9 @@ extension Daemon {
     // @port ACAppDelegate.applyLiveSessionRefresh(from: Profile, to: Profile, terminalDefaults: TerminalAppDefaults, window: SessionPane?, sandbox: UbuntuSandboxVM?) h=58c9420641bf9238 @0e28fd20
     func applyLiveRefresh(_ rec: VMRecord, force: Bool = false) async {
         guard !rec.managed, let mitm, let new = existingProfile(for: rec) else { return }
+        // Fusion's config can change without any other step (its legs, its
+        // judge): reconciled first and unconditionally, as macOS does.
+        await reconcileFusion(new)
         let steps = Self.liveSteps(from: force ? nil : liveApplied[rec.id], to: new)
         // The local model's route: a host-side remap (the guest calls
         // bromure.llm either way), no restage.

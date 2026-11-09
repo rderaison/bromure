@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// **Fusion** — OpenRouter-style multi-model answer synthesis, done
 /// inside the MITM proxy.

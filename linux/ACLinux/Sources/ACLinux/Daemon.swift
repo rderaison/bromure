@@ -718,7 +718,6 @@ public actor Daemon {
     /// the outbox: the tab roster (a fat client mounts a terminal once it's
     /// non-empty: tmux is up), its vitals, its listening ports and its
     /// docker state (GuestOutboxReports, as macOS's outbox poll reads them).
-    // partial: no fusion fields (fusionConfigurable/fusionEngaged: no fusion on Linux)
     // @port-skip linux-only: the per-VM half of ACAppDelegate.automationVMList (VMRecord.json, GuestOutbox)
     func vmEntry(_ rec: VMRecord) -> JSONValue {
         guard case .object(var o) = rec.json else { return rec.json }
@@ -734,6 +733,10 @@ public actor Daemon {
             o["mounts"] = .array(p.folderPaths.map(JSONValue.string))
             o["networkMode"] = .string(p.networkMode.rawValue)
             o["baseImageVersion"] = .string(p.baseImageVersionAtClone ?? "unknown")
+            // Fusion: configurable when its config was made (makeFusionConfig
+            // is nil exactly when it isn't), engaged per the proxy's toggle.
+            o["fusionConfigurable"] = .bool(mitm?.fusionConfig(for: p.id) != nil)
+            o["fusionEngaged"] = .bool(mitm?.fusionEngaged(for: p.id) ?? false)
         }
         let disk = vmDir(rec.id) + "/disk.raw"
         var st = stat()
@@ -1004,6 +1007,7 @@ public actor Daemon {
         case ("POST", "docker"): return dockerRoute(rec, body)
         case ("POST", "type"): return await typeRoute(rec, body)
         case ("POST", "routing"): return await routingRoute(rec, body)
+        case ("POST", "fusion"): return await fusionRoute(rec, body)
         case ("POST", "fusion"): return fusionRoute(rec)
         case ("GET", "checkpoints"): return checkpointsRoute(rec)
         case ("POST", "revert"): return revertRoute(rec, body)
@@ -1414,6 +1418,8 @@ public actor Daemon {
         // Its swap map, and the destinations a compromise alert's "Allow"
         // trusted for the session (macOS: MitmEngine.unregister's clearMap).
         mitm?.swapper.clearMap(for: pid)
+        // Fusion starts disengaged with the next session (macOS: unregister).
+        mitm?.clearFusionEngaged(for: pid)
         InferenceRepairProxy.shared.setExternalEngine(pid, nil)
         // "Allow for the rest of the session" ends with the session, for every
         // consent broker, and the imported-key approvals and host-agent keys
@@ -1609,6 +1615,7 @@ public actor Daemon {
             applyRouting(staged: staged)
             startLocalEngineIfNeeded(for: staged)
             lastStagedProfiles[rec.id] = staged
+            if let profile = existingProfile(for: rec) { await applyFusionAtLaunch(profile) }
         }
         // The address it had last, if still free (macOS's lease store), leased
         // before the switch sees it; recorded, so a restarted daemon hands the
@@ -1826,6 +1833,7 @@ public actor Daemon {
                     applyRouting(staged: staged)
                     startLocalEngineIfNeeded(for: staged)
                     lastStagedProfiles[rec.id] = staged
+                    if let profile = existingProfile(for: rec) { await applyFusionAtLaunch(profile) }
                 }
                 sw.attach(l.port, mac: rec.mac)
                 await allowLoadBalancerClaims(rec)

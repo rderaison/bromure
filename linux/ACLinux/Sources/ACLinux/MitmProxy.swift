@@ -67,6 +67,9 @@ final class MitmProxy: @unchecked Sendable {
     /// guardrailsConfigs), read per connection and per request
     /// (MitmEgress.swift).
     let guardrailsConfigs = NIOLockedValueBox<[UUID: GuardrailsConfig]>([:])
+    /// Fusion's per-workspace toggle and config (MitmFusion.swift).
+    let fusionEngagedFlags = NIOLockedValueBox<[UUID: Bool]>([:])
+    let fusionConfigs = NIOLockedValueBox<[UUID: Fusion.Config]>([:])
     /// Asks a workspace's agentd to reset the bridged client socket whose
     /// loopback port is given (the preamble's sport), calling back once done
     /// (macOS: EgressConnectionRegistry.guestAbort, by vsock port there).
@@ -1516,6 +1519,12 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // the trace level (macOS: emitTrace sends them before its trace gate):
         // a request refused above never left, so it has none.
         TraceEmitter.emitSwapEvents(swapped.swaps, host: host, path: path, profileID: profileID)
+        // 6d. Fusion, a cloud turn's alternative to the relay (macOS: after
+        // the routing and PII steps, before the forward).
+        if !local, dial == nil, !upgrade, !spooled, mint == nil, capture == nil, supplyChain == nil,
+           let fused = await fusionAnswer(out, proxy: proxy, profileID: profileID, host: host, port: port, trace: trace) {
+            return .answer(fused)
+        }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
                         supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy,
                         squelchLearn: squelchLearnOnPump, insecure: insecure)

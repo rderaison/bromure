@@ -30,11 +30,12 @@ extension Daemon {
     /// global Models settings, a login), then restart those agents in place.
     /// A workspace moving onto Bedrock gets its AWS credentials on the host
     /// with the restage (pushLiveCredentials pushes them every time).
-    // partial: no fusion re-judge (no fusion on Linux)
     // @port ACAppDelegate.refreshModelsForRunningWorkspaces() h=c64dcbdbe066ff8d @bd69274f
     func refreshModelsForRunningWorkspaces() async {
         for rec in registry.records where live[rec.id] != nil && rec.kube == nil && !rec.managed && rec.registration != true {
             guard let stored = existingProfile(for: rec), let pid = UUID(uuidString: rec.id) else { continue }
+            // Fusion's legs and credentials follow the same settings.
+            await reconcileFusion(stored)
             let fresh = await stagedProfile(stored)
             guard let prior = lastStagedProfiles[rec.id] else {
                 lastStagedProfiles[rec.id] = fresh
