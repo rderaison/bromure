@@ -14,7 +14,7 @@ struct MCPOAuthTests {
         let port: UInt16
         let requests = NIOLockedValueBox<[String]>([])
         private let fd: Int32
-        init(status: Int, body: String) throws {
+        init(status: Int, body: String, extraHeaders: String = "") throws {
             let lfd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
             var one: Int32 = 1
             setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -44,7 +44,7 @@ struct MCPOAuthTests {
                         }
                     }
                     reqs.withLockedValue { $0.append(String(decoding: got, as: UTF8.self)) }
-                    let resp = "HTTP/1.1 \(status) X\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                    let resp = "HTTP/1.1 \(status) X\r\nContent-Type: application/json\r\n\(extraHeaders)Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
                     _ = resp.withCString { write(c, $0, strlen($0)) }
                     close(c)
                 }
@@ -61,7 +61,16 @@ struct MCPOAuthTests {
         return s
     }
 
-    @Test func aTokenAboutToExpireIsRefreshedAndHandedOn() async throws {
+    /// The loopback endpoints below: only the endpoint check is relaxed (the
+    /// transport, with its no-redirect rule, stays the daemon's).
+    static func onLoopback<T>(_ body: () async throws -> T) async rethrows -> T {
+        let prior = MCPOAuthBroker.endpointRefusal
+        MCPOAuthBroker.endpointRefusal = { _ in nil }
+        defer { MCPOAuthBroker.endpointRefusal = prior }
+        return try await body()
+    }
+
+    @Test func aTokenAboutToExpireIsRefreshedAndHandedOn() async throws { try await Self.onLoopback {
         let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"NEW-ACCESS","refresh_token":"NEW-REFRESH","expires_in":3600}"#)
         defer { ep.stop() }
         let endpoint = "http://127.0.0.1:\(ep.port)/token"
@@ -86,7 +95,7 @@ struct MCPOAuthTests {
         #expect(reqs.count == 1, "only the due one refreshed")
         #expect(reqs.first?.contains("grant_type=refresh_token&refresh_token=OLD-REFRESH&client_id=cid&client_secret=s%26s") == true,
                 "\(reqs.first ?? "")")
-    }
+    } }
 
     /// The client authorizes (macOS's editor runs the OAuth flow) and PUTs
     /// the profile: the shared merge keeps each server's oauthState, the
@@ -114,7 +123,7 @@ struct MCPOAuthTests {
         #expect(staged.mcpServers.first?.bearerToken == "CLIENT-ACCESS", "and handed to the guest at staging")
     }
 
-    @Test func aFailedRefreshKeepsTheStaleToken() async throws {
+    @Test func aFailedRefreshKeepsTheStaleToken() async throws { try await Self.onLoopback {
         let ep = try TokenEndpoint(status: 400, body: #"{"error":"invalid_grant"}"#)
         defer { ep.stop() }
         var p = Profile(name: "mcp", tool: .claude, authMode: .token)
@@ -124,5 +133,34 @@ struct MCPOAuthTests {
         let out = await Daemon.populateMCPBearerTokens(p)
         #expect(out.mcpServers[0].bearerToken == "STALE")
         #expect(out.mcpServers[0].oauthState?.refreshToken == "R")
+    } }
+
+    /// The token endpoint came from the user's PUT and the daemon's POST
+    /// goes out past the MITM policy: https to public addresses only.
+    @Test func onlyAPublicHTTPSTokenEndpointIsUsed() async throws {
+        for url in ["http://auth.example/token", "https://127.0.0.1/token", "https://10.1.2.3/token",
+                    "https://192.168.1.1/token", "https://169.254.169.254/latest", "https://[::1]/token",
+                    "https://localhost/token", "https://[fe80::1]/token", "https:///token"] {
+            #expect(MCPOAuthBroker.publicHTTPSRefusal(URL(string: url)!) != nil, "\(url)")
+        }
+        // And refresh refuses before any request.
+        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"X"}"#)
+        defer { ep.stop() }
+        let state = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                  accessToken: "A", refreshToken: "R")
+        await #expect(throws: MCPOAuthBroker.BrokerError.self) { _ = try await MCPOAuthBroker.refresh(state: state) }
+        #expect(ep.requests.withLockedValue { $0 }.isEmpty, "nothing was sent")
     }
+
+    /// A redirect from the token endpoint isn't followed.
+    @Test func aRedirectIsNotFollowed() async throws { try await Self.onLoopback {
+        let target = try TokenEndpoint(status: 200, body: #"{"access_token":"REDIRECTED"}"#)
+        defer { target.stop() }
+        let ep = try TokenEndpoint(status: 307, body: "", extraHeaders: "Location: http://127.0.0.1:\(target.port)/t\r\n")
+        defer { ep.stop() }
+        let state = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                  accessToken: "A", refreshToken: "R")
+        await #expect(throws: MCPOAuthBroker.BrokerError.self) { _ = try await MCPOAuthBroker.refresh(state: state) }
+        #expect(target.requests.withLockedValue { $0 }.isEmpty, "the redirect target got nothing")
+    } }
 }

@@ -1,11 +1,12 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
 
 /// A remote MCP server's OAuth tokens on the server: refreshed when they
-/// are about to expire and handed to the guest as its bearer token at each
-/// staging (launch, live refresh, reboot), as macOS's
+/// are about to expire and handed to the guest as its bearer token where
+/// macOS does it (the launch's staging, the live credential push), as macOS's
 /// populateMCPBearerTokens. The interactive authorization (macOS's
 /// MCPOAuthBroker.authorizeServer, a browser on the host) isn't here.
 // @port-skip linux-only: the namespace (macOS's MCPOAuthBroker also authorizes, through a local browser)
@@ -17,8 +18,41 @@ enum MCPOAuthBroker {
         var description: String { switch self { case .refreshFailed(let m): return "Token refresh failed: \(m)" } }
     }
 
-    /// The transport (tests answer from a local server).
-    nonisolated(unsafe) static var session: URLSession = .shared
+    /// The transport: no redirect is followed (the token endpoint came from
+    /// a client's PUT), and 10 s at most.
+    nonisolated(unsafe) static var session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 10
+        c.timeoutIntervalForResource = 10
+        return URLSession(configuration: c, delegate: NoRedirects(), delegateQueue: nil)
+    }()
+
+    // @port-skip linux-only: see session
+    final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        // @port-skip linux-only: see session
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+
+    /// Why the daemon won't POST to `url`, or nil: on a shared server the
+    /// token endpoint is the user's (their PUT) and the daemon's request
+    /// goes out past the MITM policy, so only https to public addresses.
+    /// Tests on loopback swap it.
+    nonisolated(unsafe) static var endpointRefusal: (URL) -> String? = publicHTTPSRefusal
+
+    // @port-skip linux-only: a shared server's check on a user-supplied endpoint
+    static func publicHTTPSRefusal(_ url: URL) -> String? {
+        guard url.scheme?.lowercased() == "https" else { return "the token endpoint isn't https" }
+        guard let host = url.host, !host.isEmpty else { return "the token endpoint has no host" }
+        let ips = MitmProxy.resolve(host, port: url.port ?? 443)
+        guard !ips.isEmpty else { return "the token endpoint's host doesn't resolve" }
+        if let bad = ips.first(where: { OpenShellPolicy.isInternal($0) }) {
+            return "the token endpoint resolves to a local or private address (\(bad))"
+        }
+        return nil
+    }
 
     // @port MCPOAuthBroker.static refresh(state: MCPOAuthState) h=4a873148d744f90e @55adf953
     static func refresh(state: MCPOAuthState) async throws -> MCPOAuthState {
@@ -26,6 +60,7 @@ enum MCPOAuthBroker {
               let tokenURL = URL(string: state.tokenEndpoint) else {
             throw BrokerError.refreshFailed("No refresh token or invalid token endpoint")
         }
+        if let why = endpointRefusal(tokenURL) { throw BrokerError.refreshFailed(why) }
         var body = [
             "grant_type=refresh_token",
             "refresh_token=\(formEncode(refreshToken))",
@@ -38,6 +73,7 @@ enum MCPOAuthBroker {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(body.joined(separator: "&").utf8)
+        request.timeoutInterval = 10
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw BrokerError.refreshFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")

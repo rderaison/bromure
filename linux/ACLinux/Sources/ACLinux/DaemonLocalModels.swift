@@ -16,19 +16,21 @@ extension Daemon {
     // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch)
     /// `create` false: only a Profile the VM already has (a restarted
     /// daemon's lookups never make one).
-    func launchProfile(for rec: VMRecord, create: Bool = true) async -> Profile? {
+    func launchProfile(for rec: VMRecord, create: Bool = true, mcpTokens: Bool = false) async -> Profile? {
         guard let raw = create ? profile(for: rec) : existingProfile(for: rec) else { return nil }
         if rec.registration == true { return raw }
-        return await stagedProfile(raw)
+        return await stagedProfile(raw, mcpTokens: mcpTokens)
     }
 
     /// A workspace with Preferences › Models projected on, as a launch and
     /// a live refresh stage it.
     // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch and pushLiveCredentials)
-    func stagedProfile(_ raw: Profile) async -> Profile {
-        // Its MCP servers' OAuth tokens first (macOS: populateMCPBearerTokens
-        // before the models overlay, at launch, live edit and reboot).
-        let raw = await Self.populateMCPBearerTokens(raw)
+    /// `mcpTokens`: its MCP servers' OAuth tokens first, refreshed when due
+    /// (macOS: populateMCPBearerTokens before the models overlay) -- only
+    /// where macOS does it (the launch, the live credential push; a reboot
+    /// relaunches): a refresh token may be good for one use.
+    func stagedProfile(_ raw: Profile, mcpTokens: Bool = false) async -> Profile {
+        let raw = mcpTokens ? await Self.populateMCPBearerTokens(raw) : raw
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {
             raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)

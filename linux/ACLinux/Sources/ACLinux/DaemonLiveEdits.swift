@@ -109,7 +109,7 @@ extension Daemon {
     @discardableResult
     func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {
         guard let mitm else { return false }
-        let profile = await stagedProfile(raw)
+        let profile = await stagedProfile(raw, mcpTokens: true)
         lastStagedProfiles[rec.id] = profile
         await MainActor.run {
             mitm.applyWorkspacePolicies(raw)

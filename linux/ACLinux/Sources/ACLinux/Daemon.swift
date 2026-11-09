@@ -1317,8 +1317,9 @@ public actor Daemon {
         // cleanupSessionRegistrations' removeKeyFromHostAgent); then the
         // agent itself: the imported keys exist only in that process
         // (macOS: MitmEngine.unregister's terminateSSHAgent).
-        if mitm != nil, let profile = ProfileStore().loadAll().first(where: { $0.id == pid }) {
-            for key in Self.loadAgentKeys(for: profile, store: ProfileStore()) {
+        let store = profileStore
+        if mitm != nil, let profile = store.loadAll().first(where: { $0.id == pid }) {
+            for key in Self.loadAgentKeys(for: profile, store: store) {
                 MitmProxy.removeKeyFromHostAgent(publicKey: key.publicKey, profileID: pid)
             }
         }
@@ -1397,7 +1398,7 @@ public actor Daemon {
         // The workspace as it is stored, for the live refresh to tell what a
         // later edit changed (macOS: the session's captured profile).
         let raw = rec.managed ? nil : existingProfile(for: rec)
-        let staged = await launchProfile(for: rec)
+        let staged = await launchProfile(for: rec, mcpTokens: true)
         var launchPlan: SessionTokenPlan?
         if let profile = staged {
             let store = profileStore
