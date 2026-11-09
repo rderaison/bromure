@@ -1995,6 +1995,17 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     mutating func adoptAppEdits(from stored: Profile, opened: Profile) {
         if comments == opened.comments { comments = stored.comments }
         if squelch.enabled == opened.squelch.enabled { squelch.enabled = stored.squelch.enabled }
+        // An MCP server's OAuth state the launch refreshed while the editor
+        // was open (`keepRefreshedMCPOAuth`): the editor's copy still holds
+        // the refresh token a rotating server has spent. Left as opened, the
+        // app's wins; Authorize / Sign out in the editor changed it, and wins.
+        for i in mcpServers.indices {
+            let id = mcpServers[i].id
+            guard let was = opened.mcpServers.first(where: { $0.id == id }),
+                  was.oauthState == mcpServers[i].oauthState,
+                  let now = stored.mcpServers.first(where: { $0.id == id }) else { continue }
+            mcpServers[i].oauthState = now.oauthState
+        }
     }
 
     public mutating func adoptRuntimeFields(from stored: Profile) {
