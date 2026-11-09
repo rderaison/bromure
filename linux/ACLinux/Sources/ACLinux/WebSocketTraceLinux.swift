@@ -25,6 +25,10 @@ final class WSTraceSession: @unchecked Sendable {
     /// transcript says where it has a gap.
     private let queued = NIOLockedValueBox(0)
     private let dropped = NIOLockedValueBox(0)
+    /// A direction that dropped bytes: its frames can't be read past the
+    /// gap (a payload would parse as headers, an inflater's window is
+    /// lost), so it's fed no more, to the collector or the tap.
+    private let stopped = NIOLockedValueBox<Set<WSMessage.Direction>>([])
     private let maxQueued: Int
 
     /// Whether the messages are read at all (bodies captured): else only
@@ -57,7 +61,7 @@ final class WSTraceSession: @unchecked Sendable {
     func client(_ bytes: Data) {
         clientBytes += bytes.count
         guard let c2u, !bytes.isEmpty else { return }
-        enqueue(bytes) { c2u.feed(bytes) }
+        enqueue(bytes, .clientToUpstream, c2u)
     }
 
     /// The guest's bytes as NIO read them: copied only when captured.
@@ -76,7 +80,7 @@ final class WSTraceSession: @unchecked Sendable {
     // @port-skip linux-only: see WSTraceSession
     func toGuest(_ bytes: Data) {
         guard let u2c, !bytes.isEmpty else { return }
-        enqueue(bytes) { u2c.feed(bytes) }
+        enqueue(bytes, .upstreamToClient, u2c)
     }
 
     /// What went to the guest as NIO holds it: copied only when captured.
@@ -86,18 +90,27 @@ final class WSTraceSession: @unchecked Sendable {
         toGuest(Data(buffer.readableBytesView))
     }
 
-    /// `feed` on the queue, unless too much already waits there.
+    /// `bytes` to `collector` on the queue, unless too much already waits
+    /// there: then that direction stops here for the rest of the socket (a
+    /// note where its gap starts), its bytes only counted.
     // @port-skip linux-only: see WSTraceSession
-    private func enqueue(_ bytes: Data, _ feed: @escaping @Sendable () -> Void) {
+    private func enqueue(_ bytes: Data, _ direction: WSMessage.Direction, _ collector: WSTraceCollector) {
         let n = bytes.count
+        guard !stopped.withLockedValue({ $0.contains(direction) }) else { dropped.withLockedValue { $0 += n }; return }
         let room = queued.withLockedValue { q -> Bool in
             guard q + n <= self.maxQueued else { return false }
             q += n
             return true
         }
-        guard room else { dropped.withLockedValue { $0 += n }; return }
+        guard room else {
+            dropped.withLockedValue { $0 += n }
+            stopped.withLockedValue { _ = $0.insert(direction) }
+            // Behind what's queued: its time is where the gap starts.
+            work.async { collector.appendNote("[the trace fell behind here: the rest of this direction isn't traced]") }
+            return
+        }
         work.async { [queued] in
-            feed()
+            collector.feed(bytes)
             queued.withLockedValue { $0 -= n }
         }
     }

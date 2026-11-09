@@ -115,5 +115,25 @@ struct WebSocketTraceTests {
         let text = t.map { String(decoding: $0, as: UTF8.self) } ?? ""
         #expect(text.contains("small") && text.contains("66 bytes of this WebSocket not traced"), "\(text)")
     }
+
+    /// After a drop, that direction is fed no more (its frames can't be read
+    /// past the gap): later well-formed frames give no messages and no tap
+    /// events for it, a note says where its gap starts, and the other
+    /// direction goes on.
+    @Test func aDirectionThatDroppedIsFedNoMore() async {
+        let ws = WSTraceSession(handshake: Data(), host: "api.openai.com", path: "/v1/responses", profileID: UUID(),
+                                captureBody: true, maxQueued: 200)
+        ws.toGuest(Self.frame(0x1, Data(#"{"type":"response.created"}"#.utf8)))
+        ws.toGuest(Self.frame(0x1, Data(repeating: 0x61, count: 400)))       // past the cap: the gap
+        let completed = Data(#"{"type":"response.completed","response":{"id":"r1","model":"m","output":[]}}"#.utf8)
+        ws.toGuest(Self.frame(0x1, completed))                                // would fit, and would stream
+        ws.client(WSFrame.encode(opcode: 0x1, payload: Data(#"{"type":"response.create"}"#.utf8), masked: true))
+        let t: Data? = await withCheckedContinuation { c in ws.finish { t, _ in c.resume(returning: t) } }
+        let text = t.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        #expect(text.contains("response.created") && text.contains("the trace fell behind here"), "\(text)")
+        #expect(!text.contains("response.completed"), "nothing after the gap: \(text)")
+        #expect(ws.tap?.streamedAnyEvents == false, "the tap saw nothing past the gap")
+        #expect(text.contains("response.create\""), "the other direction goes on: \(text)")
+    }
 }
 

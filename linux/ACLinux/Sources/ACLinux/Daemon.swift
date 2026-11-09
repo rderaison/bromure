@@ -166,6 +166,9 @@ public actor Daemon {
     /// daemon's own end): never taken for a guest's reboot, even when the
     /// guest's own exit got there first (macOS: session.stopping).
     var explicitStops: Set<String> = []
+    /// A private-set refresh queued by a profile write and not yet run, this
+    /// daemon's (DaemonTraceUpload.swift): a burst of writes makes one.
+    nonisolated let streamingRefreshQueued = NIOLockedValueBox(false)
     /// Stops asked while a reboot was under way (the reboot route's, a
     /// guest's relaunch): kept until that reboot looks (stoppedDuringReboot),
     /// which vmStopped's own consuming of explicitStops can't take away.

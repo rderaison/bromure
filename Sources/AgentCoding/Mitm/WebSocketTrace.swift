@@ -483,6 +483,13 @@ final class WSTraceCollector: @unchecked Sendable {
                         truncated: true, totalBytes: msg.totalBytes))
     }
 
+    /// A note in the transcript at this point (a host that stopped feeding
+    /// this direction says where its gap starts).
+    func appendNote(_ text: String) {
+        keep(WSMessage(direction: direction, timestamp: Date(), kind: .unknown, payload: Data(text.utf8),
+                       truncated: false, totalBytes: 0))
+    }
+
     private func takePreview(_ data: Data) -> Data {
         return data.count <= Self.perMessageCap
             ? data

@@ -31,21 +31,17 @@ extension Daemon {
         await MainActor.run { Self.refreshStreamingState(store: store) }
     }
 
-    /// A refresh queued by a profile write and not yet run: a burst of
-    /// writes (a firewall sweep, every staging's token save) makes one.
-    nonisolated static let streamingRefreshQueued = NIOLockedValueBox(false)
-
     /// One refresh soon for any number of writes now. Cleared before it
     /// runs, so a write during it queues another.
     // @port-skip linux-only: the funnel's coalescing (macOS: profiles.didSet runs per assignment on the main actor)
     nonisolated func refreshStreamingSoon() {
-        let first = Self.streamingRefreshQueued.withLockedValue { q -> Bool in
+        let first = streamingRefreshQueued.withLockedValue { q -> Bool in
             defer { q = true }
             return !q
         }
         guard first else { return }
         Task {
-            Self.streamingRefreshQueued.withLockedValue { $0 = false }
+            streamingRefreshQueued.withLockedValue { $0 = false }
             await refreshStreamingNow()
         }
     }
