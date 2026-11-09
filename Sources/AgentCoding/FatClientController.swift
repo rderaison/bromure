@@ -278,6 +278,8 @@ final class RemoteHostController {
     /// Guest links being asked about as sheets, so a later poll can take one
     /// down when another client handled it (its id in `guestLinksDone`).
     private var openGuestLinks: [String: (alert: NSAlert, window: NSWindow)] = [:]
+    /// Guest links waiting for room (three asks up, or no window), logged once.
+    private var deferredGuestLinks: Set<String> = []
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
     /// Decision prompts we're currently showing as sheets, so a later poll can
@@ -605,6 +607,7 @@ final class RemoteHostController {
         let current = Set(rows.compactMap { $0["id"] as? String })
         handledGuestLinks.formIntersection(current)
 #if os(macOS)
+        deferredGuestLinks.formIntersection(current)
         for id in done {
             guard let open = openGuestLinks.removeValue(forKey: id) else { continue }
             open.window.endSheet(open.alert.window, returnCode: .abort)
@@ -620,18 +623,32 @@ final class RemoteHostController {
                 guestLinkDone(id)
             case .open, .ask:
 #if os(macOS)
-                handledGuestLinks.insert(id)
+                // Three asks up, or no window: left waiting (shown once
+                // there's room), not marked handled.
                 guard openGuestLinks.count < 3, let window = promptWindow() else {
-                    FatClientLog.log("guest link: did not open (no window to ask in, or asks pending): \(url.host ?? "?")")
+                    if deferredGuestLinks.insert(id).inserted {
+                        FatClientLog.log("guest link: waiting (no window to ask in, or asks pending): \(url.host ?? "?")")
+                    }
                     continue
                 }
+                handledGuestLinks.insert(id)
+                deferredGuestLinks.remove(id)
                 let alert = ACAppDelegate.guestURLOpenAlert(url, workspace: row["workspace"] as? String)
-                // A click meant for something else can't open it.
+                // A click meant for something else can't open it: enabled a
+                // second after the sheet is up (a window already showing a
+                // sheet queues this one behind it).
                 let openButton = alert.buttons.count > 1 ? alert.buttons[1] : nil
                 openButton?.isEnabled = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { openButton?.isEnabled = true }
+                var shown: NSObjectProtocol?
+                shown = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didBecomeKeyNotification, object: alert.window, queue: .main) { _ in
+                    if let shown { NotificationCenter.default.removeObserver(shown) }
+                    shown = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { openButton?.isEnabled = true }
+                }
                 openGuestLinks[id] = (alert, window)
                 alert.beginSheetModal(for: window) { [weak self] response in
+                    if let shown { NotificationCenter.default.removeObserver(shown) }
                     self?.openGuestLinks[id] = nil
                     // Taken down: another client handled it.
                     guard response != .abort else { return }
