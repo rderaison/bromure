@@ -57,6 +57,9 @@ enum SessionDisk {
     static let switchboardMCPConfigGuestPath = GuestMetaPaths.switchboardMCPConfigGuestPath
     static let outboxURLRelayFolder = GuestOutboxPaths.urlRelayFolder
     static let outboxAgentFolder = GuestOutboxPaths.agentFolder
+    /// The guest hostname a workspace's name gives (the daemon's port of it).
+    // @port-skip linux-only: forwards to Daemon.sanitizeHostname (the port of SessionDisk.sanitizeHostname)
+    static func sanitizeHostname(_ name: String) -> String { Daemon.sanitizeHostname(name) }
 }
 
 

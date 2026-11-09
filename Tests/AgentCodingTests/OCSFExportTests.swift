@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 @Suite("OCSF export mapping")
 struct OCSFExportTests {

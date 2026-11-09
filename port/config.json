@@ -190,6 +190,7 @@
     "Sources/AgentCoding/Mitm/WorkspaceQuarantine.swift",
     "Sources/AgentCoding/Mitm/Zstd.swift",
     "Sources/AgentCoding/NetworkLineage.swift",
+    "Sources/AgentCoding/OCSFExport.swift",
     "Sources/AgentCoding/OpenShellAdvisor.swift",
     "Sources/AgentCoding/OpenShellGovernance.swift",
     "Sources/AgentCoding/OpenShellProviderLayer.swift",
