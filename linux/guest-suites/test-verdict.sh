@@ -3,14 +3,13 @@
 # that matched nothing -> STALE, warned, 2; a partial pass -> 2; an unexpected
 # FAIL -> 1; a suite that left no log -> its entries "not checked", 1.
 set -uo pipefail
-export PYTHONDONTWRITEBYTECODE=1   # no __pycache__ beside verdict.py
 HERE=$(cd "$(dirname "$0")" && pwd)
 T=$(mktemp -d /tmp/acl-verdict.XXXXXX)
 trap 'rm -rf -- "$T"' EXIT
 fails=0
 check() {  # name, want-rc, want-text, suites...
   local name=$1 want=$2 text=$3; shift 3
-  out=$(python3 -I "$HERE/verdict.py" "$T" "$T/tsv" "$@" 2>&1); rc=$?
+  out=$(python3 -I -B "$HERE/verdict.py" "$T" "$T/tsv" "$@" 2>&1); rc=$?
   if [ "$rc" = "$want" ] && grep -q -- "$text" <<<"$out"; then echo "PASS $name"
   else echo "FAIL $name (rc $rc, want $want; wanted '$text')"; echo "$out" | sed 's/^/    /'; fails=$((fails + 1)); fi
 }

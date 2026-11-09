@@ -80,7 +80,7 @@ for s in "${SUITES[@]}"; do
 done
 
 # The verdict.
-PYTHONDONTWRITEBYTECODE=1 python3 -I "$HERE/verdict.py" "$OUT" "$HERE/expected-failures.tsv" "${SUITES[@]}"
+python3 -I -B "$HERE/verdict.py" "$OUT" "$HERE/expected-failures.tsv" "${SUITES[@]}"
 V=$?
 log "total $(( $(date +%s) - T0 ))s; logs in $OUT; exit $V"
 exit $V
