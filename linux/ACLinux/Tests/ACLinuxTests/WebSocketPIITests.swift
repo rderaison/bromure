@@ -179,4 +179,48 @@ struct WebSocketPIITests {
         #expect(upFrames.count == 1 && !String(decoding: upFrames.first ?? Data(), as: UTF8.self).contains(Self.email))
         #expect(Self.text(got) == "to \(Self.email) ok", "\(String(decoding: got, as: UTF8.self))")
     }
+
+    /// Traced, the server's side is recorded as the guest got it (macOS:
+    /// onClientOut): the real address, never the stand-in the model sent.
+    @Test @MainActor func theTraceHasWhatTheGuestGot() async throws {
+        let (proxy, pid, dir) = try PIIProxyTests.proxy()
+        defer { PIIProxyTests.cleanup(dir, pid) }
+        proxy.setUpTraceStore(rootDir: URL(fileURLWithPath: dir + "/traces", isDirectory: true))
+        proxy.setSessionTrace(TraceSession(sessionID: UUID(), level: .all), for: pid)
+        let ip = try #require(Daemon.primaryIPv4(), "a host address (loopback is always refused)")
+        let standIn = NIOLockedValueBox("")
+        let up = try WSUpstream(host: ip, reply: { payload in
+            let text = String(decoding: payload, as: UTF8.self)
+            let addr = text.range(of: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[a-z]+", options: .regularExpression)
+                .map { String(text[$0]) } ?? "none"
+            standIn.withLockedValue { $0 = addr }
+            // One whole message (not split), so the stand-in would show whole.
+            let o: [String: Any] = ["type": "content_block_delta", "index": 0, "delta": ["type": "text_delta", "text": "to \(addr) ok"]]
+            return [WSFrame.encode(opcode: WSFrame.text, payload: try! JSONSerialization.data(withJSONObject: o), masked: false),
+                    WSFrame.encode(opcode: WSFrame.text, payload: Data(#"{"type":"content_block_stop","index":0}"#.utf8), masked: false)]
+        })
+        defer { up.stop() }
+        proxy.routeAllTo = (ip, up.port)
+        let w = try await DaemonGlobalSuites.WebSocketGuardTests.Wire(proxy: proxy, pid: pid)
+        w.send(DaemonGlobalSuites.WebSocketGuardTests.upgrade)
+        #expect(String(decoding: w.read(), as: UTF8.self).hasPrefix("HTTP/1.1 101"))
+        w.send(WSFrame.encode(opcode: WSFrame.text, payload: Self.turn(), masked: true))
+        var got = Data()
+        for _ in 0..<10 where !Self.text(got).hasSuffix(" ok") { got += w.read() }
+        #expect(Self.text(got) == "to \(Self.email) ok")
+        w.close()
+        let sent = standIn.withLockedValue { $0 }
+        #expect(!sent.isEmpty && sent != Self.email, "the model saw a stand-in: \(sent)")
+        let store = try #require(proxy.traces.withLockedValue { $0 })
+        for _ in 0..<200 where !store.recent.contains(where: { $0.statusCode == 101 }) { try await Task.sleep(for: .milliseconds(10)) }
+        let r = try #require(store.recent.first { $0.statusCode == 101 })
+        var body = ""
+        for _ in 0..<100 {
+            if let b = store.loadBody(for: r, kind: .response) { body = String(decoding: b, as: UTF8.self); break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(body.contains("to \(Self.email) ok"), "the reply as the guest got it: \(body)")
+        #expect(!body.contains(sent), "not the stand-in the model sent: \(body)")
+    }
 }
+

@@ -4,16 +4,20 @@ import Foundation
 /// handleWebSocketUpgrade's collectors, then emitWebSocketTrace): both
 /// directions' messages, inflated when permessage-deflate is in use and
 /// bodies are captured, rendered into one transcript at the close; the
-/// realtime tap reads the server's messages as they come. Fed on the
-/// connection's event loop (the guest's and the upstream's channels share it).
+/// realtime tap reads the server's messages as they come. The server's side
+/// is what the guest got (its values restored), as macOS's onClientOut.
+/// Fed from the connection's event loop, which only copies and counts: the
+/// parsing, inflating, the tap and the rendering run on the session's own
+/// queue, in order (macOS: the pump's threads).
 // @port-skip linux-only: the Linux proxy's share of handleWebSocketUpgrade (collectors, byte counts)
-final class WSTraceSession {
+final class WSTraceSession: @unchecked Sendable {
     let handshake: Data
     private let c2u: WSTraceCollector?
     private let u2c: WSTraceCollector?
     let tap: RealtimeEventTap?
     private(set) var clientBytes = 0
     private(set) var upstreamBytes = 0
+    private let work = DispatchQueue(label: "io.bromure.ac.ws-trace", qos: .utility)
 
     // @port-skip linux-only: see WSTraceSession
     init(handshake: Data, host: String, path: String, profileID: UUID, captureBody: Bool) {
@@ -38,21 +42,31 @@ final class WSTraceSession {
     // @port-skip linux-only: see WSTraceSession
     func client(_ bytes: Data) {
         clientBytes += bytes.count
-        c2u?.feed(bytes)
+        guard let c2u, !bytes.isEmpty else { return }
+        work.async { c2u.feed(bytes) }
     }
 
-    /// The upstream's bytes after its 101, as they came.
+    /// The upstream's bytes after its 101, counted as they came.
     // @port-skip linux-only: see WSTraceSession
-    func upstream(_ bytes: Data) {
-        upstreamBytes += bytes.count
-        u2c?.feed(bytes)
+    func upstream(count: Int) { upstreamBytes += count }
+
+    /// What the guest got from the server side (restored, with any injected
+    /// event), as it went out.
+    // @port-skip linux-only: see WSTraceSession
+    func toGuest(_ bytes: Data) {
+        guard let u2c, !bytes.isEmpty else { return }
+        work.async { u2c.feed(bytes) }
     }
 
-    /// Both directions as one text, or nil without body capture.
+    /// Both directions as one text (nil without body capture), once every
+    /// byte fed so far is read: on the session's queue.
     // @port-skip linux-only: see WSTraceSession
-    var transcript: Data? {
-        guard let c2u, let u2c else { return nil }
-        return WSTranscriptRenderer.render(c2u: c2u, u2c: u2c)
+    func finish(_ done: @escaping @Sendable (Data?, Bool) -> Void) {
+        let c2u = c2u, u2c = u2c, tap = tap
+        work.async {
+            let transcript = (c2u != nil && u2c != nil) ? WSTranscriptRenderer.render(c2u: c2u!, u2c: u2c!) : nil
+            done(transcript, tap?.streamedAnyEvents ?? false)
+        }
     }
 }
 

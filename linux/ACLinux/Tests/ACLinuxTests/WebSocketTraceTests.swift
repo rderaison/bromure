@@ -75,15 +75,16 @@ struct WebSocketTraceTests {
             let ws = WSTraceSession(handshake: handshake, host: "api.example.com", path: "/v1/responses", profileID: pid,
                                     captureBody: level.capturesBodyForHost("api.example.com"))
             ws.client(WSFrame.encode(opcode: 0x1, payload: Data(#"{"type":"response.create"}"#.utf8), masked: true))
-            ws.upstream(Self.frame(0x1, Self.first, rsv1: true))
-            ws.upstream(Self.frame(0x1, Self.second, rsv1: true))
+            ws.toGuest(Self.frame(0x1, Self.first, rsv1: true))
+            ws.toGuest(Self.frame(0x1, Self.second, rsv1: true))
             return ws
         }
         for level in [TraceLevel.activity, .all] {
             let ws = session(level)
+            let transcript: Data? = await withCheckedContinuation { c in ws.finish { t, _ in c.resume(returning: t) } }
             TraceEmitter.emitWebSocket(session: TraceSession(sessionID: UUID(), level: level), store: store, profileID: pid,
                                        host: "api.example.com", port: 443, preSwapRequest: request, handshakeResponse: handshake,
-                                       transcript: ws.transcript, clientBytes: request.count + ws.clientBytes,
+                                       transcript: transcript, clientBytes: request.count + ws.clientBytes,
                                        upstreamBytes: handshake.count + ws.upstreamBytes, statusCode: 101,
                                        swaps: [], leaks: [], latencyMs: 5)
         }

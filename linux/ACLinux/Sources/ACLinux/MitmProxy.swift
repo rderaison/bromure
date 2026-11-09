@@ -359,13 +359,13 @@ final class MitmProxy: @unchecked Sendable {
     func emitWebSocketTrace(_ t: RequestReader.Trace, _ ws: WSTraceSession) {
         guard let store = traces.withLockedValue({ $0 }) else { return }
         let latency = Date().timeIntervalSince(t.start) * 1000
-        let transcript = ws.transcript
         let clientBytes = t.request.count + ws.clientBytes, upstreamBytes = ws.handshake.count + ws.upstreamBytes
-        let streamed = ws.tap?.streamedAnyEvents ?? false
-        Task {
+        let handshake = ws.handshake
+        // Rendered off the loop, after every message fed so far.
+        ws.finish { transcript, streamed in
             TraceEmitter.emitWebSocket(
                 session: t.session, store: store, profileID: t.profileID, host: t.host, port: t.port,
-                preSwapRequest: t.request, handshakeResponse: ws.handshake, transcript: transcript,
+                preSwapRequest: t.request, handshakeResponse: handshake, transcript: transcript,
                 clientBytes: clientBytes, upstreamBytes: upstreamBytes, statusCode: 101,
                 swaps: t.swaps, leaks: t.leaks, latencyMs: latency, skipLLMExtract: streamed)
         }
@@ -1753,14 +1753,16 @@ final class ResponseRelay: ChannelInboundHandler {
                 return
             }
             if trace != nil { keepForTrace(Data(b.readableBytesView)) }
-            wsTrace?.upstream(Data(b.readableBytesView))
+            wsTrace?.upstream(count: b.readableBytes)
             keepForLearning(b.readableBytesView)
             relayed = true
             if let wsServer {
                 // As it comes; a refused turn's event between two messages.
                 guard let out = wsServer.feed(Data(b.readableBytesView)) else { context.close(promise: nil); return }
+                wsTrace?.toGuest(out)
                 if !out.isEmpty { guest.write(guest.allocator.buffer(bytes: out), promise: nil) }
             } else {
+                wsTrace?.toGuest(Data(b.readableBytesView))
                 guest.write(b, promise: nil)
             }
             holdIfGuestFull(context)
@@ -1802,7 +1804,7 @@ final class ResponseRelay: ChannelInboundHandler {
                 wsTrace = WSTraceSession(handshake: head0, host: host, path: HTTPFrames.parseRequestLine(trace.request).1,
                                          profileID: trace.profileID,
                                          captureBody: trace.session.level.capturesBodyForHost(host))
-                wsTrace?.upstream(rest)
+                wsTrace?.upstream(count: rest.count)
             }
             var early = rest
             if let ws {
@@ -1816,7 +1818,7 @@ final class ResponseRelay: ChannelInboundHandler {
                     let guest = self.guest
                     let pid = ws.profileID
                     let server = WSServerSide(loop: context.eventLoop,
-                                              write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
+                                              write: { [weak self] in self?.wsTrace?.toGuest($0); guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
                                               restorer: ws.restoresReplies ? WSServerRestorer(vault: ws.vault) : nil,
                                               learn: ws.squelchLearns ? { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) } : nil)
                     wsServer = server
@@ -1827,12 +1829,14 @@ final class ResponseRelay: ChannelInboundHandler {
             if ws == nil, let pid = squelchLearnFor, WSHandshake.extensions(inResponse: head0) == nil {
                 let guest = self.guest
                 let server = WSServerSide(loop: context.eventLoop,
-                                          write: { guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
+                                          write: { [weak self] in self?.wsTrace?.toGuest($0); guest.writeAndFlush(guest.allocator.buffer(bytes: $0), promise: nil) },
                                           learn: { SquelchCallRegistry.shared.learn(fromServerEvent: $0, profileID: pid) })
                 wsServer = server
                 guard let read = server.feed(rest) else { context.close(promise: nil); return }
                 early = read
             }
+            // The server's side as the guest gets it (restored), for the trace.
+            wsTrace?.toGuest(early)
             onSwitched?(true, wsServer)
             out = head0 + early
         } else {
