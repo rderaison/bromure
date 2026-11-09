@@ -118,7 +118,32 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
     // MARK: Control (from the engine, on enroll/unenroll/private-mode)
 
     public func setPrivateProfiles(_ ids: Set<UUID>) {
-        queue.async { self.privateProfileIDs = ids }
+        queue.async { self.applyPrivateProfiles(ids) }
+    }
+
+    /// A workspace turned private takes what it had already buffered with it:
+    /// its groups and its envelopes awaiting a POST are dropped, not sent.
+    /// (They were filtered only when recorded, so up to a flush interval of
+    /// traces -- and a whole backlog during an outage -- still went out.) The
+    /// in-flight head stays for the send bookkeeping; `send` drops it.
+    private func applyPrivateProfiles(_ ids: Set<UUID>) {
+        privateProfileIDs = ids
+        guard !ids.isEmpty else { return }
+        for (key, g) in groups where ids.contains(g.profileID) {
+            bufferedCount -= g.events.count
+            groups.removeValue(forKey: key)
+        }
+        if bufferedCount < 0 { bufferedCount = 0 }
+        let keep = isFlushing ? 1 : 0
+        if pending.count > keep {
+            let head = pending.prefix(keep)
+            pending = Array(head) + pending.dropFirst(keep).filter { !ids.contains($0.profileID) }
+        }
+    }
+
+    /// Tests: the workspaces with something buffered or awaiting a POST.
+    func queuedProfileIDs() -> Set<UUID> {
+        queue.sync { Set(groups.values.map(\.profileID)).union(pending.map(\.profileID)) }
     }
 
     public func shutdown() {
@@ -189,8 +214,10 @@ public final class BACTraceUploader: TraceUploader, @unchecked Sendable {
 
     private func send(_ env: Envelope, attempt: Int) {
         // Re-check enrollment at send time. Lost between enqueue and now
-        // ⇒ drop the batch; a future enrollment starts clean.
-        guard let install = BACEnrollmentStore.load() else {
+        // ⇒ drop the batch; a future enrollment starts clean. Likewise a
+        // batch whose workspace has turned private since (a retry included).
+        guard !privateProfileIDs.contains(env.profileID),
+              let install = BACEnrollmentStore.load() else {
             if !pending.isEmpty { pending.removeFirst() }
             isFlushing = false
             if !pending.isEmpty { flushLocked() }
