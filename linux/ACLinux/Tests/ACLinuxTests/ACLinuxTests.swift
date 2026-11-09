@@ -10,7 +10,10 @@ import class SandboxEngine.VMNetSwitch
 
 func shortTempDir() throws -> String {
     let d = "/tmp/acl-\(UUID().uuidString.prefix(8))"
-    try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+    // 0700 whatever the umask: a daemon's runtime dir must sit in a
+    // directory no one else can write (SecureDir).
+    try FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: 0o700])
     return d
 }
 

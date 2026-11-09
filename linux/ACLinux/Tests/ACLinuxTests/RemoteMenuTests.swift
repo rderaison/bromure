@@ -51,6 +51,31 @@ struct RemoteMenuTests {
         await srv.close()
     }
 
+    /// The runtime dir and its parent: refused when a link, or writable by
+    /// the group or others (the /tmp fallback's squat); made 0700 otherwise.
+    /// The daemon refuses to start on one.
+    @Test func untrustedRuntimeDirsAreRefused() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ok = try SecureDir.runtime(dir + "/rt/bromure-ac", create: true)
+        close(ok)
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/rt")[.posixPermissions] as? Int) == 0o700)
+        // A parent others can write.
+        try FileManager.default.createDirectory(atPath: dir + "/open", withIntermediateDirectories: true)
+        chmod(dir + "/open", 0o777)
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/open/bromure-ac", create: true) }
+        // A link where the runtime dir should be.
+        try FileManager.default.createDirectory(atPath: dir + "/elsewhere", withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createSymbolicLink(atPath: dir + "/rt/linked", withDestinationPath: dir + "/elsewhere")
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/rt/linked", create: false) }
+        // The daemon won't start on the open one.
+        let config = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/open/bromure-ac",
+                                  imageDir: dir + "/image", agentdPath: dir + "/agentd.py")
+        await #expect(throws: SecureDir.Untrusted.self) { _ = try await Daemon.start(config) }
+        // Nor will an edit be scratched there.
+        #expect(throws: (any Error).self) { _ = try EditorScratch.create(contents: Data(), in: dir + "/open/bromure-ac/editor") }
+    }
+
     @Test func hostListsSplitOnCommasAndWhitespace() {
         #expect(HostListField.parse("a.com, b.org\tc.net\n d.io,,") == ["a.com", "b.org", "c.net", "d.io"])
         #expect(HostListField.parse("  ").isEmpty)
@@ -63,7 +88,8 @@ struct RemoteMenuTests {
         let prior = ProcessInfo.processInfo.environment["VISUAL"]
         defer { if let prior { setenv("VISUAL", prior, 1) } else { unsetenv("VISUAL") } }
         let scratch = dir + "/run/editor"
-        try FileManager.default.createDirectory(atPath: dir + "/run", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir + "/run", withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
         func edit(_ doc: [String: Any]) throws -> [String: Any]? { try editJSONInEditor(doc, scratchDir: scratch) }
         func editor(_ name: String, _ body: String) throws -> String {
             let path = dir + "/" + name
@@ -89,7 +115,7 @@ struct RemoteMenuTests {
     /// edit; a live process's is kept.
     @Test func staleEditFilesAreSwept() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
-        let scratch = dir + "/editor"
+        let scratch = dir + "/run/editor"
         let mine = try EditorScratch.create(contents: Data("{}".utf8), in: scratch)
         #expect((try FileManager.default.attributesOfItem(atPath: mine.path)[.posixPermissions] as? Int) == 0o600)
         // A pid that can't be running: past the kernel's pid_max.

@@ -11,7 +11,7 @@ extension Daemon {
     func fsckRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         let repair = body["repair"] == .bool(true), home = body["home"] == .bool(true)
         let id = rec.id
-        guard live[id] == nil, stopping[id] == nil, !starting.contains(id), !hasRescue(for: id),
+        guard live[id] == nil, stopping[id] == nil, !starting.contains(id), !rebooting.contains(id), !hasRescue(for: id),
               rec.state != .running, rec.state != .starting else {
             return ControlResponse(409, ["error": .string("'\(rec.name)' is running — stop it first (`workspaces kill \(rec.name)`).")])
         }
@@ -26,10 +26,11 @@ extension Daemon {
             guard FileManager.default.fileExists(atPath: path) else {
                 return ControlResponse(404, ["error": .string("No \(home ? "home" : "system disk") image for '\(rec.name)'.")])
             }
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<Ext4Fsck.Result, Error> in
+            // A thread of its own: a long check would hold a cooperative-pool one.
+            let result: Result<Ext4Fsck.Result, Error> = await SecureDir.offPool {
                 do { return .success(try Ext4Fsck.check(imagePath: path, autoFix: repair)) }
                 catch { return .failure(error) }
-            }.value
+            }
             switch result {
             case .success(let r):
                 return ControlResponse(200, ["status": .number(Double(r.status)), "output": .string(r.output),

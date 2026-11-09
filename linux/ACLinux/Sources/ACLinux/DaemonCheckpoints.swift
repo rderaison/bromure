@@ -195,8 +195,13 @@ extension Daemon {
         }
         // The image is replaced wholesale, so the VM must not have it open,
         // nor a suspended one hold a memory image of the old disk.
-        guard live[rec.id] == nil, rec.state != .running, rec.state != .starting else {
+        guard live[rec.id] == nil, rec.state != .running, rec.state != .starting, !starting.contains(rec.id) else {
             return refused("Stop the workspace first (`vm kill \(rec.name)`), then revert.")
+        }
+        // Nor while a repair (fsck, a cluster machine's) or a rescue VM has
+        // the images: the revert would replace one under the checker.
+        guard !repairMarks.contains(rec.id), !hasRescue(for: rec.id) else {
+            return refused("'\(rec.name)' is being repaired: try again when the repair is done.")
         }
         guard rec.state != .suspended else {
             return refused("It's suspended, its memory paired with these disks: shut it down first (`vm kill \(rec.name)`), then revert.")

@@ -28,6 +28,9 @@ extension DaemonGlobalSuites {
             r = await d.fsckRoute(rec, ["repair": true])
             #expect(r.status == 409 && "\(r.body)".contains("already being repaired"), "\(r.body)")
             #expect(d.repairMarks.contains(rec.id))
+            // Nor may a revert replace the image under the checker.
+            let rv = await d.revertRoute(rec, ["checkpoint": "x", "target": "disk"])
+            #expect(rv.status == 400 && "\(rv.body)".contains("being repaired"), "\(rv.body)")
             d.repairMarks.remove(rec.id)
 
             // Running, starting, or (for a repair) suspended: refused.

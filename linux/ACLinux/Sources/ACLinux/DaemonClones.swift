@@ -38,6 +38,8 @@ extension Daemon {
             try? FileManager.default.removeItem(atPath: dst)
             return nil
         }
+        // A base under repair is changing: not a copy to start from.
+        if repairMarks.contains(key) { return undo("it is being repaired") }
         do {
             try FileManager.default.createDirectory(atPath: dst, withIntermediateDirectories: true)
         } catch {

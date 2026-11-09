@@ -427,25 +427,32 @@ public struct ControlClient: Sendable {
         (try? request("GET", "/health"))?.status == 200
     }
 
-    /// Before anything is sent: the socket file must be this user's (the
-    /// runtime dir's /tmp fallback can be squatted by another user), and the
-    /// listener at the other end this user or root (systemd's socket unit
-    /// listens for a multi-user server's daemon, SocketUser=<user>).
+    /// Before anything is sent: what the path reaches (followed:
+    /// <state>/control.sock is the daemon's symlink) is pinned with O_PATH,
+    /// checked on that fd (a socket, this user's unless we are root) and
+    /// connected through /proc/self/fd/N, so nothing can be swapped in
+    /// between; the runtime dir's /tmp fallback can be squatted by another
+    /// user. The listener must also be this user or root (systemd's socket
+    /// unit listens for a multi-user server's daemon).
     // partial: refuses a socket that isn't this user's, or a listener that is neither this user nor root
     // @port ControlClient.static connect(to: String) h=31ae0b2cf2981fe9 @53294cad
     static func connect(to path: String) throws -> Int32 {
-        // stat, not lstat: <state>/control.sock is the daemon's own symlink
-        // to the real socket; what it reaches must be this user's.
+        // O_PATH (010000000 on Linux; not in the Swift Glibc module).
+        let pinned = Glibc.open(path, Int32(0o10000000) | O_CLOEXEC)
+        guard pinned >= 0 else { throw ClientError.connect(path, errno) }
+        defer { close(pinned) }
         var st = stat()
-        if stat(path, &st) == 0 {
-            guard (st.st_mode & S_IFMT) == S_IFSOCK else { throw ClientError.untrusted(path, "not a socket") }
-            guard st.st_uid == getuid() else { throw ClientError.untrusted(path, "owned by uid \(st.st_uid), not this user") }
+        guard fstat(pinned, &st) == 0 else { throw ClientError.connect(path, errno) }
+        guard (st.st_mode & S_IFMT) == S_IFSOCK else { throw ClientError.untrusted(path, "not a socket") }
+        guard getuid() == 0 || st.st_uid == getuid() else {
+            throw ClientError.untrusted(path, "owned by uid \(st.st_uid), not this user")
         }
+        let target = "/proc/self/fd/\(pinned)"
         let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
         guard fd >= 0 else { throw ClientError.connect(path, errno) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8)
+        let bytes = Array(target.utf8)
         guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(fd); throw ClientError.connect(path, ENAMETOOLONG) }
         withUnsafeMutableBytes(of: &addr.sun_path) { p in
             for (i, b) in bytes.enumerated() { p[i] = b }
@@ -457,7 +464,11 @@ public struct ControlClient: Sendable {
         guard r == 0 else { let e = errno; close(fd); throw ClientError.connect(path, e) }
         var cred = acl_ucred()
         var len = socklen_t(MemoryLayout<acl_ucred>.size)
-        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0, cred.uid == getuid() || cred.uid == 0 else {
+        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 else {
+            let e = errno; close(fd)
+            throw ClientError.untrusted(path, "couldn't read the listener's credentials (\(String(cString: strerror(e))))")
+        }
+        guard cred.uid == getuid() || cred.uid == 0 else {
             close(fd)
             throw ClientError.untrusted(path, "the listener is uid \(cred.uid), not this user")
         }

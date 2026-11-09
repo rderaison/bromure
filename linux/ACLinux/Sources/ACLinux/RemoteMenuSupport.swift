@@ -63,10 +63,12 @@ public enum RemoteMenuEntry {
     public static var command: ParsableCommand.Type { RemoteMenu.self }
 }
 
-/// Where editJSONInEditor's files live: `<runtime dir>/editor` (0700; the
-/// runtime dir is this user's, 0700, and goes at logout), one file per edit
-/// named with the editing process's pid, so a file whose process is gone
-/// (a session dropped mid-edit) is known stale.
+/// Where editJSONInEditor's files live: `<runtime dir>/editor` (0700), one
+/// file per edit named with the editing process's pid, so a file whose
+/// process is gone (a session dropped mid-edit) is known stale. Reached
+/// from the runtime dir's parent down through checked directory fds
+/// (SecureDir: never a link, this user's, writable by no one else) and the
+/// file made with openat: the /tmp fallback's parent can be squatted.
 // @port-skip linux-only: macOS writes the edit to its per-user temporary directory
 enum EditorScratch {
     // @port-skip linux-only: see EditorScratch
@@ -75,40 +77,40 @@ enum EditorScratch {
     /// A new owner-only file holding `contents`, after sweeping stale ones.
     // @port-skip linux-only: see EditorScratch
     static func create(contents: Data, in dir: String = directory()) throws -> URL {
-        // Its parent (the runtime dir, whose fallback is under /tmp) must be
-        // this user's too: someone else's could swap the directory under us.
-        let parent = (dir as NSString).deletingLastPathComponent
-        var pst = stat()
-        guard lstat(parent, &pst) == 0, (pst.st_mode & S_IFMT) == S_IFDIR, pst.st_uid == getuid() else {
-            throw ValidationError("\(parent) isn't a directory of this user's.")
-        }
-        if mkdir(dir, 0o700) != 0 && errno != EEXIST {
-            throw ValidationError("Couldn't create \(dir): \(String(cString: strerror(errno))).")
-        }
-        var st = stat()
-        guard lstat(dir, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR, st.st_uid == getuid() else {
-            throw ValidationError("\(dir) isn't a directory of this user's.")
-        }
-        _ = chmod(dir, 0o700)
-        sweep(dir)
-        let path = dir + "/bromure-workspace-\(getpid())-\(UUID().uuidString).json"
-        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw ValidationError("Couldn't create \(path): \(String(cString: strerror(errno))).") }
+        let runtime = (dir as NSString).deletingLastPathComponent
+        let rt: Int32
+        let ed: Int32
+        do {
+            rt = try SecureDir.runtime(runtime, create: true)
+            defer { close(rt) }
+            ed = try SecureDir.openAt(rt, (dir as NSString).lastPathComponent, create: true, path: dir)
+        } catch { throw ValidationError("\(error)") }
+        defer { close(ed) }
+        sweep(ed)
+        let name = "bromure-workspace-\(getpid())-\(UUID().uuidString).json"
+        let fd = openat(ed, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw ValidationError("Couldn't create \(dir)/\(name): \(String(cString: strerror(errno))).") }
         defer { close(fd) }
         guard ControlClientIO.writeAll(fd, Array(contents)) else {
-            unlink(path)
-            throw ValidationError("Couldn't write \(path).")
+            unlinkat(ed, name, 0)
+            throw ValidationError("Couldn't write \(dir)/\(name).")
         }
-        return URL(fileURLWithPath: path)
+        return URL(fileURLWithPath: dir + "/" + name)
     }
 
-    /// Removes the edit files whose process is gone.
+    /// Removes the edit files whose process is gone, in the checked dir.
     // @port-skip linux-only: see EditorScratch
-    static func sweep(_ dir: String) {
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
+    static func sweep(_ dir: Int32) {
+        let dup = Glibc.dup(dir)
+        guard dup >= 0, let d = fdopendir(dup) else { if dup >= 0 { close(dup) }; return }
+        defer { closedir(d) }
+        var stale: [String] = []
+        while let e = readdir(d) {
+            let name = withUnsafePointer(to: e.pointee.d_name) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
             let parts = name.split(separator: "-")
             guard name.hasPrefix("bromure-workspace-"), parts.count > 2, let pid = Int32(parts[2]) else { continue }
-            if kill(pid, 0) != 0 && errno == ESRCH { unlink(dir + "/" + name) }
+            if kill(pid, 0) != 0 && errno == ESRCH { stale.append(name) }
         }
+        for name in stale { unlinkat(dir, name, 0) }
     }
 }

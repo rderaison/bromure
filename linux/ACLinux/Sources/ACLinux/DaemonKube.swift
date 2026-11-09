@@ -618,10 +618,10 @@ final class LinuxKubeHost: KubeEngineHost {
             var ok = true
             for path in images {
                 let file = (path as NSString).lastPathComponent
-                let result = await Task.detached(priority: .userInitiated) { () -> Result<Ext4Fsck.Result, Error> in
+                let result: Result<Ext4Fsck.Result, Error> = await SecureDir.offPool {
                     do { return .success(try Ext4Fsck.check(imagePath: path, autoFix: true)) }
                     catch { return .failure(error) }
-                }.value
+                }
                 switch result {
                 case .success(let r):
                     if !(r.clean || r.repaired) { ok = false }

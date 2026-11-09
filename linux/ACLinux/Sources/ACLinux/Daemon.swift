@@ -239,8 +239,9 @@ public actor Daemon {
         raiseFDLimit()
         try FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        try FileManager.default.createDirectory(atPath: config.runtimeDir, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+        // Its sockets' dir: refused when someone else owns it or its parent,
+        // or either is writable by others (the /tmp fallback can be squatted).
+        close(try SecureDir.runtime(config.runtimeDir, create: true))
         Self.placeEngineKey(stateDir: config.stateDir)
         // The workspaces' store, before anything reads a Profile: adoption
         // and the refresh below do (setUpRemoteAccess sets the same root).
