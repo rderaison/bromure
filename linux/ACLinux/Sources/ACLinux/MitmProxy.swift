@@ -938,6 +938,15 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// The filter's say on reading the guest: false while it holds too much.
     private var filterWantsGuest = true
     static let maxHeld = 1 << 20
+    /// A streamed upload (macOS: driveTLS's 5z, a body past the 8 MiB
+    /// inline cap, e.g. a docker layer PUT): its head goes through the
+    /// policy alone, then its body follows upstream as it comes, neither
+    /// buffered whole nor refused: `streamLeft` more bytes of it (nil:
+    /// chunked, up to the reply). Not under an OpenShell policy, whose
+    /// strict framing reads the request whole.
+    private var streaming = false
+    private var streamLeft: Int?
+    static let inlineCap = 8 << 20
     /// This connection's cut at its workspace's quarantine (WorkspaceQuarantine).
     private var quarantineCut: UUID?
 
@@ -969,6 +978,15 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
         if started {
+            if streaming {
+                // Reads are paused until the upstream is up; what was in
+                // flight waits with the body's first bytes.
+                if let upstream { forwardStreamed(b, to: upstream, guest: context.channel) } else {
+                    pending.append(b)
+                    pendingBytes += b.readableBytes
+                }
+                return
+            }
             if upgraded, let upstream {
                 relay?.wsTrace?.client(b)
                 if wsGate != nil {
@@ -998,6 +1016,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // rules, as macOS's readRequestSpooling): a violation is a 400 that
         // says why, before any policy step.
         let strict = proxy.guardrailsConfig(for: profileID)?.egressPolicy?.openShell != nil
+        if !strict, let headEnd = buf.readableBytesView.firstRange(of: Array("\r\n\r\n".utf8)) {
+            let head = Data(buf.readableBytesView[buf.readerIndex..<headEnd.upperBound])
+            let decision = Self.streamsBody(head, buffered: buf.readableBytes - head.count)
+            if decision.stream {
+                startStreaming(context, head: head, length: decision.length)
+                return
+            }
+        }
         switch HTTPRequestFraming.complete(Data(buf.readableBytesView), strict: strict) {
         case .needMore:
             if buf.readableBytes > MitmProxy.maxBody { reply(context, Self.simple(413, "Payload Too Large")) }
@@ -1029,6 +1055,67 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                 loop.execute { self.send(plan, trace: trace, channel: channel, host: host, port: port, tls: tls, session: session) }
             }
         }
+    }
+
+    /// Whether a request's body is streamed (5z): a Content-Length past the
+    /// inline cap, or a chunked body that grew past it; `length` is the
+    /// declared one (nil: chunked).
+    // @port-skip linux-only: readRequestSpooling's inline cap, as a decision on the head
+    static func streamsBody(_ head: Data, buffered: Int) -> (stream: Bool, length: Int?) {
+        let text = String(decoding: head, as: UTF8.self)
+        if let te = SubscriptionAuthRewrite.headerValue("transfer-encoding", inHeaderSection: text),
+           te.lowercased().contains("chunked") {
+            return (buffered > inlineCap, nil)
+        }
+        guard let cl = SubscriptionAuthRewrite.headerValue("content-length", inHeaderSection: text)
+                .flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }), cl > inlineCap else { return (false, nil) }
+        return (true, cl)
+    }
+
+    /// The head through the policy (spooled: the steps macOS's 5z skips
+    /// aren't run), the body held (reads paused) until the upstream is up.
+    // @port-skip linux-only: HTTPMitmConnection.driveTLS's 5z step, on the Linux request chain
+    private func startStreaming(_ context: ChannelHandlerContext, head: Data, length: Int?) {
+        started = true
+        streaming = true
+        streamLeft = length
+        buf.moveReaderIndex(forwardBy: head.count)
+        if buf.readableBytes > 0 {
+            pending.append(buf)
+            pendingBytes += buf.readableBytes
+        }
+        buf = ByteBuffer()
+        _ = context.channel.setOption(ChannelOptions.autoRead, value: false)
+        let loop = context.eventLoop
+        let channel = context.channel
+        let (proxy, pid, host, port, tls) = (self.proxy, profileID, self.host, self.port, self.tls)
+        let start = Date()
+        let session = proxy.strictSession(of: pid)
+        FileHandle.standardError.write(Data("[mitm] streaming a \(length.map { "\($0)-byte" } ?? "chunked") request body to \(host)\n".utf8))
+        Task {
+            var trace = proxy.traceSession(for: pid).map {
+                Trace(session: $0, profileID: pid, host: host, port: port, start: start, request: head)
+            }
+            let plan = await Self.rewrite(head, proxy: proxy, profileID: pid, host: host, port: port, tls: tls,
+                                          session: session, trace: &trace, identity: identity, spooled: true)
+            loop.execute { self.send(plan, trace: trace, channel: channel, host: host, port: port, tls: tls, session: session) }
+        }
+    }
+
+    /// The streamed body's next bytes upstream, no further than its length
+    /// (what follows a request isn't another one here); the guest read
+    /// again only while the upstream takes more.
+    // @port-skip linux-only: relayUpstream's upload of a spooled body, on NIO
+    private func forwardStreamed(_ b: ByteBuffer, to upstream: Channel, guest: Channel) {
+        var b = b
+        if let left = streamLeft {
+            guard left > 0 else { return }
+            if b.readableBytes > left { b = b.getSlice(at: b.readerIndex, length: left) ?? b }
+            streamLeft = left - b.readableBytes
+        }
+        upstream.write(b, promise: nil)
+        if !upstream.isWritable { _ = guest.setOption(ChannelOptions.autoRead, value: false) }
+        upstream.flush()
     }
 
     // @port-skip linux-only: NIO plumbing of the Linux proxy
@@ -1076,7 +1163,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     // @port-skip linux-only: the swap order of HTTPMitmConnection.driveTLS (5c–5f, then TokenSwapper)
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
                         session: UInt64, trace: inout Trace?,
-                        identity: OpenShellPolicy.BinaryIdentity? = nil) async -> Plan {
+                        identity: OpenShellPolicy.BinaryIdentity? = nil, spooled: Bool = false) async -> Plan {
         var req = origin(raw)
         // A quarantined workspace's requests go nowhere.
         if WorkspaceQuarantine.shared.contains(profileID) {
@@ -1103,25 +1190,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             return .answer(RequestReader.simple(400, "Bad Request",
                 body: "Bromure: a WebSocket upgrade to a package registry is refused (its requests go through the supply-chain checks).\n"))
         }
-        // Only a WebSocket upgrade, or else SPDY/3.1 (kubectl exec, attach,
-        // port-forward against an API server), is offered: another protocol
-        // (h2c above all) would carry every later request past the
-        // per-request policy. Every other token goes, across every Upgrade
-        // header; none left, and the request is served as plain HTTP/1.1.
-        // The WebSocket steps below read frames: an SPDY stream is an opaque
-        // pipe (counted, not parsed).
+        // Only an upgrade the pump is for (macOS: pumpedUpgrade): exactly
+        // one Upgrade header naming websocket or SPDY/3.1 (kubectl exec,
+        // attach, port-forward) and nothing else, in a clean header block.
+        // Anything else (h2c above all, which would carry every later request
+        // past the per-request policy) goes on as plain HTTP/1.1, its Upgrade,
+        // Connection and HTTP2-Settings dropped as hop-by-hop. The WebSocket
+        // steps below read frames: an SPDY stream is an opaque pipe.
         var webSocket = false
-        if upgrade {
-            switch ResponseRelay.upgradeFilter(head) {
-            case .keep(let token):
-                webSocket = token == "websocket"
-            case .replace(let token):
-                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings"], add: "Upgrade: \(token)")
-                webSocket = token == "websocket"
-            case .strip:
-                req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings", "connection"], add: "Connection: close")
-                upgrade = false
-            }
+        if upgrade, ResponseRelay.pumpedUpgrade(headerBlock: head) {
+            webSocket = !(SubscriptionAuthRewrite.headerValue("upgrade", inHeaderSection: head) ?? "").lowercased().contains("spdy")
+        } else if upgrade || SubscriptionAuthRewrite.headerValue("http2-settings", inHeaderSection: head) != nil {
+            req = HTTPRequestFraming.replacingHeaders(req, drop: ["upgrade", "http2-settings", "connection"], add: nil)
+            upgrade = false
         }
         // Where this request goes, decided once: the PII step, the WebSocket
         // guard, the engine's auth and the dial all follow it (a routing
@@ -1143,7 +1224,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         trace?.leaks = leaks
         if tls, !insecure {
             switch await SubscriptionAuthRewrite.apply(rawRequest: req, host: host, method: method, path: path,
-                                                       profileID: profileID, spooledBody: false) {
+                                                       profileID: profileID, spooledBody: spooled) {
             case .answer(let reply): return .answer(reply)
             case .forward(let r, let i): req = r; injected = i
             }
@@ -1180,14 +1261,19 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var supplyChain: SupplyChainRewrite?
         // Depi's re-route: redialled to Depi with the workspace's key.
         var depiKey: String?
-        switch depiRoute(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path) {
-        case .none: break
-        case .routed(let key): depiKey = key
-        case .refused(let reply): return .answer(reply)
+        // A streamed upload (5z) carries a blob, not a lookup, a package fetch
+        // or a conversation: on macOS it's forwarded before the Depi,
+        // supply-chain and content steps, so it skips them here too.
+        if !spooled {
+            switch depiRoute(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path) {
+            case .none: break
+            case .routed(let key): depiKey = key
+            case .refused(let reply): return .answer(reply)
+            }
         }
         let dial = depiKey.map { _ in (host: DepiRegistry.host, port: DepiRegistry.port) }
-        switch await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
-                                     depiKey: depiKey) {
+        switch spooled ? .none : await supplyChainStep(req, proxy: proxy, profileID: profileID, host: host, method: method,
+                                                        path: path, depiKey: depiKey) {
         case .none: break
         case .answer(let reply): return .answer(reply)
         case .rewrite(let forward, let rewrite, let done):
@@ -1198,17 +1284,17 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         // Prompt injection, ask or block, before the model sees a byte
         // (macOS: driveTLS's enforcement after the swaps; log mode stays in
         // the trace's conversation hook).
-        if let answer = await promptInjectionAnswer(&req, proxy: proxy, profileID: profileID, host: host, path: path,
-                                                    trace: &trace) {
+        if !spooled, let answer = await promptInjectionAnswer(&req, proxy: proxy, profileID: profileID, host: host,
+                                                              path: path, trace: &trace) {
             return .answer(answer)
         }
         // Squelch: command-output noise cut before the model reads it (and
         // before PII scans it), as macOS's driveTLS does.
-        squelchStep(&req, proxy: proxy, profileID: profileID, host: host, method: method, trace: &trace)
+        if !spooled { squelchStep(&req, proxy: proxy, profileID: profileID, host: host, method: method, trace: &trace) }
         // PII protection: stand-ins for personal data before it leaves; the
         // relay restores the reply (macOS: driveTLS's PII step).
-        let pii = await piiSwap(&req, proxy: proxy, profileID: profileID, host: host, method: method, path: path,
-                                local: local)
+        let pii: (answer: Data?, vault: PIIVault?) = spooled ? (nil, nil) : await piiSwap(&req, proxy: proxy, profileID: profileID, host: host,
+                                                         method: method, path: path, local: local)
         if let answer = pii.answer { return .answer(answer) }
         // An imported kubeconfig's client certificate flagged for approval:
         // asked before it's presented (macOS asks at the server's challenge,
@@ -1234,6 +1320,8 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
             FileHandle.standardError.write(Data("[mitm] refused \(action) on \(host): issues an unswappable credential\n".utf8))
             return .answer(CredentialMint.denial(action))
         case .mint(let kind)?:
+            // Its reply is read whole and rewritten: not a streamed body's.
+            if spooled { return .answer(CredentialMint.refusal("a streamed body")) }
             mint = kind
             req = Self.readWhole(req)
             upgrade = false
@@ -1244,7 +1332,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         var capture: SignInCapture?
         // This proxy's own captures (macOS reads them through the provider,
         // which answers for the one engine; here the proxy is at hand).
-        if tls, !insecure, let c = proxy.captures.capture(for: profileID),
+        if tls, !insecure, !spooled, let c = proxy.captures.capture(for: profileID),
            let bodyStart = req.range(of: Data("\r\n\r\n".utf8)) {
             let body = req.subdata(in: bodyStart.upperBound..<req.count)
             // An ended sign-in's late exchange (this capture spent, or any
@@ -1452,6 +1540,14 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
                         self.relay = relay
                         self.awaitingUpgrade = upgrade
                         up.writeAndFlush(up.allocator.buffer(bytes: req), promise: nil)
+                        if self.streaming {
+                            // The body so far, then the guest read again.
+                            for p in self.pending { self.forwardStreamed(p, to: up, guest: channel) }
+                            self.pending.removeAll()
+                            self.pendingBytes = 0
+                            self.readGuestIfAllowed(channel)
+                            return
+                        }
                         if !upgrade {
                             self.pending.removeAll()
                             self.pendingBytes = 0
@@ -1880,6 +1976,27 @@ final class ResponseRelay: ChannelInboundHandler {
             head0 = Data(rest[rest.startIndex..<next.upperBound])
             rest = Data(rest[next.upperBound...])
         }
+        // A switch to a protocol the pump isn't for (an h2c answer to an
+        // offer never forwarded, by a server that ignores the request's
+        // Upgrade), or one nothing asked for: refused, not relayed (macOS:
+        // handleWebSocketUpgrade's 502).
+        if Self.status(head0) == 101,
+           !upgrade || !Self.pumpedUpgrade(headerBlock: String(decoding: head0, as: UTF8.self)
+                                                .components(separatedBy: "\r\n\r\n")[0]) {
+            FileHandle.standardError.write(Data("[mitm] \(host): refused a 101 to a protocol other than websocket or SPDY/3.1\n".utf8))
+            headDone = true
+            relayed = true
+            let reply = Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+            if let proxy, let trace { proxy.emitTrace(trace, response: reply, wireBytes: head0.count, truncated: false) }
+            // The guest's answer first; then both sides go (the upstream's
+            // close would end the guest before the answer otherwise).
+            let upstream = context.channel
+            guest.writeAndFlush(guest.allocator.buffer(bytes: reply)).whenComplete { _ in
+                self.guest.close(promise: nil)
+                upstream.close(promise: nil)
+            }
+            return
+        }
         headDone = true
         learning = !(upgrade && Self.status(head0) == 101)
         let out: Data
@@ -2104,33 +2221,27 @@ final class ResponseRelay: ChannelInboundHandler {
         context.fireChannelWritabilityChanged()
     }
 
-    /// What an upgrade request may offer: WebSocket if it's among the
-    /// tokens (over every Upgrade header), else SPDY/3.1; nothing else.
-    enum UpgradeFilter: Equatable {
-        /// Only the allowed protocol is there: nothing to change.
-        case keep(String)
-        /// It's there among others: the others go.
-        case replace(String)
-        /// Neither: every token goes (plain HTTP/1.1).
-        case strip
-    }
-
-    // @port-skip linux-only: the Linux proxy's upgrade policy (macOS pumps any upgrade outside OpenShell mode; being aligned to this rule)
-    static func upgradeFilter(_ head: String) -> UpgradeFilter {
-        let tokens = head.components(separatedBy: "\r\n").dropFirst().compactMap { line -> [String]? in
+    /// True when the header block (a request's, or a 101's) has exactly one
+    /// `Upgrade` header and every protocol it names is one the raw pump
+    /// carries (`websocket`, `SPDY/3.1`). The block goes upstream as it is,
+    /// so `websocket, h2c`, a second Upgrade line, or a folded continuation
+    /// line (which an upstream joins to the header above) would still offer
+    /// h2c: none of them is pumped.
+    // @port HTTPMitmConnection.static pumpedUpgrade(headerBlock: String) h=b8d8d008b8ed3751 @003f61e7
+    static func pumpedUpgrade(headerBlock: String) -> Bool {
+        var protocols: [String]?
+        for (i, line) in headerBlock.split(separator: "\r\n", omittingEmptySubsequences: false).enumerated() where i > 0 {
+            if line.first == " " || line.first == "\t" { return false }   // obs-fold
+            // A bare CR or LF, or a NUL: a lenient upstream may split there.
+            if line.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) { return false }
             guard let colon = line.firstIndex(of: ":"),
-                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { return nil }
-            return line[line.index(after: colon)...].split(separator: ",").map {
-                $0.trimmingCharacters(in: .whitespaces).lowercased()
-            }
-        }.flatMap { $0 }
-        for (allowed, matches) in [("websocket", { (t: String) in t == "websocket" || t.hasPrefix("websocket/") }),
-                                   ("SPDY/3.1", { (t: String) in t == "spdy/3.1" })] {
-            let hits = tokens.filter(matches)
-            if hits.isEmpty { continue }
-            return hits.count == tokens.count ? .keep(allowed.lowercased()) : .replace(allowed)
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { continue }
+            guard protocols == nil else { return false }                   // a second Upgrade header
+            protocols = line[line.index(after: colon)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         }
-        return .strip
+        guard let protocols, !protocols.isEmpty else { return false }
+        return protocols.allSatisfy { $0 == "websocket" || $0 == "spdy/3.1" }
     }
 
     /// The switched protocol is WebSocket (its frames can be read), not an

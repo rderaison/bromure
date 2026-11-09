@@ -214,16 +214,19 @@ struct PipelineTests {
         #expect(seen.contains("EARLY") && seen.contains("LATER"), "the stream opened after the 101: \(seen)")
     }
 
-    /// Only websocket is offered: other tokens go, across every Upgrade header.
+    /// An offer naming anything but websocket / SPDY/3.1, or in more than one
+    /// Upgrade header, isn't pumped (macOS 4477b665): it goes on as plain
+    /// HTTP/1.1, every Upgrade header dropped, and a 101 back is refused.
     @Test func onlyWebSocketIsOfferedAsAnUpgrade() throws {
         let (rig, ip) = try Self.rig(); defer { rig.stop() }
         let up = try RawUpstream(host: ip, reply: "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
         defer { up.stop() }
         let h = "\(ip):\(up.port)"
-        _ = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\nConnection: Upgrade\r\nUpgrade: h2c, websocket\r\nUpgrade: foo\r\n"
-                          + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        let out = try Self.talk(rig.path(), "GET http://\(h)/ws HTTP/1.1\r\nHost: \(h)\r\nConnection: Upgrade\r\nUpgrade: h2c, websocket\r\nUpgrade: foo\r\n"
+                                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
         let seen = up.received.withLockedValue { $0 }.lowercased()
-        #expect(seen.contains("upgrade: websocket") && !seen.contains("h2c") && !seen.contains("foo"), "\(seen)")
+        #expect(!seen.contains("upgrade:") && !seen.contains("h2c") && !seen.contains("foo"), "\(seen)")
+        #expect(out.hasPrefix("HTTP/1.1 502"), "a 101 nothing asked for: \(out.prefix(80))")
         let plain = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
         defer { plain.stop() }
         let h2 = "\(ip):\(plain.port)"
