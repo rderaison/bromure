@@ -256,13 +256,14 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     // @port-skip linux-only: see FusionPinnedProtocol
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
-    /// The dial under way, and whether the loader was stopped: after
-    /// stopLoading, nothing reaches the client. One recursive lock for both
-    /// and for each delivery, so a stop waits for a delivery under way and
-    /// a client stopping the loader from its callback doesn't deadlock.
-    private let lock = NSRecursiveLock()
+    /// The dial under way, and whether the loader ended (stopped, or its
+    /// one outcome delivered): checked and set under the lock, the client
+    /// called outside it, so nothing reaches the client after a stop or
+    /// twice, and a client stopping the loader from its callback can't
+    /// deadlock.
+    private let lock = NSLock()
     private var dial: Task<Void, Never>?
-    private var stopped = false
+    private var ended = false
 
     // @port-skip linux-only: see FusionPinnedProtocol
     override func startLoading() {
@@ -299,9 +300,9 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
         }
         lock.lock()
         self.dial = task
-        let wasStopped = stopped
+        let wasEnded = ended
         lock.unlock()
-        if wasStopped { task.cancel() }
+        if wasEnded { task.cancel() }
     }
 
     /// The leg's response as the client gets it: its body arrives whole
@@ -324,15 +325,18 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     // @port-skip linux-only: see FusionPinnedProtocol
     private func deliver(_ body: (any URLProtocolClient) -> Void) {
         lock.lock()
-        defer { lock.unlock() }
-        guard !stopped, let client else { return }
+        let mine = !ended
+        ended = true
+        let client = self.client
+        lock.unlock()
+        guard mine, let client else { return }
         body(client)
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
     override func stopLoading() {
         lock.lock()
-        stopped = true
+        ended = true
         let dial = self.dial
         lock.unlock()
         dial?.cancel()
