@@ -1670,9 +1670,9 @@ public actor Daemon {
             throw error
         }
         stampClone()
-        // A strict workspace's sandbox status, watched from its cold boot
-        // (DaemonSandboxStatusWatch.swift).
-        if restoreFrom == nil, rec.registration != true, rec.kube == nil { watchSandboxStatus(id, machine: machine) }
+        // A strict workspace's sandbox status, watched from its boot or
+        // resume (DaemonSandboxStatusWatch.swift).
+        if rec.registration != true, rec.kube == nil { watchSandboxStatus(id, machine: machine) }
         // A workspace's cold boot: its console watched for a boot that dies
         // on filesystem errors (DaemonBootRemedy; a cluster machine's has its
         // own scan). The log starts fresh with each Firecracker.
@@ -1841,6 +1841,8 @@ public actor Daemon {
                 let id = rec.id
                 await l.machine.setOnStopped { [weak self] info in Task { await self?.vmStopped(id, info) } }
                 live[id] = l
+                // Its sandbox status, watched from now (DaemonSandboxStatusWatch.swift).
+                if rec.registration != true, rec.kube == nil { watchSandboxStatus(id, machine: l.machine) }
                 // As the launch refusal (DaemonSandboxGuard.swift):
                 // a VM taken back isn't stopped, but said to be unprotected.
                 if let profile = adoptedProfile { Self.warnUnenforceableAdopted(rec, profile: profile, staged: URL(fileURLWithPath: vmDir(rec.id) + "/meta"), sentryCatalog: sentryCatalogCached()) }

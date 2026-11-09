@@ -41,6 +41,7 @@ extension Daemon {
             }
             bridge.listener = l
             BinaryIdentityService.shared.adoptBridge(bridge, for: profile.id)
+            Self.attestorBridges.withLockedValue { $0[profile.id] = WeakAttestorBridge(bridge: bridge) }
             return l
         } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': no attestor listener: \(error)\n".utf8))

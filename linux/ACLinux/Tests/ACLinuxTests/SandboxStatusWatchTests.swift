@@ -23,4 +23,34 @@ struct SandboxStatusWatchTests {
         #expect(e.kind == .blocked)
         #expect(e.decision == why)
     }
+
+    /// Only time spent strict and not paused counts: a policy made strict
+    /// later starts its count then, a compromise question's pause doesn't
+    /// use the budget.
+    @Test func onlyStrictUnpausedTimeCounts() {
+        func tick(_ c: TimeInterval, strict: Bool = true, paused: Bool = false, loading: Bool = false) -> TimeInterval? {
+            Daemon.sandboxStatusTick(counted: c, delta: 5, strict: strict, paused: paused, sentryLoading: loading)
+        }
+        #expect(tick(0, strict: false) == 0, "not strict yet: nothing counted, still watched")
+        #expect(tick(100, paused: true) == 100, "paused: nothing counted")
+        #expect(tick(100) == 105)
+        #expect(tick(264) == 269)
+        #expect(tick(265) == nil, "overdue at 270 s counted")
+        #expect(tick(265, loading: true) == 270, "the sentry still loading")
+        #expect(Daemon.sandboxStatusTick(counted: 10, delta: -3, strict: true, paused: false, sentryLoading: false) == 10)
+    }
+
+    /// The shutdown acts only on the VM the watch began with: one stopped
+    /// and started again (or rebooted) meanwhile is another machine, and
+    /// neither stopped nor reported.
+    @Test func aReplacedMachineIsntShutDown() async throws {
+        let (d, rec, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let pid = try #require(UUID(uuidString: rec.id))
+        await d.shutDownForMissingSandboxStatus(rec.id, machine: NSObject(), after: 270)
+        try await Task.sleep(for: .milliseconds(200))
+        let reported = await MainActor.run { SecurityTimeline.shared.allEvents.contains { $0.profileID == pid } }
+        #expect(!reported, "no event for a machine that isn't the live one")
+        #expect(await d.registry.find(rec.id)?.state == .stopped)
+    }
 }
