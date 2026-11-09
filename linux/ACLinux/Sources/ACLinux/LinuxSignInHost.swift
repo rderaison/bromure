@@ -131,9 +131,20 @@ extension LinuxSessionHost: ProxySignInHost {
         }
     }
 
+    /// A workspace's name, from its profile.json alone: not every profile,
+    /// nor its secrets, for each page a guest opens.
+    // @port-skip linux-only: the guest-link relay's workspace name
+    static func workspaceName(_ pid: UUID) -> String? {
+        struct Named: Decodable { let name: String }
+        let url = ProfileStore().profilesDirectory
+            .appendingPathComponent(pid.uuidString, isDirectory: true).appendingPathComponent("profile.json")
+        return (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(Named.self, from: $0) }?.name
+    }
+
     /// A page the guest opened. A server has no browser: the one it acts on
     /// is a sign-in's, published for the client that asked for it, with the
-    /// guest port its callback comes back to; any other is logged, dropped.
+    /// guest port its callback comes back to; any other page goes to the
+    /// user's own clients (GuestLinkRelay), which ask before opening it.
     /// Only the running guest's (macOS: eventIsForCurrent, a replaced
     /// sandbox's callbacks dropped): the poll reads a workspace's outbox only
     /// while its VM is live, and a launch empties it before that, so nothing
@@ -153,7 +164,7 @@ extension LinuxSessionHost: ProxySignInHost {
             // Any other page: a macOS server shows it on its own screen; a
             // Linux server has none, so it goes to the user's own clients
             // (GuestLinkRelay; refused there when its host is local or private).
-            let name = ProfileStore().loadAll().first { $0.id == pid }?.name ?? pid.uuidString
+            let name = Self.workspaceName(pid) ?? pid.uuidString
             if !GuestLinkRelay.shared.add(url, profileID: pid, workspace: name) {
                 FileHandle.standardError.write(Data("bromure-ac daemon: guest page not relayed (local/private host, or already waiting): \(url.host ?? "?")\n".utf8))
             }

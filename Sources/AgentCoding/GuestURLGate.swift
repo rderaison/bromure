@@ -154,6 +154,15 @@ enum GuestURLGate {
         return AgentScreen.isSignInURL(url.absoluteString, agent: nil) ? .open : .ask
     }
 
+    /// A page a server's workspace opened, relayed to the user's clients (a
+    /// Linux server's `guestLinks`): never opened unasked. A sign-in-shaped
+    /// link there didn't come through the sign-in flow (that one arrives as
+    /// `pendingRegistration`), and opening it would hand a guest device-code
+    /// and consent phishing, again after each one handled.
+    static func relayedDisposition(for url: URL) -> Disposition {
+        disposition(for: url) == .refuse ? .refuse : .ask
+    }
+
     /// Whether `url` may be handed to the user's real browser: it must be a
     /// web page (http or https: another scheme opens whatever app claims it,
     /// or mounts a network share, past the "in your browser" the ask says)
