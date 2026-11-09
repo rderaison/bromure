@@ -18402,19 +18402,80 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard !oauth.accessToken.isEmpty else { continue }
             if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60,
                oauth.refreshToken != nil {
+                // The refresh's result crosses threads through a locked box
+                // (it used to be written into a captured `var` the waiter
+                // read after a timeout -- a data race). One that lands after
+                // the 10 s wait isn't used by this boot, but it has spent the
+                // stored refresh token on a rotating server, so it's kept.
+                let old = oauth
+                let profileID = profile.id, serverID = profile.mcpServers[i].id
+                let box = MCPRefreshBox()
                 let sem = DispatchSemaphore(value: 0)
-                Task.detached {
-                    do {
-                        let refreshed = try await MCPOAuthBroker.refresh(state: oauth)
-                        oauth = refreshed
-                    } catch { /* keep stale token */ }
+                Task.detached { [weak self] in
+                    let refreshed = try? await MCPOAuthBroker.refresh(state: old)
+                    let late = box.deliver(refreshed)
                     sem.signal()
+                    if late, let refreshed {
+                        await self?.keepRefreshedMCPOAuth(refreshed, from: old,
+                                                          serverID: serverID, profileID: profileID)
+                    }
                 }
                 _ = sem.wait(timeout: .now() + 10)
-                profile.mcpServers[i].oauthState = oauth
+                if let refreshed = box.collect() {   // nil: failed or still running: keep the stale token
+                    oauth = refreshed
+                    profile.mcpServers[i].oauthState = refreshed
+                    keepRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID)
+                }
             }
             profile.mcpServers[i].bearerToken = oauth.accessToken
         }
+    }
+
+    /// A refreshed MCP OAuth state kept: in the saved workspace (only that
+    /// server's state, re-read from disk -- `persistRefreshedMCPOAuth`) and
+    /// in the in-memory copies a later save writes back whole (`profiles`,
+    /// the running session), each only while it still holds the state the
+    /// refresh started from.
+    private func keepRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState,
+                                       serverID: UUID, profileID: Profile.ID) {
+        do {
+            try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID)
+        } catch {
+            NSLog("[bromure-ac] MCP OAuth: couldn't save the refreshed token: \(error)")
+        }
+        if let p = profiles.firstIndex(where: { $0.id == profileID }) {
+            var copy = profiles[p]
+            if ProfileStore.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, into: &copy) {
+                profiles[p] = copy
+            }
+        }
+        if var copy = runningSessions[profileID]?.profile,
+           ProfileStore.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, into: &copy) {
+            runningSessions[profileID]?.profile = copy
+        }
+    }
+}
+
+/// One MCP OAuth refresh's result, handed from the refreshing task to the
+/// thread waiting on it. `collect` (the waiter, after its wait) takes it if
+/// it's there; a `deliver` after that is late, and the task keeps it itself.
+private final class MCPRefreshBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: MCPOAuthState?
+    private var collected = false
+
+    /// Returns true when the waiter already gave up (the result is late).
+    func deliver(_ r: MCPOAuthState?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if collected { return true }
+        result = r
+        return false
+    }
+
+    func collect() -> MCPOAuthState? {
+        lock.lock(); defer { lock.unlock() }
+        collected = true
+        return result
     }
 }
 
