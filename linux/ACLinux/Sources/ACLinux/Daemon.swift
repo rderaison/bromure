@@ -1055,7 +1055,7 @@ public actor Daemon {
             explicitStops.insert(rec.id)
             await t.value
             // That end was a suspend's: the suspended VM's own stop.
-            if let now = registry.find(rec.id), now.state == .suspended { return await deleteVM(now, action: action) }
+            if let now = registry.find(rec.id), now.state == .suspended { return await deleteVM(now, action: action, partOfReboot: partOfReboot) }
             return ControlResponse(200, ["status": "stopped"])
         }
         // Between a reboot's stop and its boot (or during that boot): it

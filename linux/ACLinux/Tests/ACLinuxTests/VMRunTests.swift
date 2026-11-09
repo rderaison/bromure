@@ -71,6 +71,13 @@ extension DaemonGlobalSuites {
                 let (q, qrec) = try #require(Self.saved(again))
                 #expect(q.id == p.id && qrec?.id == vm.id)
                 #expect(q.folderPaths == [host[0]] + more.prefix(7), "capped at the image's 8 slots")
+                // A run with no -v leaves the saved folders as they are, even
+                // more than 8 (set some other way).
+                let nine = (0..<9).map { "/srv/f\($0)" }
+                _ = try ProfileWrites.edit(p.id, store: ProfileStore()) { $0.folderPaths = nine; return true }
+                let plain = await d.vmRunWorkspace(.object(["profile": "minted"]))
+                let (r, _) = try #require(Self.saved(plain))
+                #expect(r.folderPaths == nine && ProfileStore().loadAll().first { $0.id == p.id }?.folderPaths == nine)
                 // Its boot failed: an existing workspace stays.
                 let failed = await d.createVMRoute(.object(["profile": "minted"]))
                 #expect(failed.status >= 300)

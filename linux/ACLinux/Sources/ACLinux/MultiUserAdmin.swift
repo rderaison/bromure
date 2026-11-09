@@ -21,11 +21,16 @@ public enum MultiUserAdmin {
         }
     }
 
+    /// Names that are already directories a user's would be:
+    /// /run/bromure-ac/<name> is its runtime dir and /var/lib/bromure-ac/<name>
+    /// its state, and "sock" (every user's control socket) and "secrets"
+    /// (root's vault) are there already.
+    // @port-skip linux-only: admin
+    static let reservedNames: Set<String> = ["sock", "secrets"]
+
     // @port-skip linux-only: admin
     public static func validName(_ n: String) -> Bool {
-        // Not "sock": /run/bromure-ac/<name> is its runtime dir, and that one
-        // holds every user's control socket.
-        !n.isEmpty && n.count <= 32 && !n.hasPrefix("-") && n != "bromure" && n != "root" && n != "sock"
+        !n.isEmpty && n.count <= 32 && !n.hasPrefix("-") && n != "bromure" && n != "root" && !reservedNames.contains(n)
             && n.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_-").contains($0) }
     }
 

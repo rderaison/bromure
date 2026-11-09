@@ -507,7 +507,8 @@ extension Daemon {
     nonisolated static func removeImportedSSHKey(_ key: ImportedSSHKey, for profile: Profile, profileDirectory: URL) {
         // A host-agent key has no file (filename "" would name the whole
         // imported/ dir) — the agent keeps it.
-        guard !key.isFromHostAgent, !key.filename.isEmpty, !key.filename.contains("/") else { return }
+        guard !key.isFromHostAgent, !key.filename.isEmpty, !key.filename.contains("/"),
+              key.filename != ".", key.filename != ".." else { return }
         let importedDir = profileDirectory.appendingPathComponent("agent/imported", isDirectory: true)
         try? FileManager.default.removeItem(at: importedDir.appendingPathComponent(key.filename))
         try? FileManager.default.removeItem(at: importedDir.appendingPathComponent(key.filename + ".pub"))

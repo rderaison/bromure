@@ -108,6 +108,8 @@ extension Daemon {
             }
         }
         func mount(_ p: inout Profile) -> Bool {
+            // No -v: nothing to save (an existing list is left as it is).
+            guard !added.isEmpty else { return false }
             var paths = p.folderPaths
             for host in added where !paths.contains(host) { paths.append(host) }
             let capped = Array(paths.prefix(8))

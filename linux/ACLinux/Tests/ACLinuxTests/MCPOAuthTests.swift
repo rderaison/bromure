@@ -412,6 +412,22 @@ struct MCPOAuthTests {
         #expect(flights.count == 0 && flights.joined.withLockedValue { $0 } == 1)
     }
 
+    /// A refresh saved for one workspace is saved for its clones too (the
+    /// same server, the same spent refresh token), launching or not.
+    @Test func aRefreshIsSavedForEveryCloneHoldingTheToken() {
+        let old = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "https://x/t",
+                                accessToken: "A", refreshToken: "SPENT")
+        var a = Profile(name: "a", tool: .claude, authMode: .token)
+        a.mcpServers = [Self.server("s", oauth: old)]
+        var clone = a; clone.id = UUID(); clone.name = "clone"
+        var reauthorized = a; reauthorized.id = UUID(); reauthorized.name = "re"
+        reauthorized.mcpServers[0].oauthState?.refreshToken = "OTHER"
+        var unrelated = Profile(name: "u", tool: .claude, authMode: .token)
+        unrelated.mcpServers = [Self.server("s", oauth: old)]   // its own server id
+        let ids = Daemon.sharingRefreshToken(of: old, serverID: a.mcpServers[0].id, in: [a, clone, reauthorized, unrelated], except: a.id)
+        #expect(ids == [clone.id])
+    }
+
     /// A redirect from the token endpoint isn't followed.
     @Test func aRedirectIsNotFollowed() async throws { try await Self.onLoopback {
         let target = try TokenEndpoint(status: 200, body: #"{"access_token":"REDIRECTED"}"#)

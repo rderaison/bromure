@@ -333,7 +333,25 @@ extension Daemon {
     // @port ACAppDelegate.keepRefreshedMCPOAuth(_: MCPOAuthState, from: MCPOAuthState, serverID: UUID, profileID: Profile.ID) h=49a7019d29c33622 @4237c02e
     static func keepRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState, serverID: UUID,
                                       profileID: UUID, store: ProfileStore) {
-        do { try ProfileWrites.locked { try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID) } }
-        catch { FileHandle.standardError.write(Data("bromure-ac daemon: MCP OAuth: couldn't save the refreshed token: \(error)\n".utf8)) }
+        do {
+            try ProfileWrites.locked {
+                try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID)
+                // A clone shares the server and its state: the token this
+                // refresh spent was its too, whether or not it was launching.
+                for other in sharingRefreshToken(of: old, serverID: serverID, in: store.loadAll(), except: profileID) {
+                    try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: other)
+                }
+            }
+        } catch { FileHandle.standardError.write(Data("bromure-ac daemon: MCP OAuth: couldn't save the refreshed token: \(error)\n".utf8)) }
+    }
+
+    /// The other workspaces whose server `serverID` holds `old`'s refresh
+    /// token (clones of the one that refreshed it).
+    // @port-skip linux-only: clones share server ids on the server's one store (macOS keeps the refreshed workspace's only)
+    static func sharingRefreshToken(of old: MCPOAuthState, serverID: UUID, in profiles: [Profile], except: UUID) -> [UUID] {
+        guard let token = old.refreshToken else { return [] }
+        return profiles.filter { p in
+            p.id != except && p.mcpServers.contains { $0.id == serverID && $0.oauthState?.refreshToken == token }
+        }.map(\.id)
     }
 }
