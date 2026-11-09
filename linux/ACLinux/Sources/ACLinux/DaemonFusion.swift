@@ -108,7 +108,9 @@ extension Daemon {
     /// fat client's ⚡, the remote menu).
     // @port ACAppDelegate.automationSetFusion(idOrName: String, engaged: Bool) h=cc530c9ea02bed43 @4237c02e
     func fusionRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
-        guard live[rec.id] != nil, !rec.managed, let profile = existingProfile(for: rec) else {
+        // Any running VM with a workspace profile, as macOS (no managed
+        // exclusion; /vms's fusionConfigurable says the same).
+        guard live[rec.id] != nil, let profile = existingProfile(for: rec) else {
             return .error(409, "VM not found: \(rec.name)", ["ok": false])
         }
         guard await fusionConfigurable(profile) else {

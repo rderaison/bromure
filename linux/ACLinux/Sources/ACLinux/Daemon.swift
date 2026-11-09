@@ -864,7 +864,6 @@ public actor Daemon {
         return .object(Self.withMachines(body))
     }
 
-    // partial: entries lack fusion fields (no fusion on Linux)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/vms"): h=b80678b83121852e @f127f8ab
     func listVMs() -> ControlResponse {
         let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
@@ -979,7 +978,7 @@ public actor Daemon {
         }
     }
 
-    // partial: no attach (a server has no pane); fusion is refused (no Fusion in the Linux proxy)
+    // partial: no attach (a server has no pane)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @f127f8ab
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
@@ -1008,7 +1007,6 @@ public actor Daemon {
         case ("POST", "type"): return await typeRoute(rec, body)
         case ("POST", "routing"): return await routingRoute(rec, body)
         case ("POST", "fusion"): return await fusionRoute(rec, body)
-        case ("POST", "fusion"): return fusionRoute(rec)
         case ("GET", "checkpoints"): return checkpointsRoute(rec)
         case ("POST", "revert"): return revertRoute(rec, body)
         case ("POST", "fsck"): return await fsckRoute(rec, body)
@@ -1016,7 +1014,6 @@ public actor Daemon {
         }
     }
 
-    // partial: the entry has no fusion fields (vmEntry)
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "GET": h=a05dae914d2f170b @7dd92fdf
     func getVM(_ rec: VMRecord) -> ControlResponse { ControlResponse(200, vmEntry(withIP(rec))) }
 

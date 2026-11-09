@@ -70,6 +70,8 @@ final class MitmProxy: @unchecked Sendable {
     /// Fusion's per-workspace toggle and config (MitmFusion.swift).
     let fusionEngagedFlags = NIOLockedValueBox<[UUID: Bool]>([:])
     let fusionConfigs = NIOLockedValueBox<[UUID: Fusion.Config]>([:])
+    /// Fusion's leg refusals already logged (workspace | leg).
+    let fusionRefusalsLogged = NIOLockedValueBox<Set<String>>([])
     /// Asks a workspace's agentd to reset the bridged client socket whose
     /// loopback port is given (the preamble's sport), calling back once done
     /// (macOS: EgressConnectionRegistry.guestAbort, by vsock port there).
@@ -1222,7 +1224,7 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
     /// The request as it goes upstream, or the host's own answer, in
     /// macOS's order: the subscription swaps (5c–5e), the token map's, then
     /// the 5f sign-in capture on what would go out.
-    // partial: the Linux request chain on NIO, its steps in MitmEgress, MitmMCPAuth, MitmInsecure, SupplyChainLinux and DaemonSquelch; subscription auth before the token swap; no Fusion yet
+    // partial: the Linux request chain on NIO, its steps in MitmEgress, MitmMCPAuth, MitmInsecure, SupplyChainLinux and DaemonSquelch, MitmFusion; subscription auth before the token swap
     // @port HTTPMitmConnection.driveTLS(host: String, port: Int, t0: Date, cleartext: Bool, prefix: Data) h=6a58d8d477c0e920 @81c0b354
     static func rewrite(_ raw: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int, tls: Bool,
                         session: UInt64, trace: inout Trace?,
@@ -1521,9 +1523,15 @@ final class RequestReader: ChannelInboundHandler, RemovableChannelHandler {
         TraceEmitter.emitSwapEvents(swapped.swaps, host: host, path: path, profileID: profileID)
         // 6d. Fusion, a cloud turn's alternative to the relay (macOS: after
         // the routing and PII steps, before the forward).
-        if !local, dial == nil, !upgrade, !spooled, mint == nil, capture == nil, supplyChain == nil,
-           let fused = await fusionAnswer(out, proxy: proxy, profileID: profileID, host: host, port: port, trace: trace) {
-            return .answer(fused)
+        if !local, dial == nil, !upgrade, !spooled, mint == nil, capture == nil, supplyChain == nil {
+            switch await fusionAnswer(out, proxy: proxy, profileID: profileID, host: host, port: port, trace: trace) {
+            case .notRun: break
+            case .fused(let reply): return .answer(reply)
+            case .failed:
+                // No reply, and no guest trace (macOS: the throw ends it).
+                trace = nil
+                return .answer(Data())
+            }
         }
         return .forward(out, injected, capture: capture, upgrade: upgrade, mint: mint, ws: ws, pii: pii.vault,
                         supplyChain: supplyChain, dial: dial, local: local && dial == nil, wsPolicy: wsPolicy,

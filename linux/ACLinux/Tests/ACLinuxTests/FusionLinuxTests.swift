@@ -28,10 +28,14 @@ extension DaemonGlobalSuites {
             #expect(!proxy.fusionEngaged(for: b) && proxy.fusionConfig(for: b) == nil, "another workspace's are its own")
             let turn = Data(#"POST /v1/messages HTTP/1.1\#r\#nHost: api.anthropic.com\#r\#nContent-Length: 2\#r\#n\#r\#n{}"#.utf8)
             // Not engaged: the turn goes on as usual.
-            #expect(await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: b, host: "api.anthropic.com", port: 443, trace: nil) == nil)
+            if case .notRun = await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: b, host: "api.anthropic.com", port: 443, trace: nil) {} else {
+                Issue.record("ran while not engaged")
+            }
             // Engaged, but this proxy dials no real upstream (e2e): never run.
             proxy.refusesRealUpstreams = true
-            #expect(await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: a, host: "api.anthropic.com", port: 443, trace: nil) == nil)
+            if case .notRun = await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: a, host: "api.anthropic.com", port: 443, trace: nil) {} else {
+                Issue.record("ran in e2e mode")
+            }
             proxy.clearFusionEngaged(for: a)
             #expect(!proxy.fusionEngaged(for: a) && proxy.fusionConfig(for: a) != nil, "a stop clears the toggle, not the config")
             proxy.clearFusionConfig(for: a)
@@ -46,21 +50,27 @@ extension DaemonGlobalSuites {
             await d.shutdown()
         }
 
-        @Test func theLegHostsFollowTheConfig() {
+        @Test func theLegEndpointsFollowTheConfig() {
             var c = Self.config
-            #expect(Set(RequestReader.fusionLegHosts(c)) == ["api.anthropic.com", "api.openai.com"])
+            #expect(Set(RequestReader.fusionLegEndpoints(c).map(\.key)) == ["api.anthropic.com:443", "api.openai.com:443"])
             c.legs = [.codex, .grok, .kimi]
             c.authModes = [.codex: .subscription, .grok: .subscription, .kimi: .token]
             c.judgeProvider = .grok
-            #expect(Set(RequestReader.fusionLegHosts(c)) == ["chatgpt.com", "cli-chat-proxy.grok.com", "api.moonshot.ai"])
+            #expect(Set(RequestReader.fusionLegEndpoints(c).map(\.key))
+                    == ["chatgpt.com:443", "cli-chat-proxy.grok.com:443", "api.moonshot.ai:443"])
+            // A local leg or judge: the user's external engine, on its own scheme and port.
+            c.legs = [.claude, .codex]
+            c.authModes = [.claude: .token, .codex: .local]
             c.judgeLocal = true
-            c.localEngineBase = "https://engine.example.test:8443"
-            #expect(RequestReader.fusionLegHosts(c).contains("engine.example.test"), "a user's external engine is checked too")
+            c.localEngineBase = "http://engine.example.test:8000/v1"
+            let legs = RequestReader.fusionLegEndpoints(c)
+            #expect(legs.contains(FusionLeg(host: "engine.example.test", port: 8000, tls: false)))
+            #expect(!legs.contains { $0.host == "api.openai.com" }, "a local codex leg isn't the cloud one")
             c.localEngineBase = nil
-            #expect(!RequestReader.fusionLegHosts(c).contains(InferenceService.engineHost), "not the on-host engine")
+            #expect(!RequestReader.fusionLegEndpoints(c).contains { $0.host == InferenceService.engineHost }, "not the on-host engine")
         }
 
-        @Test func aRefusedLegMakesFusionStepAside() async throws {
+        @Test func eligibilityComesBeforeTheLegsAndARefusedLegMakesFusionStepAside() async throws {
             let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
             let proxy = try MitmProxy(caDirectory: URL(fileURLWithPath: dir + "/mitm", isDirectory: true))
             let pid = UUID()
@@ -69,35 +79,67 @@ extension DaemonGlobalSuites {
             // The firewall denies every leg (no name is even looked up).
             proxy.setGuardrailsConfig(GuardrailsConfig(kubernetes: .off, kubeHosts: [],
                                                        egressPolicy: try EgressPolicy.parse("default deny")), for: pid)
-            if case .success = await proxy.checkFusionLeg("api.openai.com", profileID: pid) { Issue.record("a denied leg passed") }
+            if case .success = await proxy.checkFusionLeg(FusionLeg(host: "api.openai.com", port: 443, tls: true), profileID: pid) {
+                Issue.record("a denied leg passed")
+            }
             let turn = Data(#"POST /v1/messages HTTP/1.1\#r\#nHost: api.anthropic.com\#r\#nContent-Length: 2\#r\#n\#r\#n{}"#.utf8)
-            #expect(await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: pid, host: "api.anthropic.com", port: 443, trace: nil) == nil,
-                    "the turn goes the normal way")
+            guard case .notRun = await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: pid, host: "api.anthropic.com", port: 443, trace: nil) else {
+                Issue.record("ran with a refused leg"); return
+            }
+            #expect(proxy.fusionRefusalsLogged.withLockedValue { $0.count } == 1, "logged once")
+            _ = await RequestReader.fusionAnswer(turn, proxy: proxy, profileID: pid, host: "api.anthropic.com", port: 443, trace: nil)
+            #expect(proxy.fusionRefusalsLogged.withLockedValue { $0.count } == 1, "not again for the same leg")
+            // Not a messages POST: not eligible, nothing checked or logged.
+            proxy.fusionRefusalsLogged.withLockedValue { $0 = [] }
+            let other = Data(#"GET /v1/models HTTP/1.1\#r\#nHost: api.anthropic.com\#r\#n\#r\#n"#.utf8)
+            _ = await RequestReader.fusionAnswer(other, proxy: proxy, profileID: pid, host: "api.anthropic.com", port: 443, trace: nil)
+            #expect(proxy.fusionRefusalsLogged.withLockedValue { $0.isEmpty })
         }
 
-        @Test func thePinnedProtocolDialsOnlyCheckedAddresses() async throws {
-            let cfg = URLSessionConfiguration.ephemeral
-            cfg.protocolClasses = [FusionPinnedProtocol.self]
-            let session = URLSession(configuration: cfg)
+        @Test func aRunsSessionPinsItsHTTPLegsAndStillOpensWebSockets() async throws {
+            let ip = try #require(Daemon.primaryIPv4(), "a host address")
+            let http = try RawUpstream(host: ip, reply: "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+            defer { http.stop() }
+            let ws = try WSUpstream(host: ip, reply: { _ in [WSFrame.encode(opcode: WSFrame.text, payload: Data("pong".utf8), masked: false)] })
+            defer { ws.stop() }
+            let addr = try #require(OpenShellPolicy.IPAddress(ip))
+            // This run checked the http leg (named by an unresolvable host): its address only.
+            let cls = try #require(FusionPinnedProtocol.acquire(["engine.example.test:\(http.port)": [addr]]))
+            defer { cls.release() }
+            let session = URLSession(configuration: RequestReader.fusionSessionConfiguration(cls))
             defer { session.finishTasksAndInvalidate() }
-            var req = URLRequest(url: URL(string: "https://unchecked.example.test/v1/x")!)
-            req.timeoutInterval = 5
+            var req = URLRequest(url: URL(string: "http://engine.example.test:\(http.port)/v1/chat")!)
+            req.timeoutInterval = 10
+            let (data, resp) = try await session.data(for: req)
+            #expect((resp as? HTTPURLResponse)?.statusCode == 200 && String(decoding: data, as: UTF8.self) == "hello")
+            #expect(http.received.withLockedValue { $0 }.contains("Host: engine.example.test:\(http.port)"), "dialled to the checked address, Host the name")
+            // An unchecked host on this session: not dialled.
             do {
-                _ = try await session.data(for: req)
+                var other = URLRequest(url: URL(string: "https://unchecked.example.test/x")!)
+                other.timeoutInterval = 5
+                _ = try await session.data(for: other)
                 Issue.record("an unchecked host was dialled")
             } catch {
-                #expect((error as? URLError)?.code == .cannotConnectToHost, "refused before any lookup: \(error)")
+                #expect((error as? URLError)?.code == .cannotConnectToHost, "\(error)")
             }
-            // Two runs checked the same host: only the addresses both passed.
-            let a = UUID(), b = UUID()
-            let x = OpenShellPolicy.IPAddress.v4(0xCB007101), y = OpenShellPolicy.IPAddress.v4(0xCB007102)
-            FusionPinnedProtocol.add(a, ["h.example.test": [x, y]])
-            FusionPinnedProtocol.add(b, ["h.example.test": [y]])
-            #expect(FusionPinnedProtocol.addresses(for: "h.example.test") == [y])
-            FusionPinnedProtocol.remove(b)
-            #expect(FusionPinnedProtocol.addresses(for: "h.example.test") == [x, y])
-            FusionPinnedProtocol.remove(a)
-            #expect(FusionPinnedProtocol.addresses(for: "h.example.test").isEmpty)
+            // The WebSocket leg's protocol is still the session's (the defaults come after the pinned one).
+            let task = session.webSocketTask(with: URL(string: "ws://\(ip):\(ws.port)/codex")!)
+            task.resume()
+            try await task.send(.string("ping"))
+            if case .string(let s) = try await task.receive() { #expect(s == "pong") } else { Issue.record("no text reply") }
+            task.cancel(with: .normalClosure, reason: nil)
+        }
+
+        @Test func eachRunHasItsOwnSlot() {
+            var held: [FusionPinnedProtocol.Type] = []
+            for i in 0..<FusionPinnedProtocol.slots.count {
+                guard let c = FusionPinnedProtocol.acquire(["h\(i):443": []]) else { Issue.record("slot \(i)"); break }
+                held.append(c)
+            }
+            #expect(FusionPinnedProtocol.acquire([:]) == nil, "all taken: Fusion steps aside")
+            #expect(held[0].addresses(for: "h1:443").isEmpty && held[1].addresses(for: "h1:443").isEmpty)
+            for c in held { c.release() }
+            #expect(FusionPinnedProtocol.acquire([:]).map { $0.release(); return true } == true)
         }
 
         @Test("the collected reply is what Fusion wrote, in order")

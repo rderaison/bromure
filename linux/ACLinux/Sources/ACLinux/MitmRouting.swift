@@ -136,14 +136,4 @@ extension Daemon {
         return ControlResponse(200, ["ok": true, "routing": .string(routing.rawValue)])
     }
 
-    /// `POST /vms/<id>/fusion`: Fusion (several models judged into one
-    /// answer) isn't in the Linux proxy, so it's refused, saying so.
-    // partial: no Fusion in the Linux proxy: always refused
-    // @port ACAppDelegate.automationSetFusion(idOrName: String, engaged: Bool) h=cc530c9ea02bed43 @3b4acf09
-    func fusionRoute(_ rec: VMRecord) -> ControlResponse {
-        guard live[rec.id] != nil else {
-            return ControlResponse(409, ["ok": false, "error": .string("VM not found: \(rec.name)")])
-        }
-        return ControlResponse(409, ["ok": false, "error": "Fusion isn't available on a Linux server yet."])
-    }
 }

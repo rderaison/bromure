@@ -48,43 +48,54 @@ extension MitmProxy {
 }
 
 extension RequestReader {
+    /// What the 6d step did with a turn.
+    enum FusionStep { case notRun, fused(Data), failed }
+
     /// 6d. A Claude `/v1/messages` turn while the workspace's Fusion is
     /// engaged: its dialogue fanned out to the configured legs, judged and
     /// synthesized into one reply in the guest's wire shape (Fusion.run,
-    /// shared). Nil: not eligible (Fusion says so), and the turn goes on as
-    /// usual. Each leg dials with this daemon's own credentials (the
-    /// workspace's swap map, this user's subscription stores); every leg's
-    /// call is traced as macOS traces them. Fusion failing midway ends the
-    /// connection without a reply, as macOS's throw does.
-    /// Every leg's destination is checked first, as any other dial is (the
-    /// workspace's egress verdict, then checkDestination: resolved, every
-    /// answer checked), and the HTTPS legs are dialled to the checked
-    /// addresses only (FusionPinnedProtocol, SNI and certificate on the
-    /// name; macOS: the connection's pinned dialer). A leg refused: Fusion
-    /// steps aside for this request, which goes the normal way.
-    // partial: the Codex-subscription leg's WebSocket is checked first but dialled by name (URLSessionWebSocketTask doesn't go through a URLProtocol); none in e2e mode (no real upstream)
+    /// shared). `.notRun`: not eligible, and the turn goes on as usual.
+    /// Each leg dials with this daemon's own credentials (the workspace's
+    /// swap map, this user's subscription stores); every leg's call is
+    /// traced as macOS traces them. Fusion failing midway ends the
+    /// connection without a reply (and without a guest trace), as macOS's
+    /// throw does.
+    /// Stricter than macOS, whose Fusion dials every leg by name: each leg's
+    /// destination (its own scheme and port) is checked first, as any other
+    /// dial is (the workspace's egress verdict, then checkDestination), and
+    /// its HTTP(S) requests go to the addresses this run's checks passed only
+    /// (FusionPinnedProtocol; HTTPS through PinnedHTTPS, SNI and certificate
+    /// on the name). A leg refused: Fusion steps aside for this request,
+    /// which goes the normal way (logged once per workspace and leg).
+    // partial: the Codex-subscription leg's WebSocket is checked first but dialled by name (no URLProtocol pins a WebSocket task); none in e2e mode (no real upstream)
     // @port-skip linux-only: HTTPMitmConnection.driveTLS's 6d step, on the Linux request chain
     static func fusionAnswer(_ request: Data, proxy: MitmProxy, profileID: UUID, host: String, port: Int,
-                             trace: Trace?) async -> Data? {
+                             trace: Trace?) async -> FusionStep {
         guard !proxy.refusesRealUpstreams, proxy.fusionEngaged(for: profileID),
-              let config = proxy.fusionConfig(for: profileID) else { return nil }
-        let hosts = Set([host] + fusionLegHosts(config))
+              let config = proxy.fusionConfig(for: profileID) else { return .notRun }
+        // Fusion.run's own eligibility, before any leg is checked.
+        guard let req = HTTPWire.parse(request),
+              host == "api.anthropic.com" || host.hasSuffix(".anthropic.com"),
+              req.method.uppercased() == "POST", req.path.hasPrefix("/v1/messages") else { return .notRun }
+        let legs = Set([FusionLeg(host: host, port: port, tls: true)] + fusionLegEndpoints(config))
         var pins: [String: [MitmProxy.IPAddress]] = [:]
-        for leg in hosts {
+        for leg in legs {
             switch await proxy.checkFusionLeg(leg, profileID: profileID) {
-            case .success(let addresses): pins[leg] = addresses
+            case .success(let addresses): pins[leg.key] = addresses
             case .failure(let why):
-                FileHandle.standardError.write(Data("[mitm] fusion for \(host) stepped aside: its leg to \(leg) is refused (\(why))\n".utf8))
-                return nil
+                if proxy.fusionRefusalsLogged.withLockedValue({ $0.insert("\(profileID)|\(leg.key)").inserted }) {
+                    FileHandle.standardError.write(Data("[mitm] fusion stepped aside: its leg to \(leg.key) is refused (\(why))\n".utf8))
+                }
+                return .notRun
             }
         }
+        guard let protocolClass = FusionPinnedProtocol.acquire(pins) else {
+            FileHandle.standardError.write(Data("[mitm] fusion stepped aside: too many Fusion turns at once\n".utf8))
+            return .notRun
+        }
+        defer { protocolClass.release() }
         let reply = CollectedReply()
-        let run = UUID()
-        FusionPinnedProtocol.add(run, pins)
-        defer { FusionPinnedProtocol.remove(run) }
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.protocolClasses = [FusionPinnedProtocol.self]
-        let session = URLSession(configuration: cfg)
+        let session = URLSession(configuration: fusionSessionConfiguration(protocolClass))
         defer { session.finishTasksAndInvalidate() }
         let outcome: Fusion.Outcome?
         do {
@@ -92,13 +103,22 @@ extension RequestReader {
                                            swapper: proxy.swapper, config: config, profileID: profileID)
         } catch {
             FileHandle.standardError.write(Data("[mitm] fusion for \(host) failed: \(error)\n".utf8))
-            return Data()
+            return .failed
         }
-        guard let outcome else { return nil }
+        guard let outcome else { return .notRun }
         if let trace {
             for sc in outcome.subCalls { proxy.emitFusionCall(trace, sc) }
         }
-        return outcome.buffer
+        return .fused(outcome.buffer)
+    }
+
+    /// A Fusion run's session: its pinned protocol first, then the system's
+    /// (the WebSocket leg's protocol among them).
+    // @port-skip linux-only: see fusionAnswer
+    static func fusionSessionConfiguration(_ pinned: FusionPinnedProtocol.Type) -> URLSessionConfiguration {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [pinned] + (URLSessionConfiguration.ephemeral.protocolClasses ?? [])
+        return cfg
     }
 }
 
@@ -117,38 +137,54 @@ extension MitmProxy {
     }
 }
 
+/// A Fusion leg's endpoint: what's checked and pinned.
+// @port-skip linux-only: Fusion's leg endpoints, for the Linux destination checks
+struct FusionLeg: Hashable, Sendable {
+    let host: String
+    let port: Int
+    let tls: Bool
+    // @port-skip linux-only: see FusionLeg
+    var key: String { "\(host):\(port)" }
+}
+
 extension RequestReader {
-    /// The hosts Fusion's legs and judge reach for `config` (Fusion.askModel's
-    /// endpoints), the on-host engine aside (it's this machine's own,
-    /// dialled as the routing dials it).
+    /// The endpoints Fusion's legs and judge reach for `config`
+    /// (Fusion.askModel's), by provider and auth mode; a local leg or judge
+    /// is the user's external engine (its own scheme and port), the on-host
+    /// engine aside (this machine's own, dialled as the routing dials it).
     // @port-skip linux-only: Fusion's leg endpoints, for the Linux destination checks
-    static func fusionLegHosts(_ config: Fusion.Config) -> [String] {
-        func host(_ tool: Profile.Tool, _ auth: Profile.AuthMode?) -> [String] {
+    static func fusionLegEndpoints(_ config: Fusion.Config) -> [FusionLeg] {
+        func https(_ h: String) -> [FusionLeg] { [FusionLeg(host: h, port: 443, tls: true)] }
+        let external: [FusionLeg] = {
+            guard let url = config.localEngineBase.flatMap(URL.init(string:)), let h = url.host,
+                  h != InferenceService.engineHost, let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return [] }
+            return [FusionLeg(host: h, port: url.port ?? (scheme == "https" ? 443 : 80), tls: scheme == "https")]
+        }()
+        func endpoints(_ tool: Profile.Tool, _ auth: Profile.AuthMode?) -> [FusionLeg] {
             switch (tool, auth ?? .token) {
-            case (.claude, _): return ["api.anthropic.com"]
-            case (.codex, .subscription): return ["chatgpt.com"]
-            case (.codex, _): return ["api.openai.com"]
-            case (.grok, .subscription): return ["cli-chat-proxy.grok.com"]
-            case (.grok, _): return ["api.x.ai"]
-            case (.kimi, .subscription): return [URL(string: KimiRegion.apiBase)?.host ?? "api.kimi.ai"]
-            case (.kimi, _): return ["api.moonshot.ai"]
+            case (_, .local): return external
+            case (.claude, _): return https("api.anthropic.com")
+            case (.codex, .subscription): return https("chatgpt.com")
+            case (.codex, _): return https("api.openai.com")
+            case (.grok, .subscription): return https("cli-chat-proxy.grok.com")
+            case (.grok, _): return https("api.x.ai")
+            case (.kimi, .subscription): return https(URL(string: KimiRegion.apiBase)?.host ?? "api.kimi.ai")
+            case (.kimi, _): return https("api.moonshot.ai")
             case (.omp, _):
                 switch config.ompProvider {
-                case .anthropic: return ["api.anthropic.com"]
-                case .openai: return ["api.openai.com"]
-                case .xai: return ["api.x.ai"]
+                case .anthropic: return https("api.anthropic.com")
+                case .openai: return https("api.openai.com")
+                case .xai: return https("api.x.ai")
                 default: return []
                 }
             default: return []
             }
         }
-        var out: [String] = []
-        for leg in config.legs { out += host(leg, config.authModes[leg]) }
-        if !config.judgeLocal { out += host(config.judgeProvider, config.authModes[config.judgeProvider]) }
-        let usesLocal = config.localLegModel != nil || config.judgeLocal
-        if usesLocal, let base = config.localEngineBase.flatMap(URL.init(string:))?.host, base != InferenceService.engineHost {
-            out.append(base)
-        }
+        var out: [FusionLeg] = []
+        for leg in config.legs { out += endpoints(leg, config.authModes[leg]) }
+        if config.judgeLocal { out += external } else { out += endpoints(config.judgeProvider, config.authModes[config.judgeProvider]) }
+        if config.localLegModel != nil { out += external }
         return out
     }
 }
@@ -157,16 +193,16 @@ extension MitmProxy {
     /// A leg's check: its checked addresses, or why it's refused.
     enum FusionLegCheck { case success([IPAddress]), failure(String) }
 
-    /// One Fusion leg's host, checked as any dial is: the workspace's egress
-    /// verdict, then checkDestination (resolved, every answer checked).
+    /// One Fusion leg's endpoint, checked as any dial is: the workspace's
+    /// egress verdict, then checkDestination (resolved, every answer checked).
     // @port-skip linux-only: Fusion's legs through the Linux proxy's destination checks
-    func checkFusionLeg(_ host: String, profileID: UUID) async -> FusionLegCheck {
+    func checkFusionLeg(_ leg: FusionLeg, profileID: UUID) async -> FusionLegCheck {
         let policy = guardrailsConfig(for: profileID)?.egressPolicy
-        if ProxyPolicy.egressVerdict(policy: policy, profileID: profileID, host: host, port: 443, identity: nil) == .deny {
+        if ProxyPolicy.egressVerdict(policy: policy, profileID: profileID, host: leg.host, port: leg.port, identity: nil) == .deny {
             return .failure("the workspace's firewall denies it")
         }
         do {
-            let addresses = try await checkDestination(host: host, port: 443, profileID: profileID,
+            let addresses = try await checkDestination(host: leg.host, port: leg.port, profileID: profileID,
                                                        on: MultiThreadedEventLoopGroup.singleton.next()).get()
             return addresses.isEmpty ? .failure("no address") : .success(addresses)
         } catch let e as ProxyDestinationDenied {
@@ -177,35 +213,43 @@ extension MitmProxy {
     }
 }
 
-/// Fusion's HTTPS legs to the addresses its checks passed, never a name
-/// looked up again (PinnedHTTPS: SNI and certificate on the name). Only
-/// Fusion's sessions register it, and it takes their every HTTPS request
-/// (a request's own headers can't say which run it is: the session's are
-/// added after canInit): a host is dialled to the addresses every running
-/// Fusion that checked it passed (their intersection, so no workspace's
-/// run dials an address its own checks refused); a host no run checked,
-/// or no common address, isn't dialled.
-// @port-skip linux-only: the pinned dial of Fusion's legs (macOS: the connection's PinnedUpstreamDialer)
-final class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
-    private static let runs = NIOLockedValueBox<[UUID: [String: [MitmProxy.IPAddress]]]>([:])
+/// Fusion's HTTP(S) legs to the addresses its run's checks passed, never a
+/// name looked up again (HTTPS through PinnedHTTPS: SNI and certificate on
+/// the name; plain HTTP to the address, Host the name). A request's own
+/// headers can't say which run it is (a session's are added after canInit),
+/// so each run has its own subclass, a slot of a small pool, registered on
+/// its session alone: a host:port the run didn't check isn't dialled.
+// @port-skip linux-only: the pinned dial of Fusion's legs (macOS dials them by name)
+class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    class var slot: Int { -1 }
+    private static let table = NIOLockedValueBox<[Int: [String: [MitmProxy.IPAddress]]]>([:])
+    static let slots: [FusionPinnedProtocol.Type] = [
+        FusionPinnedSlot0.self, FusionPinnedSlot1.self, FusionPinnedSlot2.self, FusionPinnedSlot3.self,
+        FusionPinnedSlot4.self, FusionPinnedSlot5.self, FusionPinnedSlot6.self, FusionPinnedSlot7.self,
+    ]
 
+    /// A free slot holding `pins` (by "host:port"), or nil when every slot
+    /// is taken.
     // @port-skip linux-only: see FusionPinnedProtocol
-    static func add(_ run: UUID, _ pins: [String: [MitmProxy.IPAddress]]) { runs.withLockedValue { $0[run] = pins } }
-    // @port-skip linux-only: see FusionPinnedProtocol
-    static func remove(_ run: UUID) { _ = runs.withLockedValue { $0.removeValue(forKey: run) } }
-
-    /// The addresses every run that checked `host` passed.
-    // @port-skip linux-only: see FusionPinnedProtocol
-    static func addresses(for host: String) -> [MitmProxy.IPAddress] {
-        let lists = runs.withLockedValue { $0.values.compactMap { $0[host] } }
-        guard var common = lists.first else { return [] }
-        for l in lists.dropFirst() { common = common.filter { l.contains($0) } }
-        return common
+    static func acquire(_ pins: [String: [MitmProxy.IPAddress]]) -> FusionPinnedProtocol.Type? {
+        table.withLockedValue { t in
+            guard let free = slots.first(where: { t[$0.slot] == nil }) else { return nil }
+            t[free.slot] = pins
+            return free
+        }
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
+    class func release() { _ = table.withLockedValue { $0.removeValue(forKey: slot) } }
+
+    // @port-skip linux-only: see FusionPinnedProtocol
+    class func addresses(for key: String) -> [MitmProxy.IPAddress] { table.withLockedValue { $0[slot]?[key] } ?? [] }
+
+    // @port-skip linux-only: see FusionPinnedProtocol
     override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.scheme?.lowercased() == "https"
+        let scheme = request.url?.scheme?.lowercased()
+        return scheme == "https" || scheme == "http"
     }
 
     // @port-skip linux-only: see FusionPinnedProtocol
@@ -214,13 +258,18 @@ final class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     // @port-skip linux-only: see FusionPinnedProtocol
     override func startLoading() {
         let req = request
-        let addresses = Self.addresses(for: req.url?.host ?? "")
+        guard let url = req.url, let host = url.host else { return fail(URLError(.badURL)) }
+        let tls = url.scheme?.lowercased() == "https"
+        let port = url.port ?? (tls ? 443 : 80)
+        let addresses = type(of: self).addresses(for: "\(host):\(port)")
         Task {
             guard !addresses.isEmpty else { return self.fail(URLError(.cannotConnectToHost)) }
             var last: Error = URLError(.cannotConnectToHost)
             for ip in addresses {
                 do {
-                    let (response, data) = try await PinnedHTTPS.send(req, to: ip, timeout: req.timeoutInterval > 0 ? req.timeoutInterval : 600)
+                    let (response, data) = tls
+                        ? try await PinnedHTTPS.send(req, to: ip, timeout: req.timeoutInterval > 0 ? req.timeoutInterval : 600)
+                        : try await Self.plainHTTP(req, to: ip, host: host, port: port)
                     self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                     self.client?.urlProtocol(self, didLoad: data)
                     self.client?.urlProtocolDidFinishLoading(self)
@@ -235,9 +284,67 @@ final class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
+    /// A plain-HTTP leg (a user's external engine on http) to the checked
+    /// address, its Host header the name.
+    // @port-skip linux-only: see FusionPinnedProtocol
+    static func plainHTTP(_ req: URLRequest, to ip: MitmProxy.IPAddress, host: String, port: Int) async throws -> (HTTPURLResponse, Data) {
+        guard let url = req.url, var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw URLError(.badURL) }
+        c.host = { if case .v6 = ip { return "[\(ip)]" } else { return "\(ip)" } }()
+        guard let pinnedURL = c.url else { throw URLError(.badURL) }
+        var pinned = req
+        pinned.url = pinnedURL
+        pinned.setValue(port == 80 ? host : "\(host):\(port)", forHTTPHeaderField: "Host")
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(for: pinned)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return (http, data)
+    }
+
     // @port-skip linux-only: see FusionPinnedProtocol
     private func fail(_ error: Error) { client?.urlProtocol(self, didFailWithError: error) }
 
     // @port-skip linux-only: see FusionPinnedProtocol
     override func stopLoading() {}
+}
+
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot0: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 0 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot1: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 1 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot2: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 2 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot3: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 3 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot4: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 4 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot5: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 5 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot6: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 6 }
+}
+// @port-skip linux-only: a slot of FusionPinnedProtocol's pool
+final class FusionPinnedSlot7: FusionPinnedProtocol, @unchecked Sendable {
+    // @port-skip linux-only: see FusionPinnedProtocol
+    override class var slot: Int { 7 }
 }
