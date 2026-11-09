@@ -75,6 +75,13 @@ enum EditorScratch {
     /// A new owner-only file holding `contents`, after sweeping stale ones.
     // @port-skip linux-only: see EditorScratch
     static func create(contents: Data, in dir: String = directory()) throws -> URL {
+        // Its parent (the runtime dir, whose fallback is under /tmp) must be
+        // this user's too: someone else's could swap the directory under us.
+        let parent = (dir as NSString).deletingLastPathComponent
+        var pst = stat()
+        guard lstat(parent, &pst) == 0, (pst.st_mode & S_IFMT) == S_IFDIR, pst.st_uid == getuid() else {
+            throw ValidationError("\(parent) isn't a directory of this user's.")
+        }
         if mkdir(dir, 0o700) != 0 && errno != EEXIST {
             throw ValidationError("Couldn't create \(dir): \(String(cString: strerror(errno))).")
         }

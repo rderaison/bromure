@@ -34,6 +34,23 @@ struct RemoteMenuTests {
         #expect(throws: ControlClient.ClientError.self) { try c.ensureAgentRunning() }
     }
 
+    /// Nothing is sent to a "socket" that isn't one (a file squatting the
+    /// path); a real one of this user's, served by this user, is used.
+    @Test func theClientRefusesWhatIsntThisUsersSocket() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Data("x".utf8).write(to: URL(fileURLWithPath: dir + "/c.sock"))
+        #expect(throws: ControlClient.ClientError.self) { _ = try ControlClient.connect(to: dir + "/c.sock") }
+        do { _ = try ControlClient.connect(to: dir + "/c.sock") }
+        catch { #expect("\(error)".contains("not a socket"), "\(error)") }
+        try FileManager.default.removeItem(atPath: dir + "/c.sock")
+        let srv = try await ControlServer.start(path: dir + "/c.sock") { _ in ControlResponse(200, ["ok": true]) }
+        close(try ControlClient.connect(to: dir + "/c.sock"))
+        // Through a symlink (the daemon's <state>/control.sock): the socket it reaches counts.
+        try FileManager.default.createSymbolicLink(atPath: dir + "/link.sock", withDestinationPath: dir + "/c.sock")
+        close(try ControlClient.connect(to: dir + "/link.sock"))
+        await srv.close()
+    }
+
     @Test func hostListsSplitOnCommasAndWhitespace() {
         #expect(HostListField.parse("a.com, b.org\tc.net\n d.io,,") == ["a.com", "b.org", "c.net", "d.io"])
         #expect(HostListField.parse("  ").isEmpty)

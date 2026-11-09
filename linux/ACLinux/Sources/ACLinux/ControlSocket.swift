@@ -403,12 +403,13 @@ public struct ControlClient: Sendable {
 
     // @port-skip linux-only: control client errors
     public enum ClientError: Error, CustomStringConvertible {
-        case connect(String, Int32), protocolError(String)
+        case connect(String, Int32), protocolError(String), untrusted(String, String)
         // @port-skip linux-only: control client errors
         public var description: String {
             switch self {
             case .connect(let p, let e): return "can't reach the daemon at \(p): \(String(cString: strerror(e)))"
             case .protocolError(let m): return "bad response from the daemon: \(m)"
+            case .untrusted(let p, let why): return "refusing the control socket at \(p): \(why)"
             }
         }
     }
@@ -426,8 +427,20 @@ public struct ControlClient: Sendable {
         (try? request("GET", "/health"))?.status == 200
     }
 
+    /// Before anything is sent: the socket file must be this user's (the
+    /// runtime dir's /tmp fallback can be squatted by another user), and the
+    /// listener at the other end this user or root (systemd's socket unit
+    /// listens for a multi-user server's daemon, SocketUser=<user>).
+    // partial: refuses a socket that isn't this user's, or a listener that is neither this user nor root
     // @port ControlClient.static connect(to: String) h=31ae0b2cf2981fe9 @53294cad
     static func connect(to path: String) throws -> Int32 {
+        // stat, not lstat: <state>/control.sock is the daemon's own symlink
+        // to the real socket; what it reaches must be this user's.
+        var st = stat()
+        if stat(path, &st) == 0 {
+            guard (st.st_mode & S_IFMT) == S_IFSOCK else { throw ClientError.untrusted(path, "not a socket") }
+            guard st.st_uid == getuid() else { throw ClientError.untrusted(path, "owned by uid \(st.st_uid), not this user") }
+        }
         let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
         guard fd >= 0 else { throw ClientError.connect(path, errno) }
         var addr = sockaddr_un()
@@ -442,6 +455,12 @@ public struct ControlClient: Sendable {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Glibc.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard r == 0 else { let e = errno; close(fd); throw ClientError.connect(path, e) }
+        var cred = acl_ucred()
+        var len = socklen_t(MemoryLayout<acl_ucred>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0, cred.uid == getuid() || cred.uid == 0 else {
+            close(fd)
+            throw ClientError.untrusted(path, "the listener is uid \(cred.uid), not this user")
+        }
         return fd
     }
 

@@ -28,9 +28,9 @@ struct VMAttach: ParsableCommand {
         abstract: "Attach your terminal to a VM's tmux session, a tab, or a docker container.",
         discussion: """
         Examples:
-          vm attach my-workspace                      # current tmux tab
-          vm attach my-workspace 2                     # jump to tab 2
-          vm attach my-workspace containers:web -- bash  # docker exec -it into a container
+          workspaces attach my-workspace                      # current tmux tab
+          workspaces attach my-workspace 2                     # jump to tab 2
+          workspaces attach my-workspace containers:web -- bash  # docker exec -it into a container
         """)
 
     @Argument(help: "VM id or workspace name.")
@@ -173,7 +173,7 @@ struct VMRevert: ParsableCommand {
 
     @Argument(help: "Workspace id or name.")
     var vm: String
-    @Argument(help: "Checkpoint id (from `vm checkpoints`).")
+    @Argument(help: "Checkpoint id (from `workspaces checkpoints`).")
     var checkpoint: String
     @Flag(help: "Revert the ext4 home image instead of the system disk.")
     var home = false
@@ -188,7 +188,7 @@ struct VMRevert: ParsableCommand {
         guard resp.status == 200 else {
             throw ValidationError(resp.json["error"] as? String ?? "Revert failed.")
         }
-        print("Reverted \(vm)'s \(home ? "home" : "disk") to checkpoint \(checkpoint). Boot it with `vm run \(vm)`.")
+        print("Reverted \(vm)'s \(home ? "home" : "disk") to checkpoint \(checkpoint). Boot it with `workspaces run \(vm)`.")
     }
 }
 
@@ -205,7 +205,9 @@ struct WorkspacesList: ParsableCommand {
         // Running details (uptime, window, tabs) keyed by full id.
         let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
         var running: [String: [String: Any]] = [:]
-        for vm in vms { if let id = vm["id"] as? String { running[id] = vm } }
+        // /profiles names a workspace by its uppercase UUID, /vms by the VM's
+        // lowercase id: matched case-insensitively.
+        for vm in vms { if let id = vm["id"] as? String { running[id.lowercased()] = vm } }
 
         print(pad("WORKSPACE ID", 14) + pad("NAME", 22) + pad("TOOL", 9)
               + pad("AUTH", 14) + pad("STATE", 11) + pad("UP", 8) + "WINDOW")
@@ -217,7 +219,7 @@ struct WorkspacesList: ParsableCommand {
             let tool = w["tool"] as? String ?? ""
             let auth = w["authMode"] as? String ?? ""
             let state = w["state"] as? String ?? "off"
-            let vm = running[id]
+            let vm = running[id.lowercased()]
             let live = (state == "running" || state == "booting")
             let up  = live ? formatUptime(vm?["uptimeSeconds"] as? Int ?? 0) : "-"
             let win = live ? ((vm?["attached"] as? Bool ?? false) ? "attached" : "detached") : "-"
@@ -230,9 +232,9 @@ struct WorkspacesList: ParsableCommand {
                 let active = (t["active"] as? Bool ?? false) ? " *" : ""
                 print("    └─ \(title) (\(idx))\(active)")
             }
-            // Running docker containers, if any (attach with `vm attach <id> containers:<name>`).
+            // Running docker containers, if any (attach with `workspaces attach <id> containers:<name>`).
             if live {
-                for c in runningContainers(client, vmID: id) {
+                for c in runningContainers(client, vmID: (vm?["id"] as? String) ?? id) {
                     print("    🐳 \(c.name)  \(c.image)  \(c.status)")
                 }
             }
@@ -258,39 +260,34 @@ struct WorkspacesFsck: ParsableCommand {
     @Flag(name: .long, help: "Check the home image instead of the system disk.")
     var home = false
 
-    // partial: the images are this daemon's (<state>/vms/<id>/disk.raw, home.img)
+    // partial: the daemon checks its own images (POST /vms/<id>/fsck, under the VM's repair mark); the CLI opens none
     // @port WorkspacesFsck.run() h=d94c41ff455c0338 @dd6d27ed
     func run() throws {
-        // This daemon's workspaces (the daemon sets the same root at start).
-        let store = ProfileStore(rootDir: URL(fileURLWithPath: DaemonConfig.fromEnvironment().stateDir + "/profiles", isDirectory: true))
-        let needle = workspace.lowercased()
-        guard let profile = store.loadAll().first(where: {
-            $0.name.lowercased() == needle || $0.id.uuidString.lowercased() == needle
-                || $0.id.uuidString.lowercased().hasPrefix(needle)
-        }) else {
+        // The daemon checks its own images, under the VM's repair mark (no
+        // image is opened here): this user's, never another daemon's.
+        let client = RemoteMenuClient()
+        try client.ensureAgentRunning()
+        let probe = try client.request("GET", "/profiles/\(ControlClient.encodeSegment(workspace))")
+        guard probe.status == 200, let id = probe.json["id"] as? String else {
             throw ValidationError("No workspace named or id'd '\(workspace)'.")
         }
-        // Never touch an image a live VM has open — that corrupts it.
-        let client = RemoteMenuClient()
-        if client.isAgentRunning(),
-           let resp = try? client.request("GET", "/profiles/\(ControlClient.encodeSegment(profile.id.uuidString))"),
-           resp.json["running"] as? Bool == true {
-            throw ValidationError("'\(profile.name)' is running — stop it first (`vm kill \(profile.name)`).")
+        let name = probe.json["name"] as? String ?? workspace
+        print("\(repair ? "Repairing" : "Checking") \(home ? "home" : "system disk") of '\(name)' …")
+        let resp = try client.request("POST", "/vms/\(ControlClient.encodeSegment(id.lowercased()))/fsck",
+                                      body: ["repair": repair, "home": home])
+        if resp.status == 404, resp.json["error"] as? String == "VM not found" {
+            throw ValidationError("No \(home ? "home" : "system disk") image for '\(name)' (it hasn't run on this server).")
         }
-        // This daemon's layout: <state>/vms/<id>/disk.raw and home.img.
-        let vmDir = DaemonConfig.fromEnvironment().stateDir + "/vms/" + profile.id.uuidString.lowercased()
-        let url = URL(fileURLWithPath: vmDir + (home ? "/home.img" : "/disk.raw"))
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw ValidationError("No \(home ? "home" : "system disk") image at \(url.path)")
+        guard resp.status == 200 else {
+            throw ValidationError(resp.json["error"] as? String ?? "fsck failed (HTTP \(resp.status)).")
         }
-        print("\(repair ? "Repairing" : "Checking") \(home ? "home" : "system disk") of '\(profile.name)' …")
-        let result = try Ext4Fsck.check(imagePath: url.path, autoFix: repair)
-        print(result.output)
-        print(result.summary)
-        if !repair && result.status != 0 {
+        let status = resp.json["status"] as? Int ?? 8
+        print(resp.json["output"] as? String ?? "")
+        print(resp.json["summary"] as? String ?? "")
+        if !repair && status != 0 {
             print("\nRe-run with --repair to fix what can be fixed here.")
         }
-        if result.status == 4 { throw ExitCode(4) }
+        if status == 4 { throw ExitCode(4) }
     }
 }
 
@@ -344,7 +341,7 @@ struct ProfilesDescribe: ParsableCommand {
         // the old `vm describe` showed) — pulled from the running-VM listing.
         if v["running"] as? Bool == true {
             let vms = (try? client.request("GET", "/vms").json["vms"] as? [[String: Any]]) ?? []
-            if let vm = vms.first(where: { ($0["id"] as? String) == (v["id"] as? String) }) {
+            if let vm = vms.first(where: { ($0["id"] as? String)?.lowercased() == (v["id"] as? String)?.lowercased() }) {
                 print("  ── runtime ──")
                 row("state", vm["state"] as? String)
                 row("window", (vm["attached"] as? Bool ?? false) ? "attached" : "detached")
@@ -375,7 +372,7 @@ struct ProfilesDescribe: ParsableCommand {
                 if !containers.isEmpty {
                     print("  containers:")
                     for c in containers {
-                        print("    🐳 \(c.name)  \(c.image)  \(c.status)   (attach: vm attach \(v["shortId"] as? String ?? "") containers:\(c.name) -- bash)")
+                        print("    🐳 \(c.name)  \(c.image)  \(c.status)   (attach: workspaces attach \(v["shortId"] as? String ?? "") containers:\(c.name) -- bash)")
                     }
                 }
                 let target = vm["id"] as? String ?? workspace
@@ -456,7 +453,7 @@ struct WorkspacesCreate: ParsableCommand {
     @Option(name: .long, help: "Full profile JSON document: a file path, or - for stdin.")
     var fromJson: String?
 
-    // partial: --api-key also from stdin (-) or $BROMURE_AC_API_KEY, with a warning when on the command line (a shared server)
+    // partial: --api-key also from stdin (-), or $BROMURE_AC_API_KEY for a token workspace whose document has none; a warning when it is on the command line (a shared server)
     // @port WorkspacesCreate.run() h=880a2ac8163f579a @dd6d27ed
     func run() throws {
         let client = RemoteMenuClient()
@@ -471,9 +468,17 @@ struct WorkspacesCreate: ParsableCommand {
             body["authMode"] = auth
         }
         // A key on the command line is in /proc/<pid>/cmdline, which other
-        // users of a shared server can read: '-' takes it from stdin, and
-        // $BROMURE_AC_API_KEY is read when the flag is absent (as `vm run`).
-        let key = VMRunAPIKey.resolve(flag: apiKey, environment: ProcessInfo.processInfo.environment) {
+        // users of a shared server can read: '-' takes it from stdin. Absent
+        // the flag, $BROMURE_AC_API_KEY stands in for it only where macOS's
+        // flag would apply: a token workspace whose document has no key.
+        if apiKey == "-", fromJson == "-" {
+            throw ValidationError("--from-json - and --api-key - both read stdin: pass one of them as a file or a value.")
+        }
+        var env = ProcessInfo.processInfo.environment
+        if apiKey == nil, (body["authMode"] as? String != "token" || body["apiKey"] != nil) {
+            env[VMRunAPIKey.environmentVariable] = nil
+        }
+        let key = VMRunAPIKey.resolve(flag: apiKey, environment: env) {
             String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)
         }
         if key.onCommandLine { FileHandle.standardError.write(Data((VMRunAPIKey.argvWarning + "\n").utf8)) }
@@ -608,7 +613,7 @@ struct WorkspacesReboot: ParsableCommand {
 struct WorkspacePorts: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ports",
-        abstract: "Show a running workspace's listening ports (also `vm <workspace> -L`).",
+        abstract: "Show a running workspace's listening ports (also `workspaces <workspace> -L`).",
         discussion: """
         Queries the guest live with `ss` (root, so process names resolve for every
         service — netstat/lsof aren't in default Ubuntu). Loopback-bound ports are
@@ -620,7 +625,7 @@ struct WorkspacePorts: ParsableCommand {
     var workspace: String?
 
     @Flag(name: [.customShort("L"), .long],
-          help: "List listening ports (the only mode; lets `vm <workspace> -L` read naturally).")
+          help: "List listening ports (the only mode; lets `workspaces <workspace> -L` read naturally).")
     var listening = false
 
     // @port WorkspacePorts.run() h=7e81e6bfefc947e6 @dd6d27ed
@@ -639,11 +644,11 @@ struct WorkspacePorts: ParsableCommand {
         let probe = try client.request("GET", "/profiles/\(seg)")
         guard probe.status == 200 else {
             throw ValidationError(
-                "Unknown workspace (or subcommand) '\(workspace)'. See `vm ls` or `vm --help`.")
+                "Unknown workspace (or subcommand) '\(workspace)'. See `workspaces ls` or `workspaces --help`.")
         }
         guard (probe.json["running"] as? Bool) == true else {
             throw ValidationError(
-                "Workspace '\(workspace)' isn't running — start it with `vm run \(workspace)`.")
+                "Workspace '\(workspace)' isn't running — start it with `workspaces run \(workspace)`.")
         }
         let resp = try client.request(
             "POST", "/vms/\(seg)/exec",
@@ -796,7 +801,7 @@ struct TraceList: ParsableCommand {
                   + pad(String(r["status"] as? Int ?? 0), 7)
                   + pad(kb(r["requestBytes"] as? Int ?? 0), 8)
                   + pad(kb(r["responseBytes"] as? Int ?? 0), 8)
-                  + pad("\(Int(r["latencyMs"] as? Double ?? 0))ms", 8)
+                  + pad("\(r["latencyMs"] as? Int ?? Int(r["latencyMs"] as? Double ?? 0))ms", 8)
                   + flags.joined(separator: " "))
         }
         if recs.count > limit { print("… \(recs.count - limit) more (use --limit).") }

@@ -939,6 +939,7 @@ public actor Daemon {
         case ("POST", "fusion"): return fusionRoute(rec)
         case ("GET", "checkpoints"): return checkpointsRoute(rec)
         case ("POST", "revert"): return revertRoute(rec, body)
+        case ("POST", "fsck"): return await fsckRoute(rec, body)
         default: return .error(405, "Method not allowed")
         }
     }
