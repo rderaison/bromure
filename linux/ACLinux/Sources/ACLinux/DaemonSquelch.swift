@@ -34,7 +34,8 @@ extension RequestReader {
     /// Squelch is on for this socket: a model provider's (as WSPromptGuard
     /// reads them), with the workspace's Squelch on (macOS:
     /// WSContentGuard.squelchApplies).
-    // @port-skip linux-only: WSContentGuard.squelchApplies over the Linux proxy's model-socket rule
+    // partial: the Linux proxy's model-socket rule
+    // @port WSContentGuard.static squelchApplies(host: String, profileID: UUID) h=7e12c4137a9e3264 @ca94b963
     static func squelchApplies(host: String, profileID: UUID, local: Bool) -> Bool {
         let h = host.lowercased()
         return TraceLevel.isAIHost(h) && !h.contains("huggingface.co")
@@ -46,7 +47,8 @@ extension RequestReader {
     /// per-message pump (a policy or rewrite is installed, so there is no
     /// guard): client text is trimmed first, then `then` runs on it (macOS:
     /// WSContentGuard.squelchingTransform).
-    // @port-skip linux-only: WSContentGuard.squelchingTransform, over SquelchSettings
+    // partial: over SquelchSettings
+    // @port WSContentGuard.static squelchingTransform(then: ((String)->OpenShellWebSocket.MessageTransform)?, profileID: UUID, conversation: String?, ledger: SquelchLedger) h=ef491d5df3f79cce @ca94b963
     static func squelchingTransform(then: ((String) -> OpenShellWebSocket.MessageTransform)?, profileID: UUID,
                                     conversation: String?) -> (String) -> OpenShellWebSocket.MessageTransform {
         { text in

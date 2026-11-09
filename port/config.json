@@ -1124,6 +1124,58 @@
     {
       "id": "ACAppDelegate.hostIdleSeconds()",
       "reason": "no local keyboard or mouse on a server (IOKit HID idle): it is always unattended (LinuxSessionHost.unattendedIdleSeconds, in reportPushTransition)"
+    },
+    {
+      "id": "HTTPMitmConnection.static detectPromptInjection(in: Conversation, policy: PromptInjectionPolicy)",
+      "reason": "macOS's forwarder to the shared ProxyPolicy (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "HTTPMitmConnection.static injectionNextStep(detector: String, instructionsWithheld: Bool)",
+      "reason": "macOS's forwarder to the shared ProxyPolicy (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "HTTPMitmConnection.static recordPromptInjection(_: PromptInjectionFlag, outcome: String, host: String, profileID: UUID)",
+      "reason": "macOS's forwarder to the shared ProxyPolicy (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static blockEvent(_: PromptInjectionFlag, requestType: String?)",
+      "reason": "macOS's forwarder to the shared WSMessages (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static isSpace(_: UInt8)",
+      "reason": "macOS's forwarder to the shared WSMessages (isSpace) (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static sseData(_: Data)",
+      "reason": "macOS's forwarder to the shared WSServerRestorer (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static messageType(_: Data)",
+      "reason": "macOS's forwarder to the shared WSMessages (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static conversationBody(_: Data, type: String?)",
+      "reason": "macOS's forwarder to the shared WSMessages (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSContentGuard.static carriesConversation(_: Data)",
+      "reason": "macOS's forwarder to the shared WSMessages (the Linux proxy calls it directly)"
+    },
+    {
+      "id": "WSTransformRelay.Box.set(_: T)",
+      "reason": "macOS's socket relay plumbing (poll loops over file descriptors); the Linux proxy relays on NIO (WSClientFilter, WSServerSide)"
+    },
+    {
+      "id": "WSTransformRelay.Box.take()",
+      "reason": "macOS's socket relay plumbing (poll loops over file descriptors); the Linux proxy relays on NIO (WSClientFilter, WSServerSide)"
+    },
+    {
+      "id": "WSTransformRelay.static run(client: Endpoint, upstream: Endpoint, guard: WSContentGuard, onClientBytes: @escaping@Sendable(Data)->Void, onUpstreamBytes: @escaping@Sendable(Data)->Void, onClientOut: @escaping@Sendable(Data)->Void)",
+      "reason": "macOS's socket relay plumbing (poll loops over file descriptors); the Linux proxy relays on NIO (WSClientFilter, WSServerSide)"
+    },
+    {
+      "id": "WSTransformRelay.static flush(_: inoutData, to: Endpoint)",
+      "reason": "macOS's socket relay plumbing (poll loops over file descriptors); the Linux proxy relays on NIO (WSClientFilter, WSServerSide)"
     }
   ],
   "skipInheriting": [

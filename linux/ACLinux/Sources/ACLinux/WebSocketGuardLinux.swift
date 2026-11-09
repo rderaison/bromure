@@ -28,7 +28,8 @@ final class WSPromptGuard: @unchecked Sendable {
     let conversation: String?
     private let vaultBox = NIOLockedValueBox<PIIVault?>(nil)
 
-    // @port-skip linux-only: see WSPromptGuard
+    // partial: the vault opened at first use (`vault`), the policies read from the proxy when used
+    // @port WSContentGuard.init(host: String, path: String, profileID: UUID, vault: PIIVault, piiPolicy: @escaping@Sendable()->PIIPolicy?, injectionPolicy: @escaping@Sendable()->PromptInjectionPolicy?) h=07b25e3fa8b48463 @ca94b963
     init(proxy: MitmProxy, profileID: UUID, host: String, conversation: String? = nil) {
         self.proxy = proxy
         self.profileID = profileID
@@ -52,7 +53,9 @@ final class WSPromptGuard: @unchecked Sendable {
     /// (compressed) pipe: not a model provider's (WSContentGuard
     /// .isModelSocket), or none of Squelch, prompt injection or PII
     /// protection on.
-    // @port-skip linux-only: WSContentGuard.make
+    // partial: isModelSocket's rule inline; nil also when none of Squelch, prompt injection or PII is on
+    // @port WSContentGuard.static make(host: String, path: String, profileID: UUID, conversation: String?) h=a1a63b41db12b434 @ca94b963
+    // @port WSContentGuard.static isModelSocket(host: String, profileID: UUID) h=bb587db4c24e9a39 @ca94b963
     static func make(proxy: MitmProxy, profileID: UUID, host: String, local: Bool,
                      conversation: String? = nil) -> WSPromptGuard? {
         let h = host.lowercased()
@@ -86,7 +89,7 @@ final class WSPromptGuard: @unchecked Sendable {
          restoresReplies ? "pii" : nil].compactMap { $0 }
     }
 
-    // @port-skip linux-only: WSContentGuard.client
+    // @port WSContentGuard.client(_: Data) h=997bea6ecc9bf0a1 @ca94b963
     func client(_ payload: Data) async -> Verdict {
         guard payload.first(where: { !WSMessages.isSpace($0) }) == UInt8(ascii: "{") else { return .forward(nil) }
         let pi = proxy.promptInjectionPolicy(for: profileID).flatMap { $0.isActive ? $0 : nil }
@@ -216,7 +219,8 @@ final class WSClientFilter {
     }
 
     /// The guest's bytes, as they come (on the loop).
-    // @port-skip linux-only: see WSClientFilter
+    // partial: on NIO: the guest's frames reassembled and judged in order, its reads paused while too much is held
+    // @port WSTransformRelay.static clientToUpstream(client: Endpoint, upstream: Endpoint, guard: WSContentGuard, inject: InjectQueue, onChunk: (Data)->Void) h=8a3de3c0848a671e @ca94b963
     func feed(_ bytes: Data) {
         loop.preconditionInEventLoop()
         guard !failed else { return }
@@ -347,7 +351,9 @@ final class WSServerSide: @unchecked Sendable {
     /// The upstream's bytes in; what goes to the client out (the same bytes,
     /// injected events after a message), or nil for a broken stream (a
     /// continuation with no message under way, a new message inside one).
-    // @port-skip linux-only: see WSServerSide
+    // partial: the model's frames read and restored as they come on NIO (WSServerRestorer), the injected frames between messages
+    // @port WSContentGuard.server(_: Data) h=9b3577ca8807adf4 @ca94b963
+    // @port WSTransformRelay.static upstreamToClient(upstream: Endpoint, client: Endpoint, guard: WSContentGuard, inject: InjectQueue, onChunk: (Data)->Void, onOut: (Data)->Void) h=d042ab20170b3103 @ca94b963
     func feed(_ bytes: Data) -> Data? {
         if wholeMessages { return feedRestoring(bytes, restorer) }
         var out = Data()
@@ -419,7 +425,7 @@ final class WSServerSide: @unchecked Sendable {
     /// The upstream closed without a close frame: what the restorer holds
     /// goes to the client (macOS releases it at the close frame; a socket
     /// that just ends would drop it).
-    // @port-skip linux-only: see WSServerSide
+    // @port WSContentGuard.serverFinish() h=4863021cb7d6dd91 @ca94b963
     func finishAtClose() -> Data {
         guard let restorer, !passingThrough else { return Data() }
         return restorer.finish().reduce(Data()) { $0 + WSFrame.encode(opcode: WSFrame.text, payload: $1, masked: false) }
@@ -444,7 +450,7 @@ final class WSServerSide: @unchecked Sendable {
 
     /// A server event for the client (a refused turn's): now if no message
     /// is under way, else right after it.
-    // @port-skip linux-only: see WSServerSide
+    // @port WSTransformRelay.InjectQueue.push(_: Data) h=cce2b80315bb14b3 @ca94b963
     func inject(_ frame: Data) {
         pending.withLockedValue { $0.append(frame) }
         loop.execute {
@@ -454,7 +460,7 @@ final class WSServerSide: @unchecked Sendable {
         }
     }
 
-    // @port-skip linux-only: see WSServerSide
+    // @port WSTransformRelay.InjectQueue.drain() h=25366980ad1726c5 @ca94b963
     private func takeInjects() -> Data {
         pending.withLockedValue { p in defer { p.removeAll() }; return p.reduce(Data(), +) }
     }
