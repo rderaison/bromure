@@ -3205,7 +3205,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         let controller = controller, workspaceID = workspaceID
         if background {
             await controller.bulkPriority.waitForQuiet()
-            return try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+            // Brought on stage while it waited: the user's read now.
+            if background {
+                return try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+            }
         }
         return await controller.bulkPriority.foreground {
             try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
