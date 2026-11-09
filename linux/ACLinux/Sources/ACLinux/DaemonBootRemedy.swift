@@ -94,14 +94,15 @@ extension Daemon {
     // @port ACAppDelegate.performBootRemedy(_: Profile.ID, _: BootRemedy) h=9e99c78078ac6079 @4237c02e
     func performBootRemedy(_ id: String, _ remedy: BootRemedy) async {
         guard live[id] != nil, pendingBootRemedies[id] == nil, let rec = registry.find(id) else { return }
-        pendingBootRemedies[id] = remedy
-        if remedy == .repairDisk { bootRepairAttempted.insert(id) }
         // The disk held from before the stop until the remedy is done (macOS:
         // whileHoldingDisk): a start in between -- the record says stopped as
         // soon as the kill's teardown is done -- is refused as for a repair.
+        // Held already (a repair under way): no remedy, nothing left pending.
         guard repairMarks.insert(id) else { return }
         var marked = true
         defer { if marked { repairMarks.remove(id) } }
+        pendingBootRemedies[id] = remedy
+        if remedy == .repairDisk { bootRepairAttempted.insert(id) }
         rebooting.insert(id)
         defer { rebooting.remove(id); stopsDuringReboot.remove(id); pendingBootRemedies[id] = nil }
         try? FileManager.default.removeItem(atPath: snapshotDir(id))
