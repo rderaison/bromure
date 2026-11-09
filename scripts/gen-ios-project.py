@@ -42,7 +42,9 @@ NSE_SHARED = [
 ]
 
 # (name, repo url, requirement kind, requirement value) — kept in lockstep with
-# Package.swift.
+# Package.swift. Release archives build only the revisions pinned in the
+# project's committed Package.resolved: after changing one of these, re-pin
+# (see scripts/verify-ios-packages.py) and commit the reviewed result.
 PACKAGES = [
     ("swift-crypto", "https://github.com/apple/swift-crypto.git", "upToNextMajorVersion", "3.7.0"),
     ("swift-nio", "https://github.com/apple/swift-nio.git", "upToNextMajorVersion", "2.65.0"),
