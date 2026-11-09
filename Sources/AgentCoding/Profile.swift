@@ -5011,7 +5011,7 @@ public final class ProfileStore {
             name = template.gitUserName.trimmingCharacters(in: ws)
             email = template.gitUserEmail.trimmingCharacters(in: ws)
         }
-        #if os(macOS)
+        #if os(macOS) || BROMURE_LINUX
         let imported = importedGitconfig.flatMap { try? GitConfigParse.parse($0) }?.identity
         #else
         let imported: (name: String?, email: String?)? = nil   // the iOS client never seeds a guest home

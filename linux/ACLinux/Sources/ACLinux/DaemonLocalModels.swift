@@ -26,6 +26,9 @@ extension Daemon {
     /// a live refresh stage it.
     // @port-skip linux-only: launch's projection step (macOS: inline in ACAppDelegate.launch and pushLiveCredentials)
     func stagedProfile(_ raw: Profile) async -> Profile {
+        // Its MCP servers' OAuth tokens first (macOS: populateMCPBearerTokens
+        // before the models overlay, at launch, live edit and reboot).
+        let raw = await Self.populateMCPBearerTokens(raw)
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {
             raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)

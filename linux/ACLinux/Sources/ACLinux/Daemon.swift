@@ -1313,8 +1313,15 @@ public actor Daemon {
         WorkspaceQuarantine.shared.set(false, for: pid)
         mitm?.sshAgent.clearImportedKeyApprovals(for: pid)
         mitm?.sshAgent.clearHostAgentKeys(for: pid)
-        // Its ssh-agent: the imported keys exist only in that process
+        // Its own key out of its agent first, best effort (macOS:
+        // cleanupSessionRegistrations' removeKeyFromHostAgent); then the
+        // agent itself: the imported keys exist only in that process
         // (macOS: MitmEngine.unregister's terminateSSHAgent).
+        if mitm != nil, let profile = ProfileStore().loadAll().first(where: { $0.id == pid }) {
+            for key in Self.loadAgentKeys(for: profile, store: ProfileStore()) {
+                MitmProxy.removeKeyFromHostAgent(publicKey: key.publicKey, profileID: pid)
+            }
+        }
         mitm?.terminateSSHAgent(for: pid)
         // The attestor's channel goes with the session (macOS: detach at teardown).
         BinaryIdentityService.shared.dropBridge(pid)?.stop()

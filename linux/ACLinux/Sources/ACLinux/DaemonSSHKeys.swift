@@ -154,6 +154,21 @@ extension MitmProxy {
         }
     }
 
+    /// Ask a workspace's agent to drop its own key (SSH_AGENTC_REMOVE_IDENTITY)
+    /// before it goes: best effort, as macOS does; terminating the agent is
+    /// what guarantees the key is gone.
+    // @port ACAppDelegate.removeKeyFromHostAgent(publicKey: Data, profileID: UUID) h=0d8a0944bfd349b5 @4bd8405e
+    static func removeKeyFromHostAgent(publicKey: Data, profileID: UUID) {
+        guard let host = HostAgentClient.client(for: profileID) else { return }
+        let blob = OpenSSHKeyFormat.ed25519PublicBlob(publicKey: publicKey)
+        // SSH_AGENTC_REMOVE_IDENTITY = 18; payload = ssh-string(blob).
+        var msg = Data([18])
+        var len = UInt32(blob.count).bigEndian
+        msg.append(Data(bytes: &len, count: 4))
+        msg.append(blob)
+        _ = host.request(msg)
+    }
+
     /// Kill one workspace's agent — its keys exist only in that process,
     /// so this is what makes them unreachable at session end.
     // @port MitmEngine.terminateSSHAgent(for: UUID) h=2aea26d842f5ee90 @79b2d8c0

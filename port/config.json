@@ -56,6 +56,7 @@
     "Sources/AgentCoding/FatClientTypes.swift",
     "Sources/AgentCoding/FirewallRuleActions.swift",
     "Sources/AgentCoding/FolderUpload.swift",
+    "Sources/AgentCoding/GitConfigParse.swift",
     "Sources/AgentCoding/GuestAgentConfigs.swift",
     "Sources/AgentCoding/GuestCommandEncoding.swift",
     "Sources/AgentCoding/GuestEnv.swift",
@@ -979,6 +980,18 @@
     {
       "id": "InteractiveExec.static resizePayload(cols: Int, rows: Int)",
       "reason": "Linux's InteractiveExec calls the shared PTYFrame directly"
+    },
+    {
+      "id": "ACAppDelegate.static openGuestRelayedURL(_: URL, workspace: String?)",
+      "reason": "screen-only: a macOS server opens a guest's page on its own screen (no relay to a fat client); a headless server has none (LinuxSignInHost.guestOpenedURL logs it; sign-in pages go to the client)"
+    },
+    {
+      "id": "ACAppDelegate.static askBeforeOpeningGuestURL(_: URL, workspace: String?)",
+      "reason": "screen-only: the open-this-page sheet on the server's screen"
+    },
+    {
+      "id": "ACAppDelegate.static consentGrantControls(_: ConsentBroker, profileID: UUID)",
+      "reason": "screen-only: the profile editor window's consent-grant controls (no route serves them to a fat client on macOS either)"
     }
   ],
   "skipInheriting": [

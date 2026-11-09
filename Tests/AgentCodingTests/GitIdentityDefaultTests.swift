@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// The guest ~/.gitconfig identity: a workspace with no identity anywhere
 /// still commits, under a generic agent identity — never a real person's.
