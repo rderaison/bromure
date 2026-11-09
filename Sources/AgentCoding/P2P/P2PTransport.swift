@@ -3,6 +3,36 @@ import Foundation
 import Darwin
 #endif
 
+/// The socket types as socket() and addrinfo take them (Int32 constants on
+/// Darwin, an enum in Glibc).
+#if canImport(Darwin)
+let p2pSockStream = SOCK_STREAM, p2pSockDgram = SOCK_DGRAM
+#else
+let p2pSockStream = Int32(SOCK_STREAM.rawValue), p2pSockDgram = Int32(SOCK_DGRAM.rawValue)
+#endif
+
+/// The idle time before the first keepalive probe (Darwin's TCP_KEEPALIVE;
+/// Linux calls it TCP_KEEPIDLE): seconds, both.
+#if canImport(Darwin)
+private let tcpKeepIdle = TCP_KEEPALIVE
+#else
+private let tcpKeepIdle = TCP_KEEPIDLE
+#endif
+
+/// Drop a connection whose retransmits have failed for `secs` (Darwin's
+/// TCP_RXT_CONNDROPTIME, seconds; Linux's TCP_USER_TIMEOUT, milliseconds).
+#if canImport(Darwin)
+private func setRetransmitDropTime(_ fd: Int32, _ secs: Int32) {
+    var rxt = secs
+    setsockopt(fd, Int32(IPPROTO_TCP), TCP_RXT_CONNDROPTIME, &rxt, socklen_t(MemoryLayout<Int32>.size))
+}
+#else
+private func setRetransmitDropTime(_ fd: Int32, _ secs: Int32) {
+    var ms = UInt32(max(0, secs)) * 1000
+    setsockopt(fd, Int32(IPPROTO_TCP), TCP_USER_TIMEOUT, &ms, socklen_t(MemoryLayout<UInt32>.size))
+}
+#endif
+
 // MARK: - Socket tuning (interactive links)
 
 /// TCP options for the fat-client's latency-sensitive sockets. Disables Nagle
@@ -23,7 +53,7 @@ enum SocketTuning {
         var idle: Int32 = 15   // Darwin TCP_KEEPALIVE: idle seconds before first probe
         var intvl: Int32 = 5   // seconds between probes
         var cnt: Int32 = 3     // drop after this many unanswered probes (~30s)
-        setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPALIVE, &idle, sz)
+        setsockopt(fd, Int32(IPPROTO_TCP), tcpKeepIdle, &idle, sz)
         setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPINTVL, &intvl, sz)
         setsockopt(fd, Int32(IPPROTO_TCP), TCP_KEEPCNT, &cnt, sz)
     }
@@ -56,8 +86,7 @@ enum SocketTuning {
         guard fd >= 0 else { return }
         var tv = timeval(tv_sec: sndSecs, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var rxt = rxtSecs
-        setsockopt(fd, Int32(IPPROTO_TCP), TCP_RXT_CONNDROPTIME, &rxt, socklen_t(MemoryLayout<Int32>.size))
+        setRetransmitDropTime(fd, rxtSecs)
     }
 }
 
@@ -73,7 +102,7 @@ enum P2PTCP {
         var hints = addrinfo()
         hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
+        hints.ai_socktype = p2pSockStream
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(ip, String(port), &hints, &res) == 0, let info = res else { return nil }
         defer { freeaddrinfo(res) }
@@ -133,7 +162,7 @@ enum P2PTCP {
     static func resolveAll(_ host: String) -> [String] {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
+        hints.ai_socktype = p2pSockStream
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, nil, &hints, &res) == 0 else { return [] }
         defer { freeaddrinfo(res) }

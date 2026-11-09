@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Network)
 import Network
+#endif
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -167,7 +169,9 @@ final class P2PBroker: @unchecked Sendable {
     private var portMapTask: Task<Void, Never>?
     /// Network-path monitor (see startNetworkMonitor) + the last path signature,
     /// so a re-fire during a transition isn't mistaken for a new change.
+#if canImport(Network)
     private var pathMonitor: NWPathMonitor?
+#endif
     private var lastPathSignature: String = ""
     /// When peer paths were last dropped for a network change: a channel
     /// coming back right after (the recycle that change caused) isn't a
@@ -759,6 +763,7 @@ final class P2PBroker: @unchecked Sendable {
     /// app to reconnect — so a live session re-establishes in seconds instead of
     /// waiting out a dead socket's TCP timeout. Idempotent; started on the first
     /// peer dial and runs for the process lifetime (cheap).
+#if canImport(Network)
     func startNetworkMonitor() {
         lock.lock()
         guard pathMonitor == nil else { lock.unlock(); return }
@@ -807,6 +812,8 @@ final class P2PBroker: @unchecked Sendable {
         NotificationCenter.default.post(name: .bromureP2PPathChanged, object: nil)
     }
 
+#endif
+
     /// What identifies the network a path is on: its status, the real
     /// transport interfaces (no VPN/tunnel: they flap), and — so another
     /// Wi-Fi on the same en0 counts — the IPv4 address of the one the path
@@ -823,6 +830,7 @@ final class P2PBroker: @unchecked Sendable {
                 Set(own).sorted().joined(separator: ",")].joined(separator: "|")
     }
 
+#if canImport(Network)
     /// The IPv4 addresses on these interfaces ("en0=192.168.1.20").
     nonisolated static func ipv4Addresses(of names: Set<String>) -> [String] {
         var out: [String] = []
@@ -842,6 +850,8 @@ final class P2PBroker: @unchecked Sendable {
         }
         return out
     }
+
+#endif
 
     /// The signaling channel is back after an outage the path never showed
     /// (a captive portal opening up, a Wi-Fi that stopped carrying traffic):

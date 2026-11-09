@@ -5,11 +5,11 @@ import Darwin
 import Glibc
 #endif
 
-/// Interface flags as Int32: plain constants on Darwin, enum cases in Glibc.
+/// Interface flags as Int32 (Darwin's are Int32 already; Glibc's are Int).
 #if canImport(Darwin)
 private let ifUp = IFF_UP, ifLoopback = IFF_LOOPBACK
 #else
-private let ifUp = Int32(IFF_UP.rawValue), ifLoopback = Int32(IFF_LOOPBACK.rawValue)
+private let ifUp = Int32(IFF_UP), ifLoopback = Int32(IFF_LOOPBACK)
 #endif
 
 // MARK: - ICE-style connection candidate

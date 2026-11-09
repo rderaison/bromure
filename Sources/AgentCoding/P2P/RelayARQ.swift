@@ -575,7 +575,7 @@ final class ARQEndpoint: @unchecked Sendable {
     ///   - send: puts one ARQ datagram on the wire (UDP sendto / TURN send).
     init?(conv: UInt32, isInitiator: Bool, send: @escaping ([UInt8]) -> Void) {
         var sp: [Int32] = [0, 0]
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sp) == 0 else { return nil }
+        guard socketpair(AF_UNIX, p2pSockStream, 0, &sp) == 0 else { return nil }
         self.localFD = sp[0]
         self.pumpFD = sp[1]
         FDGuard.adopt(sp[0], "arq.localFD")

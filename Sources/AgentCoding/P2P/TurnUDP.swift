@@ -32,7 +32,7 @@ enum UDPSocket {
     static func connect(host: String, port: Int) -> Int32? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_DGRAM
+        hints.ai_socktype = p2pSockDgram
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { return nil }
         defer { freeaddrinfo(res) }

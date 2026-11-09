@@ -17,7 +17,7 @@ enum STUNUDP {
     static func binding(host: String, port: Int, deadline: Date) -> (ip: String, port: Int)? {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_DGRAM
+        hints.ai_socktype = p2pSockDgram
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0, let info = res else { return nil }
         defer { freeaddrinfo(res) }
@@ -73,7 +73,7 @@ enum STUNTCP {
         if tls { return TurnTLSTunnel.connect(host: host, port: port, timeout: timeout) }
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
+        hints.ai_socktype = p2pSockStream
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { return nil }
         defer { freeaddrinfo(res) }

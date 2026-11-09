@@ -201,7 +201,7 @@ func defaultGatewayV4() -> String? {
 /// then reports the address the kernel would source from — exactly the
 /// "internal client address" PCP wants in its request.
 func localAddress(towards gateway: String) -> String? {
-    let fd = socket(AF_INET, SOCK_DGRAM, 0)
+    let fd = socket(AF_INET, p2pSockDgram, 0)
     guard fd >= 0 else { return nil }
     defer { Darwin.close(fd) }
     var sa = sockaddr_in()
@@ -237,7 +237,7 @@ enum MapperUDP {
     /// can point it at a loopback fake mapper.
     static func exchange(gateway: String, request: [UInt8], port: Int = port,
                          attempts: Int = 3, firstTimeout: TimeInterval = 0.25) -> [UInt8]? {
-        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        let fd = socket(AF_INET, p2pSockDgram, 0)
         guard fd >= 0 else { return nil }
         defer { Darwin.close(fd) }
         var sa = sockaddr_in()
