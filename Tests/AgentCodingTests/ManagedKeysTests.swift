@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if canImport(ACLinux)
+@testable import ACLinux
+#else
 @testable import bromure_ac
+#endif
 
 /// The account's device keys are written into authorized_keys next to the
 /// user's own. Whatever the control plane sends, that write adds one key per
