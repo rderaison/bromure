@@ -69,6 +69,8 @@ final class RemoteHostController {
     /// without the link having gone quiet long enough to call it down): a
     /// calm indicator, content stays live.
     private(set) var linkSlow = false
+    /// The chat on screen reads first on the bulk lane (`BulkLanePriority`).
+    @ObservationIgnored let bulkPriority = BulkLanePriority()
     /// What the user sent that the host hasn't answered yet (an action, a
     /// typed prompt, a new session), since when — the window's "Sending…"
     /// cue. On a slow link (a train, a tunnel) they wait in the queue
@@ -3156,8 +3158,9 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     private let sessionID: UUID?
 
     init(controller: RemoteHostController, workspaceID: Profile.ID, windowIndex: Int? = nil,
-         sessionID: UUID? = nil, accent: Color) {
+         sessionID: UUID? = nil, accent: Color, background: Bool = false) {
         self.controller = controller
+        self.background = background
         self.workspaceID = workspaceID
         self.windowIndex = windowIndex
         self.sessionID = sessionID
@@ -3192,8 +3195,21 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         return tabs.activeTab
     }
 
+    /// Read for a chat nobody is looking at (a preload, a chat kept warm off
+    /// stage): it waits while the chat on screen reads (`BulkLanePriority`).
+    private(set) var background: Bool
+
+    func noteBackground(_ on: Bool) { background = on }
+
     func execGuest(_ command: String, timeout: Int) async -> String? {
-        try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+        let controller = controller, workspaceID = workspaceID
+        if background {
+            await controller.bulkPriority.waitForQuiet()
+            return try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+        }
+        return await controller.bulkPriority.foreground {
+            try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+        }
     }
 
     func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult {
@@ -3203,7 +3219,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
         // Unpacking a dropped folder can take a while on a big one.
         let timeout = (op["op"] as? String) == "untar" ? 600 : 30
-        return try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
+        let controller = controller, workspaceID = workspaceID
+        return await controller.bulkPriority.foreground {
+            try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
+        }
     }
 
     /// Working — unless the server says the session is asking the user
@@ -8494,6 +8513,12 @@ final class RemoteHostWindow: NSWindow {
     /// user is doing.
     private func preloadNextChat() {
         guard !preloading, controller.connected, !controller.linkSlow else { return }
+        // The chat on screen first: no preload while it reads or catches up,
+        // nor on a link too thin for one not to be in its way.
+        guard !controller.bulkPriority.foregroundBusy,
+              beautifiedModel.map({ !$0.loading && !$0.catchingUp }) ?? true,
+              BulkLanePriority.preloadAffordable(bytesPerSecond: controller.linkStats.snapshot().bytesPerSecond)
+        else { return }
         let warm = Set(warmChats.values.compactMap { $0.currentSession?()?.id })
         let running = Set(controller.listModel.profileRows.filter { $0.state == .running }.map(\.id))
         let list = controller.sessionStore.sessions.filter { running.contains($0.profileID) }
@@ -8502,7 +8527,7 @@ final class RemoteHostWindow: NSWindow {
               let w = s.windowIndex else { return }
         preloading = true
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: s.profileID, windowIndex: w,
-                                                sessionID: s.id, accent: .accentColor)
+                                                sessionID: s.id, accent: .accentColor, background: true)
         let activity = SessionHome.lastActivity(s)
         Task { [weak self] in
             await BeautifiedSessionModel.preloadHistory(provider: provider, agent: s.tool.rawValue, profileID: s.profileID)

@@ -68,9 +68,13 @@ protocol BeautifiedTranscriptProvider: AnyObject {
     /// The workspace's shared-folder mounts and how they read
     /// (`GuestSharePaths`). Empty: paths as logged.
     var guestPathNames: [String: String] { get }
+    /// The chat went off stage (`true`) or back on: a fat client's reads for
+    /// a chat nobody is looking at give way to the one on screen.
+    func noteBackground(_ on: Bool)
 }
 
 extension BeautifiedTranscriptProvider {
+    func noteBackground(_ on: Bool) {}
     func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult { .unsupported }
     var guestPathNames: [String: String] { [:] }
     var historyCacheKey: String? { nil }
@@ -1870,6 +1874,7 @@ final class BeautifiedSessionModel: ObservableObject {
     func setBackground(_ on: Bool) {
         guard background != on else { return }
         background = on
+        provider.noteBackground(on)
         guard !on else { return }
         // Back on stage: read now, not at the end of a slow sleep.
         pollTask?.cancel()

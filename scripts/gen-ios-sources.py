@@ -25,6 +25,7 @@ SHARED = [
     # Transport + protocol
     "FatClient.swift",
     "FatClientTypes.swift",
+    "BulkLanePriority.swift",  # the chat on screen reads before background ones (bulk lane)
     "FatClientLinkHealth.swift",  # adaptive timeouts + reconnect hysteresis + link simulation
     "FatClientSSHDial.swift",
     "FatClientNIOSSH.swift",
