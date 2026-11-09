@@ -1107,7 +1107,7 @@
     },
     {
       "id": "GuestLivenessStore.mark(_: Profile.ID, unresponsive: Bool, forceReboot: @escaping@MainActor()->Void)",
-      "reason": "screen-only: the banner's force-reboot action; on Linux DaemonLiveness sets the silent set each tick (LinuxSessionHost.unresponsive)"
+      "reason": "derived each tick: on Linux DaemonLiveness sets the silent set (LinuxSessionHost.unresponsive) that isUnresponsive reads; the banner's force-reboot action is the client's"
     },
     {
       "id": "GuestLivenessStore.forceReboot(of: Profile.ID)",
