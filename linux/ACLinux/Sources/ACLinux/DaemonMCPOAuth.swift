@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -57,6 +58,30 @@ enum MCPOAuthBroker {
         await checkEndpoint(url, policy)
     }
 
+    /// `work`'s result, or nil once `timeout` passes first: one continuation
+    /// resumed by whichever ends first (a resolver thread or a request that
+    /// ignores cancellation goes on alone, its late result to `late`).
+    // @port-skip linux-only: a bounded wait (macOS: a semaphore with a timeout)
+    static func firstOf<T: Sendable>(timeout: Duration, _ work: @escaping @Sendable () async -> T?,
+                                      late: (@Sendable (T) -> Void)? = nil) async -> T? {
+        let done = NIOLockedValueBox(false)
+        return await withCheckedContinuation { (c: CheckedContinuation<T?, Never>) in
+            Task.detached {
+                let r = await work()
+                let first = done.withLockedValue { d -> Bool in defer { d = true }; return !d }
+                if first { c.resume(returning: r) } else if let r { late?(r) }
+            }
+            Task.detached {
+                try? await Task.sleep(for: timeout)
+                let first = done.withLockedValue { d -> Bool in defer { d = true }; return !d }
+                if first { c.resume(returning: nil) }
+            }
+        }
+    }
+
+    /// This server's own addresses and LAN pools (tests swap it).
+    nonisolated(unsafe) static var hostOwn: @Sendable (OpenShellPolicy.IPAddress) -> Bool = { MitmProxy.isHostOwn($0) }
+
     /// Resolution off the cooperative pool, given up after `timeout`.
     nonisolated(unsafe) static var resolver: @Sendable (String, Int) -> [OpenShellPolicy.IPAddress] = { MitmProxy.resolve($0, port: $1) }
 
@@ -67,23 +92,27 @@ enum MCPOAuthBroker {
         guard let host = url.host, !host.isEmpty else { return "the token endpoint has no host" }
         let port = url.port ?? 443
         let resolve = resolver
-        let ips: [OpenShellPolicy.IPAddress] = await withTaskGroup(of: [OpenShellPolicy.IPAddress]?.self) { g in
-            g.addTask { await SecureDir.offPool { resolve(host, port) } }
-            g.addTask { try? await Task.sleep(for: timeout); return nil }
-            let first = await g.next() ?? nil
-            g.cancelAll()
-            return first ?? []
-        }
+        let ips = await firstOf(timeout: timeout, { await SecureDir.offPool { resolve(host, port) } }) ?? []
         guard !ips.isEmpty else { return "the token endpoint's host doesn't resolve (or took over \(timeout))" }
         for ip in ips {
             if OpenShellPolicy.isAlwaysBlocked(ip) || MitmProxy.v4(ip).map({ OpenShellPolicy.isAlwaysBlocked(.v4($0)) }) == true {
                 return "the token endpoint resolves to a loopback, link-local or unspecified address (\(ip))"
             }
         }
+        // What the MITM refuses every workspace on a multi-user server, public
+        // answers too: this server's own addresses (another user's service may
+        // listen there) and every account's LAN pool.
+        if let why = MitmProxy.destinationDenial(host: host, resolved: ips, hostAddresses: true, hostOwn: hostOwn) {
+            return "the token endpoint: \(why)"
+        }
+        // No binary identity here (the daemon's own request): neither check
+        // enforces the policy's binaries.
+        var egress = policy.egress
+        egress.enforceBinaries = false
         for ip in ips where OpenShellPolicy.isInternal(ip) {
             let v4: UInt32? = { if case .v4(let v) = ip { return v } else { return MitmProxy.v4(ip) } }()
-            if policy.egress.verdict(ip: v4, hostnames: [host], proto: .tcp, port: UInt16(clamping: port)) == .deny
-                || MitmProxy.openShellDenial(policy.egress.openShell, host: host, port: port, resolved: [ip],
+            if egress.verdict(ip: v4, hostnames: [host], proto: .tcp, port: UInt16(clamping: port)) == .deny
+                || MitmProxy.openShellDenial(egress.openShell, host: host, port: port, resolved: [ip],
                                             identity: nil, enforceBinaries: false) != nil {
                 return "the token endpoint resolves to a private address (\(ip)) the workspace's egress policy doesn't allow"
             }
@@ -147,43 +176,55 @@ extension Daemon {
     /// refreshed first when it expires within a minute (the stale one kept
     /// when the refresh fails or takes over 10 s). The refreshed state lives
     /// in the staged copy only, as on macOS.
-    // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=049de67ef199bfa8 @4bd8405e
-    static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false) async -> Profile {
+    // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=11cb4a0e133dab98 @4237c02e
+    static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false,
+                                        keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) -> Void)? = nil) async -> Profile {
         var profile = profile
         let policy = MCPOAuthBroker.EndpointPolicy(multiUser: multiUser, egress: profile.resolvedEgressPolicy)
         for i in profile.mcpServers.indices {
             guard profile.mcpServers[i].enabled,
                   profile.mcpServers[i].transport == .http,
-                  var oauth = profile.mcpServers[i].oauthState else { continue }
+                  let oauth = profile.mcpServers[i].oauthState else { continue }
             guard !oauth.accessToken.isEmpty else { continue }
+            var use = oauth
             if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60, oauth.refreshToken != nil {
-                let current = oauth, name = profile.mcpServers[i].name, ws = profile.name
-                oauth = await withTaskGroup(of: MCPOAuthState?.self) { g in
-                    g.addTask {
-                        do { return try await MCPOAuthBroker.refresh(state: current, policy: policy) }
-                        catch {
-                            // Said, never silent (no token in the message).
-                            FileHandle.standardError.write(Data(
-                                "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh failed, the old token kept: \(error)\n".utf8))
-                            return nil
-                        }
-                    }
-                    g.addTask {
-                        try? await Task.sleep(for: .seconds(10))
-                        if !Task.isCancelled {
-                            FileHandle.standardError.write(Data(
-                                "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh took over 10 s, the old token kept\n".utf8))
-                        }
+                let old = oauth, name = profile.mcpServers[i].name, ws = profile.name
+                let serverID = profile.mcpServers[i].id, profileID = profile.id
+                // The refreshed state is saved (macOS: persistRefreshedMCPOAuth),
+                // even one that comes after this boot stopped waiting: it spent
+                // the stored refresh token on a rotating server.
+                let refreshed = await MCPOAuthBroker.firstOf(timeout: .seconds(10), { () async -> MCPOAuthState? in
+                    do { return try await MCPOAuthBroker.refresh(state: old, policy: policy) }
+                    catch {
+                        // Said, never silent (no token in the message).
+                        FileHandle.standardError.write(Data(
+                            "bromure-ac daemon: '\(ws)': MCP server '\(name)': token refresh failed, the old token kept: \(error)\n".utf8))
                         return nil
                     }
-                    let first = await g.next() ?? nil
-                    g.cancelAll()
-                    return first ?? current
+                }, late: { late in keep?(late, old, serverID, profileID) })
+                if let refreshed {
+                    use = refreshed
+                    profile.mcpServers[i].oauthState = refreshed
+                    keep?(refreshed, old, serverID, profileID)
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "bromure-ac daemon: '\(ws)': MCP server '\(name)': no refreshed token within 10 s, the old one kept\n".utf8))
                 }
-                profile.mcpServers[i].oauthState = oauth
             }
-            profile.mcpServers[i].bearerToken = oauth.accessToken
+            profile.mcpServers[i].bearerToken = use.accessToken
         }
         return profile
+    }
+
+    /// A refreshed MCP OAuth state kept in the saved workspace: only that
+    /// server's, only while the stored state is still the one refreshed from
+    /// (the shared ProfileStore.persistRefreshedMCPOAuth). The daemon keeps
+    /// no in-memory copy a later save writes back whole.
+    // partial: the stored workspace only (no app-side copies on a server)
+    // @port ACAppDelegate.keepRefreshedMCPOAuth(_: MCPOAuthState, from: MCPOAuthState, serverID: UUID, profileID: Profile.ID) h=49a7019d29c33622 @4237c02e
+    static func keepRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState, serverID: UUID,
+                                      profileID: UUID, store: ProfileStore) {
+        do { try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID) }
+        catch { FileHandle.standardError.write(Data("bromure-ac daemon: MCP OAuth: couldn't save the refreshed token: \(error)\n".utf8)) }
     }
 }

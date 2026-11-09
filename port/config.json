@@ -992,6 +992,58 @@
     {
       "id": "ACAppDelegate.static consentGrantControls(_: ConsentBroker, profileID: UUID)",
       "reason": "screen-only: the profile editor window's consent-grant controls (no route serves them to a fat client on macOS either)"
+    },
+    {
+      "id": "MCPOAuthBroker.deinit",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.authorizeServer(url: String, existingState: MCPOAuthState?)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.startCallbackListener(preferredPort: UInt16?)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.tryBind(port: UInt16)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.waitForCallback(state: String)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.discoverMetadata(serverURL: URL)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.registerClient(metadata: AuthMetadata, redirectURI: String)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.authorize(metadata: AuthMetadata, client: ClientRegistration, redirectURI: String, port: UInt16)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.exchangeCode(_: String, metadata: AuthMetadata, client: ClientRegistration, codeVerifier: String, redirectURI: String, callbackPort: UInt16)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.static generateCodeVerifier()",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPOAuthBroker.static codeChallenge(for: String)",
+      "reason": "fat-client client side: the client's editor authorizes an MCP server (the user's decision (b)); the server keeps, refreshes and injects the tokens"
+    },
+    {
+      "id": "MCPRefreshBox.deliver(_: MCPOAuthState?)",
+      "reason": "Linux bounds the refresh with MCPOAuthBroker.firstOf (one continuation, a late result still kept)"
+    },
+    {
+      "id": "MCPRefreshBox.collect()",
+      "reason": "Linux bounds the refresh with MCPOAuthBroker.firstOf (one continuation, a late result still kept)"
     }
   ],
   "skipInheriting": [

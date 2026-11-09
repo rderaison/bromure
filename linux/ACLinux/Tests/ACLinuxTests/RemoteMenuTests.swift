@@ -59,14 +59,29 @@ struct RemoteMenuTests {
         let ok = try SecureDir.runtime(dir + "/rt/bromure-ac", create: true)
         close(ok)
         #expect((try FileManager.default.attributesOfItem(atPath: dir + "/rt")[.posixPermissions] as? Int) == 0o700)
-        // A parent of ours others can write (an earlier daemon's umask): made 0700, not refused.
+        // Ours, writable by others: refused (anything could have been planted).
         try FileManager.default.createDirectory(atPath: dir + "/open", withIntermediateDirectories: true)
         chmod(dir + "/open", 0o777)
-        close(try SecureDir.runtime(dir + "/open/bromure-ac", create: true))
-        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/open")[.posixPermissions] as? Int) == 0o700)
-        chmod(dir + "/open/bromure-ac", 0o775)
-        close(try SecureDir.runtime(dir + "/open/bromure-ac", create: false))
-        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/open/bromure-ac")[.posixPermissions] as? Int) == 0o700)
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/open/bromure-ac", create: true) }
+        // Ours, writable by its group only (an earlier daemon's 0002 umask): made
+        // 0700 when nothing in it was planted, its ssh-agents/ and vms/ checked too.
+        try FileManager.default.createDirectory(atPath: dir + "/grp/bromure-ac/vms/a1", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir + "/grp/bromure-ac/ssh-agents", withIntermediateDirectories: true)
+        try Data().write(to: URL(fileURLWithPath: dir + "/grp/bromure-ac/vms/a1/serial.log"))
+        chmod(dir + "/grp", 0o775); chmod(dir + "/grp/bromure-ac", 0o775)
+        close(try SecureDir.runtime(dir + "/grp/bromure-ac", create: false))
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp")[.posixPermissions] as? Int) == 0o700)
+        #expect((try FileManager.default.attributesOfItem(atPath: dir + "/grp/bromure-ac")[.posixPermissions] as? Int) == 0o700)
+        #expect(FileManager.default.fileExists(atPath: dir + "/grp/bromure-ac/vms/a1/serial.log"), "nothing wiped")
+        // A planted link (deep in vms/) in one its group could write: refused.
+        try FileManager.default.createSymbolicLink(atPath: dir + "/grp/bromure-ac/vms/a1/fc.sock", withDestinationPath: "/tmp/elsewhere")
+        chmod(dir + "/grp/bromure-ac", 0o770)
+        #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime(dir + "/grp/bromure-ac", create: false) }
+        // A planted entry of someone else's: refused (another uid stands in
+        // for the stranger, since this test can't make files owned by one).
+        let audited = try SecureDir.open(dir + "/grp", create: false)
+        defer { close(audited) }
+        #expect(throws: SecureDir.Untrusted.self) { try SecureDir.audit(audited, dir + "/grp", owner: getuid() &+ 1, depth: 0) }
         // One owned by someone else is refused: /tmp itself (root's).
         #expect(throws: SecureDir.Untrusted.self) { _ = try SecureDir.runtime("/tmp/bromure-ac-test-nonexistent", create: false) }
         // A link where the runtime dir should be.

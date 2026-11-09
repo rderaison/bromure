@@ -185,6 +185,57 @@ struct MCPOAuthTests {
         #expect(ep.requests.withLockedValue { $0 }.isEmpty, "nothing was sent")
     }
 
+    /// On a multi-user server the MITM's own refusals apply too, public
+    /// answers included: this server's addresses (another user's service may
+    /// listen there) and every account's LAN pool.
+    @Test func theServersOwnAddressesAreRefused() async throws {
+        let priorR = MCPOAuthBroker.resolver, priorH = MCPOAuthBroker.hostOwn
+        MCPOAuthBroker.resolver = { _, _ in [OpenShellPolicy.IPAddress("203.0.113.9")!] }
+        MCPOAuthBroker.hostOwn = { $0 == OpenShellPolicy.IPAddress("203.0.113.9")! }
+        defer { MCPOAuthBroker.resolver = priorR; MCPOAuthBroker.hostOwn = priorH }
+        let why = await MCPOAuthBroker.checkEndpoint(URL(string: "https://my-server.example/token")!, .init(multiUser: true, egress: .allowAll))
+        #expect(why?.contains("this server's own address") == true, "\(why ?? "allowed")")
+        MCPOAuthBroker.hostOwn = { _ in false }
+        #expect(await MCPOAuthBroker.checkEndpoint(URL(string: "https://my-server.example/token")!, .init(multiUser: true, egress: .allowAll)) == nil)
+    }
+
+    /// The caps bound the wait: a resolver that hangs is given up on time
+    /// (it ends on its own thread), and its late answer goes to `late`.
+    @Test func aHungResolverIsGivenUpOnTime() async throws {
+        let late = NIOLockedValueBox<Int?>(nil)
+        let start = Date()
+        let r = await MCPOAuthBroker.firstOf(timeout: .milliseconds(200), { () async -> Int? in
+            await SecureDir.offPool { Thread.sleep(forTimeInterval: 1.0); return 7 }
+        }, late: { v in late.withLockedValue { $0 = v } })
+        #expect(r == nil && Date().timeIntervalSince(start) < 0.8, "given up at 200 ms")
+        for _ in 0..<30 where late.withLockedValue({ $0 }) == nil { try await Task.sleep(for: .milliseconds(100)) }
+        #expect(late.withLockedValue { $0 } == 7, "the late answer handed on")
+        #expect(await MCPOAuthBroker.firstOf(timeout: .seconds(5), { () async -> Int? in 3 }) == 3)
+    }
+
+    /// A refreshed state is kept (the shared persistRefreshedMCPOAuth): only
+    /// that server's, only while the stored state is still the one refreshed.
+    @Test func aRefreshedTokenIsSaved() async throws { try await Self.onLoopback {
+        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"NEW","refresh_token":"ROTATED","expires_in":3600}"#)
+        defer { ep.stop() }
+        let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                accessToken: "OLD", refreshToken: "SPENT", expiresAt: Date().addingTimeInterval(20))
+        var p = Profile(name: "keep", tool: .claude, authMode: .token)
+        p.mcpServers = [Self.server("rotating", oauth: old)]
+        let kept = NIOLockedValueBox<[(MCPOAuthState, MCPOAuthState, UUID, UUID)]>([])
+        let out = await Daemon.populateMCPBearerTokens(p, keep: { n, o, s, pid in kept.withLockedValue { $0.append((n, o, s, pid)) } })
+        #expect(out.mcpServers[0].bearerToken == "NEW")
+        let k = try #require(kept.withLockedValue { $0 }.first)
+        #expect(k.0.refreshToken == "ROTATED" && k.1.refreshToken == "SPENT" && k.2 == p.mcpServers[0].id && k.3 == p.id)
+        // And the shared store writes it only over the state it came from.
+        var stored = p
+        #expect(ProfileStore.mergeRefreshedMCPOAuth(k.0, from: k.1, serverID: k.2, into: &stored))
+        #expect(stored.mcpServers[0].oauthState?.refreshToken == "ROTATED")
+        var reauthorized = p
+        reauthorized.mcpServers[0].oauthState?.refreshToken = "FROM-A-NEW-AUTHORIZATION"
+        #expect(!ProfileStore.mergeRefreshedMCPOAuth(k.0, from: k.1, serverID: k.2, into: &reauthorized), "a re-authorization wins")
+    } }
+
     /// A redirect from the token endpoint isn't followed.
     @Test func aRedirectIsNotFollowed() async throws { try await Self.onLoopback {
         let target = try TokenEndpoint(status: 200, body: #"{"access_token":"REDIRECTED"}"#)
