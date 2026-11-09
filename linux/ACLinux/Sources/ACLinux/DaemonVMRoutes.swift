@@ -41,9 +41,11 @@ extension Daemon {
         }
         // Cold, never from a saved state.
         try? FileManager.default.removeItem(atPath: snapshotDir(rec.id))
+        if await stoppedDuringReboot(rec.id) { return ControlResponse(409, ["ok": false, "error": "stopped during the reboot"]) }
         guard var now = registry.find(rec.id) else { return ControlResponse(409, ["ok": false, "error": "the VM is gone"]) }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
         let started = await start(now)
+        if await stoppedDuringReboot(rec.id) { return ControlResponse(409, ["ok": false, "error": "stopped during the reboot"]) }
         rebooting.remove(rec.id)
         let up = started.status < 300
         // A `--rm` workspace whose reboot didn't boot is over.
@@ -68,8 +70,12 @@ extension Daemon {
         if resolved == nil, profile.localEngineBaseURL == nil {
             return ControlResponse(409, ["ok": false, "error": .string("Unknown model '\(modelID)'. Try `model catalog`.")])
         }
-        profile.activeModelID = resolved?.id ?? modelID
-        do { try profileStore.update(profile) } catch {
+        let active = resolved?.id ?? modelID
+        do {
+            if let saved = try ProfileWrites.edit(profile.id, store: profileStore, { $0.activeModelID = active; return true }) {
+                profile = saved
+            } else { profile.activeModelID = active }
+        } catch {
             return ControlResponse(409, ["ok": false, "error": .string("couldn't save: \(error.localizedDescription)")])
         }
         let staged = await stagedProfile(profile)

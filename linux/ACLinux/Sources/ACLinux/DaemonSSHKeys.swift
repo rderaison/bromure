@@ -542,7 +542,10 @@ extension Daemon {
         let store = profileStore
         let dir = store.profileDirectory(for: prof)
         func saved(_ p: Profile) async -> ControlResponse {
-            do { _ = try store.update(p) } catch { return .error(500, "Couldn't save '\(p.name)': \(error)") }
+            // This route's field onto the stored copy as it is now.
+            do { _ = try ProfileWrites.edit(p.id, store: store) { $0.importedSSHKeys = p.importedSSHKeys; return true } } catch {
+                return .error(500, "Couldn't save '\(p.name)': \(error)")
+            }
             if let id = await runningVMID(of: p.id) { _ = scheduleLiveRefresh(id) }
             return ControlResponse(200, ["ok": true, "keys": Self.sshKeyRows(p)])
         }

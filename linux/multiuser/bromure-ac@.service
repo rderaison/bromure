@@ -29,7 +29,10 @@ StateDirectory=bromure-ac/%i
 StateDirectoryMode=0700
 RuntimeDirectory=bromure-ac/%i
 RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=restart
+# Kept until the host reboots (not just across a restart): it holds the
+# once-per-boot marker for workspaces set to boot at startup, which a
+# socket re-activation or an update's stop/start must not re-arm.
+RuntimeDirectoryPreserve=yes
 Environment=HOME=/var/lib/bromure-ac/%i
 Environment=XDG_STATE_HOME=/var/lib/bromure-ac/%i
 Environment=XDG_RUNTIME_DIR=/run/bromure-ac/%i

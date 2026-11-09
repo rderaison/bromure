@@ -81,14 +81,20 @@ extension Daemon {
     // @port ACAppDelegate.setSquelch(_: Profile.ID, _: Bool) h=95dbcd51ff8ff787 @2134fc7a
     @discardableResult
     func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
-        let store = profileStore
-        guard var p = store.loadAll().first(where: { $0.id == id }) else { return false }
-        guard p.squelch.enabled != on else { return true }
-        p.squelch.enabled = on
-        do { try store.update(p) } catch {
+        var changed = false
+        do {
+            let saved = try ProfileWrites.edit(id, store: profileStore) { p in
+                guard p.squelch.enabled != on else { return false }
+                p.squelch.enabled = on
+                changed = true
+                return true
+            }
+            guard saved != nil else { return false }
+        } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: squelch: couldn't save profile: \(error)\n".utf8))
             return false
         }
+        guard changed else { return true }
         Self.refreshSquelchSettings()
         return true
     }

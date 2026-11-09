@@ -112,7 +112,7 @@ extension Daemon {
                     LinuxSessionHost.shared?.readAgentToolCalls()
                     LinuxSessionHost.shared?.readGuestURLs()
                     // A guest going down for a reboot (its outbox marker).
-                    // Awaited, so a tick never starts while the last one runs.
+                    // Neither waits on a VM's end: ticks never pile up.
                     await me.readGuestRebootIntents()
                     // One powered off: its VM ended, as macOS's stops.
                     await me.endPoweredOffGuests()

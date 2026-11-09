@@ -58,17 +58,20 @@ enum MCPOAuthBroker {
         await endpointAddresses(url, policy)
     }
 
-    enum RefreshOutcome: Sendable { case refreshed(MCPOAuthState), failed }
+    /// A refresh's result; `savedFor`: the workspace its flight saved it in.
+    enum RefreshOutcome: Sendable { case refreshed(MCPOAuthState, savedFor: UUID), failed }
 
     /// The refreshes under way, one per server and refresh token.
     // @port-skip linux-only: single-flight refreshes (macOS refreshes in its one launch path)
     final class Flights: @unchecked Sendable {
         private let running = NIOLockedValueBox<[String: Task<RefreshOutcome, Never>]>([:])
+        /// Callers that joined one under way (tests).
+        let joined = NIOLockedValueBox(0)
         /// The refresh under way for `key`, or a new one running `work`.
         // @port-skip linux-only: see Flights
         func flight(_ key: String, _ work: @escaping @Sendable () async -> RefreshOutcome) -> Task<RefreshOutcome, Never> {
             running.withLockedValue { all in
-                if let t = all[key] { return t }
+                if let t = all[key] { joined.withLockedValue { $0 += 1 }; return t }
                 let t = Task { [running] in
                     let r = await work()
                     running.withLockedValue { _ = $0.removeValue(forKey: key) }
@@ -190,11 +193,14 @@ enum MCPOAuthBroker {
         let data: Data, response: URLResponse
         switch check {
         case .pinned(let ips):
-            // Only to an address that was checked; the first that answers.
+            // Only to an address that was checked; the next one only when the
+            // connection to this one failed (nothing sent: a refresh token
+            // that may have reached the server isn't sent again).
             var last: Error = BrokerError.refreshFailed("no address to connect to")
             var got: (HTTPURLResponse, Data)?
             for ip in ips {
-                do { got = try await pinnedSend(request, ip); break } catch { last = error }
+                do { got = try await pinnedSend(request, ip); break }
+                catch let e as PinnedHTTPS.ConnectFailed { last = e }
             }
             guard let got else { throw last }
             (response, data) = got
@@ -236,9 +242,13 @@ extension Daemon {
     /// refreshed first when it expires within a minute (the stale one kept
     /// when the refresh fails or takes over 10 s). The refreshed state lives
     /// in the staged copy only, as on macOS.
+    /// `stored`: the saved workspace's state for a server now (profile id,
+    /// server id), read again before a refresh: one saved since `profile`
+    /// was loaded is used instead (its refresh token is the live one).
     // @port ACAppDelegate.populateMCPBearerTokens(in: inoutProfile) h=11cb4a0e133dab98 @4237c02e
     static func populateMCPBearerTokens(_ profile: Profile, multiUser: Bool = false,
-                                        keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void)? = nil) async -> Profile {
+                                        keep: (@Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void)? = nil,
+                                        stored: (@Sendable (UUID, UUID) async -> MCPOAuthState?)? = nil) async -> Profile {
         var profile = profile
         let policy = MCPOAuthBroker.EndpointPolicy(multiUser: multiUser, egress: profile.resolvedEgressPolicy)
         for i in profile.mcpServers.indices {
@@ -247,8 +257,14 @@ extension Daemon {
                   let oauth = profile.mcpServers[i].oauthState else { continue }
             guard !oauth.accessToken.isEmpty else { continue }
             var use = oauth
-            if let exp = oauth.expiresAt, exp.timeIntervalSinceNow < 60, let refreshToken = oauth.refreshToken {
-                let old = oauth, name = profile.mcpServers[i].name, ws = profile.name
+            func due(_ s: MCPOAuthState) -> Bool { (s.expiresAt.map { $0.timeIntervalSinceNow < 60 } ?? false) && s.refreshToken != nil }
+            // Refreshed and saved since this copy was loaded: that one.
+            if due(oauth), let stored, let now = await stored(profile.id, profile.mcpServers[i].id), now != oauth, !now.accessToken.isEmpty {
+                use = now
+                profile.mcpServers[i].oauthState = now
+            }
+            if due(use), let refreshToken = use.refreshToken {
+                let old = use, name = profile.mcpServers[i].name, ws = profile.name
                 let serverID = profile.mcpServers[i].id, profileID = profile.id
                 // One refresh per server and refresh token: a launch, a live
                 // push or a relaunch meanwhile waits for the one under way
@@ -260,7 +276,7 @@ extension Daemon {
                     do {
                         let refreshed = try await MCPOAuthBroker.refresh(state: old, policy: policy)
                         await keep?(refreshed, old, serverID, profileID)
-                        return .refreshed(refreshed)
+                        return .refreshed(refreshed, savedFor: profileID)
                     } catch {
                         // Said, never silent (no token in the message).
                         FileHandle.standardError.write(Data(
@@ -269,7 +285,10 @@ extension Daemon {
                     }
                 }
                 switch await MCPOAuthBroker.firstOf(timeout: .seconds(10), { await flight.value }) {
-                case .refreshed(let refreshed)?:
+                case .refreshed(let refreshed, let savedFor)?:
+                    // A clone shares the server and its state: it keeps the
+                    // result too.
+                    if savedFor != profileID { await keep?(refreshed, old, serverID, profileID) }
                     use = refreshed
                     profile.mcpServers[i].oauthState = refreshed
                 case .failed?:
@@ -292,7 +311,7 @@ extension Daemon {
     // @port ACAppDelegate.keepRefreshedMCPOAuth(_: MCPOAuthState, from: MCPOAuthState, serverID: UUID, profileID: Profile.ID) h=49a7019d29c33622 @4237c02e
     static func keepRefreshedMCPOAuth(_ refreshed: MCPOAuthState, from old: MCPOAuthState, serverID: UUID,
                                       profileID: UUID, store: ProfileStore) {
-        do { try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID) }
+        do { try ProfileWrites.locked { try store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: serverID, profileID: profileID) } }
         catch { FileHandle.standardError.write(Data("bromure-ac daemon: MCP OAuth: couldn't save the refreshed token: \(error)\n".utf8)) }
     }
 }

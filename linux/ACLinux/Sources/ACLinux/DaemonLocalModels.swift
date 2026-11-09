@@ -35,6 +35,8 @@ extension Daemon {
         // and writes too: the two can't interleave.
         let raw = mcpTokens ? await Self.populateMCPBearerTokens(raw, multiUser: config.multiUser, keep: { new, old, server, pid in
             await MainActor.run { Self.keepRefreshedMCPOAuth(new, from: old, serverID: server, profileID: pid, store: store) }
+        }, stored: { pid, server in
+            ProfileWrites.locked { store.loadAll().first { $0.id == pid }?.mcpServers.first { $0.id == server }?.oauthState }
         }) : raw
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {

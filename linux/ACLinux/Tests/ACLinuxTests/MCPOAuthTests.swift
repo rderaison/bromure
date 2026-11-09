@@ -18,7 +18,8 @@ struct MCPOAuthTests {
         let port: UInt16
         let requests = NIOLockedValueBox<[String]>([])
         private let fd: Int32
-        init(status: Int, body: String, extraHeaders: String = "") throws {
+        /// Runs before each reply (on the server's thread): a test holds it there.
+        init(status: Int, body: String, extraHeaders: String = "", beforeReply: (@Sendable () -> Void)? = nil) throws {
             let lfd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
             var one: Int32 = 1
             setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -48,6 +49,7 @@ struct MCPOAuthTests {
                         }
                     }
                     reqs.withLockedValue { $0.append(String(decoding: got, as: UTF8.self)) }
+                    beforeReply?()
                     let resp = "HTTP/1.1 \(status) X\r\nContent-Type: application/json\r\n\(extraHeaders)Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
                     _ = resp.withCString { write(c, $0, strlen($0)) }
                     close(c)
@@ -264,6 +266,36 @@ struct MCPOAuthTests {
         #expect(lookups.withLockedValue { $0 } == 1, "looked up once")
     }
 
+    /// The next address only when the connection itself failed: after any
+    /// other error the refresh token may have reached the server, and it
+    /// isn't sent again.
+    @Test func anotherAddressOnlyWhenNothingWasSent() async throws {
+        let priorR = MCPOAuthBroker.resolver, priorS = MCPOAuthBroker.pinnedSend, priorH = MCPOAuthBroker.hostOwn
+        defer { MCPOAuthBroker.resolver = priorR; MCPOAuthBroker.pinnedSend = priorS; MCPOAuthBroker.hostOwn = priorH }
+        MCPOAuthBroker.resolver = { _, _ in ["93.184.216.34", "93.184.216.35"].map { OpenShellPolicy.IPAddress($0)! } }
+        MCPOAuthBroker.hostOwn = { _ in false }
+        let state = MCPOAuthState(clientID: "c", authorizationEndpoint: "https://x/a", tokenEndpoint: "https://idp.example/token",
+                                  accessToken: "A", refreshToken: "R")
+        for connectFails in [true, false] {
+            let dialed = NIOLockedValueBox<[String]>([])
+            MCPOAuthBroker.pinnedSend = { req, ip in
+                let n = dialed.withLockedValue { $0.append("\(ip)"); return $0.count }
+                if n == 1 {
+                    if connectFails { throw PinnedHTTPS.ConnectFailed(underlying: URLError(.cannotConnectToHost)) }
+                    throw URLError(.networkConnectionLost)   // after the request went out
+                }
+                let r = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (r, Data(#"{"access_token":"SECOND"}"#.utf8))
+            }
+            let out = try? await MCPOAuthBroker.refresh(state: state, policy: .init(multiUser: true, egress: .allowAll))
+            if connectFails {
+                #expect(out?.accessToken == "SECOND" && dialed.withLockedValue { $0 }.count == 2, "a failed connect: the next address")
+            } else {
+                #expect(out == nil && dialed.withLockedValue { $0 } == ["93.184.216.34"], "a lost connection: not sent again")
+            }
+        }
+    }
+
     /// The pinned request itself: TCP to the given address, the URL's name
     /// as the TLS server name and what the certificate must match.
     @Test func aPinnedRequestVerifiesTheNameAtTheGivenAddress() async throws {
@@ -289,7 +321,12 @@ struct MCPOAuthTests {
     /// One refresh per server and refresh token: concurrent stagings wait for
     /// the one under way, which saves its result once.
     @Test func concurrentStagingsShareOneRefresh() async throws { try await Self.onLoopback {
-        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"ONCE","refresh_token":"NEXT","expires_in":3600}"#)
+        // The reply held until the second staging has joined the first's
+        // refresh (at most 10 s): the two overlap for sure.
+        let joinedBefore = MCPOAuthBroker.flights.joined.withLockedValue { $0 }
+        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"ONCE","refresh_token":"NEXT","expires_in":3600}"#) {
+            for _ in 0..<1000 where MCPOAuthBroker.flights.joined.withLockedValue({ $0 }) == joinedBefore { usleep(10_000) }
+        }
         defer { ep.stop() }
         let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
                                 accessToken: "OLD", refreshToken: "SINGLE-\(UUID().uuidString)", expiresAt: Date().addingTimeInterval(5))
@@ -303,7 +340,50 @@ struct MCPOAuthTests {
         #expect(ra.mcpServers[0].bearerToken == "ONCE" && rb.mcpServers[0].bearerToken == "ONCE")
         #expect(ep.requests.withLockedValue { $0.count } == 1, "one request to the token endpoint")
         #expect(kept.withLockedValue { $0 } == 1, "saved once")
+        #expect(MCPOAuthBroker.flights.joined.withLockedValue { $0 } == joinedBefore + 1, "the second joined the first")
         #expect(MCPOAuthBroker.flights.count == 0, "nothing left in flight")
+    } }
+
+    /// A staging that loaded its copy before a refresh was saved (and comes
+    /// after that refresh is over) uses the saved state: the spent refresh
+    /// token isn't sent again.
+    @Test func aStaleCopyUsesTheSavedState() async throws { try await Self.onLoopback {
+        let ep = try TokenEndpoint(status: 400, body: #"{"error":"invalid_grant"}"#)
+        defer { ep.stop() }
+        let spent = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                  accessToken: "OLD", refreshToken: "SPENT-\(UUID().uuidString)", expiresAt: Date().addingTimeInterval(5))
+        var saved = spent
+        saved.accessToken = "SAVED"; saved.refreshToken = "LIVE"; saved.expiresAt = Date().addingTimeInterval(3600)
+        var p = Profile(name: "stale", tool: .claude, authMode: .token)
+        p.mcpServers = [Self.server("s", oauth: spent)]
+        let now = saved
+        let out = await Daemon.populateMCPBearerTokens(p, keep: { _, _, _, _ in }, stored: { _, _ in now })
+        #expect(out.mcpServers[0].bearerToken == "SAVED" && out.mcpServers[0].oauthState?.refreshToken == "LIVE")
+        #expect(ep.requests.withLockedValue { $0 }.isEmpty, "no refresh with the spent token")
+    } }
+
+    /// A clone shares its source's servers and their state: both stagings
+    /// share one refresh, and each workspace keeps its result.
+    @Test func aCloneKeepsTheSharedRefresh() async throws { try await Self.onLoopback {
+        let joinedBefore = MCPOAuthBroker.flights.joined.withLockedValue { $0 }
+        let ep = try TokenEndpoint(status: 200, body: #"{"access_token":"BOTH","refresh_token":"NEXT","expires_in":3600}"#) {
+            for _ in 0..<1000 where MCPOAuthBroker.flights.joined.withLockedValue({ $0 }) == joinedBefore { usleep(10_000) }
+        }
+        defer { ep.stop() }
+        let old = MCPOAuthState(clientID: "cid", authorizationEndpoint: "https://x/a", tokenEndpoint: "http://127.0.0.1:\(ep.port)/t",
+                                accessToken: "OLD", refreshToken: "CLONED-\(UUID().uuidString)", expiresAt: Date().addingTimeInterval(5))
+        var a = Profile(name: "source", tool: .claude, authMode: .token)
+        a.mcpServers = [Self.server("s", oauth: old)]
+        var b = a
+        b.id = UUID(); b.name = "clone"
+        let kept = NIOLockedValueBox<[UUID]>([])
+        let keep: @Sendable (MCPOAuthState, MCPOAuthState, UUID, UUID) async -> Void = { _, _, _, pid in kept.withLockedValue { $0.append(pid) } }
+        async let ra = Daemon.populateMCPBearerTokens(a, keep: keep)
+        async let rb = Daemon.populateMCPBearerTokens(b, keep: keep)
+        let (oa, ob) = await (ra, rb)
+        #expect(oa.mcpServers[0].bearerToken == "BOTH" && ob.mcpServers[0].bearerToken == "BOTH")
+        #expect(ep.requests.withLockedValue { $0.count } == 1, "one refresh")
+        #expect(Set(kept.withLockedValue { $0 }) == [a.id, b.id] && kept.withLockedValue { $0 }.count == 2, "kept by each workspace once")
     } }
 
     /// A redirect from the token endpoint isn't followed.

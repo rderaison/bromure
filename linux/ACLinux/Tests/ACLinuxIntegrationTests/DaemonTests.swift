@@ -411,19 +411,25 @@ struct DaemonTests {
         #expect(state.contains("stopped"), "off after the guest's poweroff: \(state)")
         try await Task.sleep(for: .seconds(10))
         #expect(try w.cli("vm", "ls").1.contains("stopped"), "and not booted again")
-        // A user's stop that races a reboot (its intent read, then the stop)
-        // leaves it off: the stop wins.
+        // A user's stop that lands while a guest's reboot is stopping or
+        // relaunching the VM: the stop wins, it stays off.
         #expect(try w.cli("vm", "start", "rb").0 == 0)
         var third = ""
         for _ in 0..<240 { third = bootID(); if third.count >= 32 { break }; try await Task.sleep(for: .milliseconds(500)) }
         #expect(third.count >= 32, "booted again for the race")
-        let id = try #require(w.vm("rb")?["id"]?.stringValue)
-        #expect(FileManager.default.createFile(atPath: w.root + "/state/bromure-ac/vms/\(id)/outbox/reboot-intent", contents: Data()))
-        try await Task.sleep(for: .seconds(2))
-        #expect(try w.cli("vm", "kill", "rb").0 == 0)
-        try await Task.sleep(for: .seconds(10))
-        let after = (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? ""
-        #expect(try w.vm("rb")?["state"]?.stringValue == "stopped", "the user's stop won; daemon log:\n\(after.suffix(2000))")
+        let daemonLog = { (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? "" }
+        let seen = daemonLog().components(separatedBy: "stopped as its guest rebooted").count
+        _ = try? w.cli("vm", "exec", "rb", "--", "sudo", "systemctl", "reboot")
+        var rebooting = false
+        for _ in 0..<1200 where !rebooting {   // 60 s
+            rebooting = daemonLog().components(separatedBy: "stopped as its guest rebooted").count > seen
+            if !rebooting { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        #expect(rebooting, "the guest's reboot was seen")
+        let (rc, _, err) = try w.cli("vm", "kill", "rb")
+        #expect(rc == 0, "the stop is taken in that window: \(err)")
+        try await Task.sleep(for: .seconds(15))
+        #expect(try w.vm("rb")?["state"]?.stringValue == "stopped", "the user's stop won; daemon log:\n\(daemonLog().suffix(2000))")
         _ = try? w.cli("vm", "kill", "--force", "rb")
     }
 

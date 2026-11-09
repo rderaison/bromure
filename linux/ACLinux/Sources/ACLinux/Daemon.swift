@@ -1047,6 +1047,14 @@ public actor Daemon {
         if let t = stopping[rec.id] {
             explicitStops.insert(rec.id)
             await t.value
+            // That end was a suspend's: the suspended VM's own stop.
+            if let now = registry.find(rec.id), now.state == .suspended { return await deleteVM(now, action: action) }
+            return ControlResponse(200, ["status": "stopped"])
+        }
+        // Between a reboot's stop and its boot (or during that boot): it
+        // stays off (the relaunch checks, stoppedDuringReboot).
+        if live[rec.id] == nil, rebooting.contains(rec.id) {
+            explicitStops.insert(rec.id)
             return ControlResponse(200, ["status": "stopped"])
         }
         guard let l = live[rec.id] else {
@@ -1760,9 +1768,12 @@ public actor Daemon {
     // partial: no live session or staged-profile copies to update (the daemon reads the store at each launch)
     // @port ACAppDelegate.saveMintedCredential(_: MintedCredential, profileID: Profile.ID) h=23a3ae42b9bdece5 @d2db8346
     @MainActor static func saveMintedCredential(_ minted: MintedCredential, profileID: UUID, store: ProfileStore) {
-        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
-        p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
-        do { _ = try store.update(p) } catch {
+        do {
+            _ = try ProfileWrites.edit(profileID, store: store) { p in
+                p.mintedCredentials = MintedCredential.pruned(p.mintedCredentials) + [minted]
+                return true
+            }
+        } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: minted credential: couldn't save profile: \(error)\n".utf8))
         }
     }

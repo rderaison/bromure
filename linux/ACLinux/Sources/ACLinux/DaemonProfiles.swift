@@ -81,7 +81,7 @@ extension Daemon {
             return .error(409, "A workspace is already named '\(name)'")
         }
         let r: [String: Any] = await MainActor.run {
-            LinuxSessionHost.shared?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "no host"]
+            ProfileWrites.locked { LinuxSessionHost.shared?.automationUpsertProfile(idOrName: nil, doc: doc) ?? ["ok": false, "error": "no host"] }
         }
         guard r["ok"] as? Bool == true, let id = r["id"] as? String else {
             return ControlResponse(400, JSONValue(foundation: r) ?? .object([:]))
@@ -105,7 +105,7 @@ extension Daemon {
     func updateProfile(_ key: String, _ body: JSONValue) async -> ControlResponse {
         guard let doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
         let r: [String: Any] = await MainActor.run {
-            LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"]
+            ProfileWrites.locked { LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"] }
         }
         let ok = r["ok"] as? Bool == true
         if ok { Self.refreshSquelchSettings() }

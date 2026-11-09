@@ -11,14 +11,22 @@ extension Daemon {
     // @port ACAppDelegate.allowSupplyChainPackage(_: String, profileID: UUID) h=98521040aaa6cdff @5b243e2e
     @discardableResult
     func allowSupplyChainPackage(_ entry: String, profileID: UUID) -> Bool {
-        let store = ProfileStore()
-        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return false }
-        if p.supplyChain.reputationAllowlist.contains(where: { $0.lowercased() == entry.lowercased() }) { return true }
-        p.supplyChain.reputationAllowlist.append(entry)
-        do { try store.update(p) } catch {
-            FileHandle.standardError.write(Data("bromure-ac daemon: supply chain: couldn't save the allowlist for \(p.name): \(error)\n".utf8))
+        var changed = false, name = ""
+        let p: Profile
+        do {
+            guard let saved = try ProfileWrites.edit(profileID, store: ProfileStore(), { p in
+                name = p.name
+                if p.supplyChain.reputationAllowlist.contains(where: { $0.lowercased() == entry.lowercased() }) { return false }
+                p.supplyChain.reputationAllowlist.append(entry)
+                changed = true
+                return true
+            }) else { return false }
+            p = saved
+        } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: supply chain: couldn't save the allowlist for \(name): \(error)\n".utf8))
             return false
         }
+        guard changed else { return true }
         // A running workspace's proxy takes it now; a stopped one's at launch.
         if live.keys.contains(where: { UUID(uuidString: $0) == profileID }) {
             mitm?.setSupplyChainPolicy(p.supplyChain, for: profileID)

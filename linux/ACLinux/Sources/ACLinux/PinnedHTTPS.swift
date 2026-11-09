@@ -16,10 +16,20 @@ import SandboxEngine
 // @port-skip linux-only: a pinned dial for a request the daemon makes itself (macOS: URLSession, unchecked)
 enum PinnedHTTPS {
     struct Refused: Error, CustomStringConvertible { let description: String }
+    /// The connection itself failed: nothing of the request was sent, so
+    /// another address may be tried (after any other error it may have
+    /// reached the server, and a refresh token isn't sent twice).
+    struct ConnectFailed: Error, CustomStringConvertible {
+        let underlying: Error
+        // @port-skip linux-only: see PinnedHTTPS
+        var description: String { "couldn't connect: \(underlying)" }
+    }
 
+    /// The request to `address`, within `timeout` overall (connect, TLS,
+    /// response): by default the request's own timeoutInterval.
     // @port-skip linux-only: see PinnedHTTPS
     static func send(_ req: URLRequest, to address: OpenShellPolicy.IPAddress, extraRoots: [NIOSSLCertificate] = [],
-                     timeout: TimeInterval = 10) async throws -> (HTTPURLResponse, Data) {
+                     timeout: TimeInterval? = nil) async throws -> (HTTPURLResponse, Data) {
         guard let url = req.url, url.scheme?.lowercased() == "https", let host = url.host else {
             throw Refused(description: "a pinned request needs an https URL")
         }
@@ -27,6 +37,7 @@ enum PinnedHTTPS {
         guard let head = NIOMTLSHTTPClient.requestBytes(req, url: url, host: host, port: port) else {
             throw Refused(description: "a header name or value carries CR or LF")
         }
+        let total = timeout ?? (req.timeoutInterval > 0 ? req.timeoutInterval : 60)
         var tls = TLSConfiguration.makeClientConfiguration()
         tls.applicationProtocols = ["http/1.1"]
         if !extraRoots.isEmpty { tls.additionalTrustRoots = [.certificates(extraRoots)] }
@@ -34,35 +45,41 @@ enum PinnedHTTPS {
         let target = try SocketAddress(ipAddress: "\(address)", port: port)
         let sni = (try? SocketAddress(ipAddress: host, port: 0)) == nil ? host : nil
         let loop = MultiThreadedEventLoopGroup.singleton.next()
-        let collector = ResponseCollector()
-        let channel = try await ClientBootstrap(group: loop)
-            .connectTimeout(.milliseconds(Int64(timeout * 1000)))
-            .channelInitializer { ch in
-                ch.eventLoop.makeCompletedFuture {
-                    try ch.pipeline.syncOperations.addHandler(NIOSSLClientHandler(context: context, serverHostname: sni))
-                    try ch.pipeline.syncOperations.addHandler(collector)
-                }
-            }
-            .connect(to: target).get()
+        let result = loop.makePromise(of: (HTTPURLResponse, Data).self)
         let done = NIOLockedValueBox(false)
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<(HTTPURLResponse, Data), Error>) in
-            func finish(_ r: Result<(HTTPURLResponse, Data), Error>) {
-                guard done.withLockedValue({ let was = $0; $0 = true; return !was }) else { return }
-                c.resume(with: r)
-            }
-            let deadline = loop.scheduleTask(in: .milliseconds(Int64(timeout * 1000))) {
-                finish(.failure(URLError(.timedOut)))
-                channel.close(promise: nil)
-            }
-            collector.onDone = { bytes, error in
-                deadline.cancel()
-                if let error { return finish(.failure(error)) }
-                guard let parsed = NIOMTLSHTTPClient.parse(bytes, url: url) else { return finish(.failure(URLError(.badServerResponse))) }
-                finish(.success(parsed))
-            }
-            var buf = channel.allocator.buffer(capacity: head.count)
-            buf.writeBytes(head)
-            channel.writeAndFlush(buf).whenFailure { e in finish(.failure(e)); channel.close(promise: nil) }
+        @Sendable func finish(_ r: Result<(HTTPURLResponse, Data), Error>) {
+            guard done.withLockedValue({ let was = $0; $0 = true; return !was }) else { return }
+            result.completeWith(r)
         }
+        // One deadline for all of it.
+        let deadline = loop.scheduleTask(in: .milliseconds(Int64(total * 1000))) { finish(.failure(URLError(.timedOut))) }
+        result.futureResult.whenComplete { _ in deadline.cancel() }
+        let collector = ResponseCollector()
+        let channel: Channel
+        do {
+            channel = try await ClientBootstrap(group: loop)
+                .connectTimeout(.milliseconds(Int64(total * 1000)))
+                .channelInitializer { ch in
+                    ch.eventLoop.makeCompletedFuture {
+                        // Before the handshake starts: its failure reaches us.
+                        collector.onDone = { bytes, error in
+                            if let error { return finish(.failure(error)) }
+                            guard let parsed = NIOMTLSHTTPClient.parse(bytes, url: url) else { return finish(.failure(URLError(.badServerResponse))) }
+                            finish(.success(parsed))
+                        }
+                        try ch.pipeline.syncOperations.addHandler(NIOSSLClientHandler(context: context, serverHostname: sni))
+                        try ch.pipeline.syncOperations.addHandler(collector)
+                    }
+                }
+                .connect(to: target).get()
+        } catch {
+            finish(.failure(ConnectFailed(underlying: error)))
+            throw ConnectFailed(underlying: error)
+        }
+        result.futureResult.whenFailure { _ in channel.close(promise: nil) }
+        var buf = channel.allocator.buffer(capacity: head.count)
+        buf.writeBytes(head)
+        channel.writeAndFlush(buf).whenFailure { e in finish(.failure(e)) }
+        return try await result.futureResult.get()
     }
 }

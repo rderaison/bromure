@@ -37,6 +37,9 @@ struct GuestRebootTests {
         let adopted = try log(earlier + "Ubuntu 24.04.5 LTS rb ttyS0\n")
         #expect(Daemon.kernelSaidPowerDown(serialLog: adopted), "the whole log says it")
         #expect(!Daemon.kernelSaidPowerDown(serialLog: adopted, from: UInt64(earlier.utf8.count)), "not past adoption")
-        for p in [restart, off, halted, both, none, old, adopted] { try? FileManager.default.removeItem(atPath: (p as NSString).deletingLastPathComponent) }
+        // A log shorter than the offset was rotated since: read from its start.
+        let rotated = try log("[ 3.0] reboot: Power down\n")
+        #expect(Daemon.kernelSaidPowerDown(serialLog: rotated, from: 1 << 20), "not past its end")
+        for p in [restart, off, halted, both, none, old, adopted, rotated] { try? FileManager.default.removeItem(atPath: (p as NSString).deletingLastPathComponent) }
     }
 }

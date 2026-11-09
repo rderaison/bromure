@@ -42,13 +42,28 @@ extension Daemon {
             try? await Task.sleep(for: .milliseconds(100))
         }
         try? FileManager.default.removeItem(atPath: snapshotDir(id))
+        if await stoppedDuringReboot(id) { return }
         guard var now = registry.find(id), live[id] == nil else { return }
         if now.state == .suspended { now.state = .stopped; try? registry.upsert(now) }
         let started = await start(now)
+        if await stoppedDuringReboot(id) { return }
         guard started.status >= 300 else { return }
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(now.name)' didn't boot again after its guest rebooted: \(started.body["error"]?.stringValue ?? "HTTP \(started.status)")\n".utf8))
         rebooting.remove(id)
         if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
+    }
+
+    /// A stop asked while `id` was between a reboot's stop and its boot, or
+    /// in that boot (deleteVM said "stopped"): the boot doesn't happen, or
+    /// the VM it started is stopped again, and a `--rm` workspace goes. True
+    /// when one was asked (the caller then boots nothing).
+    // @port-skip linux-only: a stop racing a relaunch (macOS: session.stopping cancels relaunchVM)
+    func stoppedDuringReboot(_ id: String) async -> Bool {
+        guard explicitStops.remove(id) != nil else { return false }
+        if live[id] != nil, let rec = registry.find(id) { _ = await deleteVM(rec, action: "kill") }
+        rebooting.remove(id)
+        if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }
+        return true
     }
 
     /// Whether the guest kernel's last reboot line on the serial console (its
@@ -60,7 +75,9 @@ extension Daemon {
         let size = (try? h.seekToEnd()) ?? 0
         // This boot's tail only: never before `start` (an adopted VM's log
         // may hold earlier boots').
-        try? h.seek(toOffset: max(start, size > 8192 ? size - 8192 : 0))
+        // A log shorter than that is a new one (rotated since): all of it.
+        let from = start <= size ? start : 0
+        try? h.seek(toOffset: max(from, size > 8192 ? size - 8192 : 0))
         let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
         guard let last = tail.range(of: "reboot: ", options: .backwards) else { return false }
         return tail[last.upperBound...].hasPrefix("Restarting system")
@@ -71,13 +88,17 @@ extension Daemon {
     /// ends. Its kernel's last word on the serial console says so; the VM is
     /// then ended (a stop, not a reboot: it isn't booted again).
     // @port-skip linux-only: Firecracker keeps a powered-off guest's VM up (VZ stops it)
-    func endPoweredOffGuests() async {
+    func endPoweredOffGuests() {
         for (id, l) in live where !starting.contains(id) && stopping[id] == nil && !rebooting.contains(id) {
             guard !explicitStops.contains(id), let log = l.config.serialLog,
                   Self.kernelSaidPowerDown(serialLog: log, from: serialLogStart[id] ?? 0),
                   let rec = registry.find(id) else { continue }
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': its guest powered off; ending the VM\n".utf8))
-            _ = await deleteVM(rec, action: "kill")
+            // Its own task: the outbox tick doesn't wait on a reap (one that
+            // never comes would stall every VM's). Marked now, so the next
+            // tick doesn't end it again.
+            explicitStops.insert(id)
+            Task { _ = await self.deleteVM(rec, action: "kill") }
         }
     }
 
@@ -90,7 +111,9 @@ extension Daemon {
         let size = (try? h.seekToEnd()) ?? 0
         // This boot's tail only: never before `start` (an adopted VM's log
         // may hold earlier boots').
-        try? h.seek(toOffset: max(start, size > 8192 ? size - 8192 : 0))
+        // A log shorter than that is a new one (rotated since): all of it.
+        let from = start <= size ? start : 0
+        try? h.seek(toOffset: max(from, size > 8192 ? size - 8192 : 0))
         let tail = String(decoding: (try? h.readToEnd()) ?? Data(), as: UTF8.self)
         guard let last = tail.range(of: "reboot: ", options: .backwards) else { return false }
         // "Power down", or (no ACPI power-off: Firecracker on x86) "Power off

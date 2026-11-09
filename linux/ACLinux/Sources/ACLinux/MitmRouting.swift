@@ -111,8 +111,11 @@ extension Daemon {
         guard let routing = Profile.Routing(rawValue: raw.lowercased()) else {
             return ControlResponse(409, ["ok": false, "error": "Routing must be 'cloud' or 'local'."])
         }
-        profile.modelRouting = routing
-        do { try profileStore.update(profile) } catch {
+        do {
+            if let saved = try ProfileWrites.edit(profile.id, store: profileStore, { $0.modelRouting = routing; return true }) {
+                profile = saved
+            } else { profile.modelRouting = routing }
+        } catch {
             return ControlResponse(409, ["ok": false, "error": .string("couldn't save: \(error.localizedDescription)")])
         }
         // The running session's copies, as macOS updates session.profile: a

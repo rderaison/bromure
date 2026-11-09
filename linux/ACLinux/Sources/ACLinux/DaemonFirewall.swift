@@ -19,14 +19,22 @@ extension Daemon {
     // @port ACAppDelegate.commitFirewallRulesResult(_: String, profileID: UUID) h=f3258e46b059b44e @f127f8ab
     @discardableResult
     func commitFirewallRulesResult(_ text: String, profileID: UUID) -> FirewallCommitResult {
-        let store = ProfileStore()
-        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
-        guard p.egressRules != text else { return .unchanged }
-        p.egressRules = text
-        do { try store.update(p) } catch {
-            FileHandle.standardError.write(Data("bromure-ac daemon: firewall: couldn't save rules for \(p.name): \(error)\n".utf8))
+        var changed = false, name = ""
+        let p: Profile
+        do {
+            guard let saved = try ProfileWrites.edit(profileID, store: ProfileStore(), { p in
+                name = p.name
+                guard p.egressRules != text else { return false }
+                p.egressRules = text
+                changed = true
+                return true
+            }) else { return .failed("unknown workspace") }
+            p = saved
+        } catch {
+            FileHandle.standardError.write(Data("bromure-ac daemon: firewall: couldn't save rules for \(name): \(error)\n".utf8))
             return .failed("couldn't save the workspace's firewall rules")
         }
+        guard changed else { return .unchanged }
         if live.keys.contains(where: { UUID(uuidString: $0) == profileID }) {
             mitm?.applyWorkspacePolicies(p)
             sw.egress.update(.init(p))
@@ -40,11 +48,14 @@ extension Daemon {
     /// a fat client's drawer must not show an Allow that installed nothing.
     // @port ACAppDelegate.applyFirewallEditResult(_: FirewallRuleActions.Edit, profileID: UUID) h=137b3f8d4496cc84 @f127f8ab
     func applyFirewallEditResult(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> FirewallCommitResult {
-        guard let p = ProfileStore().loadAll().first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
-        switch FirewallRuleActions.outcome(edit, to: p.egressRules) {
-        case .changed(let text): return commitFirewallRulesResult(text, profileID: profileID)
-        case .unchanged:         return .unchanged
-        case .failed(let why):   return .failed(why)
+        // The read the edit applies to and its save, as one write.
+        ProfileWrites.locked {
+            guard let p = ProfileStore().loadAll().first(where: { $0.id == profileID }) else { return .failed("unknown workspace") }
+            switch FirewallRuleActions.outcome(edit, to: p.egressRules) {
+            case .changed(let text): return commitFirewallRulesResult(text, profileID: profileID)
+            case .unchanged:         return .unchanged
+            case .failed(let why):   return .failed(why)
+            }
         }
     }
 
@@ -84,10 +95,12 @@ extension Daemon {
     /// The workspace stopped: its "until the workspace stops" rules end.
     // @port ACAppDelegate.endUntilStopFirewallRules(for: UUID) h=313e7a206f2ca535 @d48dfc6f
     func endUntilStopFirewallRules(for profileID: UUID) {
-        guard let p = ProfileStore().loadAll().first(where: { $0.id == profileID }),
-              let text = EgressPolicy.sweeping(p.egressRules, now: Date(), workspaceStopped: true)
-        else { return }
-        commitFirewallRules(text, profileID: profileID)
+        ProfileWrites.locked {
+            guard let p = ProfileStore().loadAll().first(where: { $0.id == profileID }),
+                  let text = EgressPolicy.sweeping(p.egressRules, now: Date(), workspaceStopped: true)
+            else { return }
+            commitFirewallRules(text, profileID: profileID)
+        }
     }
 
     /// Every workspace's temporary rules swept: expired ones switched off,
@@ -95,10 +108,12 @@ extension Daemon {
     /// run's "until the workspace stops" ended with it).
     // @port ACAppDelegate.sweepFirewallRules(now: Date) h=3cd736ebd61f06ec @d48dfc6f
     func sweepFirewallRules(now: Date = Date(), launch: Bool) {
-        for p in ProfileStore().loadAll() where p.egressRules.contains("#@") {
-            let stopped = launch && !live.keys.contains(where: { UUID(uuidString: $0) == p.id })
-            if let text = EgressPolicy.sweeping(p.egressRules, now: now, workspaceStopped: stopped) {
-                commitFirewallRules(text, profileID: p.id)
+        ProfileWrites.locked {
+            for p in ProfileStore().loadAll() where p.egressRules.contains("#@") {
+                let stopped = launch && !live.keys.contains(where: { UUID(uuidString: $0) == p.id })
+                if let text = EgressPolicy.sweeping(p.egressRules, now: now, workspaceStopped: stopped) {
+                    commitFirewallRules(text, profileID: p.id)
+                }
             }
         }
         // A timed rule saved another way (the profile route) arms its expiry here.
