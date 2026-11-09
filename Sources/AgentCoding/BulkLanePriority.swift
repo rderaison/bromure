@@ -49,11 +49,16 @@ final class BulkLanePriority {
     }
 
     /// Wait for the lane to be free of the user's reads (or `maxWait`), before
-    /// a background read.
-    func waitForQuiet() async {
+    /// a background read. Throws `CancellationError` when the reader was
+    /// cancelled (its chat reopened or gone), before or during the wait: it
+    /// returned normally, and the read it held back then went out anyway --
+    /// a transcript window over the lane for a chat nobody was reading.
+    func waitForQuiet() async throws {
         let start = Date()
-        while foregroundBusy, !Task.isCancelled, Date().timeIntervalSince(start) < Self.maxWait {
-            try? await Task.sleep(nanoseconds: Self.pollInterval)
+        try Task.checkCancellation()
+        while foregroundBusy, Date().timeIntervalSince(start) < Self.maxWait {
+            try await Task.sleep(nanoseconds: Self.pollInterval)
         }
+        try Task.checkCancellation()
     }
 }
