@@ -93,6 +93,18 @@ public enum InterimBake {
         let t0 = ContinuousClock.now
         try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true)
         try fm.createDirectory(atPath: o.cacheDir, withIntermediateDirectories: true)
+        // One bake per output dir: two would share .work and the partial disk.
+        let lock = open(o.outputDir + "/.bake.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw MachineError.io("open \(o.outputDir)/.bake.lock", errno) }
+        defer { Glibc.close(lock) }
+        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
+            throw BakeError.staging("another bake is running into \(o.outputDir)")
+        }
+        // The stamp on disk before this bake, for the next revision: a
+        // rebuild at the same major bumps 201 → 201.1; a new major writes fresh.
+        let priorStamp = (try? String(contentsOfFile: o.outputDir + "/base.version", encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let newStamp = nextStamp(priorStamp: priorStamp, bundled: o.imageVersion)
         let work = o.outputDir + "/.work"
         try? fm.removeItem(atPath: work)
         try fm.createDirectory(atPath: work + "/out", withIntermediateDirectories: true)
@@ -125,6 +137,15 @@ public enum InterimBake {
         let runsPostinstall = !steps.isEmpty || o.customizeScript != nil
         let partial = o.outputDir + "/base.img.partial"
         try createSparseDisk(atPath: partial, sizeBytes: UInt64(o.diskGiB) << 30)
+        // A failed bake discards its scratch disk, as macOS's createBaseImage
+        // does: the live image is untouched.
+        var promoted = false
+        defer {
+            if !promoted {
+                try? fm.removeItem(atPath: partial)
+                for f in ["vmlinuz", "initrd.img", "kernel-release", "cmdline"] { try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new") }
+            }
+        }
 
         let modloop = "\(o.alpineCDN)/alpine/v\(alpineVersion)/releases/\(alpineArch)/netboot-\(alpineRelease)/modloop-virt"
         var c = MachineConfig(
@@ -147,13 +168,19 @@ public enum InterimBake {
         // (its DHCP), over a datagram socketpair.
         let passt = try await PasstUplink.start(PasstUplink.Config(logPath: work + "/passt.log"))
         let sw = InterimSwitch(uplink: passt, mtu: { [mtu = o.mtu] _ in mtu })
-        let (port, peer) = try DgramPort.pair(name: "bake")
+        let port: DgramPort, peer: Int32
+        do { (port, peer) = try DgramPort.pair(name: "bake") } catch { sw.stop(); await passt.close(); throw error }
         sw.attach(port, mac: c.macAddress!)
         c.network = .datagram(peerFD: peer)
         defer { sw.detach(mac: c.macAddress!); port.close(); sw.stop() }
         // The serial console: Firecracker's stdin and stdout, as pipes.
         var toGuest: [Int32] = [-1, -1], fromGuest: [Int32] = [-1, -1]
-        guard acl_pipe_cloexec(&toGuest) == 0, acl_pipe_cloexec(&fromGuest) == 0 else { throw MachineError.io("pipe", errno) }
+        guard acl_pipe_cloexec(&toGuest) == 0, acl_pipe_cloexec(&fromGuest) == 0 else {
+            let e = errno
+            for fd in toGuest + fromGuest where fd >= 0 { Glibc.close(fd) }
+            await passt.close()
+            throw MachineError.io("pipe", e)
+        }
         c.consolePipes = (input: toGuest[0], output: fromGuest[1])
         let customizeLog = CustomizeLog(path: o.customizeScript != nil ? o.customizeLogPath : nil)
         let console = SerialConsole(readFD: fromGuest[0], writeFD: toGuest[1], log: work + "/serial.log",
@@ -161,9 +188,7 @@ public enum InterimBake {
         defer { console.close(); customizeLog.close() }
         let vm = FirecrackerMachine(config: c)
         progress("Starting the installer VM…")
-        // A failed bake discards its scratch disk, as macOS's createBaseImage
-        // does: the live image is untouched.
-        do { try await vm.start() } catch { await passt.close(); try? fm.removeItem(atPath: partial); throw error }
+        do { try await vm.start() } catch { await passt.close(); throw error }
 
         // 4-5. The console dialogue.
         var tSetup = ContinuousClock.now
@@ -174,7 +199,6 @@ public enum InterimBake {
             await vm.kill()
             await passt.close()
             try? fm.copyItem(atPath: work + "/serial.log", toPath: o.outputDir + "/bake.log.failed")
-            try? fm.removeItem(atPath: partial)
             throw customizeFailure(error, o)
         }
         let setupTime = ContinuousClock.now - tSetup
@@ -198,19 +222,30 @@ public enum InterimBake {
         progress("Making the image sparse…")
         do { try await ChildProcess.run("/usr/bin/fallocate", ["--dig-holes", partial]) }
         catch { progress("fallocate --dig-holes failed (\(error)); the image stays fully allocated") }
-        try? fm.removeItem(atPath: finalImage)
-        try fm.moveItem(atPath: partial, toPath: finalImage)
-        for f in ["vmlinuz", "initrd.img", "kernel-release"] {
-            try? fm.removeItem(atPath: o.outputDir + "/" + f)
-            try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f)
-        }
+        // Promote (macOS: step 5): the boot files staged under temp names
+        // beside the image first, so nothing live changes until the disk's
+        // rename(2) over base.img; then each boot file the same way, and
+        // the stamp last. A failure before the disk's rename leaves the
+        // live image whole.
         // ia32_emulation=0 as setup.sh's GRUB line: no 32-bit syscall entry,
         // which the kernel sentry (64-bit wrappers only) doesn't watch.
+        let bootFiles = ["vmlinuz", "initrd.img", "kernel-release", "cmdline"]
         try "console=ttyS0 root=LABEL=root rootfstype=ext4 ro quiet ia32_emulation=0\n"
-            .write(toFile: o.outputDir + "/cmdline", atomically: true, encoding: .utf8)
-        try (o.imageVersion + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
+            .write(toFile: work + "/out/cmdline", atomically: true, encoding: .utf8)
+        for f in bootFiles {
+            try? fm.removeItem(atPath: o.outputDir + "/" + f + ".new")
+            try fm.moveItem(atPath: work + "/out/" + f, toPath: o.outputDir + "/" + f + ".new")
+        }
+        guard rename(partial, finalImage) == 0 else { throw MachineError.io("rename \(partial)", errno) }
+        promoted = true
+        for f in bootFiles {
+            guard rename(o.outputDir + "/" + f + ".new", o.outputDir + "/" + f) == 0 else {
+                throw MachineError.io("rename \(f).new", errno)
+            }
+        }
+        try (newStamp + "\n").write(toFile: o.outputDir + "/base.version", atomically: true, encoding: .utf8)
         // Which catalog steps the image has, as macOS records a local build.
-        ImageState.write(BaseImageState(imageUUID: nil, version: o.imageVersion, appliedStepUUIDs: steps),
+        ImageState.write(BaseImageState(imageUUID: nil, version: newStamp, appliedStepUUIDs: steps),
                          imageDir: o.outputDir)
         try? fm.removeItem(atPath: o.outputDir + "/postinstall-steps")
         try? fm.removeItem(atPath: o.outputDir + "/bake.log")
@@ -283,8 +318,10 @@ public enum InterimBake {
             // A customize script compiling a toolchain can take a while
             // (macOS: 90 minutes for the phase with one, else 20).
             let timeout = o.customizeScript == nil ? o.postinstallTimeout : max(o.postinstallTimeout, .seconds(90 * 60))
-            try await con.buffer.wait(for: "SANDBOX_POSTINSTALL_DONE", timeout: timeout.seconds,
-                                      failures: ["SANDBOX_POSTINSTALL_FAILED:", "Kernel panic", "Internal error: Oops"])
+            // The markers only at a line's start: the customize step's
+            // `set -x` trace ("+ [customize] echo …") can't end the wait.
+            try await con.buffer.wait(for: "\nSANDBOX_POSTINSTALL_DONE", timeout: timeout.seconds,
+                                      failures: ["\nSANDBOX_POSTINSTALL_FAILED:", "Kernel panic", "Internal error: Oops"])
         }
         progress("Installer: copying the kernel and initrd out…")
         con.send("mkdir -p /mnt && mount -o ro /dev/vda2 /mnt && cp -L /mnt/boot/vmlinuz /tmp/out/vmlinuz && cp -L /mnt/boot/initrd.img /tmp/out/initrd.img && ls /mnt/lib/modules > /tmp/out/kernel-release && umount /mnt && sync && echo EXTRACT_\"OK\"")
@@ -338,6 +375,34 @@ public enum InterimBake {
         return ordered.map(\.uuid)
     }
 
+    /// The major component of a version stamp: everything before the first
+    /// dot. "200" → "200", "200.3" → "200".
+    // @port UbuntuImageManager.static majorVersion(of: String) h=70093b72eb8a901b @84e171b8
+    static func majorVersion(of stamp: String) -> String {
+        String(stamp.prefix { $0 != "." })
+    }
+
+    /// The stamp to write for the image about to be promoted: a rebuild at
+    /// the same major bumps a dot-revision so existing workspaces (which
+    /// recorded the prior stamp at clone time) detect drift and get offered
+    /// a reset: 200 → 200.1 → 200.2 …; a different major, or no prior
+    /// stamp, writes the bundled version fresh.
+    // @port UbuntuImageManager.static nextStamp(priorStamp: String?, bundled: String) h=d0a2eebb43a83c3a @84e171b8
+    static func nextStamp(priorStamp: String?, bundled: String) -> String {
+        guard let prior = priorStamp?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prior.isEmpty,
+              majorVersion(of: prior) == bundled
+        else { return bundled }
+        let rev: Int
+        if let dot = prior.firstIndex(of: "."),
+           let n = Int(prior[prior.index(after: dot)...]) {
+            rev = n
+        } else {
+            rev = 0
+        }
+        return "\(bundled).\(rev + 1)"
+    }
+
     /// Where the last customize run's output is kept (the whole postinstall
     /// phase, the script's `bash -x` trace included): the daemon's state
     /// dir, the XDG home for logs (macOS: ~/Library/Logs/BromureAC).
@@ -348,8 +413,10 @@ public enum InterimBake {
 
     /// The step file for the user's script: traced (`set -x`, each line
     /// tagged), so the log shows every command it ran; named so
-    /// postinstall.sh runs it last and only once.
-    static let customizeStepName = "9999-customize.sh"
+    /// postinstall.sh runs it last and only once (`*-customize.sh`).
+    /// Linux: "zzzz-", past any %04d seq (macOS: "9999-", which a seq of
+    /// 9999 or more would sort after).
+    static let customizeStepName = "zzzz-customize.sh"
     // @port UbuntuImageManager.static customizeStep(_: String) h=f9234cd17d64ecf3 @84e171b8
     static func customizeStep(_ script: String) -> String {
         "# Your customize script\nexport PS4='+ [customize] '\nset -x\n" + script + "\n"
@@ -583,8 +650,14 @@ final class CustomizeLog: Sendable {
     func start() {
         guard let path else { return }
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        fm.createFile(atPath: path, contents: Data("Base image customize run — \(Date())\n".utf8))
+        // The script's `bash -x` trace may hold anything it used: the
+        // owner's alone.
+        let dir = (path as NSString).deletingLastPathComponent
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        chmod(dir, 0o700)
+        try? fm.removeItem(atPath: path)
+        fm.createFile(atPath: path, contents: Data("Base image customize run — \(Date())\n".utf8),
+                      attributes: [.posixPermissions: 0o600])
         let h = FileHandle(forWritingAtPath: path)
         _ = try? h?.seekToEnd()
         handle.withLockedValue { $0 = h }

@@ -193,6 +193,9 @@ public actor Daemon {
     /// The sessions (`<workspace>#<session>`) whose compromise question is
     /// up (DaemonCompromise.swift).
     var compromiseAsking: Set<String> = []
+    /// The workspaces with a launch question up (the base-image drift
+    /// offer, DaemonBaseImageDrift.swift): one per workspace at a time.
+    var launchQuestions = Daemon.LaunchQuestionGate()
     /// The agent watchdog's 5 s egress sampler (DaemonWatchdog.swift).
     var watchdogSampler: Task<Void, Never>?
     /// Questions holding each VM paused (DaemonWatchdog.swift), by VM id; a
@@ -245,6 +248,9 @@ public actor Daemon {
     /// Tests: a record in the registry.
     // @port-skip linux-only: Linux daemon core (tests)
     func registerForTesting(_ rec: VMRecord) throws { try registry.upsert(rec) }
+    /// Tests: a start under way for `id` (its disk in use), or not.
+    // @port-skip linux-only: test hook
+    func markStartingForTesting(_ id: String, _ on: Bool) { if on { starting.insert(id) } else { starting.remove(id) } }
 
     /// Tests: a daemon on its own uplink and directories, nothing else started
     /// (no session engine, remote access or adoption). `uplink`: the
@@ -1138,7 +1144,10 @@ public actor Daemon {
     // @port-skip linux-only: macOS starts a VM by starting its workspace again; Linux VMs are the workspaces for now
     /// `partOfReboot`: the reboot's own boot (its relaunch, the reboot route,
     /// a boot remedy), the one start a rebooting VM takes.
-    func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false) async -> ControlResponse {
+    /// `unattended`: nobody is there to ask (an agent's or automation's
+    /// start): a launch question isn't asked (DaemonBaseImageDrift.swift).
+    func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false,
+               unattended: Bool = false, driftResolved: Bool = false) async -> ControlResponse {
         // A workspace made private (a clone of a private one, a save just
         // now) is in the private set before its VM can emit anything. First:
         // the checks below and the starting mark take one actor step.
@@ -1151,6 +1160,14 @@ public actor Daemon {
             return .error(409, "'\(rec.name)' is marked compromised (a credential was sent to the wrong host): "
                           + "clear the mark (POST /profiles/<id>/compromised {\"action\":\"clear\"}) or remove it",
                           ["compromised": .bool(true)])
+        }
+        // A cold boot of a workspace on an older base: the upgrade offer
+        // (macOS: launch's drift check). The question waits on the user, so
+        // the start then runs again on the record as it is now.
+        if !driftResolved, !partOfReboot, !resumeOnly, rec.state == .stopped, !rec.managed {
+            if let stop = await resolveDriftPrompt(rec, unattended: unattended) { return stop }
+            guard let now = registry.find(rec.id) else { return .error(404, "VM '\(rec.name)' was removed") }
+            return await start(now, body, unattended: unattended, driftResolved: true)
         }
         // Marked in the same actor step as the check, before any await: a
         // repair (kubeMachineDiskImages) or a remove sees the VM as busy
@@ -1615,12 +1632,20 @@ public actor Daemon {
             // …and its credentials and files, if it changed them.
             if existingProfile(for: rec) != raw { _ = scheduleLiveRefresh(id) }
         }
+        // The start clones the base into a missing system disk (a new
+        // workspace's, a reset one's): which base that was is recorded on
+        // the workspace, for the drift check (DaemonBaseImageDrift.swift).
+        let clones = !FileManager.default.fileExists(atPath: machine.config.overlay)
+        let baseVersion = clones ? readCurrentBaseVersion() : nil
         do {
             try await machine.start()
         } catch {
             live[id] = nil
             await teardown(l, mac: rec.mac)
             throw error
+        }
+        if let baseVersion, rec.registration != true, rec.kube == nil, let pid = UUID(uuidString: id) {
+            stampBaseImageVersionAtClone(baseVersion, profileID: pid)
         }
         // A workspace's cold boot: its console watched for a boot that dies
         // on filesystem errors (DaemonBootRemedy; a cluster machine's has its

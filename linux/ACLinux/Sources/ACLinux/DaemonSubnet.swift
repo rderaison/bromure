@@ -69,7 +69,8 @@ extension Daemon {
     static func configHomeWarning(stateDir: String, env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
         guard env["XDG_STATE_HOME"].map({ !$0.isEmpty }) == true, env["XDG_CONFIG_HOME"].map({ !$0.isEmpty }) != true else { return nil }
         let home = env["HOME"] ?? NSHomeDirectory()
-        let temps = ["/tmp/", "/var/tmp/"] + (env["TMPDIR"].map { [$0.hasSuffix("/") ? $0 : $0 + "/"] } ?? [])
+        let tmpdir = env["TMPDIR"].flatMap { $0.isEmpty ? nil : $0 }
+        let temps = ["/tmp/", "/var/tmp/"] + (tmpdir.map { [$0.hasSuffix("/") ? $0 : $0 + "/"] } ?? [])
         guard temps.contains(where: { stateDir.hasPrefix($0) }) else { return nil }
         return "bromure-ac daemon: WARNING: a state dir of its own (\(stateDir)) but this user's config home: its defaults"
             + " (the workspace subnet's choice) go to \(home)/.config/bromure-ac.plist; set XDG_CONFIG_HOME for a test or CI daemon\n"

@@ -383,6 +383,94 @@ struct DaemonTests {
         for v in ["m1", "m2"] { _ = try w.cli("vm", "kill", "--force", v) }
     }
 
+    @Test("a workspace records the base its system disk was cloned from; with a newer base on disk its start asks (through the client): No keeps the disk and holds for that base, Yes resets it to the new base")
+    func baseImageDrift() async throws {
+        var w = try World()
+        defer { w.destroy() }
+        // An image dir of its own: the image's files linked (read only), its
+        // own version stamp.
+        let img = w.root + "/image"
+        try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true)
+        for f in try FileManager.default.contentsOfDirectory(atPath: Env.image) where !["base.version", "image-state.json"].contains(f) {
+            try FileManager.default.createSymbolicLink(atPath: img + "/" + f, withDestinationPath: Env.image + "/" + f)
+        }
+        func stamp(_ v: String) throws { try (v + "\n").write(toFile: img + "/base.version", atomically: true, encoding: .utf8) }
+        try stamp("201")
+        w.extraEnv["BROMURE_AC_IMAGE"] = img
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        let world = w
+        func ready() async throws -> Bool {
+            for _ in 0..<240 {
+                if (try? world.cli("vm", "exec", "dr", "--", "true"))?.0 == 0 { return true }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            return false
+        }
+        func marker() throws -> String {
+            try world.cli("vm", "exec", "dr", "--", "cat", "/var/tmp/drift-marker").1.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        /// /state as the fat client polls it (a connected client: prompts are offered).
+        func state() -> JSONValue? {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            p.arguments = ["-sS", "--max-time", "5", "--unix-socket", world.socket, "-H", "x-bromure-console-idle-ms: 0", "http://localhost/state"]
+            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return nil }
+            let d = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            return try? JSONDecoder().decode(JSONValue.self, from: d)
+        }
+        /// A start with the drift question answered `choice`; its exit status.
+        func start(answering choice: Int) async throws -> (Int32, Bool) {
+            _ = state()   // a client is watching before the start asks
+            let started = Task.detached { try world.cli("vm", "start", "dr").0 }
+            var answered = false
+            for _ in 0..<120 where !answered {
+                if case .array(let prompts)? = state()?["pendingPrompts"],
+                   let p = prompts.first(where: { $0["title"]?.stringValue == "A newer base image is available." }),
+                   case .array(let buttons)? = p["buttons"], buttons.map(\.stringValue) == ["Yes, upgrade", "No", "Remind me later"],
+                   let pid = p["id"]?.stringValue {
+                    answered = try await FirecrackerAPI(socketPath: world.socket).request("POST", "/prompts/\(pid)/answer", ["choice": .number(Double(choice))]).status == 200
+                } else {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            return (try await started.value, answered)
+        }
+        let log = { (try? String(contentsOfFile: world.root + "/daemon.log", encoding: .utf8)) ?? "" }
+
+        #expect(try w.cli("vm", "run", "--name", "dr").0 == 0)
+        #expect(try w.vm("dr")?["baseImageVersion"]?.stringValue == "201", "stamped at the clone")
+        #expect(try w.cli("vm", "exec", "dr", "--", "sh", "-c", "echo kept > /var/tmp/drift-marker && sync").0 == 0)
+        #expect(try w.cli("vm", "kill", "dr").0 == 0)
+
+        // A rebuilt base: asked; "No" boots the disk as it is.
+        try stamp("201.1")
+        let no = try await start(answering: 1)
+        #expect(no.1, "the start asked; daemon log:\n\(log().suffix(2000))")
+        #expect(no.0 == 0)
+        #expect(try await ready())
+        #expect(try marker() == "kept", "the disk was kept")
+        #expect(try w.vm("dr")?["baseImageVersion"]?.stringValue == "201")
+        #expect(try w.cli("vm", "kill", "dr").0 == 0)
+        // Not asked again for 201.1.
+        _ = state()
+        #expect(try w.cli("vm", "start", "dr").0 == 0)
+        if case .array(let prompts)? = state()?["pendingPrompts"] { #expect(prompts.isEmpty, "\(prompts)") }
+        #expect(try await ready())
+        #expect(try w.cli("vm", "kill", "dr").0 == 0)
+
+        // The next base: asked again; "Yes" resets the system disk to it.
+        try stamp("201.2")
+        let yes = try await start(answering: 0)
+        #expect(yes.1 && yes.0 == 0, "daemon log:\n\(log().suffix(2000))")
+        #expect(try await ready())
+        #expect(try marker().isEmpty, "a fresh clone of the base")
+        #expect(try w.vm("dr")?["baseImageVersion"]?.stringValue == "201.2", "re-stamped at the new clone")
+        #expect(log().contains("system disk reset to base v201.2 (upgrade)"))
+        _ = try w.cli("vm", "kill", "--force", "dr")
+    }
+
     @Test("a workspace set to boot at login starts with the daemon; one that isn't stays off")
     func bootAtStartup() async throws {
         let w = try World()

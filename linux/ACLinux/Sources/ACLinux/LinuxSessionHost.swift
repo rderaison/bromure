@@ -377,20 +377,21 @@ final class LinuxSessionHost: AgentSessionHost {
         ProfileStore().loadAll().first { $0.name.lowercased() == name.lowercased() }?.id
     }
 
-    /// Boots the workspace (all three: a server has no screen to ask on).
+    /// Boots the workspace (all three: a server has no screen to ask on); an
+    /// agent's start (quietly) is unattended, as on macOS.
     // @port-skip linux-only: Daemon.startWorkspace
     func startProfile(_ id: Profile.ID) { boot(id) }
     // @port-skip linux-only: Daemon.startWorkspace
-    func startProfileQuietly(_ id: Profile.ID) { boot(id) }
+    func startProfileQuietly(_ id: Profile.ID) { boot(id, unattended: true) }
     // @port-skip linux-only: Daemon.startWorkspace
     func startProfileRemotely(_ id: Profile.ID) { boot(id) }
     /// Boots the workspace; a boot that fails is the workspace's refusal
     /// (unattendedLaunchRefusal) until the next attempt.
     // @port-skip linux-only: Daemon.startWorkspace
-    func boot(_ id: UUID) {
+    func boot(_ id: UUID, unattended: Bool = false) {
         launchRefusals[id] = nil
         Task { @MainActor [weak self, weak daemon] in
-            guard let why = await daemon?.startWorkspace(id) else { return }
+            guard let why = await daemon?.startWorkspace(id, unattended: unattended) else { return }
             self?.launchRefusals[id] = why
             FileHandle.standardError.write(Data("bromure-ac daemon: workspace \(id.uuidString.prefix(8)) didn't start: \(why)\n".utf8))
         }

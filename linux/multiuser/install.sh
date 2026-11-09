@@ -63,7 +63,7 @@ ln -sfn $L/bin/bromure-ac /usr/local/bin/bromure-ac
 
 # The baked image, read-only for every user (sparse copy, ~1 s).
 install -d -m 755 /var/lib/bromure-ac-image
-for f in base.img vmlinuz initrd.img cmdline; do
+for f in base.img vmlinuz initrd.img cmdline kernel-release base.version image-state.json; do
   [ -e "$IMAGE/$f" ] && cp --sparse=always "$IMAGE/$f" /var/lib/bromure-ac-image/$f.new && mv -f /var/lib/bromure-ac-image/$f.new /var/lib/bromure-ac-image/$f
 done
 chmod 644 /var/lib/bromure-ac-image/*

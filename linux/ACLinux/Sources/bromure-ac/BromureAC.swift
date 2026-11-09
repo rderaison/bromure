@@ -366,7 +366,7 @@ struct Image: AsyncParsableCommand {
         @Flag(name: .customLong("no-agent-clis"), help: "Leave out the image catalog's postinstall steps (Claude Code, Codex, Grok…).")
         var noAgentCLIs = false
         @Option(name: .long,
-                help: "A shell script to run as root inside the image after Bromure's setup (traced; log in the daemon's state dir, base-image-customize.log). Default: the one set in the daemon's defaults (image.customizeScript.enabled/.path), if any.")
+                help: "A shell script to run as root inside the image after Bromure's setup (traced; log in the daemon's state dir, base-image-customize.log). Default: the one set in your defaults (~/.config/bromure-ac.plist: image.customizeScript.enabled/.path), if any.")
         var customizeScript: String?
         @Option(name: .customLong("alpine-releases"), help: "Alpine netboot releases URL (HTTPS). Default: dl-cdn's.")
         var alpineReleases: String?

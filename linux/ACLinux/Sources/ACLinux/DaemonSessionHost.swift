@@ -56,10 +56,12 @@ extension Daemon {
     /// a boot's questions are asked; a server has no screen to ask on).
     /// Nil when it's up (or was already), else why not.
     // @port ACAppDelegate.startProfileRemotely(_: Profile.ID) h=b41392c8b01a656d @7dd92fdf
-    func startWorkspace(_ id: UUID) async -> String? {
+    /// `unattended`: an agent's or automation's start (macOS:
+    /// startProfileQuietly, startProfileForAutomation): nothing is asked.
+    func startWorkspace(_ id: UUID, unattended: Bool = false) async -> String? {
         guard let rec = registry.find(id.uuidString.lowercased()) else { return "no workspace \(id.uuidString)" }
         if rec.state == .running || live[rec.id] != nil { return nil }
-        let r = await start(rec)
+        let r = await start(rec, unattended: unattended)
         return r.status < 300 ? nil : (r.body["error"]?.stringValue ?? "couldn't start (\(r.status))")
     }
 

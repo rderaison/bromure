@@ -130,7 +130,7 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
 
     /// Boots the workspace for a run; headless either way on a server.
     // @port ACAppDelegate.startProfileForAutomation(_: Profile.ID, detached: Bool) h=94d42a800f5fdc4f @9936e30c
-    func startProfileForAutomation(_ id: Profile.ID, detached: Bool) { boot(id) }
+    func startProfileForAutomation(_ id: Profile.ID, detached: Bool) { boot(id, unattended: true) }
 
     /// One process runs the workspaces here: none is open elsewhere.
     // @port ACAppDelegate.workspaceOpenElsewhere(_: Profile.ID) h=da71c9e10f9c8655 @9936e30c

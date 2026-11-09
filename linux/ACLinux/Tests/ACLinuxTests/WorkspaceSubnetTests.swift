@@ -104,6 +104,9 @@ struct WorkspaceSubnetInUseTests {
                                          env: ["HOME": home, "XDG_STATE_HOME": "/srv/bromure/state"]) == nil)
         #expect(Daemon.configHomeWarning(stateDir: "/scratch/t/state/bromure-ac",
                                          env: ["HOME": home, "XDG_STATE_HOME": "/scratch/t/state", "TMPDIR": "/scratch"]) != nil, "under TMPDIR")
+        #expect(Daemon.configHomeWarning(stateDir: "/srv/bromure/state/bromure-ac",
+                                         env: ["HOME": home, "XDG_STATE_HOME": "/srv/bromure/state", "TMPDIR": ""]) == nil,
+                "an empty TMPDIR is unset, not /")
         // A multi-user daemon: its HOME is its state dir's parent.
         #expect(Daemon.configHomeWarning(stateDir: "/var/lib/bromure-ac/u/bromure-ac",
                                          env: ["HOME": "/var/lib/bromure-ac/u", "XDG_STATE_HOME": "/var/lib/bromure-ac/u"]) == nil)

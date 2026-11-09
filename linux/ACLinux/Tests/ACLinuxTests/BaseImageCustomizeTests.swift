@@ -5,16 +5,17 @@ import Testing
 
 @Suite("Base image customize script (Linux bake)")
 struct BaseImageCustomizeLinuxTests {
-    @Test("the script is the last step: traced, tagged, named 9999-customize.sh (postinstall.sh runs it once)")
+    @Test("the script is the last step: traced, tagged, named zzzz-customize.sh, past any seq (postinstall.sh runs it once)")
     func staging() throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let step = PostinstallStep(uuid: "7c9f1a2e-0000-4000-8000-000000000000", seq: 10, description: "A step", command: "true")
-        _ = try InterimBake.stagePostinstall([step], to: dir)
+        let late = PostinstallStep(uuid: "ffffffff-0000-4000-8000-000000000000", seq: 99999, description: "Late", command: "true")
+        _ = try InterimBake.stagePostinstall([step, late], to: dir)
         try InterimBake.stageCustomize("make install", to: dir)
         let files = try FileManager.default.contentsOfDirectory(atPath: dir + "/steps").sorted()
-        #expect(files == ["0010-7c9f1a2e.sh", "9999-customize.sh"])
-        let body = try String(contentsOfFile: dir + "/steps/9999-customize.sh", encoding: .utf8)
+        #expect(files == ["0010-7c9f1a2e.sh", "99999-ffffffff.sh", "zzzz-customize.sh"])
+        let body = try String(contentsOfFile: dir + "/steps/zzzz-customize.sh", encoding: .utf8)
         #expect(body == "# Your customize script\nexport PS4='+ [customize] '\nset -x\nmake install\n")
         let postinstall = try String(contentsOf: ImageCatalogACLinuxTests.repo
             .appendingPathComponent("Sources/AgentCoding/Resources/vm-setup/postinstall.sh"), encoding: .utf8)
@@ -55,6 +56,18 @@ struct BaseImageCustomizeLinuxTests {
         #expect(BaseImageCustomize.load(defaults: d) == (nil, nil), "no path")
     }
 
+    @Test("one bake per output dir: a second one is refused while the first holds the lock")
+    func oneBakePerDir() async throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let fd = open(dir + "/.bake.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        defer { close(fd) }
+        #expect(flock(fd, LOCK_EX | LOCK_NB) == 0)
+        let o = InterimBake.Options(outputDir: dir, cacheDir: dir + "/cache", vmSetupDir: dir, imageVersion: "201")
+        await #expect(throws: BakeError.self) { _ = try await InterimBake.bake(o) }
+        #expect(!FileManager.default.fileExists(atPath: dir + "/.work"), "refused before touching anything")
+    }
+
     @Test("the customize log keeps the postinstall phase only, under a header")
     func log() throws {
         let dir = try shortTempDir()
@@ -72,6 +85,9 @@ struct BaseImageCustomizeLinuxTests {
         #expect(text.hasPrefix("Base image customize run — "))
         #expect(text.hasSuffix("+ [customize] make\n"))
         #expect(!text.contains("setup.sh output") && !text.contains("an older run") && !text.contains("after"))
+        var st = stat()
+        #expect(stat(path, &st) == 0 && st.st_mode & 0o777 == 0o600, "the trace is the owner's alone")
+        #expect(stat(dir + "/logs", &st) == 0 && st.st_mode & 0o777 == 0o700)
         let none = CustomizeLog(path: nil)
         none.start(); none.write(Data("x".utf8)); none.close()
     }
