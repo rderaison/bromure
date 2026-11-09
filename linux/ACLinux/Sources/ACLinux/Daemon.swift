@@ -32,52 +32,26 @@ public struct DaemonConfig: Sendable {
         return configuredImageDir
     }
 
-    /// The image to boot, once it's safe to: this user's own, or one whose
-    /// dir and boot files (disk, kernel, initrd, cmdline; a link's target)
-    /// only root or this user can have written. A shared dir someone else made, or anyone may
-    /// write, could hold a planted image: refused, never booted.
+    /// The image to boot, once it's safe to (ImageTrust): its files
+    /// resolved, each and every directory above it writable by root or
+    /// this user only. Booted from those paths. A shared dir someone else
+    /// made, or anyone may write, could hold a planted image: refused.
     // @port-skip linux-only: Linux daemon configuration (the per-user image)
-    func bootableImageDir() throws -> String {
+    func checkedImage() throws -> CheckedImage {
         let dir = imageDir
-        if let why = Self.imageTrustProblem(dir) { throw ImageUntrusted(dir: dir, why: why) }
-        return dir
-    }
-
-    /// Why `dir`'s image isn't safe to boot, or nil.
-    // @port-skip linux-only: Linux daemon configuration (the per-user image)
-    static func imageTrustProblem(_ dir: String, uid: uid_t = getuid()) -> String? {
-        for path in [dir] + ["base.img", "vmlinuz", "initrd.img", "cmdline"].map({ dir + "/" + $0 }) {
-            // What boots is what a link points to: that's what's checked.
-            var st = stat()
-            guard stat(path, &st) == 0 else { continue }   // missing: the boot says so
-            if st.st_uid != 0, st.st_uid != uid { return "\(path) belongs to uid \(st.st_uid)" }
-            if st.st_mode & 0o002 != 0 { return "\(path) is world-writable" }
-            if st.st_mode & 0o020 != 0, !privateGroup(gid: st.st_gid, owner: st.st_uid) {
-                return "\(path) is writable by group \(st.st_gid)"
-            }
+        switch ImageTrust.check(dir) {
+        case .success(let image): return image
+        case .failure(let problem): throw ImageUntrusted(dir: dir, problem: problem)
         }
-        return nil
-    }
-
-    /// Whether `gid` is `owner`'s own group (a user private group: their
-    /// primary group, with no other members), where group-writable is
-    /// only the owner (Ubuntu's umask 002 makes files so).
-    // @port-skip linux-only: Linux daemon configuration (the per-user image)
-    static func privateGroup(gid: gid_t, owner: uid_t) -> Bool {
-        guard let pw = getpwuid(owner), pw.pointee.pw_gid == gid, let gr = getgrgid(gid) else { return false }
-        let name = String(cString: pw.pointee.pw_name)
-        var members: [String] = []
-        var m = gr.pointee.gr_mem
-        while let p = m?.pointee { members.append(String(cString: p)); m = m?.advanced(by: 1) }
-        return members.allSatisfy { $0 == name }
     }
 
     // @port-skip linux-only: Linux daemon configuration (the per-user image)
     struct ImageUntrusted: Error, CustomStringConvertible {
-        let dir: String, why: String
+        let dir: String, problem: ImageTrust.Problem
         // @port-skip linux-only: see ImageUntrusted
         var description: String {
-            "the guest image in \(dir) isn't safe to boot (\(why)): install your own with `bromure-ac image install`"
+            "the guest image in \(dir) isn't safe to boot (\(problem.why)): " + (problem.fix.map { "fix: \($0)" }
+                ?? "install your own with `bromure-ac image install`")
         }
     }
 
@@ -1177,7 +1151,7 @@ public actor Daemon {
             return "no saved state"
         }
         do {
-            try SnapshotIdentity.verify(state: state, overlay: (try machineConfig(rec)).overlay)
+            try SnapshotIdentity.verify(state: state, overlay: (try machineConfig(rec, checked: false)).overlay)
             try SnapshotIdentity.verify(state: state, overlay: vmDir(rec.id) + "/home.img", disk: 1)
             return nil
         } catch {
@@ -1305,6 +1279,9 @@ public actor Daemon {
         // A suspended VM resumes from its snapshot while it still pairs with
         // its disks; otherwise `resume` refuses and `start` boots it fresh.
         var restoreFrom: String?
+        // An image that isn't safe to boot refuses the start before the
+        // saved state is looked at: it's kept, not dropped for a fresh boot.
+        do { _ = try config.checkedImage() } catch { return .error(409, "Can't start '\(rec.name)': \(error)") }
         if rec.state == .suspended {
             let dir = snapshotDir(rec.id)
             if let why = snapshotUsable(rec, dir) {
@@ -1805,11 +1782,19 @@ public actor Daemon {
 
     /// A VM's machine configuration (launch and re-adoption build the same one).
     // @port-skip linux-only: Linux daemon VM layout
-    func machineConfig(_ rec: VMRecord) throws -> MachineConfig {
+    /// `checked`: from the image's checked files (a boot); else the image
+    /// dir as it is (a VM taken back already runs from it; the snapshot
+    /// check only needs the overlay's path).
+    func machineConfig(_ rec: VMRecord, checked: Bool = true) throws -> MachineConfig {
         let dir = vmDir(rec.id), run = config.runtimeDir + "/vms/" + rec.shortId
         // The system disk: a sparse raw copy of the base (Firecracker has no qcow2).
-        var qc = try MachineConfig(name: "bromure-\(rec.shortId)", bakedImage: try config.bootableImageDir(),
-                                   overlay: dir + "/disk.raw", vsockCID: rec.cid, runDirectory: run)
+        let image = checked ? try config.checkedImage()
+            : CheckedImage(dir: config.imageDir, kernel: config.imageDir + "/vmlinuz", initrd: config.imageDir + "/initrd.img",
+                           baseImage: config.imageDir + "/base.img", cmdline: config.imageDir + "/cmdline",
+                           kernelRelease: config.imageDir + "/kernel-release")
+        let cmdline = try String(contentsOfFile: image.cmdline, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        var qc = MachineConfig(name: "bromure-\(rec.shortId)", kernel: image.kernel, initrd: image.initrd, cmdline: cmdline,
+                               baseImage: image.baseImage, overlay: dir + "/disk.raw", vsockCID: rec.cid, runDirectory: run)
         qc.cpus = rec.cpus
         qc.memoryMiB = rec.memoryMiB
         qc.shares = [.init(tag: "bromure-meta", hostPath: dir + "/meta", readOnly: true),
@@ -1853,7 +1838,12 @@ public actor Daemon {
                 if !rec.managed, adoptedProfile == nil {
                     throw MachineError.invalidConfig("its workspace profile can't be read, so its network can't be governed")
                 }
-                let qc = try machineConfig(rec)
+                // Taken back as it runs, from the image it booted; one that
+                // wouldn't pass the boot check now is said, not killed.
+                do { _ = try config.checkedImage() } catch {
+                    FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': taken back, but \(error); its next boot is refused\n".utf8))
+                }
+                let qc = try machineConfig(rec, checked: false)
                 // Its network is the socketpair end the fd store kept;
                 // without it (no systemd store) the VM has no network back.
                 let storeName = "net-" + rec.shortId

@@ -205,7 +205,7 @@ extension Daemon {
             var st = stat()
             return stat(path, &st) == 0 ? Int64(st.st_size) : nil
         }
-        let base = config.imageDir + "/base.img"
+        let base = (try? config.checkedImage())?.baseImage ?? config.imageDir + "/base.img"
         var body: [String: JSONValue] = [
             "baseBytes": .number(Double(allocated(base) ?? 0)),
             "diskBytes": .number(Double(allocated(dir + "/disk.raw") ?? 0)),

@@ -254,7 +254,7 @@ extension DaemonGlobalSuites {
                 #expect(try String(contentsOfFile: meta + "/shares.txt", encoding: .utf8) == "1 app\n2 src\n3 src-2\n")
                 try FileManager.default.createDirectory(atPath: dir + "/image", withIntermediateDirectories: true)
                 try "console=ttyS0\n".write(toFile: dir + "/image/cmdline", atomically: true, encoding: .utf8)
-                #expect(try await d.machineConfig(vm).shares.map(\.tag) == ["bromure-meta", "bromure-outbox", "share-1", "share-2", "share-3"])
+                #expect(try await d.machineConfig(vm, checked: false).shares.map(\.tag) == ["bromure-meta", "bromure-outbox", "share-1", "share-2", "share-3"])
 
                 // A managed machine's folders are its own, and no shares.txt.
                 var managed = RepairMarksTests.stopped()

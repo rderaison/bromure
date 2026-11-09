@@ -54,7 +54,9 @@ extension Daemon {
     // @port-skip linux-only: the Linux guard's question (macOS boots and lets a guest without a module go on)
     func sentryCatalogReady() async -> Bool {
         guard let store = sentryModules, let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return false }
-        return Self.sentryCatalogCovers(await store.refreshCatalog(hash), kernels: Self.bootKernels(imageDir: config.imageDir))
+        // The kernels of the image a boot would use, checked (none: fail closed).
+        guard let image = try? config.checkedImage() else { return false }
+        return Self.sentryCatalogCovers(await store.refreshCatalog(hash), kernels: Self.bootKernels(releaseFile: image.kernelRelease))
     }
 
     /// The same from what's cached only (no fetch), for a VM taken back
@@ -62,14 +64,18 @@ extension Daemon {
     // @port-skip linux-only: see sentryCatalogReady
     nonisolated func sentryCatalogCached() -> Bool {
         guard let store = sentryModules, let hash = SentryModuleStore.shippedSourceHash(setupDir: setupDir) else { return false }
-        return Self.sentryCatalogCovers(store.cachedCatalog(hash), kernels: Self.bootKernels(imageDir: config.imageDir))
+        let release = (try? config.checkedImage())?.kernelRelease ?? config.imageDir + "/kernel-release"
+        return Self.sentryCatalogCovers(store.cachedCatalog(hash), kernels: Self.bootKernels(releaseFile: release))
     }
 
     /// The kernel releases the baked image boots (its `kernel-release`,
     /// InterimBake's: one per line); empty when unknown.
     // @port-skip linux-only: the Linux image's kernel, for the sentry guard
-    nonisolated static func bootKernels(imageDir: String) -> [String] {
-        ((try? String(contentsOfFile: imageDir + "/kernel-release", encoding: .utf8)) ?? "")
+    nonisolated static func bootKernels(imageDir: String) -> [String] { bootKernels(releaseFile: imageDir + "/kernel-release") }
+
+    // @port-skip linux-only: see bootKernels(imageDir:)
+    nonisolated static func bootKernels(releaseFile: String) -> [String] {
+        ((try? String(contentsOfFile: releaseFile, encoding: .utf8)) ?? "")
             .split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 

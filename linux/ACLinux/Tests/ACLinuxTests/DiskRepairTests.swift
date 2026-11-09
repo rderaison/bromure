@@ -376,12 +376,12 @@ struct ManagedFolderTests {
                                                              agentdPath: dir + "/agentd.py"), uplink: standIn)
         var rec = RepairMarksTests.stopped()
         rec.folders = ["/srv/a", "/srv/b"]
-        let shares = try await d.machineConfig(rec).shares
+        let shares = try await d.machineConfig(rec, checked: false).shares
         #expect(shares.map(\.tag) == ["bromure-meta", "bromure-outbox", "share-1", "share-2"])
         #expect(shares.first { $0.tag == "share-1" }?.hostPath == "/srv/a")
         #expect(shares.first { $0.tag == "share-2" }?.readOnly == false, "the rescue's e2fsck writes through it")
         rec.folders = nil
-        #expect(try await d.machineConfig(rec).shares.count == 2, "no folders, no slots")
+        #expect(try await d.machineConfig(rec, checked: false).shares.count == 2, "no folders, no slots")
         await d.shutdown()
     }
 }

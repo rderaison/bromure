@@ -67,7 +67,7 @@ extension Daemon {
         guard !steps.isEmpty else { return }
         // Installed into this user's own image (the shared one is copied
         // there first): asked only when that's possible.
-        guard (try? config.bootableImageDir()) != nil else { return }   // refused at boot, said there
+        guard (try? config.checkedImage()) != nil else { return }   // refused at boot, said there
         config.secureOwnImageDir()
         guard Self.mayWriteImage(config.userImageDir) else {
             FileHandle.standardError.write(Data("bromure-ac daemon: [image] \(steps.count) newly published step(s) not offered: \(config.userImageDir) isn't writable\n".utf8))
@@ -113,7 +113,7 @@ extension Daemon {
         // that's the shared, read-only one).
         let target = config.userImageDir
         let source: String
-        do { source = try config.bootableImageDir() } catch {
+        do { source = try config.checkedImage().dir } catch {
             FileHandle.standardError.write(Data("bromure-ac daemon: [image] the recommended packages weren't installed: \(error)\n".utf8))
             return
         }

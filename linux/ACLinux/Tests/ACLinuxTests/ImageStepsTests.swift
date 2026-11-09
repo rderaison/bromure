@@ -126,43 +126,93 @@ struct ImageStepsTests {
         #expect(Daemon.mayWriteImage(c.userImageDir) && !Daemon.mayWriteImage(dir + "/shared"))
     }
 
-    /// A configured image someone else could have planted isn't booted:
-    /// only root's or this user's, nothing group- or world-writable, no
-    /// link to a file that isn't; this user's own image always is.
+    /// What would boot is judged: each file's real path, it and every dir
+    /// above it root's or this user's and writable by no one else (a
+    /// sticky root dir such as /tmp aside); the boot uses those paths.
     @Test func anImageOthersMayWriteIsntBooted() throws {
-        let dir = try shortTempDir()
+        let dir = try shortTempDir()   // 0700, in /tmp (sticky, root's)
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let fm = FileManager.default
         let img = dir + "/shared"
         try fm.createDirectory(atPath: img, withIntermediateDirectories: true)
-        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline", "base.version"] { fm.createFile(atPath: img + "/" + f, contents: Data("x".utf8)) }
-        chmod(img, 0o755)
-        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline"] { chmod(img + "/" + f, 0o644) }
-        #expect(DaemonConfig.imageTrustProblem(img) == nil, "this user's, not writable by others")
-        #expect(DaemonConfig.imageTrustProblem(img, uid: getuid() &+ 1) != nil, "another user's dir")
-        chmod(img + "/vmlinuz", 0o666)
-        #expect(DaemonConfig.imageTrustProblem(img)?.contains("vmlinuz") == true, "a world-writable kernel")
-        chmod(img + "/vmlinuz", 0o644)
-        chmod(img, 0o777)
-        #expect(DaemonConfig.imageTrustProblem(img) != nil, "a world-writable dir")
-        chmod(img, 0o775)
-        var st = stat()
-        #expect(stat(img, &st) == 0)
-        #expect((DaemonConfig.imageTrustProblem(img) == nil) == DaemonConfig.privateGroup(gid: st.st_gid, owner: getuid()),
-                "group-writable: only for the owner's private group")
-        chmod(img, 0o755)
-        // A link is judged by what it points to.
-        try fm.removeItem(atPath: img + "/initrd.img")
-        fm.createFile(atPath: dir + "/elsewhere", contents: Data("x".utf8))
-        chmod(dir + "/elsewhere", 0o644)
-        try fm.createSymbolicLink(atPath: img + "/initrd.img", withDestinationPath: dir + "/elsewhere")
-        #expect(DaemonConfig.imageTrustProblem(img) == nil, "a link to a trusted file")
-        chmod(dir + "/elsewhere", 0o666)
-        #expect(DaemonConfig.imageTrustProblem(img)?.contains("initrd.img") == true, "a link to a world-writable file")
-        let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: img, agentdPath: "")
-        #expect(throws: (any Error).self) { _ = try c.bootableImageDir() }
-        if let e = try? { () throws -> Error? in do { _ = try c.bootableImageDir(); return nil } catch { return error } }() {
-            #expect("\(e)".contains("bromure-ac image install"))
+        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline", "kernel-release"] {
+            fm.createFile(atPath: img + "/" + f, contents: Data("x".utf8))
+            chmod(img + "/" + f, 0o644)
         }
+        chmod(img, 0o755)
+        guard case .success(let ok) = ImageTrust.check(img) else { Issue.record("this user's own, not writable by others"); return }
+        #expect(ok.kernel == img + "/vmlinuz" && ok.baseImage == img + "/base.img")
+        guard case .failure = ImageTrust.check(img, uid: getuid() &+ 1) else { Issue.record("another user's"); return }
+        // A world-writable kernel: refused, with the fix (the file is ours).
+        chmod(img + "/vmlinuz", 0o666)
+        guard case .failure(let p) = ImageTrust.check(img) else { Issue.record("a world-writable kernel"); return }
+        #expect(p.path == img + "/vmlinuz" && p.fix == "chmod o-w \(img)/vmlinuz")
+        chmod(img + "/vmlinuz", 0o644)
+        // A dir above it others may write (not sticky): refused.
+        chmod(dir, 0o777)
+        guard case .failure(let up) = ImageTrust.check(img) else { Issue.record("a writable dir above it"); return }
+        #expect(up.path == dir)
+        chmod(dir, 0o700)
+        // A link is judged by its target, and booted from it; a dangling one is refused.
+        try fm.createDirectory(atPath: dir + "/real", withIntermediateDirectories: true)
+        chmod(dir + "/real", 0o755)
+        fm.createFile(atPath: dir + "/real/initrd", contents: Data("x".utf8))
+        chmod(dir + "/real/initrd", 0o644)
+        try fm.removeItem(atPath: img + "/initrd.img")
+        try fm.createSymbolicLink(atPath: img + "/initrd.img", withDestinationPath: dir + "/real/initrd")
+        guard case .success(let linked) = ImageTrust.check(img) else { Issue.record("a link to a trusted file"); return }
+        #expect(linked.initrd == dir + "/real/initrd", "booted from the checked target")
+        chmod(dir + "/real", 0o777)
+        guard case .failure = ImageTrust.check(img) else { Issue.record("a link into a dir others may write"); return }
+        chmod(dir + "/real", 0o755)
+        try fm.removeItem(atPath: dir + "/real/initrd")
+        guard case .failure(let dangling) = ImageTrust.check(img) else { Issue.record("a dangling link"); return }
+        #expect(dangling.why.contains("link to nothing"))
+        // The daemon's error names the fix when it's the user's own.
+        try fm.removeItem(atPath: img + "/initrd.img")
+        fm.createFile(atPath: img + "/initrd.img", contents: Data("x".utf8))
+        chmod(img + "/initrd.img", 0o664)
+        let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: img, agentdPath: "")
+        do { _ = try c.checkedImage(); if !ImageTrust.privateGroup(gid: getgid(), owner: getuid()) { Issue.record("group-writable passed") } }
+        catch { #expect("\(error)".contains("fix: chmod g-w \(img)/initrd.img")) }
+    }
+
+    /// A private group only where every user can be listed.
+    @Test func groupsArePrivateOnlyWithLocalUsers() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        func ns(_ s: String) throws -> Bool {
+            try s.write(toFile: dir + "/ns", atomically: true, encoding: .utf8)
+            return ImageTrust.localUsersOnly(nsswitch: dir + "/ns")
+        }
+        #expect(try ns("passwd: files systemd\ngroup: files\n"))
+        #expect(try ns("passwd:\tcompat # comment\n"))
+        #expect(try !ns("passwd: files systemd sss\n"), "SSSD: users the scan can't list")
+        #expect(try !ns("passwd: files ldap\n"))
+        #expect(try !ns("group: files\n"), "no passwd line")
+        #expect(!ImageTrust.localUsersOnly(nsswitch: dir + "/none"))
+        #expect(!ImageTrust.privateGroup(gid: 0, owner: getuid()) || getuid() == 0, "not this user's primary group")
+    }
+
+    /// An image that isn't safe to boot refuses a suspended workspace's
+    /// start without touching its saved state.
+    @Test func anUntrustedImageKeepsTheSavedState() async throws {
+        let (d, rec, dir) = try await DaemonRepairGateTests.daemon()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let img = dir + "/image"
+        try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true)
+        for f in ["base.img", "vmlinuz", "initrd.img", "cmdline", "base.version"] { FileManager.default.createFile(atPath: img + "/" + f, contents: Data("x".utf8)) }
+        chmod(img + "/vmlinuz", 0o666)
+        var r = rec
+        r.state = .suspended
+        try await d.registerForTesting(r)
+        let snap = await d.snapshotDir(r.id)
+        try FileManager.default.createDirectory(atPath: snap, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snap + "/vm.snap", contents: Data([1]))
+        FileManager.default.createFile(atPath: snap + "/vm.mem", contents: Data([1]))
+        let resp = await d.start(r)
+        #expect(resp.status == 409 && (resp.body["error"]?.stringValue ?? "").contains("isn't safe to boot"), "\(resp.status) \(resp.body)")
+        #expect(FileManager.default.fileExists(atPath: snap + "/vm.snap"), "the saved state is kept")
+        await d.shutdown()
     }
 }
