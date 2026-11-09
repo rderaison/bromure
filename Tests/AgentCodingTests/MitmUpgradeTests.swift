@@ -38,6 +38,7 @@ struct MitmUpgradeTests {
     func smuggledOffers() {
         #expect(!HTTPMitmConnection.pumpedUpgrade(headerBlock: head("Connection: Upgrade", "Upgrade: websocket, h2c")))
         #expect(!HTTPMitmConnection.pumpedUpgrade(headerBlock: head("Upgrade: foo, websocket")))
+        #expect(!HTTPMitmConnection.pumpedUpgrade(headerBlock: head("Upgrade: websocket, SPDY/3.1")))
         #expect(!HTTPMitmConnection.pumpedUpgrade(headerBlock: head("Connection: Upgrade",
                                                                     "Upgrade: websocket", "Upgrade: h2c")))
         #expect(!HTTPMitmConnection.pumpedUpgrade(headerBlock: head("Connection: Upgrade",
