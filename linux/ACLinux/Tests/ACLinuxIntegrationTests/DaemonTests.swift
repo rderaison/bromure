@@ -344,6 +344,66 @@ struct DaemonTests {
         for v in ["m1", "m2"] { _ = try w.cli("vm", "kill", "--force", v) }
     }
 
+    @Test("a workspace set to boot at login starts with the daemon; one that isn't stays off")
+    func bootAtStartup() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        var daemon = try await w.startDaemon()
+        let api = FirecrackerAPI(socketPath: w.socket)
+        #expect(try await api.request("POST", "/profiles", ["name": "atboot", "bootAtStartup": true]).status == 201)
+        #expect(try await api.request("POST", "/profiles", ["name": "notboot"]).status == 201)
+        kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit()
+        daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        var state = ""
+        for _ in 0..<120 {
+            state = try w.vm("atboot")?["state"]?.stringValue ?? ""
+            if state == "running" { break }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        #expect(state == "running", "booted with the daemon")
+        #expect(try w.vm("notboot")?["state"]?.stringValue == "stopped", "the other one left off")
+        _ = try? w.cli("vm", "kill", "--force", "atboot")
+    }
+
+    @Test("a guest that reboots itself boots again: its reboot intent, then Firecracker's exit, then a cold boot")
+    func guestReboot() async throws {
+        let w = try World()
+        defer { try? FileManager.default.removeItem(atPath: w.root) }
+        let daemon = try await w.startDaemon()
+        defer { kill(daemon.processIdentifier, SIGTERM); daemon.waitUntilExit() }
+        #expect(try w.cli("vm", "run", "--name", "rb").0 == 0)
+        func bootID() -> String {
+            ((try? w.cli("vm", "exec", "rb", "--", "cat", "/proc/sys/kernel/random/boot_id"))?.1 ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var first = ""
+        for _ in 0..<120 { first = bootID(); if first.count >= 32 { break }; try await Task.sleep(for: .milliseconds(500)) }
+        #expect(first.count >= 32, "the first boot answers: \(first)")
+        _ = try? w.cli("vm", "exec", "rb", "--", "sudo", "systemctl", "reboot")
+        var second = ""
+        for _ in 0..<360 {
+            try await Task.sleep(for: .milliseconds(500))
+            let b = bootID()
+            if b.count >= 32, b != first { second = b; break }
+        }
+        let log = (try? String(contentsOfFile: w.root + "/daemon.log", encoding: .utf8)) ?? ""
+        #expect(!second.isEmpty, "booted again after the guest's reboot (first boot \(first)); daemon log:\n\(log.suffix(3000))")
+        #expect(try w.cli("vm", "ls").1.contains("running"), "running again")
+        // A guest poweroff, though, leaves it off (the kernel says "Power down").
+        _ = try? w.cli("vm", "exec", "rb", "--", "sudo", "systemctl", "poweroff")
+        var state = ""
+        for _ in 0..<120 {
+            try await Task.sleep(for: .milliseconds(500))
+            state = try w.cli("vm", "ls").1
+            if state.contains("stopped") { break }
+        }
+        #expect(state.contains("stopped"), "off after the guest's poweroff: \(state)")
+        try await Task.sleep(for: .seconds(10))
+        #expect(try w.cli("vm", "ls").1.contains("stopped"), "and not booted again")
+        _ = try? w.cli("vm", "kill", "--force", "rb")
+    }
+
     @Test("workspaces are Profiles: POST /profiles makes one from the template with its VM registered (stopped); GET lists it")
     func profiles() async throws {
         let w = try World()

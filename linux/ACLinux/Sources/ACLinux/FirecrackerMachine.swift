@@ -117,6 +117,14 @@ public actor FirecrackerMachine {
         let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: config.runDirectory, withIntermediateDirectories: true)
+            // A fresh console log per Firecracker (it appends): the daemon reads
+            // the guest kernel's last reboot line from it (DaemonGuestReboot),
+            // never a previous boot's. That one stays beside it, for a look.
+            if let serial = config.serialLog, fm.fileExists(atPath: serial) {
+                let prev = (serial as NSString).deletingPathExtension + ".prev.log"
+                try? fm.removeItem(atPath: prev)
+                try? fm.moveItem(atPath: serial, toPath: prev)
+            }
             if !config.writeBaseInPlace, !fm.fileExists(atPath: config.overlay) {
                 // The copy grows as the guest writes: a nearly full host would
                 // wedge the session mid-run, so it isn't made under the floor

@@ -1044,6 +1044,42 @@
     {
       "id": "MCPRefreshBox.collect()",
       "reason": "Linux bounds the refresh with MCPOAuthBroker.firstOf (one continuation, a late result still kept)"
+    },
+    {
+      "id": "ACAppDelegate.deleteAllCheckpoints(_: Profile.ID, from: NSWindow?)",
+      "reason": "screen-only: the editor's checkpoint purge (no route serves it to a fat client on macOS either)"
+    },
+    {
+      "id": "ACAppDelegate.purgeCheckpoints(_: Profile, _: [URL], window: NSWindow?)",
+      "reason": "screen-only: the editor's checkpoint purge (no route serves it to a fat client on macOS either)"
+    },
+    {
+      "id": "ACAppDelegate.resetProfile(_: Profile)",
+      "reason": "screen-only: the sidebar/editor reset (no route serves it to a fat client on macOS either)"
+    },
+    {
+      "id": "ACAppDelegate.resetHomeProfile(_: Profile)",
+      "reason": "screen-only: the editor's home reset (no route serves it to a fat client on macOS either)"
+    },
+    {
+      "id": "ACAppDelegate.restartLabel(for: RestartChange)",
+      "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
+    },
+    {
+      "id": "ACAppDelegate.restartRequiringChanges(from: Profile, to: Profile, booted: Profile?)",
+      "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
+    },
+    {
+      "id": "ACAppDelegate.static restartChangesToPrompt(previous: Profile, new: Profile, booted: Profile?)",
+      "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
+    },
+    {
+      "id": "ACAppDelegate.static restartRequiringChangeKinds(from: Profile, to: Profile)",
+      "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
+    },
+    {
+      "id": "ACAppDelegate.promptRestartForChanges(items: [String], window: SessionPane)",
+      "reason": "screen-only: the editor window's restart prompt (a fat client decides it itself: RemoteHostController.restartRequiringChanges)"
     }
   ],
   "skipInheriting": [

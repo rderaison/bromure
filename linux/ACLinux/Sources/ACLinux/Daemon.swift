@@ -149,6 +149,10 @@ public actor Daemon {
     /// Workspaces between a reboot's stop and its boot: a `--rm` one isn't
     /// deleted by that stop (macOS: rebootingProfiles).
     var rebooting: Set<String> = []
+    /// VMs whose guest said it's going down for a reboot (DaemonGuestReboot).
+    var guestRebootIntents: Set<String> = []
+    /// Stopped after such a reboot: relaunched once their stop is done.
+    var pendingGuestRelaunch: Set<String> = []
     /// VMs being resumed from a snapshot: a failure leaves them suspended.
     private var restoring: Set<String> = []
     /// The sign-in VMs' Profiles (never saved), by VM id.
@@ -304,6 +308,8 @@ public actor Daemon {
         let n = await d.refreshWorkspaceKubeconfigs()
         if n > 0 { FileHandle.standardError.write(Data("bromure-ac daemon: \(n) taken-back workspace(s): kubeconfigs refreshed\n".utf8)) }
         await d.setUpRemoteAccess()
+        // The workspaces set to boot at login, in the background.
+        Task { await d.bootFlaggedWorkspacesAtStartup() }
         return d
     }
 
@@ -1962,11 +1968,31 @@ public actor Daemon {
         stopping[id] = t
         await t.value
         stopping[id] = nil
+        // Its guest rebooted itself: it boots again (DaemonGuestReboot).
+        if pendingGuestRelaunch.remove(id) != nil { Task { await self.relaunchAfterGuestReboot(id) } }
     }
 
     // @port-skip linux-only: Linux daemon VM lifecycle
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
+        // Did the guest reboot itself? Read before the teardown takes its run
+        // directory (the serial log): its reboot marker (also one it left
+        // within a poll of halting), or the kernel's own last word on the
+        // console when agentd couldn't write one (a reboot before its roster
+        // loop runs). Firecracker exits on the guest's reset either way.
+        let marker = vmDir(id) + "/outbox/reboot-intent"
+        let markerLeft = FileManager.default.fileExists(atPath: marker)
+        if markerLeft { try? FileManager.default.removeItem(atPath: marker) }
+        // An end from the guest's side: Firecracker's own exit, or the
+        // outbox share's virtiofsd going first as the guest resets.
+        let guestSide: Bool
+        switch info.reason { case .guestShutdown, .virtiofsdExited: guestSide = true; default: guestSide = false }
+        let guestRebooted = guestSide && (guestRebootIntents.remove(id) != nil || markerLeft
+            || l.config.serialLog.map(Self.kernelSaidRestart(serialLog:)) == true)
+        guestRebootIntents.remove(id)
+        if guestRebooted {
+            FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)' stopped as its guest rebooted (\(info.reason)): booting it again\n".utf8))
+        }
         await teardown(l, mac: rec.mac)
         // A live refresh under way finishes first (a queued one sees the VM
         // gone): none puts its proxy state back after this clears it.
@@ -1996,6 +2022,14 @@ public actor Daemon {
         rec.pidStart = nil
         CIDAllocator.shared.release(rec.cid)
         try? registry.upsert(rec)
+        // The guest rebooted itself (its intent, then its own exit; not a stop
+        // the daemon asked for): kept as a reboot, relaunched once this stop
+        // is done (macOS: relaunchAfterGuestReboot).
+        if guestRebooted,
+           rec.registration != true, rec.kube == nil, rec.rescueFor == nil {
+            rebooting.insert(id)
+            pendingGuestRelaunch.insert(id)
+        }
         // `vm run --rm`: the workspace goes now it stopped (a suspend is a
         // stop too, as macOS's session end) -- not when it is only rebooting.
         if let pid = UUID(uuidString: id) { await dropAbandonedEphemeral(pid) }

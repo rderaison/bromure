@@ -111,6 +111,12 @@ extension Daemon {
                     LinuxSessionHost.shared?.readAgentStatus()
                     LinuxSessionHost.shared?.readAgentToolCalls()
                     LinuxSessionHost.shared?.readGuestURLs()
+                    // A guest going down for a reboot (its outbox marker).
+                    Task {
+                        await me.readGuestRebootIntents()
+                        // One powered off: its VM ended, as macOS's stops.
+                        await me.endPoweredOffGuests()
+                    }
                 }
             }
         }
