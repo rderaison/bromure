@@ -128,7 +128,7 @@ public enum InterimBake {
         if o.amend { o.customizeScript = nil }
         let fm = FileManager.default
         let t0 = ContinuousClock.now
-        try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: o.outputDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try fm.createDirectory(atPath: o.cacheDir, withIntermediateDirectories: true)
         // One bake per output dir: two would share .work and the partial disk.
         let lock = open(o.outputDir + "/.bake.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)

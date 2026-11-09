@@ -20,13 +20,16 @@ public struct DaemonConfig: Sendable {
     // @port-skip linux-only: Linux daemon configuration (the per-user image)
     public var imageDir: String { Self.hasImage(userImageDir) ? userImageDir : configuredImageDir }
     /// Where this user's image is installed, baked or amended: the
-    /// configured dir when this user may write it, else their own in the
-    /// state dir (a multi-user daemon's: per user, as its caches).
+    /// configured dir when it's there, this user's and writable, else
+    /// their own in the state dir (a multi-user daemon's: per user, as its
+    /// caches; a configured dir that's missing is never made).
     // @port-skip linux-only: Linux daemon configuration (the per-user image)
     public var userImageDir: String {
         var st = stat()
-        guard stat(configuredImageDir, &st) == 0, access(configuredImageDir, W_OK) != 0 else { return configuredImageDir }
-        return stateDir + "/image"
+        guard stat(configuredImageDir, &st) == 0, st.st_uid == getuid(), access(configuredImageDir, W_OK) == 0 else {
+            return stateDir + "/image"
+        }
+        return configuredImageDir
     }
 
     /// Whether `dir` holds an image (its disk and stamp).

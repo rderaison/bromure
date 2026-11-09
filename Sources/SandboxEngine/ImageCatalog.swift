@@ -373,6 +373,12 @@ public final class ImageCatalogStore: @unchecked Sendable {
     private let cacheURL: URL
     private let lock = NSLock()
     private var cachedRemote: ImageCatalog?
+    private var rejected = false
+
+    /// Whether the last `refresh` fetched a catalog and refused it: a
+    /// signature missing or not verifying, or a rollback to an older one
+    /// (not a network failure).
+    public var lastRefreshRejected: Bool { lock.lock(); defer { lock.unlock() }; return rejected }
 
     /// The manifest URL actually in effect for this channel (override-aware).
     public var refreshURL: URL {
@@ -460,6 +466,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
                         session: URLSession = .shared) async -> ImageCatalog? {
         var request = URLRequest(url: url ?? refreshURL)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        setRejected(false)
         do {
             let (data, resp) = try await session.data(for: request)
             // Non-HTTP responses (file:// via the override base) have no
@@ -475,7 +482,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
             // (local pipeline tests) skips this; a missing signature is
             // as fatal as a bad one so it can't be stripped.
             if Self.overrideBase == nil {
-                guard isSignatureValid(parsed) else { return nil }
+                guard isSignatureValid(parsed) else { setRejected(true); return nil }
                 // Rollback guard: never adopt a catalog signed earlier
                 // than one already adopted — replaying an old, validly
                 // signed catalog could reintroduce a retired image or
@@ -483,6 +490,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
                 if let prev = remote()?.signature?.signedAt,
                    let fresh = parsed.signature?.signedAt,
                    fresh < prev {
+                    setRejected(true)
                     return nil
                 }
             }
@@ -493,6 +501,8 @@ public final class ImageCatalogStore: @unchecked Sendable {
             return nil
         }
     }
+
+    private func setRejected(_ v: Bool) { lock.lock(); rejected = v; lock.unlock() }
 
     /// Absolute URL for a catalog-relative artifact path.
     public static func artifactURL(for path: String,

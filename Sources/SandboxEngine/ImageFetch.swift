@@ -22,6 +22,9 @@ import FoundationNetworking
 public enum ImageFetchError: LocalizedError {
     /// img-catalog.json could not be fetched (or names no image).
     case catalogUnavailable
+    /// img-catalog.json was fetched but refused: its signature is missing
+    /// or doesn't verify, or it's older than one already adopted.
+    case signatureInvalid
     /// An artifact download returned an HTTP error.
     case downloadFailed(Int)
     /// A downloaded artifact failed its sha256 check.
@@ -37,6 +40,10 @@ public enum ImageFetchError: LocalizedError {
             return NSLocalizedString(
                 "The image catalog could not be downloaded.",
                 comment: "Prebuilt image: catalog fetch failed")
+        case .signatureInvalid:
+            return NSLocalizedString(
+                "The image catalog's signature didn't verify.",
+                comment: "Prebuilt image: catalog refused (bad or missing signature, or a rollback)")
         case .downloadFailed(let code):
             return String(format: NSLocalizedString(
                 "Download failed (HTTP %d).",
@@ -177,6 +184,15 @@ public enum ImageFetch {
                 try out.write(contentsOf: chunk)
             }
             offset += UInt64(chunk.count)
+            // More than the catalog says: not this image, stop now.
+            if expectedBytes > 0, offset > UInt64(expectedBytes) {
+                // Our end closed first: gunzip, blocked writing, fails and exits.
+                try? reader.close()
+                gunzip.terminate()
+                gunzip.waitUntilExit()
+                throw ImageFetchError.expandFailed(
+                    "expands past the \(expectedBytes) bytes the catalog says")
+            }
             // 128 MB ≈ 3% steps on the 4.5 GB browser disk — the
             // expansion segment of the install bar moves smoothly.
             if expectedBytes > 0, offset - lastReported >= 128 * 1024 * 1024 {

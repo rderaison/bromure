@@ -96,7 +96,8 @@ extension Daemon {
     /// Whether this user may write an image into `dir` (made if missing).
     // @port-skip linux-only: the multi-user daemon's image dir
     static func mayWriteImage(_ dir: String) -> Bool {
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
         return access(dir, W_OK) == 0
     }
 

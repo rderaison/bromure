@@ -258,9 +258,10 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
 
     /// The dial under way, and whether the loader ended (stopped, or its
     /// one outcome delivered): checked and set under the lock, the client
-    /// called outside it, so nothing reaches the client after a stop or
-    /// twice, and a client stopping the loader from its callback can't
-    /// deadlock.
+    /// called outside it. One outcome at most, and none after a stop that
+    /// took the lock first (a stop racing a delivery already past the lock
+    /// can't recall it); a client stopping the loader from its callback
+    /// can't deadlock.
     private let lock = NSLock()
     private var dial: Task<Void, Never>?
     private var ended = false
@@ -321,7 +322,7 @@ class FusionPinnedProtocol: URLProtocol, @unchecked Sendable {
     // @port-skip linux-only: see FusionPinnedProtocol
     private func fail(_ error: Error) { deliver { $0.urlProtocol(self, didFailWithError: error) } }
 
-    /// The client's callbacks, unless the loader was stopped.
+    /// The client's callbacks, unless the loader already ended.
     // @port-skip linux-only: see FusionPinnedProtocol
     private func deliver(_ body: (any URLProtocolClient) -> Void) {
         lock.lock()

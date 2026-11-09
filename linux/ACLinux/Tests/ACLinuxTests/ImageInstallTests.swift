@@ -44,6 +44,24 @@ struct ImageInstallTests {
         #expect(!ImageCatalogStore.isSignatureValid(amdSigned, magic: arm.signingMagic, publicKeyBase64: pub))
     }
 
+    /// A catalog fetched but unsigned is refused, and said to be (not a
+    /// download failure); unreachable is just unavailable.
+    @Test func anUnsignedCatalogIsRefusedAsSuch() async throws {
+        guard ProcessInfo.processInfo.environment["BROMURE_IMAGE_CATALOG_BASE"] == nil else { return }
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let body = try JSONEncoder().encode(Self.catalog())
+        let up = try BinaryUpstream(body: body)
+        defer { up.stop() }
+        let store = ImageCatalogStore(distribution: .agentCodingAmd64(imageVersion: "201"), supportDir: URL(fileURLWithPath: dir))
+        #expect(await store.refresh(from: URL(string: "http://127.0.0.1:\(up.port)/c.json")!) == nil)
+        #expect(store.lastRefreshRejected, "fetched, then refused for its signature")
+        #expect(await store.refresh(from: URL(string: "http://127.0.0.1:9/c.json")!) == nil)
+        #expect(!store.lastRefreshRejected, "unreachable isn't a rejection")
+        #expect(ImageFetchError.signatureInvalid.localizedDescription == "The image catalog's signature didn't verify.")
+        #expect(ImageInstall.isDownloadSideFailure(ImageFetchError.signatureInvalid), "a local bake still remedies it")
+    }
+
     @Test func onlyTheDownloadsOwnFailuresFallBack() {
         #expect(ImageInstall.isDownloadSideFailure(ImageFetchError.catalogUnavailable))
         #expect(ImageInstall.isDownloadSideFailure(ImageFetchError.checksumInvalid("x")))

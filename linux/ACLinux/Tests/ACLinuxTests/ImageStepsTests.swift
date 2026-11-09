@@ -108,6 +108,12 @@ struct ImageStepsTests {
         fm.createFile(atPath: dir + "/shared/base.img", contents: Data())
         fm.createFile(atPath: dir + "/shared/base.version", contents: Data("201\n".utf8))
         let c = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: dir + "/shared", agentdPath: "")
+        let missing = DaemonConfig(stateDir: dir + "/state", runtimeDir: dir + "/run", imageDir: dir + "/nowhere", agentdPath: "")
+        #expect(missing.userImageDir == dir + "/state/image", "a configured dir that's missing is never made")
+        #expect(Daemon.mayWriteImage(missing.userImageDir))
+        var st = stat()
+        #expect(stat(dir + "/state/image", &st) == 0 && st.st_mode & 0o777 == 0o700, "the user's own image dir is theirs alone")
+        try? fm.removeItem(atPath: dir + "/state/image")
         #expect(c.userImageDir == dir + "/shared" && c.imageDir == dir + "/shared", "writable: the configured one")
         chmod(dir + "/shared", 0o555)
         guard access(dir + "/shared", W_OK) != 0 else { return }   // root writes anyway
