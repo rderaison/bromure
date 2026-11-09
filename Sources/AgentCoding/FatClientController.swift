@@ -276,7 +276,7 @@ final class RemoteHostController {
     private var handledGuestLinks: Set<String> = []
 #if os(macOS)
     /// Guest links being asked about as sheets, so a later poll can take one
-    /// down when another client handled it (its id left /state).
+    /// down when another client handled it (its id in `guestLinksDone`).
     private var openGuestLinks: [String: (alert: NSAlert, window: NSWindow)] = [:]
     /// Decision-prompt ids already surfaced to the user (dedupe across polls).
     private var promptedIDs: Set<String> = []
@@ -590,41 +590,35 @@ final class RemoteHostController {
     }
 
     /// Pages a workspace's guest opened on a server with no screen of its
-    /// own (a Linux server's `guestLinks`): its user's clients open them,
-    /// by the same GuestURLGate disposition a Mac applies to its own
-    /// guests' pages. A local or private host is refused, an agent's
-    /// sign-in page opens, any other page opens only once the user says so
-    /// (the Mac's own sheet: Cancel the default, at most 3 waiting, none
-    /// without a window). Each one handled is told back
-    /// (`/guest-links/<id>/done`), so the user's other clients drop it.
-    /// iOS opens sign-in pages only and leaves the rest to a Mac.
-    private func applyGuestLinks(_ links: [[String: Any]]?) {
+    /// own (a Linux server's `guestLinks`): its user's clients open them
+    /// once the user says so (GuestURLGate.relayedDisposition: a local or
+    /// private host refused, every other page asked about, a sign-in-shaped
+    /// one too -- a real sign-in arrives as `pendingRegistration`). The
+    /// Mac's own sheet: Cancel the default, "Open in Browser" enabled after
+    /// a second, at most 3 waiting, none without a window. Each one handled
+    /// is told back (`/guest-links/<id>/done`), so the user's other clients
+    /// drop it; a sheet comes down only when its link was handled elsewhere
+    /// (`done`), never because the server dropped it (the next one would
+    /// appear under the user's pointer). iOS opens none of them: a Mac asks.
+    private func applyGuestLinks(_ links: [[String: Any]]?, done: [String]) {
         let rows = links ?? []
         let current = Set(rows.compactMap { $0["id"] as? String })
         handledGuestLinks.formIntersection(current)
 #if os(macOS)
-        for (id, open) in openGuestLinks where !current.contains(id) {
-            openGuestLinks[id] = nil
+        for id in done {
+            guard let open = openGuestLinks.removeValue(forKey: id) else { continue }
             open.window.endSheet(open.alert.window, returnCode: .abort)
         }
 #endif
         for row in rows {
             guard let id = row["id"] as? String, !handledGuestLinks.contains(id),
                   let s = row["url"] as? String, let url = URL(string: s) else { continue }
-            switch GuestURLGate.disposition(for: url) {
+            switch GuestURLGate.relayedDisposition(for: url) {
             case .refuse:
                 handledGuestLinks.insert(id)
                 FatClientLog.log("guest link: refused a page with a local/private host: \(url.host ?? "?")")
                 guestLinkDone(id)
-            case .open:
-                handledGuestLinks.insert(id)
-#if os(macOS)
-                NSWorkspace.shared.open(url)
-#else
-                UIApplication.shared.open(url)
-#endif
-                guestLinkDone(id)
-            case .ask:
+            case .open, .ask:
 #if os(macOS)
                 handledGuestLinks.insert(id)
                 guard openGuestLinks.count < 3, let window = promptWindow() else {
@@ -632,6 +626,10 @@ final class RemoteHostController {
                     continue
                 }
                 let alert = ACAppDelegate.guestURLOpenAlert(url, workspace: row["workspace"] as? String)
+                // A click meant for something else can't open it.
+                let openButton = alert.buttons.count > 1 ? alert.buttons[1] : nil
+                openButton?.isEnabled = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { openButton?.isEnabled = true }
                 openGuestLinks[id] = (alert, window)
                 alert.beginSheetModal(for: window) { [weak self] response in
                     self?.openGuestLinks[id] = nil
@@ -1151,7 +1149,8 @@ final class RemoteHostController {
         applyPendingPrompts((snapshot["pendingPrompts"] as? [[String: Any]]) ?? [])
         applySubscriptions((snapshot["subscriptions"] as? [String: Any]) ?? [:])
         applyPendingRegistration(snapshot["pendingRegistration"] as? [String: Any])
-        applyGuestLinks(snapshot["guestLinks"] as? [[String: Any]])
+        applyGuestLinks(snapshot["guestLinks"] as? [[String: Any]],
+                        done: snapshot["guestLinksDone"] as? [String] ?? [])
         applyRegistrationSnapshot(pending: snapshot["pendingRegistration"] as? [String: Any],
                                   ended: snapshot["registrationEnded"] as? [String: Any],
                                   endedList: snapshot["registrationsEnded"] as? [[String: Any]])
