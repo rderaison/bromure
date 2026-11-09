@@ -63,6 +63,8 @@ struct WorkspaceSubnetInUseTests {
         #expect(Daemon.gatewayToUse(chosen: "172.23.5.1", inUse: "192.168.64.1") == "192.168.64.1", "deferred")
         #expect(Daemon.gatewayToUse(chosen: "172.23.5.1", inUse: nil) == "172.23.5.1")
         #expect(Daemon.gatewayToUse(chosen: "172.23.5.1", inUse: "172.23.5.1") == "172.23.5.1")
+        #expect(Daemon.gatewayToUse(chosen: "172.23.5.1", inUse: "192.168.64.1", vmsRunning: false) == "192.168.64.1",
+                "a taken-back passt keeps its -a/-g")
     }
 
     @Test func thePasstsOwnGateway() {
@@ -78,12 +80,16 @@ struct WorkspaceSubnetInUseTests {
         var stopped = RepairMarksTests.stopped(UUID().uuidString.lowercased())
         stopped.ip = "10.9.9.9"
         try reg.upsert(stopped)
-        #expect(VMRegistry.runningGateway(path: path) == nil, "a stopped VM's old lease doesn't hold the subnet")
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in true }) == nil, "a stopped VM's old lease doesn't hold the subnet")
         var running = RepairMarksTests.stopped(UUID().uuidString.lowercased())
         running.state = .running
         running.ip = "192.168.64.7"
         try reg.upsert(running)
-        #expect(VMRegistry.runningGateway(path: path) == "192.168.64.1")
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in true }) == "192.168.64.1")
+        // After a host reboot or a crash with no fd store: the record says
+        // running, but its Firecracker is gone.
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in false }) == nil, "a dead VM's record pins nothing")
+        #expect(VMRegistry.runningGateway(path: path, isAlive: Daemon.isOurVM) == nil, "no pid: not alive")
     }
 
     @Test func aTestDaemonWithTheUsersConfigHomeIsWarned() {
@@ -93,6 +99,11 @@ struct WorkspaceSubnetInUseTests {
         #expect(Daemon.configHomeWarning(stateDir: "/var/tmp/w/state/bromure-ac",
                                          env: ["HOME": home, "XDG_STATE_HOME": "/var/tmp/w/state", "XDG_CONFIG_HOME": "/var/tmp/w/config"]) == nil)
         #expect(Daemon.configHomeWarning(stateDir: home + "/.local/state/bromure-ac", env: ["HOME": home]) == nil, "the default")
+        // A single-user install with its state outside $HOME: no test's.
+        #expect(Daemon.configHomeWarning(stateDir: "/srv/bromure/state/bromure-ac",
+                                         env: ["HOME": home, "XDG_STATE_HOME": "/srv/bromure/state"]) == nil)
+        #expect(Daemon.configHomeWarning(stateDir: "/scratch/t/state/bromure-ac",
+                                         env: ["HOME": home, "XDG_STATE_HOME": "/scratch/t/state", "TMPDIR": "/scratch"]) != nil, "under TMPDIR")
         // A multi-user daemon: its HOME is its state dir's parent.
         #expect(Daemon.configHomeWarning(stateDir: "/var/lib/bromure-ac/u/bromure-ac",
                                          env: ["HOME": "/var/lib/bromure-ac/u", "XDG_STATE_HOME": "/var/lib/bromure-ac/u"]) == nil)

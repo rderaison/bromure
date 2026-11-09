@@ -284,9 +284,10 @@ public actor Daemon {
         // unless VMs already run on one (an adopted passt, running records).
         let registryPath = config.stateDir + "/vms.json"
         let chosen = Self.chooseWorkspaceGateway(hasVMs: VMRegistry.hasRecords(path: registryPath))
-        let inUse = adoptedPasst.flatMap { ProcFS.argv($0.pid).flatMap(Self.passtGateway(argv:)) }
-            ?? VMRegistry.runningGateway(path: registryPath)
-        pc.gateway = Self.gatewayToUse(chosen: chosen, inUse: inUse)
+        let passtGateway = adoptedPasst.flatMap { ProcFS.argv($0.pid).flatMap(Self.passtGateway(argv:)) }
+        let vmGateway = VMRegistry.runningGateway(path: registryPath, isAlive: Self.isOurVM)
+        pc.gateway = Self.gatewayToUse(chosen: chosen, inUse: passtGateway ?? vmGateway,
+                                       vmsRunning: vmGateway != nil)
         pc.dnsForward = pc.gateway
         Self.workspaceSubnet.withLockedValue { $0 = Self.subnetCIDR(gateway: pc.gateway) }
         let passt = try await PasstUplink.start(pc, adopting: adoptedPasst)

@@ -41,15 +41,16 @@ extension Daemon {
         return VMNetSwitch.ipString(base | 1)
     }
 
-    /// The gateway to start on: the one VMs already run on (an adopted
-    /// passt's, running records'), else the chosen one. A change (an
-    /// opt-in, a re-roll because the host joined the saved /24) waits for a
-    /// start with nothing running, and is said (macOS's VMs end at quit; a
-    /// re-adopted one here would lose its lease).
+    /// The gateway to start on: the one already in use (an adopted passt's,
+    /// live records'), else the chosen one. A change (an opt-in, a re-roll
+    /// because the host joined the saved /24) waits for a start with nothing
+    /// running, and is said (macOS's VMs end at quit; a re-adopted one here
+    /// would lose its lease, and an adopted passt keeps its -a/-g).
     // @port-skip linux-only: see chooseWorkspaceGateway
-    static func gatewayToUse(chosen: String, inUse: String?) -> String {
+    static func gatewayToUse(chosen: String, inUse: String?, vmsRunning: Bool = true) -> String {
         guard let inUse, inUse != chosen else { return chosen }
-        FileHandle.standardError.write(Data(("bromure-ac daemon: workspaces stay on \(subnetCIDR(gateway: inUse)) while VMs run on it;"
+        let what = vmsRunning ? "VMs run on it" : "the previous daemon's passt, taken back, is on it"
+        FileHandle.standardError.write(Data(("bromure-ac daemon: workspaces stay on \(subnetCIDR(gateway: inUse)) while \(what);"
             + " the move to \(subnetCIDR(gateway: chosen)) waits for a start with none running\n").utf8))
         return inUse
     }
@@ -60,14 +61,16 @@ extension Daemon {
         zip(argv, argv.dropFirst()).first { $0.0 == "-g" || $0.0 == "--gateway" }?.1
     }
 
-    /// Warning, when the daemon has a state dir of its own (a test's, CI's)
+    /// Warning, when the daemon has a temporary state dir (a test's, CI's)
     /// but this user's config home: its defaults (the subnet's choice) would
-    /// land in the user's ~/.config/bromure-ac.plist.
+    /// land in the user's ~/.config/bromure-ac.plist. A state dir elsewhere
+    /// (a single-user install's own) is no test's.
     // @port-skip linux-only: the daemon's defaults location check
     static func configHomeWarning(stateDir: String, env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
         guard env["XDG_STATE_HOME"].map({ !$0.isEmpty }) == true, env["XDG_CONFIG_HOME"].map({ !$0.isEmpty }) != true else { return nil }
         let home = env["HOME"] ?? NSHomeDirectory()
-        guard !stateDir.hasPrefix(home + "/") else { return nil }
+        let temps = ["/tmp/", "/var/tmp/"] + (env["TMPDIR"].map { [$0.hasSuffix("/") ? $0 : $0 + "/"] } ?? [])
+        guard temps.contains(where: { stateDir.hasPrefix($0) }) else { return nil }
         return "bromure-ac daemon: WARNING: a state dir of its own (\(stateDir)) but this user's config home: its defaults"
             + " (the workspace subnet's choice) go to \(home)/.config/bromure-ac.plist; set XDG_CONFIG_HOME for a test or CI daemon\n"
     }
