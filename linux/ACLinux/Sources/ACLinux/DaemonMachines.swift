@@ -11,7 +11,8 @@ extension Daemon {
     /// control connection here is the owner's (SO_PEERCRED), as macOS's
     /// isTrustedLocal; an agent host's key comes in through the SSH
     /// server's link verb, which writes the owner itself.
-    // @port-skip linux-only: the /machines block of ACAutomationServer.route (inside its isTrustedLocal branch, not a segment of its own), over the Linux router
+    // partial: /machines/approve and /machines/forget; block confirm sheet is the client's
+    // @port ACAppDelegate.fleetAction(_: UUID, _: FleetAction, on: NSWindow?) h=6761c75a31b734ef @d3ebbda2
     func machineRoute(_ req: ControlRequest, _ path: String) -> ControlResponse? {
         let hub = MachineLinkHub.shared
         let body = req.body.foundationObject as? [String: Any] ?? [:]
@@ -108,6 +109,8 @@ final class LinuxMachines {
     /// them (a machine's own word isn't taken: it could seat itself in any
     /// room) and stamps them on what it reads from the machine.
     private(set) var sessionRooms: [UUID: UUID] = [:]
+    // partial: under the daemon state dir
+    // @port ACAppDelegate.var machineSessionRoomsURL h=3dc270a4bc8180f7 @d3ebbda2
     private let sessionRoomsURL: URL
 
     /// Follow machines attaching and detaching; the user's answers to

@@ -44,6 +44,7 @@ extension Daemon {
     /// The preferences template, secrets blanked (model keys as the redaction
     /// stand-in, so a provider still reads as configured).
     // @port ACAppDelegate.automationTemplateExport() h=8a71f3508c4ba767 @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onExportTemplate h=0fc64e04425f1de9 @d3ebbda2
     static func templateExport() -> [String: Any]? {
         let p = ProfileStore().loadTemplate()
         var stripped = p
@@ -81,6 +82,7 @@ extension Daemon {
     /// Replace the template from a round-tripped document: blank secrets
     /// keep their stored value, typed ones replace it.
     // @port ACAppDelegate.automationUpdateTemplate(_: [String:Any]) h=4531169f2850d552 @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpdateTemplate h=cd1c109004b353a4 @d3ebbda2
     static func updateTemplate(_ rawDoc: [String: Any]) -> [String: Any] {
         var doc = rawDoc
         doc.removeValue(forKey: "_secretsRedacted")
@@ -118,6 +120,7 @@ extension Daemon {
     /// The global model settings, keys redacted.
     // @port ACAppDelegate.automationModelSettingsExport() h=3279f21655aa4db6 @b10aa434
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onExportModelSettings h=bd7b730514adb887 @d3ebbda2
     static func modelSettingsExport() -> [String: Any]? {
         guard let data = try? JSONEncoder().encode(ModelSettingsStore.shared.settings.redacted()),
               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -130,6 +133,7 @@ extension Daemon {
     /// stored one, a typed key replaces it.
     // @port ACAppDelegate.automationUpdateModelSettings(_: [String:Any]) h=2db24321b9f16274 @b10aa434
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpdateModelSettings h=e571c771c47454c3 @d3ebbda2
     static func updateModelSettings(_ doc: [String: Any]) -> [String: Any] {
         guard let data = try? JSONSerialization.data(withJSONObject: doc),
               let incoming = try? JSONDecoder().decode(ModelSettings.self, from: data) else {

@@ -18,7 +18,8 @@ extension Daemon {
 
     /// Restart so a fresh enrollment heartbeats at once, and an unenroll
     /// stops it (macOS: BACEnrollment.onStateChange's body).
-    // @port-skip linux-only: ACAppDelegate's BACEnrollment.onStateChange handler, without the menu and toolbar
+    // partial: no menu title refresh
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / BACEnrollment.onStateChange h=794e346bddc06cfe @d3ebbda2
     @MainActor static func applyEnrollmentState() {
         BACHeartbeat.shared.stop()
         BACIPRegister.shared.stop()

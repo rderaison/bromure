@@ -14,6 +14,7 @@ extension Daemon {
     // partial: no local-model download check (no MLX engine on Linux); always detached (a server has no pane)
     // @port ACAppDelegate.automationCreateVM(spec: [String:Any]) h=72b568a25237ce61 @2134fc7a
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/vms"): h=7a7b62405e4c0dbe @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCreateVM h=9d29b3b793c7eee4 @d3ebbda2
     func createVMRoute(_ body: JSONValue) async -> ControlResponse {
         let saved: Profile, existing: VMRecord?, minted: Bool
         switch vmRunWorkspace(body) {

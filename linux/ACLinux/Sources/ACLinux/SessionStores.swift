@@ -61,6 +61,8 @@ final class SessionStores {
 
     /// The /state keys macOS adds on a server with the sessions-first home.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentSessions h=98721b804428bec6 @b41d9876
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListDelegations h=392fda274198fde9 @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAgentRooms h=5be9e5a9c56a8a1a @d3ebbda2
     func stateEntries() -> [String: JSONValue] {
         [
             // What Squelch saved in each conversation rides along: a client
@@ -90,6 +92,8 @@ final class SessionStores {
     /// The sign-in a client started, while it runs, and how recent ones
     /// ended (macOS: the same keys, from RemoteRegistrationBroker).
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onPendingRegistration h=037369d21d9ebaf2 @dd7ba30d
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onEndedRegistration h=efb9670035ce699d @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onEndedRegistrations h=4db4840de7a5bde7 @d3ebbda2
     func registrationEntries() -> [String: JSONValue] {
         let broker = RemoteRegistrationBroker.shared
         var out: [String: JSONValue] = [:]

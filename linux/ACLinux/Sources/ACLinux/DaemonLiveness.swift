@@ -9,7 +9,8 @@ extension Daemon {
     /// (or one whose state can't be read) isn't expected to beat. Only ever
     /// a report, in its /vms entry and the session host's memory report:
     /// what to do about it stays the user's call.
-    // @port-skip linux-only: the liveness.txt branch of UbuntuSandboxVM.startOutboxPolling, for the daemon's VMs
+    // partial: report only (log, /vms, memory report). No GuestLivenessStore restart hook
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onGuestResponsive h=830168a4222110a0 @d3ebbda2
     func observeGuestLiveness(now: TimeInterval = ProcessInfo.processInfo.systemUptime) async {
         var silent: Set<String> = []
         var seen: Set<String> = []

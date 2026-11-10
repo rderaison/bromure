@@ -20,9 +20,11 @@ extension Daemon {
         /// False: this workspace already has one up: don't ask, don't boot.
         // @port ACAppDelegate.LaunchQuestionGate.begin(_: Profile.ID) h=ee2262ef9a771569 @4237c02e
         mutating func begin(_ id: Profile.ID) -> Bool { up.insert(id).inserted }
-        // @port-skip linux-only: see LaunchQuestionGate.begin
+        // partial: present but marked @port-skip ("see LaunchQuestionGate.begin"), so portmap didn't claim it
+        // @port ACAppDelegate.LaunchQuestionGate.end(_: Profile.ID) h=ba2c869405284a63 @d3ebbda2
         mutating func end(_ id: Profile.ID) { up.remove(id) }
-        // @port-skip linux-only: see LaunchQuestionGate.begin
+        // partial: present but marked @port-skip, as above
+        // @port ACAppDelegate.LaunchQuestionGate.isUp(_: Profile.ID) h=e86b95b6a6fd8ff6 @d3ebbda2
         func isUp(_ id: Profile.ID) -> Bool { up.contains(id) }
     }
 
@@ -93,7 +95,7 @@ extension Daemon {
     }
 
     /// The workspace's VM has its disk open (running, or a start under way).
-    // @port-skip linux-only: macOS's diskInUse over the daemon's VM state
+    // @port ACAppDelegate.diskInUse(_: Profile.ID) h=a9a77dd071a6cd22 @d3ebbda2
     func diskInUse(_ id: Profile.ID) -> Bool {
         let key = id.uuidString.lowercased()
         return live[key] != nil || starting.contains(key) || repairMarks.contains(key) || hasRescue(for: key)
@@ -175,6 +177,8 @@ extension Daemon {
     /// workspace started meanwhile). Nobody answering is "Remind me later".
     // partial: its drift half (a compromised workspace's start is refused, Daemon.start); the outcome is in the start's response
     // @port ACAppDelegate.resolveRemoteLaunchPrompts(_: Profile, detached: Bool, freshBootFallback: Bool, quiet: Bool) h=dfb9e70adf2469a8 @4237c02e
+    // partial: drift half only. The compromised half is a 409 refusal in Daemon.start (see confirmWipeAndProceedAsync)
+    // @port ACAppDelegate.launchNeedsPreflightPrompt(_: Profile) h=4c595c376c12e021 @d3ebbda2
     func resolveDriftPrompt(_ rec: VMRecord, unattended: Bool) async -> ControlResponse? {
         guard !rec.managed, var profile = existingProfile(for: rec) else { return nil }
         let current = readCurrentBaseVersion()

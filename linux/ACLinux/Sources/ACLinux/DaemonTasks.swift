@@ -6,7 +6,6 @@ import Foundation
 /// the app delegate's callbacks behind them; same paths, same JSON.
 extension Daemon {
     /// `/tasks…`, `/automations…`, `/automation-runs/…`; nil for any other path.
-    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/automations"): h=382dc2f2e17eee60 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automation-sources"): h=74321afd31efa247 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automations"): h=ba8982c888b6e19d @f127f8ab
@@ -17,6 +16,8 @@ extension Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automation-runs/"): h=27a2b964225dc883 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")                 || p.hasPrefix("/findings/"): h=569897f14eb6e2f1 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automations/"): h=df3d8972eac1ad9c @f127f8ab
+    // partial: inline stores.automations.remove(id)
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDeleteAutomation h=6ba93182b686f637 @d3ebbda2
     func boardRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         switch (method, path) {
@@ -265,6 +266,7 @@ extension SessionStores {
     /// Automations, their runs and next fires, with the repository watches
     /// and their findings riding along for the fat client.
     // @port ACAppDelegate.automationScheduledList() h=7100e2d62c0f78c0 @b41d9876
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListAutomations h=dc69a463606fb5e8 @d3ebbda2
     func automationList() -> [String: Any] {
         let iso = ISO8601DateFormatter()
         return [
@@ -278,6 +280,7 @@ extension SessionStores {
     }
 
     // @port ACAppDelegate.automationUpsertScheduled(_: [String:Any]) h=24dffafecafc02ac @9936e30c
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpsertAutomation h=c7283ab4d9632f18 @d3ebbda2
     func upsertAutomation(_ doc: [String: Any]) -> Bool {
         guard let automation = Self.decode(ScheduledAutomation.self, doc) else { return false }
         saveAutomation(automation)
@@ -291,6 +294,7 @@ extension SessionStores {
     }
 
     // @port ACAppDelegate.runAutomationNow(_: UUID) h=2291ec6040bd9444 @9936e30c
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRunAutomation h=64cd15ff82bc8403 @d3ebbda2
     func runAutomationNow(_ id: UUID) -> Bool {
         guard let automation = automations.automation(id), let engine = automationEngine else { return false }
         engine.runNow(automation)
@@ -298,6 +302,7 @@ extension SessionStores {
     }
 
     // @port ACAppDelegate.toggleAutomation(_: UUID) h=dcbba8fa59b171f2 @9936e30c
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onToggleAutomation h=4cce4698f1f8518d @d3ebbda2
     func toggleAutomation(_ id: UUID) -> Bool {
         guard var automation = automations.automation(id) else { return false }
         automation.enabled.toggle()

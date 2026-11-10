@@ -21,7 +21,8 @@ extension Daemon {
 
     /// `command` in the workspace's guest (bash, as the workspace user); its
     /// stdout. A non-zero exit throws with stderr, as on macOS.
-    // @port-skip linux-only: ACAppDelegate.guestExec over VZ vsock; this one is GuestShell's
+    // partial: GuestShell over Firecracker vsock; attached-machine branch kept
+    // @port ACAppDelegate.guestExec(profileID: Profile.ID, command: String, timeout: Int) h=77e3035b58c5a63a @d3ebbda2
     func guestExec(profileID: UUID, command: String, timeout: Int = 30) async throws -> String {
         // An attached machine (Bromure Sidecar) runs it on that machine: the
         // board's worktree lookups and reviews reach its sessions too.
@@ -39,7 +40,7 @@ extension Daemon {
     /// One native file op (`{"file": {...}}`, the file browser's data plane)
     /// in the workspace's guest: agentd's reply as it came. The op failing
     /// in the guest throws with its error, as on macOS.
-    // @port-skip linux-only: ACAppDelegate.guestFileOp over VZ vsock; this one is GuestShell's
+    // @port ACAppDelegate.guestFileOp(profileID: Profile.ID, op: [String:Any], timeout: Int) h=4d1e47b2461cd211 @d3ebbda2
     func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
         guard let l = live.first(where: { $0.key.caseInsensitiveCompare(profileID.uuidString) == .orderedSame })?.value else {
             throw GuestCommandError.unavailable("workspace \(profileID.uuidString.prefix(8)) isn't running")
@@ -189,7 +190,8 @@ extension Daemon {
     /// launch does before it boots. A failure is logged and the guest boots
     /// without a default model, to be retried on the next boot. An e2e
     /// daemon skips it.
-    // @port-skip linux-only: launch's kimiNeedsProvisioning gate, on the daemon's launch
+    // partial: provisions at launch only, not eagerly at startup or on store change (first launch after a Kimi sign-in waits ~1-2 s)
+    // @port ACAppDelegate.provisionKimiRecordsIfNeeded() h=44f99da9802aafd6 @d3ebbda2
     func provisionKimiIfNeeded(_ profile: Profile) async {
         guard kimiNeedsProvisioning(profile), let mitm else { return }
         if let hook = Self.kimiProvisionForTesting.withLockedValue({ $0 }) { return await hook(profile.id) }

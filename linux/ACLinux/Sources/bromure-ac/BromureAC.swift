@@ -10,12 +10,15 @@ import SandboxEngine
 // @port-skip linux-only: Linux CLI root (macOS: BromureAC's ParsableCommand)
 @main
 struct BromureAC: AsyncParsableCommand {
+    // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split
+    // @port BromureAC.static var configuration h=6859cbda432af2b9 @d3ebbda2
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
         subcommands: [Daemon.self, VM.self, Workspaces.self, Trace.self, Image.self, Remote.self, Account.self, Cloud.self,
                       Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command, Mcp.self])
 
-    // @port-skip linux-only: the entry point; tells the library the group `workspaces ports` reports help for
+    // partial: SIGPIPE is ignored in Daemon.run; no hidden __pii-scan/__squelch/__shot-* hooks
+    // @port BromureAC.static main() h=b92f6d3ecd654150 @d3ebbda2
     static func main() async {
         CLICommandsEntry.workspacesGroup = Workspaces.self
         await main(nil)
@@ -52,6 +55,10 @@ struct Daemon: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the daemon (systemd: bromure-ac.service).")
 
     // @port-skip linux-only: daemon main
+    // partial: the systemd user service (not an NSApplication): the control socket (inherited from systemd) and SIGTERM/SIGINT through DispatchSource to Daemon.shutdown
+    // @port Run.run() h=9e6fb971a835c20c @d3ebbda2
+    // @port ACAppDelegate.startControlSocket() h=28ec5dbb75f3adb6 @d3ebbda2
+    // @port ACAppDelegate.installCleanupSignalHandlers() h=7476028d960792d2 @d3ebbda2
     func run() async throws {
         // Before anything spawns threads that inherit the mask.
         _ = acl_unblock_term_signals()
@@ -480,7 +487,8 @@ struct Image: AsyncParsableCommand {
             return o
         }
 
-        // @port-skip linux-only: see Bake
+        // partial: publisher side is `image bake --no-agent-clis` driven by scripts/publish-image-amd64.sh; no build-info.json/provisioner output from the binary
+        // @port InitFossImage.run() h=80ae63309139aa57 @d3ebbda2
         static func bake(_ o: InterimBake.Options, verbose: Bool) async throws {
             let r = try await InterimBake.bake(o, progress: { FileHandle.standardError.write(Data("[bake] \($0)\n".utf8)) },
                                                output: { if verbose { FileHandle.standardError.write($0) } })

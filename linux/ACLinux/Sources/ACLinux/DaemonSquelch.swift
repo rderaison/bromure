@@ -17,7 +17,8 @@ extension Daemon {
 
     /// A change to the ledger's numbers moves /state's generation, at most
     /// once a second (macOS: SquelchLedger.onChange through SquelchRefreshGate).
-    // @port-skip linux-only: wireSquelch's ledger refresh, over StateGeneration
+    // partial: no SquelchCloud 600 s timer (its sink is unset on macOS too, so a no-op)
+    // @port ACAppDelegate.observeSquelchLedger() h=4aee0f8151302f8b @d3ebbda2
     static func wireSquelchLedger() {
         let pending = SquelchRefreshGate()
         SquelchLedger.shared.onChange = { _ in

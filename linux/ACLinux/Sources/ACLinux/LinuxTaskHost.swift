@@ -10,6 +10,8 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     /// A task's transcript: its archived copy, else the guest's, else (a
     /// Claude task's, the workspace off) read from its home image.
     // @port ACAppDelegate.fetchTaskTranscriptRaw(_: CodingTask) h=b4e71a368ec3c7eb @9936e30c
+    // partial: calls HomeImageReader.claudeTranscript inline
+    // @port ACAppDelegate.static ext4Transcript(imagePath: String, slug: String, guestCwd: String) h=d0ebf29eb8eb89b3 @d3ebbda2
     func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }) else { return nil }

@@ -32,11 +32,14 @@ extension Daemon {
 
     // partial: the running workspaces
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/sessions"): h=f55eefa10cd15af7 @f127f8ab
+    // partial: windowID/visible meaningless
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListSessions h=bbcb6c6a79d51cc4 @d3ebbda2
     func listSessions() -> ControlResponse {
         ControlResponse(200, ["sessions": .array(runningWorkspaces().map(Self.sessionInfo))])
     }
 
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/sessions"): h=ed84615f7b55066b @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCreateSession h=45ab1d9bbcf7f17c @d3ebbda2
     func createSession(_ body: JSONValue) async -> ControlResponse {
         guard let key = body["profile"]?.stringValue ?? body["profileId"]?.stringValue, !key.isEmpty else {
             return .error(400, "Missing 'profile' field")
@@ -63,6 +66,7 @@ extension Daemon {
     }
 
     // @port ACAutomationServer.handleSessionRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=24480c6ac1efef19 @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDestroySession h=9afbba69593bee80 @d3ebbda2
     func sessionRoute(_ method: String, _ rest: String, _ body: JSONValue) async -> ControlResponse {
         if rest.hasSuffix("/exec") {
             guard method == "POST" else { return .error(405, "Method not allowed") }
@@ -94,6 +98,8 @@ extension Daemon {
     /// suspend and shut down end it.
     // partial: no window to detach: Run in the Background leaves the VM running
     // @port ACAppDelegate.automationDestroySession(profileNameOrID: String) h=3d799687ae7afa9c @d3ebbda2
+    // partial: background = leave the VM running (no window to detach)
+    // @port ACAppDelegate.applyCloseAction(_: Profile.CloseAction, to: Profile.ID) h=566bec7e97cff836 @d3ebbda2
     func automationDestroySession(_ key: String) async -> Bool {
         guard let p = Self.workspace(key), let rec = registry.find(p.id.uuidString.lowercased()), live[rec.id] != nil else { return false }
         var action = p.closeAction
@@ -112,6 +118,8 @@ extension Daemon {
     /// nobody answering is Suspend, Cancel nil.
     // partial: through the fat client only (no screen here)
     // @port ACAppDelegate.promptCloseActionAsync(forName: String) h=0ab4b2f71acb333d @d3ebbda2
+    // partial: async, asks only through the fat client (PendingPromptBroker)
+    // @port ACAppDelegate.promptCloseAction(forName: String) h=b42b23f24d96536b @d3ebbda2
     static func promptCloseAction(forName name: String) async -> Profile.CloseAction? {
         let (title, message, buttons) = closePromptParts(name: name)
         return closeAction(forChoice: await PendingPromptBroker.shared.askAsync(
@@ -142,12 +150,16 @@ extension Daemon {
 
     // partial: every workspace this daemon has (its workspace rows, as /state's)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/workspaces"): h=1abca9f46bf2d854 @f127f8ab
+    // partial: rows are thin (see C automationWorkspaceList)
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListWorkspaces h=2941378ab44054f9 @d3ebbda2
     func listWorkspaces() -> ControlResponse {
         ControlResponse(200, ["workspaces": .array(records.filter { !$0.managed }.map(compromisedRow))])
     }
 
     // partial: no windows on a server (mainWindowOpen/editorOpen false), and the control socket is the trusted local caller
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/app/state"): h=10a6ac728f1b5c3d @f127f8ab
+    // partial: window flags false; locale from LANG
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGetAppState h=9b1ebc5a4003e418 @d3ebbda2
     func appState() -> ControlResponse {
         let locale = ProcessInfo.processInfo.environment["LANG"].map { String($0.prefix { $0 != "." }) } ?? "system"
         return ControlResponse(200, [

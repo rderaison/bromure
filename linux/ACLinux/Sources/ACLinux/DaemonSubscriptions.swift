@@ -43,6 +43,7 @@ extension Daemon {
     /// shared one.
     // @port ACAppDelegate.forgetSubscription(_: SubscriptionProvider, profileID: UUID?) h=2b6d62a75938ccc3 @b10aa434
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onForgetSubscription h=e27654dd84afe541 @d3ebbda2
     static func forgetSubscription(_ provider: SubscriptionProvider, profileID: UUID?, mitm: MitmProxy) {
         switch provider {
         case .claude:
@@ -69,6 +70,8 @@ extension Daemon {
     // partial: no per-launch auth notes (launchAuth) on Linux
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSubscriptionStatus h=7804aacc121a331d @b10aa434
     @MainActor
+    // partial: health is merged into /state's subscriptions per provider (store.health(for:))
+    // @port ACAppDelegate.localSubscriptionHealth(_: ModelProvider, profileID: UUID?) h=9cf74db898ae82eb @d3ebbda2
     static func subscriptionStatus(mitm: MitmProxy?, profileID pid: UUID? = nil) -> [String: Any] {
         guard let mitm else { return [:] }
         let allProfiles = ProfileStore().loadAll()

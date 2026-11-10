@@ -107,6 +107,7 @@ extension Daemon {
     /// `POST /vms/<id>/fusion {"engaged": bool}` (the CLI's `vm fusion`, a
     /// fat client's ⚡, the remote menu).
     // @port ACAppDelegate.automationSetFusion(idOrName: String, engaged: Bool) h=cc530c9ea02bed43 @4237c02e
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetFusion h=623b91993210d190 @d3ebbda2
     func fusionRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         // Any running VM with a workspace profile, as macOS (no managed
         // exclusion; /vms's fusionConfigurable says the same).

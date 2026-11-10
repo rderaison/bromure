@@ -115,7 +115,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// What the workspace's guest last said of its memory (`vmstat.txt` in its
     /// outbox, as GuestOutbox reads it for /state), when it said it (the
     /// file's date); nil while it isn't running here.
-    // @port-skip linux-only: macOS reads the VM's RunningSession fields (AgentSessionHost+App.swift)
+    // partial: mem_psi_some/full read from vmstat.txt on demand
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onVMMemoryPressure h=31997a9579511c59 @d3ebbda2
     func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? {
         guard Self.running.withLockedValue({ $0.contains(id) }) else { return nil }
         let path = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/vmstat.txt"
@@ -164,6 +165,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// conversation, which may move the report to its own tab (Codex's
     /// shared server). macOS: UbuntuSandboxVM's outbox poll + onAgentStatus.
     // @port UbuntuSandboxVM.static isAgentHookFile(_: String) h=e13963421f41cba6 @132bb730
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onAgentStatus h=ba2345e1c2011ce6 @d3ebbda2
     func readAgentStatus() {
         guard let store = SessionStores.shared?.sessions else { return }
         let fm = FileManager.default
@@ -264,7 +266,7 @@ final class LinuxSessionHost: AgentSessionHost {
     }
 
     /// ACAppDelegate.isReply: a turn ended, or the agent started asking.
-    // @port-skip linux-only: ACAppDelegate.isReply (a static in the app delegate)
+    // @port ACAppDelegate.static isReply(from: AgentStatus?, to: AgentStatus) h=6ddc87bfbf6acfe3 @d3ebbda2
     static func isReply(from before: AgentStatus?, to now: AgentStatus) -> Bool {
         switch now {
         case .done: return before == .working
@@ -417,6 +419,20 @@ final class LinuxSessionHost: AgentSessionHost {
 
     /// A worktree command for the guest, queued in the outbox as macOS does.
     // @port ACAppDelegate.automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) h=671dcd9c1a40fa03 @9936e30c
+    // partial: the shared GuestCommand.line/arg does the base64 encoding
+    // @port ACAppDelegate.b64(_: String) h=515bc6019715ca11 @d3ebbda2
+    // partial: action "create"
+    // @port ACAppDelegate.requestCreateWorktree(cwd: String, slug: String, display: String, tool: String, prompt: String?, in: SessionPane) h=6a06ff927c5acff4 @d3ebbda2
+    // partial: action "merge"
+    // @port ACAppDelegate.requestMergeWorktree(sourceBranch: String, targetBranch: String, mainRoot: String, display: String, tool: String, in: SessionPane) h=60f975b6c88e3e69 @d3ebbda2
+    // partial: action "pr"
+    // @port ACAppDelegate.requestWorktreePR(sourceBranch: String, targetBranch: String, mainRoot: String, display: String, tool: String, in: SessionPane) h=b2191bf48bd36f30 @d3ebbda2
+    // partial: action "remove"
+    // @port ACAppDelegate.requestRemoveWorktree(mainRoot: String, branch: String, in: SessionPane) h=37c22337040fd1f9 @d3ebbda2
+    // partial: action "resolve"
+    // @port ACAppDelegate.requestResolveWorktree(dir: String, tool: String, in: SessionPane) h=9b8e5281fefd5b0c @d3ebbda2
+    // partial: action "terminal"
+    // @port ACAppDelegate.requestAttachTerminal(mainRoot: String, branch: String, in: SessionPane) h=4e227ce90c80aa4c @d3ebbda2
     func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool {
         guard let id = UUID(uuidString: profileNameOrID) ?? profileID(named: profileNameOrID),
               Self.running.withLockedValue({ $0.contains(id) }),
@@ -433,7 +449,8 @@ final class LinuxSessionHost: AgentSessionHost {
 
     // MARK: The workspace
 
-    // @port-skip linux-only: ProfileStore lookup (macOS: the app's profile list)
+    // @port ACAppDelegate.profile(for: Profile.ID) h=f919764680593622 @d3ebbda2
+    // @port ACAppDelegate.currentProfile(_: Profile.ID) h=f919764680593622 @d3ebbda2
     func profile(for id: Profile.ID) -> Profile? { ProfileStore().loadAll().first { $0.id == id } }
 
     // @port-skip linux-only: a profile id by name
@@ -443,15 +460,16 @@ final class LinuxSessionHost: AgentSessionHost {
 
     /// Boots the workspace (all three: a server has no screen to ask on); an
     /// agent's start (quietly) is unattended, as on macOS.
-    // @port-skip linux-only: Daemon.startWorkspace
+    // @port ACAppDelegate.startProfile(_: Profile.ID) h=83c121486007eef5 @d3ebbda2
     func startProfile(_ id: Profile.ID) { boot(id) }
-    // @port-skip linux-only: Daemon.startWorkspace
+    // @port ACAppDelegate.startProfileQuietly(_: Profile.ID) h=003256bcbc951b64 @d3ebbda2
     func startProfileQuietly(_ id: Profile.ID) { boot(id, unattended: true) }
     // @port-skip linux-only: Daemon.startWorkspace
     func startProfileRemotely(_ id: Profile.ID) { boot(id) }
     /// Boots the workspace; a boot that fails is the workspace's refusal
     /// (unattendedLaunchRefusal) until the next attempt.
-    // @port-skip linux-only: Daemon.startWorkspace
+    // partial: records launchRefusals[id] + stderr when a boot fails
+    // @port ACAppDelegate.refuseUnattendedLaunch(_: Profile, _: String) h=56323227c6445fc0 @d3ebbda2
     func boot(_ id: UUID, unattended: Bool = false) {
         launchRefusals[id] = nil
         Task { @MainActor [weak self, weak daemon] in
@@ -466,12 +484,14 @@ final class LinuxSessionHost: AgentSessionHost {
     /// fail at once on it rather than wait out the boot timeout.
     private var launchRefusals: [Profile.ID: String] = [:]
 
-    // @port-skip linux-only: Linux's refusals are failed boots (macOS: refused prompts)
+    // partial: refusals are failed boots
+    // @port ACAppDelegate.unattendedLaunchRefusal(_: Profile.ID) h=811a6696ff91bb23 @d3ebbda2
     func unattendedLaunchRefusal(_ id: Profile.ID) -> String? { launchRefusals[id] }
 
     /// The running workspace's roster, read now from its outbox (what agentd
     /// wrote last); nil when it isn't running.
-    // @port-skip linux-only: the outbox roster (updateRoster)
+    // partial: roster from outbox tabs.txt. First-roster checkpoint in Daemon.observeCheckpoints, reboot completion in DaemonGuestReboot.swift, no UI grid reconcile
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onTabList h=c3926a661153f354 @d3ebbda2
     func tabsModel(for id: Profile.ID) -> TabsModel? {
         guard Self.running.withLockedValue({ $0.contains(id) }) else { tabs[id] = nil; return nil }
         let file = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/tabs.txt"

@@ -165,6 +165,8 @@ public struct DaemonConfig: Sendable {
 /// Firecracker VMs. Serves the control socket's routes.
 // @port-skip linux-only: the Linux daemon core (macOS: ACAppDelegate + ACAutomationServer)
 public actor Daemon {
+    // partial: Linux's running-VM record (+ VMRecord.bootedAt)
+    // @port RunningSession.init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) h=ad45d5f4e57e093c @d3ebbda2
     struct Live {
         var machine: FirecrackerMachine
         let port: DgramPort
@@ -344,7 +346,8 @@ public actor Daemon {
         return Daemon(config: config, passt: passt)
     }
 
-    // @port-skip linux-only: Linux daemon core
+    // partial: server-side launch is spread over Daemon.start/startSessionEngine. Missing: DefaultSSHKey.ensureExists + seeding the template's sshPublicKey, so new Linux workspaces don't inherit a default SSH key (C, small, see summary). Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (B: macOS-legacy data)
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=540dd0292f7c75d9 @d3ebbda2
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
         try FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true,
@@ -566,7 +569,8 @@ public actor Daemon {
     // @port-skip linux-only: Linux daemon core
     public var records: [VMRecord] { registry.records.map(withIP) }
 
-    // @port-skip linux-only: Linux daemon core
+    // partial: IP is the DHCP lease, not the guest's ip.txt
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onIPUpdate h=a648db7b5af99c9c @d3ebbda2
     private func withIP(_ r: VMRecord) -> VMRecord {
         var r = r
         if r.state == .running { r.ip = sw.dhcp.leasedIP(for: r.mac) } else { r.ip = nil }
@@ -577,7 +581,6 @@ public actor Daemon {
 
     /// The control socket's router: the subset of macOS's routes the Linux
     /// daemon has, same paths and JSON; anything else is 404 with a JSON error.
-    // @port-skip linux-only: the Linux router (each route below carries its own @port)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) h=50682b813d59b62f @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"): h=5085e35fd033de06 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/remote"): h=b6276f976a98e550 @f127f8ab
@@ -593,6 +596,8 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/start"): h=36622910b9e35c75 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / default: h=be4becd88b5244ad @f127f8ab
+    // partial: router calls daemon functions directly
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=656451da0f54eeeb @d3ebbda2
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         // A mutating request moves /state's generation on as it starts and
         // as its response goes out (macOS: route's noteMutation pair).
@@ -694,6 +699,7 @@ public actor Daemon {
     /// last N hours, for a fat client's Security window (the live mirror in
     /// /state carries only the most recent), and which run numbered them.
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=38a02ee17b6a23e7 @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityHistory h=a9a9fc7e99ac7ebd @d3ebbda2
     func securityTimelineHistory(_ fullPath: String) async -> ControlResponse {
         var hours = 24
         if let q = fullPath.split(separator: "?", maxSplits: 1).dropFirst().first {
@@ -827,7 +833,8 @@ public actor Daemon {
     /// the outbox: the tab roster (a fat client mounts a terminal once it's
     /// non-empty: tmux is up), its vitals, its listening ports and its
     /// docker state (GuestOutboxReports, as macOS's outbox poll reads them).
-    // @port-skip linux-only: the per-VM half of ACAppDelegate.automationVMList (VMRecord.json, GuestOutbox)
+    // partial: VMRecord.json + outbox keys; attached always false; 8-char shortId
+    // @port ACAppDelegate.automationVMList() h=3ee9a916e8df7fdc @d3ebbda2
     func vmEntry(_ rec: VMRecord) -> JSONValue {
         guard case .object(var o) = rec.json else { return rec.json }
         o["attached"] = false                         // no attached pane on Linux
@@ -861,6 +868,26 @@ public actor Daemon {
     // partial: the outbox read when /state is built and by the daemon's 500 ms loop; no ip.txt (the DHCP lease is the IP) nor home migration (ext4 homes)
     // @port UbuntuSandboxVM.OutboxScanner.scan() h=f2b49fb3b91a59b1 @132bb730
     // @port UbuntuSandboxVM.static parseListeningPorts(_: String) h=61192d9f084c50da @132bb730
+    // partial: merged per /state build from outbox files
+    // @port RunningSession.mirrorDockerList(_: [DockerContainer]) h=6271e800e20e457d @d3ebbda2
+    // partial: same merge by short id
+    // @port RunningSession.mirrorDockerStats(_: [(id:String,cpu:String,mem:String)]) h=2e425767b9a3afa2 @d3ebbda2
+    // partial: same merge by short id
+    // @port RunningSession.mirrorDockerArch(_: [(id:String,arch:String)]) h=609f02c2b7317cb2 @d3ebbda2
+    // partial: docker.txt read into /state's dockerContainers
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerList h=d0336c6570cbf3ee @d3ebbda2
+    // partial: docker-stats.txt merged into containers
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerStats h=fa99de72cbccc48f @d3ebbda2
+    // partial: ports.txt read into listeningPorts
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onPortsList h=f77a19aab4357fd1 @d3ebbda2
+    // partial: docker-images.txt
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerImages h=174a8c09f38f0a00 @d3ebbda2
+    // partial: docker-volumes.txt
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerVolumes h=a59e5a9e76ef20d8 @d3ebbda2
+    // partial: docker-binfmt.txt
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerBinfmt h=d9f766d2721aa94b @d3ebbda2
+    // partial: docker-arch.txt merged into containers
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerArch h=ba909494bc5cd277 @d3ebbda2
     static func outboxReports(_ outbox: String) -> [String: JSONValue] {
         func read(_ name: String) -> String { GuestOutbox.read(outbox + name) ?? "" }
         let stats = Dictionary(GuestOutboxReports.dockerStats(read("docker-stats.txt")).map { (String($0.id.prefix(12)), $0) },
@@ -910,6 +937,9 @@ public actor Daemon {
     /// pendingPrompts are what macOS's onListPendingPrompts gives.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListPendingPrompts h=7f92140cb6125056 @7dd92fdf
     // @port ACAutomationServer.buildStateSnapshot() h=fd6fbd34e08dd8ce @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityTimelineOldest h=7c333763aa5f6b36 @d3ebbda2
+    // partial: also read in securityTimelineHistory
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityTimelineRetention h=fda0927565c529fe @d3ebbda2
     func stateBody() async -> JSONValue {
         // Decision prompts waiting for a fat client's answer (PendingPromptBroker).
         // The session engine's tab rosters (LinuxSessionHost.tabsModel), from
@@ -978,6 +1008,7 @@ public actor Daemon {
     }
 
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/vms"): h=b80678b83121852e @f127f8ab
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListVMs h=66bfdf0f62a8d55c @d3ebbda2
     func listVMs() -> ControlResponse {
         let machines = JSONValue(foundation: MachineLinkHub.shared.stateAdditions().vms) ?? .array([])
         guard case .array(let more) = machines else { return ControlResponse(200, ["vms": .array(records.map(vmEntry))]) }
@@ -1147,6 +1178,10 @@ public actor Daemon {
     /// is refused (409, why) before anything is touched, and the VM keeps
     /// running (macOS: stopSession's floor check).
     // @port UbuntuSandboxVM.suspend() h=f3b02b7d4a7d5afb @132bb730
+    // partial: same free-space floor refusal. No tabs.json save (resume keeps the guest's tmux). Snapshot failure is a 500, not resume-and-keep-running
+    // @port ACAppDelegate.stopSession(_: Profile.ID, action: Profile.CloseAction) / case .suspend: h=d7733ab22c876c3d @d3ebbda2
+    // partial: refusal logged and returned as 409, no alert
+    // @port ACAppDelegate.reportSuspendRefused(name: String, _: String) h=9f3a4453d066bea6 @d3ebbda2
     func suspend(_ rec: VMRecord, floor: UInt64 = EphemeralDisk.minimumFreeBytes) async -> ControlResponse {
         guard let l = live[rec.id] else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
@@ -1210,6 +1245,20 @@ public actor Daemon {
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=3801d3e89fa37bfb @f127f8ab
     /// `partOfReboot`: the reboot's own stop (not one a client asked for).
     // @port SessionDisk.clearSavedState() h=3440dfdfd02c08d3 @e81ff085
+    // partial: the picker's close-action→suspend/shutdown mapping is the client's; server takes action=
+    // @port ACAppDelegate.stopProfile(_: Profile.ID) h=0fbd511bd3ecbc4a @d3ebbda2
+    // partial: confirm alert is client side (fat client sends action "shutdown")
+    // @port ACAppDelegate.shutdownProfile(_: Profile.ID) h=c2bba30def41a919 @d3ebbda2
+    // partial: fat client sends action "suspend"
+    // @port ACAppDelegate.suspendProfile(_: Profile.ID) h=9aa598e2c097d5df @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onStopVM h=1ba6936f0333cca3 @d3ebbda2
+    // @port ACAppDelegate.automationStopVM(idOrName: String, action: String) h=f9652ea3c5ef2297 @d3ebbda2
+    // partial: one 20 s shutdown grace for every VM (macOS gives cluster nodes and registries 60 s), see summary
+    // @port ACAppDelegate.stopSession(_: Profile.ID, action: Profile.CloseAction) h=dcc197d77385d4a2 @d3ebbda2
+    // partial: action shutdown (machine.stop, 20 s)
+    // @port ACAppDelegate.stopSession(_: Profile.ID, action: Profile.CloseAction) / case .shutdown: h=bad5b6cc68b39aec @d3ebbda2
+    // partial: DELETE /vms/<id> is the request (awaited, not fire-and-forget)
+    // @port ACAppDelegate.requestStopSession(_: Profile.ID, action: Profile.CloseAction) h=3a7abc982669f3ec @d3ebbda2
     func deleteVM(_ rec: VMRecord, action: String, partOfReboot: Bool = false) async -> ControlResponse {
         if action == "suspend" { return await suspend(rec) }
         // Asked during a reboot: that reboot boots nothing (stoppedDuringReboot).
@@ -1283,6 +1332,10 @@ public actor Daemon {
     /// a boot remedy), the one start a rebooting VM takes.
     /// `unattended`: nobody is there to ask (an agent's or automation's
     /// start): a launch question isn't asked (DaemonBaseImageDrift.swift).
+    // partial: the `starting` set holds the disk; a stop during a plain cold boot gets 409 instead of being deferred and honored (macOS bootsInFlight.takeStop); only reboots defer it
+    // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
+    // partial: start, launch and launchVM. Compromised workspace refused (409), no model-download gate (MLX), no window/pane, no virtiofs home migration
+    // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=9feccb727553e73f @d3ebbda2
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false,
                unattended: Bool = false, driftResolved: Bool = false) async -> ControlResponse {
         // A workspace made private (a clone of a private one, a save just
@@ -1412,6 +1465,8 @@ public actor Daemon {
     /// its shell agent doesn't come up within 10 s.
     // partial: no dead-pool flush-and-retry beyond GuestShell's pre-write skip
     // @port ACAutomationServer.handleExec(fd: Int32, profileID: String, bodyJSON: [String:Any]) h=009a8b0b81d659a5 @7dd92fdf
+    // partial: exec answers 409 with state off/suspended at once from the VM record
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onVMRunState h=9e3b6637f279cd88 @d3ebbda2
     func exec(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         if body["interactive"] == .bool(true) { return await interactiveExec(rec, body) }
         var command = body["command"]?.stringValue ?? ""
@@ -1511,7 +1566,8 @@ public actor Daemon {
     func vmDir(_ id: String) -> String { config.stateDir + "/vms/" + id }
 
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
-    // @port-skip linux-only: Linux daemon VM lifecycle
+    // partial: live[] insert; no lease/status menu/storage notification; stop-during-boot not deferred (see whileHoldingDisk)
+    // @port ACAppDelegate.registerSession(_: UbuntuSandboxVM, profile: Profile) h=6c27833c206af8d1 @d3ebbda2
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         // A protection this server can't enforce refuses the launch (DaemonSandboxGuard.swift).
         try await refuseUnenforceableSandbox(rec)
@@ -1533,7 +1589,8 @@ public actor Daemon {
     /// launch that failed: its trace session, SSH keys, static and minted
     /// AWS keys (macOS: MitmEngine.unregister), prompt-injection policy,
     /// swap map and kube trust, and its local engine route.
-    // @port-skip linux-only: the Linux share of macOS's cleanupSessionRegistrations and MitmEngine.unregister
+    // partial: subscription bogus keys aren't unregistered at stop (only when an automation clone is destroyed, DaemonClones.swift); no browser/MCP bridge teardown here (owned by Live)
+    // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=b0add8ae1718e68f @d3ebbda2
     func clearWorkspaceProxyState(_ pid: UUID) async {
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
         mitm?.clearSessionTrace(for: pid)
@@ -2324,6 +2381,8 @@ public actor Daemon {
 
     // partial: no windows, panes, status menu or activation policy on a server; a queued boot remedy runs through this stop (it ends in performBootRemedy)
     // @port ACAppDelegate.handleSessionStopped(profileID: Profile.ID) h=772a84595772dbe3 @4237c02e
+    // partial: ends until-stop firewall rules; no loopback forwarders/lease
+    // @port ACAppDelegate.unregisterSession(_: Profile.ID) h=597c09688ea45ecf @d3ebbda2
     private func finishStop(_ id: String, _ l: Live, _ info: FirecrackerMachine.StopInfo) async {
         guard var rec = registry.find(id) else { return }
         // A boot failure ends with its session (macOS: handleSessionStopped).
@@ -2434,7 +2493,8 @@ public actor Daemon {
 
     /// Stops every VM (killed: systemd's stop is not a graceful shutdown of
     /// guests yet) and passt.
-    // @port-skip linux-only: Linux daemon lifecycle
+    // partial: Squelch flush, ssh-agents, RemoteAccess stop; no LaunchRestorePlan (skipped file); ephemeral --rm sweep done at the next start instead
+    // @port ACAppDelegate.applicationWillTerminate(_: Notification) h=2e9c307cfdd4d82a @d3ebbda2
     public func shutdown() async {
         // A stopping daemon leaves nothing for a next one to take back (each
         // VM's teardown drops its fd store entries).

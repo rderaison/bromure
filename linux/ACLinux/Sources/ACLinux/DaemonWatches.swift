@@ -77,7 +77,8 @@ extension SessionStores {
     /// The watch engine over the daemon's engines, its automation hooks
     /// wired (macOS: the app delegate's lazy repoWatchEngine, started at
     /// launch).
-    // @port-skip linux-only: daemon wiring (macOS: ACAppDelegate's launch)
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / scheduledAutomationEngine.onRunCompleted h=928a01bb8e1dc065 @d3ebbda2
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / scheduledAutomationEngine.prepareWatchRun h=ef6f8034340f1e1b @d3ebbda2
     func startWatches(host: LinuxSessionHost) {
         guard let automations = automationEngine, let tasks = codingTaskEngine,
               let dispatcher = taskDispatcher, let delegations = delegationEngine else { return }
@@ -99,6 +100,7 @@ extension SessionStores {
     /// hub (macOS: the app delegate's, same paths and bodies). Returns the
     /// response body; "error" set = failure.
     // @port ACAppDelegate.watchesCommand(method: String, path: String, body: [String:Any]) h=43b69ba1786f52f5 @32c80445
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onWatchesCommand h=102422d4d1e202d5 @d3ebbda2
     func watchesCommand(method: String, path: String, body: [String: Any]) async -> [String: Any] {
         guard let engine = watchEngine, let watchHost else { return ["error": "no watch engine"] }
         let parts = path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
@@ -243,6 +245,7 @@ extension SessionStores {
     /// {items: […]} (dirs: also `truncated`), or {error, code} (code 401: the
     /// GitHub token was refused).
     // @port ACAppDelegate.automationSources(_: [String:Any]) h=d307a4bd8fc10bd1 @32c80445
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAutomationSources h=1ff1d0f916522573 @d3ebbda2
     func automationSources(_ body: [String: Any]) async -> [String: Any] {
         guard let pid = (body["profile"] as? String).flatMap(UUID.init(uuidString:)),
               let kind = body["kind"] as? String else { return ["error": "profile and kind required"] }

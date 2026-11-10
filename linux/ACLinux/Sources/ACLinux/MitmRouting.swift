@@ -111,6 +111,7 @@ extension Daemon {
     /// routing saved and pushed to the proxy at once. 409 when the VM isn't
     /// running or the mode isn't one.
     // @port ACAppDelegate.automationSetRouting(idOrName: String, mode: String) h=c2937c2ca8547013 @3b4acf09
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetRouting h=5ae3d0768405fded @d3ebbda2
     func routingRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         guard live[rec.id] != nil, var profile = existingProfile(for: rec) else {
             return ControlResponse(409, ["ok": false, "error": .string("VM not found: \(rec.name)")])

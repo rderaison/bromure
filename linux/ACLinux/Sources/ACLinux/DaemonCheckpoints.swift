@@ -169,6 +169,9 @@ extension Daemon {
     /// lists them; when there are none because the filesystem can't clone,
     /// a `note` says so.
     // @port ACAppDelegate.automationListCheckpoints(_: String) h=d8c277f042296251 @8546d1e2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListCheckpoints h=7cc422c69e54d04c @d3ebbda2
+    // partial: GET /vms/<id>/checkpoints lists disk and home checkpoints (target field), not home only
+    // @port ACAppDelegate.homeCheckpoints(for: Profile.ID) h=a3f815668fe527ef @d3ebbda2
     func checkpointsRoute(_ rec: VMRecord) -> ControlResponse {
         func entry(_ c: VMCheckpoints.Checkpoint, _ target: VMCheckpoints.Target) -> JSONValue {
             ["id": .string(c.id), "createdAt": .number(Double(Int(c.createdAt.timeIntervalSince1970))),
@@ -187,6 +190,11 @@ extension Daemon {
     /// disks are replaced whole); a home revert first checkpoints the
     /// current home, as macOS's does. 400 with the reason otherwise.
     // @port ACAppDelegate.automationRevertCheckpoint(idOrName: String, checkpoint: String, target: String) h=50590851e9ffd1bc @8546d1e2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRevertCheckpoint h=441d58ccf169857c @d3ebbda2
+    // partial: target=home. Same refusals, checkpoints the current home first (the fat client's rewindHome posts exactly this)
+    // @port ACAppDelegate.rewindHome(_: Profile.ID, to: String) h=1619df340c9c648c @d3ebbda2
+    // partial: the restore itself. The NSAlert checkpoint picker is screen-only
+    // @port ACAppDelegate.restoreHomeStorage(_: Profile) h=40238836dae1efe9 @d3ebbda2
     func revertRoute(_ rec: VMRecord, _ body: JSONValue) -> ControlResponse {
         func refused(_ e: String) -> ControlResponse { ControlResponse(400, ["error": .string(e)]) }
         let cp = body["checkpoint"]?.stringValue ?? ""

@@ -5,6 +5,7 @@ extension Daemon {
     /// (read, write, list…) through agentd, as the chat view and the CLI
     /// use it. 409 when the VM isn't running or the guest refused.
     // @port ACAppDelegate.automationGuestFileOp(idOrName: String, op: [String:Any], timeout: Int) h=9684560563026b32 @9ece43f6
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGuestFileOp h=d7c0b2d40da72235 @d3ebbda2
     func guestFileRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         guard live[rec.id] != nil, let pid = UUID(uuidString: rec.id) else {
             return ControlResponse(409, ["error": .string("VM not running: \(rec.name)")])
@@ -61,6 +62,7 @@ extension Daemon {
     /// model switched (saved, and the engine re-pointed); its agents keep
     /// their environment and pick the new model up on their next request.
     // @port ACAppDelegate.automationSetModel(idOrName: String, modelID: String) h=2ce6aa845ea9130e @9ece43f6
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetModel h=61d0b9117a46b056 @d3ebbda2
     func setModelRoute(_ rec: VMRecord, _ body: JSONValue) async -> ControlResponse {
         let modelID = body["modelID"]?.stringValue ?? ""
         guard live[rec.id] != nil, var profile = existingProfile(for: rec) else {
@@ -94,6 +96,33 @@ extension Daemon {
     /// expensive dashboard polling. 409 when the VM isn't running or the
     /// action is refused.
     // @port ACAppDelegate.automationDockerCommand(idOrName: String, doc: [String:Any]) h=816fd9b4c7ecc817 @843e00a9
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDockerCommand h=058ab1f6e3e65ab6 @d3ebbda2
+    // partial: action "attach" (DockerGuestVerbs.automationAction)
+    // @port ACAppDelegate.requestDockerAttach(containerID: String, shell: String, in: SessionPane) h=9600d7d0d3c53e08 @d3ebbda2
+    // partial: DockerGuestVerbs.sanitizedID, via automationAction
+    // @port ACAppDelegate.sanitizedDockerID(_: String) h=2462bd4ea168de60 @d3ebbda2
+    // partial: action "start"
+    // @port ACAppDelegate.requestDockerStart(containerID: String, in: SessionPane) h=6d03b818b15ed3f5 @d3ebbda2
+    // partial: action "stop"
+    // @port ACAppDelegate.requestDockerStop(containerID: String, in: SessionPane) h=d0aeab65f2b49a3e @d3ebbda2
+    // partial: action "remove"
+    // @port ACAppDelegate.requestDockerRemove(containerID: String, in: SessionPane) h=5e7629def3be973b @d3ebbda2
+    // partial: action "logs"
+    // @port ACAppDelegate.requestDockerLogs(containerID: String, in: SessionPane) h=142e743ad02b7834 @d3ebbda2
+    // partial: DockerGuestVerbs.sanitizedVolumeName, via automationAction
+    // @port ACAppDelegate.static sanitizedVolumeName(_: String) h=2f7280c44e5c0c49 @d3ebbda2
+    // partial: action "volume-create"
+    // @port ACAppDelegate.requestDockerVolumeCreate(name: String, in: SessionPane) h=ac7ea8df7e607faf @d3ebbda2
+    // partial: action "volume-remove"
+    // @port ACAppDelegate.requestDockerVolumeRemove(name: String, in: SessionPane) h=ec271346e2a333c7 @d3ebbda2
+    // partial: action "binfmt"
+    // @port ACAppDelegate.requestDockerBinfmtInstall(in: SessionPane) h=53517416dd248b4c @d3ebbda2
+    // partial: action "binfmt-off"
+    // @port ACAppDelegate.requestDockerBinfmtUninstall(in: SessionPane) h=899629809a95dbc0 @d3ebbda2
+    // partial: action "run"
+    // @port ACAppDelegate.requestDockerRun(spec: DockerRunSpec, in: SessionPane) h=6843cf42f3e8ca9e @d3ebbda2
+    // partial: DockerGuestVerbs.runVerb, via automationAction
+    // @port ACAppDelegate.static dockerRunVerb(spec: DockerRunSpec) h=0eb8c74126c94439 @d3ebbda2
     func dockerRoute(_ rec: VMRecord, _ body: JSONValue) -> ControlResponse {
         guard live[rec.id] != nil else {
             return ControlResponse(409, ["ok": false, "error": .string("VM not running: \(rec.name)")])
@@ -115,6 +144,7 @@ extension Daemon {
     /// written whole (agentd only ever sees a complete file).
     // @port ACAppDelegate.sendGuestCommand(_: String, profileID: Profile.ID) h=0d3070fd580c2d69 @843e00a9
     @discardableResult
+    // @port ACAppDelegate.sendCommand(_: String, in: SessionPane) h=6a03429e6bde7500 @d3ebbda2
     func sendGuestCommand(_ command: String, vmID: String) -> Bool {
         let file = vmDir(vmID) + "/outbox/cmd-\(UUID().uuidString).txt"
         return (try? (command + "\n").write(toFile: file, atomically: true, encoding: .utf8)) != nil
@@ -123,6 +153,7 @@ extension Daemon {
     /// The guest's Docker dashboard polling (CPU/mem, images) on or off:
     /// the `.docker-watch` marker in the outbox, created atomically.
     // @port ACAppDelegate.setDockerWatch(_: Bool, profileID: Profile.ID) h=3b7141c2fabe19b6 @843e00a9
+    // @port ACAppDelegate.setDockerWatch(_: Bool, in: SessionPane) h=a4e2f1f4b8db5312 @d3ebbda2
     func setDockerWatch(_ on: Bool, vmID: String) {
         let marker = vmDir(vmID) + "/outbox/.docker-watch"
         if on {
@@ -141,6 +172,7 @@ extension Daemon {
     /// older server's 404/405 (and types step by step there); "output" is
     /// the guard's, "unreachable" when the machine couldn't be asked.
     // @port ACAutomationServer.handleType(fd: Int32, profileID: String, bodyJSON: [String:Any], gzip: Bool) h=b3d460df248c6312 @30634ab2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTypeIntoPane h=18aff5566a6bdbe8 @d3ebbda2
     func typeRoute(_ rec: VMRecord?, _ body: JSONValue, key: String? = nil) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         guard let text = doc["text"] as? String,

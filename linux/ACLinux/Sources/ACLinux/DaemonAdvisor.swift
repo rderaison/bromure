@@ -85,7 +85,12 @@ extension Daemon {
     /// (`openshell-allow`, `sandbox-path`), answered by the shared handlers
     /// on a dispatch thread as macOS's server thread runs them (they wait on
     /// the advisor, up to 30 s), never on the daemon's own executor.
-    // @port-skip linux-only: the proposals / sandbox-decision handler closures of wireAutomationCallbacks, off the actor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onProfileProposals h=c7d57d903eaa8c5b @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onProfileSandboxDecision h=fe1139b2848177f1 @d3ebbda2
+    // partial: forwarder to the shared ProfileSubRoutes
+    // @port ACAppDelegate.static sandboxDecisionRoute(profileID: UUID, _: String, body: [String:Any], allow: @escaping@Sendable(UUID,String,Int,String?)async->String?, addPath: (UUID,String,Bool)->String?) h=99b32e8e958ba43f @d3ebbda2
+    // partial: forwarder to the shared ProfileSubRoutes
+    // @port ACAppDelegate.static advisorProposalsRoute(profileID: UUID, method: String, sub: [String], body: [String:Any], advisor: OpenShellAdvisor) h=0b91e545e9ce1b3f @d3ebbda2
     nonisolated static func advisorSubRoute(_ pid: UUID, method: String, sub: [String],
                                             body: [String: Any]) async -> (status: Int, body: [String: Any]) {
         await withCheckedContinuation { c in
@@ -119,6 +124,7 @@ extension Daemon {
     }
 
     /// A running workspace's guest shell, or nil.
-    // @port-skip linux-only: the daemon's live VMs by workspace
+    // partial: resolves the running VM's shell (live[])
+    // @port ACAppDelegate.sandbox(for: Profile.ID) h=1062ca4f5f94dab2 @d3ebbda2
     func liveShell(of pid: UUID) -> GuestShell? { live[pid.uuidString.lowercased()]?.shell }
 }

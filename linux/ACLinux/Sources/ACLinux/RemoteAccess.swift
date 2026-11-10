@@ -45,7 +45,8 @@ public struct RemoteSettings: Codable, Equatable, Sendable {
         try enc.encode(self).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    // @port-skip linux-only: remote settings
+    // partial: from <state>/remote.json; no BROMURE_AC_REMOTE_PORT override
+    // @port ACAppDelegate.remoteAccessConfig() h=d31f9b887f42b383 @d3ebbda2
     var serverConfig: RemoteAccessServer.Config {
         RemoteAccessServer.Config(port: port, bindAddress: bindAddress, passwordAuth: passwordAuth, pubkeyAuth: pubkeyAuth)
     }
@@ -59,7 +60,12 @@ extension Daemon {
 
     /// Points the shared server at this daemon (control socket, guest subnet,
     /// forward resolvers) and starts it if enabled.
-    // @port-skip linux-only: the daemon's half of ACAppDelegate.startRemoteAccessIfNeeded
+    // partial: sets RemoteAccessServer.shared.forwardResolver to relayFD
+    // @port ACAppDelegate.installFatClientForwardResolver() h=3d9a5a09276a7b9d @d3ebbda2
+    // partial: sets udpForwardResolver to relayFD with a "UDP" header
+    // @port ACAppDelegate.installFatClientUDPForwardResolver() h=12ed8a784237f8eb @d3ebbda2
+    // partial: sets browserMCPResolver to browserMCPFD
+    // @port ACAppDelegate.installFatClientBrowserMCPResolver() h=23e78afaa6770533 @d3ebbda2
     func setUpRemoteAccess() async {
         // The shared code's ProfileStore() lives in the state dir, and the
         // shared server keeps `remote/` (host key, authorized_keys) beside its
@@ -229,6 +235,9 @@ extension Daemon {
 
     /// `GET /remote`: what macOS's remoteAccessStatus returns.
     // @port ACAppDelegate.remoteAccessStatus() h=b15b5034f2d2161f @f127f8ab
+    // partial: host:port computed inline (primaryIPv4 for 0.0.0.0)
+    // @port ACAppDelegate.remoteReachableAddress() h=29612ab5962d0e1c @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteStatus h=c16c88e244aefab5 @d3ebbda2
     func remoteStatus() async -> ControlResponse {
         let s = RemoteSettings.load(remoteSettingsPath)
         let (running, fp, keys, keysProblem) = await MainActor.run {
@@ -253,6 +262,10 @@ extension Daemon {
     /// `POST /remote`: port, bindAddress, passwordAuth, pubkeyAuth, enabled.
     // partial: no P2P advertising, no base-image-install guard (the daemon has no install step)
     // @port ACAppDelegate.remoteAccessApply(_: [String:Any]) h=3a0c28ae8f0a1d24 @7dd92fdf
+    // partial: enabled=false stops the server; P2P serving follows refreshP2PServing
+    // @port ACAppDelegate.stopRemoteAccess() h=c8dee5fec42c01b8 @d3ebbda2
+    // partial: no cloudflared, no install guard
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteApply h=db216bf359983302 @d3ebbda2
     func remoteApply(_ spec: JSONValue) async -> ControlResponse {
         var s = RemoteSettings.load(remoteSettingsPath)
         if let p = spec["port"]?.numberValue {
@@ -283,6 +296,7 @@ extension Daemon {
 
     /// `POST /remote/keys {"key": "<openssh public key line>"}`.
     // @port ACAppDelegate.remoteAccessAddKey(_: String) h=9d3ad0a2961c4ba1 @7dd92fdf
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteAddKey h=d568325e283a1266 @d3ebbda2
     func remoteAddKey(_ body: JSONValue) async -> ControlResponse {
         let key = body["key"]?.stringValue ?? ""
         do {
@@ -296,6 +310,7 @@ extension Daemon {
 
     /// `DELETE /remote/keys/{fingerprint|comment}`.
     // @port ACAppDelegate.remoteAccessRemoveKey(_: String) h=5684b894512fbf80 @7dd92fdf
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRemoteRemoveKey h=471c869350b5e586 @d3ebbda2
     func remoteRemoveKey(_ selector: String) async -> ControlResponse {
         do {
             try await MainActor.run { try RemoteAccessServer.shared.removeAuthorizedKey(selector) }

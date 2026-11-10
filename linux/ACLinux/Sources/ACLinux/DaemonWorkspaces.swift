@@ -15,6 +15,12 @@ extension Daemon {
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "PUT", "PATCH": h=f633e99ddcbde1c8 @f127f8ab
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=94bd44937ab2cb14 @f127f8ab
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / default: h=a378a9dda33ea55e @f127f8ab
+    // partial: "policy" sub-resource → shared ProfileSubRoutes.policyRevisionsRoute
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onProfilePolicyRevisions h=1d67c3b6786f6c3d @d3ebbda2
+    // partial: resolves key, then listGuestFolders
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionFolders h=e9329a5c8e54c647 @d3ebbda2
+    // partial: calls shared ProfileSubRoutes directly (the macOS one is only a forwarder)
+    // @port ACAppDelegate.static policyRevisionsRoute(directory: URL, method: String, sub: [String]) h=e8b92416b6853e60 @d3ebbda2
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = parts[0], query = parts.count > 1 ? parts[1] : ""
@@ -86,6 +92,7 @@ extension Daemon {
     /// failed save.
     // @port ACAppDelegate.setSquelch(_: Profile.ID, _: Bool) h=95dbcd51ff8ff787 @2134fc7a
     @discardableResult
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetSquelch h=461b4c02c7a43b84 @d3ebbda2
     func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
         var changed = false
         do {
@@ -108,6 +115,9 @@ extension Daemon {
     /// Delete a workspace: its profile, and its VM's record, images and
     /// saved state. Refused while its VM runs or its disks are in use.
     // @port ACAppDelegate.automationDeleteProfile(_: String) h=bfe7e40435bea98c @2134fc7a
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDeleteProfile h=965e61b752c9fc5b @d3ebbda2
+    // partial: no confirm dialog (client side). Refuses while running, deletes the VM, profile and passphrases, kube workspaceDeleted
+    // @port ACAppDelegate.deleteProfile(_: Profile) h=7412eb8304eea968 @d3ebbda2
     func deleteWorkspace(_ key: String) async -> [String: Any] {
         guard let p = Self.workspace(key) else { return ["ok": false, "error": "Workspace not found: \(key)"] }
         let vmKey = p.id.uuidString.lowercased()
@@ -137,7 +147,10 @@ extension Daemon {
     }
 
     /// A workspace by id or name (macOS: profileByNameOrID).
-    // @port-skip linux-only: ProfileStore lookup (macOS: the app's profile list)
+    // partial: resolves any workspace, not only running ones
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onResolveProfileID h=186f6b4db7c29a4d @d3ebbda2
+    // partial: no short-id prefix match
+    // @port ACAppDelegate.profileByNameOrID(_: String) h=826632f9403037ab @d3ebbda2
     static func workspace(_ key: String) -> Profile? {
         let all = ProfileStore().loadAll()
         return all.first { $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame }
@@ -147,6 +160,7 @@ extension Daemon {
     /// The compact summary a client's workspace list and CLI read.
     // partial: the MAC is the VM record's (macOS: MACBindings)
     // @port ACAppDelegate.automationProfileDescribe(_: String) h=f0e4c0339194b0f0 @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDescribeProfile h=4d057509dc3dc017 @d3ebbda2
     func describe(_ p: Profile) -> [String: Any]? {
         let rec = registry.find(p.id.uuidString.lowercased())
         let iso = ISO8601DateFormatter()
@@ -182,6 +196,7 @@ extension Daemon {
     /// redacted identity, model keys as the stand-in), for an editor's
     /// round-trip.
     // @port ACAppDelegate.automationProfileExport(_: String) h=c3bd6cf97c423366 @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onExportProfile h=45bcd0825d999f58 @d3ebbda2
     static func profileExport(_ p: Profile) -> [String: Any]? {
         var stripped = p
         _ = ProfileSecrets.extract(stripping: &stripped)   // blank all secrets
@@ -200,7 +215,8 @@ extension Daemon {
 
     /// `?storage=1`: what the workspace's disks take (allocated bytes), as
     /// macOS's StorageSizes reports them.
-    // @port-skip linux-only: the Linux VM layout's sizes (macOS: makeStorageContext + StorageSizes.measure)
+    // partial: Linux VM disk layout
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onDescribeStorage h=220dcc14c9608a58 @d3ebbda2
     func storage(_ p: Profile) -> JSONValue {
         let dir = vmDir(p.id.uuidString.lowercased())
         func allocated(_ path: String) -> Int64? {
@@ -237,6 +253,10 @@ extension Daemon {
     /// Dotfolders are left out; nil when it can't be read now.
     // partial: no shared host folders on Linux workspaces
     // @port ACAppDelegate.listGuestFolders(profileID: UUID, path: String) h=64115e569c42caf3 @b10aa434
+    // partial: the key resolution (id or name) is in workspaceRoute's POST /agent-sessions/folders
+    // @port ACAppDelegate.listGuestFolders(profileKey: String, path: String) h=4c46ad77a88df496 @d3ebbda2
+    // partial: calls HomeImageReader.folders inline
+    // @port ACAppDelegate.static ext4Folders(imagePath: String, path: String) h=ca3e8b921fc2cb85 @d3ebbda2
     func listGuestFolders(_ profile: Profile, path: String) async -> [String]? {
         let guestPath = SessionHome.guestPath(path)
         let q = "'" + guestPath.replacingOccurrences(of: "'", with: "'\\''") + "'"

@@ -2215,6 +2215,1070 @@
     {
       "id": "SessionDisk.cleanupMetadataShare()",
       "reason": "not ported: the meta share is restaged each launch and the outbox emptied at each cold boot; removing them at a stop would drop what other paths stage into meta between runs (cluster machines, sentry modules, policy steering)"
+    },
+    {
+      "id": "SparkleGentleUpdaterDelegate.var supportsGentleScheduledUpdateReminders",
+      "reason": "screen-only: Sparkle updater UI"
+    },
+    {
+      "id": "BromureAC.static renderUIShot(_: String, dark: Bool, to: String)",
+      "reason": "screen-only: renders AppKit/SwiftUI surfaces to PNG"
+    },
+    {
+      "id": "BromureAC.static renderEnrollmentSheet(to: String)",
+      "reason": "screen-only: renders the enrollment sheet to PNG"
+    },
+    {
+      "id": "BuildProvisioner.run()",
+      "reason": "VZ-only: Alpine provisioner kernel/initrd for VZ postinstall boots; the Linux bake netboots Alpine under Firecracker"
+    },
+    {
+      "id": "makeMainMenu(delegate: ACAppDelegate)",
+      "reason": "screen-only: AppKit main menu"
+    },
+    {
+      "id": "ACAppDelegate.var editorWindow",
+      "reason": "screen-only: editor NSWindow"
+    },
+    {
+      "id": "ACAppDelegate.remoteController(forHost: UUID)",
+      "reason": "fat-client client side: remote-host mirror controller"
+    },
+    {
+      "id": "ACAppDelegate.connectedRemoteHostWindows()",
+      "reason": "fat-client client side: remote-host mirror windows"
+    },
+    {
+      "id": "ACAppDelegate.pane(for: Profile.ID)",
+      "reason": "screen-only: SessionPane registry"
+    },
+    {
+      "id": "ACAppDelegate.registerPane(_: SessionPane)",
+      "reason": "screen-only: SessionPane registry"
+    },
+    {
+      "id": "ACAppDelegate.unregisterPane(_: Profile.ID, ifMatches: SessionPane?)",
+      "reason": "screen-only: pane/libghostty surface teardown"
+    },
+    {
+      "id": "ACAppDelegate.isAttached(_: Profile.ID)",
+      "reason": "screen-only: \"has a visible pane\""
+    },
+    {
+      "id": "ACAppDelegate.hostWindow(for: Profile.ID)",
+      "reason": "screen-only: NSWindow lookup"
+    },
+    {
+      "id": "ACAppDelegate.ensureUnifiedWindow()",
+      "reason": "screen-only: unified window"
+    },
+    {
+      "id": "ACAppDelegate.revealSession(_: Profile.ID)",
+      "reason": "screen-only: window activation"
+    },
+    {
+      "id": "ACAppDelegate.detachSession(_: Profile.ID)",
+      "reason": "screen-only: detach pane, VM keeps running (a server is always \"detached\")"
+    },
+    {
+      "id": "ACAppDelegate.closeVMFromSidebar(_: Profile.ID)",
+      "reason": "screen-only: sidebar ×/last-tab close + NSAlert prompt (server side is automationDestroySession)"
+    },
+    {
+      "id": "ACAppDelegate.debugRenderUnifiedWindow(to: String)",
+      "reason": "screen-only: debug PNG render"
+    },
+    {
+      "id": "ACAppDelegate.debugRenderWindow(_: NSWindow?, to: String, contentOnly: Bool)",
+      "reason": "screen-only: debug PNG render"
+    },
+    {
+      "id": "ACAppDelegate.scriptVisibleSessions()",
+      "reason": "AppKit-only: AppleScript bridge (visible windows)"
+    },
+    {
+      "id": "ACAppDelegate.scriptCloseSession(_: Profile.ID)",
+      "reason": "AppKit-only: AppleScript bridge"
+    },
+    {
+      "id": "ACAppDelegate.releaseLeaseIfIdle(_: Profile.ID)",
+      "reason": "unused: WorkspaceLease arbitrates the app vs its login agent (two processes); a Linux user has one daemon"
+    },
+    {
+      "id": "ACAppDelegate.pinLease(_: Profile.ID)",
+      "reason": "unused: WorkspaceLease (two-process arbitration), one daemon per user on Linux"
+    },
+    {
+      "id": "ACAppDelegate.static pinOutlivesWait(questionUp: Bool, diskInUse: Bool)",
+      "reason": "unused: WorkspaceLease pin policy"
+    },
+    {
+      "id": "ACAppDelegate.unpinLease(_: Profile.ID)",
+      "reason": "unused: WorkspaceLease"
+    },
+    {
+      "id": "ACAppDelegate.refuseOpenElsewhere(_: Profile, unattended: Bool)",
+      "reason": "unused: \"open in the other Bromure process\" (lease) + NSAlert; no second process on Linux"
+    },
+    {
+      "id": "ACAppDelegate.confirmDisruptiveLifecycle(verb: String, profile: Profile, body: String)",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.connectProfile(_: Profile.ID)",
+      "reason": "screen-only: attach a window"
+    },
+    {
+      "id": "ACAppDelegate.vmDashboardData(for: Profile.ID)",
+      "reason": "screen-only: VM dashboard card (disk sizes reach clients via /state diskAllocatedBytes and GET /profiles/<id>?storage=1)"
+    },
+    {
+      "id": "ACAppDelegate.setNotes(_: Profile.ID, _: String, ifStill: String?)",
+      "reason": "screen-only: dashboard notes editor; server side is PUT /profiles with _commentsIfStill (shared ProfileEdits.automationUpsertProfile)"
+    },
+    {
+      "id": "ACAppDelegate.sidebarEditProfile(_: Profile.ID)",
+      "reason": "screen-only: opens editor window"
+    },
+    {
+      "id": "ACAppDelegate.sidebarDuplicateProfile(_: Profile.ID)",
+      "reason": "screen-only: sidebar menu action"
+    },
+    {
+      "id": "ACAppDelegate.sidebarResetProfile(_: Profile.ID)",
+      "reason": "screen-only: sidebar reset (resetProfile already skipped as screen-only)"
+    },
+    {
+      "id": "ACAppDelegate.sidebarDeleteProfile(_: Profile.ID)",
+      "reason": "screen-only: sidebar menu (server delete is Daemon.deleteWorkspace)"
+    },
+    {
+      "id": "ACAppDelegate.popOutVM(_: Profile.ID)",
+      "reason": "screen-only: pop-out window"
+    },
+    {
+      "id": "ACAppDelegate.redockVM(_: Profile.ID)",
+      "reason": "screen-only: redock window"
+    },
+    {
+      "id": "ACAppDelegate.var sessionsOnScreen",
+      "reason": "screen-only: key-window stage"
+    },
+    {
+      "id": "ACAppDelegate.loopbackCallbackRefusal(for: URL, device: VZVirtioSocketDevice?, browserResponse: String?)",
+      "reason": "fat-client client side: the OAuth callback listener is the client's (LinuxSignInHost publishes vmIP+callbackPort; the client relays via /fatclient/forward)"
+    },
+    {
+      "id": "ACAppDelegate.stopLoopbackForwarders(of: VZVirtioSocketDevice?)",
+      "reason": "VZ-only: host loopback forwarders into a VZ vsock device; on Linux the client owns them (see hasActiveLoopbackRelays)"
+    },
+    {
+      "id": "ACAppDelegate.sessionRecord(profileID: UUID, windowIndex: Int)",
+      "reason": "screen-only: only pane/window callers; Linux uses AgentSessionStore.session(profileID:windowIndex:) directly"
+    },
+    {
+      "id": "ACAppDelegate.refreshHomeSessions()",
+      "reason": "screen-only: sidebar homeSessionStore mirror + on-stage read"
+    },
+    {
+      "id": "ACAppDelegate.trackHomeSessions()",
+      "reason": "screen-only: observation driving the sidebar mirror"
+    },
+    {
+      "id": "ACAppDelegate.remoteDelegationLinks()",
+      "reason": "fat-client client side: remote-host mirrors this Mac connects to"
+    },
+    {
+      "id": "ACAppDelegate.peerMentions(forWorkspace: UUID, excluding: UUID?)",
+      "reason": "fat-client client side: chat composer @-completion (the client computes its own via backend.peerMentions)"
+    },
+    {
+      "id": "ACAppDelegate.static guardrailsRestrict(_: Profile)",
+      "reason": "unused: alias of shared GuardrailsConfig.restricts (Linux calls shared code directly)"
+    },
+    {
+      "id": "ACAppDelegate.static makeGuardrailsConfig(for: Profile)",
+      "reason": "unused: alias; Linux calls GuardrailsConfig.make directly (MitmEgress.swift)"
+    },
+    {
+      "id": "ACAppDelegate.static loopbackCallbackPort(from: URL)",
+      "reason": "unused: alias; Linux calls GuestURLGate.loopbackCallbackPort (LinuxSignInHost/LinuxRegistration)"
+    },
+    {
+      "id": "ACAppDelegate.static bareHost(_: String)",
+      "reason": "unused: alias of GuestURLGate.bareHost"
+    },
+    {
+      "id": "ACAppDelegate.static browserHost(_: String)",
+      "reason": "unused: alias of GuestURLGate.browserHost"
+    },
+    {
+      "id": "ACAppDelegate.static urlIPv4(_: String)",
+      "reason": "unused: alias of GuestURLGate.urlIPv4"
+    },
+    {
+      "id": "ACAppDelegate.static ipv4IsLocalOrPrivate(_: UInt32)",
+      "reason": "unused: alias of GuestURLGate.ipv4IsLocalOrPrivate"
+    },
+    {
+      "id": "ACAppDelegate.static reachesLoopback(_: String)",
+      "reason": "unused: alias of GuestURLGate.reachesLoopback"
+    },
+    {
+      "id": "ACAppDelegate.static opensInRealBrowser(_: URL)",
+      "reason": "unused: alias; Linux calls GuestURLGate.opensInRealBrowser"
+    },
+    {
+      "id": "ACAppDelegate.static hostIsLocalOrPrivate(_: String)",
+      "reason": "unused: alias of GuestURLGate.hostIsLocalOrPrivate"
+    },
+    {
+      "id": "ACAppDelegate.init(imageManager: UbuntuImageManager, headless: Bool)",
+      "reason": "AppKit-only: app delegate init"
+    },
+    {
+      "id": "ACAppDelegate.application(_: NSApplication, open: [URL])",
+      "reason": "screen-only: bromure:// deep-link enrollment handoff (Linux enrolls via `cloud enroll` / `account sign-in`)"
+    },
+    {
+      "id": "ACAppDelegate.applicationWillFinishLaunching(_: Notification)",
+      "reason": "AppKit-only: quit Apple-event handler"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / GuestSharePaths.resolver",
+      "reason": "screen-only: chat view's mount-name rewrite (the fat client builds its own: FatClientController)"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / case \"dark\":",
+      "reason": "screen-only: NSAppearance"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / case \"light\":",
+      "reason": "screen-only: NSAppearance"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / default:",
+      "reason": "screen-only: NSAppearance"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / ConsolePresence.shared.isMirrorWindow",
+      "reason": "screen-only: local-input seat arbitration (no local console on a server)"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / ConsolePresence.shared.onFlip",
+      "reason": "screen-only: reroute browser streams between server screen and fat client (a Linux server always routes to the client)"
+    },
+    {
+      "id": "ACAppDelegate.applicationDidFinishLaunching(_: Notification) / RepoWatchNotifier.shared.onOpen",
+      "reason": "screen-only: notification click opens the Automation hub window"
+    },
+    {
+      "id": "ACAppDelegate.static var remoteAccessSuppressed",
+      "reason": "unused: BROMURE_AC_NO_REMOTE guards a side-by-side test instance sharing the Mac's identity; a Linux test daemon has its own state dir and remote.json (off by default). Mildly unsure"
+    },
+    {
+      "id": "ACAppDelegate.startAutomationServerIfNeeded()",
+      "reason": "unused: opt-in TCP automation API; Linux serves only the control socket (cf. skipped ACAutomationServer.startTCP)"
+    },
+    {
+      "id": "ACAppDelegate.stopAutomationServer()",
+      "reason": "unused: TCP automation API not on Linux"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUIShot",
+      "reason": "screen-only: renders macOS windows (route already in skip list)"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onEditorDebug",
+      "reason": "screen-only: drives the profile editor window (route already in skip list)"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onFatClientDebug",
+      "reason": "screen-only: drives fat-client mirror windows (route already in skip list)"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGetShellConnection",
+      "reason": "VZ-only: hands the route a raw pooled vsock shell fd; Linux execs through agentd (Daemon.exec / interactiveExec), as the skip list says for vmExec"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAttachVM",
+      "reason": "screen-only: opens a GUI window on the VM (`workspaces attach --window`); Linux vmRoute has no /attach (405), which is correct"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / InferenceRepairProxy.shared.onLocalActivity",
+      "reason": "out of scope: MLX: backstop \"thinking\" signal from the in-app engine; local inference goes through the MITM, which already drives noteAgentActivity"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetGridLayout",
+      "reason": "screen-only: the grid is the window's StageLayout; Linux answers 400 in roomsRoute"
+    },
+    {
+      "id": "ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onConnectorCommand",
+      "reason": "screen-only: test hooks for macOS's connector window (the /connector route is skipped in port/config.json). Unsure B/C: Linux shares MessagingConnectorEngine but has no way to create or link the Signal/WhatsApp/Slack connector. macOS sets it up only in its local window, so a fat client can't do it on a macOS server either."
+    },
+    {
+      "id": "ACAppDelegate.automationIngestLocalTrace(_: [String:Any])",
+      "reason": "unused: InferenceRepairProxy.onLocalTrace is never set on macOS either, so nothing calls this"
+    },
+    {
+      "id": "ACAppDelegate.static codableToDict(_: T)",
+      "reason": "Linux-only equivalent: JSONValue.encoding in linux/ACLinux/Sources/ACLinux/SessionStores.swift (static func encoding<T: Encodable>(_ value: T) -> JSONValue? {), already marked @port-skip"
+    },
+    {
+      "id": "ACAppDelegate.automationGridLayout()",
+      "reason": "Already annotated inline in DaemonRooms.swift roomsRoute (GET /grid-layout returns an empty grid). Effectively A: linux/ACLinux/Sources/ACLinux/DaemonRooms.swift, func roomsRoute(...). screen-only content."
+    },
+    {
+      "id": "ACAppDelegate.automationApplyGridLayout(_: [String:Any])",
+      "reason": "screen-only: no grid window on a server (POST/PUT /grid-layout gets 400)"
+    },
+    {
+      "id": "ACAppDelegate.automationAttachVM(idOrName: String)",
+      "reason": "screen-only: attaches a window (vmRoute notes \"no attach\")"
+    },
+    {
+      "id": "ACAppDelegate.interceptKey(_: NSEvent)",
+      "reason": "AppKit-only: local key event monitor"
+    },
+    {
+      "id": "ACAppDelegate.performACSystemChord(_: String)",
+      "reason": "screen-only: ⌘Q/⌘H/lock/logout/menu chords bounced from the guest to the Mac window"
+    },
+    {
+      "id": "ACAppDelegate.lockScreen()",
+      "reason": "screen-only: locks the Mac's login session"
+    },
+    {
+      "id": "ACAppDelegate.logOut()",
+      "reason": "screen-only: loginwindow log-out Apple event"
+    },
+    {
+      "id": "ACAppDelegate.applicationShouldTerminateAfterLastWindowClosed(_: NSApplication)",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.installQuitAppleEventHandler()",
+      "reason": "AppKit-only: quit Apple Event"
+    },
+    {
+      "id": "ACAppDelegate.handleQuitAppleEvent(_: NSAppleEventDescriptor, withReplyEvent: NSAppleEventDescriptor)",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.quitAction(_: Any?)",
+      "reason": "screen-only: Quit menu item"
+    },
+    {
+      "id": "ACAppDelegate.requestQuit(source: String)",
+      "reason": "AppKit-only: quit flow with sheets and NSApp.terminate"
+    },
+    {
+      "id": "ACAppDelegate.attachedSheetCount()",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.dismissAttachedSheets()",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.applicationShouldTerminate(_: NSApplication)",
+      "reason": "AppKit-only: terminateLater handshake (the drain inside it is the C item drainRunningVMs)"
+    },
+    {
+      "id": "ACAppDelegate.replyToPendingTerminate(generation: UInt, reason: String)",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.var anyBrowserVMsRunning",
+      "reason": "fat-client client side: browser VMs live in the client's process (BrowserMCPBridge relays)"
+    },
+    {
+      "id": "ACAppDelegate.teardownAllBrowserVMs()",
+      "reason": "fat-client client side: the same browser VMs (the daemon stops its per-VM browser bridge in teardown)"
+    },
+    {
+      "id": "ACAppDelegate.runQuitConfirmation()",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.confirmQuit()",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.static quitConfirmationText(workspaces: [(name:String,action:Profile.CloseAction)], machines: [String])",
+      "reason": "screen-only: quit alert text"
+    },
+    {
+      "id": "ACAppDelegate.performBouncedQuit()",
+      "reason": "screen-only: guest-bounced ⌘Q"
+    },
+    {
+      "id": "ACAppDelegate.static fourCC(_: OSType)",
+      "reason": "AppKit-only: Apple Event code formatting"
+    },
+    {
+      "id": "ACAppDelegate.static forceStop(_: VZVirtualMachine)",
+      "reason": "VZ-only (Linux: FirecrackerMachine.kill)"
+    },
+    {
+      "id": "ACAppDelegate.windowShouldClose(_: NSWindow)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.resolveCloseAction(for: TabbedSessionWindow)",
+      "reason": "screen-only: session window close"
+    },
+    {
+      "id": "ACAppDelegate.promptCloseAction(for: TabbedSessionWindow)",
+      "reason": "screen-only: session window close"
+    },
+    {
+      "id": "ACAppDelegate.presentCloseActionModal(title: String, message: String, buttons: [String])",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.installCLIAction(_: Any?)",
+      "reason": "screen-only: menu item plus admin-prompt symlink; the Linux install ships the CLI"
+    },
+    {
+      "id": "ACAppDelegate.presentOnePasswordError(_: OnePasswordCLI.OpError, profileName: String)",
+      "reason": "screen-only: NSAlert; headless macOS just logs, and so does Linux (KubeUpstreamTrust onFirstError → stderr)"
+    },
+    {
+      "id": "ACAppDelegate.installCLISymlink(target: String, at: String)",
+      "reason": "AppKit-only: NSAppleScript admin symlink"
+    },
+    {
+      "id": "ACAppDelegate.reconcileBootLaunchAgent()",
+      "reason": "macOS launchd-only: the systemd user unit is always enabled (install-user-service.sh, WantedBy=default.target) and bootFlaggedWorkspacesAtStartup does the boots"
+    },
+    {
+      "id": "ACAppDelegate.detachAfterBoot(_: Profile.ID)",
+      "reason": "screen-only: closes the session window"
+    },
+    {
+      "id": "ACAppDelegate.windowWillClose(_: Notification)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.ensureInstallWindow()",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.renderSetup()",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.renderInitializing(title: String, subtitle: String)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.startInit(force: Bool, buildLocal: Bool, freshDownload: Bool, fromWizard: Bool)",
+      "reason": "screen-only: setup window install; Linux uses `image bake`/install (buildBaseImageLocally already skipped)"
+    },
+    {
+      "id": "ACAppDelegate.confirmLocalBuildFallback(for: Error)",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.armLocalNetworkWarning()",
+      "reason": "screen-only: macOS Sequoia Local Network privilege alert"
+    },
+    {
+      "id": "ACAppDelegate.presentBakeNetworkHealerPrompt(force: Bool)",
+      "reason": "screen-only: vmnet repair NSAlert (macOS networking)"
+    },
+    {
+      "id": "ACAppDelegate.installCheckForUpdatesMenuItem(into: NSMenu)",
+      "reason": "screen-only: Sparkle menu"
+    },
+    {
+      "id": "ACAppDelegate.installEnrollmentMenuItem(into: NSMenu)",
+      "reason": "screen-only: menu (Linux enrollment is /cloud routes)"
+    },
+    {
+      "id": "ACAppDelegate.openInferenceMetricsAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openTraceInspectorAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openCredentialApprovalsAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openSecurityTimelineAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openInferenceLogAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openEnrollmentAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openExt4FileAction(_: Any?)",
+      "reason": "screen-only: open-panel plus viewer window"
+    },
+    {
+      "id": "ACAppDelegate.enrollmentMenuTitle()",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.makeEnrollmentContentView(in: NSWindow)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.refreshEnrollmentMenuTitle()",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.currentWorkspaceContext()",
+      "reason": "screen-only: unified window selection"
+    },
+    {
+      "id": "ACAppDelegate.newWorkspaceAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.newWorkspaceFromConfigsAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.beginNewWorkspace(withWizard: Bool)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.newTabAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.addTerminalToGridAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.showAutomationBoardAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.quickTaskAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.showTaskBoardAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.var keyRemoteWindow",
+      "reason": "fat-client client side"
+    },
+    {
+      "id": "ACAppDelegate.newKubeClusterAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.showConnectorAction(_: Any?)",
+      "reason": "screen-only: connector window (see the onConnectorCommand note)"
+    },
+    {
+      "id": "ACAppDelegate.newRegistryAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.newSessionAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openManualAction(_: Any?)",
+      "reason": "screen-only: NSWorkspace open"
+    },
+    {
+      "id": "ACAppDelegate.commandPaletteAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.newRoomAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.machineReview(_: UUID, _: [String:Any], _: (inoutAgentSession)->Void)",
+      "reason": "screen-only: called only from the review window (SessionReviewWindowManager)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any])",
+      "reason": "screen-only: /debug/fatclient e2e hooks (route skipped in config)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"policy-drawer\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-create\":",
+      "reason": "screen-only: debug hook (real verb: /agent-rooms/create)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-show\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-zoom\", \"room-focus\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-layout\", \"room-page\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-delete\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"session-surface\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"sidebar-folds\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"sidebar-search\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"select-session\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"activity-open\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-sheet\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-start\":",
+      "reason": "screen-only: debug hook (real verb via /agent-sessions)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-merge\":",
+      "reason": "screen-only: debug hook (real verb via /agent-sessions)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-request\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-archive\", \"branch-delete\", \"branch-discard\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"review-open\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"review-comment\":",
+      "reason": "screen-only: debug hook (real verb: /agent-sessions/<id>/review)"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"branch-state\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"appearance\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"command-held\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"undo-toast\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / case \"room-list\":",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.roomDebug(_: String, _: [String:Any]) / default:",
+      "reason": "screen-only: debug hook"
+    },
+    {
+      "id": "ACAppDelegate.nextRoomAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.toggleLinuxAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.deleteWorkspaceAction(_: Any?)",
+      "reason": "screen-only (DELETE /profiles/<id> serves clients)"
+    },
+    {
+      "id": "ACAppDelegate.newWorktreeAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.mergeWorktreeAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.discardWorktreeAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.attachTerminalAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.validateMenuItem(_: NSMenuItem)",
+      "reason": "AppKit-only"
+    },
+    {
+      "id": "ACAppDelegate.openProfileManagerAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.showUnifiedWindowAsHome()",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openTraceInspector(for: Profile?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.showAboutPanelAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.openPreferencesAction(_: Any?)",
+      "reason": "screen-only"
+    },
+    {
+      "id": "ACAppDelegate.placeSettingsWindow(_: NSWindow, avoiding: NSWindow?)",
+      "reason": "screen-only: settings window placement on screen"
+    },
+    {
+      "id": "ACAppDelegate.static preferencesTitle(for: PreferencesTarget, hosts: [PreferencesRemoteHost])",
+      "reason": "screen-only: Preferences window title"
+    },
+    {
+      "id": "ACAppDelegate.remoteController(for: UUID)",
+      "reason": "fat-client client side: lookup of a remote host window's controller"
+    },
+    {
+      "id": "ACAppDelegate.closePreferencesWindow()",
+      "reason": "screen-only: closes the Preferences window"
+    },
+    {
+      "id": "ACAppDelegate.makeLocalPreferencesEditor()",
+      "reason": "screen-only: Preferences editor view (server side is GET/PUT /preferences, /models/settings in DaemonPreferences.swift)"
+    },
+    {
+      "id": "ACAppDelegate.makeRemotePreferencesEditor(hostID: UUID, _: RemotePreferences)",
+      "reason": "fat-client client side: the client's editor for a remote host's preferences"
+    },
+    {
+      "id": "ACAppDelegate.openRemoteAccessAction(_: Any?)",
+      "reason": "screen-only: Remote Access settings window (server side: /remote routes in RemoteAccess.swift)"
+    },
+    {
+      "id": "ACAppDelegate.presentStartupPrompt(_: NSAlert)",
+      "reason": "screen-only: NSAlert sheet for startup prompts"
+    },
+    {
+      "id": "ACAppDelegate.nextDefaultProfileName()",
+      "reason": "screen-only: placeholder name for the editor's new-workspace draft (the client names it)"
+    },
+    {
+      "id": "ACAppDelegate.duplicateProfile(_: Profile)",
+      "reason": "fat-client client side, unsure: sidebar Duplicate is local-only; a macOS server has no duplicate route for clients either, so this isn't a Linux-only gap"
+    },
+    {
+      "id": "ACAppDelegate.finishOnboarding(_: [ConfigScan.Finding])",
+      "reason": "fat-client client side: first-run onboarding wizard (ConfigScan runs on the client's Mac, see ConfigScanStandIn.swift)"
+    },
+    {
+      "id": "ACAppDelegate.migrateBedrockWorkspaces()",
+      "reason": "unused: one-time upgrade of pre-redesign per-workspace Bedrock auth. Linux workspaces postdate the redesign (unsure only if old macOS exports are imported)"
+    },
+    {
+      "id": "ACAppDelegate.migrateLegacyLocalEngineWorkspaces()",
+      "reason": "out of scope: MLX. Per-workspace local-engine fields of pre-redesign profiles (one-time migration)"
+    },
+    {
+      "id": "ACAppDelegate.migrateLegacyOmpWorkspaces()",
+      "reason": "unused: one-time pre-5.0 omp custom-server migration (Linux workspaces postdate it; unsure only for imported old exports)"
+    },
+    {
+      "id": "ACAppDelegate.registerImportedAgentKeys(_: [(tool:Profile.Tool,value:String)])",
+      "reason": "fat-client client side: onboarding import of agent API keys found on the client's Mac"
+    },
+    {
+      "id": "ACAppDelegate.markProviderSubscribed(_: ModelProvider)",
+      "reason": "fat-client client side: onboarding wizard's \"use subscription\" flip after a sign-in (unsure: if a client's onboarding should flip the server's Models settings, PUT /models/settings already exists)"
+    },
+    {
+      "id": "ACAppDelegate.applyImportedSubscription(_: ConfigScan.SubscriptionImport)",
+      "reason": "fat-client client side: onboarding import of subscription tokens found on the client's Mac"
+    },
+    {
+      "id": "ACAppDelegate.leaveOnboarding()",
+      "reason": "screen-only: closes the onboarding window"
+    },
+    {
+      "id": "ACAppDelegate.openEditorWindow(editing: Profile, category: EditorCategory)",
+      "reason": "screen-only: opens the editor window at a category"
+    },
+    {
+      "id": "ACAppDelegate.openEditorWindow(editing: Profile?)",
+      "reason": "screen-only: workspace editor window (a client's save is PUT /profiles, run by the shared ProfileEditHost in LinuxProfileEditHost.swift)"
+    },
+    {
+      "id": "ACAppDelegate.makeStorageContext(for: Profile?)",
+      "reason": "screen-only: the editor's Storage pane model (base/home image info, reset/restore buttons)"
+    },
+    {
+      "id": "ACAppDelegate.closeEditorWindow()",
+      "reason": "screen-only: closes the editor window"
+    },
+    {
+      "id": "ACAppDelegate.openSSHWindow(for: Profile)",
+      "reason": "screen-only: SSH public key viewer window"
+    },
+    {
+      "id": "ACAppDelegate.armHomeStorageUpgrade(_: Profile)",
+      "reason": "VZ-only: arms the virtiofs-to-ext4 home upgrade. Linux homes are always ext4"
+    },
+    {
+      "id": "ACAppDelegate.present(_: NSAlert, on: NSWindow?, _: @escaping(NSApplication.ModalResponse)->Void)",
+      "reason": "screen-only: NSAlert sheet/modal helper"
+    },
+    {
+      "id": "ACAppDelegate.handleEditorSave(profile: Profile, generateSSH: Bool, editing: Profile?)",
+      "reason": "screen-only: the editor's save (discard-snapshot and browser-restart alerts, SSH key viewer). A client's save is PUT /profiles, the shared automationUpsertProfile via LinuxProfileEditHost. Side finding below about its suspended-VM folder guard on Linux"
+    },
+    {
+      "id": "ACAppDelegate.showUpgradeSkipped(_: Profile)",
+      "reason": "screen-only: NSAlert. Linux returns upgradeSkippedParts' text in the start's 409"
+    },
+    {
+      "id": "ACAppDelegate.showRunningRefusal(profile: Profile, what: String)",
+      "reason": "screen-only: NSAlert. Linux routes return the refusal text"
+    },
+    {
+      "id": "ACAppDelegate.downloadingModel(for: Profile)",
+      "reason": "out of scope: MLX (Linux refuses built-in engine downloads; DaemonLocalModels.swift)"
+    },
+    {
+      "id": "ACAppDelegate.wireHomeMigration(sandbox: UbuntuSandboxVM, pane: SessionPane, profile: Profile)",
+      "reason": "VZ-only: virtiofs-to-ext4 home migration progress and stamp. Linux homes start on ext4"
+    },
+    {
+      "id": "ACAppDelegate.startNetworkHealerWatch(profile: Profile, pane: SessionPane)",
+      "reason": "VZ-only/screen-only: vmnet \"no IP\" watch that opens the network-repair prompt"
+    },
+    {
+      "id": "ACAppDelegate.presentNetworkHealerPrompt(profile: Profile, pane: SessionPane)",
+      "reason": "VZ-only/screen-only: restarts macOS vmnet daemons from an NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.addActiveTerminalToGrid(in: SessionPane)",
+      "reason": "screen-only: adds the active tab to the UI grid"
+    },
+    {
+      "id": "ACAppDelegate.openRemoteHost(_: RemoteHost)",
+      "reason": "fat-client client side: opens a remote host window"
+    },
+    {
+      "id": "ACAppDelegate.promptConnectRemoteHost(existing: RemoteHost?)",
+      "reason": "fat-client client side: Connect to Remote window"
+    },
+    {
+      "id": "ACAppDelegate.connectRemoteHostMenuAction(_: Any?)",
+      "reason": "fat-client client side: menu action"
+    },
+    {
+      "id": "ACAppDelegate.debugProbeIfRequested()",
+      "reason": "fat-client client side: debug env hook (BROMURE_FATCLIENT_PROBE)"
+    },
+    {
+      "id": "ACAppDelegate.debugOpenConnectIfRequested()",
+      "reason": "fat-client client side: debug env hook (BROMURE_FATCLIENT_CONNECT)"
+    },
+    {
+      "id": "ACAppDelegate.autoOpenRemoteHostsIfRequested()",
+      "reason": "fat-client client side: debug env hook (BROMURE_FATCLIENT_OPEN)"
+    },
+    {
+      "id": "ACAppDelegate.openAutomationRun(_: AutomationRunRecord)",
+      "reason": "screen-only: automation run window"
+    },
+    {
+      "id": "ACAppDelegate.fetchLivePlanTranscript(_: CodingTask)",
+      "reason": "fat-client client side: the client's plan window gets its transcript over remote exec"
+    },
+    {
+      "id": "ACAppDelegate.fetchTaskBranches(_: CodingTask)",
+      "reason": "fat-client client side: the client's task review window lists branches over remote exec"
+    },
+    {
+      "id": "ACAppDelegate.fetchTaskReview(_: CodingTask, base: TaskReviewData.Base?)",
+      "reason": "fat-client client side: the client's TaskReviewWindowManager runs TaskReviewData.sessionCommand over remote exec (FatClientController.swift:5214)"
+    },
+    {
+      "id": "ACAppDelegate.confirmDeleteAutomation(_: UUID)",
+      "reason": "screen-only: delete-automation confirmation NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.worktreeSlug(_: String)",
+      "reason": "screen-only: only feeds presentCreateWorktree's NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.presentCreateWorktree(cwd: String, defaultTool: String, in: SessionPane)",
+      "reason": "screen-only: NSAlert form (a client sends POST /sessions/<ws>/worktree action=create)"
+    },
+    {
+      "id": "ACAppDelegate.presentMergeWorktree(tab: TabsModel.Tab, allTabs: [TabsModel.Tab], in: SessionPane)",
+      "reason": "screen-only: NSAlert merge-target picker (a client sends action=merge/pr)"
+    },
+    {
+      "id": "ACAppDelegate.confirmRemoveWorktree(tab: TabsModel.Tab, in: SessionPane)",
+      "reason": "screen-only: NSAlert confirm (a client sends action=remove)"
+    },
+    {
+      "id": "ACAppDelegate.static compromiseActionParts(_: CompromiseRemedy, name: String)",
+      "reason": "fat-client client side: confirm-dialog text for the client's Wipe/Clear Mark"
+    },
+    {
+      "id": "ACAppDelegate.sidebarCompromise(_: Profile.ID, _: CompromiseRemedy)",
+      "reason": "screen-only: sidebar NSAlert confirm, then resolveCompromise"
+    },
+    {
+      "id": "ACAppDelegate.showMarkCleared(_: Profile)",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.showWipeSkipped(_: Profile)",
+      "reason": "screen-only: NSAlert"
+    },
+    {
+      "id": "ACAppDelegate.confirmWipeAndProceed(profile: Profile)",
+      "reason": "screen-only: local NSAlert \"Wipe and Launch\" (the remote form is confirmWipeAndProceedAsync)"
+    },
+    {
+      "id": "ACAppDelegate.askForInvestigationDestination(profileName: String)",
+      "reason": "screen-only: NSOpenPanel. macOS withholds it from remote clients too"
+    },
+    {
+      "id": "ACAppDelegate.exportForInvestigation(session: SessionDisk, destination: URL)",
+      "reason": "screen-only/unsure: only reached through the local \"Save for Investigation\" button, which macOS also withholds from remote clients (canPresentBlockingModal). A server-side export dir would be new behaviour"
+    },
+    {
+      "id": "ACAppDelegate.static tarGzip(source: URL, destination: URL)",
+      "reason": "screen-only/unsure: helper of exportForInvestigation (as above)"
+    },
+    {
+      "id": "ACAppDelegate.static eventIsForCurrent(_: AnyObject?, current: AnyObject?)",
+      "reason": "VZ-only: tells an earlier UbuntuSandboxVM's late callbacks apart. Linux has one VM per record (vmStopped's live.removeValue guard)"
+    },
+    {
+      "id": "ACAppDelegate.static stopEndsSession(of: AnyObject?, current: AnyObject?)",
+      "reason": "VZ-only: as eventIsForCurrent (Daemon.vmStopped partial note)"
+    },
+    {
+      "id": "ACAppDelegate.forgetDeletedProfile(_: Profile, unattended: Bool)",
+      "reason": "unused: the app and login agent racing to delete a workspace. Linux has one daemon"
+    },
+    {
+      "id": "ACAppDelegate.stopSession(_: Profile.ID, action: Profile.CloseAction) / case .ask, .background:",
+      "reason": "unused: unreachable on macOS too (.ask/.background collapse to .suspend)"
+    },
+    {
+      "id": "ACAppDelegate.SuspendRefused.var errorDescription",
+      "reason": "AppKit-only: error type for showError's alert"
+    },
+    {
+      "id": "ACAppDelegate.currentTabsSnapshot(for: Profile.ID)",
+      "reason": "VZ-only/screen-only: the pane's tab-bar snapshot saved with a suspend (Linux resumes the guest's own tmux roster)"
+    },
+    {
+      "id": "ACAppDelegate.attachWindow(to: RunningSession, quiet: Bool)",
+      "reason": "screen-only: builds a pane for a running VM"
+    },
+    {
+      "id": "ACAppDelegate.updateActivationPolicy()",
+      "reason": "screen-only: Dock/activation policy"
+    },
+    {
+      "id": "ACAppDelegate.setupStatusItem()",
+      "reason": "screen-only: menu-bar status item"
+    },
+    {
+      "id": "ACAppDelegate.menuNeedsUpdate(_: NSMenu)",
+      "reason": "screen-only: NSMenu delegate"
+    },
+    {
+      "id": "ACAppDelegate.updateStatusMenu()",
+      "reason": "screen-only: status menu (server side: /vms, /remote)"
+    },
+    {
+      "id": "ACAppDelegate.statusReattach(_: NSMenuItem)",
+      "reason": "screen-only: status menu action"
+    },
+    {
+      "id": "ACAppDelegate.statusStop(_: NSMenuItem)",
+      "reason": "screen-only: status menu action"
+    },
+    {
+      "id": "ACAppDelegate.statusToggleRemoteAccess(_: NSMenuItem)",
+      "reason": "screen-only: status menu toggle (server side: POST /remote, remoteApply)"
+    },
+    {
+      "id": "ACAppDelegate.var canPresentBlockingModal",
+      "reason": "screen-only: a server never shows a modal (Linux always relays through PendingPromptBroker)"
+    },
+    {
+      "id": "ACAppDelegate.showError(_: Error, message: String)",
+      "reason": "screen-only: NSAlert, or a log line when headless. Linux routes return errors in their replies"
+    },
+    {
+      "id": "ACAppDelegate.profileFromAgentDir(_: URL)",
+      "reason": "VZ-only: finds the profile for makeSSHKey's virtiofs-home ~/.ssh copy. Linux homes are ext4 (LinuxProfileEditHost.makeSSHKey partial note)"
+    },
+    {
+      "id": "Reset.run()",
+      "reason": "unused, unsure: macOS CLI's \"delete the base image so init starts fresh\". Linux image install/bake always rebuild (force), and an admin can rm the image dir. No real gap"
+    },
+    {
+      "id": "makeImageManager(storageDir: URL?)",
+      "reason": "VZ-only: macOS CLI's UbuntuImageManager over the app bundle's vm-setup (Linux: ImageCatalogACLinux, --vm-setup)"
+    },
+    {
+      "id": "locateSetupDir()",
+      "reason": "VZ-only: app-bundle resource lookup (Linux bake takes --vm-setup)"
+    },
+    {
+      "id": "JSONDecoder.static iso8601()@AgentCoding/BromureAC.swift",
+      "reason": "unused: duplicate of Profile.swift's JSONDecoder.iso8601(), which Linux builds"
+    },
+    {
+      "id": "JSONEncoder.static iso8601()@AgentCoding/BromureAC.swift",
+      "reason": "unused: duplicate of Profile.swift's JSONEncoder.iso8601(), which Linux builds"
+    },
+    {
+      "id": "ModelProvider.var subscriptionKey",
+      "reason": "fat-client client side: maps a provider to /state's subscriptions key in the client's editor"
+    },
+    {
+      "id": "RemoteHostController.SubscriptionState.var loginHealth",
+      "reason": "fat-client client side: the client's view of /state subscription health"
     }
   ],
   "skipInheriting": [

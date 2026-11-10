@@ -7,6 +7,8 @@ extension Daemon {
     /// (`?profile=`, `?id=&kind=`); nil for any other path.
     // @port ACAutomationServer.handleTraceRoute(fd: Int32, method: String, path: String) h=7f3400e099ae79fd @7dd92fdf
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p == "/trace" || p.hasPrefix("/trace?") || p.hasPrefix("/trace/"): h=d65fdfd9969838f9 @f127f8ab
+    // partial: DELETE /trace case
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onClearTrace h=36666f0771dbb649 @d3ebbda2
     func traceRoute(_ method: String, _ path: String) async -> ControlResponse? {
         guard path == "/trace" || path.hasPrefix("/trace?") || path.hasPrefix("/trace/") else { return nil }
         // Split "/path?a=b&c=d" into the bare path + a decoded query map.
@@ -64,6 +66,7 @@ extension Daemon {
     /// Newest first; previews only (no secret values).
     // @port ACAppDelegate.automationTraceList(_: String?) h=d7fbe52a7b667aeb @7057d502
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTrace h=e3a2e9c503ffccad @d3ebbda2
     static func traceList(_ mitm: MitmProxy, _ profileKey: String?) -> [[String: Any]] {
         guard let store = mitm.traces.withLockedValue({ $0 }) else { return [] }
         let wantID: Profile.ID? = profileKey.flatMap { LinuxSessionHost.shared?.profileByNameOrID($0)?.id }
@@ -96,6 +99,7 @@ extension Daemon {
     /// client's Trace Inspector binds to these.
     // @port ACAppDelegate.automationTraceRecords(_: String?) h=78344f1160a31ba2 @7057d502
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTraceRecords h=66727b3f5617966d @d3ebbda2
     static func traceRecords(_ mitm: MitmProxy, _ profileKey: String?) -> [TraceRecord] {
         guard let store = mitm.traces.withLockedValue({ $0 }) else { return [] }
         let wantID: Profile.ID? = profileKey.flatMap { LinuxSessionHost.shared?.profileByNameOrID($0)?.id }
@@ -105,6 +109,7 @@ extension Daemon {
     /// One record's captured body, decrypted for the client.
     // @port ACAppDelegate.automationLoadTraceBody(_: UUID, _: TraceStore.BodyKind) h=4dec182992b385ae @7057d502
     @MainActor
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onLoadTraceBody h=50e29fc842e693b0 @d3ebbda2
     static func loadTraceBody(_ mitm: MitmProxy, _ id: UUID, _ kind: TraceStore.BodyKind) -> Data? {
         guard let store = mitm.traces.withLockedValue({ $0 }),
               let rec = store.recent.first(where: { $0.id == id }) else { return nil }

@@ -122,6 +122,8 @@ public actor GuestShell {
     // @port-skip linux-only: the request half of ACAppDelegate.guestJSONRequest over NIO vsock
     /// `deadline`: how long a reply may take once the request is written;
     /// past it the connection is closed and the request fails (noReply).
+    // partial: callers use GuestShell.request directly (no pooled-connection retry needed)
+    // @port ACAppDelegate.guestJSONRequest(profileID: Profile.ID, request: [String:Any]) h=919d6c6671d37a04 @d3ebbda2
     public func request(_ req: [String: Any], wait: Duration = .seconds(30),
                         deadline: Duration? = nil) async throws -> [String: Any] {
         let body = try JSONSerialization.data(withJSONObject: req)

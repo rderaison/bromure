@@ -175,7 +175,8 @@ extension Daemon {
     }
 
     /// The question's title and text (macOS: presentCompromiseAlert's).
-    // @port-skip linux-only: presentCompromiseAlert's text, for the broker
+    // partial: broker question Shut down/Block/Allow (handleCompromise asks it). No Save for Investigation (as macOS remote)
+    // @port ACAppDelegate.presentCompromiseAlert(event: CompromiseEvent, profileName: String) h=547e3c42b283f232 @d3ebbda2
     static func compromiseQuestion(_ event: CompromiseEvent, workspace: String) -> (String, String) {
         let lines = event.leaks.map {
             "• \($0.fakeTokenPreview) (\($0.credentialDisplayName)): meant for \($0.declaredHost), sent to \(sanitizedHost($0.observedHost))"
@@ -272,6 +273,9 @@ extension Daemon {
     // @port ACAppDelegate.automationCompromise(_: String, _: String) h=28d2887ce4c1a943 @641863f2
     // @port SessionDisk.clearCompromised() h=148e625558c8d4ef @e81ff085
     // @port SessionDisk.clearCompromisedAsFalseAlarm() h=5f1a2f8c14587c10 @e81ff085
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCompromise h=85d4565eef215859 @d3ebbda2
+    // partial: POST /profiles/<id>/compromised {wipe|clear}. No dismisser for a pending wipe question (Linux has none)
+    // @port ACAppDelegate.resolveCompromise(_: Profile, _: CompromiseRemedy) h=736d84da481c5181 @d3ebbda2
     func resolveCompromise(_ key: String, action: String) async -> ControlResponse {
         guard let how = SessionDisk.CompromiseRemedy(rawValue: action) else {
             return ControlResponse(400, ["ok": false, "error": "action must be wipe or clear"])
@@ -309,6 +313,8 @@ extension Daemon {
     // @port ACAppDelegate.wipeCompromised(profile: Profile) h=aac0aae62f8a7fb9 @641863f2
     // partial: no tabs.json, EFI store, home backup or bootstrap home on Linux to erase
     // @port SessionDisk.wipeForCompromise() h=7313bf76da978491 @e81ff085
+    // partial: same text inline in the 500 reply
+    // @port ACAppDelegate.static wipeFailedMessage(_: [String]) h=e401d322b98f792a @d3ebbda2
     func wipeCompromised(_ profile: Profile) async -> ControlResponse {
         let key = profile.id.uuidString.lowercased()
         if let rec = registry.find(key) {

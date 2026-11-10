@@ -53,13 +53,15 @@ public struct VMRecord: Codable, Sendable, Equatable {
     // @port-skip linux-only: VM record
     public var managed: Bool { registration == true || kube != nil }
 
-    // @port-skip linux-only: VM record
+    // partial: 8 chars of the dashed id vs macOS's 12 dashless hex (describe() uses the 12-char form)
+    // @port ACAppDelegate.static shortID(_: Profile.ID) h=d358735644e44312 @d3ebbda2
     public var shortId: String { String(id.prefix(8)) }
 
     /// The VM as a `/state` workspace row (macOS: a profile), the shape a
     /// fat client's sidebar reads: `state` running, booting, suspended or off.
     // partial: no profile fields (tool, accent, auth, fonts, tokens, disk sizes)
-    // @port-skip linux-only: macOS builds rows from profiles (ACAppDelegate.automationWorkspaceList)
+    // partial: from the VM record's state (running/starting/suspended/off), not the saved-state file
+    // @port ACAppDelegate.runState(for: Profile, cached: Bool) h=49fa9646fbcbe84a @d3ebbda2
     public var workspaceJSON: JSONValue {
         let s: String
         switch state {
@@ -74,7 +76,8 @@ public struct VMRecord: Codable, Sendable, Equatable {
 
     /// The macOS vmEntry's core keys (`id`, `shortId`, `name`, `state`, `ip`,
     /// `cpuCount`, `memoryGB`, `bootedAt`, `macAddress`) plus Linux ones.
-    // @port-skip linux-only: JSON shape for /vms (a subset of macOS's automationVMList entry)
+    // partial: uptimeSeconds = Date() − bootedAt (wall clock), so a host clock step moves it (the bug macOS fixed with ContinuousClock)
+    // @port RunningSession.var uptime h=fe2c238cd5249c6a @d3ebbda2
     public var json: JSONValue {
         var o: [String: JSONValue] = [
             "id": .string(id), "shortId": .string(shortId), "name": .string(name),
@@ -169,7 +172,8 @@ public struct VMRegistry: Sendable {
     }
 
     /// By id, short id or name (as macOS matches `/vms/{id}`).
-    // @port-skip linux-only: Linux daemon state persistence
+    // partial: exact id, exact 8-char shortId or case-sensitive name; no case-insensitive name, no unique-prefix match
+    // @port ACAppDelegate.resolveRunningSessionID(_: String) h=2f017fce4128ac7e @d3ebbda2
     public func find(_ key: String) -> VMRecord? {
         records.first { $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.shortId == key || $0.name == key }
     }

@@ -296,7 +296,8 @@ extension Daemon {
     /// lost short-lived children's exits here), with `env` added to the
     /// daemon's environment through env(1) — paths only, never a secret:
     /// a passphrase goes through an askpass file, key bytes through stdin.
-    // @port-skip linux-only: the Linux spawn of ssh-add / ssh-keygen (macOS: Process)
+    // partial: ssh-add bounded by sshTool's timeout: 15
+    // @port ACAppDelegate.static runBounded(_: Process, seconds: TimeInterval) h=ceeb73afee10097e @d3ebbda2
     nonisolated static func sshTool(_ tool: String, _ arguments: [String], env: [String: String],
                                     input: Data?, timeout: TimeInterval) throws -> Data {
         try ChildProcess.capture("/usr/bin/env", env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" } + [tool] + arguments,
@@ -392,6 +393,8 @@ extension Daemon {
     }
 
     // @port ACAppDelegate.static sshPublicKeyBlob(fromOpenSSHText: String) h=3596519a56678c9b @2134fc7a
+    // partial: instance wrapper of the static already ported
+    // @port ACAppDelegate.sshPublicKeyBlob(fromOpenSSHText: String) h=ac937290c8c25624 @d3ebbda2
     nonisolated static func sshPublicKeyBlob(fromOpenSSHText text: String) -> Data? {
         let line = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first?.trimmingCharacters(in: .whitespaces) ?? ""
         let parts = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)

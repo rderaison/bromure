@@ -16,6 +16,12 @@ extension Daemon {
     // @port UbuntuSandboxVM.cancelOutboxPoll() h=490591bddcd16a06 @132bb730
     // @port UbuntuSandboxVM.static settle(_: Task<Void,Never>?, within: Double) h=9db2660ef6215dfc @132bb730
     // @port UbuntuSandboxVM.stopPolling() h=f324fdabd84247b1 @132bb730
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / delegationEngine.onBoardMessage h=bbceeb3dda3ba339 @d3ebbda2
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) / delegationEngine.boardWantsRevival h=0de206d9f8012350 @d3ebbda2
+    // partial: name taken from host.listModel.profileRows
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / SecurityTimeline.shared.workspaceName h=e7f202440a5e86cb @d3ebbda2
+    // partial: the guest-event wiring is the daemon's outbox polling loops (500 ms hooks, reboot intents) plus DaemonWatchdog's 5 s tick
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) h=4a67d1d1cdf24532 @d3ebbda2
     func startSessionEngine() async {
         let me = self, state = config.stateDir
         // Account features on (macOS: a Preferences switch a server has no
@@ -161,6 +167,8 @@ extension Daemon {
 
     /// `POST /agent-sessions/start` and `POST /agent-sessions/<id>/<action>`.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentSessionCommand h=bf7e30bfb1cc500a @9936e30c
+    // partial: the "read" action, incl. attached-machine branch
+    // @port ACAppDelegate.markSessionRead(_: UUID, upTo: Int?) h=faf9f887be5a3588 @d3ebbda2
     func agentSessionCommand(_ id: UUID?, _ action: String, _ body: JSONValue) async -> ControlResponse {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         let r: [String: Any] = await MainActor.run {

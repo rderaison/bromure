@@ -43,6 +43,8 @@ extension LinuxSessionHost: ProfileEditHost {
     /// (`id_ed25519.raw`: seed + public, 0600) and its OpenSSH public key.
     // partial: the VM home's id_ed25519.pub copy is macOS's virtiofs-home path (an ext4 home gets it from the seed)
     // @port ACAppDelegate.makeSSHKey(in: URL) h=87376ec31c91ab04 @2f4772cf
+    // partial: inline u32 helper
+    // @port uint32be(_: UInt32) h=1f03c6810715e65b @d3ebbda2
     func makeSSHKey(in dir: URL) throws -> String {
         let fm = FileManager.default
         try fm.createDirectory(at: dir, withIntermediateDirectories: true,
@@ -72,7 +74,8 @@ extension LinuxSessionHost: ProfileEditHost {
     /// it per request), its session id kept so the trace isn't split; the
     /// rest (routing, the SSH key's gate, the credential restage) is the
     /// daemon's live refresh, queued behind any other of the workspace's.
-    // @port-skip linux-only: the entry of applyLiveSessionRefresh (Daemon.liveRefresh), with its trace step
+    // partial: trace level now, the rest via Daemon.scheduleLiveRefresh. A per-workspace model edit doesn't restart its agents in place (macOS: restartAgentsWhoseModelsChanged; Linux does it only for global settings/logins in refreshModelsForRunningWorkspaces)
+    // @port ACAppDelegate.applyLiveEditToRunningSession(_: Profile) h=82d14dd9f5c4c624 @d3ebbda2
     func applyLiveEditToRunningSession(_ new: Profile) {
         if let mitm = daemon?.mitm, let cur = mitm.sessionTrace(for: new.id), cur.level != new.traceLevel {
             mitm.setSessionTrace(TraceSession(sessionID: cur.sessionID, level: new.traceLevel), for: new.id)
@@ -106,7 +109,8 @@ extension LinuxSessionHost: ProfileEditHost {
     /// guardrails, egress and prompt-injection policies at once, as macOS
     /// applies them to a running workspace (the credential restage is
     /// applyLiveEditToRunningSession's).
-    // @port-skip linux-only: no app surfaces to refresh on a server
+    // partial: didSet funnel split across this + Daemon.updateProfile (refreshSquelchSettings, scheduleNextFirewallExpiry); no sidebar/dashboard
+    // @port ACAppDelegate.var profiles h=2645ec771dff4d93 @d3ebbda2
     func profilesDidChange(saved: Profile?, editing: Profile?) {
         // Private mode, as macOS's profiles.didSet: what is sent to bromure.io.
         Daemon.refreshStreamingState(store: daemon?.mitm?.traces.withLockedValue { $0 })

@@ -71,6 +71,8 @@ extension Daemon {
     /// document (the shared save: ProfileEditHost.automationUpsertProfile),
     /// and its VM registered (stopped) with the same id. 201 with its id.
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/profiles"): h=ea29b136cb0d8add @f127f8ab
+    // partial: also creates the VM record
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCreateProfile h=293032f4590b42eb @d3ebbda2
     func createProfile(_ body: JSONValue) async -> ControlResponse {
         guard case .object = body, let doc = body.foundationObject as? [String: Any] else {
             return .error(400, "Expected a JSON object")
@@ -101,7 +103,7 @@ extension Daemon {
     /// `PUT|PATCH /profiles/<id>`: the shared save (a full document replaces,
     /// a partial one overlays; blank secrets keep the stored ones). 404 for
     /// a missing workspace, 400 for a bad document.
-    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleProfileRoute's PUT (the body is shared)
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpdateProfile h=674105853f179a6b @d3ebbda2
     func updateProfile(_ key: String, _ body: JSONValue) async -> ControlResponse {
         guard var doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
         // `_clearApiKey`: a blank key that clears the stored one (`bromure-ac
@@ -144,6 +146,13 @@ extension Daemon {
     /// a command file in the workspace's outbox, which agentd acts on (as
     /// macOS does). 400 for an unknown or stopped workspace, or a bad action.
     // @port ACAppDelegate.automationTabCommand(profileNameOrID: String, action: String, index: Int) h=c2e37c629f0f1cea @7dd92fdf
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTabCommand h=af7adda434f980a0 @d3ebbda2
+    // partial: action "new" (POST /sessions/<ws>/tab)
+    // @port ACAppDelegate.spawnNewTab(in: SessionPane) h=c0b621b0e8284f49 @d3ebbda2
+    // partial: action "select"
+    // @port ACAppDelegate.requestSelectTab(index: Int, in: SessionPane) h=dc6a2cc2f54d61ee @d3ebbda2
+    // partial: action "close"
+    // @port ACAppDelegate.requestCloseTab(index: Int, in: SessionPane) h=dd5e62edbdd96f98 @d3ebbda2
     func tabCommand(_ key: String, _ body: JSONValue) -> ControlResponse {
         let action = body["action"]?.stringValue ?? "new"
         let index = body["index"]?.numberValue.map { Int($0) } ?? body["index"]?.stringValue.flatMap { Int($0) } ?? 0
@@ -169,7 +178,7 @@ extension Daemon {
     /// command queued for the guest (LinuxSessionHost.automationWorktreeCommand,
     /// as macOS's onWorktreeCommand). The remote menu's worktree actions use it.
     /// 400 for an unknown or stopped workspace, or a bad action.
-    // @port-skip linux-only: route glue (macOS: the /worktree branch of ACAutomationServer.handleSessionRoute)
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onWorktreeCommand h=089ca5a7839722a2 @d3ebbda2
     func worktreeCommand(_ key: String, _ body: JSONValue) async -> ControlResponse {
         let action = body["action"]?.stringValue ?? ""
         var args: [String] = []

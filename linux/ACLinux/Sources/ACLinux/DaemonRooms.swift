@@ -7,7 +7,6 @@ extension Daemon {
     /// `POST /agent-rooms/<action>` or `/agent-rooms/<id>/<action>`,
     /// `/delegations/request`, `GET /delegations/<id>/file?path=…`, `POST
     /// /delegations/<id>/<action>`, `GET|PUT /grid-layout`; nil otherwise.
-    // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/grid-layout"): h=4d0357b163d592cd @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/grid-layout"): h=42afedd2c990ced4 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/delegations/request"): h=ecb28373c18671f3 @f127f8ab
@@ -15,6 +14,8 @@ extension Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/delegations/"): h=37e41e4a18a87385 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/instruction-presets"): h=d3f32e671d72af0b @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-rooms/"): h=a0235d32728bcdb1 @f127f8ab
+    // partial: always {cells: []} (no window)
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onGetGridLayout h=01dc1decc5d6d902 @d3ebbda2
     func roomsRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let pq = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = pq[0], query = pq.count > 1 ? pq[1] : ""
@@ -121,6 +122,7 @@ extension Daemon {
 /// store and the sessions in them, this server's and attached machines'.
 extension LinuxSessionHost {
     // @port ACAppDelegate.roomCommand(_: UUID?, _: String, _: [String:Any]) h=980cca82c30fb700 @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAgentRoomCommand h=e111a975feb1d0b7 @d3ebbda2
     func roomCommand(_ id: UUID?, _ action: String, _ body: [String: Any]) -> [String: Any] {
         func uuid(_ k: String) -> UUID? { (body[k] as? String).flatMap(UUID.init(uuidString:)) }
         let rooms = agentRoomStore

@@ -96,6 +96,7 @@ extension Daemon {
     /// /k8s/{id}/{action}`) on the engine.
     // partial: a deleted cluster's machines are removed here (macOS: with the cluster's folder)
     // @port ACAppDelegate.automationKubeCommand(id: String?, doc: [String:Any]) h=ccdfe10f6c32148f @32a528c5
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onKubeCommand h=d1063882746964c2 @d3ebbda2
     @MainActor static func kubeCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         guard let stores = SessionStores.shared, let engine = stores.kubeEngine else {
             return ["ok": false, "error": "unavailable"]
@@ -152,6 +153,7 @@ extension Daemon {
     /// `POST /registries/{id}/{action}`).
     // partial: a deleted registry's machine is removed here (macOS: with its folder)
     // @port ACAppDelegate.automationRegistryCommand(id: String?, doc: [String:Any]) h=769838b3e51c3441 @32a528c5
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onRegistryCommand h=413b6bcedae58870 @d3ebbda2
     @MainActor static func registryCommand(id: String?, doc: [String: Any]) -> [String: Any] {
         guard let stores = SessionStores.shared, let engine = stores.kubeEngine else {
             return ["ok": false, "error": "unavailable"]
@@ -716,7 +718,7 @@ final class LinuxKubeHost: KubeEngineHost {
         Task { completion(await daemon.kubeRelayFD(id: id, target: target)) }
     }
 
-    // @port-skip linux-only: ACAppDelegate.refreshKubeAccessForRunningWorkspaces on the Linux daemon
+    // @port ACAppDelegate.refreshKubeAccessForRunningWorkspaces() h=cb265b5ee636d0b9 @d3ebbda2
     func refreshKubeAccessForRunningWorkspaces() {
         guard let daemon else { return }
         Task { await daemon.refreshWorkspaceKubeconfigs() }

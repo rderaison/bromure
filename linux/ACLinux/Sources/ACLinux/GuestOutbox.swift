@@ -78,7 +78,8 @@ public enum GuestOutbox {
 
     /// vmstat.txt (`key value` per line): cpu, mem_used_kb, mem_total_kb,
     /// load, disk_used_kb, disk_total_kb, as the VM entry's keys.
-    // @port-skip linux-only: the vmstat.txt branch of UbuntuSandboxVM.startOutboxPolling, as data
+    // partial: read per /state build, not pushed
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onVMStats h=b49d28df77267b0b @d3ebbda2
     public static func vitalsJSON(_ raw: String) -> [String: JSONValue] {
         var cpu = 0.0, used = 0, total = 0, load = 0.0, diskUsed = 0, diskTotal = 0
         for line in raw.split(whereSeparator: \.isNewline) {

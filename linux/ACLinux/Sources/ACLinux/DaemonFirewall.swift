@@ -71,7 +71,7 @@ extension Daemon {
 
     /// `POST /profiles/<id>/firewall {rules}`: the whole ruleset, committed
     /// (400 when it doesn't parse or the workspace is unknown).
-    // @port-skip linux-only: the /firewall branch of handleProfileRoute, over the Linux router
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onCommitFirewall h=686bf7cbe90e15bb @d3ebbda2
     func firewallRoute(_ key: String, _ body: JSONValue) -> ControlResponse {
         guard let rules = body["rules"]?.stringValue else { return .error(400, "rules required") }
         guard let p = Self.workspace(key), (try? EgressPolicy.parse(rules)) != nil else {
@@ -83,7 +83,7 @@ extension Daemon {
     /// `POST /profiles/<id>/firewall-edit {op, rule | ruleText, duration}`:
     /// one quick edit, applied to the rules as they are now (concurrent edits
     /// each land, in the order they arrive: the daemon is one actor).
-    // @port-skip linux-only: the /firewall-edit branch of handleProfileRoute, over the Linux router
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onFirewallEdit h=7abba4c76d944e14 @d3ebbda2
     func firewallEditRoute(_ key: String, _ body: JSONValue) -> ControlResponse {
         guard let doc = body.foundationObject as? [String: Any], let edit = FirewallRuleActions.Edit(wire: doc) else {
             return .error(400, "a valid edit (op insert|disable|enable|remove) required")
