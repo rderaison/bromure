@@ -206,3 +206,16 @@ extension DaemonGlobalSuites {
         }
     }
 }
+
+/// The build's metadata from the stamp beside the binary (macOS: Info.plist).
+@Suite("Build info")
+struct BuildInfoTests {
+    @Test func theStampIsReadAndAnUnstampedBinaryIsDev() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try #"{"version":"v5.5","build":"Jenkins #7","commit":"abcd1234","date":"","extra":3}"#
+            .write(toFile: dir + "/b.json", atomically: true, encoding: .utf8)
+        #expect(BuildInfo.read(dir + "/b.json") == ["version": "v5.5", "build": "Jenkins #7", "commit": "abcd1234"])
+        #expect(BuildInfo.read(dir + "/none.json").isEmpty)
+        #expect(BuildInfo.dictionary["version"] != nil, "always a version (linux-dev unstamped)")
+    }
+}
