@@ -230,7 +230,7 @@ public enum GatewayMain {
         // Only when the admin turned P2P on (bromure-ac admin p2p on): a
         // socket systemd made is closed otherwise.
         let activated = FDStore.take()["p2p"]?.first
-        let p2pOn = P2PSettings.load().enabled
+        let p2pOn = P2PSettings.load(P2PSettings.systemPath, trusted: true).enabled
         if let fd = activated, !p2pOn { close(fd) }
         if p2pOn, activated != nil || settings.p2pSocket.map({ !$0.isEmpty }) == true {
             let i = RemoteAccessServer(paths: paths)

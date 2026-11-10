@@ -18,15 +18,30 @@ public struct P2PSettings: Codable, Equatable, Sendable {
         self.bindAddress = bindAddress
     }
 
+    public static let systemPath = "/etc/bromure-ac/p2p.json"
+
+    /// Where a daemon reads it: the system file, or BROMURE_P2P_SETTINGS
+    /// (tests). The gateway reads the system file only.
     // @port-skip linux-only: see P2PSettings
     public static var defaultPath: String {
-        ProcessInfo.processInfo.environment["BROMURE_P2P_SETTINGS"] ?? "/etc/bromure-ac/p2p.json"
+        ProcessInfo.processInfo.environment["BROMURE_P2P_SETTINGS"] ?? systemPath
     }
 
-    /// The file's settings; missing or unreadable: off.
+    /// The file's settings; missing, unreadable, or (`trusted`) not root's
+    /// alone (the file and its dir owned by root, writable by no one else):
+    /// off.
     // @port-skip linux-only: see P2PSettings
-    public static func load(_ path: String = defaultPath) -> P2PSettings {
-        (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap { try? JSONDecoder().decode(P2PSettings.self, from: $0) }
+    public static func load(_ path: String = defaultPath, trusted: Bool? = nil) -> P2PSettings {
+        let mustBeRoots = trusted ?? (path == systemPath)
+        if mustBeRoots {
+            for p in [path, (path as NSString).deletingLastPathComponent] {
+                var st = stat()
+                guard lstat(p, &st) == 0, st.st_uid == 0, st.st_mode & 0o022 == 0, st.st_mode & S_IFMT != S_IFLNK else {
+                    return P2PSettings()
+                }
+            }
+        }
+        return (try? Data(contentsOf: URL(fileURLWithPath: path))).flatMap { try? JSONDecoder().decode(P2PSettings.self, from: $0) }
             ?? P2PSettings()
     }
 

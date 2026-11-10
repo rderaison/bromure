@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import NIOEmbedded
 import NIOPosix
 import NIOSSH
 import Testing
@@ -169,6 +170,37 @@ struct GatewayP2PIngressTests {
         f.stop()
         #expect(P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 1) == nil, "closed")
         #expect(P2PIngressForwarder.listen(on: "not-an-address") == nil)
+    }
+
+    /// A pinned account has its own cap on password checks in flight
+    /// (within the global one), freed as they end.
+    @Test func eachAccountHasItsOwnVerificationCap() {
+        let t = RemoteAuthThrottle()
+        for _ in 0..<RemoteAuthThrottle.perAccountInFlight { #expect(t.beginVerification(account: "alice")) }
+        #expect(!t.beginVerification(account: "alice"), "alice's slots are taken")
+        #expect(t.beginVerification(account: "bob"), "bob's aren't")
+        t.endVerification(account: "alice")
+        #expect(t.beginVerification(account: "alice"))
+    }
+
+    /// The gateway trusts the switch only from a file root alone may write.
+    @Test func p2pSettingsAreTrustedOnlyWhenRootsAlone() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try P2PSettings(enabled: true).save(dir + "/p2p.json")
+        #expect(P2PSettings.load(dir + "/p2p.json", trusted: false).enabled)
+        #expect(!P2PSettings.load(dir + "/p2p.json", trusted: true).enabled || getuid() == 0, "this user's file, not root's")
+    }
+
+    /// No PROXY line in time: closed.
+    @Test func aSilentIngressConnectionIsClosed() throws {
+        let channel = EmbeddedChannel()
+        try channel.pipeline.syncOperations.addHandler(ProxyHeaderHandler(timeout: .milliseconds(50)) { _ in
+            channel.eventLoop.makeSucceededVoidFuture()
+        })
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).wait()
+        #expect(channel.isActive)
+        channel.embeddedEventLoop.advanceTime(by: .milliseconds(60))
+        #expect(!channel.isActive, "closed at the deadline")
     }
 
     /// What the server says first on a new connection to `path` (2 s at most).

@@ -34,6 +34,22 @@ extension Daemon {
         }
     }
 
+    /// A multi-user daemon re-reads the admin's P2P switch every 30 s and
+    /// follows it (on: serve; off: stop, the ingress closed).
+    // @port-skip linux-only: see refreshP2PServing
+    func watchP2PSettings(every interval: Duration = .seconds(30)) {
+        guard config.multiUser else { return }
+        Task { [weak self] in
+            var last = P2PSettings.load()
+            while true {
+                try? await Task.sleep(for: interval)
+                guard let self else { return }
+                let now = P2PSettings.load()
+                if now != last { last = now; await self.refreshP2PServing() }
+            }
+        }
+    }
+
     /// Not served any more: the broker stops, the ingress port closes.
     // @port-skip linux-only: see refreshP2PServing
     func stopP2PServing() {
@@ -52,6 +68,9 @@ extension Daemon {
 final class P2PIngressForwarder: @unchecked Sendable {
     static let shared = P2PIngressForwarder()
     private let state = NIOLockedValueBox<(fd: Int32, port: Int)>((-1, 0))
+    /// Connections being spliced; more than `maxConnections` at once are closed.
+    private static let open = NIOLockedValueBox(0)
+    static let maxConnections = 64
 
     /// The ingress port, listening (made on first use), or nil.
     // @port-skip linux-only: see P2PIngressForwarder
@@ -99,7 +118,11 @@ final class P2PIngressForwarder: @unchecked Sendable {
         while true {
             let cfd = accept(lfd, nil, nil)
             if cfd < 0 { if errno == EINTR { continue }; return }
+            guard open.withLockedValue({ n -> Bool in guard n < maxConnections else { return false }; n += 1; return true }) else {
+                close(cfd); continue
+            }
             Thread.detachNewThread {
+                defer { open.withLockedValue { $0 -= 1 } }
                 guard let gfd = connectUnix(gatewaySocket) else { close(cfd); return }
                 let line = Array(proxyLine(cfd).utf8)
                 guard line.withUnsafeBytes({ Glibc.write(gfd, $0.baseAddress, $0.count) }) == line.count else {

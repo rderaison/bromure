@@ -886,8 +886,21 @@ struct Admin: AsyncParsableCommand {
             default: throw ValidationError("on or off")
             }
             try FileManager.default.createDirectory(atPath: "/etc/bromure-ac", withIntermediateDirectories: true)
-            try s.save()
-            print("P2P \(s.enabled ? "on, users' ports on " + (s.bindAddress ?? "0.0.0.0") : "off"): restart the gateway (systemctl restart bromure-gw); users' daemons follow at their next start or sign-in")
+            chown("/etc/bromure-ac", 0, 0)
+            chmod("/etc/bromure-ac", 0o755)   // root's alone: the gateway trusts nothing else
+            try s.save(P2PSettings.systemPath)
+            chown(P2PSettings.systemPath, 0, 0)
+            // The ingress socket goes with it; the gateway restarts on it.
+            let sh = { (args: [String]) in
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/systemctl")
+                p.arguments = args
+                try? p.run()
+                p.waitUntilExit()
+            }
+            sh(s.enabled ? ["enable", "--now", "bromure-gw-p2p.socket"] : ["disable", "--now", "bromure-gw-p2p.socket"])
+            sh(["try-restart", "bromure-gw.service"])
+            print("P2P \(s.enabled ? "on, users' ports on " + (s.bindAddress ?? "0.0.0.0") : "off"); the gateway restarted; users' daemons follow within 30 s")
         }
     }
 

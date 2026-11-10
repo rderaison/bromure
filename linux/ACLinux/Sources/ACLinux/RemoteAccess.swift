@@ -91,7 +91,7 @@ extension Daemon {
         if P2PIdentity.current() != nil { await MainActor.run { LinuxAccountKeys.shared.start() } }
         let s = RemoteSettings.load(remoteSettingsPath)
         LinuxAccountPassword.allowPAM.withLockedValue { $0 = s.allowAccountPassword }
-        defer { Task { await self.refreshP2PServing() } }
+        defer { Task { await self.refreshP2PServing(); await self.watchP2PSettings() } }
         guard s.enabled else { return }
         do {
             try await MainActor.run { try RemoteAccessServer.shared.start(s.serverConfig) }
