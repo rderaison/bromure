@@ -268,7 +268,9 @@ private final class Collector: SyntaxVisitor {
     // and closures included), so the walk doesn't descend into them.
     private func params(_ clause: FunctionParameterClauseSyntax) -> String {
         clause.parameters.map { p in
-            "\(p.firstName.text): \(p.type.trimmedDescription.replacingOccurrences(of: " ", with: ""))"
+            // All whitespace out, newlines too: a type written over several
+            // lines makes the same id as on one.
+            "\(p.firstName.text): \(String(p.type.trimmedDescription.filter { !$0.isWhitespace }))"
         }.joined(separator: ", ")
     }
 

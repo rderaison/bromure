@@ -34,6 +34,19 @@ struct PortMapCoreTests {
         #expect(a[0].hash != c[0].hash)
     }
 
+    @Test("a parameter type written over several lines makes the same id as on one")
+    func multiLineSignatures() {
+        let a = Inventory.scan(source: """
+            struct D {
+                func run(_ s: Int,
+                         done: @escaping (String,
+                                          Int?) -> Void) { }
+            }
+            """, file: "a.swift", fileInLinuxBuild: false)
+        #expect(a.map(\.id) == ["D.run(_: Int, done: @escaping(String,Int?)->Void)"])
+        #expect(!a[0].id.contains("\n"))
+    }
+
     @Test("#if decides which build a function is in, #else included")
     func conditions() {
         let r = Inventory.scan(source: """
