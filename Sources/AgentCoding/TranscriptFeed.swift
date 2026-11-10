@@ -25,6 +25,10 @@ final class TranscriptFeed {
     let maxBudget: Int
     private let baseBudget: Int
     private(set) var budget: Int
+    /// While "load earlier" holds the budget up: the file offset where the
+    /// history it brought in ends. Once the head trim passes it, that
+    /// history has aged out and the budget comes back down.
+    private var raisedUntil: Int?
 
     private var path: String?
     private var data = Data()
@@ -87,12 +91,12 @@ final class TranscriptFeed {
             } else {
                 // First read, another file, or too far behind: start over.
                 path = f.path; data = f.chunk; base = f.start; end = f.end
-                budget = baseBudget
+                budget = baseBudget; raisedUntil = nil
                 changed = true
             }
         } else if path != nil || !items.isEmpty {
             path = nil; data = Data(); pq = Data(); base = 0; end = 0
-            budget = baseBudget
+            budget = baseBudget; raisedUntil = nil
             changed = true
         }
         if changed { await reparse(agent: agent) }
@@ -110,6 +114,8 @@ final class TranscriptFeed {
         var joined = f.chunk
         joined.append(data)
         data = joined
+        // The first load of a raise marks the newest history it holds up.
+        raisedUntil = max(raisedUntil ?? 0, base)
         base = f.start
         // What was asked for survives a couple of windows of new output.
         // (One line longer than a window may take it past `maxBudget`; the
@@ -119,13 +125,17 @@ final class TranscriptFeed {
         return true
     }
 
-    /// Drop the head down to the base budget's worth less a window (so a
-    /// trim happens once per window of growth, not on every poll), from the
+    /// Drop the head down to the budget's worth less a window (so a trim
+    /// happens once per window of growth, not on every poll), from the
     /// start of the line the cut lands in -- never forward: one giant last
     /// line would then be the whole history. Copies, so the dropped bytes
-    /// are freed.
+    /// are freed. A raised budget is trimmed to, not past: what "load
+    /// earlier" brought in goes oldest first, a window at a time, and the
+    /// budget is back to its base only once all of it has (Finding
+    /// "Transcript trim discards loaded earlier history when the raised
+    /// budget is reached").
     private func trimHead() {
-        let keep = max(windowBytes, min(budget, baseBudget) - windowBytes)
+        let keep = max(windowBytes, budget - windowBytes)
         guard data.count > keep else { return }
         let cut = data.startIndex + (data.count - keep)
         guard let nl = data[..<cut].lastIndex(of: 0x0A) else { return }
@@ -133,7 +143,7 @@ final class TranscriptFeed {
         guard keepFrom > data.startIndex else { return }
         base += keepFrom - data.startIndex
         data = Data(data[keepFrom...])
-        budget = baseBudget
+        if let r = raisedUntil, base >= r { budget = baseBudget; raisedUntil = nil }
     }
 
     private func reparse(agent: String?) async {

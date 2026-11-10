@@ -1070,8 +1070,12 @@ final class BeautifiedSessionModel: ObservableObject {
         var base = 0
         var end = 0
         /// Head-trim threshold; raised by "load earlier" so what the user
-        /// asked for is never trimmed away again.
+        /// asked for survives new output (`trimHead`).
         var budget = BeautifiedSessionModel.historyBudget
+        /// While raised: the file offset where the history "load earlier"
+        /// brought in ends; the budget is back to its base once the head
+        /// trim has passed it.
+        var raisedUntil: Int?
     }
     private var buffers: [String: TranscriptBuffer] = [:]
     /// Most recently used last; the oldest is dropped past `maxBuffers`.
@@ -2114,9 +2118,15 @@ final class BeautifiedSessionModel: ObservableObject {
 
     /// Drop the oldest lines so the buffer is back to `initialHistoryBytes`
     /// (whole lines only; the base offset follows). Rare — a session has to
-    /// write tens of MB while on show.
+    /// write tens of MB while on show. A budget "load earlier" raised is
+    /// trimmed to, less a window, not past: what it brought in goes oldest
+    /// first, and the budget is back to its base once all of it has
+    /// (Finding "Transcript trim discards loaded earlier history when the
+    /// raised budget is reached").
     private static func trimHead(_ buf: inout TranscriptBuffer) {
-        let cut = buf.data.startIndex + (buf.data.count - initialHistoryBytes)
+        let keep = buf.raisedUntil == nil ? initialHistoryBytes
+            : max(initialHistoryBytes, buf.budget - earlierHistoryBytes)
+        let cut = buf.data.startIndex + (buf.data.count - keep)
         // Keep from the start of the line the cut lands in (never skip
         // forward: one giant last line would then be the whole history).
         guard cut > buf.data.startIndex, let nl = buf.data[..<cut].lastIndex(of: 0x0A) else { return }
@@ -2124,6 +2134,7 @@ final class BeautifiedSessionModel: ObservableObject {
         guard keepFrom > buf.data.startIndex else { return }
         buf.base += keepFrom - buf.data.startIndex
         buf.data = Data(buf.data[keepFrom...])
+        if let r = buf.raisedUntil, buf.base >= r { buf.budget = historyBudget; buf.raisedUntil = nil }
     }
 
     /// Parse the history on show (plus the pending-question line) off the
@@ -2252,6 +2263,7 @@ final class BeautifiedSessionModel: ObservableObject {
         var data = chunk
         data.append(buf.data)
         buf.data = data
+        buf.raisedUntil = max(buf.raisedUntil ?? 0, buf.base)
         buf.base = fetch.start
         buf.budget = max(buf.budget, buf.data.count + Self.earlierHistoryBytes * 2)
         buffers[path] = buf
