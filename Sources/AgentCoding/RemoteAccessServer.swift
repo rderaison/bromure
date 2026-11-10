@@ -73,6 +73,9 @@ final class RemoteAccessServer {
         /// forwarders reach): its address keys the password rate limit.
         /// Never on a listener anyone else can reach.
         var proxyHeader: Bool = false
+        /// How long a connection may go without a session open (OpenSSH's
+        /// LoginGraceTime). Shorter only in tests.
+        var loginGrace: TimeAmount = .seconds(120)
     }
 
     private let paths: Paths
@@ -213,7 +216,8 @@ final class RemoteAccessServer {
         let setup = ConnectionSetup(authFactory: authFactory, hostKey: hostKey, exe: exe, user: user,
                                     controlSocketPath: controlSocketPath, forwardResolver: forwardResolver,
                                     udpForwardResolver: udpForwardResolver, browserMCPResolver: browserMCPResolver,
-                                    delegationMCPResolver: delegationMCPResolver, router: router)
+                                    delegationMCPResolver: delegationMCPResolver, router: router,
+                                    loginGrace: config.loginGrace)
         var bootstrap = ServerBootstrap(group: g)
             .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         // TCP keepalive (below) is TCP's: a Unix socket's peer is local (a
@@ -280,6 +284,7 @@ final class RemoteAccessServer {
         let browserMCPResolver: BrowserMCPResolver?
         let delegationMCPResolver: StreamResolver?
         let router: RemoteAccountRouter?
+        let loginGrace: TimeAmount
     }
 
     /// One accepted connection's SSH pipeline: its own auth delegate
@@ -306,7 +311,7 @@ final class RemoteAccessServer {
         // LoginGraceTime: keepalives kept a silent peer's connection
         // open for good, so enough of them ran this process out of
         // descriptors.
-        let loginGrace = channel.eventLoop.scheduleTask(in: .seconds(120)) {
+        let loginGrace = channel.eventLoop.scheduleTask(in: setup.loginGrace) {
             FatClientLog.log("srv: \(ip): no session within the login grace, closing")
             channel.close(promise: nil)
         }
