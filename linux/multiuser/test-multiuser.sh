@@ -77,16 +77,61 @@ R=$(as $A $W/$A POST /vms/same/exec "{\"command\":\"timeout 4 bash -c 'exec 3<>/
 echo "$R" | grep -q BLOCKED && ok "$A's guest can't reach the host ($LAN:$PORT)" || no "$A's guest reached the host: $R"
 R=$(as $A $W/$A POST /vms/same/exec "{\"command\":\"timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' && echo REACHED || echo BLOCKED\",\"timeout\":15}")
 echo "$R" | grep -q REACHED && ok "$A's guest still reaches the Internet" || no "$A's guest has no Internet: $R"
-# B's guest and A's guest both serve; A's forward to B's address reaches A's own guest.
+# B's guest and A's guest both serve; A's forward to B's address never
+# reaches B's guest: A's own guest when it has that address too, else one of
+# A's VMs dials it on A's own network (macOS: relayVM), where nothing answers.
 for u in $A $B; do
   as $u $W/$u POST /vms/same/exec "{\"command\":\"mkdir -p /tmp/w && echo from-$u > /tmp/w/i && cd /tmp/w && (nohup python3 -m http.server 8080 >/dev/null 2>&1 &)\"}" >/dev/null
 done
 sleep 1
 IP=$(echo "$SB" | python3 -c "import json,sys; print(json.load(sys.stdin)['vms'][0]['ip'])")
+IPA=$(echo "$SA" | python3 -c "import json,sys; print(json.load(sys.stdin)['vms'][0]['ip'])")
 R=$(req GET /i | timeout 20 ssh "${SSHO[@]}" -i $W/$A -o IdentitiesOnly=yes "$A@$HOST" "bromure-fatclient/1 forward $IP 8080" 2>/dev/null | tail -1)
-[ "$R" = from-$A ] && ok "$A's forward to $IP reaches A's own guest, not B's" || no "$A's forward: '$R'"
+if [ "$IPA" = "$IP" ]; then want=from-$A; else want=""; fi
+[ "$R" = "$want" ] && ok "$A's forward to $B's address $IP doesn't reach $B's guest ($A's is $IPA; got '$R')" || no "$A's forward to $IP ($A's is $IPA): '$R'"
 R=$(req GET /i | timeout 20 ssh "${SSHO[@]}" -i $W/$B -o IdentitiesOnly=yes "$B@$HOST" "bromure-fatclient/1 forward $IP 8080" 2>/dev/null | tail -1)
 [ "$R" = from-$B ] && ok "$B's forward reaches B's guest" || no "$B's forward: '$R'"
+# Each account's own server: its state (settings, profiles, image copy,
+# download caches, P2P identity, credential vault, logs) and runtime dirs are
+# its own, out of the other's reach; a profile one makes the other never sees.
+for pair in "$A $B" "$B $A"; do set -- $pair
+  for d in /var/lib/bromure-ac/$1 /run/bromure-ac/$1; do
+    [ "$(sudo -n stat -c '%a %U' $d 2>&1)" = "700 $1" ] && ok "$d is $1's alone (0700)" || no "$d: $(sudo -n stat -c '%a %U' $d 2>&1)"
+    sudo -n -u $2 ls $d >/dev/null 2>&1 && no "$2 listed $d" || ok "$2 can't list $d"
+  done
+  strays=$(sudo -n find /var/lib/bromure-ac/$1 /run/bromure-ac/$1 ! -user $1 2>/dev/null | head -3)
+  [ -z "$strays" ] && ok "every file in $1's state and runtime dirs is $1's" || no "not $1's: $strays"
+  # The service's journal: root's and the admin groups' only.
+  [ -z "$(sudo -n -u $2 journalctl -q --no-pager -u bromure-ac@$1 -n 5 2>/dev/null)" ] \
+    && ok "$2 can't read $1's daemon log" || no "$2 read $1's daemon log"
+done
+R=$(as $A $W/$A POST /profiles '{"name":"only-in-a"}')
+echo "$R" | grep -q 'only-in-a' && ok "$A made profile only-in-a" || no "$A's profile: $R"
+as $A $W/$A GET /profiles | grep -q only-in-a && ! as $B $W/$B GET /profiles | grep -q only-in-a \
+  && ok "$B's profiles don't show $A's" || no "profile only-in-a: wrong account"
+# Neither /state names the other account; both see a server of their own.
+echo "$SA" | grep -q "$B" && no "$A's /state names $B" || ok "$A's /state never names $B"
+echo "$SB" | grep -q "$A" && no "$B's /state names $A" || ok "$B's /state never names $A"
+# The shared image is read-only to both (each amends its own copy).
+for u in $A $B; do
+  sudo -n -u $u test -w /var/lib/bromure-ac-image/base.img && no "$u can write the shared image" || ok "$u can't write the shared image"
+done
+# The users' TCP listeners (MITM proxies, P2P ingress, anything a daemon or
+# its children open): none answers the other user.
+for pair in "$A $B" "$B $A"; do set -- $pair
+  ports=$(sudo -n ss -ltnHe | awk -v u="uid:$(id -u $1)" 'index($0, u) {print $4}' | sort -u | tr '\n' ' ')
+  open=""
+  for ap in $ports; do
+    a=${ap%:*}; p=${ap##*:}; case $a in '*'|0.0.0.0|'[::]') a=127.0.0.1;; esac; a=${a#[}; a=${a%]}
+    sudo -n -u $2 python3 -c "import socket,sys; s=socket.create_connection((sys.argv[1], int(sys.argv[2])), 2)" "$a" "$p" 2>/dev/null && open="$open $ap"
+  done
+  [ -z "$open" ] && ok "none of $1's TCP listeners answers $2 (${ports:-none})" || no "$2 reached $1's listeners:$open"
+done
+# Guest to guest: neither user's VM reaches the other's server.
+for pair in "$A $IP from-$B" "$B $IPA from-$A"; do set -- $pair
+  R=$(as $1 $W/$1 POST /vms/same/exec "{\"command\":\"python3 -c \\\"import urllib.request as u; print(u.urlopen('http://$2:8080/i', timeout=4).read().decode())\\\" 2>/dev/null || echo NONE\",\"timeout\":15}")
+  echo "$R" | grep -q "$3" && no "$1's guest fetched the other user's guest at $2" || ok "$1's guest doesn't reach the other user's guest at $2"
+done
 # Browser MCP through the gateway: A's channel carries A's agent (a stand-in
 # in A's guest on vsock 5830); B can't open A's VM's.
 FA=$(echo "$SA" | python3 -c "import json,sys; print(json.load(sys.stdin)['vms'][0]['id'])")
