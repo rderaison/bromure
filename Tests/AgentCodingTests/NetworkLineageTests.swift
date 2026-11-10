@@ -796,7 +796,39 @@ struct NetworkLineageSharedIPTests {
         #expect(src.contains("let hosts = [decision?.host ?? dst]"))
         #expect(src.contains("let aliases = decision?.host == nil && !viaProxy ? hostNames(dst) : []"))
         #expect(!src.contains("hosts += hostNames(dst)"))
-        #expect(src.contains("if names.count == 1, let name = cached.first { data[\"host\"] = .string(name) }"))
+        #expect(src.contains("if names.count == 1, let name = named.first { data[\"host\"] = .string(name) }"))
+    }
+
+    /// Finding "CNAME responses erase the hostname from unlinked network
+    /// flows": a CNAME answer gives the address the site asked for and its
+    /// CDN target; counted as two sites, the flow showed the bare address.
+    @Test("An unlinked flow is named by the one site looked up, not left bare by its CNAME target")
+    func cnameKeepsHost() async throws {
+        func host(cached: [String], queried: [String]?) async -> String? {
+            let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+            l.decisionWait = 0.05
+            l.emit = { _, t, d in sink.add(t, d) }
+            l.hostNames = { $0 == "208.80.154.224" ? cached : [] }
+            if let queried { l.queriedHostNames = { $0 == "208.80.154.224" ? queried : [] } }
+            l.noteFlow(profileID: pid, ["pid": 900, "proto": "tcp", "dst": "208.80.154.224", "dport": 443,
+                                        "comm": "curl"])
+            for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return NetworkLineageTests.S(sink.flows.first?["host"])
+        }
+        let cname = ["www.wikipedia.org", "dyna.wikimedia.org"]
+        #expect(await host(cached: cname, queried: ["www.wikipedia.org"]) == "www.wikipedia.org")
+        // Two sites looked up for one address: still ambiguous.
+        #expect(await host(cached: cname + ["www.wikimedia.org"],
+                           queried: ["www.wikimedia.org", "www.wikipedia.org"]) == nil)
+        // Only a CNAME target known: the cached names, as before.
+        #expect(await host(cached: ["dyna.wikimedia.org"], queried: []) == "dyna.wikimedia.org")
+        #expect(await host(cached: ["github.com"], queried: nil) == "github.com")
+
+        // The app wires the cache's queried names to lineage.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("NetworkLineage.shared.queriedHostNames = { VMNetSwitch.shared.queriedHostnames(forIP: $0) }"))
     }
 }
 

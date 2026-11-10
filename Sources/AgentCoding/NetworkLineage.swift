@@ -91,6 +91,9 @@ public final class NetworkLineage: @unchecked Sendable {
     /// report is rate-limited per destination), so an agent's own fetch of a
     /// page it had just looked up went unmatched.
     var hostNames: @Sendable (String) -> [String] = { _ in [] }
+    /// `hostNames`' names the guest asked for, without the CNAME targets its
+    /// answers also gave the address. nil: `hostNames` as they are.
+    var queriedHostNames: (@Sendable (String) -> [String])?
 
     // MARK: Inputs
 
@@ -499,13 +502,18 @@ public final class NetworkLineage: @unchecked Sendable {
         }
         if let host = decision?.host { data["host"] = .string(host) }
         // No decision named it: what the guest's DNS answers called it --
-        // when they gave the address one name. A shared (CDN) address's
-        // first cached name is as likely another site's; an agent fetch
-        // matched below names the one it was.
+        // when one site was looked up for the address. A shared (CDN)
+        // address's first cached name is as likely another site's; an agent
+        // fetch matched below names the one it was. A CNAME answer's target
+        // is no second site: counted, it left every CDN-fronted flow without
+        // a host (Finding "CNAME responses erase the hostname from unlinked
+        // network flows").
         if data["host"] == nil, !viaProxy {
             let cached = hostNames(dst)
-            let names = Set(cached.map(Self.bareHost)).subtracting(["", "?"])
-            if names.count == 1, let name = cached.first { data["host"] = .string(name) }
+            let asked = queriedHostNames?(dst) ?? cached
+            let named = asked.isEmpty ? cached : asked
+            let names = Set(named.map(Self.bareHost)).subtracting(["", "?"])
+            if names.count == 1, let name = named.first { data["host"] = .string(name) }
         }
         if proto == "packet" {
             // A raw packet socket (AF_PACKET): frames built below the socket
