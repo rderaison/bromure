@@ -3769,6 +3769,14 @@
     {
       "id": "P2PBroker.static ipv4Addresses(of: Set<String>)",
       "reason": "a dialer's path monitor: macOS starts it on the first outgoing peer dial only (never in server mode), and a Linux server only listens (see startNetworkMonitor's claim); its signaling channel reconnects on its own"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didBecomeInvalidWithError: Error?)",
+      "reason": "Apple-framework-only: the URLSession delegate of macOS's client-certificate upstream; Linux dials upstreams with NIO (MitmProxy.connectUpstream), presenting the cert from the endpoint's NIOSSL context and never following redirects itself"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, task: URLSessionTask, willPerformHTTPRedirection: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping(URLRequest?)->Void)",
+      "reason": "Apple-framework-only: the URLSession delegate of macOS's client-certificate upstream; Linux dials upstreams with NIO (MitmProxy.connectUpstream), presenting the cert from the endpoint's NIOSSL context and never following redirects itself"
     }
   ],
   "skipInheriting": [
