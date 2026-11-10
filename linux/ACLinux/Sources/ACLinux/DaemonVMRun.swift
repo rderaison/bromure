@@ -64,7 +64,7 @@ extension Daemon {
         // A sign-in VM (its throwaway profile), a disk repair's rescue
         // machine: not workspaces to run, answered as unknown, before
         // anything is resolved (or saved) for them.
-        if let ref, let rec = registry.find(ref), rec.registration == true || rec.rescueFor != nil {
+        if let ref, let rec = registry.findExact(ref), rec.registration == true || rec.rescueFor != nil {
             return .failure(VMRunRefusal(response: .error(404, "No workspace '\(ref)'", ["notFound": .bool(true)])))
         }
         if let ref, let (p, rec) = workspace(ref) {

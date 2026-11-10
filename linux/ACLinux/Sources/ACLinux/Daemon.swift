@@ -1272,6 +1272,8 @@ public actor Daemon {
             let state = dir + "/vm.snap"
             try SnapshotIdentity.of(overlay: l.config.overlay).write(forState: state)
             try SnapshotIdentity.of(overlay: vmDir(rec.id) + "/home.img").write(forState: state, disk: 1)
+            // Its shared folders too: a resume against another set is refused.
+            try Self.writeSnapshotShares(shareFolders(rec), dir: dir)
         } catch {
             // A VM the snapshot ended (a refusal past the rings' stop) is
             // stopped: no half state is kept.
@@ -1307,10 +1309,30 @@ public actor Daemon {
         do {
             try SnapshotIdentity.verify(state: state, overlay: (try machineConfig(rec, checked: false)).overlay)
             try SnapshotIdentity.verify(state: state, overlay: vmDir(rec.id) + "/home.img", disk: 1)
-            return nil
         } catch {
             return "\(error)"
         }
+        return Self.snapshotSharesDrift(saved: Self.readSnapshotShares(dir: dir), now: shareFolders(rec))
+    }
+
+    /// The shared folders a snapshot was taken with (part of macOS's
+    /// configuration fingerprint), beside it.
+    // @port-skip linux-only: the folders half of the snapshot fingerprint (see snapshotUsable's claims)
+    static func writeSnapshotShares(_ folders: [String], dir: String) throws {
+        try JSONSerialization.data(withJSONObject: folders).write(to: URL(fileURLWithPath: dir + "/shares.json"), options: .atomic)
+    }
+
+    // @port-skip linux-only: see writeSnapshotShares
+    static func readSnapshotShares(dir: String) -> [String]? {
+        FileManager.default.contents(atPath: dir + "/shares.json").flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String] }
+    }
+
+    /// Why a snapshot can't resume against the folders the VM has now (nil:
+    /// it can). One taken before folders were recorded is let through.
+    // @port-skip linux-only: see writeSnapshotShares
+    static func snapshotSharesDrift(saved: [String]?, now: [String]) -> String? {
+        guard let saved, saved != now else { return nil }
+        return "its shared folders changed since it was suspended"
     }
 
     /// `DELETE /vms/{id}` with `{"action": "shutdown"|"suspend"|"kill"}`; a

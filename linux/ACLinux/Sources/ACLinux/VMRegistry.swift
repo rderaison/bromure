@@ -171,20 +171,30 @@ public struct VMRegistry: Sendable {
         try enc.encode(records).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    /// By id, short id or name (as macOS matches `/vms/{id}`): exactly
-    /// first, then the name in any case, then a unique id prefix (Docker
-    /// style, dashes ignored).
+    /// By id, name or short id (as macOS matches `/vms/{id}`): exactly
+    /// first (id, name, short id), then the name in any case, then a unique
+    /// id prefix (Docker style, dashes ignored).
     // partial: any VM, not only running ones; the 8-character short id too
     // @port ACAppDelegate.resolveRunningSessionID(_: String) h=2f017fce4128ac7e @d3ebbda2
     public func find(_ key: String) -> VMRecord? {
-        if let r = records.first(where: { $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.shortId == key || $0.name == key }) {
-            return r
-        }
-        if let r = records.first(where: { $0.name.lowercased() == key.lowercased() }) { return r }
+        if let r = findExact(key) { return r }
+        // Past an exact match, only what a route serves: never a sign-in or
+        // a rescue machine.
+        let candidates = records.filter { $0.registration != true && $0.rescueFor == nil }
+        if let r = candidates.first(where: { $0.name.lowercased() == key.lowercased() }) { return r }
         let k = key.replacingOccurrences(of: "-", with: "").lowercased()
         guard !k.isEmpty else { return nil }
-        let matches = records.filter { $0.id.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k) }
+        let matches = candidates.filter { $0.id.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k) }
         return matches.count == 1 ? matches.first : nil
+    }
+
+    /// By its full id, its name, or its short id, in macOS's order (the id
+    /// first, then the name, then the short id), exactly.
+    // @port-skip linux-only: the exact half of find
+    public func findExact(_ key: String) -> VMRecord? {
+        records.first { $0.id.caseInsensitiveCompare(key) == .orderedSame }
+            ?? records.first { $0.name == key }
+            ?? records.first { $0.shortId == key }
     }
 
     // @port-skip linux-only: Linux daemon state persistence

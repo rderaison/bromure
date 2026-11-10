@@ -268,7 +268,8 @@ public actor FirecrackerMachine {
     public func kill() async -> StopInfo {
         if case .stopped(let info) = state { return info }
         guard let process else { return finishIdle(.killed) }
-        pendingReason = .killed
+        // A snapshot that finished just before: still a suspend.
+        if pendingReason != .suspended { pendingReason = .killed }
         process.signal(SIGKILL)
         return await waitUntilStopped()
     }

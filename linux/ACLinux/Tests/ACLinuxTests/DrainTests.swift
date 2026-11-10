@@ -142,6 +142,33 @@ struct LookupTests {
         #expect(reg.find("") == nil)
         #expect(reg.find(a.shortId)?.id == a.id)
     }
+
+    /// macOS's order: the full id, then the name, then the short id; past
+    /// exact matches, never a sign-in or rescue machine.
+    @Test func theNameBeatsAnotherVMsShortIDAndSignInsArentGuessed() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        var reg = VMRegistry(path: dir + "/vms.json")
+        var a = DrainTests.rec("x"); a.id = "cafe0001-0000-4000-8000-000000000001"
+        var b = DrainTests.rec("cafe0001"); b.id = "beef0002-0000-4000-8000-000000000002"
+        var signIn = DrainTests.rec("reg"); signIn.id = "dead0003-0000-4000-8000-000000000003"; signIn.registration = true
+        try reg.upsert(a); try reg.upsert(b); try reg.upsert(signIn)
+        #expect(reg.find("cafe0001")?.id == b.id, "a name before another VM's short id")
+        #expect(reg.find("dead") == nil, "a sign-in isn't found by a prefix")
+        #expect(reg.findExact(signIn.id)?.id == signIn.id, "only exactly")
+        #expect(reg.findExact("cafe") == nil)
+    }
+
+    /// A snapshot taken with other shared folders isn't resumed (macOS: its
+    /// configuration fingerprint).
+    @Test func aSnapshotsFoldersMustStillMatch() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Daemon.writeSnapshotShares(["/srv/a", "/srv/b"], dir: dir)
+        let saved = Daemon.readSnapshotShares(dir: dir)
+        #expect(saved == ["/srv/a", "/srv/b"])
+        #expect(Daemon.snapshotSharesDrift(saved: saved, now: ["/srv/a", "/srv/b"]) == nil)
+        #expect(Daemon.snapshotSharesDrift(saved: saved, now: ["/srv/a"]) != nil)
+        #expect(Daemon.snapshotSharesDrift(saved: nil, now: ["/srv/a"]) == nil, "an older snapshot: let through")
+    }
 }
 
 /// The classifiers stay resident only for what a running workspace's
