@@ -384,6 +384,9 @@ public actor Daemon {
         // Its sockets' dir: refused when someone else owns it or its parent,
         // or either is writable by others (the /tmp fallback can be squatted).
         close(try SecureDir.runtime(config.runtimeDir, create: true))
+        // The local-model repair proxy only ever listens on its unix socket in
+        // that dir, whatever starts it first (a MITM that didn't start too).
+        Self.useRepairProxySocket(Self.repairProxySocketPath(runtimeDir: config.runtimeDir))
         Self.placeEngineKey(stateDir: config.stateDir)
         // The workspaces' store, before anything reads a Profile: adoption
         // and the refresh below do (setUpRemoteAccess sets the same root).
@@ -480,9 +483,8 @@ public actor Daemon {
                 Task { @MainActor in Self.saveMintedCredential(minted, profileID: pid, store: ProfileStore()) }
             }
             // The local-model repair proxy, up before any VM (macOS: with
-            // the MITM engine), on its unix socket: the bridges and the MITM
-            // dial it there.
-            Self.useRepairProxySocket(Self.repairProxySocketPath(runtimeDir: config.runtimeDir))
+            // the MITM engine), on its unix socket (set above): the bridges
+            // and the MITM dial it there.
             InferenceRepairProxy.shared.startIfNeeded()
         }
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }

@@ -36,6 +36,21 @@ struct RepairProxySocketTests {
         Daemon.repairProxySocket.withLockedValue { $0 = "/run/bromure-ac/u/bromure-ac/inference-repair.sock" }
         #expect(Daemon.repairProxyTarget()?.pathname == "/run/bromure-ac/u/bromure-ac/inference-repair.sock")
         Daemon.repairProxySocket.withLockedValue { $0 = nil }
-        #expect(Daemon.repairProxyTarget()?.ipAddress == "127.0.0.1", "a daemon that set none: its loopback port")
+        #expect(Daemon.repairProxyTarget() == nil, "none set: nothing dialed, never TCP")
+        Daemon.repairProxyTCPForTests.withLockedValue { $0 = true }
+        defer { Daemon.repairProxyTCPForTests.withLockedValue { $0 = false } }
+        #expect(Daemon.repairProxyTarget()?.ipAddress == "127.0.0.1", "a test's daemon: its loopback port")
+    }
+
+    /// The daemon sets the socket at start, before the MITM (which may fail
+    /// to start) or a local-model launch can start the proxy.
+    @Test func theSocketIsSetBeforeAnythingStartsTheProxy() throws {
+        let src = try String(contentsOfFile: #filePath.replacingOccurrences(of: "Tests/ACLinuxTests/RepairProxySocketTests.swift",
+                                                                       with: "Sources/ACLinux/Daemon.swift"), encoding: .utf8)
+        let set = try #require(src.range(of: "Self.useRepairProxySocket(")).lowerBound
+        let runtime = try #require(src.range(of: "SecureDir.runtime(config.runtimeDir")).lowerBound
+        let mitm = try #require(src.range(of: "if let mitm = d.mitm")).lowerBound
+        let first = try #require(src.range(of: "InferenceRepairProxy.shared.startIfNeeded()")).lowerBound
+        #expect(runtime < set && set < mitm && set < first)
     }
 }

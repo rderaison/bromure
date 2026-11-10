@@ -393,11 +393,17 @@ extension Daemon {
         repairProxySocket.withLockedValue { $0 }.flatMap { try? SocketAddress(unixDomainSocketPath: $0) }
     }
 
-    /// Where a bridge or the MITM dials the proxy: its socket, else (a
-    /// daemon that set none: tests) its loopback port.
+    /// Tests only: a daemon that never started (no socket set) may dial the
+    /// proxy's loopback port. Off, nothing ever dials TCP.
+    static let repairProxyTCPForTests = NIOLockedValueBox(false)
+
+    /// Where a bridge or the MITM dials the proxy: its socket; with none set,
+    /// nil (fail closed), or a test's loopback port.
     // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
     static func repairProxyTarget() -> SocketAddress? {
-        repairProxyAddress() ?? (try? SocketAddress(ipAddress: InferenceService.engineHost, port: InferenceRepairProxy.shared.listenPort))
+        if let a = repairProxyAddress() { return a }
+        guard repairProxyTCPForTests.withLockedValue({ $0 }) else { return nil }
+        return try? SocketAddress(ipAddress: InferenceService.engineHost, port: InferenceRepairProxy.shared.listenPort)
     }
 
     /// The proxy listens at `path` from now on (InferenceRepairProxy.makeListener).
