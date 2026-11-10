@@ -16,6 +16,21 @@ public final class SessionDisk {
     /// without a prompt. Exported from api_key.env (the process env every
     /// guest launch sources; Claude Code won't take it from settings.json).
     static let claudeYoloEnv = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+    /// This session has had a Mac folder shared in (writable): set once
+    /// seen, so a live refresh that drops the folders (a change that needs a
+    /// restart -- the share stays mounted until then) doesn't bring back
+    /// `claudeYoloEnv` over it.
+    private var hadHostShares = false
+    /// Whether api_key.env exports `claudeYoloEnv`: only while nothing of
+    /// the Mac's is writable from the guest. A shared folder is the user's
+    /// real files, mounted read-write at ~/<name>: a dangerous rm there
+    /// isn't undone by discarding the VM, so Claude Code's last check stays
+    /// (Finding "Dangerous rm bypass can delete writable host shared
+    /// folders").
+    var exportsClaudeYoloEnv: Bool {
+        if !sharedFolders.isEmpty { hadHostShares = true }
+        return !hadHostShares
+    }
     /// The profile this session was launched with. Mutable so a live
     /// refresh (env-var / credential / guardrail edit on a running
     /// session) can swap in the edited profile and re-emit the meta
@@ -768,10 +783,12 @@ public final class SessionDisk {
         // Claude Code's bypass mode (--dangerously-skip-permissions: unattended
         // runs, a session switched to it) still stops at a dangerous rm: it
         // asks, waits 2 min, then denies, which stalls a run nobody watches.
-        // This VM is disposable, so that last check goes too. Process env
-        // only: Claude Code ignores it from settings.json, and strips it from
-        // the commands it runs. No effect in auto mode, the interactive default.
-        lines.append("export \(Self.claudeYoloEnv)=1")
+        // This VM is disposable, so that last check goes too -- unless a Mac
+        // folder is shared in, which isn't (`exportsClaudeYoloEnv`). Process
+        // env only: Claude Code ignores it from settings.json, and strips it
+        // from the commands it runs. No effect in auto mode, the interactive
+        // default.
+        if exportsClaudeYoloEnv { lines.append("export \(Self.claudeYoloEnv)=1") }
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
         if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }
