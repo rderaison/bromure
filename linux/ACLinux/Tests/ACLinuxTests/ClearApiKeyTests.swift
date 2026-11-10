@@ -30,5 +30,23 @@ extension DaemonGlobalSuites {
             #expect(host.store.loadAll().first { $0.id == p.id }?.name == p.name)
             await d.shutdown()
         }
+
+        /// A suspended workspace's shared folders can't change (its resume
+        /// would come back with the old set): the daemon's snapshot says so.
+        @Test func aSuspendedWorkspacesFoldersCantChange() async throws {
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let host = LinuxSessionHost(daemon: d, stateDir: dir + "/state")
+            var p = host.store.newProfileFromTemplate(name: "folders-\(UUID().uuidString.prefix(8))")
+            p = try host.store.save(p)
+            defer { try? FileManager.default.removeItem(at: host.store.profileDirectory(for: p)) }
+            #expect(!host.hasSuspendedState(p))
+            try FileManager.default.createDirectory(atPath: dir + "/state/vms/" + p.id.uuidString.lowercased() + "/snapshot",
+                                                    withIntermediateDirectories: true)
+            #expect(host.hasSuspendedState(p))
+            let r = host.automationUpsertProfile(idOrName: p.id.uuidString, doc: ["folderPaths": [dir]])
+            #expect(r["ok"] as? Bool == false && (r["error"] as? String)?.contains("suspended VM") == true)
+            await d.shutdown()
+        }
     }
 }
