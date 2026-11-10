@@ -24,8 +24,13 @@ public enum DefaultSSHKey {
         }
     }
 
+    /// Where the keypair lives instead of Application Support (the Linux
+    /// daemon: its state directory). nil on macOS.
+    nonisolated(unsafe) public static var directoryOverride: URL?
+
     /// `~/Library/Application Support/BromureAC/default-ssh/`.
     public static var directoryURL: URL {
+        if let directoryOverride { return directoryOverride }
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
