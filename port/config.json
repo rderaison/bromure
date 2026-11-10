@@ -3777,6 +3777,10 @@
     {
       "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, task: URLSessionTask, willPerformHTTPRedirection: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping(URLRequest?)->Void)",
       "reason": "Apple-framework-only: the URLSession delegate of macOS's client-certificate upstream; Linux dials upstreams with NIO (MitmProxy.connectUpstream), presenting the cert from the endpoint's NIOSSL context and never following redirects itself"
+    },
+    {
+      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didReceive: URLAuthenticationChallenge, completionHandler: @escaping(URLSession.AuthChallengeDisposition,URLCredential?)->Void)",
+      "reason": "Apple-framework-only: URLSession's client-certificate challenge; on Linux the consent gate runs per request in MitmProxy.rewrite and the cert is presented by the endpoint's NIOSSL context (connectUpstream)"
     }
   ],
   "skipInheriting": [
