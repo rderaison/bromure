@@ -1,0 +1,31 @@
+import Foundation
+import Testing
+@testable import ACLinux
+
+extension DaemonGlobalSuites {
+    /// `bromure-ac mcp`'s `set profile setting apiKey ""` clears the stored
+    /// key, as macOS's AppleScript command does; a blank key in a document
+    /// keeps it (an export's redacted secrets).
+    @Suite("MCP: a blank API key clears it", .serialized)
+    @MainActor
+    struct ClearApiKeyTests {
+        @Test func aBlankKeyClearsWhereADocumentsKeepsIt() async throws {
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let host = LinuxSessionHost(daemon: d, stateDir: dir + "/state")
+            var p = host.store.newProfileFromTemplate(name: "clear-key-\(UUID().uuidString.prefix(8))")
+            p.apiKey = "test-placeholder-value"
+            p = try host.store.save(p)
+            defer { try? FileManager.default.removeItem(at: host.store.profileDirectory(for: p)) }
+            host.profiles = host.store.loadAll()
+
+            _ = host.automationUpsertProfile(idOrName: p.id.uuidString, doc: ["apiKey": ""])
+            #expect(host.store.loadAll().first { $0.id == p.id }?.apiKey == "test-placeholder-value", "a document's blank key keeps it")
+
+            #expect(Daemon.clearApiKey(host, p.id.uuidString)["ok"] as? Bool == true)
+            #expect(host.store.loadAll().first { $0.id == p.id }?.apiKey == nil)
+            #expect(Daemon.clearApiKey(host, "no-such-workspace")["ok"] as? Bool == false)
+            await d.shutdown()
+        }
+    }
+}

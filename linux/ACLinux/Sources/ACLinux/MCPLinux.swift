@@ -42,12 +42,20 @@ extension ACMCPServerImpl {
         return .success((fd, "\(host):\(port)"))
     }
 
+    /// The request line's target: the path as given (the control socket
+    /// reads its query, as /profiles/<id>?full=1).
+    // partial: the path and query as given (macOS: URL(string:).path)
+    // @port ACMCPServerImpl.static requestTarget(base: String, path: String) h=c64311adf5a5335e @a7592ef4
+    nonisolated static func requestTarget(base: String, path: String) -> String? {
+        path.hasPrefix("/") ? path : "/" + path
+    }
+
     /// The profile tools over the daemon's /profiles routes, answering as
     /// the AppleScript commands do ("ok", the value, or "error: …").
     // partial: over /profiles routes (no AppleScript); apiKey reads blank (the export strips secrets, as the JSON tool does on macOS)
     // @port ACMCPServerImpl.profileCommand(_: MCPProfileOp) h=7987d6f80751b0c3 @86956704
     func profileCommand(_ op: MCPProfileOp) async throws -> String {
-        func seg(_ s: String) -> String { ControlClient.encodeSegment(s) }
+        func seg(_ s: String) -> String { Self.pathSegment(s) }
         func full(_ p: String) async throws -> [String: Any]? {
             let r = try await apiCall("GET", "/profiles/\(seg(p))?full=1")
             return r["error"] == nil ? r : nil
@@ -115,6 +123,7 @@ extension ACMCPServerImpl {
         case "closeAction":
             guard Profile.CloseAction(rawValue: v) != nil else { return .failure(MCPAPIError(message: "invalid closeAction '\(v)'")) }
             return .success([k: v])
+        case "apiKey" where v.isEmpty: return .success(["_clearApiKey": true])
         case "apiKey", "keyboardLayoutOverride": return .success([k: v.isEmpty ? NSNull() : v])
         case "memoryGB":
             guard let n = Int(v), n >= 1 else { return .failure(MCPAPIError(message: "memoryGB must be a positive integer")) }

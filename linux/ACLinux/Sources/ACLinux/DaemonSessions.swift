@@ -66,23 +66,28 @@ extension Daemon {
     func sessionRoute(_ method: String, _ rest: String, _ body: JSONValue) async -> ControlResponse {
         if rest.hasSuffix("/exec") {
             guard method == "POST" else { return .error(405, "Method not allowed") }
-            let key = String(rest.dropLast("/exec".count))
+            let key = Self.segment(String(rest.dropLast("/exec".count)))
             guard let p = Self.workspace(key), let rec = registry.find(p.id.uuidString.lowercased()) else {
                 return .error(404, "Session not found")
             }
             return await exec(rec, body)
         }
+        let key = Self.segment(rest)
         switch method {
         case "GET":
-            guard let p = runningWorkspaces().first(where: { $0.id.uuidString.caseInsensitiveCompare(rest) == .orderedSame || $0.name == rest })
+            guard let p = runningWorkspaces().first(where: { $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame || $0.name == key })
             else { return .error(404, "Session not found") }
             return ControlResponse(200, Self.sessionInfo(p))
         case "DELETE":
-            return await automationDestroySession(rest) ? ControlResponse(200, ["status": "closed"]) : .error(404, "Session not found")
+            return await automationDestroySession(key) ? ControlResponse(200, ["status": "closed"]) : .error(404, "Session not found")
         default:
             return .error(405, "Method not allowed")
         }
     }
+
+    /// A path segment, its %XX decoded (`bromure-ac mcp` encodes names).
+    // @port-skip linux-only: see sessionRoute
+    static func segment(_ s: String) -> String { s.removingPercentEncoding ?? s }
 
     /// Closed as the workspace says (its close action; Ask asks through the
     /// client): run in the background keeps the VM (the session goes on),

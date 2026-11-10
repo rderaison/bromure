@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 import Testing
 @testable import ACLinux
 
@@ -35,6 +36,24 @@ struct MCPLinuxTests {
         guard case .failure(let c) = ACMCPServerImpl.settingDoc("closeAction", "explode") else { Issue.record("closeAction"); return }
         #expect(c.message == "invalid closeAction 'explode'")
         guard case .success(let blank) = ACMCPServerImpl.settingDoc("apiKey", "") else { Issue.record("apiKey"); return }
-        #expect(blank["apiKey"] is NSNull)
+        #expect(blank.count == 1 && blank["_clearApiKey"] as? Bool == true, "a blank key clears the stored one, as on macOS")
+    }
+
+    /// Workspace names go into the path percent-encoded, the query kept (the
+    /// control socket reads it); the daemon decodes them.
+    @Test func pathSegmentsAreEncoded() async throws {
+        #expect(ACMCPServerImpl.pathSegment("My work/space?x") == "My%20work%2Fspace%3Fx")
+        #expect(ACMCPServerImpl.requestTarget(base: "unix:/x", path: "/profiles/a?full=1") == "/profiles/a?full=1")
+        #expect(Daemon.segment("My%20work%2Fspace") == "My work/space")
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let seen = NIOLockedValueBox<String>("")
+        let srv = try await ControlServer.start(path: dir + "/control.sock") { req in
+            seen.withLockedValue { $0 = req.path }
+            return ControlResponse(200, ["status": "closed"])
+        }
+        defer { Task { await srv.close() } }
+        _ = ACMCPServerImpl.rawHTTP(base: "unix:" + dir + "/control.sock", method: "DELETE",
+                                    path: "/sessions/\(ACMCPServerImpl.pathSegment("a b"))", bodyData: nil)
+        #expect(seen.withLockedValue { $0 } == "/sessions/a%20b")
     }
 }

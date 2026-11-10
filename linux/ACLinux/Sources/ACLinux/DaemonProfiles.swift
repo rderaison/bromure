@@ -103,9 +103,16 @@ extension Daemon {
     /// a missing workspace, 400 for a bad document.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleProfileRoute's PUT (the body is shared)
     func updateProfile(_ key: String, _ body: JSONValue) async -> ControlResponse {
-        guard let doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
+        guard var doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
+        // `_clearApiKey`: a blank key that clears the stored one (`bromure-ac
+        // mcp`'s `set profile setting apiKey ""`, as macOS's AppleScript
+        // command), where a blank key in a document keeps it.
+        let clearKey = doc.removeValue(forKey: "_clearApiKey") as? Bool == true
         let r: [String: Any] = await MainActor.run {
-            ProfileWrites.locked { LinuxSessionHost.shared?.automationUpsertProfile(idOrName: key, doc: doc) ?? ["ok": false, "error": "no host"] }
+            ProfileWrites.locked {
+                guard let host = LinuxSessionHost.shared else { return ["ok": false, "error": "no host"] }
+                return clearKey ? Self.clearApiKey(host, key) : host.automationUpsertProfile(idOrName: key, doc: doc)
+            }
         }
         let ok = r["ok"] as? Bool == true
         if ok { Self.refreshSquelchSettings() }
@@ -114,6 +121,23 @@ extension Daemon {
         if ok { scheduleNextFirewallExpiry() }
         let status = ok ? 200 : ((r["error"] as? String)?.contains("not found") == true ? 404 : 400)
         return ControlResponse(status, JSONValue(foundation: r) ?? .object([:]))
+    }
+
+    /// The workspace's API key cleared and saved, applied to its running
+    /// session (macOS: `set profile setting … key "apiKey" to value ""`).
+    // @port-skip linux-only: see updateProfile (macOS: BromureACSetProfileSettingCommand's apiKey case, AppleScript)
+    @MainActor
+    static func clearApiKey(_ host: LinuxSessionHost, _ key: String) -> [String: Any] {
+        guard var p = host.profileByNameOrID(key) else { return ["ok": false, "error": "Workspace not found: \(key)"] }
+        p.apiKey = nil
+        do {
+            _ = try host.store.update(p)
+            host.profiles = host.store.loadAll()
+            host.applyLiveEditToRunningSession(p)
+            return ["ok": true]
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
     }
 
     /// POST /sessions/<workspace>/tab {"action": new|select|close, "index"}:

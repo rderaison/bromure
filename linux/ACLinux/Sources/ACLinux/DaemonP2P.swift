@@ -15,27 +15,32 @@ import NIOConcurrencyHelpers
 extension Daemon {
     // partial: the front door's port on a single-user server; on a multi-user one, this user's ingress into the gateway
     // @port ACAppDelegate.startRemoteAccessIfNeeded() h=1b169b783684295d @d3ebbda2
-    func refreshP2PServing() async {
-        guard P2PIdentity.current() != nil else { stopP2PServing(); return }
+    /// false: P2P is on but couldn't be served (no ingress port), so the
+    /// watcher tries again; `quiet` doesn't log that again.
+    @discardableResult
+    func refreshP2PServing(quiet: Bool = false) async -> Bool {
+        guard P2PIdentity.current() != nil else { stopP2PServing(); return true }
         if config.multiUser {
             // The admin's call (bromure-ac admin p2p): off, nothing announced.
             let settings = P2PSettings.load()
-            guard settings.enabled else { stopP2PServing(); return }
+            guard settings.enabled else { stopP2PServing(); return true }
             guard let port = P2PIngressForwarder.shared.ensure(gatewaySocket: config.gatewayP2PSocket,
                                                                bindAddress: settings.bindAddress) else {
-                FileHandle.standardError.write(Data("bromure-ac daemon: P2P not served: no ingress port\n".utf8))
-                return
+                if !quiet { FileHandle.standardError.write(Data("bromure-ac daemon: P2P not served: no ingress port (retrying)\n".utf8)) }
+                return false
             }
             P2PBroker.shared.startServing(sshPort: port)
         } else {
             let s = RemoteSettings.load(remoteSettingsPath)
-            guard s.enabled else { stopP2PServing(); return }
+            guard s.enabled else { stopP2PServing(); return true }
             P2PBroker.shared.startServing(sshPort: s.port)
         }
+        return true
     }
 
     /// A multi-user daemon re-reads the admin's P2P switch every 30 s and
-    /// follows it (on: serve; off: stop, the ingress closed).
+    /// follows it (on: serve; off: stop, the ingress closed); a failed serve
+    /// is retried each time while it's still on.
     // @port-skip linux-only: see refreshP2PServing
     func watchP2PSettings(every interval: Duration = .seconds(30)) {
         guard config.multiUser else { return }
@@ -45,7 +50,13 @@ extension Daemon {
                 try? await Task.sleep(for: interval)
                 guard let self else { return }
                 let now = P2PSettings.load()
-                if now != last { last = now; await self.refreshP2PServing() }
+                // On but not served (its ingress never opened): again, quietly.
+                let unserved = now.enabled && !P2PIngressForwarder.shared.isOpen && P2PIdentity.current() != nil
+                if now != last || unserved {
+                    let retry = now == last
+                    last = now
+                    await self.refreshP2PServing(quiet: retry)
+                }
             }
         }
     }
@@ -83,6 +94,10 @@ final class P2PIngressForwarder: @unchecked Sendable {
             return port
         }
     }
+
+    /// Whether the ingress is listening.
+    // @port-skip linux-only: see P2PIngressForwarder
+    var isOpen: Bool { state.withLockedValue { $0.fd >= 0 } }
 
     /// The ingress closed (P2P not served any more); a later ensure opens a new one.
     // @port-skip linux-only: see P2PIngressForwarder

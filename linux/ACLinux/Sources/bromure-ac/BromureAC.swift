@@ -886,21 +886,36 @@ struct Admin: AsyncParsableCommand {
             default: throw ValidationError("on or off")
             }
             try FileManager.default.createDirectory(atPath: "/etc/bromure-ac", withIntermediateDirectories: true)
-            chown("/etc/bromure-ac", 0, 0)
-            chmod("/etc/bromure-ac", 0o755)   // root's alone: the gateway trusts nothing else
+            // Root's alone: the gateway trusts nothing else (and ignores a
+            // switch it doesn't trust, so a failure here is P2P left off).
+            guard chown("/etc/bromure-ac", 0, 0) == 0, chmod("/etc/bromure-ac", 0o755) == 0 else {
+                throw ValidationError("couldn't make /etc/bromure-ac root's alone: \(String(cString: strerror(errno)))")
+            }
             try s.save(P2PSettings.systemPath)
-            chown(P2PSettings.systemPath, 0, 0)
+            guard chown(P2PSettings.systemPath, 0, 0) == 0 else {
+                throw ValidationError("couldn't make \(P2PSettings.systemPath) root's: \(String(cString: strerror(errno)))")
+            }
             // The ingress socket goes with it; the gateway restarts on it.
+            var failures: [String] = []
             let sh = { (args: [String]) in
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/bin/systemctl")
                 p.arguments = args
-                try? p.run()
-                p.waitUntilExit()
+                do {
+                    try p.run()
+                    p.waitUntilExit()
+                    if p.terminationStatus != 0 { failures.append("systemctl \(args.joined(separator: " ")) exited \(p.terminationStatus)") }
+                } catch {
+                    failures.append("systemctl \(args.joined(separator: " ")): \(error.localizedDescription)")
+                }
             }
             sh(s.enabled ? ["enable", "--now", "bromure-gw-p2p.socket"] : ["disable", "--now", "bromure-gw-p2p.socket"])
             sh(["try-restart", "bromure-gw.service"])
-            print("P2P \(s.enabled ? "on, users' ports on " + (s.bindAddress ?? "0.0.0.0") : "off"); the gateway restarted; users' daemons follow within 30 s")
+            let saved = "P2P \(s.enabled ? "on, users' ports on " + (s.bindAddress ?? "0.0.0.0") : "off") (saved)"
+            guard failures.isEmpty else {
+                throw ValidationError("\(saved), but: \(failures.joined(separator: "; ")); the gateway may not follow until it restarts")
+            }
+            print("\(saved); the gateway restarted; users' daemons follow within 30 s")
         }
     }
 
