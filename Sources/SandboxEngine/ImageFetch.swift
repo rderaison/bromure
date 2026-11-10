@@ -242,7 +242,7 @@ final class LargeFileDownloader: NSObject, URLSessionDownloadDelegate, @unchecke
         // truncated body.
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
+        defer { URLSessionRetirement.retire(session) }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             continuation = cont
             session.downloadTask(with: url).resume()

@@ -2,6 +2,7 @@
 import AppKit
 #endif
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -214,7 +215,7 @@ public enum PromptInjectionModels {
 
         func run(_ url: URL) async throws -> (URL, URLResponse) {
             let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-            defer { session.finishTasksAndInvalidate() }
+            defer { URLSessionRetirement.retire(session) }
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { cont in
                     lock.lock()

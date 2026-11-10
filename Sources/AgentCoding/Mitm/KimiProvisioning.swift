@@ -319,13 +319,18 @@ public actor KimiProvisioner {
         return await task.value
     }
 
+    /// One session for every provisioning call, never freed (on Linux a freed
+    /// session that had an idle HTTP/2 connection crashes the process: see
+    /// URLSessionRetirement).
+    private static let session = URLSession(configuration: .ephemeral)
+
     /// `GET <base>/models` with the real bearer → the config kimi would write.
     static func provision(token: String, credentialName: String) async throws -> String {
         var req = URLRequest(url: URL(string: KimiRegion.baseURL + "/models")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 30
-        let (data, response) = try await URLSession(configuration: .ephemeral).data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw KimiProvisioning.ProvisioningError.malformedModelsResponse
         }

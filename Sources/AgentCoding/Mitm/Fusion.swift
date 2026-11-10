@@ -597,6 +597,11 @@ enum Fusion {
         }
     }
 
+    /// One session for every model listing, never freed (on Linux a freed
+    /// session that had an idle HTTP/2 connection crashes the process: see
+    /// URLSessionRetirement).
+    private static let modelsSession = URLSession(configuration: .ephemeral)
+
     private static func fetchModels(cred: Cred) async -> [String] {
         let (base, header): (String, (String, String)) = {
             switch cred {
@@ -617,8 +622,7 @@ enum Fusion {
         r.setValue(header.1, forHTTPHeaderField: header.0)
         if case .anthropicBearer = cred { r.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
         if base.contains("anthropic") { r.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version") }
-        let session = URLSession(configuration: .ephemeral)
-        guard let (data, resp) = try? await session.data(for: r),
+        guard let (data, resp) = try? await modelsSession.data(for: r),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let arr = obj["data"] as? [[String: Any]] else { return [] }

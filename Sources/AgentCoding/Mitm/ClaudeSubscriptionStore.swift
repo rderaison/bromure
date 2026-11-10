@@ -437,13 +437,16 @@ public actor ClaudeSubscriptionRefresher {
     private var inflight: [String: Task<String, Error>] = [:]
     private var lastRefreshAt: [String: Date] = [:]
 
-    /// The HTTP stack the refresh goes out on (tests stub it).
-    private let sessionConfiguration: URLSessionConfiguration
+    /// The HTTP stack the refresh goes out on (tests stub it): one session
+    /// for the refresher's life, its connections reused. (On Linux a freed
+    /// session that had an idle HTTP/2 connection crashes the process: see
+    /// URLSessionRetirement.)
+    private let session: URLSession
 
     public init(store: ClaudeSubscriptionStore,
                 sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
-        self.sessionConfiguration = sessionConfiguration
+        self.session = URLSession(configuration: sessionConfiguration)
     }
 
     /// A currently-valid access token for `profileID`, refreshing proactively
@@ -525,7 +528,6 @@ public actor ClaudeSubscriptionRefresher {
             throw error
         }
 
-        let session = URLSession(configuration: sessionConfiguration)
         let data: Data, response: URLResponse
         do {
             (data, response) = try await session.data(for: req)

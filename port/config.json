@@ -303,6 +303,7 @@
     "Sources/SandboxEngine/SandboxEngine.swift",
     "Sources/SandboxEngine/SandboxError.swift",
     "Sources/SandboxEngine/TraceEvent.swift",
+    "Sources/SandboxEngine/URLSessionRetirement.swift",
     "Sources/SandboxEngine/VMConfig.swift",
     "Sources/SandboxEngine/VMNetSwitch+EgressEvent.swift",
     "Sources/SandboxEngine/VMNetSwitch+Packets.swift",

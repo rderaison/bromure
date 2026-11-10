@@ -382,13 +382,16 @@ public actor GrokSubscriptionRefresher {
     static let forcedRefreshFloor: TimeInterval = 60
 
     private var lastRefreshAt: [String: Date] = [:]
-    /// The HTTP stack the refresh goes out on (tests stub it).
-    private let sessionConfiguration: URLSessionConfiguration
+    /// The HTTP stack the refresh goes out on (tests stub it): one session
+    /// for the refresher's life, its connections reused. (On Linux a freed
+    /// session that had an idle HTTP/2 connection crashes the process: see
+    /// URLSessionRetirement.)
+    private let session: URLSession
 
     public init(store: GrokSubscriptionStore,
                 sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
-        self.sessionConfiguration = sessionConfiguration
+        self.session = URLSession(configuration: sessionConfiguration)
     }
 
     /// A currently-valid access token, refreshing proactively near expiry.
@@ -476,7 +479,6 @@ public actor GrokSubscriptionRefresher {
         let form = "grant_type=refresh_token&refresh_token=\(enc(sent))&client_id=\(enc(Self.clientID))"
         req.httpBody = Data(form.utf8)
 
-        let session = URLSession(configuration: sessionConfiguration)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: req)
         lastRefreshAt[slot] = Date()
