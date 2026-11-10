@@ -33,7 +33,7 @@ extension Daemon {
     // @port ACAppDelegate.refreshModelsForRunningWorkspaces() h=c64dcbdbe066ff8d @bd69274f
     func refreshModelsForRunningWorkspaces() async {
         for rec in registry.records where live[rec.id] != nil && rec.kube == nil && !rec.managed && rec.registration != true {
-            guard let stored = existingProfile(for: rec), let pid = UUID(uuidString: rec.id) else { continue }
+            guard let stored = existingProfile(for: rec) else { continue }
             // Fusion's legs and credentials follow the same settings.
             await reconcileFusion(stored)
             let fresh = await stagedProfile(stored)
@@ -53,14 +53,11 @@ extension Daemon {
             }
             FileHandle.standardError.write(Data("bromure-ac daemon: '\(stored.name)': restaging for \(tools.map(\.rawValue).sorted().joined(separator: ", "))\n".utf8))
             // Swap map, env, config files, home seed, the AWS credentials,
-            // and lastStagedProfiles.
+            // and lastStagedProfiles; then the agents whose staging moved
+            // restart in place (applyLiveRefresh's restartAgentsWhoseModelsChanged).
             await scheduleLiveRestage(rec.id).value
             applyRouting(staged: fresh)
             startLocalEngineIfNeeded(for: fresh)
-            guard let now = lastStagedProfiles[rec.id], prior != now else { continue }
-            let restart = LiveModelRefresh.agentsNeedingRestart(from: prior, to: now)
-            guard !restart.isEmpty else { continue }
-            await MainActor.run { SessionStores.shared?.engine?.restartAgentsInPlace(profileID: pid, tools: restart) }
         }
     }
 }

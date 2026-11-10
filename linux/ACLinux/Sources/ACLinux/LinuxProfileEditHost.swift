@@ -84,7 +84,7 @@ extension LinuxSessionHost: ProfileEditHost {
     /// it per request), its session id kept so the trace isn't split; the
     /// rest (routing, the SSH key's gate, the credential restage) is the
     /// daemon's live refresh, queued behind any other of the workspace's.
-    // partial: trace level now, the rest via Daemon.scheduleLiveRefresh. A per-workspace model edit doesn't restart its agents in place (macOS: restartAgentsWhoseModelsChanged; Linux does it only for global settings/logins in refreshModelsForRunningWorkspaces)
+    // partial: trace level now, the rest via Daemon.scheduleLiveRefresh (which restarts the agents whose staging moved)
     // @port ACAppDelegate.applyLiveEditToRunningSession(_: Profile) h=82d14dd9f5c4c624 @d3ebbda2
     func applyLiveEditToRunningSession(_ new: Profile) {
         if let mitm = daemon?.mitm, let cur = mitm.sessionTrace(for: new.id), cur.level != new.traceLevel {

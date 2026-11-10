@@ -75,8 +75,21 @@ extension Daemon {
         }
         // Applied only once all of it is: a restage that failed is done
         // again on the next refresh.
+        let priorStaged = lastStagedProfiles[rec.id]
         if steps.restage, !(await pushLiveCredentials(rec, new)) { return }
         liveApplied[rec.id] = new
+        // The agents whose staging moved restart in place, conversation kept.
+        if steps.restage { await restartAgentsWhoseModelsChanged(profileID: new.id, id: rec.id, priorStaged: priorStaged) }
+    }
+
+    /// After a restage: restart, in place, the agents whose staging moved
+    /// between `priorStaged` and what pushLiveCredentials just recorded.
+    // @port ACAppDelegate.restartAgentsWhoseModelsChanged(profileID: UUID, priorStaged: Profile?) h=b90fb658f27488de @bd69274f
+    func restartAgentsWhoseModelsChanged(profileID: UUID, id: String, priorStaged: Profile?) async {
+        guard let prior = priorStaged, let now = lastStagedProfiles[id], prior != now else { return }
+        let tools = LiveModelRefresh.agentsNeedingRestart(from: prior, to: now)
+        guard !tools.isEmpty else { return }
+        await MainActor.run { SessionStores.shared?.engine?.restartAgentsInPlace(profileID: profileID, tools: tools) }
     }
 
     /// Which of a live refresh's steps an edit from `old` (nil: unknown)
