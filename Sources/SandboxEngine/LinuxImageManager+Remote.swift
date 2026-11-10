@@ -268,8 +268,7 @@ extension LinuxImageManager {
             )
             progress(.stepDone("Installing recommended packages"))
 
-            try? fm.removeItem(at: linuxDiskURL)
-            try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
+            try ImagePromotion.replace(scratchDisk, over: linuxDiskURL)
 
             try? fm.removeItem(at: graphicsCapabilitiesURL)
             if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }

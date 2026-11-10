@@ -39,10 +39,13 @@ public enum ImagePromotion {
         defer { lock.release() }
         // An earlier crash's leftovers first, under the lock.
         recoverLocked(in: dir)
+        let journal = dir.appendingPathComponent(journalName)
+        guard !fm.fileExists(atPath: journal.path) else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: journal.path])
+        }
         for (_, live) in pairs { try? fm.removeItem(at: backup(live)) }
 
         let entries = pairs.map { Entry(live: $0.to.lastPathComponent, hadLive: fm.fileExists(atPath: $0.to.path)) }
-        let journal = dir.appendingPathComponent(journalName)
         try JSONEncoder().encode(entries).write(to: journal, options: .atomic)
         sync(journal)
 
@@ -69,6 +72,15 @@ public enum ImagePromotion {
         for (_, backup) in setAside { try? fm.removeItem(at: backup) }
     }
 
+    /// One file over another in a single rename(2): the destination is
+    /// replaced atomically, never missing -- unlike removing it first.
+    public static func replace(_ from: URL, over to: URL) throws {
+        guard rename(from.path, to.path) == 0 else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: to.path,
+                                                          NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)])
+        }
+    }
+
     /// Rolls an interrupted promotion in `dir` back to the previous image.
     /// Nothing to do without a journal; skipped while another process (or
     /// this one) is promoting.
@@ -85,8 +97,10 @@ public enum ImagePromotion {
     private static func recoverLocked(in dir: URL) {
         let fm = FileManager.default
         let journal = dir.appendingPathComponent(journalName)
-        guard let data = try? Data(contentsOf: journal) else { return }
-        let entries = (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+        // Unreadable (it's written atomically, so not expected): kept, and
+        // its backups with it, rather than dropped unrestored.
+        guard let data = try? Data(contentsOf: journal),
+              let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return }
         for e in entries where !e.live.isEmpty && !e.live.contains("/") {
             let live = dir.appendingPathComponent(e.live)
             let prev = backup(live)

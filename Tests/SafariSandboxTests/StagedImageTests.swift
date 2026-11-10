@@ -195,6 +195,35 @@ struct StagedImageTests {
         #expect(try leftovers(dir).isEmpty)
     }
 
+    @Test("An unreadable journal keeps its backups, and blocks a promotion that would delete them")
+    func unreadableJournalKept() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let j = dir.appendingPathComponent(ImagePromotion.journalName)
+        try Data("not json".utf8).write(to: j)
+        try setAside(m.linuxDiskURL)
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(FileManager.default.fileExists(atPath: j.path))
+        #expect(contents(m.linuxDiskURL.appendingPathExtension("previous")) == "old-linux-base.img")
+        let staged = dir.appendingPathComponent("x.building")
+        try Data("new".utf8).write(to: staged)
+        #expect(throws: (any Error).self) { try m.promote([(staged, m.linuxDiskURL)]) }
+        #expect(contents(m.linuxDiskURL.appendingPathExtension("previous")) == "old-linux-base.img")
+    }
+
+    @Test("A single file is replaced in one rename, never missing")
+    func replaceInOneRename() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let staged = dir.appendingPathComponent("linux-base.img.partial")
+        try Data("amended".utf8).write(to: staged)
+        try ImagePromotion.replace(staged, over: m.linuxDiskURL)
+        #expect(contents(m.linuxDiskURL) == "amended")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+        #expect(throws: (any Error).self) { try ImagePromotion.replace(staged, over: m.linuxDiskURL) }
+        #expect(contents(m.linuxDiskURL) == "amended")
+    }
+
     @Test("A completed promotion leaves no journal or backups behind, and recovery then changes nothing")
     func completedPromotionIsClean() async throws {
         let (m, dir) = try makeManager()

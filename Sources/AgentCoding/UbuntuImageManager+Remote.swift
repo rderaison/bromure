@@ -251,8 +251,7 @@ extension UbuntuImageManager {
             let priorStamp = installedImageVersion
             let bundledMajor = priorStamp.map(Self.majorVersion(of:)) ?? Self.imageVersion
             let newStamp = Self.nextStamp(priorStamp: priorStamp, bundled: bundledMajor)
-            try? fm.removeItem(at: baseDiskURL)
-            try fm.moveItem(at: scratchDisk, to: baseDiskURL)
+            try ImagePromotion.replace(scratchDisk, over: baseDiskURL)
             try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
 
             var state = loadImageState()
