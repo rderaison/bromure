@@ -54,7 +54,6 @@ struct Trace: AsyncParsableCommand {
 struct Daemon: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the daemon (systemd: bromure-ac.service).")
 
-    // @port-skip linux-only: daemon main
     // partial: the systemd user service (not an NSApplication): the control socket (inherited from systemd) and SIGTERM/SIGINT through DispatchSource to Daemon.shutdown
     // @port Run.run() h=9e6fb971a835c20c @d3ebbda2
     // @port ACAppDelegate.startControlSocket() h=28ec5dbb75f3adb6 @d3ebbda2

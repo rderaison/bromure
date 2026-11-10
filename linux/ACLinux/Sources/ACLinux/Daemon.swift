@@ -1296,7 +1296,7 @@ public actor Daemon {
         case "kill":
             await vmStopped(rec.id, await l.machine.kill())
         default:
-            await vmStopped(rec.id, await l.machine.stop(timeout: .seconds(20)))
+            await vmStopped(rec.id, await l.machine.stop(timeout: Self.shutdownGrace(rec)))
         }
         // vmStopped ran above, not just from onStopped's Task: the record
         // says stopped before the reply does (a `start` right after works).
@@ -2491,8 +2491,52 @@ public actor Daemon {
         for name in Self.perVMStorePrefixes { FDStore.remove(name + l.storedNet.dropFirst("net-".count)) }
     }
 
-    /// Stops every VM (killed: systemd's stop is not a graceful shutdown of
-    /// guests yet) and passt.
+    /// The running workspaces suspended or shut down as their close action
+    /// says (Ask and Run in the Background: suspend), and cluster machines
+    /// suspended (theirs is always suspend), in parallel, for at most
+    /// `budget` (inside the unit's TimeoutStopSec); a sign-in or rescue VM
+    /// is killed after.
+    // partial: bounded by the systemd stop budget; a VM still going after it is stopped, then killed (macOS: forceStop)
+    // @port ACAppDelegate.drainRunningVMs() h=8a6454a5bf4582a2 @d3ebbda2
+    func drainRunningVMs(budget: Duration = .seconds(80)) async {
+        let plan = Self.drainPlan(records.filter { live[$0.id] != nil && $0.state == .running }) { existingProfile(for: $0) }
+        guard !plan.isEmpty else { return }
+        FileHandle.standardError.write(Data("bromure-ac daemon: stopping: \(plan.count) workspace(s) by their close action\n".utf8))
+        let drain = Task { [self] in
+            await withTaskGroup(of: Void.self) { group in
+                for (rec, action) in plan { group.addTask { _ = await self.deleteVM(rec, action: action) } }
+            }
+        }
+        // Whichever comes first: a stop that never returns doesn't hold the exit.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let resumed = NIOLockedValueBox(false)
+            let finish: @Sendable () -> Void = {
+                if resumed.withLockedValue({ let first = !$0; $0 = true; return first }) { cont.resume() }
+            }
+            Task { await drain.value; finish() }
+            Task { try? await Task.sleep(for: budget); finish() }
+        }
+    }
+
+    /// How long a shutdown waits for the guest to power off before it's
+    /// killed: a cluster machine or registry (containerd, etcd, Longhorn)
+    /// 60 s, as on macOS (cut sooner, its filesystem came back dirty).
+    // @port-skip linux-only: the grace of stopSession's .shutdown (see deleteVM; a workspace keeps 20 s, macOS 15 s)
+    static func shutdownGrace(_ rec: VMRecord) -> Duration { rec.kube != nil ? .seconds(60) : .seconds(20) }
+
+    /// Each workspace's stop (`suspend` or `shutdown`), from its close action.
+    // @port-skip linux-only: see drainRunningVMs
+    static func drainPlan(_ running: [VMRecord], profile: (VMRecord) -> Profile?) -> [(VMRecord, String)] {
+        running.compactMap { rec in
+            guard rec.registration != true, rec.rescueFor == nil else { return nil }
+            if rec.kube != nil { return (rec, "suspend") }
+            guard !rec.managed, let p = profile(rec) else { return nil }
+            return (rec, p.closeAction == .shutdown ? "shutdown" : "suspend")
+        }
+    }
+
+    /// Ends every VM (each workspace by its close action, then a stop, then
+    /// a kill: see drainRunningVMs) and passt.
     // partial: Squelch flush, ssh-agents, RemoteAccess stop; no LaunchRestorePlan (skipped file); ephemeral --rm sweep done at the next start instead
     // @port ACAppDelegate.applicationWillTerminate(_: Notification) h=2e9c307cfdd4d82a @d3ebbda2
     public func shutdown() async {
@@ -2501,7 +2545,16 @@ public actor Daemon {
         unwireWatchdog()
         // Squelch's numbers written out (macOS: quit's flush).
         SquelchLedger.shared.flush()
+        // Each running workspace ends as it says (macOS: quit drains them by
+        // their close action), within the stop's budget; what's left is killed.
+        await drainRunningVMs()
         for id in live.keys { explicitStops.insert(id) }
+        // Past the drain: a stop (15 s to power off), then what's left killed.
+        // Drain 80 s + 15 s stays inside TimeoutStopSec (120 s).
+        let left = Array(live.values)
+        await withTaskGroup(of: Void.self) { group in
+            for l in left { group.addTask { _ = await l.machine.stop(timeout: .seconds(15)) } }
+        }
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }

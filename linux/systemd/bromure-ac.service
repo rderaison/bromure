@@ -16,8 +16,10 @@ Environment="BROMURE_AGENTD=@AGENTD@"
 # Where the install put the PII detector's model. The paths here are quoted,
 # and the install escapes what systemd would otherwise expand or split.
 Environment="BROMURE_PII_MODEL_DIR=@PIIMODEL@"
-# Only the daemon is signalled: on stop, the daemon's own SIGTERM path shuts
-# its VMs and passt down. If the daemon dies (crash, OOM), its VMs keep
+# Only the daemon is signalled: on stop, the daemon's own SIGTERM path
+# suspends or shuts down each workspace as its close action says (within
+# 80 s: TimeoutStopSec leaves room for the snapshots), stops what's left
+# (15 s), then ends the rest and passt. If the daemon dies (crash, OOM), its VMs keep
 # running in the cgroup and the restarted daemon re-adopts them (pidfile
 # identity, Firecracker's API socket, its network end and vsock listener). A daemon that hangs past
 # TimeoutStopSec is SIGKILLed alone; ExecStopPost= then ends what's left in
@@ -28,7 +30,7 @@ ExecStopPost="@BIN@" stop-post
 # passt's socket and pidfd, and each VM's network socket and vsock listener:
 # a crash restart takes passt (and its open flows) and the VMs back.
 FileDescriptorStoreMax=64
-TimeoutStopSec=30
+TimeoutStopSec=120
 Restart=on-failure
 RestartSec=2
 
