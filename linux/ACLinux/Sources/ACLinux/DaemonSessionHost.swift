@@ -30,11 +30,25 @@ extension Daemon {
             return out
         }
         guard let l = live.first(where: { $0.key.caseInsensitiveCompare(profileID.uuidString) == .orderedSame })?.value else {
-            throw GuestCommandError.unavailable("workspace \(profileID.uuidString.prefix(8)) isn't running")
+            throw guestUnavailableError(profileID)
         }
         let r = try await l.shell.exec(command, timeout: timeout, wait: .seconds(10))
         guard r.exitCode == 0 else { throw GuestCommandError.failed(exitCode: r.exitCode, stderr: r.stderr) }
         return r.stdout
+    }
+
+    /// The error for a guest that can't be reached: its VM's actual state
+    /// (off / suspended), so the file explorer and a fat client say "The VM
+    /// is suspended" instead of a generic "isn't running".
+    // @port ACAppDelegate.guestUnavailableError(_: Profile.ID) h=9156eeec09ec726a @d3ebbda2
+    func guestUnavailableError(_ profileID: UUID) -> GuestCommandError {
+        let error: GuestExecError
+        switch registry.find(profileID.uuidString.lowercased())?.state {
+        case .suspended?: error = .vmSuspended
+        case .stopped?: error = .vmOff
+        default: error = .vmNotRunning
+        }
+        return .unavailable(error.errorDescription ?? "The VM isn't running")
     }
 
     /// One native file op (`{"file": {...}}`, the file browser's data plane)
@@ -43,7 +57,7 @@ extension Daemon {
     // @port ACAppDelegate.guestFileOp(profileID: Profile.ID, op: [String:Any], timeout: Int) h=4d1e47b2461cd211 @d3ebbda2
     func guestFileOp(profileID: UUID, op: [String: Any], timeout: Int = 30) async throws -> [String: Any] {
         guard let l = live.first(where: { $0.key.caseInsensitiveCompare(profileID.uuidString) == .orderedSame })?.value else {
-            throw GuestCommandError.unavailable("workspace \(profileID.uuidString.prefix(8)) isn't running")
+            throw guestUnavailableError(profileID)
         }
         let o = try await l.shell.request(["file": op, "timeout": timeout], wait: .seconds(10))
         if let err = o["error"] as? String {

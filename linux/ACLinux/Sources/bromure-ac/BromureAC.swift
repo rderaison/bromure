@@ -369,7 +369,30 @@ extension VM {
 
 // @port-skip linux-only: Linux CLI group for the guest image (macOS: the app's Rebuild Base Image)
 struct Image: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Install.self, Bake.self])
+    static let configuration = CommandConfiguration(abstract: "Manage the guest image.", subcommands: [Install.self, Bake.self, Info.self])
+
+    /// `image info`: macOS's `info`, the base image's version, sizes and path.
+    struct Info: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show information about the base image (version, size, path).")
+        // @port Info.run() h=a184410d64f78a25 @d3ebbda2
+        func run() async throws {
+            let dir = DaemonConfig.fromEnvironment().imageDir
+            let disk = dir + "/base.img"
+            var st = stat()
+            guard stat(disk, &st) == 0 else {
+                print("No base image yet. Install it with `bromure-ac image install`.")
+                return
+            }
+            let version = (try? String(contentsOfFile: dir + "/base.version", encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            func human(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+            print("Base image")
+            print("  version:  \(version)")
+            print("  size:     \(human(Int64(st.st_size))) (virtual)")
+            print("  on disk:  \(human(Int64(st.st_blocks) * 512))")
+            print("  path:     \(disk)")
+        }
+    }
 
     /// `image install`: macOS's `init`. The prebuilt amd64 image when it's
     /// published (the amd64 channel's signed catalog), else a local bake.

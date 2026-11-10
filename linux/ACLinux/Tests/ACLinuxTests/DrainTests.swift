@@ -50,3 +50,23 @@ struct LoadBalancerRelayTests {
         #expect(!Daemon.inSubnet("192.168.64.1", cidr: "bogus"))
     }
 }
+
+extension DaemonGlobalSuites {
+    /// A guest that can't be reached is named by its VM's state (macOS:
+    /// guestUnavailableError): the file explorer says "The VM is off".
+    @Suite("Guest unavailable wording", .serialized)
+    struct GuestUnavailableTests {
+        @Test func theErrorNamesTheVMsState() async throws {
+            let (d, rec, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let pid = try #require(UUID(uuidString: rec.id))
+            do { _ = try await d.guestExec(profileID: pid, command: "true"); Issue.record("ran") }
+            catch { #expect("\(error)".contains("The VM is off")) }
+            var s = rec; s.state = .suspended
+            try await d.registerForTesting(s)
+            do { _ = try await d.guestExec(profileID: pid, command: "true"); Issue.record("ran") }
+            catch { #expect("\(error)".contains("The VM is suspended")) }
+            await d.shutdown()
+        }
+    }
+}
