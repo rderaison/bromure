@@ -875,6 +875,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard let vm else { return false }
         if vm.state == .paused {
             do { try await vm.resume() } catch { return false }
+            // Writing a large snapshot can keep it paused for a while.
+            signalClockResync()
         }
         return self.vm === vm && vm.state == .running
     }
