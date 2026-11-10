@@ -26,6 +26,15 @@ protocol ProfileEditHost: AnyObject {
     /// `profiles` was reloaded after a save (`saved`), or after an edit found
     /// its workspace deleted (nil): the host's own surfaces follow.
     func profilesDidChange(saved: Profile?, editing: Profile?)
+    /// Whether the workspace's VM is suspended (its saved state on disk).
+    func hasSuspendedState(_ profile: Profile) -> Bool
+}
+
+extension ProfileEditHost {
+    /// macOS: the VM's saved state beside the profile.
+    func hasSuspendedState(_ profile: Profile) -> Bool {
+        FileManager.default.fileExists(atPath: store.profileDirectory(for: profile).appendingPathComponent("vm.state").path)
+    }
 }
 
 extension ProfileEditHost {
@@ -163,9 +172,7 @@ extension ProfileEditHost {
             // reasoning as the GUI's discard alert). Headless can't prompt, so
             // refuse rather than silently discard the snapshot.
             if existing.folderPaths != incoming.folderPaths {
-                let stateURL = store.profileDirectory(for: existing)
-                    .appendingPathComponent("vm.state")
-                if FileManager.default.fileExists(atPath: stateURL.path) {
+                if hasSuspendedState(existing) {
                     return ["ok": false, "error":
                         "Shared folders changed but this workspace has a suspended VM. "
                         + "Stop it first (`vm kill \(existing.name)`), then edit folders."]
