@@ -14309,17 +14309,44 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             guard let text, !text.isEmpty else { continue }
             // The full read stops at its cap (the file's first 25 MB): the
-            // end -- where the final report is -- comes from the session
-            // copy's tail, joined where the two share records.
-            if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text),
-               let tail = await taskSessionTranscript(task),
-               let joined = SessionTranscriptCache.merge(history: Data(text.utf8),
-                                                         incoming: Data(tail.utf8), mode: .overlapOnly) {
-                return String(decoding: joined, as: UTF8.self)
+            // archive re-reads the file whole, then joins the session copy's
+            // tail where the two share records. Over the whole read's
+            // ceiling (or unreadable so), sharing none: the head and that
+            // tail both -- the end is where the final report is -- never the
+            // head alone (Finding "Capped transcript head is archived when
+            // the session tail does not overlap").
+            if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text) {
+                let whole = await wholeGuestTranscript(task, head: text)
+                let tail = await taskSessionTranscript(task)
+                let kept = TaskTranscriptArchive.archiveJoin(
+                    whole: whole?.data ?? Data(text.utf8), complete: whole?.complete ?? false,
+                    sessionTail: tail.map { Data($0.utf8) })
+                return String(decoding: kept, as: UTF8.self)
             }
             return text
         }
         return nil
+    }
+
+    /// The guest transcript a capped full read came from, re-read whole in
+    /// exact chunks up to `wholeReadCeiling`. `complete`: it reached the
+    /// file's end. nil when unreadable, or not the same file as `head`.
+    private func wholeGuestTranscript(_ task: CodingTask, head: String) async -> (data: Data, complete: Bool)? {
+        guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
+              let locate = CodingTaskEngine.taskTranscriptLocate(branch: branch, agent: task.tool)
+        else { return nil }
+        let chunk = TaskTranscriptArchive.wholeReadChunk
+        var data = Data()
+        while data.count < TaskTranscriptArchive.wholeReadCeiling {
+            let cmd = locate + TaskTranscriptArchive.chunkEmit(offset: data.count, bytes: chunk)
+            guard let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 60),
+                  let d = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { return nil }
+            if data.isEmpty, !TaskTranscriptArchive.samePrefix(head, d) { return nil }
+            data.append(d)
+            if d.count < chunk { return (data, true) }
+        }
+        return (data, false)
     }
 
     /// The host's copy of the task's own session (cache + live tail).

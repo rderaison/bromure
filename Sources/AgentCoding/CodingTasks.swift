@@ -3923,6 +3923,12 @@ final class CodingTaskEngine {
                             + "| iconv -f UTF-8 -t UTF-8 -c; fi")
     }
 
+    /// `taskTranscriptCommand`'s lookup alone: sets `$f`, prints nothing --
+    /// for a caller that reads the file its own way (the archive's chunks).
+    nonisolated static func taskTranscriptLocate(branch: String, agent: Profile.Tool = .claude) -> String? {
+        transcriptCommand(branch: branch, agent: agent, emit: "")
+    }
+
     /// Locates the session's transcript as `taskTranscriptCommand` does (into
     /// `$f`), then runs `emit` on it.
     private nonisolated static func transcriptCommand(
