@@ -1034,7 +1034,7 @@ public actor Daemon {
         }
         let body: [String: JSONValue] = [
             "version": 1, "hostKind": "linux",
-            "build": .object(BuildInfo.dictionary.mapValues { .string($0) }),
+            "build": ["version": .string(BuildInfo.version)],
             "vms": .array(vms), "workspaces": .array(workspaceRows),
             "workspacesListed": true,
             "supportsPush": true,
@@ -2679,44 +2679,9 @@ public actor Daemon {
     }
 }
 
-/// The build's metadata (macOS: stamped into Info.plist): from the
-/// `bromure-ac.build-info.json` installed beside the binary
-/// (linux/stamp-build-info.sh); an unstamped binary is "linux-dev".
 // @port-skip linux-only: build metadata for /state
 public enum BuildInfo {
-    // @port-skip linux-only: the stamp file's contents
-    static let stamped: [String: String] = read(
-        URL(fileURLWithPath: CommandLine.arguments.first ?? "").resolvingSymlinksInPath().path + ".build-info.json")
-
-    /// A stamp file's string keys (empty ones dropped); none when unreadable.
-    // @port-skip linux-only: the stamp file's contents
-    static func read(_ file: String) -> [String: String] {
-        guard let data = FileManager.default.contents(atPath: file),
-              let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        return d.compactMapValues { ($0 as? String).flatMap { $0.isEmpty ? nil : $0 } }
-    }
-
-    // partial: the stamp file beside the binary (macOS: Info.plist), its keys version/build/commit/date
-    // @port BuildInfo.static value(_: String) h=4c2352ec08e1677d @aebe673e
-    static func value(_ key: String) -> String? { stamped[key] }
-
-    // @port-skip linux-only: the stamp's version, or linux-dev (macOS: CFBundleShortVersionString)
-    public static var version: String { value("version") ?? "linux-dev" }
-
-    /// "Jenkins #412 · 69919d6a · 2026-10-09 01:12 UTC"; nil for an unstamped binary.
-    // @port BuildInfo.static var summary h=8760683c99908efd @aebe673e
-    static var summary: String? {
-        let parts = ["build", "commit", "date"].compactMap(value)
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    /// For /state: what a client (or a debugging session) can read remotely.
-    // @port BuildInfo.static var dictionary h=43a8f2be1a99f999 @aebe673e
-    static var dictionary: [String: String] {
-        var d = ["version": version]
-        for k in ["build", "commit", "date"] { if let v = value(k) { d[k] = v } }
-        return d
-    }
+    public static let version = "linux-dev"
 }
 
 extension Daemon {
