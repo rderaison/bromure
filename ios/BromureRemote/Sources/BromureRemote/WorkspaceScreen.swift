@@ -1349,12 +1349,16 @@ struct SessionFilesPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     let cwd: String
+    /// A sheet of its own (the phone), not the side pane `filePaneOpen`
+    /// toggles: open whenever it's mounted.
+    var standalone = false
     @State private var model = FileExplorerModel()
 
     var body: some View {
         FileExplorerPane(model: model, listModel: controller.listModel,
                          onAutoSetOpen: { _ in },
-                         pinnedContext: (profileID, cwd))
+                         pinnedContext: (profileID, cwd),
+                         standalone: standalone)
             .onAppear { [controller] in
                 model.execProvider = { [weak controller] id, command, timeout in
                     guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
@@ -1376,7 +1380,8 @@ struct SessionFilesButton: View {
             .accessibilityLabel("Files")
             .sheet(isPresented: $shown) {
                 NavigationStack {
-                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd)
+                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd,
+                                     standalone: true)
                         .navigationTitle("Files")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
