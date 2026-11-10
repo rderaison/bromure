@@ -48,4 +48,38 @@ struct GuestReportsTests {
         #expect(Set(try FileManager.default.contentsOfDirectory(atPath: dir + "/virtiofs-tags")) == ["bromure-meta", "share-1"],
                 "a restore keeps the guest's")
     }
+
+    /// Eight URLs a tick; a backlog over 64 is a flood, its excess dropped.
+    @Test func aURLFloodIsShed() {
+        let few = (0..<20).map { "u\($0)" }
+        #expect(LinuxSessionHost.urlBatch(few) == (Array(few.prefix(8)), []), "the rest wait for the next tick")
+        let flood = (0..<65).map { "u\($0)" }
+        let (open, shed) = LinuxSessionHost.urlBatch(flood)
+        #expect(open == Array(flood.prefix(8)) && shed == Array(flood.dropFirst(8)))
+        #expect(LinuxSessionHost.urlBatch((0..<64).map { "u\($0)" }).shed.isEmpty, "64 is no flood yet")
+    }
+
+    /// agentd is rewritten only when it changed (an identical rewrite would
+    /// bump its mtime and restart it on a resume).
+    @Test func agentdIsStagedOnlyWhenItChanged() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try "v1".write(toFile: dir + "/src.py", atomically: true, encoding: .utf8)
+        try Daemon.stageAgentd(dir + "/src.py", into: dir)
+        var st = stat()
+        #expect(stat(dir + "/bromure-agentd.py", &st) == 0 && st.st_mode & 0o777 == 0o755)
+        let ino = st.st_ino
+        try Daemon.stageAgentd(dir + "/src.py", into: dir)
+        #expect(stat(dir + "/bromure-agentd.py", &st) == 0 && st.st_ino == ino, "unchanged: not rewritten")
+        try "v2".write(toFile: dir + "/src.py", atomically: true, encoding: .utf8)
+        try Daemon.stageAgentd(dir + "/src.py", into: dir)
+        #expect(FileManager.default.contents(atPath: dir + "/bromure-agentd.py") == Data("v2".utf8))
+    }
+
+    @Test func theGraphicsMarkerFollowsTheSetting() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try Daemon.writeTerminalGraphicsMarker(in: dir, allowed: true)
+        #expect(FileManager.default.fileExists(atPath: dir + "/terminal-graphics-enabled"))
+        try Daemon.writeTerminalGraphicsMarker(in: dir, allowed: false)
+        #expect(!FileManager.default.fileExists(atPath: dir + "/terminal-graphics-enabled"))
+    }
 }

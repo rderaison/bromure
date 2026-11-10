@@ -110,6 +110,8 @@ extension Daemon {
     // partial: no PII model download, fusion, or 1Password error prompt (not on Linux yet)
     // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=12a93ff58499be07 @0e28fd20
     @discardableResult
+    // @port SessionDisk.refreshMetadataShare(profile: Profile, tokenPlan: SessionTokenPlan?) h=5b64b7f1093111b6 @e81ff085
+    // @port UbuntuSandboxVM.applyEgressPolicy(_: EgressPolicy?) h=871ee8ef54b551a8 @132bb730
     func pushLiveCredentials(_ rec: VMRecord, _ raw: Profile) async -> Bool {
         guard let mitm else { return false }
         let profile = await stagedProfile(raw, mcpTokens: true)

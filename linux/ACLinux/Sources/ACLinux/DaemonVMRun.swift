@@ -196,7 +196,7 @@ extension Daemon {
     /// The host folders `rec`'s VM shares, in their share-<N> slots: a
     /// managed machine's own, else its workspace's shared folders
     /// (SessionDisk.sharedFolders: up to 8, as macOS attaches them).
-    // @port-skip linux-only: the folder shares of UbuntuSandboxVM's configuration, from the VM record's workspace
+    // @port SessionDisk.var sharedFolders h=94fe8b974ac172e5 @e81ff085
     func shareFolders(_ rec: VMRecord) -> [String] {
         if let folders = rec.folders { return Array(folders.prefix(8)) }
         guard !rec.managed, rec.registration != true, rec.kube == nil, let p = existingProfile(for: rec) else { return [] }

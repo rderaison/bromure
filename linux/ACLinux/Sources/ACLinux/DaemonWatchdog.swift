@@ -58,7 +58,7 @@ extension Daemon {
     }
 
     /// Each running workspace's off-subnet bytes, from its VM's switch port.
-    // @port-skip linux-only: the sampler's body over the daemon's running VMs
+    // @port UbuntuSandboxVM.var egressByteCount h=4627de6e728bb949 @132bb730
     func sampleWatchdogBytes(interval: TimeInterval) {
         for rec in registry.records where live[rec.id] != nil {
             guard let pid = UUID(uuidString: rec.id) else { continue }
@@ -172,7 +172,8 @@ extension Daemon {
 
     /// Cuts the VM's port (and marks it), pauses it and asks; `signals`
     /// empty: asked again after a restart.
-    // @port-skip linux-only: handleWatchdogTrip's body, shared with the restart's re-ask
+    // partial: handleWatchdogTrip's body (shared with the restart's re-ask); the quarantine is the switch port's (sw.egress.setQuarantined)
+    // @port UbuntuSandboxVM.setNetworkQuarantined(_: Bool) h=a8bf065c076940d0 @132bb730
     func quarantineAndAsk(_ pid: UUID, signals: [AgentWatchdog.Signal]) async {
         guard let (id, machine) = compromiseVM(pid), let rec = registry.find(id) else { return }
         // One watchdog question per VM at a time.

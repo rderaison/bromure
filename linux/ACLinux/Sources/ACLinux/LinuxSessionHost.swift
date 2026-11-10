@@ -163,7 +163,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// its hooks' folder (one-shot: read, then removed): line 1 the signal, line 2 the hook's
     /// conversation, which may move the report to its own tab (Codex's
     /// shared server). macOS: UbuntuSandboxVM's outbox poll + onAgentStatus.
-    // @port-skip linux-only: the outbox poll of UbuntuSandboxVM.startOutboxPolling for agent-status files, on the host
+    // @port UbuntuSandboxVM.static isAgentHookFile(_: String) h=e13963421f41cba6 @132bb730
     func readAgentStatus() {
         guard let store = SessionStores.shared?.sessions else { return }
         let fm = FileManager.default

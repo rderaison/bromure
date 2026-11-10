@@ -870,7 +870,7 @@
     },
     {
       "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/connector\"):",
-      "reason": "test hooks driving macOS's connector window and its Slack/WhatsApp setup sheets (create, window, slack-setup, disconnect, wa-qr\u2026): a Linux server has no such window"
+      "reason": "test hooks driving macOS's connector window and its Slack/WhatsApp setup sheets (create, window, slack-setup, disconnect, wa-qr…): a Linux server has no such window"
     },
     {
       "id": "ACAutomationServer.vmExec(profileID: String, command: String, timeoutSeconds: Int)",
@@ -902,7 +902,7 @@
     },
     {
       "id": "ACAutomationServer.static sanitizeJSON(_: Any)",
-      "reason": "[String: Any] \u2192 JSON cleanup for JSONSerialization; Linux builds JSONValue, valid by construction"
+      "reason": "[String: Any] → JSON cleanup for JSONSerialization; Linux builds JSONValue, valid by construction"
     },
     {
       "id": "ACAutomationServer.static comparableSections(_: [String:Any])",
@@ -2095,6 +2095,126 @@
     {
       "id": "HTTPMitmConnection.runTransparentHTTP(host: String, port: Int)",
       "reason": "the transparent flow's TLS / HTTP entry on SecureTransport; on Linux, MitmTransparent's serveTransparent hands the flow to the same RequestReader chain"
+    },
+    {
+      "id": "SessionDisk.var bootstrapHomeDirectory",
+      "reason": "VZ-only: a virtiofs bootstrap home for older ext4 images; the Linux image starts agentd itself"
+    },
+    {
+      "id": "SessionDisk.prepareBootstrapHomeDirectory()",
+      "reason": "VZ-only: see SessionDisk.var bootstrapHomeDirectory"
+    },
+    {
+      "id": "SessionDisk.var tabsURL",
+      "reason": "not needed: macOS pre-fills its tab bar before a restore; Linux tabs come from the guest's tabs.txt roster and tmux survives the snapshot"
+    },
+    {
+      "id": "SessionDisk.saveTabs(_: TabsState)",
+      "reason": "not needed: see SessionDisk.var tabsURL"
+    },
+    {
+      "id": "SessionDisk.loadTabs()",
+      "reason": "not needed: see SessionDisk.var tabsURL"
+    },
+    {
+      "id": "SessionDisk.var machineIdentifierURL",
+      "reason": "VZ-only: VZGenericMachineIdentifier; Firecracker has none"
+    },
+    {
+      "id": "UbuntuSandboxVM.static persistentMachineIdentifier(for: SessionDisk?)",
+      "reason": "VZ-only: VZGenericMachineIdentifier; Firecracker has none"
+    },
+    {
+      "id": "SessionDisk.var efiVarsURL",
+      "reason": "VZ-only: the EFI variable store (Firecracker boots the kernel directly)"
+    },
+    {
+      "id": "SessionDisk.efiVariableStoreURL(base: URL)",
+      "reason": "VZ-only: the EFI variable store (Firecracker boots the kernel directly)"
+    },
+    {
+      "id": "SessionDisk.static detectDisplayScale()",
+      "reason": "screen-only: NSScreen's scale (and unused)"
+    },
+    {
+      "id": "shellQuote(_: String)@AgentCoding/SessionDisk.swift",
+      "reason": "unused helper"
+    },
+    {
+      "id": "SessionDisk.makeWelcomeMessage()",
+      "reason": "no guest reader: welcome.txt isn't read by the home seed's .bashrc or agentd (dead on macOS too)"
+    },
+    {
+      "id": "UbuntuSandboxVM.static var anyLive",
+      "reason": "AppKit-only: the exception handler's gate (BromureApplication)"
+    },
+    {
+      "id": "UbuntuSandboxVM.applyInterceptDisabled(_: Bool)",
+      "reason": "no transparent interception on Linux: the guest's proxy is always cooperative"
+    },
+    {
+      "id": "UbuntuSandboxVM.prepare() / case .bridged:",
+      "reason": "bridged LAN not on Linux for now (decided 2026-11-09): a bridged profile gets NAT"
+    },
+    {
+      "id": "UbuntuSandboxVM.static diskAttachment(_: URL)",
+      "reason": "VZ-only: VZ disk attachment (Firecracker's drives are in machineConfig)"
+    },
+    {
+      "id": "UbuntuSandboxVM.var socketDevice",
+      "reason": "VZ-only: the VZ vsock device (Firecracker's vsock is a host Unix socket)"
+    },
+    {
+      "id": "UbuntuSandboxVM.static discardPausedInstance(_: VZVirtualMachine)",
+      "reason": "VZ-only: VZ instance lifecycle (Linux's suspend failure path is Daemon.suspend's)"
+    },
+    {
+      "id": "UbuntuSandboxVM.discardFailedRestore()",
+      "reason": "VZ-only: VZ instance lifecycle (a failed Firecracker restore boots fresh in launchVM)"
+    },
+    {
+      "id": "UbuntuSandboxVM.saveAlreadyPausedState()",
+      "reason": "VZ-only: VZ instance lifecycle"
+    },
+    {
+      "id": "UbuntuSandboxVM.resumeAfterFailedSuspend()",
+      "reason": "VZ-only: VZ instance lifecycle (Linux's suspend failure path is Daemon.suspend's)"
+    },
+    {
+      "id": "UbuntuSandboxVM.restartOutboxPollAfterFailedSuspend()",
+      "reason": "VZ-only: VZ instance lifecycle (the daemon's outbox loop never stops)"
+    },
+    {
+      "id": "UbuntuSandboxVM.releaseSerialConsole()",
+      "reason": "VZ-only: the VZ serial pipe (Firecracker writes its serial log itself)"
+    },
+    {
+      "id": "UbuntuSandboxVM.deinit",
+      "reason": "VZ-only: VZ instance and pipe teardown (Daemon.teardown on Linux)"
+    },
+    {
+      "id": "UbuntuSandboxVM.static listing(_: URL, max: Int)",
+      "reason": "not ported: the bounded outbox directory cursor; the daemon's 500 ms loop reads the outbox's few files whole"
+    },
+    {
+      "id": "UbuntuSandboxVM.DirCursor.deinit",
+      "reason": "not ported: see UbuntuSandboxVM.static listing(_: URL, max: Int)"
+    },
+    {
+      "id": "UbuntuSandboxVM.DirCursor.next(_: URL, examine: Int, keep: Int, match: (String)->Bool)",
+      "reason": "not ported: see UbuntuSandboxVM.static listing(_: URL, max: Int)"
+    },
+    {
+      "id": "UbuntuSandboxVM.DirCursor.reset()",
+      "reason": "not ported: see UbuntuSandboxVM.static listing(_: URL, max: Int)"
+    },
+    {
+      "id": "UbuntuSandboxVM.isCurrent(_: VZVirtualMachine)",
+      "reason": "inline on Linux: a stop or a report counts only while live[id]'s machine is the one that sent it"
+    },
+    {
+      "id": "SessionDisk.cleanupMetadataShare()",
+      "reason": "not ported: the meta share is restaged each launch and the outbox emptied at each cold boot; removing them at a stop would drop what other paths stage into meta between runs (cluster machines, sentry modules, policy steering)"
     }
   ],
   "skipInheriting": [

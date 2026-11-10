@@ -203,17 +203,19 @@ extension Daemon {
 
     /// `compromised.flag` in the workspace's directory (macOS: SessionDisk.compromiseMarkURL).
     // @port SessionDisk.static compromiseMarkURL(profile: Profile, store: ProfileStore) h=f360ea547e538e83 @9c8246cb
+    // @port SessionDisk.var compromisedFlagURL h=0c48de97170c722e @e81ff085
     static func compromiseMarkURL(_ profile: Profile, store: ProfileStore) -> URL {
         store.profileDirectory(for: profile).appendingPathComponent("compromised.flag", isDirectory: false)
     }
 
-    // @port-skip linux-only: SessionDisk.isCompromised's static lookup
+    // @port SessionDisk.var isCompromised h=5c420fcf385f4c7a @e81ff085
+    // @port SessionDisk.static isCompromised(profile: Profile, store: ProfileStore) h=a5e152bc5b098be3 @e81ff085
     static func isCompromised(_ profile: Profile, store: ProfileStore) -> Bool {
         FileManager.default.fileExists(atPath: compromiseMarkURL(profile, store: store).path)
     }
 
     /// The mark, its last resolution dropped (macOS: SessionDisk.markCompromised).
-    // @port-skip linux-only: SessionDisk.markCompromised at the same paths
+    // @port SessionDisk.markCompromised() h=602281e2fcb9820e @e81ff085
     static func markCompromised(_ profile: Profile, store: ProfileStore) {
         let url = compromiseMarkURL(profile, store: store)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -223,13 +225,14 @@ extension Daemon {
 
     /// How the mark was last resolved (`compromise.resolved`: macOS's
     /// SessionDisk.lastCompromiseResolution), or nil.
-    // @port-skip linux-only: SessionDisk.lastCompromiseResolution at the same path
+    // @port SessionDisk.var compromiseResolutionURL h=9ec5206d52a9275b @e81ff085
+    // @port SessionDisk.var lastCompromiseResolution h=62c01d9c9eb060b1 @e81ff085
     static func lastCompromiseResolution(_ profile: Profile, store: ProfileStore) -> SessionDisk.CompromiseRemedy? {
         let url = store.profileDirectory(for: profile).appendingPathComponent("compromise.resolved")
         return (try? String(contentsOf: url, encoding: .utf8)).flatMap(SessionDisk.CompromiseRemedy.init(rawValue:))
     }
 
-    // @port-skip linux-only: SessionDisk.recordCompromiseResolution at the same path
+    // @port SessionDisk.recordCompromiseResolution(_: CompromiseRemedy) h=fbe0e725a52c70e1 @e81ff085
     static func recordCompromiseResolution(_ how: SessionDisk.CompromiseRemedy, _ profile: Profile, store: ProfileStore) {
         let url = store.profileDirectory(for: profile).appendingPathComponent("compromise.resolved")
         try? Data(how.rawValue.utf8).write(to: url, options: .atomic)
@@ -267,6 +270,8 @@ extension Daemon {
     /// the disk. A mark resolved the other way meanwhile is said, never
     /// reported as done.
     // @port ACAppDelegate.automationCompromise(_: String, _: String) h=28d2887ce4c1a943 @641863f2
+    // @port SessionDisk.clearCompromised() h=148e625558c8d4ef @e81ff085
+    // @port SessionDisk.clearCompromisedAsFalseAlarm() h=5f1a2f8c14587c10 @e81ff085
     func resolveCompromise(_ key: String, action: String) async -> ControlResponse {
         guard let how = SessionDisk.CompromiseRemedy(rawValue: action) else {
             return ControlResponse(400, ["ok": false, "error": "action must be wipe or clear"])
@@ -302,6 +307,8 @@ extension Daemon {
     /// refused while the VM's disks are in use; anything left after it
     /// keeps the workspace marked.
     // @port ACAppDelegate.wipeCompromised(profile: Profile) h=aac0aae62f8a7fb9 @641863f2
+    // partial: no tabs.json, EFI store, home backup or bootstrap home on Linux to erase
+    // @port SessionDisk.wipeForCompromise() h=7313bf76da978491 @e81ff085
     func wipeCompromised(_ profile: Profile) async -> ControlResponse {
         let key = profile.id.uuidString.lowercased()
         if let rec = registry.find(key) {

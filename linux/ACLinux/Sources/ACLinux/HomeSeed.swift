@@ -109,6 +109,7 @@ enum HomeSeed {
     }
 
     // @port SessionDisk.bumpGenerationCounter(named: String, in: URL) h=1c3f6cdf67ca13c0 @25ad3a88
+    // @port SessionDisk.bumpEnvGeneration(in: URL) h=fdc7bc5671a292e9 @e81ff085
     static func bumpGenerationCounter(named name: String, in dir: URL) {
         let url = dir.appendingPathComponent(name)
         let current = (try? String(contentsOf: url, encoding: .utf8))

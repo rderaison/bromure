@@ -102,7 +102,8 @@ public actor FirecrackerMachine {
     /// Firecracker, and returns once its API reports the VM running. Owns
     /// the network peer descriptor (`.datagram(peerFD:)`): closed here once
     /// Firecracker has its copy, or on failure.
-    // @port-skip linux-only: Firecracker backend
+    // partial: the sparse overlay copy with its free-space floor
+    // @port SessionDisk.ensureDiskExists() h=478a5bf2065cd692 @e81ff085
     public func start() async throws {
         guard state == .idle else { throw MachineError.alreadyStarted }
         var peerFD: Int32 = -1
@@ -272,7 +273,7 @@ public actor FirecrackerMachine {
         return await waitUntilStopped()
     }
 
-    // @port-skip linux-only: Firecracker backend
+    // @port UbuntuSandboxVM.waitUntilStopped() h=da20a1a8b6882955 @132bb730
     public func waitUntilStopped() async -> StopInfo {
         if case .stopped(let info) = state { return info }
         return await withCheckedContinuation { stopWaiters.append($0) }

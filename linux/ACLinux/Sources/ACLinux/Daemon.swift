@@ -858,7 +858,9 @@ public actor Daemon {
     /// The guest's listening ports and docker state from its outbox, as
     /// macOS's entry carries them (RunningSession's mirrors: a container's
     /// stats and arch merged by short id).
-    // @port-skip linux-only: RunningSession.listeningPorts / dockerContainers… mirrors, read from the outbox per entry
+    // partial: the outbox read when /state is built and by the daemon's 500 ms loop; no ip.txt (the DHCP lease is the IP) nor home migration (ext4 homes)
+    // @port UbuntuSandboxVM.OutboxScanner.scan() h=f2b49fb3b91a59b1 @132bb730
+    // @port UbuntuSandboxVM.static parseListeningPorts(_: String) h=61192d9f084c50da @132bb730
     static func outboxReports(_ outbox: String) -> [String: JSONValue] {
         func read(_ name: String) -> String { GuestOutbox.read(outbox + name) ?? "" }
         let stats = Dictionary(GuestOutboxReports.dockerStats(read("docker-stats.txt")).map { (String($0.id.prefix(12)), $0) },
@@ -1030,7 +1032,8 @@ public actor Daemon {
     }
 
     /// A new VM's MAC, from its CID at creation (it keeps it after).
-    // @port-skip linux-only: Linux VM identity
+    // partial: derived from the VM's CID and kept in its registry record
+    // @port SessionDisk.persistentMACAddress() h=9491b26ee7b5609b @e81ff085
     static func mac(forCID cid: UInt32) -> String {
         String(format: "52:54:00:%02x:%02x:%02x", cid >> 16 & 0xFF, cid >> 8 & 0xFF, cid & 0xFF)
     }
@@ -1135,7 +1138,7 @@ public actor Daemon {
 
     /// Where a suspended VM's snapshot is kept (`vm.snap`, `vm.mem`, and the
     /// disks' identities beside `vm.snap`).
-    // @port-skip linux-only: Linux daemon VM layout
+    // @port SessionDisk.var savedStateURL h=8ed009241fd27fea @e81ff085
     func snapshotDir(_ id: String) -> String { vmDir(id) + "/snapshot" }
 
     /// Suspend: a full snapshot of the running VM (its virtiofsds' state with
@@ -1143,7 +1146,7 @@ public actor Daemon {
     /// The RAM snapshot needs room: below the free-space floor the suspend
     /// is refused (409, why) before anything is touched, and the VM keeps
     /// running (macOS: stopSession's floor check).
-    // @port-skip linux-only: Firecracker snapshot suspend (macOS: requestStopSession(.suspend) saves VZ state)
+    // @port UbuntuSandboxVM.suspend() h=f3b02b7d4a7d5afb @132bb730
     func suspend(_ rec: VMRecord, floor: UInt64 = EphemeralDisk.minimumFreeBytes) async -> ControlResponse {
         guard let l = live[rec.id] else {
             return .error(409, "VM '\(rec.name)' is \(rec.state.rawValue)", ["state": .string(rec.state.rawValue)])
@@ -1179,7 +1182,14 @@ public actor Daemon {
     }
 
     /// The snapshot in `dir` still pairs with the VM's disks.
-    // @port-skip linux-only: snapshot identity for both disks
+    // partial: a snapshot is refused by its disks' identity (SnapshotIdentity), not a configuration fingerprint; no drift log line
+    // @port SessionDisk.var hasSavedState h=b4df5a45a3d143b3 @e81ff085
+    // @port UbuntuSandboxVM.var hasSavedState h=6346abb08728ed60 @132bb730
+    // @port UbuntuSandboxVM.static fingerprintURL(for: URL) h=04714b0cae5836d4 @132bb730
+    // @port UbuntuSandboxVM.static fingerprint(of: VZVirtualMachineConfiguration, baseVersion: String) h=706efc149387ea1e @132bb730
+    // @port UbuntuSandboxVM.static writeFingerprint(_: [String:String], to: URL) h=48aa2f31892f7a4c @132bb730
+    // @port UbuntuSandboxVM.static readFingerprint(at: URL) h=2d496d0f04794325 @132bb730
+    // @port UbuntuSandboxVM.static drift(from: [String:String]?, to: [String:String]) h=07c62aeb2858e7c8 @132bb730
     func snapshotUsable(_ rec: VMRecord, _ dir: String) -> String? {
         let state = dir + "/vm.snap"
         guard FileManager.default.fileExists(atPath: state), FileManager.default.fileExists(atPath: dir + "/vm.mem") else {
@@ -1199,6 +1209,7 @@ public actor Daemon {
     /// still runs).
     // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=3801d3e89fa37bfb @f127f8ab
     /// `partOfReboot`: the reboot's own stop (not one a client asked for).
+    // @port SessionDisk.clearSavedState() h=3440dfdfd02c08d3 @e81ff085
     func deleteVM(_ rec: VMRecord, action: String, partOfReboot: Bool = false) async -> ControlResponse {
         if action == "suspend" { return await suspend(rec) }
         // Asked during a reboot: that reboot boots nothing (stoppedDuringReboot).
@@ -1493,7 +1504,10 @@ public actor Daemon {
 
     // MARK: VM plumbing
 
-    // @port-skip linux-only: Linux daemon VM layout
+    // partial: one directory per VM (disk.raw, home.img, meta, outbox, snapshot), as SessionDisk's per-profile paths
+    // @port SessionDisk.init(profile: Profile, store: ProfileStore, baseDiskURL: URL) h=881ba2facf69f61b @e81ff085
+    // @port SessionDisk.var diskURL h=a895a660e8d1cf54 @e81ff085
+    // @port SessionDisk.var homeDirectory h=c3a8d349091cd4ec @e81ff085
     func vmDir(_ id: String) -> String { config.stateDir + "/vms/" + id }
 
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
@@ -1577,7 +1591,19 @@ public actor Daemon {
         }
     }
 
-    // @port-skip linux-only: Linux daemon VM lifecycle
+    // @port UbuntuSandboxVM.start() h=343c52a5aa429cc0 @132bb730
+    // @port UbuntuSandboxVM.restore() h=5e1c0505692c05a0 @132bb730
+    // partial: the meta share is restaged file by file each launch, not emptied first; the home is always ext4 (no virtiofs or migrate home); agentd alone (its five predecessors and the welcome text have no guest reader); no ssh/ copy (keys are signed through the SSH agent); no X11 markers
+    // @port SessionDisk.MitmSessionAssets.init(caCertificatePEM: String, bridgeScriptURL: URL, awsCredsHelperURL: URL?, claudeTokenAgentURL: URL?, codexTokenAgentURL: URL?, shellAgentURL: URL?, loopbackRelayAgentURL: URL?, agentdURL: URL?) h=0bbb00048673d166 @e81ff085
+    // @port SessionDisk.prepareMetadataShare(forRestore: Bool) h=5b555fba82f7f244 @e81ff085
+    // @port SessionDisk.var homeAttachMode h=896ac6c0ec07ab75 @e81ff085
+    // @port SessionDisk.var homeImageURL h=8d68ba4704c340ae @e81ff085
+    // @port SessionDisk.var homeSeedDirectory h=c511b8b45faf2da2 @e81ff085
+    // @port SessionDisk.bumpSeedGeneration() h=5a70c460432aec13 @e81ff085
+    // @port UbuntuSandboxVM.init(imageManager: UbuntuImageManager) h=e1cba0f019e9d897 @132bb730
+    // @port UbuntuSandboxVM.init(imageManager: UbuntuImageManager, sessionDisk: SessionDisk) h=c6b945e2bc28a7d8 @132bb730
+    // @port UbuntuSandboxVM.prepare() h=f5dccff3dc476eeb @132bb730
+    // @port UbuntuSandboxVM.prepare() / case .nat: h=4196bb9ffb041bd1 @132bb730
     private func launchVM(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         if let hook = Self.launchHookForTesting.withLockedValue({ $0 }) { try await hook(rec.id) }
         let dir = vmDir(rec.id)
@@ -1589,8 +1615,8 @@ public actor Daemon {
         // 0777 as on macOS: every guest uid (the workspace's, a run_as user's)
         // writes there through plain DAC. The VM directory above it stays 0700.
         try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
-        try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
-        try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
+        try Self.stageAgentd(config.agentdPath, into: dir + "/meta")
+        try Self.writeTerminalGraphicsMarker(in: dir + "/meta", allowed: Self.terminalGraphicsAllowed())
         try Self.writeVirtiofsTagMarkers(["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }),
                                          in: dir + "/meta", fresh: restoreFrom == nil)
         try writeSharesFile(rec, meta: dir + "/meta")
@@ -1854,6 +1880,8 @@ public actor Daemon {
     /// `checked`: from the image's checked files (a boot); else the image
     /// dir as it is (a VM taken back already runs from it; the snapshot
     /// check only needs the overlay's path).
+    // partial: Firecracker's serial log in the VM's run directory, rotated per boot
+    // @port UbuntuSandboxVM.static openConsoleLog(name: String, id: String?) h=e7b379c04855bc0c @132bb730
     func machineConfig(_ rec: VMRecord, checked: Bool = true) throws -> MachineConfig {
         let dir = vmDir(rec.id), run = config.runtimeDir + "/vms/" + rec.shortId
         // The system disk: a sparse raw copy of the base (Firecracker has no qcow2).
@@ -2195,6 +2223,8 @@ public actor Daemon {
     /// A new home's size, GiB: the daemon's setting (BROMURE_AC_HOME_GB)
     /// when set, else scaled to `freeBytes` (nil = unknown, the full default).
     // @port SessionDisk.static resolvedHomeImageGB(freeBytes: UInt64?) h=55629d74848e1a35 @7d72a296
+    // @port SessionDisk.static var homeImageOverrideGB h=c589714525b0a59e @e81ff085
+    // @port SessionDisk.static scaledHomeImageGB(freeBytes: UInt64?) h=761fbfac3c2c8319 @e81ff085
     static func resolvedHomeImageGB(override: Int?, freeBytes: UInt64?) -> Int {
         min(1024, max(8, override ?? HomeImageSizing.scaledGB(freeBytes: freeBytes)))
     }
@@ -2226,6 +2256,7 @@ public actor Daemon {
     /// a grow that doesn't happen says why.
     // partial: no ProfileStore change notice, and no home checkpoints to purge after a grow
     // @port SessionDisk.growHomeImageIfNeeded() h=d288b72a68027d0d @7d72a296
+    // @port SessionDisk.var homeGrowsToTarget h=393f1a47a22c3815 @e81ff085
     static func growHomeImageIfNeeded(atPath path: String, target: UInt64, setting: Int?,
                                       floor: UInt64 = EphemeralDisk.minimumFreeBytes) throws -> String {
         let gib = { (b: UInt64) in "\(b >> 30) GiB" }
@@ -2265,6 +2296,8 @@ public actor Daemon {
     /// Firecracker went away (any reason): unplug it, and record what it is now.
     // partial: one VM per workspace record (no earlier sandbox's late stop to tell apart); a reboot relaunches, an explicit stop wins
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onStopped h=63ea87a5b3a8e015 @4237c02e
+    // @port UbuntuSandboxVM.virtualMachine(_: VZVirtualMachine, didStopWithError: Error) h=68ff73723e9161f9 @132bb730
+    // @port UbuntuSandboxVM.guestDidStop(_: VZVirtualMachine) h=8d8c9f61be881881 @132bb730
     func vmStopped(_ id: String, _ info: FirecrackerMachine.StopInfo) async {
         // Both onStopped's Task and a stop route call this; the first does
         // the work, and every caller returns only once it is done (the
@@ -2379,7 +2412,8 @@ public actor Daemon {
         mitm.setSessionTrace(TraceSession(sessionID: UUID(), level: profile.traceLevel), for: pid)
     }
 
-    // @port-skip linux-only: Linux daemon VM lifecycle
+    // partial: the switch port detached (no MAC pool on Linux)
+    // @port UbuntuSandboxVM.releaseMACToPool() h=195c41e10d8439f8 @132bb730
     private func teardown(_ l: Live, mac: String) async {
         sw.detach(mac: mac)
         sw.dhcp.release(mac: mac)

@@ -110,7 +110,7 @@ extension LinuxSessionHost: ProxySignInHost {
 
     /// The guests' URL relay (`url-*.txt` in the outbox or its relay folder,
     /// from bromure-open): at most 8 a tick, 8 KiB each, http(s) only,
-    /// consumed as read (macOS: UbuntuSandboxVM's outbox poll).
+    /// consumed as read, a flood shed (macOS: UbuntuSandboxVM's outbox poll).
     // @port-skip linux-only: the url-*.txt half of UbuntuSandboxVM.startOutboxPolling, on the host
     func readGuestURLs() {
         let fm = FileManager.default
@@ -120,7 +120,13 @@ extension LinuxSessionHost: ProxySignInHost {
                 ((try? fm.contentsOfDirectory(atPath: dir)) ?? [])
                     .filter { $0.hasPrefix("url-") && $0.hasSuffix(".txt") }.map { (name: $0, path: dir + $0) }
             }.sorted { $0.name < $1.name }.map(\.path)
-            for path in paths.prefix(8) {
+            let (batch, shed) = Self.urlBatch(paths)
+            for path in shed { try? fm.removeItem(atPath: path) }
+            if !shed.isEmpty {
+                FileHandle.standardError.write(Data(
+                    "[ac] outbox: \(shed.count) URL request(s) dropped — the guest is flooding the relay\n".utf8))
+            }
+            for path in batch {
                 let raw = GuestOutbox.read(path, limit: 8 << 10)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 try? fm.removeItem(atPath: path)
@@ -129,6 +135,15 @@ extension LinuxSessionHost: ProxySignInHost {
                 guestOpenedURL(url, profileID: id)
             }
         }
+    }
+
+    /// A tick's URL files: the first 8 are read; past them the rest wait
+    /// for the next tick, unless more than 64 are queued -- a flood, whose
+    /// excess goes unopened so the backlog drains (macOS's outbox poll).
+    // @port-skip linux-only: readGuestURLs's tick (macOS: the outbox poll's maxURLsPerTick and urlBacklogHighWater)
+    nonisolated static func urlBatch(_ paths: [String], perTick: Int = 8, highWater: Int = 64) -> (open: [String], shed: [String]) {
+        let open = Array(paths.prefix(perTick))
+        return (open, paths.count > highWater ? Array(paths.dropFirst(perTick)) : [])
     }
 
     /// A workspace's name, from its profile.json alone: not every profile,

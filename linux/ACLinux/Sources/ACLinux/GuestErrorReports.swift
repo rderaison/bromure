@@ -61,3 +61,36 @@ extension LinuxSessionHost {
         }
     }
 }
+
+extension Daemon {
+    /// The guest daemon into the meta share, only when it changed: the
+    /// running agentd re-hashes on an mtime change and exits to upgrade, so
+    /// an identical rewrite would restart it on every resume.
+    // @port-skip linux-only: the bromure-agentd.py step of SessionDisk.prepareMetadataShare (see its claim on launchVM)
+    static func stageAgentd(_ source: String, into meta: String) throws {
+        let dest = meta + "/bromure-agentd.py"
+        let new = try Data(contentsOf: URL(fileURLWithPath: source))
+        guard FileManager.default.contents(atPath: dest) != new else { return }
+        try new.write(to: URL(fileURLWithPath: dest), options: .atomic)
+        guard chmod(dest, 0o755) == 0 else { throw MachineError.io("chmod \(dest)", errno) }
+    }
+
+    /// The operator's opt-in to guest terminal graphics (`terminal.allowGraphics`,
+    /// default off): agentd lets tmux pass kitty-graphics escapes through.
+    // partial: this user's defaults on the server (the client's own ghostty config decides what it renders)
+    // @port TerminalAppDefaults.static terminalGraphicsAllowed() h=b7ea44d683838717 @212f497c
+    static func terminalGraphicsAllowed() -> Bool {
+        UserDefaults.standard.bool(forKey: "terminal.allowGraphics")
+    }
+
+    /// The `terminal-graphics-enabled` marker, written or removed each launch.
+    // @port-skip linux-only: the terminal-graphics-enabled step of SessionDisk.prepareMetadataShare
+    static func writeTerminalGraphicsMarker(in meta: String, allowed: Bool) throws {
+        let marker = meta + "/terminal-graphics-enabled"
+        if allowed {
+            try "".write(toFile: marker, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(atPath: marker)
+        }
+    }
+}

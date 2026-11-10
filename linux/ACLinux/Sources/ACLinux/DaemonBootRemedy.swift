@@ -16,6 +16,7 @@ extension Daemon {
     /// this boot's lines start) until the roster arrives or the VM is gone.
     // partial: the console scanner of UbuntuSandboxVM for a workspace, over its serial log, wired to handleBootFilesystemFailure
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onBootFilesystemFailure h=de8e6317529f360e @4237c02e
+    // @port UbuntuSandboxVM.prepare() / serialOut.fileHandleForReading.readabilityHandler h=8cf706bf907ea1fe @132bb730
     func startBootConsoleScan(_ id: String, console: (path: String, offset: UInt64)) {
         let bootedAt = Date()
         bootStartedAt[id] = bootedAt

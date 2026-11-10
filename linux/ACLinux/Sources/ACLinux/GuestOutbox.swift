@@ -14,9 +14,9 @@ public struct GuestTab: Sendable, Equatable {
     public var rootRepo: String?
     public var display: String?
     public var repoRoot: String?
-    // @port-skip linux-only: GuestTab member
+    // @port GuestTab.var isWorktree h=d9946624b622ce6d @132bb730
     public var isWorktree: Bool { !(worktreeBranch?.isEmpty ?? true) }
-    // @port-skip linux-only: GuestTab member
+    // @port GuestTab.var isGitRepo h=c068d77753af9f85 @132bb730
     public var isGitRepo: Bool { !(repoRoot?.isEmpty ?? true) }
 }
 
@@ -107,7 +107,7 @@ public enum GuestOutbox {
     /// The guest writes it (untrusted): no more than the limit is ever read,
     /// whatever its size says or becomes, and a FIFO or other non-regular
     /// file is refused rather than waited on.
-    // @port-skip linux-only: UbuntuSandboxVM.boundedText for a path
+    // @port UbuntuSandboxVM.static boundedText(_: URL, max: Int) h=af27e07e1a41b93e @132bb730
     public static func read(_ path: String, limit: Int = readLimit) -> String? {
         let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { return nil }

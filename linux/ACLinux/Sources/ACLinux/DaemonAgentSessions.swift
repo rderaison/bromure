@@ -5,7 +5,17 @@ import Foundation
 /// /agent-sessions routes and the app delegate's onAgentSessionCommand.
 extension Daemon {
     /// The engine, its host and stores: made once, at daemon start.
-    // @port-skip linux-only: daemon wiring (macOS: the app delegate's properties)
+    // partial: one loop for every running guest, never cancelled (the outbox is read only while its VM is live)
+    // @port UbuntuSandboxVM.startOutboxPolling() h=cc24e51012a2f026 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.static queue(for: URL) h=232dcf7ee1689146 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.init(outbox: URL) h=4d5d5d392e21da43 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.cancel() h=da06f4c926986485 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.var isCancelled h=65b4422e1f138453 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.tick() h=c44e9c892b202af9 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.consume(_: URL) h=372c23cb3ad6ef4f @132bb730
+    // @port UbuntuSandboxVM.cancelOutboxPoll() h=490591bddcd16a06 @132bb730
+    // @port UbuntuSandboxVM.static settle(_: Task<Void,Never>?, within: Double) h=9db2660ef6215dfc @132bb730
+    // @port UbuntuSandboxVM.stopPolling() h=f324fdabd84247b1 @132bb730
     func startSessionEngine() async {
         let me = self, state = config.stateDir
         // Account features on (macOS: a Preferences switch a server has no

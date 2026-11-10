@@ -7,7 +7,9 @@ extension Daemon {
     /// (`proxy_port`, bridged to host vsock 8443) and `proxy.env`, which
     /// every shell sources: the proxy variables and the per-language CA
     /// bundles. Without a proxy, none of them: the guest goes out directly.
-    // @port-skip linux-only: SessionDisk.prepareMetadataShare's MITM share, for the Linux proxy (the full function is AppKit-side)
+    // partial: always 65534 (no Linux guest ever used the legacy 8080, so there is no port to record for a restore)
+    // @port SessionDisk.var guestProxyPortURL h=930d1f5166756575 @e81ff085
+    // @port SessionDisk.guestProxyPort(coldBoot: Bool) h=35aff47bcd3dd3cf @e81ff085
     func writeProxyMeta(_ meta: URL, profile: Profile?, tokenPlan: SessionTokenPlan? = nil,
                         extraNoProxy: [String] = [], registries: [String] = []) throws {
         let fm = FileManager.default
