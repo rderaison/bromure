@@ -34,6 +34,9 @@ public final class LinuxImageManager {
 
     public init(storageDir: URL? = nil) {
         self.storageDir = storageDir ?? VMConfig.defaultStorageDirectory
+        // A promotion a crash interrupted: the previous image back first,
+        // before anything checks the live paths.
+        ImagePromotion.recover(in: self.storageDir)
     }
 
     // MARK: - Public
@@ -262,30 +265,11 @@ public final class LinuxImageManager {
         }
     }
 
-    /// Moves each staged file over its live counterpart as one unit: the
-    /// live files are set aside first and put back if any move fails, so the
-    /// image is never a mix of old and new boot files.
+    /// Moves each staged file over its live counterpart as one unit, so the
+    /// image is never a mix of old and new boot files -- nor, after a crash
+    /// midway, missing (`ImagePromotion`).
     func promote(_ pairs: [(from: URL, to: URL)]) throws {
-        let fm = FileManager.default
-        var setAside: [(live: URL, backup: URL)] = []
-        var promoted: [URL] = []
-        do {
-            for (_, live) in pairs where fm.fileExists(atPath: live.path) {
-                let backup = live.appendingPathExtension("previous")
-                try? fm.removeItem(at: backup)
-                try fm.moveItem(at: live, to: backup)
-                setAside.append((live, backup))
-            }
-            for (from, live) in pairs {
-                try fm.moveItem(at: from, to: live)
-                promoted.append(live)
-            }
-        } catch {
-            for live in promoted { try? fm.removeItem(at: live) }
-            for (live, backup) in setAside { try? fm.moveItem(at: backup, to: live) }
-            throw error
-        }
-        for (_, backup) in setAside { try? fm.removeItem(at: backup) }
+        try ImagePromotion.promote(pairs, in: storageDir)
     }
 
     public var linuxDiskURL: URL {

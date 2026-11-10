@@ -206,13 +206,11 @@ extension LinuxImageManager {
             //    stale to `baseImageExists` (the catalog's exact version,
             //    which may lead or lag the constant around release week,
             //    is recorded in image-state.json instead).
+            //    As one unit: removing each live file before its move left
+            //    a mix, or nothing, on a failure or crash between them.
             try? fm.removeItem(at: graphicsCapabilitiesURL)
-            try? fm.removeItem(at: linuxDiskURL)
-            try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
-            try? fm.removeItem(at: linuxKernelURL)
-            try fm.moveItem(at: scratchKernel, to: linuxKernelURL)
-            try? fm.removeItem(at: linuxInitrdURL)
-            try fm.moveItem(at: scratchInitrd, to: linuxInitrdURL)
+            try promote([(scratchDisk, linuxDiskURL), (scratchKernel, linuxKernelURL),
+                         (scratchInitrd, linuxInitrdURL)])
             try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
             if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }
             writeImageState(BaseImageState(
