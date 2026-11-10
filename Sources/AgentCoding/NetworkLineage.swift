@@ -545,15 +545,21 @@ public final class NetworkLineage: @unchecked Sendable {
         if link == nil, let leaf = processes.last, case .int(let leafPid)? = leaf["pid"] {
             var leafKey = ProcKey(pid: leafPid, startNs: 0)
             if case .int(let ns)? = leaf["start_ns"] { leafKey.startNs = UInt64(truncatingIfNeeded: ns) }
-            // Every name the destination goes by: the decision's, the
-            // proxied target, and what the guest's DNS answers called it.
-            var hosts = [decision?.host, dst].compactMap { $0 }
-            if !viaProxy { hosts += hostNames(dst) }
-            if let m = Self.matchAgentFetch(hosts: hosts, leafPid: leafPid,
+            // The name the decision gave this flow is its destination, and
+            // only that. Without one: the address (the proxied target), and
+            // -- as aliases -- what the guest's DNS answers called it, which
+            // for a shared (CDN) address is every site hosted there (Finding
+            // CWE-670, "Agent fetch flow can be attributed to a different
+            // fetch on a shared IP").
+            let hosts = [decision?.host ?? dst]
+            let aliases = decision?.host == nil && !viaProxy ? hostNames(dst) : []
+            if let m = Self.matchAgentFetch(hosts: hosts, aliases: aliases, leafPid: leafPid,
                                             leafSeenAt: Self.resolve(leafKey, in: vm).flatMap { vm.procs[$0]?.at },
                                             calls: vm.toolCalls, at: t),
                let call = vm.toolCalls.first(where: { $0.id == m.toolUseID }) {
                 link = (call, m.confidence)
+                // The DNS name the call named, not just the first cached.
+                if decision?.host == nil, !viaProxy, let h = m.host { data["host"] = .string(h) }
             }
         }
         if let link {
@@ -656,26 +662,44 @@ public final class NetworkLineage: @unchecked Sendable {
     /// exec: a process started after the call isn't the one that made it (a
     /// reused pid). "likely": the match is by host and time, not by process.
     static func matchAgentFetch(host: String, leafPid: Int, leafSeenAt: Date?, calls: [ToolCall], at: Date)
-        -> (toolUseID: String, confidence: String)? {
+        -> (toolUseID: String, confidence: String, host: String?)? {
         matchAgentFetch(hosts: [host], leafPid: leafPid, leafSeenAt: leafSeenAt, calls: calls, at: at)
     }
 
-    /// `matchAgentFetch` for a destination known by several names (its
-    /// address, the decision's host, DNS answers): any of them named counts.
-    static func matchAgentFetch(hosts: [String], leafPid: Int, leafSeenAt: Date?, calls: [ToolCall], at: Date)
-        -> (toolUseID: String, confidence: String)? {
+    /// `matchAgentFetch` for a destination known by several names. `hosts`
+    /// name the destination itself (the decision's host, or the address):
+    /// any of them named counts. `aliases` are the names the guest's DNS
+    /// gave the address -- on a shared (CDN) address, unrelated sites too:
+    /// one counts only when it's the only alias the best-matching calls
+    /// name; calls naming two different ones are two fetches the address
+    /// can't tell apart, and the flow is nobody's. `host`: the alias the
+    /// call named, when that's what matched.
+    static func matchAgentFetch(hosts: [String], aliases: [String] = [], leafPid: Int, leafSeenAt: Date?,
+                                calls: [ToolCall], at: Date)
+        -> (toolUseID: String, confidence: String, host: String?)? {
         let hs = Set(hosts.map(Self.bareHost)).subtracting(["", "?"])
-        guard !hs.isEmpty else { return nil }
+        let al = Set(aliases.map(Self.bareHost)).subtracting(["", "?"]).subtracting(hs)
+        guard !hs.isEmpty || !al.isEmpty else { return nil }
         // 2: the host itself named; 1: a subdomain of it, or it of one (a
-        // redirect); 0: neither.
-        func rank(_ c: ToolCall) -> Int {
-            guard let cmd = c.command else { return 0 }
-            return Self.hostsNamed(in: cmd).map { named in
-                hs.contains(named) ? 2
-                    : hs.contains { h in h.hasSuffix("." + named) || named.hasSuffix("." + h) } ? 1 : 0
-            }.max() ?? 0
+        // redirect); 0: neither. With the aliases the call matched by, when
+        // no host of `hosts` matched as well.
+        func rank(_ named: String, _ h: String) -> Int {
+            named == h ? 2 : h.hasSuffix("." + named) || named.hasSuffix("." + h) ? 1 : 0
         }
-        let candidates: [(call: ToolCall, rank: Int)] = calls.compactMap { c in
+        func rank(_ c: ToolCall) -> (rank: Int, via: Set<String>) {
+            guard let cmd = c.command else { return (0, []) }
+            let named = Self.hostsNamed(in: cmd)
+            let direct = named.flatMap { n in hs.map { rank(n, $0) } }.max() ?? 0
+            var best = direct, via = Set<String>()
+            for n in named { for a in al {
+                let r = rank(n, a)
+                guard r > direct, r >= best, r > 0 else { continue }
+                if r > best { best = r; via = [] }
+                via.insert(a)
+            } }
+            return (best, via)
+        }
+        let candidates: [(call: ToolCall, rank: Int, via: Set<String>)] = calls.compactMap { c in
             guard let pid = c.agentPid, pid == leafPid else { return nil }
             // A command's traffic is its own processes', never the agent's:
             // a Bash `curl https://api.github.com` names a host, but the
@@ -685,12 +709,23 @@ public final class NetworkLineage: @unchecked Sendable {
             let age = at.timeIntervalSince(c.at)
             guard age >= -2, age <= agentFetchWindow else { return nil }
             let r = rank(c)
-            return r > 0 ? (c, r) : nil
+            return r.rank > 0 ? (c, r.rank, r.via) : nil
         }
         // The best-named host first, then the newest: a flow the sentry
         // reported late (repeats folded) still goes to the call naming it.
-        guard let best = candidates.max(by: { ($0.rank, $0.call.at) < ($1.rank, $1.call.at) }) else { return nil }
-        return (best.call.id, "likely")
+        // A call naming the destination itself beats one as well named by
+        // an alias only.
+        func key(_ c: (call: ToolCall, rank: Int, via: Set<String>)) -> (Int, Int, Date) {
+            (c.rank, c.via.isEmpty ? 1 : 0, c.call.at)
+        }
+        guard let best = candidates.max(by: { key($0) < key($1) }) else { return nil }
+        guard !best.via.isEmpty else { return (best.call.id, "likely", nil) }
+        // Matched by an alias only (so is every call as good): they must all
+        // name the same one, or the shared address can't say whose fetch
+        // this was.
+        let named = candidates.filter { $0.rank == best.rank }.reduce(into: Set<String>()) { $0.formUnion($1.via) }
+        guard named.count == 1 else { return nil }
+        return (best.call.id, "likely", named.first)
     }
 
     /// A host as compared: lowercased, no port, brackets, trailing dot or `www.`.

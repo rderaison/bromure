@@ -748,6 +748,57 @@ struct NetworkLineageFetchRankTests {
     }
 }
 
+/// Finding CWE-670, "Agent fetch flow can be attributed to a different
+/// fetch on a shared IP": every name the DNS cache holds for a CDN address
+/// counted as the destination, so a still-connecting fetch of site B went
+/// to a newer fetch of site A hosted at the same address.
+@Suite("Network lineage: a shared address's DNS names don't pick the fetch")
+struct NetworkLineageSharedIPTests {
+    let t0 = Date()
+    func fetch(_ id: String, _ url: String, ago: TimeInterval) -> NetworkLineage.ToolCall {
+        .init(id: id, tool: "WebFetch", command: #"{"url":"\#(url)"}"#, reasoning: "", at: t0.addingTimeInterval(-ago),
+              agentPid: 412, agent: "claude")
+    }
+
+    @Test("The decision's host is matched alone; ambiguous DNS aliases attribute nothing; one alias does")
+    func sharedIP() {
+        let b = fetch("b", "https://site-b.example/page", ago: 5)
+        let a = fetch("a", "https://site-a.example/page", ago: 1)
+        let ip = "151.101.1.1", cached = ["site-a.example", "site-b.example"]
+        // B's decision names B: B's call, though A's is newer and A is cached for the address.
+        let byDecision = NetworkLineage.matchAgentFetch(hosts: ["site-b.example"], leafPid: 412, leafSeenAt: nil,
+                                                        calls: [b, a], at: t0)
+        #expect(byDecision?.toolUseID == "b")
+        #expect(byDecision?.host == nil)
+        // No decision host: both cached names are named by a call -- nobody's.
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [b, a], at: t0) == nil)
+        // Only one of them was fetched: that call, and the name it used.
+        let one = NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                                 calls: [b], at: t0)
+        #expect(one?.toolUseID == "b")
+        #expect(one?.host == "site-b.example")
+        // Two fetches of the same site: the newer, as before.
+        let b2 = fetch("b2", "https://site-b.example/other", ago: 2)
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [b, b2], at: t0)?.toolUseID == "b2")
+        // A call naming the address itself beats one naming only an alias.
+        let byIP = fetch("ip", "http://\(ip)/x", ago: 4)
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [byIP, a], at: t0)?.toolUseID == "ip")
+    }
+
+    @Test("A resolved flow: the decision's host wins over a newer fetch of another site at the same address")
+    func resolved() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/NetworkLineage.swift"), encoding: .utf8)
+        #expect(src.contains("let hosts = [decision?.host ?? dst]"))
+        #expect(src.contains("let aliases = decision?.host == nil && !viaProxy ? hostNames(dst) : []"))
+        #expect(!src.contains("hosts += hostNames(dst)"))
+    }
+}
+
 @Suite("Network lineage: a live sequence replayed")
 struct NetworkLineageReplayTests {
     /// The stand-in agent's run on a live guest: an omp-style piped curl, two
