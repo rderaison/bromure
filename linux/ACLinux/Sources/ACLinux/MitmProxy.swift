@@ -527,7 +527,7 @@ final class MitmProxy: @unchecked Sendable {
             $0 ? (InferenceService.engineHost, InferenceService.repairProxyPort, false, true) : (host, port, requestedTLS, false)
         } ?? route(host: host, port: port, tls: requestedTLS, profileID: profileID)
         if routed.local {
-            guard let to = try? SocketAddress(ipAddress: routed.host, port: routed.port) else {
+            guard let to = Daemon.repairProxyTarget() else {
                 return loop.makeFailedFuture(ProxyDestinationUnresolved(host: host, port: port))
             }
             return dial(host: host, to: [to], tls: routed.tls, ctx: upstreamContext, on: loop)

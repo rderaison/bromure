@@ -480,7 +480,9 @@ public actor Daemon {
                 Task { @MainActor in Self.saveMintedCredential(minted, profileID: pid, store: ProfileStore()) }
             }
             // The local-model repair proxy, up before any VM (macOS: with
-            // the MITM engine): the bridges read its port per connection.
+            // the MITM engine), on its unix socket: the bridges and the MITM
+            // dial it there.
+            Self.useRepairProxySocket(Self.repairProxySocketPath(runtimeDir: config.runtimeDir))
             InferenceRepairProxy.shared.startIfNeeded()
         }
         let storedNet = stored.filter { perVM($0.key) && $0.value.count == 1 }.mapValues { $0[0] }

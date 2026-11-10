@@ -272,10 +272,11 @@ final class InferenceBridgeListener: @unchecked Sendable {
                     guest.closeFuture.whenComplete { _ in WorkspaceQuarantine.shared.remove(cut, for: profileID) }
                 }
                 // Paused until the proxy side is connected.
+                guard let proxyAt = Daemon.repairProxyTarget() else { return guest.eventLoop.makeFailedFuture(ChannelError.inputClosed) }
                 return guest.setOption(ChannelOptions.autoRead, value: false).flatMap {
                     ClientBootstrap(group: guest.eventLoop)
                         .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-                        .connect(host: "127.0.0.1", port: InferenceRepairProxy.shared.listenPort)
+                        .connect(to: proxyAt)
                 }.flatMap { proxy in
                     let (a, b) = SpliceHandler.matchedPair()
                     return guest.pipeline.addHandler(a).flatMap { proxy.pipeline.addHandler(b) }.flatMap {
@@ -372,5 +373,65 @@ final class SpliceHandler: ChannelDuplexHandler, @unchecked Sendable {
         guard pendingRead, let context else { return }
         pendingRead = false
         context.read()
+    }
+}
+
+/// The local-model repair proxy's listener: a unix socket in this user's own
+/// runtime dir (0700), never a loopback TCP port, which every login on a
+/// multi-user server could connect to. The vsock bridges and the MITM's
+/// local route reach it there.
+extension Daemon {
+    /// The socket's path, set at start (nil: not yet, or a test's daemon).
+    static let repairProxySocket = NIOLockedValueBox<String?>(nil)
+
+    // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
+    static func repairProxySocketPath(runtimeDir: String) -> String { runtimeDir + "/inference-repair.sock" }
+
+    /// Where the repair proxy is reached: its unix socket, once set.
+    // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
+    static func repairProxyAddress() -> SocketAddress? {
+        repairProxySocket.withLockedValue { $0 }.flatMap { try? SocketAddress(unixDomainSocketPath: $0) }
+    }
+
+    /// Where a bridge or the MITM dials the proxy: its socket, else (a
+    /// daemon that set none: tests) its loopback port.
+    // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
+    static func repairProxyTarget() -> SocketAddress? {
+        repairProxyAddress() ?? (try? SocketAddress(ipAddress: InferenceService.engineHost, port: InferenceRepairProxy.shared.listenPort))
+    }
+
+    /// The proxy listens at `path` from now on (InferenceRepairProxy.makeListener).
+    // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
+    static func useRepairProxySocket(_ path: String) {
+        repairProxySocket.withLockedValue { $0 = path }
+        InferenceRepairProxy.makeListener = { Self.listenUnix(path) }
+    }
+
+    /// A listening unix socket at `path` (0600; a stale one replaced), or -1
+    /// (said why).
+    // @port-skip linux-only: the repair proxy's unix listener (macOS: loopback TCP, one user per Mac)
+    static func listenUnix(_ path: String) -> Int32 {
+        var addr = sockaddr_un()
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
+            inferenceLog("the repair proxy's socket path is too long: \(path)")
+            return -1
+        }
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue) | Int32(SOCK_CLOEXEC.rawValue), 0)
+        guard fd >= 0 else { return -1 }
+        unlink(path)
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { b in for (i, c) in bytes.enumerated() { b[i] = c } }
+        // In the user's 0700 runtime dir, which no other account traverses;
+        // the socket itself 0600 too.
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard rc == 0, chmod(path, 0o600) == 0, listen(fd, 64) == 0 else {
+            inferenceLog("the repair proxy can't listen on \(path): \(String(cString: strerror(errno)))")
+            close(fd)
+            return -1
+        }
+        return fd
     }
 }
