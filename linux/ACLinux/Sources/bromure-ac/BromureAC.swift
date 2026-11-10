@@ -13,13 +13,16 @@ struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
         subcommands: [Daemon.self, VM.self, Workspaces.self, Trace.self, Image.self, Remote.self, Account.self, Cloud.self,
-                      Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command, Mcp.self])
+                      Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command, Mcp.self,
+                      ModelCommand.self])
 
     // partial: SIGPIPE is ignored in Daemon.run; no hidden __pii-scan/__squelch/__shot-* hooks
     // @port BromureAC.static main() h=b92f6d3ecd654150 @d3ebbda2
     // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split
     // @port BromureAC.static var configuration h=6859cbda432af2b9 @d3ebbda2
     static func main() async {
+        // Hidden verification hooks, before parsing (macOS's main too).
+        if HiddenHooks.run(Array(CommandLine.arguments.dropFirst())) { return }
         CLICommandsEntry.workspacesGroup = Workspaces.self
         await main(nil)
     }
@@ -117,7 +120,48 @@ enum Signals {
 struct VM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs.", subcommands: [Run.self, Ls.self, Exec.self, Kill.self, Suspend.self, Resume.self,
-                                                 Start.self, Rm.self])
+                                                 Start.self, Rm.self, Routing.self])
+
+    /// `vm routing cloud|local <vm>`: a running VM's LLM backend routing.
+    struct Routing: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "routing", abstract: "Set LLM backend routing for a running VM: cloud | local.")
+        @Argument(help: "cloud | local") var mode: String
+        @Argument(help: "VM id or workspace name.") var vm: String
+        // @port VMRouting.run() h=7bac4efeb5f39ece @5907a950
+        func run() async throws {
+            let m = mode.lowercased()
+            guard ["cloud", "local"].contains(m) else { throw ValidationError("Mode must be 'cloud' or 'local'.") }
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/routing", body: ["mode": .string(m)])
+            guard r.status == 200, r.json["ok"] == .bool(true) else {
+                throw ValidationError(r.json["error"]?.stringValue ?? "Couldn't set routing for \(vm).")
+            }
+            print("Routing set to \(m) for \(vm).")
+        }
+    }
+}
+
+/// `model use <model> <vm>`: a running VM's active local model (an external
+/// engine's on Linux: no built-in MLX engine, so no catalog/pull/rm).
+// @port-skip linux-only: the Linux CLI's model group (macOS's Model, its MLX verbs out of scope)
+struct ModelCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "model", abstract: "Set the active local model of a running VM's workspace.", subcommands: [Use.self])
+
+    struct Use: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "use", abstract: "Set the active local model for a running VM's workspace.")
+        @Argument(help: "Model id.") var model: String
+        @Argument(help: "VM id or workspace name.") var vm: String
+        // @port ModelUse.run() h=e125dfa732c6a153 @5907a950
+        func run() async throws {
+            let r = try client().request("POST", "/vms/\(ControlClient.encodeSegment(vm))/model", body: ["modelID": .string(model)])
+            guard r.status == 200, r.json["ok"] == .bool(true) else {
+                throw ValidationError(r.json["error"]?.stringValue ?? "Couldn't set model for \(vm).")
+            }
+            print("Active model set to \(r.json["model"]?.stringValue ?? model) for \(vm).")
+        }
+    }
 }
 
 /// `bromure-ac mcp`: the MCP server (stdio) over this user's daemon
