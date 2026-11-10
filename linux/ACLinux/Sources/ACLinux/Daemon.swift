@@ -240,6 +240,9 @@ public actor Daemon {
     var bootClock: [String: ContinuousClock.Instant] = [:]
     /// VMs whose suspend (RAM snapshot) is being written.
     var suspending: Set<String> = []
+    /// A stop asked for while the VM's boot had nothing to stop yet: the VM
+    /// is stopped the way asked once it's up (macOS: BootsInFlight's pendingStops).
+    var pendingStops: [String: String] = [:]
     /// VMs whose guest said it's going down for a reboot (DaemonGuestReboot).
     var guestRebootIntents: Set<String> = []
     /// Stopped after such a reboot: relaunched once their stop is done.
@@ -1216,6 +1219,17 @@ public actor Daemon {
     // @port SessionDisk.var savedStateURL h=8ed009241fd27fea @e81ff085
     func snapshotDir(_ id: String) -> String { vmDir(id) + "/snapshot" }
 
+    /// Remembers a stop for a boot under way; false when there is none.
+    // @port BootsInFlight.deferStop(_: UUID, action: Profile.CloseAction) h=0b002a6cc0d2ef1f @22b7d4bb
+    func deferStop(_ id: String, action: String) -> Bool {
+        guard starting.contains(id) else { return false }
+        pendingStops[id] = action
+        return true
+    }
+
+    // @port BootsInFlight.takeStop(_: UUID) h=298540cbb6a3bafd @22b7d4bb
+    func takeStop(_ id: String) -> String? { pendingStops.removeValue(forKey: id) }
+
     /// The VM network's gateway (passt's address there).
     // @port-skip linux-only: passt's gateway for other files of the daemon
     var vmnetGateway: String { passt.config.gateway }
@@ -1320,6 +1334,11 @@ public actor Daemon {
     // partial: DELETE /vms/<id> is the request (awaited, not fire-and-forget)
     // @port ACAppDelegate.requestStopSession(_: Profile.ID, action: Profile.CloseAction) h=3a7abc982669f3ec @d3ebbda2
     func deleteVM(_ rec: VMRecord, action: String, partOfReboot: Bool = false) async -> ControlResponse {
+        // Still booting (not a reboot's): nothing to stop yet, and the VM that
+        // comes up would stay up. Stopped once it's up instead.
+        if live[rec.id] == nil, !partOfReboot, !rebooting.contains(rec.id), deferStop(rec.id, action: action) {
+            return ControlResponse(202, ["status": "stopping", "deferred": true])
+        }
         if action == "suspend" { return await suspend(rec) }
         // Asked during a reboot: that reboot boots nothing (stoppedDuringReboot).
         if rebooting.contains(rec.id), !partOfReboot { stopsDuringReboot.insert(rec.id) }
@@ -1392,7 +1411,7 @@ public actor Daemon {
     /// a boot remedy), the one start a rebooting VM takes.
     /// `unattended`: nobody is there to ask (an agent's or automation's
     /// start): a launch question isn't asked (DaemonBaseImageDrift.swift).
-    // partial: the `starting` set holds the disk; a stop during a plain cold boot gets 409 instead of being deferred and honored (macOS bootsInFlight.takeStop); only reboots defer it
+    // partial: the `starting` set holds the disk (a stop during the boot is deferred: deferStop)
     // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
     // partial: start, launch and launchVM. No model-download gate (MLX), no window/pane, no virtiofs home migration
     // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=9feccb727553e73f @d3ebbda2
@@ -1487,8 +1506,13 @@ public actor Daemon {
         defer { restoring.remove(rec.id) }
         do {
             try await launch(&r, restoreFrom: restoreFrom)
+            // A stop asked for during the boot: honored now that it's up.
+            if let action = takeStop(rec.id), let now = registry.find(rec.id) {
+                Task { _ = await self.deleteVM(now, action: action) }
+            }
             return ControlResponse(200, ["status": "running"])
         } catch {
+            pendingStops[rec.id] = nil
             CIDAllocator.shared.release(r.cid)
             if let dir = restoreFrom {
                 // Still suspended, its snapshot as it was: a retry, or a

@@ -159,3 +159,23 @@ struct ClassifierLifecycleTests {
         #expect(LinuxClassifierLifecycle.needs(for: []) == .init(), "nothing running: nothing needed")
     }
 }
+
+extension DaemonGlobalSuites {
+    /// A stop asked for while the VM boots is kept and done once it's up
+    /// (macOS: BootsInFlight.deferStop / takeStop), not refused.
+    @Suite("Stop during a boot", .serialized)
+    struct StopDuringBootTests {
+        @Test func aStopDuringABootIsDeferred() async throws {
+            let (d, rec, dir) = try await DaemonRepairGateTests.daemon()
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            await d.markStartingForTesting(rec.id, true)
+            let r = await d.deleteVM(rec, action: "suspend")
+            #expect(r.status == 202 && r.body["deferred"] == .bool(true))
+            #expect(await d.takeStop(rec.id) == "suspend")
+            #expect(await d.takeStop(rec.id) == nil, "taken once")
+            await d.markStartingForTesting(rec.id, false)
+            #expect(await d.deferStop(rec.id, action: "shutdown") == false, "no boot under way")
+            await d.shutdown()
+        }
+    }
+}
