@@ -4376,7 +4376,12 @@ for n, c in enumerate(calls, 1):
             const got = (d.messages || []).find((m) => m.kind === "deliver");
             assert(got && got.text.includes(reply), `no deliver message on the record: ${JSON.stringify(d.messages || []).slice(0, 300)}`);
             const f = (got.files || [])[0];
-            assert(f && f.includes(`/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/reply.txt`), `reply file not landed: ${JSON.stringify(got.files)}`);
+            // Each transfer lands in a folder of its own (inbox/<id>/<transfer>/),
+            // so a failed send can't touch an earlier message's file of the
+            // same name. A and B share the VM: the path is the guest's.
+            const inbox = `/home/ubuntu/.bromure/inbox/${reqID.slice(0, 8).toLowerCase()}/`;
+            assert(f && f.startsWith(inbox) && /^[0-9a-f]{8}\/reply\.txt$/.test(f.slice(inbox.length)),
+                   `reply file not landed in its own folder of ${inbox}: ${JSON.stringify(got.files)}`);
             assertEq((await gx(vm.id, `cat ${JSON.stringify(f)}`)).trim(), `${reply} file`, "landed reply differs");
             // Reading takes whatever was left: a second look is empty.
             await mcp(vm.id, A.w, [{ name: "read_inbox", arguments: { delegation_id: reqID } }]);
