@@ -55,6 +55,9 @@ pipeline {
         // .ipas (same app name) never clobber each other.
         ARCHIVE_XR = "${WORKSPACE}/build/BromureRemote-xr.xcarchive"
         EXPORT_XR  = "${WORKSPACE}/build/export-xr"
+        // The pinned package checkouts (Resolve packages), reused by both
+        // archives so nothing is fetched or resolved inside the credentials.
+        SPM_DIR    = "${WORKSPACE}/build/spm"
 
         // CFBundleVersion must be unique for every TestFlight upload; the
         // Jenkins build number gives us a monotonic one for free. Both
@@ -107,6 +110,29 @@ pipeline {
                     set -euo pipefail
                     python3 scripts/gen-ios-sources.py
                     python3 scripts/gen-ios-project.py
+                '''
+            }
+        }
+
+        stage('Resolve packages') {
+            steps {
+                // Before any credential: fetch exactly the revisions pinned in
+                // the committed Package.resolved (no resolution -- a newly
+                // published version in a requirement's range can't come in),
+                // and check every checkout sits at its pin. The archive below
+                // runs package plug-ins without a trust prompt, so they must
+                // be this reviewed code.
+                sh '''
+                    set -euo pipefail
+                    rm -rf "$SPM_DIR"
+                    python3 -I scripts/verify-ios-packages.py
+                    xcodebuild -resolvePackageDependencies \
+                        -project "$PROJECT" \
+                        -scheme "$SCHEME" \
+                        -disableAutomaticPackageResolution \
+                        -clonedSourcePackagesDirPath "$SPM_DIR"
+                    python3 -I scripts/verify-ios-packages.py "$SPM_DIR"
+                    git diff --exit-code -- "$PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
                 '''
             }
         }
@@ -198,18 +224,23 @@ pipeline {
                         # the archive never asks Apple to mint a development
                         # profile (which a team with no registered devices can't
                         # do). Each target reads its own PROFILE_* variable.
-                        # Package plugins (SwiftTerm's SwiftTermBuildInfoPlugin) and
-                        # macros need a one-time "Trust" click in Xcode; a CI
-                        # agent can't click, so the archive skips the prompt
-                        # ("Validate plug-in … ARCHIVE FAILED" otherwise).
+                        # Package plugins (SwiftTerm's SwiftTermBuildInfoPlugin)
+                        # need a one-time "Trust" click in Xcode; a CI agent
+                        # can't click, so the archive skips the prompt
+                        # ("Validate plug-in … ARCHIVE FAILED" otherwise). What
+                        # it runs is only the pinned, verified checkouts
+                        # (Resolve packages): no resolution here, the same
+                        # package directory. Macro validation stays on (no
+                        # package declares a macro).
                         xcodebuild archive \
                             -project "$PROJECT" \
                             -scheme "$SCHEME" \
                             -configuration Release \
                             -destination 'generic/platform=iOS' \
                             -archivePath "$ARCHIVE" \
+                            -disableAutomaticPackageResolution \
+                            -clonedSourcePackagesDirPath "$SPM_DIR" \
                             -skipPackagePluginValidation \
-                            -skipMacroValidation \
                             IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
                             PROFILE_APP="$PROFILE_APP" \
                             PROFILE_NSE="$PROFILE_NSE" \
@@ -229,8 +260,9 @@ pipeline {
                                 -configuration Release \
                                 -destination 'generic/platform=visionOS' \
                                 -archivePath "$ARCHIVE_XR" \
+                                -disableAutomaticPackageResolution \
+                                -clonedSourcePackagesDirPath "$SPM_DIR" \
                                 -skipPackagePluginValidation \
-                                -skipMacroValidation \
                                 IOS_SIGN_IDENTITY="$IOS_SIGN_IDENTITY" \
                                 PROFILE_APP="$PROFILE_APP" \
                                 PROFILE_NSE="$PROFILE_NSE" \
