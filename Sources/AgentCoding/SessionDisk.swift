@@ -12,6 +12,10 @@ import SandboxEngine
 /// It carries the API key (api_key.env), the profile's SSH keys, and an
 /// init script the guest sources on login.
 public final class SessionDisk {
+    /// Claude Code 2.1.322+: lets bypass mode run dangerous rm commands
+    /// without a prompt. Exported from api_key.env (the process env every
+    /// guest launch sources; Claude Code won't take it from settings.json).
+    static let claudeYoloEnv = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
     /// The profile this session was launched with. Mutable so a live
     /// refresh (env-var / credential / guardrail edit on a running
     /// session) can swap in the edited profile and re-emit the meta
@@ -761,6 +765,13 @@ public final class SessionDisk {
             }
         }
 
+        // Claude Code's bypass mode (--dangerously-skip-permissions: unattended
+        // runs, a session switched to it) still stops at a dangerous rm: it
+        // asks, waits 2 min, then denies, which stalls a run nobody watches.
+        // This VM is disposable, so that last check goes too. Process env
+        // only: Claude Code ignores it from settings.json, and strips it from
+        // the commands it runs. No effect in auto mode, the interactive default.
+        lines.append("export \(Self.claudeYoloEnv)=1")
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
         if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }
