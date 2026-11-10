@@ -7,9 +7,16 @@ import SandboxEngine
 // (into the workspace's policy, saved through the editor's path, applied
 // live), and how approved system packages are installed in the guest.
 extension Daemon {
-    // partial: no organization-boundary change notice (the Linux daemon reads the boundary at each launch)
     // @port ACAppDelegate.wireOpenShellAdvisor(_: MitmEngine) h=0c8bae1b66803f62 @2134fc7a
     func wireOpenShellAdvisor() {
+        // A new organization boundary / managed policy (the enrollment's
+        // heartbeat, a local boundary) re-resolves every running workspace's
+        // firewall at once.
+        // (The center keeps the observer: the daemon's lifetime.)
+        _ = NotificationCenter.default.addObserver(forName: OpenShellGovernance.changedNotification,
+                                                   object: nil, queue: nil) { [weak self] _ in
+            Task { await self?.reapplyOpenShellGovernance() }
+        }
         guard let mitm else { return }
         let advisor = OpenShellAdvisor.shared
         let modes = OpenShellAdvisorModeCache.shared
@@ -58,6 +65,24 @@ extension Daemon {
             }
         }
         Self.refreshWatchdogModes()
+    }
+
+    /// The governance changed: each running workspace's guardrails and egress
+    /// policy resolved again, its watchdog mode and the list's shield too.
+    // @port ACAppDelegate.reapplyOpenShellGovernance() h=e638e4da0c5cfc55 @d3ebbda2
+    func reapplyOpenShellGovernance() async {
+        let profiles = ProfileStore().loadAll()
+        let running = records.filter { live[$0.id] != nil && !$0.managed }.compactMap { existingProfile(for: $0) }
+        let (mitm, sw) = (mitm, sw)
+        await MainActor.run {
+            OpenShellAdvisorModeCache.shared.refresh(profiles)
+            Self.refreshWatchdogModes()
+            LinuxSessionHost.shared?.refreshShieldState(profiles)
+            for p in running {
+                mitm?.setGuardrailsConfig(GuardrailsConfig.make(for: p), for: p.id)
+                sw.egress.update(.init(p))
+            }
+        }
     }
 
     /// Add a path to a workspace's OpenShell `filesystem_policy` (the
