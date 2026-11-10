@@ -4580,7 +4580,7 @@ final class CodingTaskEngine {
             // (same courtesy as the automation pull).
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if !TaskTranscriptArchive.has(taskID),
-               let text = await delegate.fetchTaskTranscriptRaw(task), !text.isEmpty {
+               let text = await delegate.fetchTaskTranscriptRaw(task, forArchive: true), !text.isEmpty {
                 TaskTranscriptArchive.save(text, taskID: taskID)
                 BACDebug.log("tasks", "“\(task.title)”: transcript archived "
                     + "(\(text.utf8.count) bytes)")
