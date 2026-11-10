@@ -136,9 +136,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// the pool-ready hook.
     private var pendingLaunch: PendingLaunch?
     private enum PendingLaunch {
+        /// App launch: ask which profile and network to boot.
+        case launchPicker
+        /// No window (Dock click): open the startup profile directly.
         case startup
-        case profile(UUID, URL?)
+        case profile(UUID, URL?, network: String? = nil)
     }
+    /// The launch picker, while it is up.
+    private var launchPickerWindow: NSWindow?
+    private var launchPickerCompletion: ((LaunchChoice?) -> Void)?
+    /// Identifies the pre-boot picker askLaunchChoice is waiting on.
+    private var launchPickerToken: UUID?
     /// File ▸ New Window With Profile — rebuilt on each open.
     private weak var profilesSubmenu: NSMenu?
     private var settingsWindow: NSWindow?
@@ -263,6 +271,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.hideSetupWindow()
             if let url = self.pendingURL {
                 self.pendingURL = nil
+                // A profile/network already picked at launch takes the link.
+                if case .profile(let id, nil, let network)? = self.pendingLaunch,
+                   let profile = self.state.profileManager.profile(withID: id) {
+                    self.pendingLaunch = nil
+                    self.openNewBrowser(with: profile, initialURL: url, networkOverride: network)
+                    return
+                }
                 self.pendingLaunch = nil
                 // Re-enter the normal URL handling flow now that the pool is ready
                 self.application(NSApp, open: [url])
@@ -315,8 +330,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             snapshotSetupWindowIfRequested()
             return
         }
+        // BROMURE_SKIP_LAUNCH_PICKER: unattended runs (e2e) keep the old
+        // launch — warm the default VM, open the startup profile.
+        if ProcessInfo.processInfo.environment["BROMURE_SKIP_LAUNCH_PICKER"] == nil {
+            state.launchConfigProvider = { [weak self] in await self?.askLaunchChoice() }
+            pendingLaunch = .launchPicker
+        } else {
+            pendingLaunch = .startup
+        }
         state.checkState()
-        pendingLaunch = .startup
         if state.poolReady {
             performPendingLaunch()
         } else {
@@ -351,30 +373,133 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard state.poolReady, let launch = pendingLaunch else { return }
         pendingLaunch = nil
         switch launch {
-        case .startup:
+        case .startup, .launchPicker:
             guard sessions.isEmpty else { return }
             // Profiles load asynchronously (iCloud discovery); the pool
             // normally takes longer, but never open a profile-less window
             // just because the roster hasn't landed yet.
             guard state.profileManager.isReady else {
-                pendingLaunch = .startup
+                pendingLaunch = launch
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
                     self.performPendingLaunch()
                 }
                 return
             }
+            if case .launchPicker = launch, showLaunchPicker(completion: { [weak self] choice in
+                guard let self, let choice,
+                      let profile = self.state.profileManager.profile(withID: choice.profileID) else { return }
+                self.openNewBrowser(with: profile, networkOverride: choice.network)
+            }) { return }
             if let profile = startupProfile() {
                 openNewBrowser(with: profile)
             } else {
                 openNewBrowser()
             }
-        case .profile(let id, let url):
+        case .profile(let id, let url, let network):
             if let profile = state.profileManager.profile(withID: id) {
-                openNewBrowser(with: profile, initialURL: url)
+                openNewBrowser(with: profile, initialURL: url, networkOverride: network)
             }
         }
     }
+
+    /// Before the first VM boots: ask which profile and network to start
+    /// with, and hand the pool that config so its VM boots on the chosen
+    /// NIC. The choice becomes the pending launch, opened on pool-ready.
+    /// Cancel (or no profiles) warms the default VM and opens nothing.
+    @MainActor private func askLaunchChoice() async -> VMConfig? {
+        while !state.profileManager.isReady {
+            try? await Task.sleep(for: .milliseconds(250))
+            if Task.isCancelled { return nil }
+        }
+        if Task.isCancelled { return nil }
+        hideSetupWindow()
+        // The pool's warm-up can be cancelled while we wait (restartPool,
+        // an image rebuild); take this picker down then — the replacement
+        // pool asks again. The token keeps a late cancel from closing the
+        // replacement's picker.
+        let token = UUID()
+        let choice: LaunchChoice? = await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                if showLaunchPicker(completion: { cont.resume(returning: $0) }) {
+                    launchPickerToken = token
+                } else {
+                    cont.resume(returning: nil)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.launchPickerToken == token else { return }
+                self.finishLaunchPicker(nil)
+            }
+        }
+        if Task.isCancelled { return nil }
+        guard let choice,
+              let profile = state.profileManager.profile(withID: choice.profileID) else {
+            // Leave a launch some other path queued meanwhile (⌘N) alone.
+            if case .launchPicker? = pendingLaunch { pendingLaunch = nil }
+            return nil
+        }
+        pendingLaunch = .profile(profile.id, nil, network: choice.network)
+        if !state.poolReady { showSetupWindow() }
+        var config = state.buildConfig(for: profile)
+        config.networkInterface = choice.network
+        return config
+    }
+
+    /// The launch window: pick the profile to boot and the network its
+    /// session uses. Non-modal so the automation server and AppleScript
+    /// keep running while it waits. `completion` gets the choice, or nil
+    /// on Cancel / close. Returns false (completion not called) when
+    /// there is no profile to choose.
+    @MainActor private func showLaunchPicker(completion: @escaping (LaunchChoice?) -> Void) -> Bool {
+        let profiles = state.profileManager.allProfiles
+        guard !profiles.isEmpty else { return false }
+        finishLaunchPicker(nil)  // never two pickers / dangling completions
+        let initial = startupProfile()?.id ?? profiles[0].id
+        let window = NSWindow(contentRect: .zero,
+                              styleMask: [.titled, .closable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        let view = LaunchPickerView(
+            profiles: profiles, initialProfileID: initial,
+            interfaces: VMConfig.bridgedInterfaces(),
+            onOpen: { [weak self] choice in self?.finishLaunchPicker(choice) },
+            onCancel: { [weak self] in self?.finishLaunchPicker(nil) }
+        )
+        launchPickerCompletion = completion
+        // Same chrome as the starting splash: the brand band runs up under
+        // the traffic lights.
+        let hosting = NSHostingView(rootView: view)
+        hosting.safeAreaRegions = []
+        window.contentView = hosting
+        window.title = "Bromure"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.delegate = self  // title-bar close clears launchPickerWindow
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        launchPickerWindow = window
+        return true
+    }
+
+    /// Take the launch picker down and report `choice` (nil = cancelled)
+    /// to whoever is waiting on it, exactly once.
+    @MainActor private func finishLaunchPicker(_ choice: LaunchChoice?) {
+        let completion = launchPickerCompletion
+        launchPickerCompletion = nil
+        launchPickerToken = nil
+        if let window = launchPickerWindow {
+            launchPickerWindow = nil
+            window.orderOut(nil)
+        }
+        completion?(choice)
+    }
+
+    /// Any other path (⌘N, a link from another app) opening a window
+    /// first dismisses the picker as a cancel.
+    @MainActor private func closeLaunchPicker() { finishLaunchPicker(nil) }
 
     /// Re-run the profile-roster observation: bump every open window's
     /// chip so its menu re-renders, then re-arm (Observation fires once).
@@ -495,7 +620,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         } else {
             print("[URL] storing as pending URL")
             pendingURL = url
-            if state.phase != .ready { showSetupWindow() }
+            // The launch picker is up: the link opens in the profile chosen
+            // there once the VM is ready (onPoolReady), so keep it in front.
+            if let launchPickerWindow {
+                launchPickerWindow.makeKeyAndOrderFront(nil)
+            } else if state.phase != .ready {
+                showSetupWindow()
+            }
         }
     }
 
@@ -877,6 +1008,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSWindow) === setupWindow {
             setupWindow = nil
+        }
+        if (notification.object as? NSWindow) === launchPickerWindow {
+            finishLaunchPicker(nil)
         }
     }
 
@@ -1605,6 +1739,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     }
 
     @MainActor func openNewBrowser(initialURL: URL? = nil) {
+        closeLaunchPicker()
         guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
             if state.phase != .ready { showSetupWindow() }
@@ -1662,7 +1797,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
     }
 
-    @MainActor func openNewBrowser(with profile: Profile, initialURL: URL? = nil) {
+    /// - Parameter networkOverride: "nat" or a bridged interface id for
+    ///   this session only (the launch picker); nil keeps the profile's.
+    @MainActor func openNewBrowser(with profile: Profile, initialURL: URL? = nil,
+                                   networkOverride: String? = nil) {
+        closeLaunchPicker()
         // Re-fetch the profile from the manager to pick up any settings changes
         // that occurred between the UI capture and now (e.g. settings panel save).
         let profile = state.profileManager.profile(withID: profile.id) ?? profile
@@ -1671,7 +1810,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             if let url = initialURL {
                 pendingURL = url
             } else {
-                pendingLaunch = .profile(profile.id, nil)
+                pendingLaunch = .profile(profile.id, nil, network: networkOverride)
             }
             if state.phase != .ready { showSetupWindow() }
             return
@@ -1692,6 +1831,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         state.isLaunching = true
         state.profileManager.markUsed(id: profile.id)
         var config = state.buildConfig(for: profile)
+        if let networkOverride { config.networkInterface = networkOverride }
         // Override homepage so xinitrc launches Chromium with the URL using
         // all proper flags, instead of a bare navigateTo after the fact.
         if let initialURL { config.homePage = initialURL.absoluteString }
@@ -1770,7 +1910,8 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             self.state.isLaunching = false
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
-                self?.openNewBrowser(with: profile, initialURL: initialURL)
+                self?.openNewBrowser(with: profile, initialURL: initialURL,
+                                     networkOverride: networkOverride)
             }
             guard proceed else { return }
             let session = BrowserSession(
@@ -2374,6 +2515,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// Dock click with no window: open one, like Safari. With windows
     /// (visible or minimised) AppKit's default reopen brings them back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // The launch picker is up (before the pool's first boot): front it.
+        if let launchPickerWindow {
+            launchPickerWindow.makeKeyAndOrderFront(nil)
+            return false
+        }
         if state.phase != .ready {
             showSetupWindow()
             return false

@@ -82,6 +82,11 @@ final class AppState: @unchecked Sendable {
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?
+    /// Asked once, before the pool boots its first VM: the launch window
+    /// picks the profile and network, and the VM boots with that config
+    /// (so a bridged NIC is chosen before anything starts). nil = the
+    /// default warm-up. Cleared once used.
+    var launchConfigProvider: (@MainActor () async -> VMConfig?)?
     var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
     /// Called when UI (settings pane, etc.) wants to open the enrollment
     /// window. Wired up by the app delegate so the same window can be reached
@@ -581,7 +586,15 @@ final class AppState: @unchecked Sendable {
         }
         warmUpTask = Task {
             do {
-                try await pool?.warmUp()
+                var requested: VMConfig?
+                if let provider = launchConfigProvider {
+                    requested = await provider()
+                    // Cancelled (restartPool, a rebuild) while asking: keep
+                    // the provider so the replacement pool asks again.
+                    guard !Task.isCancelled else { return }
+                    launchConfigProvider = nil
+                }
+                try await pool?.warmUp(requestedConfig: requested)
                 guard !Task.isCancelled else { return }
                 poolReady = true
                 phase = .ready

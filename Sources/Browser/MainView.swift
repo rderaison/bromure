@@ -649,7 +649,7 @@ private struct DetailsBox: View {
 
 /// Capsule progress bar in the brand gradient. `nil` animates a sweeping
 /// segment for work that reports no fraction.
-private struct BrandProgressBar: View {
+struct BrandProgressBar: View {
     let value: Double?
     var height: CGFloat = 8
 
@@ -671,6 +671,10 @@ private struct BrandProgressBar: View {
                             .fill(fill)
                             .frame(width: w)
                             .offset(x: -w + (geo.size.width + w) * phase)
+                            // Span the whole track: without this the view is
+                            // only the segment's width, so the clip below cut
+                            // the sweep off a third of the way across.
+                            .frame(width: geo.size.width, alignment: .leading)
                     }
                     .clipShape(Capsule())
                 }
@@ -684,6 +688,49 @@ private struct BrandProgressBar: View {
     }
 }
 
+/// The brand band shared by the starting splash and the launch picker:
+/// the white mark with rings rippling out from it, solid and dashed
+/// alternating as in the brand artwork.
+struct BrandHeader: View {
+    var height: CGFloat = 150
+    var markWidth: CGFloat = 54
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        ZStack {
+            Brand.backdrop(scheme)
+            TimelineView(.animation) { context in
+                Canvas { ctx, size in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                    for i in 0..<4 {
+                        // Each ring grows from behind the mark and fades
+                        // as it nears the edges.
+                        let p = CGFloat((t / 3.6 + Double(i) / 4).truncatingRemainder(dividingBy: 1))
+                        let w = markWidth * 1.67 + p * size.width * 1.05
+                        let h = w * 0.62
+                        let ring = Path(ellipseIn: CGRect(x: center.x - w / 2, y: center.y - h / 2,
+                                                          width: w, height: h))
+                        let color = GraphicsContext.Shading.color(.white.opacity(0.32 * (1 - p)))
+                        if i.isMultiple(of: 2) {
+                            ctx.stroke(ring, with: color, lineWidth: 1.2)
+                        } else {
+                            ctx.stroke(ring, with: color,
+                                       style: StrokeStyle(lineWidth: 1.2, dash: [3, 4]))
+                        }
+                    }
+                }
+            }
+            BromureMark()
+                .fill(.white)
+                .frame(width: markWidth, height: markWidth / BromureMark.aspectRatio)
+                .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        }
+        .frame(height: height)
+        .clipped()
+    }
+}
+
 // MARK: - Starting panel
 
 /// Normal launch: a small splash that the first browser window replaces
@@ -691,42 +738,9 @@ private struct BrandProgressBar: View {
 /// as a launcher. Rings ripple out from the mark while the pool's first
 /// VM boots.
 struct StartingPanel: View {
-    @Environment(\.colorScheme) private var scheme
-
     var body: some View {
         VStack(spacing: 0) {
-            ZStack {
-                Brand.backdrop(scheme)
-                TimelineView(.animation) { context in
-                    Canvas { ctx, size in
-                        let t = context.date.timeIntervalSinceReferenceDate
-                        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                        for i in 0..<4 {
-                            // Each ring grows from behind the mark and fades
-                            // as it nears the edges; solid and dashed
-                            // alternate, as in the brand artwork.
-                            let p = CGFloat((t / 3.6 + Double(i) / 4).truncatingRemainder(dividingBy: 1))
-                            let w = 90 + p * size.width * 1.05
-                            let h = w * 0.62
-                            let ring = Path(ellipseIn: CGRect(x: center.x - w / 2, y: center.y - h / 2,
-                                                              width: w, height: h))
-                            let color = GraphicsContext.Shading.color(.white.opacity(0.32 * (1 - p)))
-                            if i.isMultiple(of: 2) {
-                                ctx.stroke(ring, with: color, lineWidth: 1.2)
-                            } else {
-                                ctx.stroke(ring, with: color,
-                                           style: StrokeStyle(lineWidth: 1.2, dash: [3, 4]))
-                            }
-                        }
-                    }
-                }
-                BromureMark()
-                    .fill(.white)
-                    .frame(width: 54, height: 54 / BromureMark.aspectRatio)
-                    .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-            }
-            .frame(height: 150)
-            .clipped()
+            BrandHeader(height: 150, markWidth: 54)
 
             VStack(spacing: 6) {
                 Text("Starting Bromure")

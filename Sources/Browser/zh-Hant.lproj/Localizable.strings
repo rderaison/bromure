@@ -808,3 +808,12 @@
 /* Profile settings › General: the profile Bromure opens at launch */
 "Default Profile" = "預設設定檔";
 "Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "啟動 Bromure、按一下其 Dock 圖像，或在沒有瀏覽器視窗位於最前方時按下 ⌘N 時，開啟此設定檔，而非上次使用的設定檔。";
+
+/* Launch picker: profile + network for the first session */
+"Profile" = "描述檔";
+"Shares your Mac's connection" = "共享 Mac 的網路連線";
+"Bridged on %@ · its own address on that network" = "橋接到 %@ · 在該網路上擁有自己的位址";
+"Start a Browser Session" = "開始瀏覽工作階段";
+"Choose a profile and the network it connects through." = "選擇一個描述檔及其連線所用的網路。";
+"Shared (NAT)" = "共享 (NAT)";
+"Bridged — %@" = "橋接 — %@";

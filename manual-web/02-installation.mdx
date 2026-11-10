@@ -97,13 +97,24 @@ Two errors have their own wording:
 
 ### Starting
 
+Once the image is installed, you won't see the setup layout again during a normal launch. Before it boots any VM, Bromure asks **Start a Browser Session**: pick the **Profile** to open and the **Network** its session connects through, then click **Open** (or press Return).
+
 <p align="center">
-  <img src="images/starting.en.jpg" width="360" alt="The Starting Bromure splash: a blue band with the white Bromure mark and rings rippling out from it, the title Starting Bromure, the line Warming up a fresh VM. The first window after launch takes a few seconds longer., and a small progress bar" />
+  <img src="images/launch-picker.en.jpg" width="400" alt="The Start a Browser Session window: a blue band with the white Bromure mark, the title Start a Browser Session, a Profile list (Private Browsing, Work selected with a check mark, Banking, Research), a Network field reading Shared (NAT) — Shares your Mac's connection, and Cancel and Open buttons" />
 </p>
 
-Once the image is installed, you won't see the setup layout again during a normal launch. Instead, a small splash reads **Starting Bromure** — "Warming up a fresh VM. The first window after launch takes a few seconds longer." — while Bromure boots its first VM. The splash disappears as soon as your first window opens, usually within seconds.
+- **Profile** starts on your most recently used profile (or the one chosen under [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with)); on the very first launch that is the built-in **Private Browsing** profile, which keeps nothing when you close it. Click a profile, or use the ↑ and ↓ keys.
+- **Network** offers **Shared (NAT)** — the VM shares your Mac's connection — and one **Bridged — *adapter*** entry per network adapter (Wi-Fi, Ethernet, …), which puts the VM directly on that network with its own address. It starts on the profile's own setting ([Network Isolation › Network Interface](07-profile-settings/network-isolation.mdx)), or the app-wide [Network](08-app-settings/network.mdx) setting when the profile has none. Your choice applies to this session only; the profile's setting is unchanged.
 
-Like Safari, launching Bromure opens a browser window. It opens in your most recently used profile (you can pick a fixed one under [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with)); on the very first launch that is the built-in **Private Browsing** profile, which keeps nothing when you close it. [Quick Start](03-quick-start.mdx) picks up from here.
+**Cancel** opens nothing (Bromure still warms a VM on the default network in the background); click the Dock icon or press ⌘N to open a window later.
+
+After **Open**, the VM boots on the network you chose while a small splash reads **Starting Bromure** — "Starting a fresh VM. Your browser will open in a few seconds." The splash disappears as soon as your window opens, usually within seconds.
+
+<p align="center">
+  <img src="images/starting.en.jpg" width="360" alt="The Starting Bromure splash: a blue band with the white Bromure mark and rings rippling out from it, the title Starting Bromure, the line Starting a fresh VM. Your browser will open in a few seconds., and a small progress bar" />
+</p>
+
+[Quick Start](03-quick-start.mdx) picks up from here.
 
 ## What setup does
 

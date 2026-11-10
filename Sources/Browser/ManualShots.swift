@@ -14,7 +14,7 @@ import BrowserBridges
 /// pass `-AppleLanguages "(fr)"` like any launch.
 enum ManualShots {
     static let shots: [String] =
-        ["setup-welcome", "setup-progress", "setup-error", "starting", "new-profile",
+        ["setup-welcome", "setup-progress", "setup-error", "starting", "launch-picker", "new-profile",
          "enrollment", "phishing-consent", "warp-eula", "trace-viewer"]
         + SettingsCategory.allCases.map { "profile-\(fileName($0))" }
         + appPanes.map { "settings-\($0.file)" }
@@ -84,6 +84,26 @@ enum ManualShots {
             let host = hosting(MainView(state: state))
             host.safeAreaRegions = []
             let w = window(host, title: "Bromure", style: [.titled, .closable, .miniaturizable, .fullSizeContentView])
+            w.titleVisibility = .hidden
+            w.titlebarAppearsTransparent = true
+            return w
+
+        case "launch-picker":
+            var work = ProfileSettings(); work.persistent = true
+            let profiles = [
+                Profile(name: NSLocalizedString("Private Browsing", comment: ""), color: nil),
+                Profile(name: "Work", color: .blue, settings: work),
+                Profile(name: "Banking", color: .green, settings: work),
+                Profile(name: "Research", color: .orange),
+            ]
+            let view = LaunchPickerView(
+                profiles: profiles, initialProfileID: profiles[1].id,
+                interfaces: [.init(id: "en0", localizedName: "Wi-Fi"),
+                             .init(id: "en7", localizedName: "USB 10/100/1000 LAN")],
+                onOpen: { _ in }, onCancel: {})
+            let host = hosting(view)
+            host.safeAreaRegions = []
+            let w = window(host, title: "Bromure", style: [.titled, .closable, .fullSizeContentView])
             w.titleVisibility = .hidden
             w.titlebarAppearsTransparent = true
             return w
