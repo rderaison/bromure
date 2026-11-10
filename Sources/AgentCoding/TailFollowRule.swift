@@ -11,10 +11,21 @@ import Foundation
 /// it was. (Finding "Streaming content can detach tail following during an
 /// active scroll".)
 enum TailFollowRule {
+    /// How far the user's scroll has moved toward the top since it last
+    /// moved toward the end: upward frames add up (a slow trackpad scroll of
+    /// under a point a frame still counts), a downward one starts over. Not
+    /// the net offset since the scroll began: scrolling down 80 points and
+    /// then back up 40 in one wheel phase is still +40 net, and would never
+    /// let go. (Finding "Reversing a wheel scroll can fail to detach tail
+    /// following".)
+    static func upwardRun(_ run: CGFloat, adding delta: CGFloat) -> CGFloat {
+        delta > 0 ? 0 : run + delta
+    }
+
     /// A scroll lets go: the user is scrolling, the offset has moved toward
-    /// the top since the scroll began (`offsetDelta`, summed over its
-    /// frames), and the end is now below the view's bottom edge (an
-    /// overscroll bouncing back at the end isn't away).
+    /// the top (`offsetDelta`, the `upwardRun` so far), and the end is now
+    /// below the view's bottom edge (an overscroll bouncing back at the end
+    /// isn't away).
     static func releases(userScrolling: Bool, offsetDelta: CGFloat, tailY: CGFloat?, viewport: CGFloat) -> Bool {
         guard userScrolling, viewport > 0, offsetDelta < -1 else { return false }
         return (tailY ?? .infinity) > viewport + 2
