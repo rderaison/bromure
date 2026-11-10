@@ -101,6 +101,23 @@ grep -q '"stdout" *: *"[^"]' "$OUT/agent.json" && pass "claude runs in the guest
 api GET /state | js "[s for s in d.get('agentSessions', []) if s.get('id')=='$SID']" | grep -q "$SID" \
   && pass "the session is in /state" || fail "the session isn't in /state"
 
+# 3b. what a client's panes do with a running workspace
+R=$(api POST "/sessions/$ID/tab" '{"action": "new"}')
+for _ in $(seq 30); do
+  T2=$(api GET /state | js "[len(v['tabs']) for v in d['vms'] if v['id'].lower()=='$ID'][0]" 2>/dev/null)
+  [ "${T2:-0}" -gt "${TABS:-0}" ] && break; sleep 1
+done
+[ "${T2:-0}" -gt "${TABS:-0}" ] && pass "a new tab ($TABS -> $T2)" || fail "no new tab: $R ($TABS -> $T2)"
+api POST "/vms/$ID/file" '{"op": {"op": "list", "path": "/home/ubuntu"}}' | grep -q e2e-mark \
+  && pass "the file browser lists the home" || fail "file list: $(api POST "/vms/$ID/file" '{"op": {"op": "list", "path": "/home/ubuntu"}}' | head -c 300)"
+api POST /agent-sessions/folders "{\"profile\": \"$ID\", \"path\": \"~\"}" | grep -q '"folders"' \
+  && pass "the new-session folder picker answers" || fail "folders: $(api POST /agent-sessions/folders "{\"profile\": \"$ID\", \"path\": \"~\"}")"
+R=$(api POST "/profiles/$ID/firewall" '{"rules": "deny tcp blocked.example\ndefault allow"}')
+case "$R" in *'"ok" : true'*|*'"ok": true'*) pass "a firewall rule saved live" ;; *) fail "firewall: $R" ;; esac
+api GET /state | js "[w['sandboxed'] for w in d['workspaces'] if w['name']=='e2e'][0]" | grep -q True \
+  && pass "its row shows the shield" || fail "no shield after a rule"
+api GET /squelch | grep -qi "$ID" && pass "GET /squelch lists it" || fail "squelch: $(api GET /squelch | head -c 200)"
+
 # 4. suspend and resume
 UP1=$(gx 'cat /proc/uptime' | grep -o '"stdout" *: *"[0-9.]*' | grep -o '[0-9.]*$')
 R=$(T=200 api DELETE "/vms/$ID" '{"action": "suspend"}')
@@ -125,9 +142,24 @@ gx "$AGENT" | grep -q '"stdout" *: *"[^"]' && pass "the agent is still running a
 api GET /state | js "[s for s in d.get('agentSessions', []) if s.get('id')=='$SID']" | grep -q "$SID" \
   && pass "its session is still in /state" || fail "the session is gone after the restart"
 
+# 5b. a soft reboot (the guest halts and boots again), and the CLI's list
+UPB=$(gx 'cat /proc/uptime' | grep -o '"stdout" *: *"[0-9.]*' | grep -o '[0-9.]*$')
+R=$(T=200 api POST "/vms/$ID/reboot" '{"mode": "soft"}')
+sleep 3
+wait_state running 240 && pass "rebooted ($R)" || fail "not running after the reboot: $R"
+for _ in $(seq 60); do gx 'true' | grep -q '"exitCode" *: *0' && break; sleep 1; done
+UPA=$(gx 'cat /proc/uptime' | grep -o '"stdout" *: *"[0-9.]*' | grep -o '[0-9.]*$')
+python3 -I -c "import sys; sys.exit(0 if float(sys.argv[2]) < float(sys.argv[1]) + 5 and float(sys.argv[2]) < 120 else 1)" "${UPB:-0}" "${UPA:-999}" \
+  && pass "a fresh boot (uptime $UPB -> $UPA s)" || fail "uptime $UPB -> $UPA: not rebooted?"
+gx 'cat ~/e2e-mark' | grep -q e2e-mark && pass "the home survives the reboot" || fail "home lost across the reboot"
+cli workspaces ls 2>&1 | grep -q e2e && pass "workspaces ls lists it" || fail "workspaces ls: $(cli workspaces ls 2>&1 | head -5)"
+
 # 6. shut down, delete
 R=$(T=120 api DELETE "/vms/$ID" '{"action": "shutdown"}')
 wait_state off 90 && pass "shut down" || fail "not off: $R"
+CP=$(api GET "/vms/$ID/checkpoints")
+case "$CP" in *'"checkpoints"'*) pass "checkpoints answer ($(echo "$CP" | js "len(d['checkpoints'])") listed$(echo "$CP" | js "'; ' + d['note'] if 'note' in d else ''"))" ;;
+  *) fail "checkpoints: $CP" ;; esac
 R=$(api DELETE "/profiles/$ID")
 api GET /state | js "[w['name'] for w in d['workspaces']]" | grep -q "'e2e'" && fail "not deleted: $R" || pass "deleted"
 
