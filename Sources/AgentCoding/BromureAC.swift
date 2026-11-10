@@ -14302,10 +14302,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
         for source in TaskTranscriptArchive.readOrder(forArchive: forArchive) {
             let text: String?
+            var pinned: String?
             switch source {
             case .archive: text = TaskTranscriptArchive.load(task.id)
             case .session: text = await taskSessionTranscript(task)
-            case .guest: text = await fullTaskTranscript(task)
+            case .guest:
+                let full = await fullTaskTranscript(task)
+                text = full?.text
+                pinned = full?.pinnedID
             }
             guard let text, !text.isEmpty else { continue }
             // The full read stops at its cap (the file's first 25 MB): the
@@ -14314,13 +14318,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // ceiling (or unreadable so), sharing none: the head and that
             // tail both -- the end is where the final report is -- never the
             // head alone (Finding "Capped transcript head is archived when
-            // the session tail does not overlap").
+            // the session tail does not overlap") -- and only when the read
+            // was of the session's own conversation (Finding "Capped
+            // archive can append an unrelated session transcript").
             if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text) {
-                let whole = await wholeGuestTranscript(task, head: text)
+                let whole = await wholeGuestTranscript(task, head: text, pinnedID: pinned)
                 let tail = await taskSessionTranscript(task)
+                let same = TaskTranscriptArchive.sameConversation(
+                    pinnedID: pinned, tool: task.tool.rawValue, head: text, sessionTail: tail)
                 let kept = TaskTranscriptArchive.archiveJoin(
                     whole: whole?.data ?? Data(text.utf8), complete: whole?.complete ?? false,
-                    sessionTail: tail.map { Data($0.utf8) })
+                    sessionTail: tail.map { Data($0.utf8) }, sameConversation: same)
                 return String(decoding: kept, as: UTF8.self)
             }
             return text
@@ -14331,10 +14339,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The guest transcript a capped full read came from, re-read whole in
     /// exact chunks up to `wholeReadCeiling`. `complete`: it reached the
     /// file's end. nil when unreadable, or not the same file as `head`.
-    private func wholeGuestTranscript(_ task: CodingTask, head: String) async -> (data: Data, complete: Bool)? {
-        guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
-              let locate = CodingTaskEngine.taskTranscriptLocate(branch: branch, agent: task.tool)
-        else { return nil }
+    /// `pinnedID`: the conversation `head` was read by -- that file again,
+    /// not the worktree's newest.
+    private func wholeGuestTranscript(_ task: CodingTask, head: String,
+                                      pinnedID: String?) async -> (data: Data, complete: Bool)? {
+        let locate: String
+        if let pinnedID {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: pinnedID, into: "f")
+            guard !pick.isEmpty else { return nil }
+            locate = "f=\"\"; " + pick
+        } else {
+            guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
+                  let byBranch = CodingTaskEngine.taskTranscriptLocate(branch: branch, agent: task.tool)
+            else { return nil }
+            locate = byBranch
+        }
         let chunk = TaskTranscriptArchive.wholeReadChunk
         var data = Data()
         while data.count < TaskTranscriptArchive.wholeReadCeiling {
@@ -14364,8 +14383,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the Done archive ran would be saved as this task's, for good
     /// (Finding "Archiving can save a newer conversation from the same
     /// worktree"). Without an id: by branch, as before, but not a file that
-    /// is another session's conversation.
-    private func fullTaskTranscript(_ task: CodingTask) async -> String? {
+    /// is another session's conversation. `pinnedID`: the conversation id
+    /// the file was read by (nil for the by-branch lookups).
+    private func fullTaskTranscript(_ task: CodingTask) async -> (text: String, pinnedID: String?)? {
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
         let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
@@ -14376,7 +14396,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if let out = try? await guestExec(profileID: task.profileID, command: "f=\"\"; " + pick + emit,
                                                   timeout: 30),
                    !out.isEmpty {
-                    return out
+                    return (out, id)
                 }
                 guard task.tool == .claude,
                       let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
@@ -14384,16 +14404,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 guard FileManager.default.fileExists(atPath: img.path) else { return nil }
                 return await Task.detached(priority: .userInitiated) {
                     Self.ext4Transcript(imagePath: img.path, conversationID: id)
-                }.value
+                }.value.map { ($0, id) }
             }
         }
         let others = Set(agentSessionStore.sessions.compactMap { s -> String? in
             guard s.id != task.sessionID, s.profileID == task.profileID else { return nil }
             return s.agentTranscriptID?.lowercased()
         })
-        func mine(_ text: String) -> String? {
+        func mine(_ text: String) -> (text: String, pinnedID: String?)? {
             TaskTranscriptArchive.fallbackBelongs(text, tool: task.tool.rawValue, otherConversationIDs: others)
-                ? text : nil
+                ? (text, nil) : nil
         }
         // Kimi, a task with no session of its own: the worktree session's
         // journal by id — no folder/slug guessing (Kimi cuts bucket names).
@@ -14410,7 +14430,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
                 if let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 30),
                    !out.isEmpty {
-                    return out
+                    return (out, nil)
                 }
             }
         }

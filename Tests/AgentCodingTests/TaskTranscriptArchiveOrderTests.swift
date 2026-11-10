@@ -69,7 +69,8 @@ struct TaskTranscriptArchivePastCapTests {
     @Test("No shared record and a read short of the end: the head and the tail both, not the head alone")
     func headAndTail() {
         let head = recs(1...5), tail = recs(50...55)
-        let kept = String(decoding: TaskTranscriptArchive.archiveJoin(whole: head, complete: false, sessionTail: tail),
+        let kept = String(decoding: TaskTranscriptArchive.archiveJoin(whole: head, complete: false, sessionTail: tail,
+                                                                                  sameConversation: true),
                           as: UTF8.self)
         #expect(kept.contains(#""content":"m1""#))
         #expect(kept.contains(#""content":"m55""#))   // the end, where the final report is
@@ -80,12 +81,56 @@ struct TaskTranscriptArchivePastCapTests {
     func wholeAndOverlap() {
         let whole = recs(1...20)
         // Complete and nothing shared (another conversation's tail): the file as read.
-        #expect(TaskTranscriptArchive.archiveJoin(whole: whole, complete: true, sessionTail: recs(50...55)) == whole)
+        #expect(TaskTranscriptArchive.archiveJoin(whole: whole, complete: true, sessionTail: recs(50...55),
+                                                          sameConversation: true) == whole)
         // Shared records: the tail's newer ones join after.
-        let joined = String(decoding: TaskTranscriptArchive.archiveJoin(whole: whole, complete: true, sessionTail: recs(18...25)),
+        let joined = String(decoding: TaskTranscriptArchive.archiveJoin(whole: whole, complete: true, sessionTail: recs(18...25),
+                                                                                      sameConversation: false),
                             as: UTF8.self)
         #expect(joined.contains(#""content":"m25""#) && joined.contains(#""content":"m1""#))
-        #expect(TaskTranscriptArchive.archiveJoin(whole: whole, complete: false, sessionTail: nil) == whole)
+        #expect(TaskTranscriptArchive.archiveJoin(whole: whole, complete: false, sessionTail: nil, sameConversation: true) == whole)
+    }
+
+    @Test("An unshared tail not proven to be the same conversation isn't appended")
+    func unrelatedTailRefused() throws {
+        // Finding "Capped archive can append an unrelated session transcript":
+        // the capped read was the worktree's newest file (or an offline
+        // read), the session copy another conversation.
+        let head = recs(1...5), other = recs(50...55)
+        #expect(TaskTranscriptArchive.archiveJoin(whole: head, complete: false, sessionTail: other,
+                                                  sameConversation: false) == head)
+        // Shared records still join, proven or not.
+        let joined = String(decoding: TaskTranscriptArchive.archiveJoin(
+            whole: head, complete: false, sessionTail: recs(4...8), sameConversation: false), as: UTF8.self)
+        #expect(joined.contains(#""content":"m8""#))
+
+        let a = "11111111-2222-4333-8444-555555555555", b = "66666666-7777-4888-9999-000000000000"
+        func claude(_ id: String) -> String { #"{"type":"user","sessionId":"\#(id)","uuid":"x"}"# + "\n" }
+        // Not read by the session's own id: never the same.
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude",
+                                                         head: claude(a), sessionTail: claude(a)))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "codex", head: "x", sessionTail: "y"))
+        // Pinned, and Claude's records agree (or don't say).
+        #expect(TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "claude",
+                                                        head: claude(a), sessionTail: claude(a.uppercased())))
+        #expect(TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "claude", head: claude(a), sessionTail: nil))
+        #expect(TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "codex", head: "x", sessionTail: "y"))
+        // Pinned, but either names another conversation.
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "claude",
+                                                         head: claude(a), sessionTail: claude(b)))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "claude",
+                                                         head: claude(b), sessionTail: claude(a)))
+
+        // The archive path threads the pinned id through, and only the
+        // pinned reads carry one.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("let whole = await wholeGuestTranscript(task, head: text, pinnedID: pinned)"))
+        #expect(ac.contains("sessionTail: tail.map { Data($0.utf8) }, sameConversation: same)"))
+        #expect(ac.contains("return (out, id)"))
+        #expect(ac.contains("}.value.map { ($0, id) }"))
+        #expect(ac.contains("? (text, nil) : nil"))
     }
 
     @Test("The re-read is checked against the capped read, in exact chunks")
@@ -119,7 +164,7 @@ struct TaskTranscriptArchivePastCapTests {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
-        #expect(ac.contains("let whole = await wholeGuestTranscript(task, head: text)"))
+        #expect(ac.contains("let whole = await wholeGuestTranscript(task, head: text, pinnedID: pinned)"))
         #expect(ac.contains("TaskTranscriptArchive.archiveJoin("))
     }
 }
