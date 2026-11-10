@@ -7,6 +7,16 @@ import Foundation
 extension Daemon {
     /// `/tasks…`, `/automations…`, `/automation-runs/…`; nil for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/automations"): h=382dc2f2e17eee60 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automation-sources"): h=74321afd31efa247 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/automations"): h=ba8982c888b6e19d @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/tasks"): h=2b0018397b4d82e0 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/tasks"): h=8bf6fcc99c5cc833 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/tasks/") && p.hasSuffix("/transcript"): h=3f4c3f73c062b4c0 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/tasks/"): h=246559f981c3fb35 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automation-runs/"): h=27a2b964225dc883 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p == "/watches" || p.hasPrefix("/watches/")                 || p.hasPrefix("/findings/"): h=569897f14eb6e2f1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/automations/"): h=df3d8972eac1ad9c @f127f8ab
     func boardRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         switch (method, path) {

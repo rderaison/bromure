@@ -296,6 +296,7 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
     }
 
     // @port-skip linux-only: NIO request framing
+    // @port ACAutomationServer.handleRequest(fd: Int32) h=2753bc13a5818633 @f127f8ab
     private func process(_ context: ChannelHandlerContext) {
         guard authorized == true, !started else { return }
         guard let end = buf.readableBytesView.firstRange(of: Array("\r\n\r\n".utf8)) else {

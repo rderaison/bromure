@@ -6,6 +6,8 @@ import Foundation
 extension Daemon {
     /// `POST /subscriptions/register|forget`; nil for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/register"): h=660996cce7a181e6 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/subscriptions/forget"): h=588a794720f01642 @f127f8ab
     func subscriptionsRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let provider = body["provider"]?.stringValue ?? ""
         let pid = body["profileId"]?.stringValue.flatMap(UUID.init(uuidString:))

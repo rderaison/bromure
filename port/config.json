@@ -808,6 +808,122 @@
       "reason": "ui"
     },
     {
+      "id": "ACAutomationServer.static awaitTaskAnswer(_: @escaping@MainActor(UUID,[String:Any])async->[String:Any], id: UUID, body: [String:Any])",
+      "reason": "macOS bridges a main-actor answer back to its blocking request thread with a semaphore; Linux routes are async (boardRoute awaits the answer)"
+    },
+    {
+      "id": "ACAutomationServer.static jsonNumberOrNull(_: Double?)",
+      "reason": "a [String: Any] JSON helper; Linux builds JSONValue"
+    },
+    {
+      "id": "ACAutomationServer.init(port: UInt16, bindAddress: String)",
+      "reason": "the automation API's TCP listener (macOS's localhost port): a Linux daemon serves its control socket only (ControlServer, NIO)"
+    },
+    {
+      "id": "ACAutomationServer.startTCP()",
+      "reason": "the automation API's TCP listener (macOS's localhost port): a Linux daemon serves its control socket only (ControlServer, NIO)"
+    },
+    {
+      "id": "ACAutomationServer.beginAccepting(on: Int32)",
+      "reason": "the automation API's TCP listener (macOS's localhost port): a Linux daemon serves its control socket only (ControlServer, NIO)"
+    },
+    {
+      "id": "ACAutomationServer.acceptConnection()",
+      "reason": "the automation API's TCP listener (macOS's localhost port): a Linux daemon serves its control socket only (ControlServer, NIO)"
+    },
+    {
+      "id": "ACAutomationServer.static setReceiveTimeout(_: Int32, _: TimeInterval)",
+      "reason": "the automation API's TCP listener (macOS's localhost port): a Linux daemon serves its control socket only (ControlServer, NIO)"
+    },
+    {
+      "id": "ACAutomationServer.init(unixSocketPath: String)",
+      "reason": "macOS's BSD-socket server; Linux's control socket is ControlServer.start (startUnix's port)"
+    },
+    {
+      "id": "ACAutomationServer.start()",
+      "reason": "macOS's BSD-socket server; Linux's control socket is ControlServer.start (startUnix's port)"
+    },
+    {
+      "id": "ACAutomationServer.stop()",
+      "reason": "macOS's BSD-socket server; Linux's control socket closes with ControlServer.close"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (_, let p) where p == \"/debug/ui-shot\" || p.hasPrefix(\"/debug/ui-shot?\"):",
+      "reason": "screen-only: renders macOS windows to PNG (a debug hook)"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/debug/editor\"):",
+      "reason": "screen-only: drives macOS's profile editor window (a debug hook)"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/debug/fatclient\"):",
+      "reason": "screen-only: drives macOS's fat-client windows (a debug hook)"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/detect/prompt-injection\"):",
+      "reason": "debug-only (BROMURE_DEBUG_CLAUDE): runs the detectors on posted text; Linux's detectors run in the proxy and its tests"
+    },
+    {
+      "id": "ACAutomationServer.static runDetection(text: String, kind: String)",
+      "reason": "debug-only (BROMURE_DEBUG_CLAUDE): see /detect/prompt-injection"
+    },
+    {
+      "id": "ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (\"POST\", \"/connector\"):",
+      "reason": "test hooks driving macOS's connector window and its Slack/WhatsApp setup sheets (create, window, slack-setup, disconnect, wa-qr\u2026): a Linux server has no such window"
+    },
+    {
+      "id": "ACAutomationServer.vmExec(profileID: String, command: String, timeoutSeconds: Int)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static writeScreen(_: Int32, _: [UInt8])",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static writeAll(_: Int32, _: [UInt8], _: Int)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static executeShellCommand(fd: Int32, command: String, argv: [String]?, timeout: Int)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static exchangeJSON(fd: Int32, request: [String:Any], replyWithin: TimeInterval?)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static writeAllStreaming(_: Int32, _: Data)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static writeAllData(_: Int32, _: Data)",
+      "reason": "macOS's raw-fd plumbing for the guest shell bridge and responses; a Linux daemon execs through agentd (Daemon.exec) and writes responses through NIO (ControlServer.encode)"
+    },
+    {
+      "id": "ACAutomationServer.static sanitizeJSON(_: Any)",
+      "reason": "[String: Any] \u2192 JSON cleanup for JSONSerialization; Linux builds JSONValue, valid by construction"
+    },
+    {
+      "id": "ACAutomationServer.static comparableSections(_: [String:Any])",
+      "reason": "the push feed's NSObject comparison of [String: Any] sections; Linux compares JSONValue sections directly (changedSections, frame)"
+    },
+    {
+      "id": "ACAutomationServer.static wholeFrame(_: [String:Any])",
+      "reason": "the push feed's NSObject comparison of [String: Any] sections; Linux compares JSONValue sections directly (changedSections, frame)"
+    },
+    {
+      "id": "ACAutomationServer.static pushComparable(_: [String:Any])",
+      "reason": "the push feed's NSObject comparison of [String: Any] sections; Linux compares JSONValue sections directly (changedSections, frame)"
+    },
+    {
+      "id": "ACAutomationProfileInfo.toDict()",
+      "reason": "/profiles rows: Linux's are describe(_:) (automationProfileDescribe's port)"
+    },
+    {
+      "id": "ACAutomationServer.sendFirewallResult(fd: Int32, _: FirewallCommitResult)",
+      "reason": "writes firewallResponse on the fd; Linux returns firewallResponse's ControlResponse"
+    },
+    {
       "path": "Sources/AgentCoding/CloudflareTunnel.swift",
       "reason": "the client runs the quick tunnel (decided 2026-11-09): macOS's VM dashboard starts cloudflared on whichever Mac shows it, with the guest's address as origin -- a fat client's reaches a remote server's guest through its own utun tunnel -- so a Linux server needs none and downloads none. An iPad/iOS client has no tunnel either way, as with a remote Mac server today; server-side tunnels would be a new feature for both platforms"
     },

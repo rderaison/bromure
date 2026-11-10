@@ -8,6 +8,13 @@ extension Daemon {
     /// `/delegations/request`, `GET /delegations/<id>/file?path=…`, `POST
     /// /delegations/<id>/<action>`, `GET|PUT /grid-layout`; nil otherwise.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/grid-layout"): h=4d0357b163d592cd @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/grid-layout"): h=42afedd2c990ced4 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/delegations/request"): h=ecb28373c18671f3 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/delegations/") && p.contains("/file"): h=ebb2cde6d2c87e52 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/delegations/"): h=37e41e4a18a87385 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/instruction-presets"): h=d3f32e671d72af0b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-rooms/"): h=a0235d32728bcdb1 @f127f8ab
     func roomsRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let pq = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = pq[0], query = pq.count > 1 ? pq[1] : ""

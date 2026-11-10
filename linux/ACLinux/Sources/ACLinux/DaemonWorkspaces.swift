@@ -9,6 +9,12 @@ extension Daemon {
     /// firewall (`POST …/firewall`, `…/firewall-edit`), and `POST
     /// /agent-sessions/folders`; nil for any other path.
     // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=59e55ae73cdc6185 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/squelch"): h=7683b90b12a0dc9b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/profiles/"): h=da0189f989a394c5 @f127f8ab
+    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "GET": h=2480df5b415bae78 @f127f8ab
+    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "PUT", "PATCH": h=f633e99ddcbde1c8 @f127f8ab
+    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / case "DELETE": h=94bd44937ab2cb14 @f127f8ab
+    // @port ACAutomationServer.handleProfileRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / default: h=a378a9dda33ea55e @f127f8ab
     func workspaceRoute(_ method: String, _ fullPath: String, _ body: JSONValue) async -> ControlResponse? {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = parts[0], query = parts.count > 1 ? parts[1] : ""

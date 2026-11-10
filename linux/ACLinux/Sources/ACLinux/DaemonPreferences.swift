@@ -9,6 +9,10 @@ extension Daemon {
     /// `GET|PUT|PATCH /preferences`, `GET|PUT|PATCH /models/settings`; nil
     /// for any other path.
     // @port-skip linux-only: the Linux router's share of ACAutomationServer.handleRequest
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/preferences"): h=135b9ea34619bb62 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("PUT", "/preferences"), ("PATCH", "/preferences"): h=f4188d370ef7a6bd @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/models/settings"): h=2694f9914b1a08f4 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("PUT", "/models/settings"), ("PATCH", "/models/settings"): h=279aafb685a1b5b9 @f127f8ab
     func preferencesRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse? {
         let doc = (body.foundationObject as? [String: Any]) ?? [:]
         switch (method, path) {

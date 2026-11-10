@@ -578,6 +578,21 @@ public actor Daemon {
     /// The control socket's router: the subset of macOS's routes the Linux
     /// daemon has, same paths and JSON; anything else is 404 with a JSON error.
     // @port-skip linux-only: the Linux router (each route below carries its own @port)
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) h=50682b813d59b62f @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/prompts/") && p.hasSuffix("/answer"): h=5085e35fd033de06 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/remote"): h=b6276f976a98e550 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/remote"): h=d60f95389e82ca48 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/remote/keys"): h=0e65891011a4819a @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where m == "DELETE" && p.hasPrefix("/remote/keys/"): h=9403aaa57e622dc5 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/transcript"): h=5176a61b92c6486b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/git-state"): h=1623f7ebb4fc189b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/folders"): h=17e37813123c560a @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p.hasPrefix("/agent-sessions/") && p.hasSuffix("/pending"): h=b5fc63a31b498a9b @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/worktree-open"), ("POST", "/agent-sessions/worktree-discard"): h=3df772160cb4d8e1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/switchboard"): h=79ec264d6a0b2a2e @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", "/agent-sessions/start"): h=36622910b9e35c75 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / default: h=be4becd88b5244ad @f127f8ab
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         // A mutating request moves /state's generation on as it starts and
         // as its response goes out (macOS: route's noteMutation pair).
@@ -892,6 +907,7 @@ public actor Daemon {
     /// The `/state` snapshot (state() and stateSubscribe()); its
     /// pendingPrompts are what macOS's onListPendingPrompts gives.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListPendingPrompts h=7f92140cb6125056 @7dd92fdf
+    // @port ACAutomationServer.buildStateSnapshot() h=fd6fbd34e08dd8ce @f127f8ab
     func stateBody() async -> JSONValue {
         // Decision prompts waiting for a fat client's answer (PendingPromptBroker).
         // The session engine's tab rosters (LinuxSessionHost.tabsModel), from
@@ -1075,6 +1091,8 @@ public actor Daemon {
 
     // partial: no attach (a server has no pane)
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case (let m, let p) where p.hasPrefix("/vms/"): h=343ebd5280ded291 @f127f8ab
+    // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) h=b83437067e545b26 @f127f8ab
+    // @port ACAutomationServer.handleVMRoute(fd: Int32, method: String, path: String, bodyJSON: [String:Any]) / default: h=a378a9dda33ea55e @f127f8ab
     func vmRoute(_ method: String, _ path: String, _ body: JSONValue) async -> ControlResponse {
         let parts = path.dropFirst("/vms/".count).split(separator: "/", maxSplits: 1).map(String.init)
         let sub = parts.count > 1 ? parts[1] : ""
