@@ -75,16 +75,37 @@ enum TaskTranscriptArchive {
     /// end unless `complete` is false) and the session copy's tail: joined
     /// where they share records; when they share none and the read stopped
     /// short, both -- the head, then the tail (the end, with the final
-    /// report) -- rather than the head alone.
-    static func archiveJoin(whole: Data, complete: Bool, sessionTail: Data?) -> Data {
+    /// report) -- rather than the head alone, but only when the two are
+    /// known to be one conversation (`sameConversation`). Otherwise an
+    /// unshared tail may be another conversation -- the full read can be
+    /// the worktree's newest file -- and appending it would archive that
+    /// one as part of this task's, for good (Finding "Capped archive can
+    /// append an unrelated session transcript").
+    static func archiveJoin(whole: Data, complete: Bool, sessionTail: Data?,
+                            sameConversation: Bool) -> Data {
         guard let tail = sessionTail, !tail.isEmpty else { return whole }
         if let joined = SessionTranscriptCache.merge(history: whole, incoming: tail, mode: .overlapOnly) {
             return joined
         }
-        if !complete, let both = SessionTranscriptCache.merge(history: whole, incoming: tail, mode: .continuation) {
+        if !complete, sameConversation,
+           let both = SessionTranscriptCache.merge(history: whole, incoming: tail, mode: .continuation) {
             return both
         }
         return whole
+    }
+
+    /// A full read and the session copy are one conversation: the read was
+    /// pinned to the session's own conversation id (`pinnedID`), and --
+    /// Claude names its conversation in every record -- neither names a
+    /// different one.
+    static func sameConversation(pinnedID: String?, tool: String, head: String, sessionTail: String?) -> Bool {
+        guard let pinnedID else { return false }
+        guard tool == "claude" else { return true }
+        let want = pinnedID.lowercased()
+        for text in [head, sessionTail ?? ""] {
+            if let id = claudeConversationID(text), id.lowercased() != want { return false }
+        }
+        return true
     }
 
     /// Overridable for tests (a temp dir); nil = the real location.
