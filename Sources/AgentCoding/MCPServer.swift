@@ -12,7 +12,7 @@ struct MCP: ParsableCommand {
     var debug = false
 
     @Option(name: .long, help: "Bromure AC automation API URL.")
-    var apiURL: String = "http://127.0.0.1:9223"
+    var apiURL: String = MCP.defaultAPIURL
 
     func run() throws {
         let server = ACMCPServerImpl(apiBase: apiURL, debug: debug)
@@ -20,7 +20,7 @@ struct MCP: ParsableCommand {
         Task {
             await server.run()
             finished = true
-            CFRunLoopStop(CFRunLoopGetMain())
+            MCP.stopMainLoop()
         }
         while !finished {
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
@@ -30,7 +30,7 @@ struct MCP: ParsableCommand {
 
 // MARK: - MCP server actor
 
-private actor ACMCPServerImpl {
+actor ACMCPServerImpl {
     let apiBase: String
     let debug: Bool
 
@@ -213,22 +213,22 @@ private actor ACMCPServerImpl {
             return textResult(jsonString(r))
         case "bromure_ac_get_profile":
             let profile = try requireArg(args, "profile")
-            return textResult(try acScript("get profile json \"\(escapeAS(profile))\""))
+            return textResult(try await profileCommand(.getJSON(profile)))
         case "bromure_ac_set_profile":
             let profile = try requireArg(args, "profile")
             let json = try requireArg(args, "json")
-            let r = try acScript("set profile json \"\(escapeAS(profile))\" to value \"\(escapeAS(json))\"")
+            let r = try await profileCommand(.setJSON(profile, json))
             if r != "ok" { throw MCPACError.api(r) }
             return textResult("ok")
         case "bromure_ac_get_profile_setting":
             let profile = try requireArg(args, "profile")
             let key = try requireArg(args, "key")
-            return textResult(try acScript("get profile setting \"\(escapeAS(profile))\" key \"\(escapeAS(key))\""))
+            return textResult(try await profileCommand(.getSetting(profile, key)))
         case "bromure_ac_set_profile_setting":
             let profile = try requireArg(args, "profile")
             let key = try requireArg(args, "key")
             let value = try requireArg(args, "value")
-            let r = try acScript("set profile setting \"\(escapeAS(profile))\" key \"\(escapeAS(key))\" to value \"\(escapeAS(value))\"")
+            let r = try await profileCommand(.setSetting(profile, key, value))
             if r != "ok" { throw MCPACError.api(r) }
             return textResult("ok")
         case "bromure_ac_app_state" where debug:
@@ -284,7 +284,7 @@ private actor ACMCPServerImpl {
         ["content": [["type": "text", "text": "Error: \(msg)"]], "isError": true]
     }
 
-    nonisolated private func jsonString(_ v: Any) -> String {
+    nonisolated func jsonString(_ v: Any) -> String {
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v, options: [.sortedKeys]),
               let s = String(data: data, encoding: .utf8) else { return "\(v)" }
@@ -296,35 +296,13 @@ private actor ACMCPServerImpl {
         throw MCPACError.missingParam(key)
     }
 
-    nonisolated private func escapeAS(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-    }
-
     nonisolated private func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private func acScript(_ cmd: String) throws -> String {
-        // osascript subprocess. The MCP server runs out-of-process from
-        // the AC app, so this is the cleanest channel for AppleScript-only
-        // commands (the HTTP server's surface is intentionally smaller).
-        let full = "tell application \"Bromure Agentic Coding\" to \(cmd)"
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        task.arguments = ["-e", full]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-        try task.run()
-        task.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
     // MARK: - HTTP
 
-    private func apiCall(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
+    func apiCall(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
         let base = apiBase
         let bodyData = body != nil ? try JSONSerialization.data(withJSONObject: body!) : nil
         return await withCheckedContinuation { continuation in
@@ -334,26 +312,16 @@ private actor ACMCPServerImpl {
         }
     }
 
-    nonisolated private static func rawHTTP(base: String, method: String, path: String, bodyData: Data?) -> [String: Any] {
-        guard let url = URL(string: "\(base)\(path)"),
-              let host = url.host, let port = url.port else {
-            return ["error": "Invalid API URL"]
+    nonisolated static func rawHTTP(base: String, method: String, path: String, bodyData: Data?) -> [String: Any] {
+        let api: (fd: Int32, host: String)
+        switch openAPI(base: base) {
+        case .success(let a): api = a
+        case .failure(let e): return ["error": e.message]
         }
-        let req = "\(method) \(url.path) HTTP/1.1\r\nHost: \(host):\(port)\r\nContent-Type: application/json\r\nContent-Length: \(bodyData?.count ?? 0)\r\nConnection: close\r\n\r\n"
-
-        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return ["error": "Socket failed"] }
+        let fd = api.fd
         defer { Darwin.close(fd) }
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr(host)
-        guard withUnsafePointer(to: &addr, {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }) == 0 else { return ["error": "Connect failed"] }
+        let target = path.hasPrefix("/") ? path : "/" + path
+        let req = "\(method) \(target) HTTP/1.1\r\nHost: \(api.host)\r\nContent-Type: application/json\r\nContent-Length: \(bodyData?.count ?? 0)\r\nConnection: close\r\n\r\n"
 
         _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
         if let bodyData {
@@ -383,7 +351,7 @@ private actor ACMCPServerImpl {
 
 // MARK: - Errors
 
-private enum MCPACError: LocalizedError {
+enum MCPACError: LocalizedError {
     case missingParam(String)
     case api(String)
     case unknownTool(String)
@@ -395,4 +363,80 @@ private enum MCPACError: LocalizedError {
         case .unknownTool(let n):  return "Unknown tool: \(n)"
         }
     }
+}
+
+// MARK: - macOS: the app's localhost API, its AppleScript
+
+#if canImport(Darwin)
+extension MCP {
+    static var defaultAPIURL: String { "http://127.0.0.1:9223" }
+    static func stopMainLoop() { CFRunLoopStop(CFRunLoopGetMain()) }
+}
+
+struct MCPAPIError: Error { let message: String }
+
+extension ACMCPServerImpl {
+    /// A connected socket to the API at `base` (http://host:port), and the
+    /// Host header for it.
+    nonisolated static func openAPI(base: String) -> Result<(fd: Int32, host: String), MCPAPIError> {
+        guard let url = URL(string: base), let host = url.host, let port = url.port else {
+            return .failure(MCPAPIError(message: "Invalid API URL"))
+        }
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return .failure(MCPAPIError(message: "Socket failed")) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr(host)
+        guard withUnsafePointer(to: &addr, {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }) == 0 else { Darwin.close(fd); return .failure(MCPAPIError(message: "Connect failed")) }
+        return .success((fd, "\(host):\(port)"))
+    }
+
+    /// The profile tools: the app's AppleScript commands.
+    func profileCommand(_ op: MCPProfileOp) async throws -> String {
+        switch op {
+        case .getJSON(let p): return try acScript("get profile json \"\(escapeAS(p))\"")
+        case .setJSON(let p, let json): return try acScript("set profile json \"\(escapeAS(p))\" to value \"\(escapeAS(json))\"")
+        case .getSetting(let p, let k): return try acScript("get profile setting \"\(escapeAS(p))\" key \"\(escapeAS(k))\"")
+        case .setSetting(let p, let k, let v):
+            return try acScript("set profile setting \"\(escapeAS(p))\" key \"\(escapeAS(k))\" to value \"\(escapeAS(v))\"")
+        }
+    }
+
+    nonisolated func escapeAS(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+
+    func acScript(_ cmd: String) throws -> String {
+        // osascript subprocess. The MCP server runs out-of-process from
+        // the AC app, so this is the cleanest channel for AppleScript-only
+        // commands (the HTTP server's surface is intentionally smaller).
+        let full = "tell application \"Bromure Agentic Coding\" to \(cmd)"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", full]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        try task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+}
+#endif
+
+/// The four profile tools' operations (macOS: AppleScript commands).
+enum MCPProfileOp: Sendable {
+    case getJSON(String)
+    case setJSON(String, String)
+    case getSetting(String, String)
+    case setSetting(String, String, String)
 }
