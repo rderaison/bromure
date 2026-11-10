@@ -22,6 +22,11 @@ final class InferenceRepairProxy: @unchecked Sendable {
     /// `InferenceService.enginePort`; we forward there.
     private(set) var listenPort = 0
 
+    /// A listening socket the host makes in place of the loopback TCP port
+    /// (the Linux daemon: a unix socket in its user's own runtime dir, which
+    /// no other account on the server reaches). nil: loopback TCP, as here.
+    nonisolated(unsafe) static var makeListener: (() -> Int32)?
+
     private var listenFD: Int32 = -1
     private var running = false
     private let lock = NSLock()
@@ -94,6 +99,14 @@ final class InferenceRepairProxy: @unchecked Sendable {
     func startIfNeeded(enginePort: Int = InferenceService.enginePort) {
         lock.lock(); defer { lock.unlock() }
         if running { return }
+        if let make = Self.makeListener {
+            let fd = make()
+            guard fd >= 0 else { return }
+            listenFD = fd
+            running = true
+            Thread.detachNewThread { [weak self] in self?.acceptLoop(enginePort: enginePort) }
+            return
+        }
         let fd = tcpSocket()
         guard fd >= 0 else { return }
         var yes: Int32 = 1
