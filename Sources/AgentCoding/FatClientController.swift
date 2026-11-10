@@ -3212,7 +3212,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     func execGuest(_ command: String, timeout: Int) async -> String? {
         let controller = controller, workspaceID = workspaceID
         if background {
-            await controller.bulkPriority.waitForQuiet()
+            // Cancelled meanwhile (the chat reopened or gone): no read. The
+            // transport runs detached, so a request sent now would cross the
+            // lane whatever became of its reader.
+            guard (try? await controller.bulkPriority.waitForQuiet()) != nil else { return nil }
             // Brought on stage while it waited: the user's read now.
             if background {
                 return try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
