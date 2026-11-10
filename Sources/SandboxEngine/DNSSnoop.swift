@@ -139,6 +139,17 @@ final class DNSSnoopCache: @unchecked Sendable {
         }.map(\.key)
     }
 
+    /// The names the guest asked for that answered with `ip`, most recent
+    /// first -- `names(for:)` without the CNAME targets. One CNAME answer
+    /// gives an address two names (`www.wikipedia.org` and its
+    /// `dyna.wikimedia.org`), but only one site was looked up.
+    func queriedNames(for ip: UInt32, now: Date = Date()) -> [String] {
+        let all = names(for: ip, now: now)
+        lock.lock(); defer { lock.unlock() }
+        guard let e = map[ip], e.expiry > now else { return [] }
+        return all.filter { e.names[$0]?.query == true }
+    }
+
     private func pruneLocked(_ now: Date) {
         map = map.filter { $0.value.expiry > now }
     }

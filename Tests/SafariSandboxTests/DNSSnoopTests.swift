@@ -74,6 +74,18 @@ struct DNSSnoopTests {
         #expect(c.names(for: 1, now: t.addingTimeInterval(8)).prefix(2).contains("www.wikipedia.org"))
     }
 
+    @Test("The names asked for, without the CNAME targets")
+    func queriedNamesOnly() {
+        let c = DNSSnoopCache(), t = Date()
+        c.record(ip: 1, name: "dyna.wikimedia.org", ttl: 300, query: false, now: t)
+        c.record(ip: 1, name: "www.wikipedia.org", ttl: 300, query: true, now: t)
+        #expect(c.queriedNames(for: 1, now: t) == ["www.wikipedia.org"])
+        c.record(ip: 1, name: "www.wikimedia.org", ttl: 300, query: true, now: t.addingTimeInterval(5))
+        #expect(c.queriedNames(for: 1, now: t.addingTimeInterval(6)) == ["www.wikimedia.org", "www.wikipedia.org"])
+        #expect(c.queriedNames(for: 1, now: t.addingTimeInterval(4000)).isEmpty)
+        #expect(c.queriedNames(for: 2, now: t).isEmpty)
+    }
+
     @Test("A CDN name once queried directly doesn't outrank the site every later answer is for (#38)")
     func queriedRecencyBeatsStickyAlias() {
         let c = DNSSnoopCache()

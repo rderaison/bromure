@@ -4076,6 +4076,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Network lineage names a direct flow's address by what the guest's
         // DNS answers called it (an agent's own fetch names a host).
         NetworkLineage.shared.hostNames = { VMNetSwitch.shared.hostnames(forIP: $0) }
+        NetworkLineage.shared.queriedHostNames = { VMNetSwitch.shared.queriedHostnames(forIP: $0) }
         VMNetSwitch.shared.setEgressObserver { ev in
             let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
             let host = ev.proto == 41 ? "(no IPv6 rules)"
