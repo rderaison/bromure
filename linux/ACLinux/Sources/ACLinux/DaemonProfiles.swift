@@ -100,6 +100,62 @@ extension Daemon {
         return ControlResponse(201, JSONValue(foundation: out) ?? .object([:]))
     }
 
+    /// A new user's first workspace (macOS: made silently at the end of
+    /// onboarding), once per state directory and only when there's none:
+    /// its agent is the first the Models settings can start (Claude Code,
+    /// Codex, Grok, Kimi, omp); with nothing configured, Claude Code, whose
+    /// in-session sign-in covers the first start. Tried again at the next
+    /// start if it couldn't be made.
+    // partial: at the daemon's first start (onboarding is the client's)
+    // @port ACAppDelegate.ensureFirstWorkspace(created: UUID?) h=9002aaea13b8bb95 @d3ebbda2
+    func ensureFirstWorkspace() async {
+        let marker = config.stateDir + "/first-workspace"
+        guard !FileManager.default.fileExists(atPath: marker) else { return }
+        guard profileStore.loadAll().isEmpty, !records.contains(where: { !$0.managed }) else {
+            try? Data().write(to: URL(fileURLWithPath: marker))
+            return
+        }
+        let store = profileStore
+        let draft = store.newProfileFromTemplate(name: Self.nextDefaultProfileName(existing: []))
+        let subscribed = subscribedProviders(for: draft)
+        let (tool, authMode) = await MainActor.run { () -> (Profile.Tool, Profile.AuthMode) in
+            let ready = draft.agentsReadyToStart(ModelSettingsStore.shared.effective(for: draft), subscribed: subscribed)
+            return Self.firstWorkspaceAgent(draft, ready: ready)
+        }
+        let r = await createProfile(["name": .string(draft.name), "tool": .string(tool.rawValue),
+                                     "authMode": .string(authMode.rawValue)])
+        guard r.status == 201 else {
+            FileHandle.standardError.write(Data("[onboarding] couldn't create the first workspace: \(r.body["error"]?.stringValue ?? "\(r.status)")\n".utf8))
+            return
+        }
+        try? Data().write(to: URL(fileURLWithPath: marker))
+        FileHandle.standardError.write(Data("bromure-ac daemon: created the first workspace, '\(draft.name)' (\(tool.rawValue))\n".utf8))
+    }
+
+    /// The first workspace's agent: its own if it can start, else the first
+    /// of Claude Code, Codex, Grok, Kimi, omp that can (omp has no subscription).
+    // @port-skip linux-only: the agent pick of ensureFirstWorkspace
+    static func firstWorkspaceAgent(_ p: Profile, ready: Set<Profile.Tool>) -> (Profile.Tool, Profile.AuthMode) {
+        var (tool, auth) = (p.tool, p.authMode)
+        let preference: [Profile.Tool] = [.claude, .codex, .grok, .kimi, .omp]
+        if !ready.contains(tool), let pick = preference.first(where: ready.contains) {
+            tool = pick
+            if tool == .omp, auth == .subscription { auth = .token }
+        }
+        return (tool, auth)
+    }
+
+    /// "Default workspace", or "Default workspace 2", 3… past the names taken.
+    // @port ACAppDelegate.nextDefaultProfileName() h=f451a027c6618d41 @d3ebbda2
+    static func nextDefaultProfileName(existing names: [String]) -> String {
+        let base = NSLocalizedString("Default workspace", comment: "Placeholder name for a new profile")
+        let existing = Set(names.map { $0.lowercased() })
+        if !existing.contains(base.lowercased()) { return base }
+        var n = 2
+        while existing.contains("\(base) \(n)".lowercased()) { n += 1 }
+        return "\(base) \(n)"
+    }
+
     /// `PUT|PATCH /profiles/<id>`: the shared save (a full document replaces,
     /// a partial one overlays; blank secrets keep the stored ones). 404 for
     /// a missing workspace, 400 for a bad document.

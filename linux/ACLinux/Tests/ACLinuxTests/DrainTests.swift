@@ -93,3 +93,30 @@ extension DaemonGlobalSuites {
         }
     }
 }
+
+extension DaemonGlobalSuites {
+    /// A new user's first workspace (macOS: ensureFirstWorkspace): its name,
+    /// its agent, and never when there's one already.
+    @Suite("First workspace", .serialized)
+    struct FirstWorkspaceTests {
+        @Test func itsNameAndAgentAreMacOSs() {
+            #expect(Daemon.nextDefaultProfileName(existing: []) == "Default workspace")
+            #expect(Daemon.nextDefaultProfileName(existing: ["default workspace", "Default workspace 2"]) == "Default workspace 3")
+            let p = Profile(name: "x", tool: .claude, authMode: .subscription)
+            #expect(Daemon.firstWorkspaceAgent(p, ready: []) == (.claude, .subscription), "nothing set up: Claude Code")
+            #expect(Daemon.firstWorkspaceAgent(p, ready: [.claude, .codex]) == (.claude, .subscription))
+            #expect(Daemon.firstWorkspaceAgent(p, ready: [.grok, .codex]) == (.codex, .subscription))
+            #expect(Daemon.firstWorkspaceAgent(p, ready: [.omp]) == (.omp, .token), "omp has no subscription")
+        }
+
+        @Test func aUserWithAWorkspaceGetsNone() async throws {
+            let (d, _, dir) = try await DaemonRepairGateTests.daemon()   // one workspace VM registered
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let before = await d.records.count
+            await d.ensureFirstWorkspace()
+            #expect(await d.records.count == before)
+            #expect(FileManager.default.fileExists(atPath: dir + "/state/first-workspace"), "once: not again after")
+            await d.shutdown()
+        }
+    }
+}

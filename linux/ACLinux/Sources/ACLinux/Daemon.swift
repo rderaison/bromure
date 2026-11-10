@@ -475,6 +475,8 @@ public actor Daemon {
         // `--rm` workspaces a previous daemon left stopped.
         await d.sweepStoppedEphemeral()
         await d.startSessionEngine()
+        // A new user's first workspace (macOS: at the end of onboarding).
+        await d.ensureFirstWorkspace()
         // Taken-back workspaces: their credentials were set up as adoption
         // took them (before their proxy listeners served); their kubeconfigs
         // are rewritten now that the session host is up (the kube fakes were

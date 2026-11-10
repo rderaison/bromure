@@ -2993,10 +2993,6 @@
       "reason": "screen-only: NSAlert sheet for startup prompts"
     },
     {
-      "id": "ACAppDelegate.nextDefaultProfileName()",
-      "reason": "screen-only: placeholder name for the editor's new-workspace draft (the client names it)"
-    },
-    {
       "id": "ACAppDelegate.duplicateProfile(_: Profile)",
       "reason": "fat-client client side, unsure: sidebar Duplicate is local-only; a macOS server has no duplicate route for clients either, so this isn't a Linux-only gap"
     },
