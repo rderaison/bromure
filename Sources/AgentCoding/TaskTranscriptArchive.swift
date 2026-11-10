@@ -97,9 +97,19 @@ enum TaskTranscriptArchive {
     /// A full read and the session copy are one conversation: the read was
     /// pinned to the session's own conversation id (`pinnedID`), and --
     /// Claude names its conversation in every record -- neither names a
-    /// different one.
+    /// different one. Unpinned (a by-branch read: the session learned no
+    /// id), Claude's records prove it alone: the head and the tail both name
+    /// one conversation, the same (Finding "Unpinned task loses the session
+    /// tail when its transcript reread is incomplete"). Other tools' records
+    /// name none, so an unpinned read stays unproven.
     static func sameConversation(pinnedID: String?, tool: String, head: String, sessionTail: String?) -> Bool {
-        guard let pinnedID else { return false }
+        guard let pinnedID else {
+            guard tool == "claude", let tail = sessionTail,
+                  let a = claudeConversationID(head), let b = claudeConversationID(tail),
+                  AgentSessionLocator.isConversationUUID(a)
+            else { return false }
+            return a.lowercased() == b.lowercased()
+        }
         guard tool == "claude" else { return true }
         let want = pinnedID.lowercased()
         for text in [head, sessionTail ?? ""] {
