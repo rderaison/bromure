@@ -106,10 +106,34 @@ struct TaskTranscriptArchivePastCapTests {
 
         let a = "11111111-2222-4333-8444-555555555555", b = "66666666-7777-4888-9999-000000000000"
         func claude(_ id: String) -> String { #"{"type":"user","sessionId":"\#(id)","uuid":"x"}"# + "\n" }
-        // Not read by the session's own id: never the same.
+        // Not read by the session's own id: Claude's records alone can
+        // prove it -- both name one conversation, the same (Finding
+        // "Unpinned task loses the session tail when its transcript reread
+        // is incomplete"); anything less, or another tool, can't.
+        #expect(TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude",
+                                                        head: claude(a), sessionTail: claude(a.uppercased())))
         #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude",
-                                                         head: claude(a), sessionTail: claude(a)))
+                                                         head: claude(a), sessionTail: claude(b)))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude", head: claude(a), sessionTail: nil))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude", head: claude(a), sessionTail: "{}\n"))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude", head: "{}\n", sessionTail: claude(a)))
+        let notUUID = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz".replacingOccurrences(of: "z", with: "-")
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude",
+                                                         head: claude(notUUID), sessionTail: claude(notUUID)))
         #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "codex", head: "x", sessionTail: "y"))
+        #expect(!TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "codex",
+                                                         head: claude(a), sessionTail: claude(a)))
+        // And so the unpinned capped read keeps its head and its tail.
+        let uHead = String(decoding: recs(1...5), as: UTF8.self).replacingOccurrences(of: #""type":"user","#,
+                                                                                     with: #""type":"user","sessionId":"\#(a)","#)
+        let uTail = String(decoding: recs(50...55), as: UTF8.self).replacingOccurrences(of: #""type":"user","#,
+                                                                                       with: #""type":"user","sessionId":"\#(a)","#)
+        let same = TaskTranscriptArchive.sameConversation(pinnedID: nil, tool: "claude", head: uHead, sessionTail: uTail)
+        #expect(same)
+        let kept = String(decoding: TaskTranscriptArchive.archiveJoin(whole: Data(uHead.utf8), complete: false,
+                                                                      sessionTail: Data(uTail.utf8), sameConversation: same),
+                          as: UTF8.self)
+        #expect(kept.contains(#""content":"m1""#) && kept.contains(#""content":"m55""#))
         // Pinned, and Claude's records agree (or don't say).
         #expect(TaskTranscriptArchive.sameConversation(pinnedID: a, tool: "claude",
                                                         head: claude(a), sessionTail: claude(a.uppercased())))
