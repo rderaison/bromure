@@ -933,6 +933,10 @@
       "reason": "osascript to the app: a Linux server has no AppleScript (profileCommand goes through the daemon's /profiles routes)"
     },
     {
+      "id": "ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onDockerRunStatus",
+      "reason": "screen-only: a detached docker run's pull/start progress in the server's own pane (not in /state: a fat client of a macOS server doesn't get it either)"
+    },
+    {
       "path": "Sources/AgentCoding/CloudflareTunnel.swift",
       "reason": "the client runs the quick tunnel (decided 2026-11-09): macOS's VM dashboard starts cloudflared on whichever Mac shows it, with the guest's address as origin -- a fat client's reaches a remote server's guest through its own utun tunnel -- so a Linux server needs none and downloads none. An iPad/iOS client has no tunnel either way, as with a remote Mac server today; server-side tunnels would be a new feature for both platforms"
     },

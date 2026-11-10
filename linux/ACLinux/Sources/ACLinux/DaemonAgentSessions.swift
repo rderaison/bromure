@@ -118,6 +118,7 @@ extension Daemon {
                     LinuxSessionHost.shared?.readAgentStatus()
                     LinuxSessionHost.shared?.readAgentToolCalls()
                     LinuxSessionHost.shared?.readGuestURLs()
+                    LinuxSessionHost.shared?.readGuestErrors()
                     // A guest going down for a reboot (its outbox marker).
                     // Neither waits on a VM's end: ticks never pile up.
                     await me.readGuestRebootIntents()

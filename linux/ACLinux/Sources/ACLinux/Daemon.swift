@@ -1591,10 +1591,13 @@ public actor Daemon {
         try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
         try? fm.removeItem(atPath: dir + "/meta/bromure-agentd.py")
         try fm.copyItem(atPath: config.agentdPath, toPath: dir + "/meta/bromure-agentd.py")
-        for tag in ["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }) {
-            _ = fm.createFile(atPath: dir + "/meta/virtiofs-tags/" + tag, contents: nil)
-        }
+        try Self.writeVirtiofsTagMarkers(["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }),
+                                         in: dir + "/meta", fresh: restoreFrom == nil)
         try writeSharesFile(rec, meta: dir + "/meta")
+        // The automation runs' worktree branches: the guest keeps them out
+        // of its boot restore instead of reopening a tab for each old run.
+        let retired = await MainActor.run { Self.automationWorktreeBranches(SessionStores.shared?.automations) }
+        try retired.map { $0 + "\n" }.joined().write(toFile: dir + "/meta/retired-worktrees.txt", atomically: true, encoding: .utf8)
         // The guest MTU rule (PasstUplink.Config.mtu): 65520 behind passt;
         // VPN profiles keep the macOS 1280/1400 (no profiles on Linux yet).
         try "\(passt.mtu)\n".write(toFile: dir + "/meta/mtu", atomically: true, encoding: .utf8)
@@ -1799,6 +1802,16 @@ public actor Daemon {
            let serial = machine.config.serialLog {
             startBootConsoleScan(id, console: (serial, 0))
         }
+        // Its console's trouble (failed units, panics, OOM kills…) echoed
+        // to the daemon's log for as long as this machine runs.
+        if let serial = machine.config.serialLog {
+            let name = rec.name
+            Task { [weak self] in
+                await BootConsoleScan.echoTrouble(path: serial, name: name,
+                                                  alive: { await self?.live[id]?.machine === machine },
+                                                  emit: { FileHandle.standardError.write(Data(($0 + "\n").utf8)) })
+            }
+        }
         rec.state = .running
         if let restoreFrom {
             // The resumed guest sets its clock from this (agentd's resume
@@ -1814,6 +1827,26 @@ public actor Daemon {
             rec.pidStart = Self.processStartTime(pid)
         }
         try registry.upsert(rec)
+    }
+
+    /// The virtiofs tags the guest mounts (agentd's ConditionPathExists on
+    /// each marker): on a fresh boot the set is written anew, so a share
+    /// removed since leaves no marker behind; a restore keeps the guest's.
+    // partial: the meta share's dir (macOS: the session disk's URL)
+    // @port UbuntuSandboxVM.static writeVirtiofsTagMarkers(_: [String], in: URL) h=b4d0d99cb225f582 @132bb730
+    static func writeVirtiofsTagMarkers(_ tags: [String], in meta: String, fresh: Bool) throws {
+        let fm = FileManager.default
+        let dir = meta + "/virtiofs-tags"
+        if fresh { try? fm.removeItem(atPath: dir) }
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for tag in tags { _ = fm.createFile(atPath: dir + "/" + tag, contents: nil) }
+    }
+
+    /// Every automation run's worktree branch ("wt/<slug>").
+    // @port ACAppDelegate.var automationWorktreeBranches h=1c0ccd3f72caa27f @d3ebbda2
+    @MainActor
+    static func automationWorktreeBranches(_ store: ScheduledAutomationStore?) -> [String] {
+        store?.runs.compactMap { $0.branchSlug.map { "wt/" + $0 } } ?? []
     }
 
     /// A VM's machine configuration (launch and re-adoption build the same one).

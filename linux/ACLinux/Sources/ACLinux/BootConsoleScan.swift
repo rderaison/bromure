@@ -23,6 +23,51 @@ enum BootConsoleScan {
         return String(trimmed.suffix(200))
     }
 
+    /// The daemon-log form of one guest console line, or nil to keep it
+    /// out (it stays in the VM's serial log): only trouble -- systemd
+    /// FAILED units, kernel panics and oopses, OOM kills, emergency mode,
+    /// fsck failures -- ANSI colour stripped, `[guest <name>]` first.
+    // @port UbuntuSandboxVM.static consoleLineForAppLog(_: String, name: String) h=73bf638297235b22 @132bb730
+    static func consoleLineForAppLog(_ raw: String, name: String) -> String? {
+        let line = raw.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return nil }
+        let markers = ["FAILED", "Kernel panic", "Oops:", "BUG:", "Out of memory",
+                       "oom-kill", "emergency mode", "Emergency", "end Kernel panic"]
+        guard markers.contains(where: { line.contains($0) }) || fsBootFailureMatch(in: line) != nil else { return nil }
+        return "[guest \(name)] \(line)"
+    }
+
+    /// Follows a VM's serial log while `alive` says so, each trouble line
+    /// (consoleLineForAppLog) to `emit` (macOS: the console reader's echo
+    /// into the app log).
+    // @port-skip linux-only: the console reader of UbuntuSandboxVM.prepare, over a log file
+    static func echoTrouble(path: String, name: String, poll: Duration = .seconds(1),
+                            alive: @Sendable () async -> Bool, emit: @Sendable (String) -> Void) async {
+        var at: UInt64 = 0
+        var buffer = Data()
+        while !Task.isCancelled, await alive() {
+            if let h = FileHandle(forReadingAtPath: path) {
+                let size = (try? h.seekToEnd()) ?? 0
+                if size < at { at = 0; buffer.removeAll() }
+                if size > at {
+                    try? h.seek(toOffset: at)
+                    let data = (try? h.read(upToCount: Int(min(size - at, 1 << 20)))) ?? Data()
+                    at += UInt64(data.count)
+                    buffer.append(data)
+                }
+                try? h.close()
+            }
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = String(decoding: buffer[buffer.startIndex..<nl], as: UTF8.self)
+                buffer.removeSubrange(buffer.startIndex...nl)
+                if let out = consoleLineForAppLog(line, name: name) { emit(out) }
+            }
+            if buffer.count > 64 << 10 { buffer.removeAll() }   // a line that never ends
+            try? await Task.sleep(for: poll)
+        }
+    }
+
     /// Scans `path` from `offset` until a match (returned), or `keepGoing`
     /// says stop (nil), or `timeout`. Each line is checked, and the
     /// partial tail too: the emergency prompts end without a newline.
