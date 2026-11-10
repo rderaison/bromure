@@ -796,6 +796,7 @@ struct NetworkLineageSharedIPTests {
         #expect(src.contains("let hosts = [decision?.host ?? dst]"))
         #expect(src.contains("let aliases = decision?.host == nil && !viaProxy ? hostNames(dst) : []"))
         #expect(!src.contains("hosts += hostNames(dst)"))
+        #expect(src.contains("if names.count == 1, let name = cached.first { data[\"host\"] = .string(name) }"))
     }
 }
 

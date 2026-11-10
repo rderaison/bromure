@@ -498,8 +498,15 @@ public final class NetworkLineage: @unchecked Sendable {
             // only once it has read the request — silence isn't a verdict.
         }
         if let host = decision?.host { data["host"] = .string(host) }
-        // No decision named it: what the guest's DNS answers called it.
-        if data["host"] == nil, !viaProxy, let name = hostNames(dst).first { data["host"] = .string(name) }
+        // No decision named it: what the guest's DNS answers called it --
+        // when they gave the address one name. A shared (CDN) address's
+        // first cached name is as likely another site's; an agent fetch
+        // matched below names the one it was.
+        if data["host"] == nil, !viaProxy {
+            let cached = hostNames(dst)
+            let names = Set(cached.map(Self.bareHost)).subtracting(["", "?"])
+            if names.count == 1, let name = cached.first { data["host"] = .string(name) }
+        }
         if proto == "packet" {
             // A raw packet socket (AF_PACKET): frames built below the socket
             // layer, so no destination here. The switch still filters and
