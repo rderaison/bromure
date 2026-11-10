@@ -4361,3 +4361,4 @@
 /* Suspend refused for lack of disk space */
 "Couldn't suspend “%@”: the disk is almost full." = "„%@“ konnte nicht angehalten werden: Das Volume ist fast voll.";
 "The workspace is still running." = "Der Arbeitsbereich läuft weiter.";
+"Restart Browser" = "Browser neu starten";

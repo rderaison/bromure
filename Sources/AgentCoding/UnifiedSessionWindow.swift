@@ -1119,6 +1119,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     private func browserModel(for id: Profile.ID) -> BrowserPaneModel {
         if let m = browserModels[id] { return m }
         let m = BrowserPaneModel()
+        m.onRestart = { [weak self] in self?.rebootBrowser(for: id) }
         browserModels[id] = m
         return m
     }
