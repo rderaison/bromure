@@ -1523,7 +1523,15 @@ final class RemoteHostController {
         if let auto = grid["autoFill"] as? Bool { gridStore.setAutoFill(auto) }
     }
 
+    /// The automations section as last applied: the same again changes
+    /// nothing, so it isn't decoded (each item re-encoded first) and pushed
+    /// to the stores -- with every snapshot, several a second.
+    private var lastAutomations: NSDictionary?
+
     private func applyAutomations(_ autos: [String: Any]) {
+        let raw = autos as NSDictionary
+        if let last = lastAutomations, last.isEqual(to: autos) { return }
+        lastAutomations = raw
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         func decode<T: Decodable>(_ arr: [[String: Any]], _ type: T.Type) -> [T] {
             arr.compactMap { dict in
