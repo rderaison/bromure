@@ -336,16 +336,28 @@ extension Daemon {
     }
 
     /// A stream to the guest loopback relay (vsock 5010) of the VM leased
-    /// `ip`, `header` already sent: what a fat client's forward rides on.
-    /// -1 when no running VM has that address (relaying through another VM,
-    /// as macOS does for LoadBalancer addresses, isn't here yet).
-    // partial: only the VM's own address (no relay VM for LoadBalancer addresses); TCP and UDP share it
+    /// `ip` (or one relaying to it: relayVM), `header` already sent: what a
+    /// fat client's forward rides on. -1 when no running VM has or reaches it.
+    // partial: TCP and UDP share it
     // @port ACAppDelegate.resolveFatClientForward(ip: String, port: Int, completion: @escaping@Sendable(Int32)->Void) h=52e22521fc27c675 @7dd92fdf
     // @port ACAppDelegate.resolveFatClientForwardUDP(ip: String, completion: @escaping@Sendable(Int32)->Void) h=9665f79520e2f22d @7dd92fdf
     func relayFD(ip: String, header: String) async -> Int32 {
-        guard let rec = registry.records.first(where: { $0.state == .running && sw.dhcp.leasedIP(for: $0.mac) == ip }),
-              let l = live[rec.id] else {
-            FatClientLog.log("forward-resolver: no running VM at \(ip)")
+        // A VM's own address: its agent dials its own loopback. Any other
+        // address on the VM network (a MetalLB / VM-scoped LoadBalancer IP):
+        // relayed through a VM that can reach it, which dials it itself.
+        let running = registry.records.filter { $0.state == .running && live[$0.id] != nil }
+        let owner = running.first { sw.dhcp.leasedIP(for: $0.mac) == ip }
+        var relay = owner
+        var header = header
+        if owner == nil, Self.inSubnet(ip, cidr: Self.workspaceSubnet.withLockedValue { $0 }) {
+            let ranges: [(cluster: String, range: String)] = await MainActor.run {
+                (SessionStores.shared?.kube.clusters ?? []).compactMap { c in c.metallbRange.map { (c.id.uuidString, $0) } }
+            }
+            relay = Self.relayVM(forVMNetIP: ip, running: running, ranges: ranges)
+            header = header == "UDP\n" ? "UDP \(ip)\n" : "\(ip):" + header
+        }
+        guard let rec = relay, let l = live[rec.id] else {
+            FatClientLog.log("forward-resolver: no running VM at or reaching \(ip)")
             return -1
         }
         let fd = await l.config.dialGuest(port: 5010)
@@ -354,6 +366,35 @@ extension Daemon {
         guard ok else { close(fd); return -1 }
         relayOpened[ip] = Date()
         return fd
+    }
+
+    /// The VM that relays to an address on the VM network no VM owns: a node
+    /// of the cluster whose LoadBalancer range holds it (kube-proxy there
+    /// answers for MetalLB and VM-scoped Services), else any cluster node,
+    /// else any running VM: each reaches the whole subnet, which the host
+    /// can't dial itself.
+    // partial: the subnet check is the caller's (relayFD)
+    // @port ACAppDelegate.relayVM(forVMNetIP: String) h=32b91a53cfae52ce @d3ebbda2
+    nonisolated static func relayVM(forVMNetIP ip: String, running: [VMRecord],
+                                    ranges: [(cluster: String, range: String)]) -> VMRecord? {
+        guard let v = VMNetSwitch.parseIPv4(ip) else { return nil }
+        let nodes = running.filter { $0.kube != nil }
+        for (cluster, r) in ranges {
+            let ends = r.split(separator: "-").compactMap { VMNetSwitch.parseIPv4(String($0)) }
+            guard ends.count == 2, ends[0] <= ends[1], (ends[0]...ends[1]).contains(v) else { continue }
+            if let n = nodes.first(where: { $0.kube?.caseInsensitiveCompare(cluster) == .orderedSame }) { return n }
+        }
+        return nodes.first ?? running.first
+    }
+
+    /// Whether `ip` is in `cidr` (a.b.c.d/n).
+    // @port-skip linux-only: the VM network's subnet check (macOS: VMNetSwitch.subnet.containsGuest)
+    nonisolated static func inSubnet(_ ip: String, cidr: String) -> Bool {
+        let parts = cidr.split(separator: "/")
+        guard parts.count == 2, let base = VMNetSwitch.parseIPv4(String(parts[0])), let bits = Int(parts[1]),
+              (0...32).contains(bits), let v = VMNetSwitch.parseIPv4(ip) else { return false }
+        let mask: UInt32 = bits == 0 ? 0 : ~UInt32(0) << (32 - UInt32(bits))
+        return v & mask == base & mask
     }
 
     /// A /fatclient/forward relay closed.

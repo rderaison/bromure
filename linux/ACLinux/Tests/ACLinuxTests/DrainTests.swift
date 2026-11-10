@@ -30,3 +30,23 @@ struct DrainTests {
         #expect(Daemon.shutdownGrace(Self.rec("w")) == .seconds(20))
     }
 }
+
+/// A fat client's forward to an address no VM leases (a MetalLB
+/// LoadBalancer IP): relayed through a node of the cluster that owns it.
+@Suite("Forwards to LoadBalancer addresses")
+struct LoadBalancerRelayTests {
+    @Test func theClustersNodeRelaysItsRange() {
+        let ws = DrainTests.rec("ws")
+        var a = DrainTests.rec("a-1"); a.kube = "AAAA"
+        var b = DrainTests.rec("b-1"); b.kube = "bbbb"
+        let ranges = [(cluster: "aaaa", range: "192.168.64.200-192.168.64.210"), (cluster: "BBBB", range: "192.168.64.220-192.168.64.230")]
+        #expect(Daemon.relayVM(forVMNetIP: "192.168.64.225", running: [ws, a, b], ranges: ranges)?.name == "b-1")
+        #expect(Daemon.relayVM(forVMNetIP: "192.168.64.205", running: [ws, a, b], ranges: ranges)?.name == "a-1")
+        #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [ws, a, b], ranges: ranges)?.name == "a-1", "any node")
+        #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [ws], ranges: ranges)?.name == "ws", "any VM")
+        #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [], ranges: ranges) == nil)
+        #expect(Daemon.inSubnet("192.168.64.99", cidr: "192.168.64.0/24"))
+        #expect(!Daemon.inSubnet("10.0.0.1", cidr: "192.168.64.0/24"))
+        #expect(!Daemon.inSubnet("192.168.64.1", cidr: "bogus"))
+    }
+}

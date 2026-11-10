@@ -240,8 +240,9 @@ struct DaemonTests {
         #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
 
         // SIGTERM (the systemctl stop path, with signals unblocked even though
-        // Foundation's Process spawned the daemon with them blocked) kills the
-        // running VMs, closes passt and unlinks control.sock.
+        // Foundation's Process spawned the daemon with them blocked) ends each
+        // running workspace by its close action (suspend, the default),
+        // closes passt and unlinks control.sock.
         let termKids = Self.children(of: daemon.processIdentifier)
         kill(daemon.processIdentifier, SIGTERM)
         let tTerm = ContinuousClock.now
@@ -253,6 +254,10 @@ struct DaemonTests {
         #expect(termKids.filter { Self.alive($0.0) }.isEmpty, "children left after SIGTERM: \(termKids)")
 
         daemon = try await w.startDaemon()
+        #expect(try w.state(of: "dm2") == "suspended", "suspended by its close action, not killed")
+        #expect(try w.cli("vm", "start", "dm2").0 == 0, "and it resumes")
+        #expect(try w.cli("vm", "exec", "dm2", "--", "true").0 == 0)
+        #expect(try w.cli("vm", "kill", "dm2").0 == 0)
         #expect(try w.state(of: "dm2") == "stopped")
         // A name that's another VM's id or short id is refused.
         let short = try #require(try w.vm("dm2")?["shortId"]?.stringValue)
