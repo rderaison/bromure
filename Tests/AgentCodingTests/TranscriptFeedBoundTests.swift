@@ -103,6 +103,51 @@ struct TranscriptFeedBoundTests {
         #expect(g.file.count > feed.maxBudget)
     }
 
+    /// Finding "Transcript trim discards loaded earlier history when the
+    /// raised budget is reached": past the raised budget the trim cut back to
+    /// two windows, dropping what "load earlier" had just brought in.
+    @Test("Past a raised budget the trim drops a window, not the loaded history; the budget comes down once it has aged out")
+    func raisedBudgetTrimsGradually() async {
+        let g = FakeGuest()
+        let w = 4_096
+        let feed = TranscriptFeed(windowBytes: w)
+        g.append(600)
+        _ = await refresh(feed, g)
+        #expect(await feed.loadEarlier(agent: "claude", command: g.command, exec: { g.exec($0) }))
+        let raised = feed.budget
+        #expect(raised > 3 * w)
+        func first() -> String { feed.items.first.map { "\($0.kind)" } ?? "" }
+        let oldest = first()
+        var trims = 0, sawBase = false, last = feed.heldBytes
+        for _ in 0..<400 {
+            g.append(1)
+            _ = await refresh(feed, g)
+            if feed.heldBytes < last {
+                trims += 1
+                if trims == 1 {
+                    // The first trim past the raise keeps all but a window of it.
+                    #expect(feed.heldBytes >= raised - w - 400)
+                    #expect(first() != oldest)
+                }
+            }
+            last = feed.heldBytes
+            #expect(feed.heldBytes <= max(raised, feed.budget) + 400)
+            if feed.budget == 3 * w { sawBase = true; break }
+        }
+        #expect(trims >= 1)
+        #expect(sawBase)   // the loaded history aged out: back to the base budget
+    }
+
+    @Test("The desktop chat's buffer trims a raised budget the same way")
+    func desktopRaisedBudget() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BeautifiedSessionView.swift"), encoding: .utf8)
+        #expect(src.contains(": max(initialHistoryBytes, buf.budget - earlierHistoryBytes)"))
+        #expect(src.contains("if let r = buf.raisedUntil, buf.base >= r { buf.budget = historyBudget; buf.raisedUntil = nil }"))
+        #expect(src.contains("buf.raisedUntil = max(buf.raisedUntil ?? 0, buf.base)\n        buf.base = fetch.start"))
+    }
+
     @Test("A closed window's feed and a room's evicted session drop their transcripts")
     func closedFeedsAreDropped() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
