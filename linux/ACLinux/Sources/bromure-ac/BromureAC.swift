@@ -935,7 +935,9 @@ struct Admin: AsyncParsableCommand {
     }
 
     struct P2P: AsyncParsableCommand {
+        // Named: the type's name would make it `p2-p`.
         static let configuration = CommandConfiguration(
+            commandName: "p2p",
             abstract: "Whether this server's users may be reached over P2P (root; off by default).",
             discussion: "On, each signed-in user's daemon announces a port of its own (on --bind, by default the gateway's address) that leads only to that user's account through the gateway; off, none does.")
         @Argument(help: "on, off, or nothing to show it.") var state: String?
