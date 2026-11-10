@@ -3940,6 +3940,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
+        // Host sleep stops the guests' clocks; set them right on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let n = UbuntuSandboxVM.resyncClocksAfterHostWake()
+                if n > 0 {
+                    FileHandle.standardError.write(Data(
+                        "[ac] Mac woke: resyncing the clock of \(n) VM(s)\n".utf8))
+                }
+            }
+        }
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
         // the folder the user knows (~/<name>).
         GuestSharePaths.resolver = { [weak self] id in
@@ -15889,7 +15901,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // re-opens. Nothing is added to the session allowlist.
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15908,7 +15920,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                 "scope": .string("session"), "unmanaged": .bool(true)])
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15931,7 +15943,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -16253,9 +16265,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case 2:
                 sandbox.setNetworkQuarantined(false)
                 AgentWatchdog.shared.release(profileID: pid)
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = sandbox.vm, vm.state == .paused, (try? await vm.resume()) != nil { sandbox.signalClockResync() }
             case 1:
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = sandbox.vm, vm.state == .paused, (try? await vm.resume()) != nil { sandbox.signalClockResync() }
             default:
                 // A forced stop (the guest is paused and untrusted, so no clean
                 // poweroff) fires no delegate callback: finish the teardown here,

@@ -8556,10 +8556,11 @@ def task_reapply_binfmt():
 
 
 def resume_watcher_service():
-    """Resume-time clock resync: VZ freezes CLOCK_REALTIME during
-    saveMachineState, so on resume the wall clock lags until timesyncd notices.
-    The host writes the current Unix ts into /mnt/bromure-meta/.resume-signal
-    right after vm.resume(); we set the clock when the signal is AHEAD of our
+    """Clock resync: VZ freezes CLOCK_REALTIME during saveMachineState and
+    while the Mac sleeps, and the image runs no time daemon, so the wall clock
+    stays behind. The host writes the current Unix ts into
+    /mnt/bromure-meta/.resume-signal right after vm.resume() and when the Mac
+    wakes; we set the clock when the signal is AHEAD of our
     own clock. Polling (not inotify): virtiofs doesn't reliably deliver inotify
     for host-side writes. Absorbs both the old root systemd watcher and the
     spice respawner (spice is gone).
@@ -8585,12 +8586,47 @@ def resume_watcher_service():
             ts = ""
         if ts and ts != last:
             last = ts
-            if ts.isdigit() and int(ts) > time.time():
-                _sudo(["date", "-u", "-s", "@" + ts])
-                log("resume", "clock set (target ts=%s)" % ts)
+            if not _have_sudo():
+                pass    # strict: the root clock watcher applies it
+            elif ts.isdigit() and int(ts) > time.time():
+                if _sudo(["date", "-u", "-s", "@" + ts]).returncode == 0:
+                    log("resume", "clock set (target ts=%s)" % ts)
+                else:
+                    log("resume", "could not set the clock (target ts=%s)" % ts)
             else:
                 log("resume", "ignoring stale/non-forward signal: %r" % ts)
         time.sleep(2)
+
+
+# The strict sandbox takes sudo away, so resume_watcher_service can no longer
+# set the clock, and the image's bromure-resume.path never fires: it relies on
+# inotify, which virtiofs does not deliver for host-side writes. This root loop,
+# started by the strict script before the revocation, does the same job. It sets
+# the clock with clock_settime instead of running date: the kernel sentry logs
+# every root exec, and a poll that execs would fill the timeline. Same rule as
+# resume_watcher_service: apply only a ts ahead of the guest clock. Only the host
+# can write the signal (the meta share is read-only in the guest).
+CLOCK_WATCH_UNIT = "bromure-clockd"
+CLOCK_WATCH_CODE = """
+import time
+path = "/mnt/bromure-meta/.resume-signal"
+last = ""
+while True:
+    try:
+        with open(path) as f:
+            ts = f.read().strip()
+    except OSError:
+        ts = ""
+    if ts and ts != last:
+        last = ts
+        if ts.isdigit() and int(ts) > time.time():
+            try:
+                time.clock_settime(time.CLOCK_REALTIME, float(ts))
+                print("clock set (target ts=" + ts + ")", flush=True)
+            except OSError as exc:
+                print("could not set the clock: " + str(exc), flush=True)
+    time.sleep(2)
+"""
 
 
 def ip_reporter_service():
@@ -8761,6 +8797,10 @@ if [ -r %(spec)s ] && [ -r %(sandboxd)s ]; then
   systemd-run --unit=bromure-sandboxd --collect -p Restart=on-failure -p RestartSec=1 -p StartLimitIntervalSec=0 %(setenv)s /usr/bin/python3 %(sandboxd)s >/dev/null 2>&1
   for i in $(seq 1 200); do [ -S %(ctl)s ] && break; sleep 0.1; done
 fi
+# The clock watcher: once sudo is gone nothing else can set the clock after a
+# restore or a host sleep (see CLOCK_WATCH_CODE).
+systemctl reset-failed %(clockunit)s >/dev/null 2>&1
+systemd-run --unit=%(clockunit)s --collect -p Restart=always -p RestartSec=2 -p StartLimitIntervalSec=0 /usr/bin/python3 -c %(clockcode)s >/dev/null 2>&1
 # A unit whose only job is to tell the sentry that shutdown has begun, while
 # systemd is still stopping things. The reboot notifier in the module fires long
 # after userspace has finished unmounting, so without this the last rows in every
@@ -8805,7 +8845,9 @@ touch %(done)s
        "sandboxd": shlex.quote(sandboxd), "spec": shlex.quote(OPENSHELL_SPEC),
        "sentryunit": SENTRY_UNIT,
        "ctl": shlex.quote(SANDBOX_CTL), "setenv": _systemd_setenv(),
-       "strictd": shlex.quote(strictd), "done": STRICT_DONE}
+       "strictd": shlex.quote(strictd), "done": STRICT_DONE,
+       "clockunit": CLOCK_WATCH_UNIT,
+       "clockcode": shlex.quote(CLOCK_WATCH_CODE)}
     p = subprocess.run(["sudo", "-n", "sh", "-c", script], capture_output=True, text=True, timeout=60)
     # The script just took sudo away. Anything in this incarnation that asks
     # again must get the new answer, not the one cached before the revocation --
