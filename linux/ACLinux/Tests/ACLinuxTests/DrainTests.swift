@@ -70,3 +70,26 @@ extension DaemonGlobalSuites {
         }
     }
 }
+
+extension DaemonGlobalSuites {
+    /// The default SSH key (macOS: made at launch): in the daemon's state
+    /// directory, once, and the template carries its public key.
+    @Suite("Default SSH key", .serialized)
+    struct DefaultSSHKeyTests {
+        @Test func theKeyIsMadeOnceAndTheTemplateCarriesIt() throws {
+            let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+            let before = DefaultSSHKey.directoryOverride
+            defer { DefaultSSHKey.directoryOverride = before }
+            let store = ProfileStore(rootDir: URL(fileURLWithPath: dir + "/profiles", isDirectory: true))
+            Daemon.bootstrapDefaultSSHKey(stateDir: dir, store: store)
+            #expect(DefaultSSHKey.directoryURL.path == dir + "/default-ssh")
+            let pub = try DefaultSSHKey.publicKeyText()
+            #expect(pub.hasPrefix("ssh-ed25519 "))
+            #expect(store.loadTemplate().sshPublicKey == pub)
+            var st = stat()
+            #expect(stat(dir + "/default-ssh", &st) == 0 && st.st_mode & 0o077 == 0, "owner-only")
+            Daemon.bootstrapDefaultSSHKey(stateDir: dir, store: store)
+            #expect(try DefaultSSHKey.publicKeyText() == pub, "made once")
+        }
+    }
+}

@@ -346,7 +346,26 @@ public actor Daemon {
         return Daemon(config: config, passt: passt)
     }
 
-    // partial: server-side launch is spread over Daemon.start/startSessionEngine. Missing: DefaultSSHKey.ensureExists + seeding the template's sshPublicKey, so new Linux workspaces don't inherit a default SSH key (C, small, see summary). Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (B: macOS-legacy data)
+    /// The default SSH key (macOS: at launch): made once, in the state
+    /// directory, and the template carries its public key so a new
+    /// workspace inherits it (the save copies the keypair into its agent dir).
+    // @port-skip linux-only: the DefaultSSHKey step of applicationDidFinishLaunching (see its claim on start)
+    static func bootstrapDefaultSSHKey(stateDir: String, store: ProfileStore) {
+        DefaultSSHKey.directoryOverride = URL(fileURLWithPath: stateDir + "/default-ssh", isDirectory: true)
+        do {
+            try DefaultSSHKey.ensureExists()
+            let pub = try DefaultSSHKey.publicKeyText()
+            var template = store.loadTemplate()
+            if template.sshPublicKey != pub {
+                template.sshPublicKey = pub
+                try? store.saveTemplate(template)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("[ssh] default key bootstrap failed: \(error)\n".utf8))
+        }
+    }
+
+    // partial: server-side launch is spread over Daemon.start/startSessionEngine. Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (macOS-legacy data)
     // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=540dd0292f7c75d9 @d3ebbda2
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
@@ -359,6 +378,8 @@ public actor Daemon {
         // The workspaces' store, before anything reads a Profile: adoption
         // and the refresh below do (setUpRemoteAccess sets the same root).
         ProfileStore.defaultRootDir = URL(fileURLWithPath: config.stateDir + "/profiles", isDirectory: true)
+        // The default SSH key every new workspace inherits, in the state dir.
+        Self.bootstrapDefaultSSHKey(stateDir: config.stateDir, store: ProfileStore())
         // Under systemd with a fd store, the previous daemon's passt (and the
         // flows it holds) is taken back rather than replaced.
         var pc = PasstUplink.Config(logPath: config.runtimeDir + "/passt.log")
