@@ -1511,9 +1511,9 @@ struct TailFollowingScroll<Content: View>: View {
         /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
         var userScrolling = false
         /// How far the user's scroll has moved the offset toward the top
-        /// since it last moved toward the end (`TailFollowRule.upwardRun`,
-        /// negative) -- summed, so a slow trackpad scroll of under a point a
-        /// frame still adds up.
+        /// since it last turned there (`TailFollowRule.upwardRun`, negative,
+        /// never above 0) -- summed, so a slow trackpad scroll of under a
+        /// point a frame still adds up.
         var scrolledUp: CGFloat = 0
         var tailY: CGFloat?
         /// A snap budget: layout drift can report many times a second, and

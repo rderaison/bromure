@@ -12,14 +12,16 @@ import Foundation
 /// active scroll".)
 enum TailFollowRule {
     /// How far the user's scroll has moved toward the top since it last
-    /// moved toward the end: upward frames add up (a slow trackpad scroll of
-    /// under a point a frame still counts), a downward one starts over. Not
-    /// the net offset since the scroll began: scrolling down 80 points and
-    /// then back up 40 in one wheel phase is still +40 net, and would never
-    /// let go. (Finding "Reversing a wheel scroll can fail to detach tail
-    /// following".)
+    /// turned there: every frame adds (a slow trackpad scroll of under a
+    /// point a frame still counts), but moving toward the end never takes it
+    /// above 0. Not the net offset since the scroll began: scrolling down 80
+    /// points and then back up 40 in one wheel phase is still +40 net, and
+    /// would never let go. Clamped rather than reset on a downward frame, so
+    /// a sub-point jitter only trims the run, and a slow scroll back down
+    /// still pays it off. (Finding "Reversing a wheel scroll can fail to
+    /// detach tail following".)
     static func upwardRun(_ run: CGFloat, adding delta: CGFloat) -> CGFloat {
-        delta > 0 ? 0 : run + delta
+        min(0, run + delta)
     }
 
     /// A scroll lets go: the user is scrolling, the offset has moved toward

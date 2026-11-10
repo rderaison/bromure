@@ -93,11 +93,14 @@ struct TailFollowReversedScrollTests {
         #expect(TailFollowRule.atRest(sticky: false, atBottom: false) == .none)
     }
 
-    @Test("Moving toward the end starts the run over; sub-point upward frames still add up")
-    func runResets() {
-        #expect(run([-30, 5]) == 0)
-        #expect(run([-30, 5, -0.4, -0.4, -0.4]) < -1)
-        #expect(!TailFollowRule.releases(userScrolling: true, offsetDelta: run([-30, 5, -0.5]),
+    @Test("Moving toward the end pays the run off but never past 0; jitter only trims it")
+    func runClamps() {
+        #expect(run([-30, 5]) == -25)                       // a jitter or a short turn back
+        #expect(run([-30, 50]) == 0)                        // all the way back toward the end
+        #expect(run([-30, 50, -0.4, -0.4, -0.4]) < -1)      // then sub-point frames up still add up
+        #expect(TailFollowRule.releases(userScrolling: true, offsetDelta: run([-10, -10, 0.3]),
+                                        tailY: vp + 300, viewport: vp))
+        #expect(!TailFollowRule.releases(userScrolling: true, offsetDelta: run([-30, 50, -0.5]),
                                          tailY: vp + 300, viewport: vp))
         // Scrolling only toward the end never lets go.
         #expect(!TailFollowRule.releases(userScrolling: true, offsetDelta: run([10, 10, 10]),
