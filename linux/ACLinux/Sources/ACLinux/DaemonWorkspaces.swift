@@ -25,6 +25,8 @@ extension Daemon {
         let parts = fullPath.split(separator: "?", maxSplits: 1).map(String.init)
         let path = parts[0], query = parts.count > 1 ? parts[1] : ""
         switch (method, path) {
+        case ("GET", "/squelch"):
+            return ControlResponse(200, JSONValue(foundation: Self.squelchStats()) ?? ["workspaces": [:]])
         case ("POST", "/agent-sessions/folders"):
             guard let key = body["profile"]?.stringValue, !key.isEmpty else { return .error(400, "profile required") }
             guard let p = Self.workspace(key) else { return .error(404, "The machine's folders can't be read right now") }
@@ -251,7 +253,6 @@ extension Daemon {
     /// a workspace, for the new-session folder browser: asked of the guest
     /// while it runs, read from its ext4 home image (HomeImageReader) when it's off.
     /// Dotfolders are left out; nil when it can't be read now.
-    // partial: no shared host folders on Linux workspaces
     // @port ACAppDelegate.listGuestFolders(profileID: UUID, path: String) h=64115e569c42caf3 @b10aa434
     // partial: the key resolution (id or name) is in workspaceRoute's POST /agent-sessions/folders
     // @port ACAppDelegate.listGuestFolders(profileKey: String, path: String) h=4c46ad77a88df496 @d3ebbda2
@@ -268,12 +269,67 @@ extension Daemon {
                 timeout: 10) {
             return out.split(whereSeparator: \.isNewline).map(String.init)
         }
+        // The host folders the machine mounts: in the guest they're ~/<name>
+        // symlinks into /mnt/bromure-share-N, which only exist while it runs:
+        // off, they're read straight from this server.
+        let shares = SessionDisk.sharedFolders(profile.folderPaths)
+        if let dir = Self.hostShareDirectory(guestPath: guestPath, shares: shares) {
+            return Self.hostFolders(in: dir)
+        }
         let home = "/home/ubuntu"
         guard guestPath == home || guestPath.hasPrefix(home + "/") else { return nil }
         let rel = guestPath == home ? "/" : String(guestPath.dropFirst(home.count))
         let img = vmDir(profile.id.uuidString.lowercased()) + "/home.img"
-        guard FileManager.default.fileExists(atPath: img) else { return nil }
-        return await Task.detached(priority: .userInitiated) { HomeImageReader.folders(imagePath: img, path: rel) }.value
+        var names: [String]?
+        if FileManager.default.fileExists(atPath: img) {
+            names = await Task.detached(priority: .userInitiated) { HomeImageReader.folders(imagePath: img, path: rel) }.value
+        }
+        guard rel == "/", !shares.isEmpty else { return names }
+        // The home lists the shares too (a home never booted has none of
+        // their symlinks yet).
+        let all = Set(names ?? []).union(shares.map(\.mountName))
+        return all.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// The host folder behind a guest path inside a shared folder
+    /// (~/<name>/… or /mnt/bromure-share-N/…), nil for any other path.
+    // @port ACAppDelegate.static hostShareDirectory(guestPath: String, shares: [SessionDisk.SharedFolder]) h=ce221fc59a21099d @d3ebbda2
+    nonisolated static func hostShareDirectory(guestPath: String, shares: [SessionDisk.SharedFolder]) -> URL? {
+        for (i, share) in shares.enumerated() {
+            for root in ["/home/ubuntu/" + share.mountName, "/mnt/bromure-share-\(i + 1)"] {
+                if guestPath == root { return share.url }
+                if guestPath.hasPrefix(root + "/") {
+                    return share.url.appendingPathComponent(String(guestPath.dropFirst(root.count + 1)))
+                }
+            }
+        }
+        return nil
+    }
+
+    /// A host folder's subfolders (no dotfolders), sorted as Finder does.
+    // @port ACAppDelegate.static hostFolders(in: URL) h=0794a33ec83a0c6d @d3ebbda2
+    nonisolated static func hostFolders(in dir: URL) -> [String]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        return names.filter { name in
+            var isDir: ObjCBool = false
+            return !name.hasPrefix(".")
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path, isDirectory: &isDir)
+                && isDir.boolValue
+        }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// `GET /squelch`: each workspace's Squelch setting and what it saved
+    /// over its last 30 commands / 30 days (macOS: onSquelchStats).
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSquelchStats h=d6dd55f18cba5011 @d3ebbda2
+    static func squelchStats() -> [String: Any] {
+        var out: [String: Any] = [:]
+        for p in ProfileStore().loadAll() {
+            var row: [String: Any] = ["name": p.name, "enabled": p.squelch.enabled]
+            if let sum = SquelchLedger.shared.summary(p.id, commands: 30, days: 30),
+               let v = JSONValue.encoding(sum)?.foundationObject { row["summary"] = v }
+            out[p.id.uuidString] = row
+        }
+        return ["workspaces": out]
     }
 
 }
