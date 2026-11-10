@@ -36,6 +36,12 @@ struct HostMirrorScreen: View {
     @State private var openSessionID: UUID?
     /// A room pushed (its tabs of sessions + Switchboard).
     @State private var openRoomID: UUID?
+    /// A board or the Grid pushed. Like every destination the iPad layout
+    /// can show (`PadSelection`), it goes through state that publishes the
+    /// fold focus -- an inline NavigationLink left the focus on whatever was
+    /// opened before, and an unfold lost the screen.
+    @State private var openBoard: PhoneBoard?
+    enum PhoneBoard: Hashable { case coding, automations, grid }
     /// The room a new session is being started in (nil = none).
     @State private var newSessionRoom: UUID?
     @State private var newSession = false
@@ -72,6 +78,9 @@ struct HostMirrorScreen: View {
         case .session(let id): openSessionID = id
         case .room(let id): openRoomID = id
         case .workspace(let pid): deepWorkspace = WorkspaceDeepLink(profileID: pid, window: nil)
+        case .coding: openBoard = .coding
+        case .automations: openBoard = .automations
+        case .grid: openBoard = .grid
         default: break
         }
     }
@@ -177,6 +186,14 @@ struct HostMirrorScreen: View {
         .onChange(of: deepWorkspace) { _, link in
             if let link, openSessionID == nil, openRoomID == nil { publishFocus(.workspace(link.profileID)) }
         }
+        .onChange(of: openBoard) { _, board in
+            switch board {
+            case .coding: publishFocus(.coding)
+            case .automations: publishFocus(.automations)
+            case .grid: publishFocus(.grid)
+            case nil: break
+            }
+        }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { _, count in AppBadge.set(count) }
         // Once the mirror connects and the workspaces load, a tapped
@@ -190,6 +207,13 @@ struct HostMirrorScreen: View {
         .navigationDestination(item: $deepWorkspace) { link in
             WorkspaceScreen(controller: controller, profileID: link.profileID,
                             initialWindow: link.window)
+        }
+        .navigationDestination(item: $openBoard) { board in
+            switch board {
+            case .coding: CodingBoardScreen(controller: controller)
+            case .automations: AutomationsBoardScreen(controller: controller)
+            case .grid: GridScreen(controller: controller)
+            }
         }
         .navigationDestination(item: $openSessionID) { id in
             MobileSessionScreen(controller: controller, sessionID: id,
@@ -316,11 +340,11 @@ struct HostMirrorScreen: View {
 
     private var boardsRow: some View {
         HStack(spacing: 12) {
-            NavigationLink { CodingBoardScreen(controller: controller) } label: {
+            Button { openBoard = .coding } label: {
                 boardCard("Coding Tasks", icon: "checklist",
                           count: controller.taskStore.tasks.count, tint: .blue)
             }.buttonStyle(.plain)
-            NavigationLink { AutomationsBoardScreen(controller: controller) } label: {
+            Button { openBoard = .automations } label: {
                 boardCard("Automations", icon: "bolt.badge.clock.fill",
                           count: controller.automationStore.automations.count, tint: .orange)
             }.buttonStyle(.plain)
@@ -379,9 +403,8 @@ struct HostMirrorScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Needs your input", icon: "exclamationmark.bubble.fill", tint: .red)
             ForEach(waitingAgents) { agent in
-                NavigationLink {
-                    WorkspaceScreen(controller: controller, profileID: agent.profileID,
-                                    initialWindow: agent.windowIndex)
+                Button {
+                    deepWorkspace = WorkspaceDeepLink(profileID: agent.profileID, window: agent.windowIndex)
                 } label: { waitingAgentCard(agent) }
                 .buttonStyle(.plain)
             }
@@ -440,7 +463,7 @@ struct HostMirrorScreen: View {
                 .accessibilityLabel("New workspace")
             }
             if machinesExpanded {
-                NavigationLink { GridScreen(controller: controller) } label: { gridCard }
+                Button { openBoard = .grid } label: { gridCard }
                     .buttonStyle(.plain)
                 if vmRows.isEmpty {
                     Text(controller.hasSnapshot ? "No workspaces on this server."
@@ -450,8 +473,8 @@ struct HostMirrorScreen: View {
                         .padding(.vertical, 8)
                 } else {
                     ForEach(vmRows) { row in
-                        NavigationLink {
-                            WorkspaceScreen(controller: controller, profileID: row.id)
+                        Button {
+                            deepWorkspace = WorkspaceDeepLink(profileID: row.id, window: nil)
                         } label: { workspaceCard(row) }
                         .buttonStyle(.plain)
                         .contextMenu {
@@ -491,8 +514,8 @@ struct HostMirrorScreen: View {
                 }
                 if nativeExpanded {
                     ForEach(rows) { row in
-                        NavigationLink {
-                            WorkspaceScreen(controller: controller, profileID: row.id)
+                        Button {
+                            deepWorkspace = WorkspaceDeepLink(profileID: row.id, window: nil)
                         } label: { workspaceCard(row, native: true) }
                         .buttonStyle(.plain)
                     }
