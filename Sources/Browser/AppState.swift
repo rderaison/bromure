@@ -239,9 +239,9 @@ final class AppState: @unchecked Sendable {
             startPool()
             scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
-            // Image files exist but version mismatch — auto-reinstall
+            // Image files exist but version mismatch — auto-reinstall. The
+            // old image stays in place until the replacement is promoted.
             installReason = .update
-            deleteImageFiles()
             startInit()
         } else {
             phase = .needsSetup
@@ -319,6 +319,17 @@ final class AppState: @unchecked Sendable {
                 self.startPool()
             } catch {
                 guard !Task.isCancelled else { return }
+                // Both install paths leave a previous image untouched when
+                // they fail. Keep browsing on it rather than strand the user;
+                // an out-of-date one is retried at the next launch.
+                if self.installReason != .firstRun, self.imageManager.hasBootFiles {
+                    let message = Self.localizedMessage(for: error)
+                    NSLog("Bromure: image install failed, keeping the previous image: %@", message)
+                    self.consoleLog += "\nImage install failed (\(message)); keeping the previous image.\n"
+                    self.phase = .warmingUp
+                    self.startPool()
+                    return
+                }
                 self.phase = .error(Self.localizedMessage(for: error))
             }
         }
@@ -433,7 +444,6 @@ final class AppState: @unchecked Sendable {
         pool = nil
         Task { await oldPool?.shutdown() }
         installReason = .refresh
-        deleteImageFiles()
         startInit()
     }
 
@@ -711,10 +721,8 @@ final class AppState: @unchecked Sendable {
             pool = nil
             poolReady = false
 
-            // Delete old image files
-            deleteImageFiles()
-
-            // Rebuild
+            // Rebuild. The current image is only replaced once the new
+            // one has been downloaded or built.
             startInit()
         }
     }

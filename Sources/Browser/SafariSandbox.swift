@@ -5488,15 +5488,8 @@ struct Init: ParsableCommand {
             // path promotes atomically, so only the (in-place) local
             // build pre-deletes the old artifacts.
             func buildLocally() async throws {
-                if manager.hasImageFiles {
-                    print("Removing existing Linux base image...")
-                    let fm = FileManager.default
-                    try? fm.removeItem(at: manager.linuxDiskURL)
-                    try? fm.removeItem(at: manager.linuxKernelURL)
-                    try? fm.removeItem(at: manager.linuxInitrdURL)
-                    try? fm.removeItem(at: manager.imageVersionURL)
-                    try? fm.removeItem(at: manager.imageStateURL)
-                }
+                // createBaseImage builds into staging files and replaces the
+                // existing image only on success, so a failed build keeps it.
                 _ = await catalogStore.refresh()
                 let catalog = catalogStore.effective()
                 try await manager.createBaseImage(

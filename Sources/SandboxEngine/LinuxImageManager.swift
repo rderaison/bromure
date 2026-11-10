@@ -123,89 +123,92 @@ public final class LinuxImageManager {
         let fm = FileManager.default
         try fm.createDirectory(at: storageDir, withIntermediateDirectories: true)
 
-        try? fm.removeItem(at: graphicsCapabilitiesURL)
+        // Build into staging files; the live image (an older version, or the
+        // one being rebuilt) stays bootable until the build has succeeded.
+        try await withStagedImage { staged in
+            // 1. Download Alpine netboot kernel and initramfs
+            let netbootKernel = storageDir.appendingPathComponent("netboot-vmlinuz")
+            let netbootInitrd = storageDir.appendingPathComponent("netboot-initramfs")
 
-        // 1. Download Alpine netboot kernel and initramfs
-        let netbootKernel = storageDir.appendingPathComponent("netboot-vmlinuz")
-        let netbootInitrd = storageDir.appendingPathComponent("netboot-initramfs")
+            if !fm.fileExists(atPath: netbootKernel.path) ||
+               !fm.fileExists(atPath: netbootInitrd.path) {
+                progress(.stepStart("Downloading the build tools"))
+                try await downloadNetbootFiles(
+                    kernelDest: netbootKernel,
+                    initrdDest: netbootInitrd,
+                    progress: progress
+                )
+                progress(.stepDone("Downloading the build tools"))
+            } else {
+                progress(.stepDone("Build tools already downloaded"))
+            }
 
-        if !fm.fileExists(atPath: netbootKernel.path) ||
-           !fm.fileExists(atPath: netbootInitrd.path) {
-            progress(.stepStart("Downloading the build tools"))
-            try await downloadNetbootFiles(
-                kernelDest: netbootKernel,
-                initrdDest: netbootInitrd,
+            // 2. Create raw disk image
+            progress(.stepStart("Creating disk image"))
+            try createRawDisk(at: staged.disk, sizeMB: diskSizeMB)
+            progress(.stepDone("Creating disk image"))
+
+            // 3. Boot the Alpine netboot installer, debootstrap Ubuntu to
+            //    disk, add Chromium.
+            progress(.stepStart("Installing Ubuntu Linux with Chromium"))
+            try await installLinux(
+                netbootKernel: netbootKernel,
+                netbootInitrd: netbootInitrd,
+                targetDisk: staged.disk,
+                keyboardLayout: keyboardLayout,
+                naturalScrolling: naturalScrolling,
+                locale: locale,
+                displayScale: displayScale,
+                extraKernelOptions: extraKernelOptions,
+                fossOnly: fossOnly,
                 progress: progress
             )
-            progress(.stepDone("Downloading the build tools"))
-        } else {
-            progress(.stepDone("Build tools already downloaded"))
-        }
+            progress(.stepDone("Installing Ubuntu Linux with Chromium"))
 
-        // 2. Create raw disk image
-        progress(.stepStart("Creating disk image"))
-        try createRawDisk(at: linuxDiskURL, sizeMB: diskSizeMB)
-        progress(.stepDone("Creating disk image"))
-
-        // 3. Boot the Alpine netboot installer, debootstrap Ubuntu to
-        //    disk, add Chromium.
-        progress(.stepStart("Installing Ubuntu Linux with Chromium"))
-        try await installLinux(
-            netbootKernel: netbootKernel,
-            netbootInitrd: netbootInitrd,
-            targetDisk: linuxDiskURL,
-            keyboardLayout: keyboardLayout,
-            naturalScrolling: naturalScrolling,
-            locale: locale,
-            displayScale: displayScale,
-            extraKernelOptions: extraKernelOptions,
-            fossOnly: fossOnly,
-            progress: progress
-        )
-        progress(.stepDone("Installing Ubuntu Linux with Chromium"))
-
-        // 4. Read kernel + initramfs from the transfer disk (written by install VM).
-        //    The installed kernel and mkinitfs initramfs must match versions.
-        progress(.stepStart("Preparing boot files"))
-        let transferDisk = storageDir.appendingPathComponent("transfer.img")
-        let efiKernel = storageDir.appendingPathComponent("installed-vmlinuz-efi")
-        try Self.readBootFilesFromTransfer(
-            transferDisk: transferDisk,
-            kernelDest: efiKernel,
-            initrdDest: linuxInitrdURL
-        )
-        try? fm.removeItem(at: transferDisk)
-
-        // Extract raw ARM64 Image from the installed EFI stub kernel
-        try? fm.removeItem(at: linuxKernelURL)
-        try extractRawKernel(from: efiKernel, to: linuxKernelURL)
-        try? fm.removeItem(at: efiKernel)
-        progress(.stepDone("Preparing boot files"))
-
-        // 5. Apply the catalog postinstall steps (the non-free software a
-        //    published image can't carry — see browser-img-catalog.json).
-        //    Runs while the netboot files are still cached, so the
-        //    provisioner boot doesn't re-download them. Fonts and the
-        //    user config were already baked by setup.sh, so the
-        //    provisioner only executes the steps.
-        if !postinstallSteps.isEmpty {
-            progress(.stepStart("Installing recommended packages"))
-            try await runPostinstall(
-                steps: postinstallSteps,
-                targetDisk: linuxDiskURL,
-                copyFonts: false,
-                personalize: nil,
-                progress: progress
+            // 4. Read kernel + initramfs from the transfer disk (written by install VM).
+            //    The installed kernel and mkinitfs initramfs must match versions.
+            progress(.stepStart("Preparing boot files"))
+            let transferDisk = storageDir.appendingPathComponent("transfer.img")
+            let efiKernel = storageDir.appendingPathComponent("installed-vmlinuz-efi")
+            try Self.readBootFilesFromTransfer(
+                transferDisk: transferDisk,
+                kernelDest: efiKernel,
+                initrdDest: staged.initrd
             )
-            progress(.stepDone("Installing recommended packages"))
-        }
+            try? fm.removeItem(at: transferDisk)
 
-        // 6. Clean up
-        try? fm.removeItem(at: netbootKernel)
-        try? fm.removeItem(at: netbootInitrd)
-        try? fm.removeItem(at: netbootInitrdShimmedURL)
+            // Extract raw ARM64 Image from the installed EFI stub kernel
+            try? fm.removeItem(at: staged.kernel)
+            try extractRawKernel(from: efiKernel, to: staged.kernel)
+            try? fm.removeItem(at: efiKernel)
+            progress(.stepDone("Preparing boot files"))
+
+            // 5. Apply the catalog postinstall steps (the non-free software a
+            //    published image can't carry — see browser-img-catalog.json).
+            //    Runs while the netboot files are still cached, so the
+            //    provisioner boot doesn't re-download them. Fonts and the
+            //    user config were already baked by setup.sh, so the
+            //    provisioner only executes the steps.
+            if !postinstallSteps.isEmpty {
+                progress(.stepStart("Installing recommended packages"))
+                try await runPostinstall(
+                    steps: postinstallSteps,
+                    targetDisk: staged.disk,
+                    copyFonts: false,
+                    personalize: nil,
+                    progress: progress
+                )
+                progress(.stepDone("Installing recommended packages"))
+            }
+
+            // 6. Clean up
+            try? fm.removeItem(at: netbootKernel)
+            try? fm.removeItem(at: netbootInitrd)
+            try? fm.removeItem(at: netbootInitrdShimmedURL)
+        }
 
         // 7. Write version stamp + provenance (local build: no image uuid)
+        try? fm.removeItem(at: graphicsCapabilitiesURL)
         try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
         writeImageState(BaseImageState(
             imageUUID: nil,
@@ -221,6 +224,69 @@ public final class LinuxImageManager {
     }
 
     // MARK: - URLs
+
+    /// Staging paths for a local build, next to the live image (same volume,
+    /// so promotion is a rename).
+    public struct StagedImage: Sendable {
+        public let disk: URL
+        public let kernel: URL
+        public let initrd: URL
+    }
+
+    /// Runs `build` against fresh staging files and promotes them over the
+    /// live disk, kernel and initrd only when it returns. If it throws (or
+    /// is cancelled), the staging files are removed and the live image is
+    /// left exactly as it was — still bootable.
+    public func withStagedImage(_ build: (StagedImage) async throws -> Void) async throws {
+        let fm = FileManager.default
+        let staged = StagedImage(
+            disk: storageDir.appendingPathComponent("linux-base.img.building"),
+            kernel: storageDir.appendingPathComponent("vmlinuz.building"),
+            initrd: storageDir.appendingPathComponent("initrd.building"))
+        let all = [staged.disk, staged.kernel, staged.initrd]
+        for url in all { try? fm.removeItem(at: url) }
+        do {
+            try await build(staged)
+            try Task.checkCancellation()
+            for (from, to) in [(staged.disk, linuxDiskURL), (staged.kernel, linuxKernelURL),
+                               (staged.initrd, linuxInitrdURL)] {
+                guard fm.fileExists(atPath: from.path) else {
+                    throw SandboxError.diskCreationFailed("Local build produced no \(to.lastPathComponent)")
+                }
+            }
+            try promote([(staged.disk, linuxDiskURL), (staged.kernel, linuxKernelURL),
+                         (staged.initrd, linuxInitrdURL)])
+        } catch {
+            for url in all { try? fm.removeItem(at: url) }
+            throw error
+        }
+    }
+
+    /// Moves each staged file over its live counterpart as one unit: the
+    /// live files are set aside first and put back if any move fails, so the
+    /// image is never a mix of old and new boot files.
+    func promote(_ pairs: [(from: URL, to: URL)]) throws {
+        let fm = FileManager.default
+        var setAside: [(live: URL, backup: URL)] = []
+        var promoted: [URL] = []
+        do {
+            for (_, live) in pairs where fm.fileExists(atPath: live.path) {
+                let backup = live.appendingPathExtension("previous")
+                try? fm.removeItem(at: backup)
+                try fm.moveItem(at: live, to: backup)
+                setAside.append((live, backup))
+            }
+            for (from, live) in pairs {
+                try fm.moveItem(at: from, to: live)
+                promoted.append(live)
+            }
+        } catch {
+            for live in promoted { try? fm.removeItem(at: live) }
+            for (live, backup) in setAside { try? fm.moveItem(at: backup, to: live) }
+            throw error
+        }
+        for (_, backup) in setAside { try? fm.removeItem(at: backup) }
+    }
 
     public var linuxDiskURL: URL {
         storageDir.appendingPathComponent("linux-base.img")
