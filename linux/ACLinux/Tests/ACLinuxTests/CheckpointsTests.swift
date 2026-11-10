@@ -23,6 +23,8 @@ extension DaemonGlobalSuites {
             try Data("x".utf8).write(to: URL(fileURLWithPath: dir + "/a"))
             let why = VMCheckpoints.reflink(dir + "/a", dir + "/b")
             #expect(why == VMCheckpoints.unsupportedReason, "\(why ?? "cloned")")
+            #expect(VMCheckpoints.unsupportedReason.hasSuffix("put the state directory on btrfs (or XFS with reflink) to have them"),
+                    "it says what to do")
             #expect(!FileManager.default.fileExists(atPath: dir + "/b"), "nothing left behind")
 
             let (d, _, ddir) = try await DaemonRepairGateTests.daemon()

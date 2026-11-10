@@ -42,7 +42,8 @@ enum VMCheckpoints {
     }
 
     static let unsupportedReason =
-        "this server's filesystem can't make copy-on-write clones (no reflink, as on ext4), so no checkpoints are taken"
+        "this server's filesystem can't make copy-on-write clones (no reflink, as on ext4), so no checkpoints are taken: "
+        + "put the state directory on btrfs (or XFS with reflink) to have them"
 
     // @port-skip linux-only: ProfileStore.checkpointsDirectory / homeCheckpointsDirectory, per VM
     static func directory(_ vmDir: String, _ target: Target) -> String {
