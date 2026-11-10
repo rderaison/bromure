@@ -119,8 +119,8 @@ extension Daemon {
 
     /// The global model settings, keys redacted.
     // @port ACAppDelegate.automationModelSettingsExport() h=3279f21655aa4db6 @b10aa434
-    @MainActor
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onExportModelSettings h=bd7b730514adb887 @d3ebbda2
+    @MainActor
     static func modelSettingsExport() -> [String: Any]? {
         guard let data = try? JSONEncoder().encode(ModelSettingsStore.shared.settings.redacted()),
               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -132,8 +132,8 @@ extension Daemon {
     /// Replace the global model settings: a blank or redacted key keeps the
     /// stored one, a typed key replaces it.
     // @port ACAppDelegate.automationUpdateModelSettings(_: [String:Any]) h=2db24321b9f16274 @b10aa434
-    @MainActor
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpdateModelSettings h=e571c771c47454c3 @d3ebbda2
+    @MainActor
     static func updateModelSettings(_ doc: [String: Any]) -> [String: Any] {
         guard let data = try? JSONSerialization.data(withJSONObject: doc),
               let incoming = try? JSONDecoder().decode(ModelSettings.self, from: data) else {

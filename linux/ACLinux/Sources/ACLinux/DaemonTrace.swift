@@ -65,8 +65,8 @@ extension Daemon {
 
     /// Newest first; previews only (no secret values).
     // @port ACAppDelegate.automationTraceList(_: String?) h=d7fbe52a7b667aeb @7057d502
-    @MainActor
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTrace h=e3a2e9c503ffccad @d3ebbda2
+    @MainActor
     static func traceList(_ mitm: MitmProxy, _ profileKey: String?) -> [[String: Any]] {
         guard let store = mitm.traces.withLockedValue({ $0 }) else { return [] }
         let wantID: Profile.ID? = profileKey.flatMap { LinuxSessionHost.shared?.profileByNameOrID($0)?.id }
@@ -98,8 +98,8 @@ extension Daemon {
     /// Full records (newest first), optionally one workspace's: the fat
     /// client's Trace Inspector binds to these.
     // @port ACAppDelegate.automationTraceRecords(_: String?) h=78344f1160a31ba2 @7057d502
-    @MainActor
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListTraceRecords h=66727b3f5617966d @d3ebbda2
+    @MainActor
     static func traceRecords(_ mitm: MitmProxy, _ profileKey: String?) -> [TraceRecord] {
         guard let store = mitm.traces.withLockedValue({ $0 }) else { return [] }
         let wantID: Profile.ID? = profileKey.flatMap { LinuxSessionHost.shared?.profileByNameOrID($0)?.id }
@@ -108,8 +108,8 @@ extension Daemon {
 
     /// One record's captured body, decrypted for the client.
     // @port ACAppDelegate.automationLoadTraceBody(_: UUID, _: TraceStore.BodyKind) h=4dec182992b385ae @7057d502
-    @MainActor
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onLoadTraceBody h=50e29fc842e693b0 @d3ebbda2
+    @MainActor
     static func loadTraceBody(_ mitm: MitmProxy, _ id: UUID, _ kind: TraceStore.BodyKind) -> Data? {
         guard let store = mitm.traces.withLockedValue({ $0 }),
               let rec = store.recent.first(where: { $0.id == id }) else { return nil }

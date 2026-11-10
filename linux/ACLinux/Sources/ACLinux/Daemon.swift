@@ -165,8 +165,6 @@ public struct DaemonConfig: Sendable {
 /// Firecracker VMs. Serves the control socket's routes.
 // @port-skip linux-only: the Linux daemon core (macOS: ACAppDelegate + ACAutomationServer)
 public actor Daemon {
-    // partial: Linux's running-VM record (+ VMRecord.bootedAt)
-    // @port RunningSession.init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) h=ad45d5f4e57e093c @d3ebbda2
     struct Live {
         var machine: FirecrackerMachine
         let port: DgramPort
@@ -1601,6 +1599,8 @@ public actor Daemon {
     /// Stages the VM's files, plugs it into the switch, starts Firecracker.
     // partial: live[] insert; no lease/status menu/storage notification; stop-during-boot not deferred (see whileHoldingDisk)
     // @port ACAppDelegate.registerSession(_: UbuntuSandboxVM, profile: Profile) h=6c27833c206af8d1 @d3ebbda2
+    // partial: Linux's running-VM record (+ VMRecord.bootedAt)
+    // @port RunningSession.init(profileID: Profile.ID, profile: Profile, sandbox: UbuntuSandboxVM) h=ad45d5f4e57e093c @d3ebbda2
     private func launch(_ rec: inout VMRecord, restoreFrom: String? = nil) async throws {
         // A protection this server can't enforce refuses the launch (DaemonSandboxGuard.swift).
         try await refuseUnenforceableSandbox(rec)

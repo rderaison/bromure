@@ -38,9 +38,8 @@ enum ProfileWrites {
     /// The stored workspace `id` (secrets merged), changed by `change` and
     /// saved when it says so (false: nothing to write). nil when there is no
     /// such workspace; the saved copy otherwise (the stored one when unchanged).
-    // @port-skip linux-only: macOS serializes these on the main actor
-    @discardableResult
     // @port ACAppDelegate.saveField(of: Profile.ID, _: (inoutProfile)->Void) h=2d4a7c788902c948 @d3ebbda2
+    @discardableResult
     static func edit(_ id: UUID, store: ProfileStore, _ change: (inout Profile) throws -> Bool) throws -> Profile? {
         let saved: Profile? = try locked {
             guard var p = store.loadAll().first(where: { $0.id == id }) else { return nil }

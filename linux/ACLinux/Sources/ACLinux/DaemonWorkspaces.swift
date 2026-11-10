@@ -93,8 +93,8 @@ extension Daemon {
     /// applied to its traffic at once. False for an unknown workspace or a
     /// failed save.
     // @port ACAppDelegate.setSquelch(_: Profile.ID, _: Bool) h=95dbcd51ff8ff787 @2134fc7a
-    @discardableResult
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSetSquelch h=461b4c02c7a43b84 @d3ebbda2
+    @discardableResult
     func setSquelch(_ id: Profile.ID, _ on: Bool) -> Bool {
         var changed = false
         do {

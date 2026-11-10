@@ -10,8 +10,6 @@ import SandboxEngine
 // @port-skip linux-only: Linux CLI root (macOS: BromureAC's ParsableCommand)
 @main
 struct BromureAC: AsyncParsableCommand {
-    // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split
-    // @port BromureAC.static var configuration h=6859cbda432af2b9 @d3ebbda2
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
         subcommands: [Daemon.self, VM.self, Workspaces.self, Trace.self, Image.self, Remote.self, Account.self, Cloud.self,
@@ -19,6 +17,8 @@ struct BromureAC: AsyncParsableCommand {
 
     // partial: SIGPIPE is ignored in Daemon.run; no hidden __pii-scan/__squelch/__shot-* hooks
     // @port BromureAC.static main() h=b92f6d3ecd654150 @d3ebbda2
+    // partial: Linux's own command tree (daemon/vm/workspaces/trace/image/remote/account/cloud/admin…); no argv0 bromure-cli split
+    // @port BromureAC.static var configuration h=6859cbda432af2b9 @d3ebbda2
     static func main() async {
         CLICommandsEntry.workspacesGroup = Workspaces.self
         await main(nil)

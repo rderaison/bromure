@@ -109,12 +109,12 @@ final class LinuxMachines {
     /// them (a machine's own word isn't taken: it could seat itself in any
     /// room) and stamps them on what it reads from the machine.
     private(set) var sessionRooms: [UUID: UUID] = [:]
-    // partial: under the daemon state dir
-    // @port ACAppDelegate.var machineSessionRoomsURL h=3dc270a4bc8180f7 @d3ebbda2
     private let sessionRoomsURL: URL
 
     /// Follow machines attaching and detaching; the user's answers to
     /// machines asking to join are kept in the state dir.
+    // partial: under the daemon state dir
+    // @port ACAppDelegate.var machineSessionRoomsURL h=3dc270a4bc8180f7 @d3ebbda2
     // @port ACAppDelegate.watchAttachedMachines() h=4225ae8ed5d459db @d2db8346
     init(stateDir: String) {
         let dir = URL(fileURLWithPath: stateDir, isDirectory: true)

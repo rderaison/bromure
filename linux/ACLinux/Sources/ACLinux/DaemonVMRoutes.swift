@@ -143,8 +143,8 @@ extension Daemon {
     /// A command line for agentd: a `cmd-<uuid>.txt` file in the outbox,
     /// written whole (agentd only ever sees a complete file).
     // @port ACAppDelegate.sendGuestCommand(_: String, profileID: Profile.ID) h=0d3070fd580c2d69 @843e00a9
-    @discardableResult
     // @port ACAppDelegate.sendCommand(_: String, in: SessionPane) h=6a03429e6bde7500 @d3ebbda2
+    @discardableResult
     func sendGuestCommand(_ command: String, vmID: String) -> Bool {
         let file = vmDir(vmID) + "/outbox/cmd-\(UUID().uuidString).txt"
         return (try? (command + "\n").write(toFile: file, atomically: true, encoding: .utf8)) != nil
