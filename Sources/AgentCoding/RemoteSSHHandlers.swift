@@ -315,13 +315,21 @@ extension RemoteAuthDelegate {
                 responsePromise.succeed(ok ? .success : .failure)
             }
         case .password(let pw):
-            guard allowPassword, let delay = throttle.reserve(ip: peerIP), throttle.beginVerification() else {
+            // A pinned connection's attempt takes a slot in its client's
+            // bucket and in its account's own (a user faking client addresses
+            // still meets the account's rate), within the account's own cap
+            // on verifications in flight.
+            let pinned = pinnedAccount
+            guard allowPassword, let ipDelay = throttle.reserve(ip: peerIP),
+                  let accountDelay = pinned.map({ throttle.reserve(ip: "account:" + $0) }) ?? .some(0),
+                  throttle.beginVerification(account: pinned) else {
                 responsePromise.succeed(.failure)
                 return
             }
+            let delay = max(ipDelay, accountDelay)
             let throttle = self.throttle, password = pw.password
             let work: @Sendable () -> Void = {
-                defer { throttle.endVerification() }
+                defer { throttle.endVerification(account: pinned) }
                 let ok = router.verifyPassword(user: user, password: password)
                 if ok { grant.account = user }
                 responsePromise.succeed(ok ? .success : .failure)
@@ -401,6 +409,10 @@ final class RemoteAuthThrottle: @unchecked Sendable {
     private let lock = NSLock()
     private struct Bucket { var tokens: Double; var last: Date; var nextSlot: Date }
     private var inFlight = 0
+    /// Verifications in flight per pinned account (`perAccountInFlight`
+    /// each, within the global 16): one local user can't take every slot.
+    private var accountInFlight: [String: Int] = [:]
+    static let perAccountInFlight = 4
     private var buckets: [String: Bucket] = [:]
     private let capacity: Double
     private let refillPerSec: Double
@@ -447,16 +459,24 @@ final class RemoteAuthThrottle: @unchecked Sendable {
     /// Global bound on concurrently-running password verifications — an IP
     /// spray can't stack unbounded OpenDirectory work. Pair every true
     /// return with `endVerification()`.
-    func beginVerification() -> Bool {
+    func beginVerification(account: String? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard inFlight < 16 else { return false }
+        if let account {
+            guard accountInFlight[account, default: 0] < Self.perAccountInFlight else { return false }
+            accountInFlight[account, default: 0] += 1
+        }
         inFlight += 1
         return true
     }
 
-    func endVerification() {
+    func endVerification(account: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         inFlight -= 1
+        if let account {
+            let left = accountInFlight[account, default: 1] - 1
+            accountInFlight[account] = left > 0 ? left : nil
+        }
     }
 
     /// Drop idle, fully-refilled buckets and hard-cap the map so an IP-spray

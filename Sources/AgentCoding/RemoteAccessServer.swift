@@ -635,17 +635,32 @@ final class RemoteAccessServer {
     }
 }
 
-/// Reads a connection's PROXY protocol v1 line (at most 107 bytes, CRLF),
-/// then has the SSH pipeline installed behind it with the client's address,
-/// hands it what came after the line, and leaves. Anything else: closed.
+/// Reads a connection's PROXY protocol v1 line (at most 107 bytes, CRLF,
+/// within `timeout`), then has the SSH pipeline installed behind it with
+/// the client's address, hands it what came after the line, and leaves.
+/// Anything else, or nothing in time: closed.
 final class ProxyHeaderHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias InboundOut = ByteBuffer
     private var pending: ByteBuffer?
     private var done = false
     private let install: (String) -> EventLoopFuture<Void>
+    private let timeout: TimeAmount
+    private var deadline: Scheduled<Void>?
 
-    init(install: @escaping (String) -> EventLoopFuture<Void>) { self.install = install }
+    init(timeout: TimeAmount = .seconds(10), install: @escaping (String) -> EventLoopFuture<Void>) {
+        self.timeout = timeout
+        self.install = install
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        let channel = context.channel
+        deadline = context.eventLoop.scheduleTask(in: timeout) { [weak self] in
+            if self?.done != true { channel.close(promise: nil) }
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) { deadline?.cancel() }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var chunk = unwrapInboundIn(data)
@@ -663,12 +678,13 @@ final class ProxyHeaderHandler: ChannelInboundHandler, RemovableChannelHandler, 
               let parsed = RemoteAccessServer.proxyClientIP(line) else { context.close(promise: nil); return }
         buf.moveReaderIndex(forwardBy: 2)
         done = true
+        deadline?.cancel()
         pending = nil
         let rest = buf
         install(parsed ?? "unknown").whenComplete { result in
             guard case .success = result else { context.close(promise: nil); return }
             if rest.readableBytes > 0 { context.fireChannelRead(self.wrapInboundOut(rest)) }
-            context.pipeline.removeHandler(context: context, promise: nil)
+            context.pipeline.syncOperations.removeHandler(context: context, promise: nil)
         }
     }
 }
