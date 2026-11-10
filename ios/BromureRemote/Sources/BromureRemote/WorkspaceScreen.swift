@@ -1510,6 +1510,10 @@ struct TailFollowingScroll<Content: View>: View {
         /// The scroll view reports the user moving it -- a finger, a
         /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
         var userScrolling = false
+        /// How far the user's scroll has moved the offset since it began
+        /// (negative: toward the top) -- summed, so a slow trackpad scroll
+        /// of under a point a frame still adds up.
+        var scrolledBy: CGFloat = 0
         var tailY: CGFloat?
         /// A snap budget: layout drift can report many times a second, and
         /// each snap is a layout pass -- the watchdog catches what's skipped.
@@ -1560,6 +1564,7 @@ struct TailFollowingScroll<Content: View>: View {
             // pushes the end down too, mid-scroll, without the user going
             // anywhere (`TailFollowRule`).
             .modifier(UserScrollPhase(changed: { scrolling in
+                if scrolling, !follow.userScrolling { follow.scrolledBy = 0 }
                 follow.userScrolling = scrolling
                 follow.lastUserScroll = Date()
                 guard !scrolling else { return }
@@ -1569,7 +1574,9 @@ struct TailFollowingScroll<Content: View>: View {
                 case .none: break
                 }
             }, offsetMoved: { delta in
-                if TailFollowRule.releases(userScrolling: follow.userScrolling, offsetDelta: delta,
+                guard follow.userScrolling else { return }
+                follow.scrolledBy += delta
+                if TailFollowRule.releases(userScrolling: true, offsetDelta: follow.scrolledBy,
                                            tailY: follow.tailY, viewport: viewport) {
                     follow.sticky = false
                 }

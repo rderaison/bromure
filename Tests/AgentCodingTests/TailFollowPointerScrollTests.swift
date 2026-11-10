@@ -30,7 +30,8 @@ struct TailFollowPointerScrollTests {
         // ...by the offset, not the end's position (a row grows too).
         #expect(!body[release.lowerBound..<snapBranch.lowerBound].contains("follow.sticky = false"))
         #expect(ws.contains(".onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { old, new in"))
-        #expect(ws.contains("if TailFollowRule.releases(userScrolling: follow.userScrolling, offsetDelta: delta,"))
+        #expect(ws.contains("follow.scrolledBy += delta\n                if TailFollowRule.releases(userScrolling: true, offsetDelta: follow.scrolledBy,"))
+        #expect(ws.contains("if scrolling, !follow.userScrolling { follow.scrolledBy = 0 }"))
         #expect(ws.contains("switch TailFollowRule.atRest(sticky: follow.sticky, atBottom: atBottom(follow.tailY)) {"))
         // Both chats use the shared view.
         let room = try Self.src("ios/BromureRemote/Sources/BromureRemote/RoomScreens.swift")

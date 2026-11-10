@@ -11,9 +11,10 @@ import Foundation
 /// it was. (Finding "Streaming content can detach tail following during an
 /// active scroll".)
 enum TailFollowRule {
-    /// A scroll position change lets go: the user is scrolling, the offset
-    /// moved toward the top, and the end is now below the view's bottom
-    /// edge (an overscroll bouncing back at the end isn't away).
+    /// A scroll lets go: the user is scrolling, the offset has moved toward
+    /// the top since the scroll began (`offsetDelta`, summed over its
+    /// frames), and the end is now below the view's bottom edge (an
+    /// overscroll bouncing back at the end isn't away).
     static func releases(userScrolling: Bool, offsetDelta: CGFloat, tailY: CGFloat?, viewport: CGFloat) -> Bool {
         guard userScrolling, viewport > 0, offsetDelta < -1 else { return false }
         return (tailY ?? .infinity) > viewport + 2
