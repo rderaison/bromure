@@ -3,9 +3,10 @@ import Testing
 
 /// Issue #64: the guest's clock stood still while the Mac slept, and nothing
 /// set it right on wake. The host now writes `.resume-signal` on wake as well as
-/// after a restore. On a strict workspace agentd has no sudo to apply it, so a
-/// root watcher started before the revocation does.
-@Suite("Guest clock resync: wake signal, strict root watcher", .serialized)
+/// after a restore. On a strict workspace agentd has no sudo to apply it, so the
+/// root attestor does, and it restarts itself on a newly staged copy so that a
+/// workspace restored from an older snapshot gets the watcher too.
+@Suite("Guest clock resync: wake signal, strict attestor", .serialized)
 struct GuestClockResyncTests {
     private static let python = "/usr/bin/python3"
     private static let vmSetup = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -34,42 +35,31 @@ struct GuestClockResyncTests {
         return String(decoding: data, as: UTF8.self)
     }
 
-    @Test("The strict root script starts the clock watcher before sudo is revoked",
-          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
-    func strictScriptStartsWatcher() throws {
-        let out = try run("""
-            m.strict_sandbox_requested = lambda: True
-            m.strict_sandbox_applied = lambda: False
-            m._have_sudo = lambda: True
-            seen = []
-            def spy(argv, **kw):
-                seen.append(argv); return subprocess.CompletedProcess(argv, 0, '', '')
-            m.subprocess.run = spy
-            class Exit(Exception): pass
-            def fake_exit(code): raise Exit()
-            m.os._exit = fake_exit
-            try: m.task_strict_sandbox()
-            except Exit: pass
-            script = [a for a in seen if a[:3] == ['sudo', '-n', 'sh']][0][-1]
-            lines = script.splitlines()
-            run_at = [i for i, l in enumerate(lines) if l.startswith('systemd-run --unit=bromure-clockd ')]
-            revoke_at = [i for i, l in enumerate(lines) if 'apply' in l and l.startswith('/usr/bin/python3')]
-            # The watcher's code is one shell word; parse the whole script to get it.
-            words = shlex.split(script, comments=True)
-            code = words[words.index('-c', words.index('--unit=bromure-clockd')) + 1]
-            print(json.dumps({"one": len(run_at) == 1,
-                              "before": bool(run_at and revoke_at and run_at[0] < revoke_at[0]),
-                              "code": code == m.CLOCK_WATCH_CODE}))
-            """)
-        #expect(out.contains(#""one": true"#), "\(out)")
-        #expect(out.contains(#""before": true"#), "\(out)")
-        #expect(out.contains(#""code": true"#), "\(out)")
+    private func runAttestd(_ script: String) throws -> String {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("attestd-clock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.currentDirectoryURL = Self.vmSetup
+        p.arguments = ["-c", "\(Self.python) - '\(dir.path)' --selftest <<'PY'\n"
+            + "import importlib.util, sys, os, json, shutil\n"
+            + "s = importlib.util.spec_from_file_location('attestd', 'bromure-attestd.py')\n"
+            + "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+            + "d = os.path.realpath(sys.argv[1])\n"
+            + "m.log = lambda *a: None\n"
+            + script + "\nPY"]
+        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
     }
 
-    @Test("The root watcher steps the clock forward only, once per signal, without exec",
+    @Test("attestd steps the clock forward only, once per signal, without exec",
           .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
-    func watcherForwardOnly() throws {
-        let out = try run("""
+    func attestdClockForwardOnly() throws {
+        let out = try runAttestd("""
             sig = d + '/sig'
             now = [1000.0]
             set_to = []
@@ -77,24 +67,65 @@ struct GuestClockResyncTests {
             # garbage, ahead again.
             seq = ['1806', '1806', '900', 'x12', '2000']
             polls = [0]
-            class Stop(Exception): pass
             def sleep(_):
                 polls[0] += 1
-                if polls[0] >= len(seq): raise Stop()
-                open(sig, 'w').write(seq[polls[0]])
+                if polls[0] < len(seq): open(sig, 'w').write(seq[polls[0]])
             def settime(clk, t):
                 set_to.append(t); now[0] = t
-            fake = types.SimpleNamespace(time=lambda: now[0], sleep=sleep,
-                                         clock_settime=settime, CLOCK_REALTIME=0)
-            sys.modules['time'] = fake
             open(sig, 'w').write(seq[0])
-            code = m.CLOCK_WATCH_CODE.replace('/mnt/bromure-meta/.resume-signal', sig)
-            g = {}
-            try: exec(code, g)
-            except Stop: pass
+            m.clock_watcher(path=sig, sleep=sleep, now=lambda: now[0], settime=settime,
+                            running=lambda: polls[0] < len(seq))
             print(json.dumps({"set": set_to}))
             """)
         #expect(out.contains(#"{"set": [1806.0, 2000.0]}"#), "\(out)")
+    }
+
+    @Test("attestd exits for a newly staged copy of itself, not for a byte-identical rewrite",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func attestdUpgradesOnNewCopy() throws {
+        let out = try runAttestd("""
+            f = d + '/bromure-attestd.py'
+            shutil.copy('bromure-attestd.py', f)
+            body = open(f).read()
+            # Poll 1: rewritten identically (new mtime). Poll 2: a new version.
+            steps = [lambda: open(f, 'w').write(body),
+                     lambda: open(f, 'w').write(body + '\\n# v2\\n')]
+            polls = [0]; exits = []
+            class Exited(Exception): pass
+            def sleep(_):
+                if polls[0] < len(steps):
+                    steps[polls[0]]()
+                    st = os.stat(f); os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9 * (polls[0] + 1)))
+                polls[0] += 1
+            def exit(code):
+                exits.append(polls[0]); raise Exited()
+            try: m.upgrade_watcher(path=f, sleep=sleep, exit=exit, running=lambda: polls[0] < 5)
+            except Exited: pass
+            print(json.dumps({"exits": exits}))
+            """)
+        // No exit after the identical rewrite (poll 1); exit after the new copy (poll 2).
+        #expect(out.contains(#"{"exits": [2]}"#), "\(out)")
+    }
+
+    @Test("attestd's main starts the clock and upgrade watchers",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: python)))
+    func attestdMainStartsWatchers() throws {
+        let out = try runAttestd("""
+            started = []
+            class T:
+                def __init__(self, target=None, daemon=None): self.t = target
+                def start(self): started.append(self.t.__name__)
+            m.threading.Thread = T
+            m.os.geteuid = lambda: 0
+            class Stop(Exception): pass
+            def boom(): raise Stop()
+            m.load_secret = boom
+            m.time.sleep = lambda _: (_ for _ in ()).throw(Stop())
+            try: m.main()
+            except Stop: pass
+            print(json.dumps({"started": sorted(started)}))
+            """)
+        #expect(out.contains(#"{"started": ["clock_watcher", "upgrade_watcher"]}"#), "\(out)")
     }
 
     @Test("Under strict, agentd's own watcher runs no sudo",
