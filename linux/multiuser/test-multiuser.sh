@@ -116,6 +116,27 @@ PY
 [ "$R" = OK ] && ok "$A's browser-mcp channel relays $A's agent (ids rewritten and restored)" || no "$A's browser-mcp: $R"
 T0=$(date +%s); timeout 20 ssh "${SSHO[@]}" -i $W/$B -o IdentitiesOnly=yes "$B@$HOST" "bromure-fatclient/1 browser-mcp $FA" </dev/null >/dev/null 2>&1; RC=$?
 [ $RC != 0 ] && [ $RC != 124 ] && ok "$B can't open $A's VM's browser-mcp (refused in $(( $(date +%s) - T0 ))s)" || no "$B's browser-mcp for $A's VM: rc=$RC"
+# The P2P ingress (bromure-gw-p2p.socket): each connection pinned to the uid
+# that made it, whatever user name or key the client gives. Connections made
+# as A (socat under sudo -u) are A's account's alone; root's get no banner.
+P2P=/run/bromure-ac/p2p.sock
+viaP2P() {  # CONNECTING_USER LOGIN KEY METHOD PATH: one request over a connection made as CONNECTING_USER
+  req "$4" "$5" "" | timeout 60 ssh "${SSHO[@]}" -o ProxyCommand="sudo -n -u $1 socat - UNIX-CONNECT:$P2P" -i "$3" \
+    -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o HostKeyAlias=bromure-p2p "$2@p2p" 'bromure-fatclient/1 control' 2>/dev/null \
+    | sed -n '/^{/,$p'; }
+[ -S $P2P ] && [ "$(stat -c '%a %U' $P2P)" = "666 root" ] && [ "$(stat -c '%a %U' $(dirname $P2P))" = "755 root" ] \
+  && ok "p2p.sock is 0666 and root's, in root's 0755 dir" || no "p2p.sock: $(stat -c '%a %U' $P2P 2>&1) in $(stat -c '%a %U' $(dirname $P2P))"
+viaP2P $A $A $W/$A GET /health | grep -q '"status"' && ok "$A's key opens $A on a P2P connection made as $A" || no "$A over P2P"
+[ -z "$(viaP2P $A $B $W/$B GET /health)" ] && ok "$B's key and name refused on $A's P2P connection" || no "$B got in on $A's P2P connection"
+[ -z "$(viaP2P $A $A $W/$B GET /health)" ] && ok "$B's key refused as $A on $A's P2P connection" || no "$B's key opened $A over P2P"
+viaP2P $B $B $W/$B GET /health | grep -q '"status"' && ok "$B's own P2P connection opens $B" || no "$B over P2P"
+[ -z "$(timeout 5 sudo -n socat -u UNIX-CONNECT:$P2P - 2>/dev/null | head -c 8)" ] && ok "root's P2P connection gets no banner" || no "root got a banner"
+# Each user's daemon (where its P2P broker and ingress run) is that user's uid.
+for u in $A $B; do
+  pid=$(systemctl show bromure-ac@$u -p MainPID --value)
+  uid=$(awk '/^Uid:/{print $2}' /proc/$pid/status 2>/dev/null)
+  [ -n "$uid" ] && [ "$uid" = "$(id -u $u)" ] && ok "bromure-ac@$u (pid $pid) runs as $u's uid $uid" || no "bromure-ac@$u uid '$uid'"
+done
 # A crash of A's daemon: A's VM re-adopted, B untouched.
 PB=$(systemctl show bromure-ac@$B -p MainPID --value); PA=$(systemctl show bromure-ac@$A -p MainPID --value)
 sudo -n kill -9 $PA; sleep 5
