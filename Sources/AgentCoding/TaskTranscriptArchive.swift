@@ -31,6 +31,43 @@ enum TaskTranscriptArchive {
         text.utf8.count >= fullReadCap - 65_536
     }
 
+    /// A capped archive read goes on: the file re-read whole, in exact
+    /// chunks, up to this much (Finding "Capped transcript head is archived
+    /// when the session tail does not overlap").
+    static let wholeReadCeiling = 128_000_000
+    static let wholeReadChunk = 16_000_000
+
+    /// Shell that prints `bytes` bytes of `$f` from `offset`, base64 (exact:
+    /// a chunk cut inside a character survives, where the full read's UTF-8
+    /// repair would drop it).
+    static func chunkEmit(offset: Int, bytes: Int) -> String {
+        "if [ -n \"$f\" ]; then tail -c +\(max(0, offset) + 1) \"$f\" | head -c \(max(0, bytes)) | base64 | tr -d '\\n'; fi"
+    }
+
+    /// A whole re-read is of the file the capped read came from: the same
+    /// first 4 KB. (The capped read's UTF-8 repair could only make a file
+    /// with a bad byte that early differ: then the re-read isn't used.)
+    static func samePrefix(_ head: String, _ whole: Data) -> Bool {
+        let n = min(4_096, head.utf8.count, whole.count)
+        return n > 0 && Data(head.utf8.prefix(n)) == whole.prefix(n)
+    }
+
+    /// What the archive keeps of a full read (`whole`: it reached the file's
+    /// end unless `complete` is false) and the session copy's tail: joined
+    /// where they share records; when they share none and the read stopped
+    /// short, both -- the head, then the tail (the end, with the final
+    /// report) -- rather than the head alone.
+    static func archiveJoin(whole: Data, complete: Bool, sessionTail: Data?) -> Data {
+        guard let tail = sessionTail, !tail.isEmpty else { return whole }
+        if let joined = SessionTranscriptCache.merge(history: whole, incoming: tail, mode: .overlapOnly) {
+            return joined
+        }
+        if !complete, let both = SessionTranscriptCache.merge(history: whole, incoming: tail, mode: .continuation) {
+            return both
+        }
+        return whole
+    }
+
     /// Overridable for tests (a temp dir); nil = the real location.
     nonisolated(unsafe) static var directoryOverride: URL?
 
