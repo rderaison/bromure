@@ -68,6 +68,11 @@ final class RemoteAccessServer {
         /// a socket made where this process can't make one). Before
         /// unixSocketPath and bindAddress:port.
         var boundSocketFD: Int32? = nil
+        /// Each connection starts with a PROXY protocol v1 line naming the
+        /// client (the Linux gateway's P2P ingress, which only pinned local
+        /// forwarders reach): its address keys the password rate limit.
+        /// Never on a listener anyone else can reach.
+        var proxyHeader: Bool = false
     }
 
     private let paths: Paths
@@ -227,20 +232,31 @@ final class RemoteAccessServer {
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), tcpKeepIdle), value: 60)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPINTVL), value: 30)
             .childChannelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_KEEPCNT), value: 4) }
+        let proxyHeader = config.proxyHeader
         bootstrap = bootstrap
             .childChannelInitializer { channel in
+                // A PROXY line first, where the listener takes one: the SSH
+                // pipeline goes in once it names the client.
+                let install = { (pinned: String?) -> EventLoopFuture<Void> in
+                    guard proxyHeader else { return Self.initializeConnection(channel, pinnedAccount: pinned, peerIP: nil, setup) }
+                    return channel.eventLoop.makeCompletedFuture {
+                        try channel.pipeline.syncOperations.addHandler(ProxyHeaderHandler { ip in
+                            Self.initializeConnection(channel, pinnedAccount: pinned, peerIP: ip, setup)
+                        })
+                    }
+                }
                 // Pinned: the account first, from the connection alone (it
                 // runs before the channel reads anything); none, closed
                 // before the banner.
-                guard let accountPin else { return Self.initializeConnection(channel, pinnedAccount: nil, setup) }
+                guard let accountPin else { return install(nil) }
                 return accountPin(channel).flatMap { pinned in
                     guard let pinned else { return channel.eventLoop.makeFailedFuture(RemoteSSHError.noAccountPin) }
-                    return Self.initializeConnection(channel, pinnedAccount: pinned, setup)
+                    return install(pinned)
                 }
             }
 
         do {
-            let ch = try (config.boundSocketFD.map { bootstrap.withBoundSocket(descriptor: $0) }
+            let ch = try (config.boundSocketFD.map { bootstrap.withBoundSocket(NIOBSDSocket.Handle($0)) }
                           ?? config.unixSocketPath.map { bootstrap.bind(unixDomainSocketPath: $0, cleanupExistingSocketFile: true) }
                           ?? bootstrap.bind(host: config.bindAddress, port: config.port)).wait()
             self.group = g
@@ -269,15 +285,19 @@ final class RemoteAccessServer {
     /// One accepted connection's SSH pipeline: its own auth delegate
     /// (its peer's IP for the rate limiter, the account it's pinned to if
     /// any), its channels' budget, the session handlers.
-    private static func initializeConnection(_ channel: Channel, pinnedAccount: String?,
-                                             _ setup: ConnectionSetup) -> EventLoopFuture<Void> {
+    /// Runs in NIO's child initializer, off the main actor: it touches
+    /// nothing of the server's own state, only `setup`'s.
+    nonisolated private static func initializeConnection(_ channel: Channel, pinnedAccount: String?, peerIP: String?,
+                                                         _ setup: ConnectionSetup) -> EventLoopFuture<Void> {
         let (hostKey, exe, user, controlSocketPath) = (setup.hostKey, setup.exe, setup.user, setup.controlSocketPath)
         let (forwardResolver, udpForwardResolver) = (setup.forwardResolver, setup.udpForwardResolver)
         let (browserMCPResolver, delegationMCPResolver, router) = (setup.browserMCPResolver, setup.delegationMCPResolver, setup.router)
         // Per-connection delegate carrying this peer's IP for the
         // rate limiter; the throttle state itself is shared.
-        let peerIP = channel.remoteAddress?.ipAddress ?? "unknown"
-        let delegate = setup.authFactory.make(peerIP: peerIP, pinnedAccount: pinnedAccount)
+        // A pinned connection's bucket is its account's at that address: one
+        // client's guesses don't throttle another account's logins.
+        let ip = peerIP ?? channel.remoteAddress?.ipAddress ?? "unknown"
+        let delegate = setup.authFactory.make(peerIP: pinnedAccount.map { "\($0)|\(ip)" } ?? ip, pinnedAccount: pinnedAccount)
         let grant = delegate.grant
         // What this connection's channels may hold together.
         let budget = RemoteConnectionBudget()
@@ -312,6 +332,20 @@ final class RemoteAccessServer {
                 RemoteErrorHandler(),
             ])
         }
+    }
+
+    /// A PROXY protocol v1 line's client address ("PROXY TCP4 <src> <dst>
+    /// <sport> <dport>"; "PROXY UNKNOWN": .some(nil)), or nil when malformed.
+    nonisolated static func proxyClientIP(_ line: String) -> String?? {
+        let f = line.split(separator: " ", omittingEmptySubsequences: false)
+        guard f.first == "PROXY", f.count >= 2 else { return nil }
+        if f[1] == "UNKNOWN" { return .some(nil) }
+        guard f.count == 6, f[1] == "TCP4" || f[1] == "TCP6", Int(f[4]).map({ (0...65535).contains($0) }) == true,
+              Int(f[5]).map({ (0...65535).contains($0) }) == true else { return nil }
+        let ip = String(f[2])
+        var v4 = in_addr(), v6 = in6_addr()
+        guard inet_pton(AF_INET, ip, &v4) == 1 || inet_pton(AF_INET6, ip, &v6) == 1 else { return nil }
+        return .some(ip)
     }
 
     /// Turn an opaque NIO bind error ("NIOCore.IOError error 1") into something
@@ -598,5 +632,43 @@ final class RemoteAccessServer {
         guard fields.count >= 2, let blob = Data(base64Encoded: String(fields[1])) else { return nil }
         let digest = Data(SHA256.hash(data: blob))
         return "SHA256:" + digest.base64EncodedString().replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Reads a connection's PROXY protocol v1 line (at most 107 bytes, CRLF),
+/// then has the SSH pipeline installed behind it with the client's address,
+/// hands it what came after the line, and leaves. Anything else: closed.
+final class ProxyHeaderHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+    private var pending: ByteBuffer?
+    private var done = false
+    private let install: (String) -> EventLoopFuture<Void>
+
+    init(install: @escaping (String) -> EventLoopFuture<Void>) { self.install = install }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var chunk = unwrapInboundIn(data)
+        guard !done else { context.fireChannelRead(data); return }
+        if pending == nil { pending = chunk } else { pending!.writeBuffer(&chunk) }
+        guard var buf = pending else { return }
+        let bytes = Array(buf.readableBytesView.prefix(108))
+        guard let cr = bytes.firstIndex(of: UInt8(ascii: "\r")) else {
+            if buf.readableBytes >= 107 { context.close(promise: nil) }
+            return
+        }
+        guard cr + 1 < buf.readableBytes else { return }   // the LF still to come
+        guard cr + 1 < bytes.count, bytes[cr + 1] == UInt8(ascii: "\n"),
+              let line = buf.readString(length: cr),
+              let parsed = RemoteAccessServer.proxyClientIP(line) else { context.close(promise: nil); return }
+        buf.moveReaderIndex(forwardBy: 2)
+        done = true
+        pending = nil
+        let rest = buf
+        install(parsed ?? "unknown").whenComplete { result in
+            guard case .success = result else { context.close(promise: nil); return }
+            if rest.readableBytes > 0 { context.fireChannelRead(self.wrapInboundOut(rest)) }
+            context.pipeline.removeHandler(context: context, promise: nil)
+        }
     }
 }
