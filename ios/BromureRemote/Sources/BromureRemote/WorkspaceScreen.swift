@@ -1510,6 +1510,10 @@ struct TailFollowingScroll<Content: View>: View {
         /// The scroll view reports the user moving it -- a finger, a
         /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
         var userScrolling = false
+        /// How far the user's scroll has moved the offset since it began
+        /// (negative: toward the top) -- summed, so a slow trackpad scroll
+        /// of under a point a frame still adds up.
+        var scrolledBy: CGFloat = 0
         var tailY: CGFloat?
         /// A snap budget: layout drift can report many times a second, and
         /// each snap is a layout pass -- the watchdog catches what's skipped.
@@ -1556,12 +1560,27 @@ struct TailFollowingScroll<Content: View>: View {
             // A trackpad or mouse wheel scrolls without any drag: the scroll
             // phase is what says the user moved it, so the end's move it
             // causes lets go (in `tailMoved`) instead of snapping back.
-            .modifier(UserScrollPhase { scrolling in
+            // Only the offset moving up lets go: a streaming row growing
+            // pushes the end down too, mid-scroll, without the user going
+            // anywhere (`TailFollowRule`).
+            .modifier(UserScrollPhase(changed: { scrolling in
+                if scrolling, !follow.userScrolling { follow.scrolledBy = 0 }
                 follow.userScrolling = scrolling
                 follow.lastUserScroll = Date()
-                // Stopped at the end: follow again.
-                if !scrolling, !follow.sticky, atBottom(follow.tailY) { follow.sticky = true }
-            })
+                guard !scrolling else { return }
+                switch TailFollowRule.atRest(sticky: follow.sticky, atBottom: atBottom(follow.tailY)) {
+                case .follow: follow.sticky = true      // stopped at the end: follow again
+                case .snap: snap(proxy)                 // a row grew while scrolling
+                case .none: break
+                }
+            }, offsetMoved: { delta in
+                guard follow.userScrolling else { return }
+                follow.scrolledBy += delta
+                if TailFollowRule.releases(userScrolling: true, offsetDelta: follow.scrolledBy,
+                                           tailY: follow.tailY, viewport: viewport) {
+                    follow.sticky = false
+                }
+            }))
             .onAppear { snap(proxy) }
             .onChange(of: changeKey) { _, _ in if follow.sticky { snap(proxy) } }
             // The watchdog: a layout pass that reported nothing new still
@@ -1608,10 +1627,11 @@ struct TailFollowingScroll<Content: View>: View {
         follow.tailY = y
         guard viewport > 0 else { return }
         if follow.userScrolling {
-            // The user's own scroll, by whatever input: away from the end
-            // lets go -- before the sticky branch could snap it back.
+            // The user's own scroll, by whatever input: never snapped back
+            // mid-gesture. Whether it let go is the offset's to say
+            // (`offsetMoved`), not the end's position: a row growing moves
+            // that too.
             follow.lastUserScroll = Date()
-            if y > viewport + 2 { follow.sticky = false }
             return
         }
         if follow.sticky {
@@ -1637,12 +1657,17 @@ struct TailFollowingScroll<Content: View>: View {
 /// user scrolling.
 private struct UserScrollPhase: ViewModifier {
     let changed: (Bool) -> Void
+    /// The scroll offset's change (negative: toward the top).
+    let offsetMoved: (CGFloat) -> Void
     func body(content: Content) -> some View {
         if #available(iOS 18.0, visionOS 2.0, *) {
             content.onScrollPhaseChange { _, phase in
                 // Not `.tracking`: a finger resting on the chat while rows
                 // arrive hasn't scrolled anywhere.
                 changed(phase == .interacting || phase == .decelerating)
+            }
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { old, new in
+                offsetMoved(new - old)
             }
         } else {
             content
