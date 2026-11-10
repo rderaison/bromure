@@ -14360,12 +14360,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let cmd = locate + TaskTranscriptArchive.chunkEmit(offset: data.count, bytes: chunk)
             guard let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 60),
                   let d = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return nil }
+            else {
+                // The workspace is off (the capped head came from the home
+                // image): the pinned file from there, past the cap (Finding
+                // "Pinned transcript head is truncated when the chunk reader
+                // selects a newer conversation").
+                guard data.isEmpty, let pinnedID else { return nil }
+                return await wholeImageTranscript(task, head: head, conversationID: pinnedID)
+            }
             if data.isEmpty, !TaskTranscriptArchive.samePrefix(head, d) { return nil }
             data.append(d)
             if d.count < chunk { return (data, true) }
         }
         return (data, false)
+    }
+
+    /// `wholeGuestTranscript` with the workspace off: conversation `id`'s
+    /// file read from the home image (Claude only, as `fullTaskTranscript`'s
+    /// offline read), up to `wholeReadCeiling`. nil when unreadable, or not
+    /// the file `head` came from.
+    private func wholeImageTranscript(_ task: CodingTask, head: String,
+                                      conversationID id: String) async -> (data: Data, complete: Bool)? {
+        guard task.tool == .claude,
+              let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+        let img = store.homeImageURL(for: profile)
+        guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+        let ceiling = TaskTranscriptArchive.wholeReadCeiling
+        guard let r = await Task.detached(priority: .userInitiated, operation: {
+            Self.ext4TranscriptData(imagePath: img.path, conversationID: id, limit: ceiling)
+        }).value, TaskTranscriptArchive.samePrefix(head, r.data) else { return nil }
+        return (r.data, r.size <= UInt64(r.data.count))
     }
 
     /// The host's copy of the task's own session (cache + live tail).
@@ -14571,6 +14595,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Claude conversation `id`'s transcript in the home image, whichever
     /// project folder holds it.
     nonisolated static func ext4Transcript(imagePath: String, conversationID id: String) -> String? {
+        guard let r = ext4TranscriptData(imagePath: imagePath, conversationID: id,
+                                         limit: TaskTranscriptArchive.fullReadCap)
+        else { return nil }
+        return String(decoding: r.data, as: UTF8.self)
+    }
+
+    /// Claude conversation `id`'s transcript in the home image: its first
+    /// `limit` bytes, exact, and the file's whole size. nil when absent or
+    /// empty. (The capped archive read continues the pinned file past
+    /// `fullReadCap` this way when the workspace is off.)
+    nonisolated static func ext4TranscriptData(imagePath: String, conversationID id: String,
+                                               limit: Int) -> (data: Data, size: UInt64)? {
         guard AgentSessionLocator.isConversationUUID(id),
               let vol = try? Ext4Volume(path: imagePath),
               let projIno = try? vol.resolve("/.claude/projects"),
@@ -14580,8 +14616,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                   let files = try? vol.listDir(entry.ino),
                   let f = files.first(where: { $0.name == id + ".jsonl" }),
                   let ino = try? vol.inode(f.ino), ino.isRegular,
-                  let data = try? vol.readData(ino, limit: 25_000_000), !data.isEmpty else { continue }
-            return String(decoding: Data(data.prefix(25_000_000)), as: UTF8.self)
+                  let data = try? vol.readData(ino, limit: limit), !data.isEmpty else { continue }
+            return (Data(data.prefix(limit)), ino.size)
         }
         return nil
     }

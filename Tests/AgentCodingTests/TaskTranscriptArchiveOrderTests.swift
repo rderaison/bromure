@@ -133,6 +133,58 @@ struct TaskTranscriptArchivePastCapTests {
         #expect(ac.contains("? (text, nil) : nil"))
     }
 
+    @Test("The whole re-read follows the pinned conversation, not the worktree's newest file")
+    func rereadFollowsPin() throws {
+        // Finding "Pinned transcript head is truncated when the chunk reader
+        // selects a newer conversation": the re-read took the worktree's
+        // newest file, failed the prefix check, and the archive kept the head.
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("ttapin-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let slug = "fix-thing-261110-1253-abcd"
+        let dir = home.appendingPathComponent(".claude/projects/-home-ubuntu-repo-\(slug)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let mine = "11111111-2222-4333-8444-555555555555", other = "66666666-7777-4888-9999-000000000000"
+        let mineBytes = Data("mine: the task's own conversation\n".utf8)
+        try mineBytes.write(to: dir.appendingPathComponent("\(mine).jsonl"))
+        let otherURL = dir.appendingPathComponent("\(other).jsonl")
+        try Data("other: a newer one\n".utf8).write(to: otherURL)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
+                                              ofItemAtPath: otherURL.path)
+        func run(_ locate: String) throws -> Data {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", locate + TaskTranscriptArchive.chunkEmit(offset: 0, bytes: 1_000)]
+            p.environment = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+            let out = Pipe()
+            p.standardOutput = out
+            try p.run()
+            p.waitUntilExit()
+            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            return Data(base64Encoded: text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Data()
+        }
+        // By branch: the newest file -- the other conversation.
+        let byBranch = try #require(CodingTaskEngine.taskTranscriptLocate(branch: "wt/" + slug, agent: .claude))
+        #expect(try run(byBranch) == Data("other: a newer one\n".utf8))
+        // Pinned, as the re-read now does: the task's own file.
+        let pinned = "f=\"\"; " + AgentSessionLocator.pinnedFragment(tool: "claude", id: mine, into: "f")
+        #expect(try run(pinned) == mineBytes)
+        #expect(TaskTranscriptArchive.samePrefix(String(decoding: mineBytes, as: UTF8.self), try run(pinned)))
+
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let fn = try #require(ac.range(of: "private func wholeGuestTranscript("))
+        let body = String(ac[fn.upperBound...].prefix(3000))
+        #expect(body.contains("locate = \"f=\\\"\\\"; \" + pick"))
+        // Workspace off: the pinned file from the home image, past the cap.
+        #expect(body.contains("return await wholeImageTranscript(task, head: head, conversationID: pinnedID)"))
+        let img = try #require(ac.range(of: "private func wholeImageTranscript("))
+        let imgBody = String(ac[img.upperBound...].prefix(1500))
+        #expect(imgBody.contains("Self.ext4TranscriptData(imagePath: img.path, conversationID: id, limit: ceiling)"))
+        #expect(imgBody.contains("TaskTranscriptArchive.samePrefix(head, r.data)"))
+        #expect(imgBody.contains("return (r.data, r.size <= UInt64(r.data.count))"))
+    }
+
     @Test("The re-read is checked against the capped read, in exact chunks")
     func reread() throws {
         let head = String(decoding: recs(1...3), as: UTF8.self)
