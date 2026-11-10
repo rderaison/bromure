@@ -136,6 +136,21 @@ extension Daemon {
             log("Packages installed (base image now v\(now)).")
         } catch {
             log("the recommended packages weren't installed: \(error)")
+            let row = Self.amendFailedRow(steps, error: "\(error)")
+            await MainActor.run { SecurityTimeline.shared.append(row) }
         }
     }
+
+    /// A failed amend's Security Timeline row (no prompt: macOS shows the
+    /// error in its install window, which the daemon has none of). The base
+    /// image is no workspace's, so the row names none.
+    // @port-skip linux-only: the timeline row stands for macOS's install-window error
+    static func amendFailedRow(_ steps: [PostinstallStep], error: String, now: Date = Date()) -> SecurityTimeline.Event {
+        SecurityTimeline.Event(time: now, engine: "Base image",
+                               condition: "install " + steps.map(\.description).joined(separator: ", "),
+                               decision: "install failed — \(error)", kind: .blocked, profileID: imageRowProfileID)
+    }
+
+    /// The profile id of a row about the base image: none of a workspace's.
+    static let imageRowProfileID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 }

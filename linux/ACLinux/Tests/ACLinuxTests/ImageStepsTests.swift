@@ -257,4 +257,16 @@ struct ImageStepsTests {
         #expect(InterimBake.clearSharedWrite(shared) && mode(shared) == 0o755)
         #expect(!InterimBake.clearSharedWrite(own + "/linked"))
     }
+
+    /// A failed amend is a blocked Security Timeline row naming the steps
+    /// and the error (no prompt), about no workspace.
+    @Test func aFailedAmendIsABlockedTimelineRow() {
+        let e = Daemon.amendFailedRow([Self.step("aaaa", 1, "Claude Code"), Self.step("bbbb", 2, "Codex")],
+                                      error: "the installer VM exited 1")
+        #expect(e.engine == "Base image")
+        #expect(e.condition == "install Claude Code, Codex")
+        #expect(e.decision == "install failed — the installer VM exited 1")
+        #expect(e.kind == .blocked)
+        #expect(e.profileID == Daemon.imageRowProfileID && e.profileID.uuidString == "00000000-0000-0000-0000-000000000000")
+    }
 }
