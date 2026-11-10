@@ -67,7 +67,7 @@ mkdir -p "$(dirname "$BIN")" "$(dirname "$AGENTD")" "$UNIT_DIR"
 install -m 0755 "$(swift build --package-path "$ROOT/linux/ACLinux" -c release --show-bin-path)/bromure-ac" "$BIN"
 # Its build metadata (/state's "build"), beside it.
 "$ROOT/linux/stamp-build-info.sh" "$BIN.build-info.json.new" && chmod 644 "$BIN.build-info.json.new" \
-  && mv -f "$BIN.build-info.json.new" "$BIN.build-info.json"
+  && mv -f "$BIN.build-info.json.new" "$BIN.build-info.json" || exit 1
 # The guest scripts: agentd and what the daemon stages beside it (a strict or
 # OpenShell workspace isn't started without its scripts). Only what git
 # tracks, built in vm-setup.new and swapped in whole.

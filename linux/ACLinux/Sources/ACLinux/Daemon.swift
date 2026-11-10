@@ -1484,7 +1484,10 @@ public actor Daemon {
         guard starting.insert(rec.id).inserted else {
             return .error(409, "VM '\(rec.name)' is already starting")
         }
-        defer { starting.remove(rec.id) }
+        // Released early by a deferred stop (below): the marks are then a
+        // later start's, never this one's to clear.
+        var marksReleased = false
+        defer { if !marksReleased { starting.remove(rec.id) } }
         // A stop deferred for an earlier boot isn't this one's.
         pendingStops[rec.id] = nil
         var r = rec
@@ -1537,7 +1540,7 @@ public actor Daemon {
             }
             restoring.insert(rec.id)
         }
-        defer { restoring.remove(rec.id) }
+        defer { if !marksReleased { restoring.remove(rec.id) } }
         do {
             try await launch(&r, restoreFrom: restoreFrom)
             // A stop asked for during the boot: honored now that it's up, by
@@ -1548,6 +1551,7 @@ public actor Daemon {
                 // workspace's boot (not swept), and a second stop deferred.
                 starting.remove(rec.id)
                 restoring.remove(rec.id)
+                marksReleased = true
                 return await deleteVM(now, action: action)
             }
             return ControlResponse(200, ["status": "running"])
@@ -2228,7 +2232,12 @@ public actor Daemon {
                     applyRouting(staged: staged)
                     startLocalEngineIfNeeded(for: staged)
                     lastStagedProfiles[rec.id] = staged
-                    if let profile = existingProfile(for: rec) { await applyFusionAtLaunch(profile) }
+                    if let profile = existingProfile(for: rec) {
+                        // What its staging was made from (as a launch records
+                        // it): an edit since restarts its agents.
+                        liveApplied[rec.id] = profile
+                        await applyFusionAtLaunch(profile)
+                    }
                 }
                 sw.attach(l.port, mac: rec.mac)
                 await allowLoadBalancerClaims(rec)
