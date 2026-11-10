@@ -301,6 +301,16 @@ final class RemoteAccessServer {
         let grant = delegate.grant
         // What this connection's channels may hold together.
         let budget = RemoteConnectionBudget()
+        // A connection that never gets a session open (one opens only
+        // once signed in) is closed after a login grace, as OpenSSH's
+        // LoginGraceTime: keepalives kept a silent peer's connection
+        // open for good, so enough of them ran this process out of
+        // descriptors.
+        let loginGrace = channel.eventLoop.scheduleTask(in: .seconds(120)) {
+            FatClientLog.log("srv: \(ip): no session within the login grace, closing")
+            channel.close(promise: nil)
+        }
+        channel.closeFuture.whenComplete { _ in loginGrace.cancel() }
         return channel.eventLoop.makeCompletedFuture {
             try channel.pipeline.syncOperations.addHandlers([
                 NIOSSHHandler(
@@ -313,6 +323,7 @@ final class RemoteAccessServer {
                         guard channelType == .session else {
                             return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.invalidChannelType)
                         }
+                        loginGrace.cancel()   // signed in: a session is opening
                         guard budget.openChannel() else {
                             FatClientLog.log("srv: \(RemoteConnectionBudget.maxChannels) channels open on this connection: refusing another")
                             return childChannel.eventLoop.makeFailedFuture(RemoteSSHError.tooManyChannels)
