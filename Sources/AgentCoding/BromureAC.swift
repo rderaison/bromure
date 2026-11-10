@@ -14357,14 +14357,49 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// The task's whole transcript file: the guest by session id (Kimi) or
-    /// branch, else the home image when the workspace is off (Claude).
+    /// The task's whole transcript file. Its own session's conversation by
+    /// id when that session learned one -- the guest's file, else (Claude,
+    /// workspace off) the home image's -- and never the worktree's newest
+    /// file then: another conversation started in the same worktree before
+    /// the Done archive ran would be saved as this task's, for good
+    /// (Finding "Archiving can save a newer conversation from the same
+    /// worktree"). Without an id: by branch, as before, but not a file that
+    /// is another session's conversation.
     private func fullTaskTranscript(_ task: CodingTask) async -> String? {
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
-        // Kimi: the session's own journal by id, when the task's session
-        // learned it — no folder/slug guessing (Kimi cuts bucket names).
-        if task.tool == .kimi {
+        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
+        let own = task.sessionID.flatMap { agentSessionStore.session($0) }?.agentTranscriptID
+        if let id = own {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: id, into: "f")
+            if !pick.isEmpty {
+                if let out = try? await guestExec(profileID: task.profileID, command: "f=\"\"; " + pick + emit,
+                                                  timeout: 30),
+                   !out.isEmpty {
+                    return out
+                }
+                guard task.tool == .claude,
+                      let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+                let img = store.homeImageURL(for: profile)
+                guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+                return await Task.detached(priority: .userInitiated) {
+                    Self.ext4Transcript(imagePath: img.path, conversationID: id)
+                }.value
+            }
+        }
+        let others = Set(agentSessionStore.sessions.compactMap { s -> String? in
+            guard s.id != task.sessionID, s.profileID == task.profileID else { return nil }
+            return s.agentTranscriptID?.lowercased()
+        })
+        func mine(_ text: String) -> String? {
+            TaskTranscriptArchive.fallbackBelongs(text, tool: task.tool.rawValue, otherConversationIDs: others)
+                ? text : nil
+        }
+        // Kimi, a task with no session of its own: the worktree session's
+        // journal by id — no folder/slug guessing (Kimi cuts bucket names).
+        // (A task's own session without an id yet: any other session here
+        // with one is another conversation.)
+        if task.tool == .kimi, task.sessionID == nil {
             let slug = String(branch.dropFirst(3))
             if let id = agentSessionStore.sessions.first(where: { s in
                 s.profileID == task.profileID
@@ -14384,7 +14419,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let out = try? await guestExec(profileID: task.profileID,
                                           command: cmd, timeout: 30),
            !out.isEmpty {
-            return out
+            return mine(out)
         }
         // Offline: read the image directly (read-only; safe even if a VM
         // has the disk attached — same tolerance as the ext4 browser).
@@ -14399,7 +14434,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let guestCwd = ScheduledAutomationEngine.guestPath(task.repoPath)
         return await Task.detached(priority: .userInitiated) {
             Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
-        }.value
+        }.value.flatMap(mine)
     }
 
     /// The folders inside `path` ("~", "~/proj", an absolute guest path)
@@ -14513,6 +14548,24 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// home.img: candidate project dirs are any `*-<slug>` (worktree
     /// sessions) plus the Claude-encoded cwd (plain-tab sessions); the
     /// newest `.jsonl` by inode mtime wins. Pure file IO — run detached.
+    /// Claude conversation `id`'s transcript in the home image, whichever
+    /// project folder holds it.
+    nonisolated static func ext4Transcript(imagePath: String, conversationID id: String) -> String? {
+        guard AgentSessionLocator.isConversationUUID(id),
+              let vol = try? Ext4Volume(path: imagePath),
+              let projIno = try? vol.resolve("/.claude/projects"),
+              let entries = try? vol.listDir(projIno) else { return nil }
+        for entry in entries where entry.name != "." && entry.name != ".." {
+            guard let dirInode = try? vol.inode(entry.ino), dirInode.isDir,
+                  let files = try? vol.listDir(entry.ino),
+                  let f = files.first(where: { $0.name == id + ".jsonl" }),
+                  let ino = try? vol.inode(f.ino), ino.isRegular,
+                  let data = try? vol.readData(ino, limit: 25_000_000), !data.isEmpty else { continue }
+            return String(decoding: Data(data.prefix(25_000_000)), as: UTF8.self)
+        }
+        return nil
+    }
+
     nonisolated static func ext4Transcript(imagePath: String, slug: String,
                                            guestCwd: String) -> String? {
         guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),

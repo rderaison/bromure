@@ -1217,6 +1217,26 @@ enum AgentSessionLocator {
         s.count == 36 && UUID(uuidString: s) != nil
     }
 
+    /// `$varName` = Claude conversation `id`'s transcript, whatever project
+    /// folder it's under (Claude names the file after the conversation).
+    nonisolated static func claudePinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(ls -t \"$HOME\"/.claude/projects/*/\(id).jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = the transcript of conversation `id` for `tool` (a
+    /// `Profile.Tool` raw value), "" for a tool or id no file is named by.
+    nonisolated static func pinnedFragment(tool: String, id: String, into varName: String) -> String {
+        switch tool {
+        case "claude": return claudePinnedFragment(id: id, into: varName)
+        case "kimi": return kimiPinnedFragment(id: id, into: varName)
+        case "grok": return grokPinnedFragment(id: id, into: varName)
+        case "codex": return codexPinnedFragment(id: id, into: varName)
+        case "omp": return ompPinnedFragment(id: id, into: varName)
+        default: return ""
+        }
+    }
+
     /// `$varName` = Grok session `id`'s transcript, whatever folder it's under.
     nonisolated static func grokPinnedFragment(id: String, into varName: String) -> String {
         guard isConversationUUID(id) else { return "" }

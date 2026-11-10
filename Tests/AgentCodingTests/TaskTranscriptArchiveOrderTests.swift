@@ -123,3 +123,68 @@ struct TaskTranscriptArchivePastCapTests {
         #expect(ac.contains("TaskTranscriptArchive.archiveJoin("))
     }
 }
+
+/// Finding "Archiving can save a newer conversation from the same
+/// worktree": the full read took the worktree's newest transcript, so a
+/// conversation started there before the Done archive ran was saved as
+/// the task's, and read first forever after.
+@Suite("Task transcript archive: the task's own conversation")
+struct TaskTranscriptArchiveOwnConversationTests {
+    let mine = "11111111-2222-4333-8444-555555555555"
+    let theirs = "99999999-8888-4777-8666-555555555555"
+
+    @Test("The pinned read takes the task's conversation by id, not the folder's newest")
+    func pinnedReadTakesOwnFile() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("ttao-\(UUID().uuidString)")
+        let proj = home.appendingPathComponent(".claude/projects/-home-ubuntu-proj-wt-x")
+        try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let own = proj.appendingPathComponent("\(mine).jsonl"), other = proj.appendingPathComponent("\(theirs).jsonl")
+        try Data("own\n".utf8).write(to: own)
+        try Data("other\n".utf8).write(to: other)
+        // The other conversation is the newer one.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: own.path)
+        let cmd = "f=\"\"; " + AgentSessionLocator.pinnedFragment(tool: "claude", id: mine, into: "f") + "cat \"$f\""
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", cmd]
+        p.environment = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        p.waitUntilExit()
+        #expect(String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self) == "own\n")
+        // No file named by a non-id; every tool with ids has a pinned read.
+        #expect(AgentSessionLocator.pinnedFragment(tool: "claude", id: "../x", into: "f").isEmpty)
+        for t in ["claude", "codex", "grok", "omp"] {
+            #expect(!AgentSessionLocator.pinnedFragment(tool: t, id: mine, into: "f").isEmpty)
+        }
+        #expect(!AgentSessionLocator.pinnedFragment(tool: "kimi", id: "session_" + mine, into: "f").isEmpty)
+    }
+
+    @Test("A newest-file fallback that is another session's conversation isn't the task's")
+    func fallbackOwnership() {
+        let line = #"{"type":"user","sessionId":"\#(theirs)","message":{"role":"user","content":"hi"}}"# + "\n"
+        #expect(TaskTranscriptArchive.claudeConversationID(line) == theirs)
+        #expect(!TaskTranscriptArchive.fallbackBelongs(line, tool: "claude", otherConversationIDs: [theirs]))
+        #expect(TaskTranscriptArchive.fallbackBelongs(line, tool: "claude", otherConversationIDs: [mine]))
+        #expect(TaskTranscriptArchive.fallbackBelongs("no id here\n", tool: "claude", otherConversationIDs: [theirs]))
+        #expect(TaskTranscriptArchive.fallbackBelongs(line, tool: "codex", otherConversationIDs: [theirs]))
+    }
+
+    @Test("With its session's id the full read never falls back to the folder's newest")
+    func ownIDFirst() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        let fn = try #require(ac.range(of: "private func fullTaskTranscript("))
+        let body = String(ac[fn.upperBound...].prefix(5000))
+        let pinned = try #require(body.range(of: "AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: id, into: \"f\")"))
+        let newest = try #require(body.range(of: "CodingTaskEngine.taskTranscriptCommand(branch: branch,"))
+        #expect(pinned.lowerBound < newest.lowerBound)
+        #expect(body.contains("Self.ext4Transcript(imagePath: img.path, conversationID: id)"))
+        #expect(body.contains("return mine(out)"))
+        #expect(body.contains("}.value.flatMap(mine)"))
+        #expect(body.contains("if task.tool == .kimi, task.sessionID == nil {"))
+    }
+}

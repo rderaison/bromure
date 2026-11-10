@@ -22,6 +22,25 @@ enum TaskTranscriptArchive {
         forArchive ? [.guest, .session] : [.archive, .session, .guest]
     }
 
+    /// A Claude transcript's conversation id: its first record's
+    /// `sessionId`. nil when none is found near the top.
+    static func claudeConversationID(_ text: String) -> String? {
+        let head = String(text.utf8.prefix(65_536)) ?? String(decoding: Data(text.utf8.prefix(65_536)), as: UTF8.self)
+        guard let r = head.range(of: #""sessionId"\s*:\s*"([0-9a-fA-F-]{36})""#, options: .regularExpression) else { return nil }
+        let m = head[r]
+        guard let q = m.dropLast().lastIndex(of: "\"") else { return nil }
+        return String(m[m.index(after: q)..<m.index(before: m.endIndex)])
+    }
+
+    /// A worktree's newest transcript, read for a task with no conversation
+    /// id of its own: not this task's when it is another session's
+    /// conversation (one started in the same worktree). Claude names its
+    /// conversation in every record; other tools' files aren't checked.
+    static func fallbackBelongs(_ text: String, tool: String, otherConversationIDs: Set<String>) -> Bool {
+        guard tool == "claude", let id = claudeConversationID(text) else { return true }
+        return !otherConversationIDs.contains(id.lowercased())
+    }
+
     /// The full read's cap (`head -c 25000000`, the ext4 read's limit).
     static let fullReadCap = 25_000_000
 
