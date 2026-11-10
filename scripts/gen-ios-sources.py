@@ -91,6 +91,7 @@ SHARED = [
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
+    "TranscriptFeed.swift",      # the iOS readers' bounded incremental transcript feed
     "TranscriptActivity.swift",
     "MermaidFence.swift",
     "DisplayCards.swift",  # display-MCP cards (show_media / show_chart); vega bundled via gen-ios-project.py  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback

@@ -1153,7 +1153,11 @@ enum RoomTranscriptCache {
         if let f = feeds[id] { return f }
         let f = TranscriptFeed()
         feeds[id] = f
-        while order.count > 12 { feeds.removeValue(forKey: order.removeFirst()) }
+        while order.count > 12 {
+            let old = order.removeFirst()
+            feeds.removeValue(forKey: old)
+            items.removeValue(forKey: old)
+        }
         return f
     }
 }
