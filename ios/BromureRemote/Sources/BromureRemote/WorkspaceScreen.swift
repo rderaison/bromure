@@ -1499,6 +1499,9 @@ struct TailFollowingScroll<Content: View>: View {
     private final class Follow {
         var sticky = true
         var lastUserScroll = Date.distantPast
+        /// The scroll view reports the user moving it -- a finger, a
+        /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
+        var userScrolling = false
         var tailY: CGFloat?
         /// A snap budget: layout drift can report many times a second, and
         /// each snap is a layout pass -- the watchdog catches what's skipped.
@@ -1541,6 +1544,15 @@ struct TailFollowingScroll<Content: View>: View {
             .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { v in
                 follow.lastUserScroll = Date()
                 if v.translation.height > 2 { follow.sticky = false }
+            })
+            // A trackpad or mouse wheel scrolls without any drag: the scroll
+            // phase is what says the user moved it, so the end's move it
+            // causes lets go (in `tailMoved`) instead of snapping back.
+            .modifier(UserScrollPhase { scrolling in
+                follow.userScrolling = scrolling
+                follow.lastUserScroll = Date()
+                // Stopped at the end: follow again.
+                if !scrolling, !follow.sticky, atBottom(follow.tailY) { follow.sticky = true }
             })
             .onAppear { snap(proxy) }
             .onChange(of: changeKey) { _, _ in if follow.sticky { snap(proxy) } }
@@ -1587,6 +1599,13 @@ struct TailFollowingScroll<Content: View>: View {
     private func tailMoved(_ y: CGFloat, _ proxy: ScrollViewProxy) {
         follow.tailY = y
         guard viewport > 0 else { return }
+        if follow.userScrolling {
+            // The user's own scroll, by whatever input: away from the end
+            // lets go -- before the sticky branch could snap it back.
+            follow.lastUserScroll = Date()
+            if y > viewport + 2 { follow.sticky = false }
+            return
+        }
         if follow.sticky {
             // Not the user: the end moved because rows were measured.
             if !follow.userRecent, !atBottom(y) { snap(proxy) }
@@ -1600,6 +1619,26 @@ struct TailFollowingScroll<Content: View>: View {
         guard Date().timeIntervalSince(follow.lastSnap) > 0.15 else { return }
         follow.lastSnap = Date()
         DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+    }
+}
+
+/// Reports whether the user is moving the scroll view: touch, trackpad and
+/// mouse-wheel scrolling all go through the scroll phase (iOS 18+), where a
+/// `DragGesture` sees only touch. Programmatic scrolls (`.animating`), a
+/// touch that hasn't moved yet (`.tracking`) and rest (`.idle`) aren't the
+/// user scrolling.
+private struct UserScrollPhase: ViewModifier {
+    let changed: (Bool) -> Void
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, visionOS 2.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                // Not `.tracking`: a finger resting on the chat while rows
+                // arrive hasn't scrolled anywhere.
+                changed(phase == .interacting || phase == .decelerating)
+            }
+        } else {
+            content
+        }
     }
 }
 
