@@ -49,7 +49,7 @@ extension Daemon {
     // @port-skip linux-only: see chooseWorkspaceGateway
     static func gatewayToUse(chosen: String, inUse: String?, vmsRunning: Bool = true) -> String {
         guard let inUse, inUse != chosen else { return chosen }
-        let what = vmsRunning ? "VMs run on it" : "the previous daemon's passt, taken back, is on it"
+        let what = vmsRunning ? "VMs run or are suspended on it" : "the previous daemon's passt, taken back, is on it"
         FileHandle.standardError.write(Data(("bromure-ac daemon: workspaces stay on \(subnetCIDR(gateway: inUse)) while \(what);"
             + " the move to \(subnetCIDR(gateway: chosen)) waits for a start with none running\n").utf8))
         return inUse

@@ -111,17 +111,24 @@ public struct VMRegistry: Sendable {
         return !((try? dec.decode([VMRecord].self, from: data)) ?? []).isEmpty
     }
 
-    /// The gateway (.1) of the /24 a running record's lease is on, read only:
-    /// the subnet VMs still run on across a daemon restart. Only records
-    /// `isAlive` confirms (as `init` checks them): after a host reboot or a
-    /// crash, a stale record pins nothing.
+    /// The gateway (.1) of the /24 a running or suspended record's lease is
+    /// on, read only: the subnet VMs still run on across a daemon restart. A
+    /// suspended guest resumes with the address it had (its memory is the
+    /// snapshot's): moving the subnet under it leaves it an address nothing
+    /// routes. Only records `isAlive` confirms (as `init` checks them), and
+    /// suspended ones whose snapshot is there: after a host reboot or a
+    /// crash, a stale record pins nothing. A running VM's subnet first: it
+    /// is the one the switch serves now.
     // @port-skip linux-only: Linux daemon state persistence
     public static func runningGateway(path: String, isAlive: (VMRecord) -> Bool) -> String? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .secondsSince1970
         let recs = (try? dec.decode([VMRecord].self, from: data)) ?? []
-        for r in recs where (r.state == .running || r.state == .starting) && isAlive(r) {
+        let vmsDir = (path as NSString).deletingLastPathComponent + "/vms/"
+        let running = recs.filter { ($0.state == .running || $0.state == .starting) && isAlive($0) }
+        let suspended = recs.filter { $0.state == .suspended && FileManager.default.fileExists(atPath: vmsDir + $0.id + "/snapshot/vm.snap") }
+        for r in running + suspended {
             let p = (r.ip ?? "").split(separator: ".")
             if p.count == 4 { return p[0..<3].joined(separator: ".") + ".1" }
         }

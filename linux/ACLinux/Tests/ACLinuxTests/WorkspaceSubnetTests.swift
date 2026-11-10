@@ -92,6 +92,31 @@ struct WorkspaceSubnetInUseTests {
         #expect(VMRegistry.runningGateway(path: path, isAlive: Daemon.isOurVM) == nil, "no pid: not alive")
     }
 
+    /// A suspended guest resumes with its address: its subnet stays while
+    /// its snapshot is there.
+    @Test func suspendedRecordsLeases() throws {
+        let dir = try shortTempDir()
+        let path = dir + "/vms.json"
+        var reg = VMRegistry(path: path, isAlive: { _ in true })
+        let id = UUID().uuidString.lowercased()
+        var suspended = RepairMarksTests.stopped(id)
+        suspended.state = .suspended
+        suspended.ip = "172.23.104.2"
+        try reg.upsert(suspended)
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in false }) == nil, "no snapshot: nothing to resume")
+        let snap = dir + "/vms/" + id + "/snapshot"
+        try FileManager.default.createDirectory(atPath: snap, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: snap + "/vm.snap", contents: Data())
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in false }) == "172.23.104.1",
+                "a suspended VM holds its subnet, whatever isAlive says")
+        var running = RepairMarksTests.stopped(UUID().uuidString.lowercased())
+        running.state = .running
+        running.ip = "192.168.64.2"
+        try reg.upsert(running)
+        #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in true }) == "192.168.64.1",
+                "a running VM's subnet wins over a suspended one listed before it")
+    }
+
     @Test func aTestDaemonWithTheUsersConfigHomeIsWarned() {
         let home = "/home/someone"
         #expect(Daemon.configHomeWarning(stateDir: "/var/tmp/w/state/bromure-ac",

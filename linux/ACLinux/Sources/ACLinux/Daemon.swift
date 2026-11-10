@@ -410,6 +410,10 @@ public actor Daemon {
         // unless VMs already run on one (an adopted passt, running records).
         let registryPath = config.stateDir + "/vms.json"
         let chosen = Self.chooseWorkspaceGateway(hasVMs: VMRegistry.hasRecords(path: registryPath))
+        // The choice on disk before any VM takes a lease on it (a restart
+        // that forgot it would choose again: DaemonDefaults.swift).
+        Self.flushDefaults()
+        Self.startDefaultsFlusher()
         let passtGateway = adoptedPasst.flatMap { ProcFS.argv($0.pid).flatMap(Self.passtGateway(argv:)) }
         let vmGateway = VMRegistry.runningGateway(path: registryPath, isAlive: Self.isOurVM)
         pc.gateway = Self.gatewayToUse(chosen: chosen, inUse: passtGateway ?? vmGateway,
@@ -2706,8 +2710,10 @@ public actor Daemon {
         // A stopping daemon leaves nothing for a next one to take back (each
         // VM's teardown drops its fd store entries).
         unwireWatchdog()
-        // Squelch's numbers written out (macOS: quit's flush).
+        // Squelch's numbers written out (macOS: quit's flush), and the
+        // defaults (DaemonDefaults.swift).
         SquelchLedger.shared.flush()
+        Self.flushDefaults()
         // Each running workspace ends as it says (macOS: quit drains them by
         // their close action), within the stop's budget; what's left is killed.
         await drainRunningVMs()
