@@ -77,11 +77,15 @@ extension Daemon {
         // Applied only once all of it is: a restage that failed is done
         // again on the next refresh.
         let priorStaged = lastStagedProfiles[rec.id]
+        // An edit not yet applied restarts its agents even on a forced
+        // restage that otherwise wouldn't (a sign-in's, a cluster's): it
+        // advances the staging the edit's own refresh would compare against.
+        let restart = Self.restartsAgents(asked: restartAgents, applied: liveApplied[rec.id], stored: new)
         if steps.restage {
             let ok = await pushLiveCredentials(rec, new)
             // The agents whose staging moved restart in place, conversation
             // kept, whether or not every write landed (macOS: from its defer).
-            if restartAgents { await restartAgentsWhoseModelsChanged(profileID: new.id, id: rec.id, priorStaged: priorStaged) }
+            if restart { await restartAgentsWhoseModelsChanged(profileID: new.id, id: rec.id, priorStaged: priorStaged) }
             if !ok { return }
         }
         liveApplied[rec.id] = new
@@ -101,6 +105,15 @@ extension Daemon {
     /// to `new` needs.
     struct LiveSteps: Equatable {
         var routing = true, sshGate = true, importedKeys = true, restage = true
+    }
+
+    /// Whether a refresh restarts the agents whose staging moved: asked
+    /// to (a profile edit's, the global Models refresh's), or a stored edit
+    /// that needs a restage isn't applied yet (a forced restage running
+    /// first would otherwise leave the edit's own refresh nothing to see).
+    // @port-skip linux-only: see applyLiveRefresh
+    static func restartsAgents(asked: Bool, applied: Profile?, stored: Profile) -> Bool {
+        asked || (applied.map { liveSteps(from: $0, to: stored).restage } ?? false)
     }
 
     // @port-skip linux-only: applyLiveSessionRefresh's conditions, as a function

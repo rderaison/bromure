@@ -224,3 +224,21 @@ struct BuildInfoTests {
         #expect(BuildInfo.dictionary["version"] != nil, "always a version (linux-dev unstamped)")
     }
 }
+
+
+/// A forced restage (a sign-in's) restarts agents only for an edit it
+/// carries along; otherwise only profile edits and the Models refresh do.
+@Suite("Live refresh restarts")
+struct LiveRestartTests {
+    @Test func aForcedRestageRestartsOnlyForAPendingEdit() {
+        var applied = Profile(name: "w", tool: .claude, authMode: .token)
+        applied.id = UUID()
+        #expect(Daemon.restartsAgents(asked: true, applied: applied, stored: applied))
+        #expect(!Daemon.restartsAgents(asked: false, applied: applied, stored: applied), "nothing pending: a sign-in's restage")
+        var edited = applied
+        edited.apiKey = "test-placeholder-value"
+        #expect(Daemon.liveSteps(from: applied, to: edited).restage, "an edit that needs a restage")
+        #expect(Daemon.restartsAgents(asked: false, applied: applied, stored: edited), "carried by the forced restage: restarted")
+        #expect(!Daemon.restartsAgents(asked: false, applied: nil, stored: edited), "unknown (taken back): not taken for an edit")
+    }
+}

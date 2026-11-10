@@ -388,6 +388,9 @@ public actor Daemon {
         // The workspaces' store, before anything reads a Profile: adoption
         // and the refresh below do (setUpRemoteAccess sets the same root).
         ProfileStore.defaultRootDir = URL(fileURLWithPath: config.stateDir + "/profiles", isDirectory: true)
+        // The build stamp, read now: after an upgrade replaces the binary,
+        // /proc/self/exe names a deleted file.
+        _ = BuildInfo.stamped
         // The default SSH key every new workspace inherits, in the state dir.
         Self.bootstrapDefaultSSHKey(stateDir: config.stateDir, store: ProfileStore())
         // Under systemd with a fd store, the previous daemon's passt (and the
@@ -1482,6 +1485,8 @@ public actor Daemon {
             return .error(409, "VM '\(rec.name)' is already starting")
         }
         defer { starting.remove(rec.id) }
+        // A stop deferred for an earlier boot isn't this one's.
+        pendingStops[rec.id] = nil
         var r = rec
         // `homeGB`: a new home size, applied by this cold boot. Images don't shrink.
         if let gb = body["homeGB"]?.numberValue.map({ min(1024, max(8, Int($0))) }) {
@@ -1538,6 +1543,11 @@ public actor Daemon {
             // A stop asked for during the boot: honored now that it's up, by
             // this start (no later boot can be the one it stops).
             if let action = takeStop(rec.id), let now = registry.find(rec.id) {
+                // The boot is over: its marks go first, or the stop would be
+                // taken for a resume's (kept suspended) and an ephemeral
+                // workspace's boot (not swept), and a second stop deferred.
+                starting.remove(rec.id)
+                restoring.remove(rec.id)
                 return await deleteVM(now, action: action)
             }
             return ControlResponse(200, ["status": "running"])
