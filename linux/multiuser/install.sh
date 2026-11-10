@@ -97,6 +97,10 @@ install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bro
 install -d -m 700 -o bromure -g bromure /var/lib/bromure-gw
 [ -e /var/lib/bromure-gw/gateway.json ] || { printf '{"port": %s, "bindAddress": "%s", "codeLogin": true, "socketDir": "/run/bromure-ac/sock"}\n' "$PORT" "$BIND" > /var/lib/bromure-gw/gateway.json; chown bromure:bromure /var/lib/bromure-gw/gateway.json; chmod 600 /var/lib/bromure-gw/gateway.json; }
 systemctl daemon-reload
+# The socket's service mustn't be running when it starts (systemd refuses:
+# an earlier install's gateway, which had no socket): stopped first, started
+# again below.
+systemctl is-active --quiet bromure-gw-p2p.socket || systemctl stop bromure-gw.service
 systemctl enable --now bromure-gw-p2p.socket
 systemctl enable --now bromure-gw.service bromure-lan.service
 systemctl restart bromure-gw.service bromure-lan.service
