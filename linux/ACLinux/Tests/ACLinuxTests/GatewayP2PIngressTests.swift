@@ -151,6 +151,32 @@ struct GatewayP2PIngressTests {
         #expect(Self.firstBytes(dir + "/p2p.sock", sending: "SSH-2.0-OpenSSH_9\r\n").isEmpty, "no PROXY line: closed")
     }
 
+    /// A connection that names its client and then never signs in is
+    /// closed once the login grace runs out (macOS's and the TCP gateway's
+    /// too; 120 s, shortened here).
+    @Test func aConnectionThatNeverSignsInIsClosed() async throws {
+        guard getuid() != 0 else { return }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/sock", withIntermediateDirectories: true)
+        let router = GatewayRouter(socketDir: dir + "/sock")
+        let mine = try await GatewayKeyAccessTests.daemon(dir + "/sock", Self.me, GatewayKeyAccessTests.Keys([]))
+        defer { Task { await mine.close() } }
+        let server = await MainActor.run { () -> RemoteAccessServer in
+            let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: dir + "/remote", isDirectory: true)))
+            s.accountRouter = router
+            s.accountPin = GatewayP2PIngress.pin(router: router)
+            return s
+        }
+        try await MainActor.run { try server.start(.init(port: 0, bindAddress: "", passwordAuth: false, pubkeyAuth: true,
+                                                          unixSocketPath: dir + "/p2p.sock", proxyHeader: true,
+                                                          loginGrace: .milliseconds(300))) }
+        defer { Task { @MainActor in server.stop() } }
+        let r = Self.untilClosed(dir + "/p2p.sock", sending: "PROXY TCP4 203.0.113.7 10.0.0.1 51000 40123\r\n", within: 5)
+        #expect(r.said.hasPrefix("SSH-2.0-"))
+        #expect(r.closed, "closed by the server once the grace ran out")
+        #expect(r.after < 4, "within the grace, not the read timeout")
+    }
+
     @Test func p2pIsOffUnlessTheAdminSaysSo() throws {
         let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
         #expect(P2PSettings.load(dir + "/none.json") == P2PSettings(enabled: false, bindAddress: nil))
@@ -204,6 +230,31 @@ struct GatewayP2PIngressTests {
     }
 
     /// What the server says first on a new connection to `path` (2 s at most).
+    /// Everything the server says until it closes the connection (or the
+    /// deadline passes), and when.
+    static func untilClosed(_ path: String, sending: String, within seconds: Int) -> (said: String, closed: Bool, after: Double) {
+        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        guard fd >= 0 else { return ("", false, 0) }
+        defer { close(fd) }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in p.copyBytes(from: Array(path.utf8)); p[path.utf8.count] = 0 }
+        let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard rc == 0 else { return ("", false, 0) }
+        _ = Array(sending.utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let start = Date()
+        var said = [UInt8]()
+        var buf = [UInt8](repeating: 0, count: 256)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n > 0 { said += buf[0..<n]; continue }
+            return (String(decoding: said, as: UTF8.self), n == 0 || (n < 0 && errno == ECONNRESET), Date().timeIntervalSince(start))
+        }
+    }
+
     static func firstBytes(_ path: String, sending: String? = nil) -> String {
         let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
         guard fd >= 0 else { return "" }
