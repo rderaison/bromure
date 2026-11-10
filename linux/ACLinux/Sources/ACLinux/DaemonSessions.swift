@@ -10,7 +10,7 @@ extension Daemon {
         switch (method, path) {
         case ("GET", "/sessions"): return listSessions()
         case ("POST", "/sessions"): return await createSession(body)
-        case ("GET", "/workspaces"): return listWorkspaces()
+        case ("GET", "/workspaces"): return await listWorkspaces()
         case ("GET", "/app/state"): return appState()
         case (_, let p) where p.hasPrefix("/sessions/"): return await sessionRoute(method, String(p.dropFirst("/sessions/".count)), body)
         default: return nil
@@ -152,8 +152,8 @@ extension Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", "/workspaces"): h=1abca9f46bf2d854 @f127f8ab
     // partial: rows are thin (see C automationWorkspaceList)
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onListWorkspaces h=2941378ab44054f9 @d3ebbda2
-    func listWorkspaces() -> ControlResponse {
-        ControlResponse(200, ["workspaces": .array(records.filter { !$0.managed }.map(compromisedRow))])
+    func listWorkspaces() async -> ControlResponse {
+        ControlResponse(200, ["workspaces": .array(await workspaceRows(records.filter { !$0.managed }))])
     }
 
     // partial: no windows on a server (mainWindowOpen/editorOpen false), and the control socket is the trusted local caller

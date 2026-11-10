@@ -36,13 +36,64 @@ extension Daemon {
         return (id, m)
     }
 
-    /// A workspace row of /state, with `compromised` (macOS: its rows'
-    /// key, which the fat client reads).
-    // @port-skip linux-only: /state's workspace rows
-    func compromisedRow(_ rec: VMRecord) -> JSONValue {
+    /// /state's (and GET /workspaces') rows: each workspace's, with the
+    /// agents it can run worked out on the main actor (the Models settings
+    /// live there) once for all of them.
+    // partial: no attached Mac's agents (a server's rows are its own workspaces)
+    // @port ACAppDelegate.readyToolSpecs(for: Profile) h=f54a19bf83a16d1c @d3ebbda2
+    func workspaceRows(_ recs: [VMRecord]) async -> [JSONValue] {
+        let profiles = recs.map { existingProfile(for: $0) }
+        let subscribed = profiles.map { $0.map(subscribedProviders(for:)) ?? [] }
+        let ready: [UUID: [Profile.ToolSpec]] = await MainActor.run {
+            var out: [UUID: [Profile.ToolSpec]] = [:]
+            for (p, sub) in zip(profiles, subscribed) {
+                if let p { out[p.id] = p.readyToolSpecs(ModelSettingsStore.shared.effective(for: p), subscribed: sub) }
+            }
+            return out
+        }
+        return zip(recs, profiles).map { compromisedRow($0, profile: $1, ready: $1.flatMap { ready[$0.id] }) }
+    }
+
+    /// A workspace row of /state, as macOS's: its run state and size, its
+    /// color, agent and notes, which credentials it holds (never their
+    /// values), the agents it can run, whether something restricts its
+    /// traffic, Squelch, a boot failure, terminal appearance overrides.
+    // partial: cpuCount is the VM record's; no attached Mac's agents (a server lists only its own)
+    // @port ACAppDelegate.automationWorkspaceList() h=eae7cd8d00c7143c @d3ebbda2
+    // @port ACAppDelegate.static homeImageBytes(_: URL) h=0a65e360ff407aee @d3ebbda2
+    func compromisedRow(_ rec: VMRecord, profile: Profile?, ready: [Profile.ToolSpec]?) -> JSONValue {
         guard case .object(var o) = rec.workspaceJSON else { return rec.workspaceJSON }
-        let profile = existingProfile(for: rec)
         o["compromised"] = .bool(profile.map { Self.isCompromised($0, store: profileStore) } ?? false)
+        let dir = vmDir(rec.id)
+        var st = stat()
+        let disk = stat(dir + "/disk.raw", &st) == 0 ? (Int64(st.st_blocks) * 512, Int64(st.st_size)) : (0, 0)
+        o["diskAllocatedBytes"] = .number(Double(disk.0))
+        o["diskCapacityBytes"] = .number(Double(disk.1))
+        // A fat client's editor remeasures when this moves (a wipe, reset or
+        // rollback leaves the run state as it was).
+        o["homeImageBytes"] = stat(dir + "/home.img", &st) == 0 ? .number(Double(st.st_size)) : .null
+        if let profile {
+            o["accentHex"] = .string(profile.color.hexInUI)
+            o["color"] = .string(profile.color.rawValue)
+            o["tool"] = .string(profile.tool.rawValue)
+            o["authMode"] = .string(profile.authMode.rawValue)
+            o["memoryGB"] = .number(Double(profile.memoryGB))
+            o["hasGitHubToken"] = .bool(profile.hasGitHubCredential)
+            o["hasLinearToken"] = .bool(!profile.linearToken.isEmpty)
+            o["askBeforeUseLabels"] = .array(profile.askBeforeUseCredentialLabels.map { .string($0) })
+            o["additionalTools"] = .array(profile.additionalTools.filter { $0.tool != profile.tool }.map {
+                ["tool": .string($0.tool.rawValue), "authMode": .string($0.authMode.rawValue)]
+            })
+            if let ready {
+                o["readyTools"] = .array(ready.map { ["tool": .string($0.tool.rawValue), "authMode": .string($0.authMode.rawValue)] })
+            }
+            o["sandboxed"] = .bool(profile.restrictsEgress)
+            o["comments"] = .string(profile.comments)
+            if let v = profile.customFontFamily { o["fontFamily"] = .string(v) }
+            if let v = profile.customFontSize { o["fontSize"] = .number(Double(v)) }
+            if let v = profile.customBackgroundHex { o["backgroundHex"] = .string(v) }
+            if let v = profile.customForegroundHex { o["foregroundHex"] = .string(v) }
+        }
         // Squelch's setting and what it saved (macOS: the workspace row's
         // squelch / squelchSummary).
         if let profile {

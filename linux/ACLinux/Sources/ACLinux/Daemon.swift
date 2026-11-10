@@ -981,6 +981,7 @@ public actor Daemon {
         // every workspace; with no profiles here each VM is its own workspace,
         // same id, which is what a fat client opens a terminal on.
         let all = records
+        let workspaceRows = await workspaceRows(all.filter { !$0.managed })
         // Each tab's hook status, as macOS's automationVMList gives it.
         let vms: [JSONValue] = all.filter { $0.state == .running || $0.state == .starting }.map { rec in
             guard case .object(var o) = vmEntry(rec), case .array(let tabs)? = o["tabs"],
@@ -995,7 +996,7 @@ public actor Daemon {
         let body: [String: JSONValue] = [
             "version": 1, "hostKind": "linux",
             "build": ["version": .string(BuildInfo.version)],
-            "vms": .array(vms), "workspaces": .array(all.filter { !$0.managed }.map(compromisedRow)),
+            "vms": .array(vms), "workspaces": .array(workspaceRows),
             "workspacesListed": true,
             "supportsPush": true,
             "vmnetSubnet": .string(Self.workspaceSubnet.withLockedValue { $0 }),
