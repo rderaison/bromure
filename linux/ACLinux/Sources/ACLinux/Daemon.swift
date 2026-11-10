@@ -658,6 +658,7 @@ public actor Daemon {
             let raw = String(p.dropFirst("/remote/keys/".count))
             return await remoteRemoveKey(raw.removingPercentEncoding ?? raw)
         default:
+            if let r = await sessionsRoute(req.method, path, req.body) { return r }
             if let r = await boardRoute(req.method, path, req.body) { return r }
             if let r = await preferencesRoute(req.method, path, req.body) { return r }
             if let r = await subscriptionsRoute(req.method, path, req.body) { return r }
