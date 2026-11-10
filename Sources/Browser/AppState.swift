@@ -319,10 +319,12 @@ final class AppState: @unchecked Sendable {
                 self.startPool()
             } catch {
                 guard !Task.isCancelled else { return }
-                // Both install paths leave a previous image untouched when
-                // they fail. Keep browsing on it rather than strand the user;
-                // an out-of-date one is retried at the next launch.
-                if self.installReason != .firstRun, self.imageManager.hasBootFiles {
+                // Both install paths promote all boot files as one unit
+                // (ImagePromotion), so a failure leaves the previous image
+                // whole. Keep browsing on it only when the pool can boot it:
+                // files and version stamp, the check the pool itself makes.
+                // An out-of-date image is reported and kept for the next try.
+                if self.installReason != .firstRun, self.imageManager.baseImageExists {
                     let message = Self.localizedMessage(for: error)
                     NSLog("Bromure: image install failed, keeping the previous image: %@", message)
                     self.consoleLog += "\nImage install failed (\(message)); keeping the previous image.\n"
