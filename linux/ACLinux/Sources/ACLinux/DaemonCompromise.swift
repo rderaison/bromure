@@ -399,3 +399,102 @@ extension Daemon {
         return ControlResponse(200, ["ok": true])
     }
 }
+
+extension Daemon {
+    /// Tests: the owner's answer to the wipe question, by workspace (nil: asked through the broker).
+    static let wipeAnswerForTesting = NIOLockedValueBox<(@Sendable (UUID) async -> Int)?>(nil)
+
+    /// A start of a workspace marked compromised: its owner is asked to wipe
+    /// it (Wipe and Launch / Cancel; nobody answering is Cancel, never a
+    /// wipe), through the client, as macOS asks a remote start. nil: wiped,
+    /// boot it; otherwise why it didn't start.
+    // partial: an unattended start (an agent's, an automation's) is refused, as before: nobody to ask
+    // @port ACAppDelegate.confirmWipeAndProceedAsync(profile: Profile) h=55b2cb4c6b8adf35 @d3ebbda2
+    // partial: the answer and the wipe's outcome mapped inline (wipeCompromised's reply)
+    // @port ACAppDelegate.static compromiseWipe(confirmed: Bool, wiped: ()->CompromiseWipeStep) h=520e47ef500f357c @d3ebbda2
+    func resolveCompromisePrompt(_ rec: VMRecord, _ profile: Profile, unattended: Bool) async -> ControlResponse? {
+        if unattended {
+            return .error(409, "'\(rec.name)' is marked compromised (a credential was sent to the wrong host): "
+                          + "wipe it (POST /profiles/<id>/compromised {\"action\":\"wipe\"}) or clear the mark ({\"action\":\"clear\"})",
+                          ["compromised": .bool(true)])
+        }
+        guard launchQuestions.begin(profile.id) else {
+            return .error(409, "'\(rec.name)' already has a question up: answer it first")
+        }
+        let (title, info) = Self.compromisePromptParts(profile: profile)
+        let answer: Int
+        if let hook = Self.wipeAnswerForTesting.withLockedValue({ $0 }) {
+            answer = await hook(profile.id)
+        } else {
+            answer = await PendingPromptBroker.shared.askAsync(
+                profileID: profile.id, title: title, message: info,
+                buttons: [NSLocalizedString("Wipe and Launch", comment: ""), NSLocalizedString("Cancel", comment: "")],
+                fallback: 1)
+        }
+        launchQuestions.end(profile.id)
+        guard answer == 0 else {
+            return ControlResponse(409, ["ok": false, "cancelled": true, "error": "Not started: it's still marked compromised."])
+        }
+        guard registry.find(rec.id) != nil else { return .error(404, "'\(rec.name)' was removed") }
+        // Cleared as a false alarm while the question was up: nothing wiped, not started.
+        guard Self.isCompromised(profile, store: profileStore) else {
+            let (title, message) = Self.markClearedParts(profile.name)
+            return .error(409, title + ": " + message)
+        }
+        let wiped = await wipeCompromised(profile)
+        switch wiped.status {
+        case 200: return nil
+        case 409:
+            // Started meanwhile (an automation): not wiped, still marked.
+            let (title, message) = Self.wipeSkippedParts(profile.name)
+            return .error(409, title + ": " + message)
+        default: return wiped
+        }
+    }
+
+    /// The wipe question's title and text, shared folders listed (they're not wiped).
+    // @port ACAppDelegate.static compromisePromptParts(profile: Profile) h=352fe8802d8fbdd7 @d3ebbda2
+    static func compromisePromptParts(profile: Profile) -> (title: String, info: String) {
+        let title = String(
+            format: NSLocalizedString("⛔ “%@” is marked as compromised", comment: ""),
+            profile.name)
+        var info = NSLocalizedString(
+            "Bromure refused to boot this VM because the proxy detected an outbound credential leak in a previous session.",
+            comment: "")
+        info += "\n\n"
+        info += NSLocalizedString(
+            "To continue, the VM disk image and the persistent home folder must be wiped. Your tokens, ssh keys, and workspace settings are preserved.",
+            comment: "")
+        let shares = profile.folderPaths
+        if !shares.isEmpty {
+            info += "\n\n"
+            info += NSLocalizedString(
+                "WARNING: shared folders are NOT wiped. Compromised packages or files may still be present in:",
+                comment: "")
+            info += "\n"
+            for path in shares {
+                info += "  • \(path)\n"
+            }
+            info += NSLocalizedString(
+                "Inspect those folders before launching anything that re-uses them.",
+                comment: "")
+        }
+        return (title, info)
+    }
+
+    // @port ACAppDelegate.static markClearedParts(_: String) h=8c2a7f2a145a4295 @d3ebbda2
+    static func markClearedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "Its compromised mark was cleared as a false alarm while the question was up, so nothing was wiped and it didn't start. Start it again to boot it on its current disk.",
+            comment: "compromise wipe skipped"))
+    }
+
+    // @port ACAppDelegate.static wipeSkippedParts(_: String) h=9666400fa5ad2e04 @d3ebbda2
+    static func wipeSkippedParts(_ name: String) -> (title: String, message: String) {
+        (String(format: NSLocalizedString("“%@” wasn't wiped", comment: "compromise wipe skipped"), name),
+         NSLocalizedString(
+            "It started on its current disk while the question was up (an automation launched it), so nothing was wiped and it's still marked compromised. Shut it down and start it again to wipe it.",
+            comment: "compromise wipe skipped"))
+    }
+}

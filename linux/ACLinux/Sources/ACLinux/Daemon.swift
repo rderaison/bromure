@@ -1342,7 +1342,7 @@ public actor Daemon {
     /// start): a launch question isn't asked (DaemonBaseImageDrift.swift).
     // partial: the `starting` set holds the disk; a stop during a plain cold boot gets 409 instead of being deferred and honored (macOS bootsInFlight.takeStop); only reboots defer it
     // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
-    // partial: start, launch and launchVM. Compromised workspace refused (409), no model-download gate (MLX), no window/pane, no virtiofs home migration
+    // partial: start, launch and launchVM. No model-download gate (MLX), no window/pane, no virtiofs home migration
     // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=9feccb727553e73f @d3ebbda2
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false,
                unattended: Bool = false, driftResolved: Bool = false) async -> ControlResponse {
@@ -1354,10 +1354,12 @@ public actor Daemon {
                                            rebooting: rebooting.contains(rec.id) && !partOfReboot) { return refusal }
         // A workspace marked compromised boots only once the mark is gone
         // (macOS: launch's compromised-disk check).
+        // Its owner is asked to wipe it first (Wipe and Launch / Cancel).
         if !rec.managed, let p = existingProfile(for: rec), Self.isCompromised(p, store: profileStore) {
-            return .error(409, "'\(rec.name)' is marked compromised (a credential was sent to the wrong host): "
-                          + "clear the mark (POST /profiles/<id>/compromised {\"action\":\"clear\"}) or remove it",
-                          ["compromised": .bool(true)])
+            if let stop = await resolveCompromisePrompt(rec, p, unattended: unattended) { return stop }
+            guard let now = registry.find(rec.id) else { return .error(404, "VM '\(rec.name)' was removed") }
+            return await start(now, body, resumeOnly: resumeOnly, partOfReboot: partOfReboot,
+                               unattended: unattended, driftResolved: driftResolved)
         }
         // A cold boot of a workspace on an older base: the upgrade offer
         // (macOS: launch's drift check). The question waits on the user, so
