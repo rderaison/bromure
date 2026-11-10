@@ -13,7 +13,7 @@ struct BromureAC: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bromure-ac", abstract: "Bromure Agentic Coding, headless Linux host.",
         subcommands: [Daemon.self, VM.self, Workspaces.self, Trace.self, Image.self, Remote.self, Account.self, Cloud.self,
-                      Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command])
+                      Gateway.self, LANHelperCommand.self, Admin.self, SSHKey.self, StopPost.self, RemoteMenuEntry.command, Mcp.self])
 
     // @port-skip linux-only: the entry point; tells the library the group `workspaces ports` reports help for
     static func main() async {
@@ -112,6 +112,21 @@ struct VM: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Manage VMs.", subcommands: [Run.self, Ls.self, Exec.self, Kill.self, Suspend.self, Resume.self,
                                                  Start.self, Rm.self])
+}
+
+/// `bromure-ac mcp`: the MCP server (stdio) over this user's daemon
+/// (MCPServer.swift, shared).
+// @port-skip linux-only: the Linux CLI's front for the shared MCP command
+struct Mcp: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mcp", abstract: "Run the AC MCP server for AI tool integration (stdio).")
+    @Flag(name: .long, help: "Include debug tools (VM shell access, app state).") var debug = false
+    @Option(name: .customLong("api-url"), help: "The daemon's API: unix:<socket> (default: this user's control socket) or http://host:port.")
+    var apiURL: String?
+    // @port-skip linux-only: see Mcp
+    func run() throws {
+        try LinuxMCP.run((debug ? ["--debug"] : []) + (apiURL.map { ["--api-url", $0] } ?? []))
+    }
 }
 
 // @port-skip linux-only: CLI plumbing

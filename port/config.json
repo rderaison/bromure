@@ -104,6 +104,7 @@
     "Sources/AgentCoding/LLMEventExtractor.swift",
     "Sources/AgentCoding/LiveModelRefresh.swift",
     "Sources/AgentCoding/LiveSessionRefresh.swift",
+    "Sources/AgentCoding/MCPServer.swift",
     "Sources/AgentCoding/MachineLinks.swift",
     "Sources/AgentCoding/MemoryAdmission.swift",
     "Sources/AgentCoding/MessagingConnectorEngine.swift",
@@ -922,6 +923,14 @@
     {
       "id": "ACAutomationServer.sendFirewallResult(fd: Int32, _: FirewallCommitResult)",
       "reason": "writes firewallResponse on the fd; Linux returns firewallResponse's ControlResponse"
+    },
+    {
+      "id": "ACMCPServerImpl.escapeAS(_: String)",
+      "reason": "AppleScript quoting: a Linux server has no AppleScript (profileCommand goes through the daemon's /profiles routes)"
+    },
+    {
+      "id": "ACMCPServerImpl.acScript(_: String)",
+      "reason": "osascript to the app: a Linux server has no AppleScript (profileCommand goes through the daemon's /profiles routes)"
     },
     {
       "path": "Sources/AgentCoding/CloudflareTunnel.swift",
