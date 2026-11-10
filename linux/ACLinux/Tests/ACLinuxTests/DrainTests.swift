@@ -143,3 +143,19 @@ struct LookupTests {
         #expect(reg.find(a.shortId)?.id == a.id)
     }
 }
+
+/// The classifiers stay resident only for what a running workspace's
+/// policy needs (macOS: ClassifierLifecycle).
+@Suite("Classifier lifecycle")
+struct ClassifierLifecycleTests {
+    @Test func whatTheRunningWorkspacesNeed() {
+        var a = Profile(name: "a", tool: .claude, authMode: .token)
+        var b = Profile(name: "b", tool: .claude, authMode: .token)
+        a.pii.enabled = true
+        b.promptInjection.detectRulesInjection = true
+        b.promptInjection.detectSourceInjection = false
+        let n = LinuxClassifierLifecycle.needs(for: [a, b])
+        #expect(n.pii == a.pii.isActive && n.rulesInjection && !n.sourceInjection)
+        #expect(LinuxClassifierLifecycle.needs(for: []) == .init(), "nothing running: nothing needed")
+    }
+}

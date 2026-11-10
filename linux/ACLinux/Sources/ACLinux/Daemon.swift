@@ -484,6 +484,8 @@ public actor Daemon {
         await d.startSessionEngine()
         // A new user's first workspace (macOS: at the end of onboarding).
         await d.ensureFirstWorkspace(freshState: freshState)
+        // The classifiers released when no running workspace needs them.
+        await d.startClassifierLifecycle()
         // Taken-back workspaces: their credentials were set up as adoption
         // took them (before their proxy listeners served); their kubeconfigs
         // are rewritten now that the session host is up (the kube fakes were
