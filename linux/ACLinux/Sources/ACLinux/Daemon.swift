@@ -235,6 +235,9 @@ public actor Daemon {
     var pendingBootRemedies: [String: BootRemedy] = [:]
     /// When a workspace's watched cold boot began (its roster is newer).
     var bootStartedAt: [String: Date] = [:]
+    /// When each VM this daemon cold-booted came up, on a clock a host time
+    /// change doesn't move: its uptime (macOS: ContinuousClock).
+    var bootClock: [String: ContinuousClock.Instant] = [:]
     /// VMs whose guest said it's going down for a reboot (DaemonGuestReboot).
     var guestRebootIntents: Set<String> = []
     /// Stopped after such a reboot: relaunched once their stop is done.
@@ -866,6 +869,10 @@ public actor Daemon {
     func vmEntry(_ rec: VMRecord) -> JSONValue {
         guard case .object(var o) = rec.json else { return rec.json }
         o["attached"] = false                         // no attached pane on Linux
+        if rec.state == .running, let t = bootClock[rec.id] {
+            let d = ContinuousClock.now - t
+            o["uptimeSeconds"] = .number(Double(d.components.seconds))
+        }
         guard rec.state == .running else { o["tabs"] = []; return .object(o) }
         let outbox = vmDir(rec.id) + "/outbox/"
         o["tabs"] = .array(GuestOutbox.parseRoster(GuestOutbox.read(outbox + "tabs.txt") ?? "").map(GuestOutbox.tabJSON))
@@ -1937,6 +1944,7 @@ public actor Daemon {
             try? FileManager.default.removeItem(atPath: restoreFrom)
         } else {
             rec.bootedAt = Date()
+            bootClock[rec.id] = .now
         }
         if let pid = await machine.pid {
             rec.pid = pid
@@ -2420,6 +2428,7 @@ public actor Daemon {
         guard var rec = registry.find(id) else { return }
         // A boot failure ends with its session (macOS: handleSessionStopped).
         activeBootFailures[id] = nil
+        bootClock[id] = nil
         bootStartedAt[id] = nil
         // Did the guest reboot itself? Read before the teardown takes its run
         // directory (the serial log): its reboot marker (also one it left

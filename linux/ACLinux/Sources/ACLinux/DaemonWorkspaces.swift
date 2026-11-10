@@ -151,12 +151,16 @@ extension Daemon {
     /// A workspace by id or name (macOS: profileByNameOrID).
     // partial: resolves any workspace, not only running ones
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onResolveProfileID h=186f6b4db7c29a4d @d3ebbda2
-    // partial: no short-id prefix match
     // @port ACAppDelegate.profileByNameOrID(_: String) h=826632f9403037ab @d3ebbda2
     static func workspace(_ key: String) -> Profile? {
         let all = ProfileStore().loadAll()
-        return all.first { $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame }
-            ?? all.first { $0.name.lowercased() == key.lowercased() }
+        if let p = all.first(where: { $0.id.uuidString.caseInsensitiveCompare(key) == .orderedSame })
+            ?? all.first(where: { $0.name.lowercased() == key.lowercased() }) { return p }
+        // Docker-style short-id prefix (dash-insensitive).
+        let k = key.replacingOccurrences(of: "-", with: "").lowercased()
+        guard !k.isEmpty else { return nil }
+        let matches = all.filter { $0.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k) }
+        return matches.count == 1 ? matches.first : nil
     }
 
     /// The compact summary a client's workspace list and CLI read.

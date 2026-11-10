@@ -76,7 +76,7 @@ public struct VMRecord: Codable, Sendable, Equatable {
 
     /// The macOS vmEntry's core keys (`id`, `shortId`, `name`, `state`, `ip`,
     /// `cpuCount`, `memoryGB`, `bootedAt`, `macAddress`) plus Linux ones.
-    // partial: uptimeSeconds = Date() − bootedAt (wall clock), so a host clock step moves it (the bug macOS fixed with ContinuousClock)
+    // partial: uptimeSeconds here is Date() − bootedAt; Daemon.vmEntry replaces it from a monotonic clock for a VM this daemon booted (one taken back from a previous daemon keeps the wall clock's)
     // @port RunningSession.var uptime h=fe2c238cd5249c6a @d3ebbda2
     public var json: JSONValue {
         var o: [String: JSONValue] = [
@@ -171,11 +171,20 @@ public struct VMRegistry: Sendable {
         try enc.encode(records).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    /// By id, short id or name (as macOS matches `/vms/{id}`).
-    // partial: exact id, exact 8-char shortId or case-sensitive name; no case-insensitive name, no unique-prefix match
+    /// By id, short id or name (as macOS matches `/vms/{id}`): exactly
+    /// first, then the name in any case, then a unique id prefix (Docker
+    /// style, dashes ignored).
+    // partial: any VM, not only running ones; the 8-character short id too
     // @port ACAppDelegate.resolveRunningSessionID(_: String) h=2f017fce4128ac7e @d3ebbda2
     public func find(_ key: String) -> VMRecord? {
-        records.first { $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.shortId == key || $0.name == key }
+        if let r = records.first(where: { $0.id.caseInsensitiveCompare(key) == .orderedSame || $0.shortId == key || $0.name == key }) {
+            return r
+        }
+        if let r = records.first(where: { $0.name.lowercased() == key.lowercased() }) { return r }
+        let k = key.replacingOccurrences(of: "-", with: "").lowercased()
+        guard !k.isEmpty else { return nil }
+        let matches = records.filter { $0.id.replacingOccurrences(of: "-", with: "").lowercased().hasPrefix(k) }
+        return matches.count == 1 ? matches.first : nil
     }
 
     // @port-skip linux-only: Linux daemon state persistence

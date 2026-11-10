@@ -120,3 +120,22 @@ extension DaemonGlobalSuites {
         }
     }
 }
+
+/// Workspaces named as macOS takes them: exactly, by name in any case, or
+/// by a unique id prefix (dashes ignored).
+@Suite("Workspace lookup as macOS's")
+struct LookupTests {
+    @Test func aVMIsFoundByCaseOrPrefix() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        var reg = VMRegistry(path: dir + "/vms.json")
+        var a = DrainTests.rec("Web"); a.id = "abcdef12-0000-4000-8000-000000000001"
+        var b = DrainTests.rec("api"); b.id = "abcdef99-0000-4000-8000-000000000002"
+        try reg.upsert(a); try reg.upsert(b)
+        #expect(reg.find("web")?.id == a.id, "the name in any case")
+        #expect(reg.find("abcdef1")?.id == a.id, "a unique prefix")
+        #expect(reg.find("ABCDEF990000")?.id == b.id, "dashes and case ignored")
+        #expect(reg.find("abcdef") == nil, "ambiguous")
+        #expect(reg.find("") == nil)
+        #expect(reg.find(a.shortId)?.id == a.id)
+    }
+}
