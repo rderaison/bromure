@@ -2,7 +2,8 @@ import Foundation
 
 /// Whether a multi-user server's users may be reached over P2P, the admin's
 /// call (`bromure-ac admin p2p on|off`): /etc/bromure-ac/p2p.json, root's,
-/// readable by every daemon. Off (or missing): the gateway serves no P2P
+/// readable by every daemon; the install writes it on. Off (or missing,
+/// unreadable, not root's alone): the gateway serves no P2P
 /// ingress and no user's daemon announces anything. On: each user's ingress
 /// listens on `bindAddress` (the gateway's when the admin turned it on),
 /// so P2P doesn't reach further than the gateway itself does.

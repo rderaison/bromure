@@ -2,8 +2,9 @@
 # linux/multiuser/install.sh [--bind ADDR] [--port N]: install the multi-user
 # Bromure server (root). Binaries and the Swift runtime under
 # /usr/local/lib/bromure-ac, the guest image under /var/lib/bromure-ac-image,
-# the units, the gateway's account `bromure`; starts the gateway. Users come
-# next: `bromure-ac admin add <name>`.
+# the units, the gateway's account `bromure`; starts the gateway, with P2P on
+# (`bromure-ac admin p2p off` turns it off). Users come next:
+# `bromure-ac admin add <name>`.
 # Needs a release build (linux/ACLinux: swift build -c release), Firecracker
 # (linux/firecracker/build.sh) and the baked image, from the invoking user.
 set -euo pipefail
@@ -96,6 +97,13 @@ case "$LANIF" in -*|.|..|*[!A-Za-z0-9_.:-]*) echo "install.sh: '$LANIF' isn't an
 install -m 644 "$HERE/bromure-ac@.service" "$HERE/bromure-ac@.socket" "$HERE/bromure-gw.service" "$HERE/bromure-gw-p2p.socket" "$HERE/bromure-lan.service" /etc/systemd/system/
 install -d -m 700 -o bromure -g bromure /var/lib/bromure-gw
 [ -e /var/lib/bromure-gw/gateway.json ] || { printf '{"port": %s, "bindAddress": "%s", "codeLogin": true, "socketDir": "/run/bromure-ac/sock"}\n' "$PORT" "$BIND" > /var/lib/bromure-gw/gateway.json; chown bromure:bromure /var/lib/bromure-gw/gateway.json; chmod 600 /var/lib/bromure-gw/gateway.json; }
+# P2P is on by default, users' ports on the gateway's address (as `bromure-ac
+# admin p2p on` sets it); the admin's own choice (`admin p2p off`) is kept.
+if [ ! -e /etc/bromure-ac/p2p.json ]; then
+  GWBIND=$(python3 -c 'import json; print(json.load(open("/var/lib/bromure-gw/gateway.json")).get("bindAddress") or "0.0.0.0")')
+  printf '{"bindAddress": "%s", "enabled": true}\n' "$GWBIND" > /etc/bromure-ac/p2p.json.new && chmod 644 /etc/bromure-ac/p2p.json.new \
+    && mv -f /etc/bromure-ac/p2p.json.new /etc/bromure-ac/p2p.json
+fi
 systemctl daemon-reload
 # The socket's service mustn't be running when it starts (systemd refuses:
 # an earlier install's gateway, which had no socket): stopped first, started
@@ -104,4 +112,4 @@ systemctl is-active --quiet bromure-gw-p2p.socket || systemctl stop bromure-gw.s
 systemctl enable --now bromure-gw-p2p.socket
 systemctl enable --now bromure-gw.service bromure-lan.service
 systemctl restart bromure-gw.service bromure-lan.service
-echo "installed; gateway: $(systemctl is-active bromure-gw.service), LAN helper: $(systemctl is-active bromure-lan.service). Add users: bromure-ac admin add <name>; their LAN pools: bromure-ac admin pool add <name> <range>"
+echo "installed; gateway: $(systemctl is-active bromure-gw.service), LAN helper: $(systemctl is-active bromure-lan.service), $(/usr/local/bin/bromure-ac admin p2p). Add users: bromure-ac admin add <name>; their LAN pools: bromure-ac admin pool add <name> <range>"

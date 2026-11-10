@@ -227,7 +227,7 @@ public enum GatewayMain {
         // The P2P ingress: the same host key and accounts, each connection
         // pinned (the TCP listener above never is).
         var p2p = "no P2P ingress"
-        // Only when the admin turned P2P on (bromure-ac admin p2p on): a
+        // Only while P2P is on (on from the install; bromure-ac admin p2p): a
         // socket systemd made is closed otherwise.
         let activated = FDStore.take()["p2p"]?.first
         let p2pOn = P2PSettings.load(P2PSettings.systemPath, trusted: true).enabled
