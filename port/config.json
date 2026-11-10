@@ -3761,6 +3761,14 @@
     {
       "id": "LibC.static shutdown(_: Int32, _: Int32)",
       "reason": "Darwin side of LibC: the same shared file has the Glibc one"
+    },
+    {
+      "id": "P2PBroker.handlePathUpdate(_: NWPath)",
+      "reason": "a dialer's path monitor: macOS starts it on the first outgoing peer dial only (never in server mode), and a Linux server only listens (see startNetworkMonitor's claim); its signaling channel reconnects on its own"
+    },
+    {
+      "id": "P2PBroker.static ipv4Addresses(of: Set<String>)",
+      "reason": "a dialer's path monitor: macOS starts it on the first outgoing peer dial only (never in server mode), and a Linux server only listens (see startNetworkMonitor's claim); its signaling channel reconnects on its own"
     }
   ],
   "skipInheriting": [
