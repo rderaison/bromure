@@ -312,12 +312,6 @@ actor ACMCPServerImpl {
         }
     }
 
-    /// One path segment (a workspace's id or name), percent-encoded.
-    nonisolated static func pathSegment(_ s: String) -> String {
-        s.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn:
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? s
-    }
-
     nonisolated static func rawHTTP(base: String, method: String, path: String, bodyData: Data?) -> [String: Any] {
         let api: (fd: Int32, host: String)
         switch openAPI(base: base) {
@@ -401,6 +395,10 @@ extension ACMCPServerImpl {
         }) == 0 else { Darwin.close(fd); return .failure(MCPAPIError(message: "Connect failed")) }
         return .success((fd, "\(host):\(port)"))
     }
+
+    /// A path segment (a workspace's id or name) as macOS has always sent
+    /// it: as is (requestTarget's URL decodes an encoded one anyway).
+    nonisolated static func pathSegment(_ s: String) -> String { s }
 
     /// The request line's target, as macOS has always sent it: the URL's
     /// path (no query or fragment, %XX decoded).
