@@ -482,9 +482,26 @@ public enum InterimBake {
     // @port-skip linux-only: the bake's image permissions
     @discardableResult
     static func clearSharedWrite(_ path: String) -> Bool {
+        // Opened without following a link, and judged and changed through
+        // that one fd: a link swapped in meanwhile isn't followed.
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
         var st = stat()
-        guard lstat(path, &st) == 0, st.st_mode & S_IFMT != S_IFLNK, st.st_uid == getuid(), st.st_mode & 0o022 != 0 else { return false }
-        return chmod(path, mode_t(st.st_mode & 0o7777 & ~0o022)) == 0
+        guard fstat(fd, &st) == 0, st.st_uid == getuid(), st.st_mode & 0o022 != 0 else { return false }
+        return fchmod(fd, mode_t(st.st_mode & 0o7777 & ~0o022)) == 0
+    }
+
+    /// `path` set to `mode` the same way (no link followed, this user's).
+    // @port-skip linux-only: the bake's image permissions
+    @discardableResult
+    static func setOwnMode(_ path: String, _ mode: mode_t) -> Bool {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_uid == getuid(), st.st_mode & 0o7777 != mode else { return false }
+        return fchmod(fd, mode) == 0
     }
 
     /// An amended image's applied steps: what it had, and the new ones

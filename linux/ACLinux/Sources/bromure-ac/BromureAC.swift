@@ -802,7 +802,7 @@ struct LANHelperCommand: ParsableCommand {
 struct Admin: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Multi-user server: add, remove and list Bromure users (root).",
-        subcommands: [Add.self, Remove.self, List.self, Code.self, Pool.self])
+        subcommands: [Add.self, Remove.self, List.self, Code.self, Pool.self, P2P.self])
 
     struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Add a Bromure user (a system account unless --existing).")
@@ -843,6 +843,37 @@ struct Admin: AsyncParsableCommand {
             A granted address becomes one of this server's own addresses while a Service is published on it:             anything on the server listening on 0.0.0.0 (sshd, the gateway…) answers there too, as it already             does on the server's own LAN address.
             """,
             subcommands: [PoolAdd.self, PoolRemove.self, PoolList.self])
+    }
+
+    struct P2P: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Whether this server's users may be reached over P2P (root; off by default).",
+            discussion: "On, each signed-in user's daemon announces a port of its own (on --bind, by default the gateway's address) that leads only to that user's account through the gateway; off, none does.")
+        @Argument(help: "on, off, or nothing to show it.") var state: String?
+        @Option(help: "The address users' P2P ports listen on (default: the gateway's bindAddress).") var bind: String?
+        // @port-skip linux-only: admin CLI
+        func run() async throws {
+            var s = P2PSettings.load()
+            guard let state else {
+                print("P2P: \(s.enabled ? "on" : "off")\(s.enabled ? ", on " + (s.bindAddress ?? "0.0.0.0") : "")")
+                return
+            }
+            guard geteuid() == 0 else { throw ValidationError("admin p2p needs root") }
+            switch state {
+            case "on":
+                s.enabled = true
+                if let bind { s.bindAddress = bind } else if s.bindAddress == nil {
+                    let gw = (try? Data(contentsOf: URL(fileURLWithPath: "/var/lib/bromure-gw/gateway.json")))
+                        .flatMap { try? JSONDecoder().decode(GatewaySettings.self, from: $0) } ?? GatewaySettings()
+                    s.bindAddress = gw.bindAddress
+                }
+            case "off": s.enabled = false
+            default: throw ValidationError("on or off")
+            }
+            try FileManager.default.createDirectory(atPath: "/etc/bromure-ac", withIntermediateDirectories: true)
+            try s.save()
+            print("P2P \(s.enabled ? "on, users' ports on " + (s.bindAddress ?? "0.0.0.0") : "off"): restart the gateway (systemctl restart bromure-gw); users' daemons follow at their next start or sign-in")
+        }
     }
 
     struct PoolAdd: AsyncParsableCommand {

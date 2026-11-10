@@ -98,7 +98,7 @@ struct GatewayP2PIngressTests {
             return s
         }
         try await MainActor.run { try server.start(.init(port: 0, bindAddress: "", passwordAuth: false, pubkeyAuth: true,
-                                                          unixSocketPath: dir + "/p2p.sock")) }
+                                                          unixSocketPath: dir + "/p2p.sock", proxyHeader: true)) }
         defer { Task { @MainActor in server.stop() } }
         let forwarder = P2PIngressForwarder()
         let port = try #require(forwarder.ensure(gatewaySocket: dir + "/p2p.sock"))
@@ -119,8 +119,60 @@ struct GatewayP2PIngressTests {
         return n > 0 ? String(decoding: buf[0..<n], as: UTF8.self) : ""
     }
 
+    @Test func proxyLinesAreParsedStrictly() {
+        #expect(RemoteAccessServer.proxyClientIP("PROXY TCP4 203.0.113.7 10.0.0.1 51000 40123") == .some("203.0.113.7"))
+        #expect(RemoteAccessServer.proxyClientIP("PROXY TCP6 2001:db8::1 2001:db8::2 51000 40123") == .some("2001:db8::1"))
+        #expect(RemoteAccessServer.proxyClientIP("PROXY UNKNOWN") == .some(nil))
+        for bad in ["PROXY TCP4 nothost 10.0.0.1 1 2", "PROXY TCP4 1.2.3.4 10.0.0.1 1", "SSH-2.0-x", "PROXY TCP4 1.2.3.4 5.6.7.8 1 99999", ""] {
+            #expect(RemoteAccessServer.proxyClientIP(bad) == nil, "\(bad)")
+        }
+    }
+
+    /// A listener that takes a PROXY line: a valid one, then the banner; a
+    /// bogus one, closed with nothing said.
+    @Test func theIngressReadsTheProxyLineFirst() async throws {
+        guard getuid() != 0 else { return }
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        try FileManager.default.createDirectory(atPath: dir + "/sock", withIntermediateDirectories: true)
+        let router = GatewayRouter(socketDir: dir + "/sock")
+        let mine = try await GatewayKeyAccessTests.daemon(dir + "/sock", Self.me, GatewayKeyAccessTests.Keys([]))
+        defer { Task { await mine.close() } }
+        let server = await MainActor.run { () -> RemoteAccessServer in
+            let s = RemoteAccessServer(paths: .init(dir: URL(fileURLWithPath: dir + "/remote", isDirectory: true)))
+            s.accountRouter = router
+            s.accountPin = GatewayP2PIngress.pin(router: router)
+            return s
+        }
+        try await MainActor.run { try server.start(.init(port: 0, bindAddress: "", passwordAuth: false, pubkeyAuth: true,
+                                                          unixSocketPath: dir + "/p2p.sock", proxyHeader: true)) }
+        defer { Task { @MainActor in server.stop() } }
+        #expect(Self.firstBytes(dir + "/p2p.sock", sending: "PROXY TCP4 203.0.113.7 10.0.0.1 51000 40123\r\n").hasPrefix("SSH-2.0-"))
+        #expect(Self.firstBytes(dir + "/p2p.sock", sending: "SSH-2.0-OpenSSH_9\r\n").isEmpty, "no PROXY line: closed")
+    }
+
+    @Test func p2pIsOffUnlessTheAdminSaysSo() throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        #expect(P2PSettings.load(dir + "/none.json") == P2PSettings(enabled: false, bindAddress: nil))
+        try P2PSettings(enabled: true, bindAddress: "127.0.0.1").save(dir + "/p2p.json")
+        #expect(P2PSettings.load(dir + "/p2p.json") == P2PSettings(enabled: true, bindAddress: "127.0.0.1"))
+        var st = stat()
+        #expect(stat(dir + "/p2p.json", &st) == 0 && st.st_mode & 0o777 == 0o644)
+    }
+
+    /// The ingress listens on the admin's address, and closes when P2P stops.
+    @Test func theIngressBindsTheAdminsAddressAndCloses() throws {
+        let f = P2PIngressForwarder()
+        let port = try #require(f.ensure(gatewaySocket: "/nonexistent", bindAddress: "127.0.0.1"))
+        let probe = P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 2)
+        #expect(probe != nil)
+        if let probe { close(probe) }
+        f.stop()
+        #expect(P2PTCP.connect(ip: "127.0.0.1", port: port, timeout: 1) == nil, "closed")
+        #expect(P2PIngressForwarder.listen(on: "not-an-address") == nil)
+    }
+
     /// What the server says first on a new connection to `path` (2 s at most).
-    static func firstBytes(_ path: String) -> String {
+    static func firstBytes(_ path: String, sending: String? = nil) -> String {
         let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
         guard fd >= 0 else { return "" }
         defer { close(fd) }
@@ -130,6 +182,7 @@ struct GatewayP2PIngressTests {
         let rc = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
             connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
         guard rc == 0 else { return "" }
+        if let sending { _ = Array(sending.utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) } }
         var tv = timeval(tv_sec: 2, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         var buf = [UInt8](repeating: 0, count: 64)

@@ -11,7 +11,12 @@ PORT=${PORT:-$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['port'
 W=$(mktemp -d); pass=0; fail=0
 ok() { echo "PASS $*"; pass=$((pass + 1)); }
 no() { echo "FAIL $*"; fail=$((fail + 1)); }
-cleanup() { for u in $A $B; do sudo -n bromure-ac admin remove $u --purge --delete-account >/dev/null 2>&1; done; rm -rf "$W"; }
+# P2P as the admin had it, put back at the end (the run turns it on).
+P2P_WAS=$(bromure-ac admin p2p 2>/dev/null | sed -n 's/^P2P: \(on\|off\).*/\1/p')
+cleanup() {
+  for u in $A $B; do sudo -n bromure-ac admin remove $u --purge --delete-account >/dev/null 2>&1; done; rm -rf "$W"
+  [ "$P2P_WAS" = on ] || { sudo -n bromure-ac admin p2p off >/dev/null 2>&1; sudo -n systemctl restart bromure-gw.service; }
+}
 trap cleanup EXIT
 SSHO=(-p $PORT -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$W/known_hosts -o LogLevel=ERROR -o ConnectTimeout=10)
 req() { local b=${3:-}; printf '%s %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$1" "$2" ${#b} "$b"; }
@@ -120,8 +125,11 @@ T0=$(date +%s); timeout 20 ssh "${SSHO[@]}" -i $W/$B -o IdentitiesOnly=yes "$B@$
 # that made it, whatever user name or key the client gives. Connections made
 # as A (socat under sudo -u) are A's account's alone; root's get no banner.
 P2P=/run/bromure-ac/p2p.sock
+sudo -n bromure-ac admin p2p on >/dev/null && sudo -n systemctl restart bromure-gw.service && sleep 1 || no "admin p2p on"
+# A forwarder's connection: a PROXY line first, then the SSH stream.
 viaP2P() {  # CONNECTING_USER LOGIN KEY METHOD PATH: one request over a connection made as CONNECTING_USER
-  req "$4" "$5" "" | timeout 60 ssh "${SSHO[@]}" -o ProxyCommand="sudo -n -u $1 socat - UNIX-CONNECT:$P2P" -i "$3" \
+  req "$4" "$5" "" | timeout 60 ssh "${SSHO[@]}" \
+    -o ProxyCommand="sudo -n -u $1 sh -c '(printf \"PROXY UNKNOWN\\r\\n\"; cat) | socat - UNIX-CONNECT:$P2P'" -i "$3" \
     -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o HostKeyAlias=bromure-p2p "$2@p2p" 'bromure-fatclient/1 control' 2>/dev/null \
     | sed -n '/^{/,$p'; }
 [ -S $P2P ] && [ "$(stat -c '%a %U' $P2P)" = "666 root" ] && [ "$(stat -c '%a %U' $(dirname $P2P))" = "755 root" ] \
@@ -130,7 +138,10 @@ viaP2P $A $A $W/$A GET /health | grep -q '"status"' && ok "$A's key opens $A on 
 [ -z "$(viaP2P $A $B $W/$B GET /health)" ] && ok "$B's key and name refused on $A's P2P connection" || no "$B got in on $A's P2P connection"
 [ -z "$(viaP2P $A $A $W/$B GET /health)" ] && ok "$B's key refused as $A on $A's P2P connection" || no "$B's key opened $A over P2P"
 viaP2P $B $B $W/$B GET /health | grep -q '"status"' && ok "$B's own P2P connection opens $B" || no "$B over P2P"
-[ -z "$(timeout 5 sudo -n socat -u UNIX-CONNECT:$P2P - 2>/dev/null | head -c 8)" ] && ok "root's P2P connection gets no banner" || no "root got a banner"
+[ -z "$( (printf 'PROXY UNKNOWN\r\n'; sleep 3) | timeout 5 sudo -n socat - UNIX-CONNECT:$P2P 2>/dev/null | head -c 8)" ] \
+  && ok "root's P2P connection gets no banner" || no "root got a banner"
+[ -z "$( (printf 'SSH-2.0-x\r\n'; sleep 3) | timeout 5 sudo -n -u $A socat - UNIX-CONNECT:$P2P 2>/dev/null | head -c 8)" ] \
+  && ok "no PROXY line: closed before the banner" || no "a connection without a PROXY line got a banner"
 # Each user's daemon (where its P2P broker and ingress run) is that user's uid.
 for u in $A $B; do
   pid=$(systemctl show bromure-ac@$u -p MainPID --value)

@@ -227,13 +227,18 @@ public enum GatewayMain {
         // The P2P ingress: the same host key and accounts, each connection
         // pinned (the TCP listener above never is).
         var p2p = "no P2P ingress"
+        // Only when the admin turned P2P on (bromure-ac admin p2p on): a
+        // socket systemd made is closed otherwise.
         let activated = FDStore.take()["p2p"]?.first
-        if activated != nil || settings.p2pSocket.map({ !$0.isEmpty }) == true {
+        let p2pOn = P2PSettings.load().enabled
+        if let fd = activated, !p2pOn { close(fd) }
+        if p2pOn, activated != nil || settings.p2pSocket.map({ !$0.isEmpty }) == true {
             let i = RemoteAccessServer(paths: paths)
             i.accountRouter = router
             i.accountPin = GatewayP2PIngress.pin(router: router)
             try i.start(.init(port: 0, bindAddress: "", passwordAuth: settings.codeLogin, pubkeyAuth: true,
-                              unixSocketPath: activated == nil ? settings.p2pSocket : nil, boundSocketFD: activated))
+                              unixSocketPath: activated == nil ? settings.p2pSocket : nil, boundSocketFD: activated,
+                              proxyHeader: true))
             ingress = i
             p2p = "P2P ingress \(activated != nil ? "(socket-activated)" : settings.p2pSocket ?? "")"
         }

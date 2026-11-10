@@ -65,7 +65,7 @@ public struct DaemonConfig: Sendable {
         var st = stat()
         guard lstat(dir, &st) == 0, st.st_mode & S_IFMT == S_IFDIR, st.st_uid == getuid() else { return }
         var changed: [String] = []
-        if st.st_mode & 0o777 != 0o700, chmod(dir, 0o700) == 0 { changed.append(dir) }
+        if InterimBake.setOwnMode(dir, 0o700) { changed.append(dir) }
         for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
             let path = dir + "/" + name
             var f = stat()
@@ -2360,7 +2360,7 @@ public actor Daemon {
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }
         await MainActor.run { RemoteAccessServer.shared.stop() }
-        P2PBroker.shared.stopServing()
+        stopP2PServing()
         mitm?.terminateAllSSHAgents()
         sw.stop()
         await passt.close()
