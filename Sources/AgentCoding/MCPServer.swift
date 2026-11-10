@@ -209,7 +209,7 @@ actor ACMCPServerImpl {
             })?["id"] as? String else {
                 throw MCPACError.api("Profile not found: \(profile)")
             }
-            let r = try await apiCall("DELETE", "/sessions/\(id)")
+            let r = try await apiCall("DELETE", "/sessions/\(Self.pathSegment(id))")
             return textResult(jsonString(r))
         case "bromure_ac_get_profile":
             let profile = try requireArg(args, "profile")
@@ -238,7 +238,7 @@ actor ACMCPServerImpl {
             let profile = try requireArg(args, "profile")
             let command = try requireArg(args, "command")
             let timeout = (args["timeout"] as? Int) ?? Int((args["timeout"] as? Double) ?? 30)
-            let r = try await apiCall("POST", "/sessions/\(profile)/exec",
+            let r = try await apiCall("POST", "/sessions/\(Self.pathSegment(profile))/exec",
                                       body: ["command": command, "timeout": timeout])
             if let err = r["error"] as? String { throw MCPACError.api(err) }
             var output = ""
@@ -251,7 +251,7 @@ actor ACMCPServerImpl {
         case "bromure_ac_vm_read_file" where debug:
             let profile = try requireArg(args, "profile")
             let path = try requireArg(args, "path")
-            let r = try await apiCall("POST", "/sessions/\(profile)/exec",
+            let r = try await apiCall("POST", "/sessions/\(Self.pathSegment(profile))/exec",
                                       body: ["command": "cat \(shellQuote(path))", "timeout": 10])
             if let err = r["error"] as? String { throw MCPACError.api(err) }
             if (r["exitCode"] as? Int ?? -1) != 0 {
@@ -265,7 +265,7 @@ actor ACMCPServerImpl {
             let mode = (args["mode"] as? String) ?? "644"
             let b64 = Data(content.utf8).base64EncodedString()
             let cmd = "echo '\(b64)' | base64 -d > \(shellQuote(path)) && chmod \(mode) \(shellQuote(path))"
-            let r = try await apiCall("POST", "/sessions/\(profile)/exec",
+            let r = try await apiCall("POST", "/sessions/\(Self.pathSegment(profile))/exec",
                                       body: ["command": cmd, "timeout": 10])
             if let err = r["error"] as? String { throw MCPACError.api(err) }
             return textResult("Wrote \(content.count) bytes to \(path)")
@@ -312,6 +312,12 @@ actor ACMCPServerImpl {
         }
     }
 
+    /// One path segment (a workspace's id or name), percent-encoded.
+    nonisolated static func pathSegment(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? s
+    }
+
     nonisolated static func rawHTTP(base: String, method: String, path: String, bodyData: Data?) -> [String: Any] {
         let api: (fd: Int32, host: String)
         switch openAPI(base: base) {
@@ -320,7 +326,7 @@ actor ACMCPServerImpl {
         }
         let fd = api.fd
         defer { Darwin.close(fd) }
-        let target = path.hasPrefix("/") ? path : "/" + path
+        guard let target = requestTarget(base: base, path: path) else { return ["error": "Invalid API URL"] }
         let req = "\(method) \(target) HTTP/1.1\r\nHost: \(api.host)\r\nContent-Type: application/json\r\nContent-Length: \(bodyData?.count ?? 0)\r\nConnection: close\r\n\r\n"
 
         _ = req.withCString { Darwin.write(fd, $0, strlen($0)) }
@@ -394,6 +400,12 @@ extension ACMCPServerImpl {
             }
         }) == 0 else { Darwin.close(fd); return .failure(MCPAPIError(message: "Connect failed")) }
         return .success((fd, "\(host):\(port)"))
+    }
+
+    /// The request line's target, as macOS has always sent it: the URL's
+    /// path (no query or fragment, %XX decoded).
+    nonisolated static func requestTarget(base: String, path: String) -> String? {
+        URL(string: "\(base)\(path)")?.path
     }
 
     /// The profile tools: the app's AppleScript commands.
