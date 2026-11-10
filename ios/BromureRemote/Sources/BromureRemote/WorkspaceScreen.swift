@@ -449,6 +449,14 @@ private struct TerminalsPane: View {
         return (cwd?.isEmpty ?? true) ? nil : cwd
     }
 
+    /// Which conversation window `w`'s reader may show: its session's own
+    /// (by conversation id), never the folder's newest -- two sessions of one
+    /// agent in one folder would otherwise show each other's.
+    private func transcriptPin(for w: Int) -> TranscriptPin {
+        let s = controller.sessionStore.session(profileID: profileID, windowIndex: w)
+        return controller.sessionStore.chatTranscriptPin(for: s, profileID: profileID)
+    }
+
     private var currentTab: TabsModel.Tab? {
         guard let win = effectiveWindow else { return nil }
         return tabs.first { $0.index == win }
@@ -556,6 +564,7 @@ private struct TerminalsPane: View {
                             TranscriptReaderView(controller: controller, profileID: profileID,
                                                  window: win, guestCwd: guestCwd(for: win),
                                                  agent: agentKind(currentTab),
+                                                 pin: transcriptPin(for: win),
                                                  since: transcriptSince, store: transcripts,
                                                  bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                         }
@@ -682,7 +691,7 @@ private struct TerminalsPane: View {
         // fact ("claude" → "Fix the tests (codex)") must rebuild the store
         // locator, or the poll keeps watching the wrong session store.
         return "\(win)-\(isAgentic(currentTab))-\(agentKind(currentTab) ?? "?")-"
-            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
+            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")-\(transcriptPin(for: win).hashValue)"
     }
 
     private func pollTranscriptPresence() async {
@@ -691,7 +700,8 @@ private struct TerminalsPane: View {
               !transcriptPresent.contains(win),
               let cwd = guestCwd(for: win), !cwd.isEmpty,
               let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince,
-                                                               agent: agent)
+                                                               agent: agent, pinnedWindow: win,
+                                                               pin: transcriptPin(for: win))
         else { return }
         while !Task.isCancelled {
             if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
@@ -860,6 +870,10 @@ private struct TranscriptReaderView: View {
     /// Canonical agent kind of the tool this tab runs — locator + parser
     /// hint; nil searches every session store and sniffs the format.
     let agent: String?
+    /// The window's session's own conversation (`chatTranscriptPin`): read
+    /// that, or the file the window's agent named -- never the folder's
+    /// newest, which may be another session's.
+    let pin: TranscriptPin
     /// Epoch floor (this workspace's boot time) so a pre-reboot pending-question
     /// dump or an older session's transcript isn't tailed as if it were live —
     /// see TerminalsPane.transcriptSince.
@@ -913,7 +927,7 @@ private struct TranscriptReaderView: View {
         // The agent kind re-keys it too — the call site remounts on a kind
         // change anyway (its .id carries the kind), so this is belt and
         // braces for a future caller that doesn't.
-        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")") { await poll() }
+        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")\u{1f}\(pin.hashValue)") { await poll() }
     }
 
     // MARK: Composer + image attach
@@ -1215,9 +1229,10 @@ private struct TranscriptReaderView: View {
     /// The guest command for one read of this tab's transcript.
     private var chunkCommand: TranscriptFeed.Command? {
         guard let cwd = guestCwd, !cwd.isEmpty else { return nil }
-        let since = since, agent = agent
+        let since = since, agent = agent, window = window, pin = pin
         return { known, offset, bytes, earlier in
             CodingTaskEngine.transcriptChunkCommand(guestCwd: cwd, since: since, agent: agent,
+                                                    pinnedWindow: window, pin: pin,
                                                     knownPath: known, knownOffset: offset,
                                                     bytes: bytes, earlier: earlier)
         }

@@ -1228,9 +1228,11 @@ struct RoomTranscriptView: View {
                let probe = AgentSessionLocator.parseFloorProbe(try? await controller.guestExec(
                    session.profileID, command: AgentSessionLocator.floorProbeCommand(window: window), timeout: 8)) {
                 let w = window
+                // The session's own conversation, never the folder's newest.
+                let pin = controller.sessionStore.chatTranscriptPin(for: session, profileID: session.profileID)
                 command = { known, offset, bytes, earlier in
                     CodingTaskEngine.transcriptChunkCommand(guestCwd: probe.cwd, since: probe.since,
-                                                            agent: agent, pinnedWindow: w,
+                                                            agent: agent, pinnedWindow: w, pin: pin,
                                                             knownPath: known, knownOffset: offset,
                                                             bytes: bytes, earlier: earlier)
                 }
