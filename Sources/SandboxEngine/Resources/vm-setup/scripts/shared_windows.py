@@ -698,18 +698,25 @@ class Controller:
                     raise RuntimeError('Chromium window bounds did not converge: ' + json.dumps(evidence, sort_keys=True))
                 time.sleep(.05)
 
-        def at(actual, state, shrink=0):
+        def at(actual, state):
             return (actual.get('windowState') == state and
-                    actual.get('left') == bounds['left'] and actual.get('top') == bounds['top'] and
-                    actual.get('width') == bounds['width'] - shrink and
-                    actual.get('height') == bounds['height'] - shrink)
+                    all(actual.get(key) == bounds[key] for key in ('left', 'top', 'width', 'height')))
+
+        def clamped(actual):
+            # The 1px clamp below, which can also nudge the origin by up to
+            # 1px while the window stays inside its output.
+            return (actual.get('windowState') == 'normal' and
+                    actual.get('width') == bounds['width'] - 1 and
+                    actual.get('height') == bounds['height'] - 1 and
+                    actual.get('left') in (bounds['left'], bounds['left'] + 1) and
+                    actual.get('top') in (bounds['top'], bounds['top'] + 1))
 
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
         # Chromium restores a non-normal window INSTEAD of applying numeric
         # bounds. Observe the asynchronous restore before sending geometry.
         wait_bounds('restore', lambda actual: actual.get('windowState') == 'normal')
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
-        actual = wait_bounds('geometry', lambda actual: at(actual, 'normal') or at(actual, 'normal', 1))
+        actual = wait_bounds('geometry', lambda actual: at(actual, 'normal') or clamped(actual))
         if at(actual, 'normal'):
             return
         # Chromium's X11 backend (X11Window::AdjustSizeForDisplay) shrinks a
@@ -866,7 +873,25 @@ class Controller:
             self.bindings[index] = wid
             if cmd == 'attachPrimary':
                 self.active.setdefault(wid, self.groups[wid][0]['id'])
-            self.place(wid, active[index])
+            try:
+                self.place(wid, active[index])
+            except Exception:
+                if cmd != 'resize':
+                    # Free the scanout so the host can retry; a window this
+                    # command created and never placed is closed, not orphaned.
+                    self.bindings.pop(index, None)
+                    if cmd == 'create':
+                        self.active.pop(wid, None)
+                        # Best effort: the placement error is what the host
+                        # must see, never a cleanup failure.
+                        try:
+                            self.refresh()
+                            for target in list(self.groups.get(wid, [])):
+                                self.call('Target.closeTarget', {'targetId': target['id']})
+                            self.refresh()
+                        except Exception:
+                            pass
+                raise
             return {'windowId': wid, 'targetId': self.active.get(wid)}
         integer(wid, 1, SAFE_INTEGER, 'windowId')
         if wid not in self.groups:
