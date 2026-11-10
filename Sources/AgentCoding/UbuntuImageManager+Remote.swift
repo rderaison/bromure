@@ -186,10 +186,8 @@ extension UbuntuImageManager {
             //    offered a reset (same semantics as a local rebuild).
             let newStamp = Self.nextStamp(priorStamp: priorStamp,
                                           bundled: Self.majorVersion(of: image.version))
-            try? fm.removeItem(at: baseDiskURL)
-            try fm.moveItem(at: scratchDisk, to: baseDiskURL)
-            try? fm.removeItem(at: efiVarsURL)
-            try fm.moveItem(at: scratchEFI, to: efiVarsURL)
+            try ImagePromotion.promote([(scratchDisk, baseDiskURL), (scratchEFI, efiVarsURL)],
+                                       in: storageDir)
             try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
             writeImageState(BaseImageState(
                 imageUUID: image.uuid,
@@ -253,8 +251,7 @@ extension UbuntuImageManager {
             let priorStamp = installedImageVersion
             let bundledMajor = priorStamp.map(Self.majorVersion(of:)) ?? Self.imageVersion
             let newStamp = Self.nextStamp(priorStamp: priorStamp, bundled: bundledMajor)
-            try? fm.removeItem(at: baseDiskURL)
-            try fm.moveItem(at: scratchDisk, to: baseDiskURL)
+            try ImagePromotion.replace(scratchDisk, over: baseDiskURL)
             try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
 
             var state = loadImageState()

@@ -109,4 +109,133 @@ struct StagedImageTests {
         #expect(contents(manager.linuxKernelURL) == "new-kernel")
         #expect(contents(manager.linuxInitrdURL) == "new-initrd")
     }
+
+    // MARK: A promotion a crash interrupted
+    //
+    // Finding "Interrupted local promotion leaves no bootable live image"
+    // (CWE-459): a kill between setting the live files aside and moving the
+    // new ones in left no live image; startup asked for setup while the old
+    // one sat under .previous.
+
+    private func journal(_ dir: URL, _ entries: [(String, Bool)]) throws {
+        try JSONEncoder().encode(entries.map { ImagePromotion.Entry(live: $0.0, hadLive: $0.1) })
+            .write(to: dir.appendingPathComponent(ImagePromotion.journalName))
+    }
+    private func setAside(_ url: URL) throws {
+        try FileManager.default.moveItem(at: url, to: url.appendingPathExtension("previous"))
+    }
+    private func leftovers(_ dir: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasSuffix(".previous") || $0 == ImagePromotion.journalName }
+    }
+
+    @Test("Killed after the live files were set aside: the next launch has the previous image back")
+    func crashAfterSetAside() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try journal(dir, [("linux-base.img", true), ("vmlinuz", true), ("initrd", true)])
+        for url in [m.linuxDiskURL, m.linuxKernelURL, m.linuxInitrdURL] { try setAside(url) }
+        #expect(!m.hasBootFiles)
+
+        let relaunched = LinuxImageManager(storageDir: dir)
+        #expect(relaunched.hasBootFiles)
+        #expect(contents(m.linuxDiskURL) == "old-linux-base.img")
+        #expect(contents(m.linuxKernelURL) == "old-vmlinuz")
+        #expect(contents(m.linuxInitrdURL) == "old-initrd")
+        #expect(try leftovers(dir).isEmpty)
+    }
+
+    @Test("Killed midway (one new file in, one set aside, one not yet): all three old ones")
+    func crashMidway() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try journal(dir, [("linux-base.img", true), ("vmlinuz", true), ("initrd", true)])
+        try setAside(m.linuxDiskURL)
+        try Data("new-disk".utf8).write(to: m.linuxDiskURL)
+        try setAside(m.linuxKernelURL)
+        // initrd: never set aside, still the old one.
+
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(contents(m.linuxDiskURL) == "old-linux-base.img")
+        #expect(contents(m.linuxKernelURL) == "old-vmlinuz")
+        #expect(contents(m.linuxInitrdURL) == "old-initrd")
+        #expect(try leftovers(dir).isEmpty)
+    }
+
+    @Test("A first install killed midway leaves no half image to boot")
+    func crashFirstInstall() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("staged-image-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try journal(dir, [("linux-base.img", false), ("vmlinuz", false), ("initrd", false)])
+        try Data("new-disk".utf8).write(to: dir.appendingPathComponent("linux-base.img"))
+
+        let m = LinuxImageManager(storageDir: dir)
+        #expect(!m.hasImageFiles)
+        #expect(try leftovers(dir).isEmpty)
+    }
+
+    @Test("A promotion under way elsewhere (its lock held) isn't rolled back")
+    func liveLockSkipsRecovery() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try journal(dir, [("linux-base.img", true)])
+        try setAside(m.linuxDiskURL)
+        try Data("new-disk".utf8).write(to: m.linuxDiskURL)
+        let fd = open(dir.appendingPathComponent(ImagePromotion.lockName).path, O_CREAT | O_RDWR, 0o600)
+        #expect(fd >= 0)
+        #expect(flock(fd, LOCK_EX) == 0)
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(contents(m.linuxDiskURL) == "new-disk")
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(ImagePromotion.journalName).path))
+        flock(fd, LOCK_UN); close(fd)
+        // Released (the other process gone): the next launch rolls it back.
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(contents(m.linuxDiskURL) == "old-linux-base.img")
+        #expect(try leftovers(dir).isEmpty)
+    }
+
+    @Test("An unreadable journal keeps its backups, and blocks a promotion that would delete them")
+    func unreadableJournalKept() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let j = dir.appendingPathComponent(ImagePromotion.journalName)
+        try Data("not json".utf8).write(to: j)
+        try setAside(m.linuxDiskURL)
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(FileManager.default.fileExists(atPath: j.path))
+        #expect(contents(m.linuxDiskURL.appendingPathExtension("previous")) == "old-linux-base.img")
+        let staged = dir.appendingPathComponent("x.building")
+        try Data("new".utf8).write(to: staged)
+        #expect(throws: (any Error).self) { try m.promote([(staged, m.linuxDiskURL)]) }
+        #expect(contents(m.linuxDiskURL.appendingPathExtension("previous")) == "old-linux-base.img")
+    }
+
+    @Test("A single file is replaced in one rename, never missing")
+    func replaceInOneRename() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let staged = dir.appendingPathComponent("linux-base.img.partial")
+        try Data("amended".utf8).write(to: staged)
+        try ImagePromotion.replace(staged, over: m.linuxDiskURL)
+        #expect(contents(m.linuxDiskURL) == "amended")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+        #expect(throws: (any Error).self) { try ImagePromotion.replace(staged, over: m.linuxDiskURL) }
+        #expect(contents(m.linuxDiskURL) == "amended")
+    }
+
+    @Test("A completed promotion leaves no journal or backups behind, and recovery then changes nothing")
+    func completedPromotionIsClean() async throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await m.withStagedImage { staged in
+            try Data("new-disk".utf8).write(to: staged.disk)
+            try Data("new-kernel".utf8).write(to: staged.kernel)
+            try Data("new-initrd".utf8).write(to: staged.initrd)
+        }
+        #expect(try leftovers(dir).isEmpty)
+        _ = LinuxImageManager(storageDir: dir)
+        #expect(contents(m.linuxDiskURL) == "new-disk")
+        #expect(contents(m.linuxInitrdURL) == "new-initrd")
+    }
 }
