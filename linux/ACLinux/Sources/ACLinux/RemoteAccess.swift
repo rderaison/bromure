@@ -349,11 +349,14 @@ extension Daemon {
         let owner = running.first { sw.dhcp.leasedIP(for: $0.mac) == ip }
         var relay = owner
         var header = header
-        if owner == nil, Self.inSubnet(ip, cidr: Self.workspaceSubnet.withLockedValue { $0 }) {
+        if owner == nil, Self.isGuestAddress(ip, cidr: Self.workspaceSubnet.withLockedValue { $0 }, gateway: vmnetGateway) {
             let ranges: [(cluster: String, range: String)] = await MainActor.run {
                 (SessionStores.shared?.kube.clusters ?? []).compactMap { c in c.metallbRange.map { (c.id.uuidString, $0) } }
             }
-            relay = Self.relayVM(forVMNetIP: ip, running: running, ranges: ranges)
+            // Only workspaces and cluster machines relay (as macOS's live
+            // sessions): never a sign-in, rescue or attached VM.
+            let relays = running.filter { $0.registration != true && $0.rescueFor == nil && ($0.kube != nil || !$0.managed) }
+            relay = Self.relayVM(forVMNetIP: ip, running: relays, ranges: ranges)
             header = header == "UDP\n" ? "UDP \(ip)\n" : "\(ip):" + header
         }
         guard let rec = relay, let l = live[rec.id] else {
@@ -387,14 +390,17 @@ extension Daemon {
         return nodes.first ?? running.first
     }
 
-    /// Whether `ip` is in `cidr` (a.b.c.d/n).
+    /// Whether `ip` is a guest's address in `cidr` (a.b.c.d/n): in it, and
+    /// not its network, broadcast or gateway address (macOS: VmnetSubnet.containsGuest).
     // @port-skip linux-only: the VM network's subnet check (macOS: VMNetSwitch.subnet.containsGuest)
-    nonisolated static func inSubnet(_ ip: String, cidr: String) -> Bool {
+    nonisolated static func isGuestAddress(_ ip: String, cidr: String, gateway: String) -> Bool {
         let parts = cidr.split(separator: "/")
         guard parts.count == 2, let base = VMNetSwitch.parseIPv4(String(parts[0])), let bits = Int(parts[1]),
               (0...32).contains(bits), let v = VMNetSwitch.parseIPv4(ip) else { return false }
         let mask: UInt32 = bits == 0 ? 0 : ~UInt32(0) << (32 - UInt32(bits))
-        return v & mask == base & mask
+        let network = base & mask
+        guard v & mask == network else { return false }
+        return v != network && v != network | ~mask && v != VMNetSwitch.parseIPv4(gateway)
     }
 
     /// A /fatclient/forward relay closed.

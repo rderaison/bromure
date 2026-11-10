@@ -238,6 +238,8 @@ public actor Daemon {
     /// When each VM this daemon cold-booted came up, on a clock a host time
     /// change doesn't move: its uptime (macOS: ContinuousClock).
     var bootClock: [String: ContinuousClock.Instant] = [:]
+    /// VMs whose suspend (RAM snapshot) is being written.
+    var suspending: Set<String> = []
     /// VMs whose guest said it's going down for a reboot (DaemonGuestReboot).
     var guestRebootIntents: Set<String> = []
     /// Stopped after such a reboot: relaunched once their stop is done.
@@ -370,6 +372,10 @@ public actor Daemon {
     // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=540dd0292f7c75d9 @d3ebbda2
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
+        // A state dir with no registry and no workspaces yet: a new user's
+        // (one who upgrades with none, on purpose, gets no first workspace).
+        let freshState = !FileManager.default.fileExists(atPath: config.stateDir + "/vms.json")
+            && ((try? FileManager.default.contentsOfDirectory(atPath: config.stateDir + "/profiles")) ?? []).isEmpty
         try FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         // Its sockets' dir: refused when someone else owns it or its parent,
@@ -477,7 +483,7 @@ public actor Daemon {
         await d.sweepStoppedEphemeral()
         await d.startSessionEngine()
         // A new user's first workspace (macOS: at the end of onboarding).
-        await d.ensureFirstWorkspace()
+        await d.ensureFirstWorkspace(freshState: freshState)
         // Taken-back workspaces: their credentials were set up as adoption
         // took them (before their proxy listeners served); their kubeconfigs
         // are rewritten now that the session host is up (the kube fakes were
@@ -1208,6 +1214,20 @@ public actor Daemon {
     // @port SessionDisk.var savedStateURL h=8ed009241fd27fea @e81ff085
     func snapshotDir(_ id: String) -> String { vmDir(id) + "/snapshot" }
 
+    /// The VM network's gateway (passt's address there).
+    // @port-skip linux-only: passt's gateway for other files of the daemon
+    var vmnetGateway: String { passt.config.gateway }
+
+    /// A VM's state as its record on disk says, read without the registry's
+    /// load-time tidying (which would save): for a reader outside the actor.
+    // @port-skip linux-only: the registry file, read only
+    nonisolated static func recordState(stateDir: String, id: String) -> VMRecord.State? {
+        guard let data = FileManager.default.contents(atPath: stateDir + "/vms.json") else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .secondsSince1970
+        return (try? dec.decode([VMRecord].self, from: data))?.first { $0.id.caseInsensitiveCompare(id) == .orderedSame }?.state
+    }
+
     /// Suspend: a full snapshot of the running VM (its virtiofsds' state with
     /// it), its two disks' identities recorded, then the VM ends suspended.
     /// The RAM snapshot needs room: below the free-space floor the suspend
@@ -1227,6 +1247,8 @@ public actor Daemon {
             return .error(409, why)
         }
         explicitStops.insert(rec.id)
+        suspending.insert(rec.id)
+        defer { suspending.remove(rec.id) }
         let dir = snapshotDir(rec.id)
         try? FileManager.default.removeItem(atPath: dir)
         do {
@@ -1726,6 +1748,8 @@ public actor Daemon {
         // 0777 as on macOS: every guest uid (the workspace's, a run_as user's)
         // writes there through plain DAC. The VM directory above it stays 0700.
         try HomeSeed.prepareOutboxDirectory(URL(fileURLWithPath: dir + "/outbox"), forRestore: restoreFrom != nil)
+        // A cold boot: a snapshot left behind (a suspend cut short) is spent.
+        if restoreFrom == nil { try? fm.removeItem(atPath: snapshotDir(rec.id)) }
         try Self.stageAgentd(config.agentdPath, into: dir + "/meta")
         try Self.writeTerminalGraphicsMarker(in: dir + "/meta", allowed: Self.terminalGraphicsAllowed())
         try Self.writeVirtiofsTagMarkers(["bromure-meta", "bromure-outbox"] + shareFolders(rec).indices.map({ "share-\($0 + 1)" }),
@@ -2610,10 +2634,14 @@ public actor Daemon {
         await drainRunningVMs()
         for id in live.keys { explicitStops.insert(id) }
         // Past the drain: a stop (15 s to power off), then what's left killed.
-        // Drain 80 s + 15 s stays inside TimeoutStopSec (120 s).
-        let left = Array(live.values)
+        // Drain 80 s + 15 s stays inside TimeoutStopSec (120 s). A suspend
+        // still writing its snapshot gets those 15 s to finish instead.
+        let left = live.filter { !suspending.contains($0.key) }.map(\.value)
         await withTaskGroup(of: Void.self) { group in
             for l in left { group.addTask { _ = await l.machine.stop(timeout: .seconds(15)) } }
+            group.addTask { [self] in
+                for _ in 0..<150 where await !self.suspending.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+            }
         }
         for (_, l) in live { await l.machine.kill() }
         for _ in 0..<50 where !live.isEmpty { try? await Task.sleep(for: .milliseconds(20)) }

@@ -101,17 +101,18 @@ extension Daemon {
     }
 
     /// A new user's first workspace (macOS: made silently at the end of
-    /// onboarding), once per state directory and only when there's none:
+    /// onboarding), once per state directory, only for a new one
+    /// (`freshState`: no registry or workspaces before this start):
     /// its agent is the first the Models settings can start (Claude Code,
     /// Codex, Grok, Kimi, omp); with nothing configured, Claude Code, whose
     /// in-session sign-in covers the first start. Tried again at the next
     /// start if it couldn't be made.
     // partial: at the daemon's first start (onboarding is the client's)
     // @port ACAppDelegate.ensureFirstWorkspace(created: UUID?) h=9002aaea13b8bb95 @d3ebbda2
-    func ensureFirstWorkspace() async {
+    func ensureFirstWorkspace(freshState: Bool) async {
         let marker = config.stateDir + "/first-workspace"
         guard !FileManager.default.fileExists(atPath: marker) else { return }
-        guard profileStore.loadAll().isEmpty, !records.contains(where: { !$0.managed }) else {
+        guard freshState, profileStore.loadAll().isEmpty, !records.contains(where: { !$0.managed }) else {
             try? Data().write(to: URL(fileURLWithPath: marker))
             return
         }

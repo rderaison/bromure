@@ -41,8 +41,14 @@ extension DaemonGlobalSuites {
             p = try host.store.save(p)
             defer { try? FileManager.default.removeItem(at: host.store.profileDirectory(for: p)) }
             #expect(!host.hasSuspendedState(p))
-            try FileManager.default.createDirectory(atPath: dir + "/state/vms/" + p.id.uuidString.lowercased() + "/snapshot",
-                                                    withIntermediateDirectories: true)
+            let snap = dir + "/state/vms/" + p.id.uuidString.lowercased() + "/snapshot"
+            try FileManager.default.createDirectory(atPath: snap, withIntermediateDirectories: true)
+            try Data("s".utf8).write(to: URL(fileURLWithPath: snap + "/vm.snap"))
+            var rec = RepairMarksTests.stopped(p.id.uuidString.lowercased())
+            try await d.registerForTesting(rec)
+            #expect(!host.hasSuspendedState(p), "a snapshot a cut-short suspend left: not suspended")
+            rec.state = .suspended
+            try await d.registerForTesting(rec)
             #expect(host.hasSuspendedState(p))
             let r = host.automationUpsertProfile(idOrName: p.id.uuidString, doc: ["folderPaths": [dir]])
             #expect(r["ok"] as? Bool == false && (r["error"] as? String)?.contains("suspended VM") == true)

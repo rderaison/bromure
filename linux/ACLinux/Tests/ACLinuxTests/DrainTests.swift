@@ -45,9 +45,13 @@ struct LoadBalancerRelayTests {
         #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [ws, a, b], ranges: ranges)?.name == "a-1", "any node")
         #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [ws], ranges: ranges)?.name == "ws", "any VM")
         #expect(Daemon.relayVM(forVMNetIP: "192.168.64.99", running: [], ranges: ranges) == nil)
-        #expect(Daemon.inSubnet("192.168.64.99", cidr: "192.168.64.0/24"))
-        #expect(!Daemon.inSubnet("10.0.0.1", cidr: "192.168.64.0/24"))
-        #expect(!Daemon.inSubnet("192.168.64.1", cidr: "bogus"))
+        let g = "192.168.64.1"
+        #expect(Daemon.isGuestAddress("192.168.64.99", cidr: "192.168.64.0/24", gateway: g))
+        #expect(!Daemon.isGuestAddress("10.0.0.1", cidr: "192.168.64.0/24", gateway: g))
+        #expect(!Daemon.isGuestAddress("192.168.64.1", cidr: "192.168.64.0/24", gateway: g), "the gateway")
+        #expect(!Daemon.isGuestAddress("192.168.64.0", cidr: "192.168.64.0/24", gateway: g), "the network")
+        #expect(!Daemon.isGuestAddress("192.168.64.255", cidr: "192.168.64.0/24", gateway: g), "the broadcast")
+        #expect(!Daemon.isGuestAddress("192.168.64.9", cidr: "bogus", gateway: g))
     }
 }
 
@@ -113,7 +117,7 @@ extension DaemonGlobalSuites {
             let (d, _, dir) = try await DaemonRepairGateTests.daemon()   // one workspace VM registered
             defer { try? FileManager.default.removeItem(atPath: dir) }
             let before = await d.records.count
-            await d.ensureFirstWorkspace()
+            await d.ensureFirstWorkspace(freshState: true)
             #expect(await d.records.count == before)
             #expect(FileManager.default.fileExists(atPath: dir + "/state/first-workspace"), "once: not again after")
             await d.shutdown()

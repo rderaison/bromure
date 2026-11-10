@@ -20,10 +20,14 @@ extension LinuxSessionHost: ProfileEditHost {
     // @port ACAppDelegate.var fakeTokenSalt h=cde5f561e03ae1f1 @7057d502
     var fakeTokenSalt: Data? { daemon?.mitm?.fakeTokenSalt }
 
-    /// Suspended: its VM's snapshot is on disk (macOS: vm.state beside the profile).
-    // @port-skip linux-only: the daemon's snapshot directory (Daemon.snapshotDir)
+    /// Suspended: its VM record says so and its snapshot is on disk (macOS:
+    /// vm.state beside the profile). A snapshot left by a suspend cut short
+    /// isn't a suspended VM.
+    // @port-skip linux-only: the daemon's VM record and snapshot directory (Daemon.snapshotDir)
     func hasSuspendedState(_ profile: Profile) -> Bool {
-        FileManager.default.fileExists(atPath: stateDir + "/vms/" + profile.id.uuidString.lowercased() + "/snapshot")
+        let id = profile.id.uuidString.lowercased()
+        return Daemon.recordState(stateDir: stateDir, id: id) == .suspended
+            && FileManager.default.fileExists(atPath: stateDir + "/vms/" + id + "/snapshot/vm.snap")
     }
 
     // @port-skip linux-only: Daemon.workspace (macOS: profileByNameOrID over the app's list)
