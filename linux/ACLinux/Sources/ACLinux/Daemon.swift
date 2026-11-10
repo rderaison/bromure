@@ -422,6 +422,13 @@ public actor Daemon {
                 mitm.traces.withLockedValue { $0 }?.onConversationActivity = { pid in
                     LinuxSessionHost.shared?.noteAgentActivity(pid)
                 }
+                // A refused model call (401/402/403): the Switchboard's notice,
+                // and the Codex tabs that were mid-turn need the user (macOS:
+                // traceStore.onConversationResult).
+                mitm.traces.withLockedValue { $0 }?.onConversationResult = { pid, host, status in
+                    SessionStores.shared?.switchboardEngine?.noteAPIResult(profileID: pid, host: host, status: status)
+                    LinuxSessionHost.shared?.noteModelCallRefused(pid, status: status)
+                }
                 MitmProxy.liveActivity.withLockedValue { $0 = { pid in
                     Task { @MainActor in LinuxSessionHost.shared?.noteAgentActivity(pid) }
                 } }

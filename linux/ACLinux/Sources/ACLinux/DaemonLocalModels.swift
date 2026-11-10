@@ -1,4 +1,5 @@
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
@@ -40,9 +41,38 @@ extension Daemon {
         }) : raw
         let subscribed = subscribedProviders(for: raw)
         return await MainActor.run {
-            raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
+            Self.noteSubscriptionAuth(for: raw, subscribed: subscribed)
+            return raw.overlaidWithGlobalModels(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
         }
     }
+
+    /// How each subscription agent of the stored workspace authenticates
+    /// now, for /state's `launchAuth`; a subscription that falls back to the
+    /// Settings › Models API key is logged and sent to the cloud as
+    /// credential.subscription_auth (once per change: the workspace is
+    /// staged more often here than macOS launches it).
+    // partial: logged and emitted when the verdict changes, not at every staging
+    // @port ACAppDelegate.noteSubscriptionAuth(for: Profile) h=dceb3195eefccfe8 @d3ebbda2
+    @MainActor
+    static func noteSubscriptionAuth(for raw: Profile, subscribed: Set<ModelProvider>) {
+        let verdicts = raw.subscriptionResolutions(ModelSettingsStore.shared.effective(for: raw), subscribed: subscribed)
+        let before = subscriptionAuthNotes.withLockedValue { notes in
+            let old = notes[raw.id]
+            notes[raw.id] = verdicts.isEmpty ? nil : verdicts
+            return old ?? [:]
+        }
+        for (tool, verdict) in verdicts.sorted(by: { $0.key.rawValue < $1.key.rawValue })
+        where verdict == .apiKeyFallback && before[tool] != .apiKeyFallback {
+            FileHandle.standardError.write(Data("bromure-ac daemon: \(tool.rawValue): \(raw.name) is set to its subscription but none is signed in — using the API key from Settings › Models\n".utf8))
+            BACEventEmitter.shared.emitDetached(
+                profileID: raw.id, eventType: "credential.subscription_auth",
+                eventData: ["agent": .string(tool.rawValue), "verdict": .string("api_key_fallback")])
+        }
+    }
+
+    /// Each workspace's verdicts from its last staging (macOS: subscriptionAuthNotes).
+    // @port-skip linux-only: see noteSubscriptionAuth
+    static let subscriptionAuthNotes = NIOLockedValueBox<[UUID: [Profile.Tool: Profile.SubscriptionResolution]]>([:])
 
     /// The providers with a signed-in subscription the workspace can use.
     // @port ACAppDelegate.subscribedProviders(for: Profile) h=6f587086eef888b7 @7057d502

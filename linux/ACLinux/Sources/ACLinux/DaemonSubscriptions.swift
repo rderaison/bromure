@@ -100,7 +100,25 @@ extension Daemon {
                          health: mitm.grokStore.health(for: pid), hasOwn: mitm.grokStore.hasProfileRecord) { out["grok"] = e }
         if let e = entry(mitm.kimiStore.record(for: pid)?.savedAt, mitm.kimiStore.reauthRequiredAt(for: pid),
                          health: mitm.kimiStore.health(for: pid), hasOwn: mitm.kimiStore.hasProfileRecord) { out["kimi"] = e }
+        // How each subscription agent authenticated at the workspace's last
+        // staging: "api_key_fallback" / "sign_in_needed" make a signed-out
+        // subscription visible instead of silently billed.
+        if let pid, let notes = subscriptionAuthNotes.withLockedValue({ $0[pid] }) {
+            for (tool, verdict) in notes { out[tool.rawValue] = Self.withLaunchAuth(out[tool.rawValue], verdict) }
+        }
         return out
+    }
+
+    /// A subscription entry with its `launchAuth` (macOS's wording).
+    // @port-skip linux-only: see subscriptionStatus
+    static func withLaunchAuth(_ entry: Any?, _ verdict: Profile.SubscriptionResolution) -> [String: Any] {
+        var d = entry as? [String: Any] ?? [:]
+        switch verdict {
+        case .subscription:   d["launchAuth"] = "subscription"
+        case .signInNeeded:   d["launchAuth"] = "sign_in_needed"
+        case .apiKeyFallback: d["launchAuth"] = "api_key_fallback"
+        }
+        return d
     }
 
     /// `/state`'s `securityTimeline`: the rows the timeline holds, as macOS

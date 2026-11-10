@@ -235,6 +235,22 @@ final class LinuxSessionHost: AgentSessionHost {
             agentPid: o["pid"] as? Int, agent: o["agent"] as? String)
     }
 
+    /// The provider refused a model call outright (401/402/403) for this VM:
+    /// Codex fires no hook for a failed turn, so its tab sat "working"
+    /// forever. Every Codex session mid-turn on the VM shares the refused
+    /// credential: it needs the user. (The other agents report it themselves.)
+    // partial: no pane on a server: the session records and their windows (macOS's no-pane branch)
+    // @port ACAppDelegate.noteModelCallRefused(_: Profile.ID, status: Int) h=bf3156f72c8f0600 @d3ebbda2
+    func noteModelCallRefused(_ id: UUID, status: Int) {
+        guard [401, 402, 403].contains(status), let store = SessionStores.shared?.sessions else { return }
+        let codexWindows = Set(store.sessions
+            .filter { $0.profileID == id && !$0.hasEnded && $0.tool == .codex }
+            .compactMap(\.windowIndex))
+        for (index, st) in agentStatus[id] ?? [:] where st == .working && codexWindows.contains(index) {
+            setTabAgentStatus(id, index: index, .needsInput)
+        }
+    }
+
     /// A tab's hook status, with what the macOS app delegate does around it:
     /// a turn that ended or a question is a reply (unread on clients), and a
     /// new turn means no dialog waits any more. `turnEnded` false: a done
