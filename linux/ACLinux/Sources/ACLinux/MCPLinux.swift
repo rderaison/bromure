@@ -42,6 +42,11 @@ extension ACMCPServerImpl {
         return .success((fd, "\(host):\(port)"))
     }
 
+    /// One path segment (a workspace's id or name), percent-encoded: the
+    /// daemon decodes it (macOS sends it as is).
+    // @port ACMCPServerImpl.static pathSegment(_: String) h=5213c3049a5a9e61 @ab1fa1a4
+    nonisolated static func pathSegment(_ s: String) -> String { ControlClient.encodeSegment(s) }
+
     /// The request line's target: the path as given (the control socket
     /// reads its query, as /profiles/<id>?full=1).
     // partial: the path and query as given (macOS: URL(string:).path)

@@ -110,6 +110,8 @@ extension Daemon {
         // mcp`'s `set profile setting apiKey ""`, as macOS's AppleScript
         // command), where a blank key in a document keeps it.
         let clearKey = doc.removeValue(forKey: "_clearApiKey") as? Bool == true
+        // Alone: a document that also changes other fields isn't half-applied.
+        if clearKey, !doc.isEmpty { return .error(400, "_clearApiKey goes alone, not with other fields") }
         let r: [String: Any] = await MainActor.run {
             ProfileWrites.locked {
                 guard let host = LinuxSessionHost.shared else { return ["ok": false, "error": "no host"] }

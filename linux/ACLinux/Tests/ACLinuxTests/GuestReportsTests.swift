@@ -35,7 +35,7 @@ struct GuestReportsTests {
         await BootConsoleScan.echoTrouble(path: log, name: "w", poll: .milliseconds(5),
                                           alive: { ticks.withLockedValue { $0 += 1; return $0 <= 2 } },
                                           emit: { l in lines.withLockedValue { $0.append(l) } })
-        #expect(lines.withLockedValue { $0 } == ["[guest w] [  1.0] Kernel panic - not syncing"])
+        #expect(lines.withLockedValue { $0 } == ["[guest w] [ 1.0] Kernel panic - not syncing"])
     }
 
     @Test func aFreshBootsTagsAreWrittenAnew() throws {
@@ -81,5 +81,32 @@ struct GuestReportsTests {
         #expect(FileManager.default.fileExists(atPath: dir + "/terminal-graphics-enabled"))
         try Daemon.writeTerminalGraphicsMarker(in: dir, allowed: false)
         #expect(!FileManager.default.fileExists(atPath: dir + "/terminal-graphics-enabled"))
+    }
+
+    /// Escape sequences of every kind, other control characters and long
+    /// lines don't reach the daemon's log as the guest wrote them.
+    @Test func consoleLinesAreFlattened() {
+        #expect(BootConsoleScan.flattened("a\u{1B}]0;title\u{07}b\u{1B}]8;;http://x\u{1B}\\c") == "abc", "OSC, BEL or ST ended")
+        #expect(BootConsoleScan.flattened("x\u{1B}[?25lFAILED\u{1B}[0m y") == "xFAILED y")
+        #expect(BootConsoleScan.flattened("ab\u{1B}cd\u{1B}") == "abd", "a bare ESC takes its next character")
+        #expect(BootConsoleScan.flattened("FAILED\rfake\u{08}\tline\u{00}") == "FAILED fake line")
+        let long = BootConsoleScan.flattened("FAILED " + String(repeating: "x", count: 1000))
+        #expect(long.count == 301 && long.hasSuffix("…"))
+    }
+
+    /// A flood of console trouble: a few lines a poll, the rest counted.
+    @Test func consoleTroubleIsRateLimited() async throws {
+        let dir = try shortTempDir(); defer { try? FileManager.default.removeItem(atPath: dir) }
+        let log = dir + "/serial.log"
+        try (0..<20).map { "FAILED unit \($0)\n" }.joined().write(toFile: log, atomically: true, encoding: .utf8)
+        let lines = NIOLockedValueBox<[String]>([])
+        let ticks = NIOLockedValueBox(0)
+        await BootConsoleScan.echoTrouble(path: log, name: "w", poll: .milliseconds(5), perPoll: 5,
+                                          alive: { ticks.withLockedValue { $0 += 1; return $0 <= 2 } },
+                                          emit: { l in lines.withLockedValue { $0.append(l) } })
+        let got = lines.withLockedValue { $0 }
+        #expect(got.count == 6)
+        #expect(got.prefix(5).allSatisfy { $0.hasPrefix("[guest w] FAILED unit ") })
+        #expect(got.last == "[guest w] 15 more console line(s) of trouble not shown")
     }
 }

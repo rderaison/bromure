@@ -25,6 +25,9 @@ extension DaemonGlobalSuites {
             #expect(Daemon.clearApiKey(host, p.id.uuidString)["ok"] as? Bool == true)
             #expect(host.store.loadAll().first { $0.id == p.id }?.apiKey == nil)
             #expect(Daemon.clearApiKey(host, "no-such-workspace")["ok"] as? Bool == false)
+            let mixed = await d.updateProfile(p.id.uuidString, ["_clearApiKey": true, "name": "renamed"])
+            #expect(mixed.status == 400, "not half-applied")
+            #expect(host.store.loadAll().first { $0.id == p.id }?.name == p.name)
             await d.shutdown()
         }
     }

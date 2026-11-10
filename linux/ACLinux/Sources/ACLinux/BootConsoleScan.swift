@@ -29,8 +29,7 @@ enum BootConsoleScan {
     /// fsck failures -- ANSI colour stripped, `[guest <name>]` first.
     // @port UbuntuSandboxVM.static consoleLineForAppLog(_: String, name: String) h=73bf638297235b22 @132bb730
     static func consoleLineForAppLog(_ raw: String, name: String) -> String? {
-        let line = raw.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let line = flattened(raw)
         guard !line.isEmpty else { return nil }
         let markers = ["FAILED", "Kernel panic", "Oops:", "BUG:", "Out of memory",
                        "oom-kill", "emergency mode", "Emergency", "end Kernel panic"]
@@ -38,13 +37,30 @@ enum BootConsoleScan {
         return "[guest \(name)] \(line)"
     }
 
+    /// A guest's console line made safe for the daemon's log: escape
+    /// sequences (CSI, OSC, a bare ESC's next character) gone, every other
+    /// control character (CR included) a space, runs of spaces one, at most
+    /// 300 characters (as ScheduledAutomationEngine.guestReported).
+    // @port-skip linux-only: see consoleLineForAppLog (the guest writes the serial console)
+    static func flattened(_ raw: String) -> String {
+        let noEscapes = raw
+            .replacingOccurrences(of: "\u{1B}\\][^\u{07}\u{1B}]*(\u{07}|\u{1B}\\\\)?", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}\\[[0-9;?<=>!]*[ -/]*[@-~]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1B}.?", with: "", options: .regularExpression)
+        let flat = String(String.UnicodeScalarView(noEscapes.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) ? " " : $0
+        })).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return flat.count > 300 ? String(flat.prefix(300)) + "…" : flat
+    }
+
     /// Follows a VM's serial log while `alive` says so, each trouble line
     /// (consoleLineForAppLog) to `emit` (macOS: the console reader's echo
     /// into the app log).
     // @port-skip linux-only: the console reader of UbuntuSandboxVM.prepare, over a log file
-    static func echoTrouble(path: String, name: String, poll: Duration = .seconds(1),
+    static func echoTrouble(path: String, name: String, poll: Duration = .seconds(1), perPoll: Int = 5,
                             alive: @Sendable () async -> Bool, emit: @Sendable (String) -> Void) async {
         var at: UInt64 = 0
+        var dropped = 0
         var buffer = Data()
         while !Task.isCancelled, await alive() {
             if let h = FileHandle(forReadingAtPath: path) {
@@ -58,14 +74,23 @@ enum BootConsoleScan {
                 }
                 try? h.close()
             }
+            // At most `perPoll` lines each poll: a guest flooding its console
+            // can't flood the daemon's log (what's dropped is counted).
+            var sent = 0
             while let nl = buffer.firstIndex(of: 0x0A) {
                 let line = String(decoding: buffer[buffer.startIndex..<nl], as: UTF8.self)
                 buffer.removeSubrange(buffer.startIndex...nl)
-                if let out = consoleLineForAppLog(line, name: name) { emit(out) }
+                guard let out = consoleLineForAppLog(line, name: name) else { continue }
+                if sent < perPoll { emit(out); sent += 1 } else { dropped += 1 }
+            }
+            if sent < perPoll, dropped > 0 {
+                emit("[guest \(name)] \(dropped) more console line(s) of trouble not shown")
+                dropped = 0
             }
             if buffer.count > 64 << 10 { buffer.removeAll() }   // a line that never ends
             try? await Task.sleep(for: poll)
         }
+        if dropped > 0 { emit("[guest \(name)] \(dropped) more console line(s) of trouble not shown") }
     }
 
     /// Scans `path` from `offset` until a match (returned), or `keepGoing`
