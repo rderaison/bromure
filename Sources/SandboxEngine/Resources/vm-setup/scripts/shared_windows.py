@@ -685,26 +685,42 @@ class Controller:
             raise ValueError('physical geometry must align with common display scale')
         bounds = dict(left=rect['x'] // self.scale, top=rect['y'] // self.scale,
                       width=rect['width'] // self.scale, height=rect['height'] // self.scale)
-        deadline = time.monotonic() + 3
         initial = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
         def wait_bounds(phase, matches):
+            deadline = time.monotonic() + 3
             while True:
                 actual = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
                 if matches(actual):
-                    return
+                    return actual
                 if time.monotonic() >= deadline:
                     evidence = dict(windowId=wid, phase=phase, scale=self.scale,
                                     requested=bounds, initial=initial, observed=actual)
                     raise RuntimeError('Chromium window bounds did not converge: ' + json.dumps(evidence, sort_keys=True))
                 time.sleep(.05)
 
+        def at(actual, state, shrink=0):
+            return (actual.get('windowState') == state and
+                    actual.get('left') == bounds['left'] and actual.get('top') == bounds['top'] and
+                    actual.get('width') == bounds['width'] - shrink and
+                    actual.get('height') == bounds['height'] - shrink)
+
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
         # Chromium restores a non-normal window INSTEAD of applying numeric
         # bounds. Observe the asynchronous restore before sending geometry.
         wait_bounds('restore', lambda actual: actual.get('windowState') == 'normal')
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
-        wait_bounds('geometry', lambda actual: actual.get('windowState') == 'normal' and
-                    all(actual.get(key) == value for key, value in bounds.items()))
+        actual = wait_bounds('geometry', lambda actual: at(actual, 'normal') or at(actual, 'normal', 1))
+        if at(actual, 'normal'):
+            return
+        # Chromium's X11 backend (X11Window::AdjustSizeForDisplay) shrinks a
+        # normal window whose size equals a display's by 1px on each axis, so
+        # a WM won't take it for fullscreen — and every shared window is
+        # exactly its own RandR output. Whether it fires depends on Chromium
+        # having seen the new mode yet. It skips maximized windows, and
+        # Openbox (no struts in the guest) maximizes to the output's full
+        # rect, so maximize the window on the output it now sits on.
+        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'maximized'}})
+        wait_bounds('maximize', lambda actual: at(actual, 'maximized'))
 
     def apply_topology(self, topology, prospective=None):
         rows, root = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
