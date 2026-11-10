@@ -18,20 +18,21 @@ extension Daemon {
     /// so the last one leaves the last save applied.
     // @port-skip linux-only: the daemon's queue for applyLiveSessionRefresh (macOS runs it on the main thread)
     @discardableResult
-    func scheduleLiveRefresh(_ id: String, force: Bool = false) -> Task<Void, Never> {
+    func scheduleLiveRefresh(_ id: String, force: Bool = false, restartAgents: Bool = true) -> Task<Void, Never> {
         let prior = liveRefreshTail[id]
-        let t = Task { await prior?.value; await self.liveRefresh(id, force: force) }
+        let t = Task { await prior?.value; await self.liveRefresh(id, force: force, restartAgents: restartAgents) }
         liveRefreshTail[id] = t
         return t
     }
 
     /// Queue the whole restage for VM `id`, whatever the workspace's last
     /// edit was: a credential came to exist with no profile change (a
-    /// sign-in), as macOS's direct pushLiveCredentials calls.
+    /// sign-in), as macOS's direct pushLiveCredentials calls: no agent is
+    /// restarted (`restartAgents`: the global Models refresh's, which does).
     // @port-skip linux-only: the daemon's queue for a direct pushLiveCredentials
     @discardableResult
-    func scheduleLiveRestage(_ id: String) -> Task<Void, Never> {
-        scheduleLiveRefresh(id, force: true)
+    func scheduleLiveRestage(_ id: String, restartAgents: Bool = false) -> Task<Void, Never> {
+        scheduleLiveRefresh(id, force: true, restartAgents: restartAgents)
     }
 
     /// The VM id of workspace `pid`'s running VM.
@@ -42,16 +43,16 @@ extension Daemon {
 
     /// One live refresh, for a VM that runs.
     // @port-skip linux-only: the daemon's entry of applyLiveSessionRefresh
-    func liveRefresh(_ id: String, force: Bool = false) async {
+    func liveRefresh(_ id: String, force: Bool = false, restartAgents: Bool = true) async {
         guard live[id] != nil, let rec = registry.find(id) else { return }
-        await applyLiveRefresh(rec, force: force)
+        await applyLiveRefresh(rec, force: force, restartAgents: restartAgents)
     }
 
     /// What the stored workspace changed since `rec`'s staging last applied
     /// it (everything, when that's unknown: the daemon restarted since the
     /// launch, or `force`), applied.
     // @port ACAppDelegate.applyLiveSessionRefresh(from: Profile, to: Profile, terminalDefaults: TerminalAppDefaults, window: SessionPane?, sandbox: UbuntuSandboxVM?) h=58c9420641bf9238 @0e28fd20
-    func applyLiveRefresh(_ rec: VMRecord, force: Bool = false) async {
+    func applyLiveRefresh(_ rec: VMRecord, force: Bool = false, restartAgents: Bool = true) async {
         guard !rec.managed, let mitm, let new = existingProfile(for: rec) else { return }
         // Fusion's config can change without any other step (its legs, its
         // judge): reconciled first and unconditionally, as macOS does.
@@ -76,10 +77,14 @@ extension Daemon {
         // Applied only once all of it is: a restage that failed is done
         // again on the next refresh.
         let priorStaged = lastStagedProfiles[rec.id]
-        if steps.restage, !(await pushLiveCredentials(rec, new)) { return }
+        if steps.restage {
+            let ok = await pushLiveCredentials(rec, new)
+            // The agents whose staging moved restart in place, conversation
+            // kept, whether or not every write landed (macOS: from its defer).
+            if restartAgents { await restartAgentsWhoseModelsChanged(profileID: new.id, id: rec.id, priorStaged: priorStaged) }
+            if !ok { return }
+        }
         liveApplied[rec.id] = new
-        // The agents whose staging moved restart in place, conversation kept.
-        if steps.restage { await restartAgentsWhoseModelsChanged(profileID: new.id, id: rec.id, priorStaged: priorStaged) }
     }
 
     /// After a restage: restart, in place, the agents whose staging moved

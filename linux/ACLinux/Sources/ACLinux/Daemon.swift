@@ -1273,7 +1273,7 @@ public actor Daemon {
             try SnapshotIdentity.of(overlay: l.config.overlay).write(forState: state)
             try SnapshotIdentity.of(overlay: vmDir(rec.id) + "/home.img").write(forState: state, disk: 1)
             // Its shared folders too: a resume against another set is refused.
-            try Self.writeSnapshotShares(shareFolders(rec), dir: dir)
+            try Self.writeSnapshotShares(Self.launchedShares(l.config), dir: dir)
         } catch {
             // A VM the snapshot ended (a refusal past the rings' stop) is
             // stopped: no half state is kept.
@@ -1320,6 +1320,13 @@ public actor Daemon {
     // @port-skip linux-only: the folders half of the snapshot fingerprint (see snapshotUsable's claims)
     static func writeSnapshotShares(_ folders: [String], dir: String) throws {
         try JSONSerialization.data(withJSONObject: folders).write(to: URL(fileURLWithPath: dir + "/shares.json"), options: .atomic)
+    }
+
+    /// The shared folders the VM was launched with (its share-N devices):
+    /// a folder edit since applies at the next boot, not to this one.
+    // @port-skip linux-only: see writeSnapshotShares
+    static func launchedShares(_ config: MachineConfig) -> [String] {
+        config.shares.filter { $0.tag.hasPrefix("share-") }.map(\.hostPath)
     }
 
     // @port-skip linux-only: see writeSnapshotShares
@@ -1528,9 +1535,10 @@ public actor Daemon {
         defer { restoring.remove(rec.id) }
         do {
             try await launch(&r, restoreFrom: restoreFrom)
-            // A stop asked for during the boot: honored now that it's up.
+            // A stop asked for during the boot: honored now that it's up, by
+            // this start (no later boot can be the one it stops).
             if let action = takeStop(rec.id), let now = registry.find(rec.id) {
-                Task { _ = await self.deleteVM(now, action: action) }
+                return await deleteVM(now, action: action)
             }
             return ControlResponse(200, ["status": "running"])
         } catch {

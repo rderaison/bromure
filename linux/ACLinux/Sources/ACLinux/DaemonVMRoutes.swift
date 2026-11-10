@@ -72,7 +72,7 @@ extension Daemon {
         // On an external engine the id namespace is that server's, not the
         // catalog's: any id, and the engine rejects unknowns.
         if resolved == nil, profile.localEngineBaseURL == nil {
-            return ControlResponse(409, ["ok": false, "error": .string("Unknown model '\(modelID)'. Try `model catalog`.")])
+            return ControlResponse(409, ["ok": false, "error": .string("Unknown model '\(modelID)': not one of this server's local models (Settings › Models).")])
         }
         let active = resolved?.id ?? modelID
         do {

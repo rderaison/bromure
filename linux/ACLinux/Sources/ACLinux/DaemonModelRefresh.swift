@@ -55,7 +55,7 @@ extension Daemon {
             // Swap map, env, config files, home seed, the AWS credentials,
             // and lastStagedProfiles; then the agents whose staging moved
             // restart in place (applyLiveRefresh's restartAgentsWhoseModelsChanged).
-            await scheduleLiveRestage(rec.id).value
+            await scheduleLiveRestage(rec.id, restartAgents: true).value
             applyRouting(staged: fresh)
             startLocalEngineIfNeeded(for: fresh)
         }

@@ -168,6 +168,11 @@ struct LookupTests {
         #expect(Daemon.snapshotSharesDrift(saved: saved, now: ["/srv/a", "/srv/b"]) == nil)
         #expect(Daemon.snapshotSharesDrift(saved: saved, now: ["/srv/a"]) != nil)
         #expect(Daemon.snapshotSharesDrift(saved: nil, now: ["/srv/a"]) == nil, "an older snapshot: let through")
+        // What's recorded is what the VM was launched with, not the stored list.
+        var c = MachineConfig(name: "m", kernel: "/k", initrd: "/i", cmdline: "console=ttyS0", baseImage: "/b", overlay: "/o.raw", vsockCID: 7, runDirectory: "/r")
+        c.shares = [.init(tag: "bromure-meta", hostPath: "/m", readOnly: true), .init(tag: "share-1", hostPath: "/srv/a"),
+                    .init(tag: "bromure-outbox", hostPath: "/o"), .init(tag: "share-2", hostPath: "/srv/b")]
+        #expect(Daemon.launchedShares(c) == ["/srv/a", "/srv/b"])
     }
 }
 
