@@ -211,17 +211,17 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     // @port-skip linux-only: the daemon's session store
     var agentSessionStore: AgentSessionStore { SessionStores.shared!.sessions }
 
-    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherSendBack)
+    // @port ACAppDelegate.dispatcherSendBack(_: UUID, feedback: String) h=9ed1a4fccf48b950 @0c31f70f
     func dispatcherSendBack(_ taskID: UUID, feedback: String) async -> Bool {
         await SessionStores.shared?.taskDispatcher?.sendBack(taskID, feedback: feedback) ?? false
     }
 
-    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherSteerLanding)
+    // @port ACAppDelegate.dispatcherSteerLanding(_: UUID, text: String) h=f8667552280f3a78 @0c31f70f
     func dispatcherSteerLanding(_ taskID: UUID, text: String) async -> Bool {
         await SessionStores.shared?.taskDispatcher?.steerLanding(taskID, text: text) ?? false
     }
 
-    // @port-skip linux-only: the daemon's task dispatcher (ACAppDelegate.dispatcherRecall)
+    // @port ACAppDelegate.dispatcherRecall(_: UUID) h=20cea9c7d2978c98 @0c31f70f
     func dispatcherRecall(_ taskID: UUID) { SessionStores.shared?.taskDispatcher?.recall(taskID) }
 
     // @port ACAppDelegate.settleCodingTaskRefusals(now: Date, liveBranches: (UUID)->[String]) h=6c290afbe8141d2e @0c31f70f

@@ -2061,19 +2061,7 @@
       "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
     },
     {
-      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didBecomeInvalidWithError: Error?)",
-      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
-    },
-    {
-      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, task: URLSessionTask, willPerformHTTPRedirection: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping(URLRequest?)->Void)",
-      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
-    },
-    {
       "id": "ClientCertChallengeDelegate.init(identityRegistry: ClientIdentityRegistry, caRegistry: ClusterCATrustRegistry, consent: ConsentBroker, profileID: UUID, host: String, port: Int, insecure: Bool)",
-      "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
-    },
-    {
-      "id": "ClientCertChallengeDelegate.urlSession(_: URLSession, didReceive: URLAuthenticationChallenge, completionHandler: @escaping(URLSession.AuthChallengeDisposition,",
       "reason": "the macOS proxy's URLSession / SecureTransport / file-descriptor plumbing; the Linux proxy is SwiftNIO (MitmProxy.swift: ConnectHandler, RequestReader, ResponseRelay; dials only checked addresses, follows no redirects)"
     },
     {
@@ -3275,6 +3263,502 @@
     {
       "id": "RemoteHostController.SubscriptionState.var loginHealth",
       "reason": "fat-client client side: the client's view of /state subscription health"
+    },
+    {
+      "id": "AppLog.static hookExitCalls(in: UnsafePointer<mach_header>?)",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static teeStderr()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static writeAll(_: Int32, _: UnsafeRawPointer, _: Int)",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static rotateIfLarge(_: URL)",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static var url",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static build()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static installFatalSignalBreadcrumbs()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static onFatal(_: Int32)",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "exitHookTestBailOut()",
+      "reason": "AppKit/Darwin-only: test bail-out for the macOS _exit GOT hook (__exit-hook-test)"
+    },
+    {
+      "id": "AppLog.static install()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static exitTrace()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static writeBacktrace()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "AppLog.static installExitHook()",
+      "reason": "AppKit/Darwin-only: GUI-process durable log (Darwin/MachO); the daemon's stderr is the systemd journal, which also records exit status and signals"
+    },
+    {
+      "id": "BuildInfo.static showAboutPanel()",
+      "reason": "screen-only: About panel"
+    },
+    {
+      "id": "ACAppDelegate.registrationAlert(title: String, text: String)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "ACAppDelegate.presentRegistrationAlert(_: NSAlert, on: NSWindow?, fallback: NSApplication.ModalResponse, completion: @escaping(NSApplication.ModalResponse)->Void)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "ACAppDelegate.presentRegistrationAlert(_: NSAlert, on: NSWindow?, fallback: NSApplication.ModalResponse)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "NonModalAlertPresenter.init(alert: NSAlert, completion: @escaping(NSApplication.ModalResponse)->Void)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "NonModalAlertPresenter.static show(_: NSAlert, completion: @escaping(NSApplication.ModalResponse)->Void)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "NonModalAlertPresenter.clicked(_: NSButton)",
+      "reason": "screen-only: NSAlert presentation of the sign-in flow (Linux registration reports via onEvent/teardown message to the fat client)"
+    },
+    {
+      "id": "SpecBench.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "blockingRun(_: @escaping()asyncthrows->T)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "ConvParseTest.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "EngineKeyPrint.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ToolCallRepairTest.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "MLXEngineChild.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "UncheckedBox.init(_: T)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "MLXServe.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "MLXSelfTest.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "fmtGB(_: Int64)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "RepairServe.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ModelCatalogList.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ModelLS.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ProgressBar.static render(_: Double, label: String, width: Int)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "ModelPull.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ModelRM.run()",
+      "reason": "out of scope: MLX engine CLI (model catalog/pull/serve/bench; Linux uses external engines only)"
+    },
+    {
+      "id": "ProgressBar.static draw(_: Double, label: String)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "ProgressBar.static finish()",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "ProgressBar.static bytesLabel(_: Int64, _: Int64)",
+      "reason": "out of scope: MLX CLI helper (only used by the MLX model verbs)"
+    },
+    {
+      "id": "BACMTLSIdentity.static derFromPEM(_: String, type: String)",
+      "reason": "Apple-framework-only: PEM->DER for SecPKCS12Import; NIOSSL reads the PEM directly (BACMTLSIdentity.current)"
+    },
+    {
+      "id": "CodexTokenBridge.BridgeError.var errorDescription",
+      "reason": "VZ-only: the VZ bridge's error enum; Linux's TokenAgentChannel uses TokenAgentDisconnected"
+    },
+    {
+      "id": "CodexTokenBridge.var isConnected",
+      "reason": "VZ-only: forwards to the shared TokenAgentChannel.isConnected, which Linux reads directly (state.codexBridge?.isConnected)"
+    },
+    {
+      "id": "CodexTokenBridge.write(access: String, refresh: String, idToken: String)",
+      "reason": "unused: CodexTokenBridge.write has no caller on macOS either"
+    },
+    {
+      "id": "CodexTokenBridge.rpc(_: [String:Any])",
+      "reason": "VZ-only: thin wrapper over the shared TokenAgentChannel.rpc, which Linux calls directly (TokenAgentRead.codex)"
+    },
+    {
+      "id": "ControlClient.init(socketPath: String, dial: @escaping()->Int32?)",
+      "reason": "fat-client client side: custom dial (SSH tunnel / NIOSSH) for a remote bromure-ac"
+    },
+    {
+      "id": "ControlClient.static samplesLatency(_: String, _: String)",
+      "reason": "fat-client client side: RTT sampling for the remote link's LinkStats"
+    },
+    {
+      "id": "FDGuard.static unregister(_: Int32, _: String, verb: String)",
+      "reason": "Apple-framework-only: FDGuard's env-armed audit (Darwin guarded-fd syscalls, os.Logger); Linux has a pass-through stand-in (RemoteShims.swift)"
+    },
+    {
+      "id": "FDGuard.static trace(_: String)",
+      "reason": "Apple-framework-only: FDGuard's env-armed audit (Darwin guarded-fd syscalls, os.Logger); Linux has a pass-through stand-in (RemoteShims.swift)"
+    },
+    {
+      "id": "FDGuard.static report(_: String)",
+      "reason": "Apple-framework-only: FDGuard's env-armed audit (Darwin guarded-fd syscalls, os.Logger); Linux has a pass-through stand-in (RemoteShims.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.saveFailed()",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.keep()",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.revert(now: Date)",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "SettingsWindowSession.init(window: NSWindow, live: FirewallLiveEdit?, onGone: @escaping(SettingsWindowSession)->Void)",
+      "reason": "screen-only: settings NSWindow session for the firewall editor"
+    },
+    {
+      "id": "SettingsWindowSession.close()",
+      "reason": "screen-only: settings NSWindow session for the firewall editor"
+    },
+    {
+      "id": "SettingsWindowSession.var hasEnded",
+      "reason": "screen-only: settings NSWindow session for the firewall editor"
+    },
+    {
+      "id": "SettingsWindowSession.end()",
+      "reason": "screen-only: settings NSWindow session for the firewall editor"
+    },
+    {
+      "id": "FirewallLiveEdit.var isSaving",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.init(profileID: UUID, opening: String, settle: TimeInterval, commit: @escapingCommit, observeChanges: Bool)",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.deinit",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.edited(_: String)",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.apply(_: String)",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.changedElsewhere(previous: String?, new: String)",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "FirewallLiveEdit.beginSave()",
+      "reason": "fat-client client side: firewall editor's live-edit session (settings window or fat client's own editor, which commits through the host's /firewall routes, ported in DaemonFirewall.swift)"
+    },
+    {
+      "id": "HostNetwork.static primaryInterfaceName()",
+      "reason": "out of scope: bridged LAN - picks the NIC for a bridged vmnet tap / KubeLANAnnouncer; Linux answers LAN pools through the LAN helper (bromure-lan.service)"
+    },
+    {
+      "id": "ClusterCATrustRegistry.setCA(pem: String, host: String, profileID: UUID)",
+      "reason": "unused: ClusterCATrustRegistry.setCA has no caller on macOS (replaceAll is used; ported in KubeUpstreamTrust)"
+    },
+    {
+      "id": "PinnedClusterTrust.static acceptPinnedDespiteValidityPeriod(_: SecTrust, host: String)",
+      "reason": "Apple-framework-only: works around Apple's 398-day SSL max-validity rule in SecTrust; BoringSSL/NIOSSL has no such rule, so a long-lived pinned cluster cert already validates"
+    },
+    {
+      "id": "ClientIdentityRegistry.Entry.init(identity: SecIdentity, consentCredentialID: String?, consentDisplayName: String?)",
+      "reason": "Apple-framework-only: SecIdentity entry struct; Linux keeps KubeUpstreamTrust.Identity (NIOSSL chain/key + the same consent fields), built in replaceAll"
+    },
+    {
+      "id": "ConsentPrompt.static race(token: UUID, remote: @escaping@Sendable()async->Int?, local: @escaping@Sendable(UUID)async->Int?)",
+      "reason": "screen-only: races the local panel against the fat client; a server has only the remote surface (Linux choose awaits PendingPromptBroker alone)"
+    },
+    {
+      "id": "ConsentPanelPresenter.Request.effectiveDeadline(now: Date)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.Reply.init(_: CheckedContinuation<Int?,Never>)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.Reply.resume(_: Int?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.Reply.var isAnswered",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.var openCount",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump (test counter)"
+    },
+    {
+      "id": "ConsentPanelPresenter.var shownTitles",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump (test hook)"
+    },
+    {
+      "id": "ConsentPanelPresenter.present(profileID: UUID, title: String, message: String, choices: [String], denyIndex: Int, style: NSAlert.Style, detailText: String?, timeout: TimeInterval, isNotice: Bool, token: UUID?, deadline: Date?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.presentOffMain(profileID: UUID, title: String, message: String, choices: [String], denyIndex: Int, style: NSAlert.Style, detailText: String?, timeout: TimeInterval, isNotice: Bool, token: UUID?, deadline: Date?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.armWatchdog(_: Request, _: Reply)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.expire(_: UUID, requestID: UUID)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.static request(profileID: UUID, title: String, message: String, choices: [String], denyIndex: Int, style: NSAlert.Style, detailText: String?, timeout: TimeInterval, isNotice: Bool, token: UUID?, deadline: Date?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.enqueue(_: Request, _: Reply)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.withdraw(token: UUID)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.answer(profileID: UUID, choice: Int?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.pump(_: UUID)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelPresenter.resolve(_: UUID, requestID: UUID, choice: Int?)",
+      "reason": "screen-only: local consent panel (NSPanel queue/countdown); Linux routes every consent to the fat client (PendingPromptBroker) or the terminal pump"
+    },
+    {
+      "id": "ConsentPanelWindow.init(request: Request, answer: @escaping(Int?)->Void, show: Bool, screenFrame: NSRect?)",
+      "reason": "screen-only: NSPanel consent window"
+    },
+    {
+      "id": "ConsentPanelWindow.static textSection(_: String, width: CGFloat, monospaced: Bool, bordered: Bool)",
+      "reason": "screen-only: NSPanel consent window layout"
+    },
+    {
+      "id": "ConsentPanelWindow.static secondsLeft(until: Date, now: Date)",
+      "reason": "screen-only: consent window countdown"
+    },
+    {
+      "id": "ConsentPanelWindow.tick(now: Date)",
+      "reason": "screen-only: consent window countdown"
+    },
+    {
+      "id": "ConsentPanelWindow.static countdownLine(secondsLeft: Int, request: ConsentPanelPresenter.Request)",
+      "reason": "screen-only: consent window countdown text"
+    },
+    {
+      "id": "ConsentPanelWindow.var countdownText",
+      "reason": "screen-only: consent window countdown text"
+    },
+    {
+      "id": "ConsentPanelWindow.choose(_: NSButton)",
+      "reason": "screen-only: NSButton action"
+    },
+    {
+      "id": "ConsentPanelWindow.windowWillClose(_: Notification)",
+      "reason": "screen-only: NSWindowDelegate"
+    },
+    {
+      "id": "ConsentPanelWindow.finish(_: Int?)",
+      "reason": "screen-only: consent window"
+    },
+    {
+      "id": "ConsentPanelWindow.dismiss()",
+      "reason": "screen-only: consent window"
+    },
+    {
+      "id": "PinnedUpstreamDialer.var lastFailure",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.noteFailure(host: String, port: Int, _: String)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.noteSuccess()",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.deinit",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.var proxyDictionary",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream) (CFNetwork proxy dictionary)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.shutdownListener()",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.acceptLoop()",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.serve(_: Int32)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.static originForm(_: Data, target: String)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.static headerSafe(_: String)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.refuse(_: Int32)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.writeAll(_: Int32, _: Data)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "PinnedUpstreamDialer.static writeAllRaw(_: Int32, _: [UInt8], _: Int)",
+      "reason": "Apple-framework-only: loopback proxy that pins URLSession/CFNetwork upstream dials; Linux NIO dials the checked addresses directly (MitmProxy.connectUpstream)"
+    },
+    {
+      "id": "P2PEnrollmentCoordinator.init()",
+      "reason": "screen-only: SwiftUI observable state for Settings (Linux reads P2PIdentity.current() per request)"
+    },
+    {
+      "id": "ACAppDelegate.watchWorkspaceChoices()",
+      "reason": "screen-only: local hub editor's workspace list (fat client's hub uses the server routes and its mirrored profiles)"
+    },
+    {
+      "id": "ACAppDelegate.findingSessionChoices()",
+      "reason": "screen-only: local hub \"Ask @session\" picker (fat client builds it from mirrored sessions; server side is POST /findings/{id}/session)"
+    },
+    {
+      "id": "ACAppDelegate.showAutomationHub(finding: UUID?)",
+      "reason": "screen-only: opens the automation hub window"
+    },
+    {
+      "id": "ACAppDelegate.openFixTask(_: UUID)",
+      "reason": "screen-only: opens the task review window / task board"
+    },
+    {
+      "id": "ACAppDelegate.switchboardRoomChoices()",
+      "reason": "screen-only: local hub room picker (fat client has the rooms mirrored; server side is POST /findings/{id}/switchboard)"
+    },
+    {
+      "id": "SubscriptionTokenBridge.var isConnected",
+      "reason": "VZ-only wrapper property; Linux reads the shared TokenAgentChannel.isConnected (stored) directly"
+    },
+    {
+      "id": "SubscriptionTokenBridge.write(access: String, refresh: String)",
+      "reason": "unused: no caller of SubscriptionTokenBridge.write on macOS either"
+    },
+    {
+      "id": "Color.var hexString",
+      "reason": "screen-only: SwiftUI Color for the appearance editor"
+    },
+    {
+      "id": "TerminalAppDefaults.static ghosttyConfig(for: Profile?, terminalDefaults: TerminalAppDefaults)",
+      "reason": "screen-only: host-side ghostty surface config (the terminal renders on the fat client)"
+    },
+    {
+      "id": "TerminalAppDefaults.static terminalGraphicsConfigLines()",
+      "reason": "screen-only: ghostty image-protocol line; the guest-side marker is honoured on Linux (GuestErrorReports terminalGraphicsAllowed)"
+    },
+    {
+      "id": "TerminalAppDefaults.static hex(from: Data?)",
+      "reason": "AppKit-only: decodes Terminal.app NSColor prefs; Linux uses TerminalAppDefaults.fallback"
+    },
+    {
+      "id": "Color.init(hex: String)",
+      "reason": "screen-only: SwiftUI Color for the appearance editor"
+    },
+    {
+      "id": "Provisioner.static var setupDir",
+      "reason": "unused: Provisioner.setupDir has no caller (the image managers resolve vm-setup themselves); also VZ installer path"
+    },
+    {
+      "id": "ACAppDelegate.static dropSupersededComments(_: inout[String:Any], stored: String, ifStill: String?)",
+      "reason": "macOS glue: an alias of the shared ProfileNotes.dropSupersededComments, which the shared save calls on Linux too"
+    },
+    {
+      "id": "ACAppDelegate.static notesStill(_: String, _: String)",
+      "reason": "macOS glue: an alias of the shared ProfileNotes.notesStill"
+    },
+    {
+      "id": "LibC.static shutdown(_: Int32, _: Int32)",
+      "reason": "Darwin side of LibC: the same shared file has the Glibc one"
     }
   ],
   "skipInheriting": [

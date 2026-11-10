@@ -143,6 +143,10 @@ extension Daemon {
     /// host-side, in the workspace's directory: a fresh boot drops it, a VM
     /// taken back keeps it (its module reconnects with a proof).
     // @port KernelSentryService.attach(profile: Profile, socketDevice: VZVirtioSocketDevice, restoring: Bool) h=fa39b107a197f581 @546fa806
+    // partial: VsockFDListener over Firecracker hybrid vsock
+    // @port SentryBridge.listen(on: VZVirtioSocketDevice) h=fd6553c9ac676afa @546fa806
+    // partial: accept closure calls bridge.accept(fd)
+    // @port SentryBridge.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=0b456ca2c062662e @546fa806
     func serveSentry(_ rec: VMRecord, profile: Profile?, udsPath: String, stored: Int32?, restoring: Bool) async -> VsockFDListener? {
         if let profile { KernelSentryService.shared.dropBridge(profile.id)?.closeChannel() }
         guard let profile, !rec.managed, rec.registration != true,

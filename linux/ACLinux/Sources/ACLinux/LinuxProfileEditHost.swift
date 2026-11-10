@@ -17,7 +17,7 @@ extension LinuxSessionHost: ProfileEditHost {
     /// A server has no Terminal preferences: the defaults (as its seeds).
     // @port-skip linux-only: no terminal preferences on a server
     var terminalDefaults: TerminalAppDefaults { .fallback }
-    // @port-skip linux-only: the daemon's proxy salt
+    // @port ACAppDelegate.var fakeTokenSalt h=cde5f561e03ae1f1 @7057d502
     var fakeTokenSalt: Data? { daemon?.mitm?.fakeTokenSalt }
 
     /// Suspended: its VM's snapshot is on disk (macOS: vm.state beside the profile).
@@ -117,6 +117,8 @@ extension LinuxSessionHost: ProfileEditHost {
     /// applyLiveEditToRunningSession's).
     // partial: didSet funnel split across this + Daemon.updateProfile (refreshSquelchSettings, scheduleNextFirewallExpiry); no sidebar/dashboard
     // @port ACAppDelegate.var profiles h=2645ec771dff4d93 @d3ebbda2
+    // partial: no sidebar/browser reboot (screen-only); boot-at-startup handled by DaemonBootAtStartup
+    // @port ACAppDelegate.profilesDidChange(saved: Profile?, editing: Profile?) h=b3ec16137564c7de @7057d502
     func profilesDidChange(saved: Profile?, editing: Profile?) {
         // Private mode, as macOS's profiles.didSet: what is sent to bromure.io.
         Daemon.refreshStreamingState(store: daemon?.mitm?.traces.withLockedValue { $0 })

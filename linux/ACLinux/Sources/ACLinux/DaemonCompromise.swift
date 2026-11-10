@@ -110,7 +110,8 @@ extension Daemon {
     /// bridged client socket by its port (macOS: installFirewallGuestAbort,
     /// by vsock port there; Firecracker's vsock doesn't give the host the
     /// guest's).
-    // @port-skip linux-only: ACAppDelegate.installFirewallGuestAbort's guest request, by the client's port
+    // partial: agentd resets by client sport/peer (Firecracker vsock gives no guest port)
+    // @port ACAppDelegate.installFirewallGuestAbort() h=76aa689ad65c2910 @f127f8ab
     func wireBridgeAbort() {
         mitm?.bridgeAbort.withLockedValue { $0 = { [weak self] pid, sport, peer, done in
             Task {

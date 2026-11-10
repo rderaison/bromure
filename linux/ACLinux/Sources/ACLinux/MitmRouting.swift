@@ -18,12 +18,12 @@ extension MitmProxy {
         routingContexts.withLockedValue { $0[profileID] = context }
     }
 
-    // @port-skip linux-only: the routing half of clearWorkspacePolicies
+    // @port MitmEngine.clearRouting(for: UUID) h=26dc1bfc5637e64f @45a144c8
     func clearRouting(for profileID: UUID) {
         _ = routingContexts.withLockedValue { $0.removeValue(forKey: profileID) }
     }
 
-    // @port-skip linux-only: HTTPProxy.routingProvider, on the Linux proxy
+    // @port MitmEngine.routingContext(for: UUID) h=dda93805c792e192 @45a144c8
     func routingContext(for profileID: UUID?) -> LLMRoutingContext? {
         guard let profileID else { return nil }
         return routingContexts.withLockedValue { $0[profileID] }

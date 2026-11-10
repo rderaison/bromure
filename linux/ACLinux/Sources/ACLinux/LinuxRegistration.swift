@@ -27,7 +27,8 @@ final class LinuxRegistrationState {
     var agentLaunchConfirmed = false
     var onEvent: ((HostSignInEvent) -> Void)?
 
-    // @port-skip linux-only: ClaudeRegistrationState.init's Linux twin
+    // partial: no scratchDir (guest files read via guestExec)
+    // @port ClaudeRegistrationState.init(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope, scratchProfile: Profile, scratchDir: URL) h=c7a226b48b1ca931 @6c6cd9cf
     init(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope, scratchProfile: Profile) {
         self.provider = provider
         self.scope = scope
@@ -46,7 +47,13 @@ final class TokenAgentListener {
     private var acceptSource: DispatchSourceRead?
     private let channel: TokenAgentChannel
 
-    // @port-skip linux-only: the token agents' hybrid-vsock listener
+    // partial: TokenAgentListener over Firecracker hybrid vsock (port 8447) + shared TokenAgentChannel
+    // @port CodexTokenBridge.init(socketDevice: VZVirtioSocketDevice) h=f31ef90768c197de @6c6cd9cf
+    // partial: hybrid-vsock listener instead of a VZ listener delegate
+    // @port ListenerDelegate.init(onConnection: @escaping(VZVirtioSocketConnection)->Void)@AgentCoding/CodexTokenBridge.swift h=10107f1f71ecd03d @6c6cd9cf
+    // partial: hybrid-vsock listener
+    // @port ListenerDelegate.init(onConnection: @escaping(VZVirtioSocketConnection)->Void)@AgentCoding/SubscriptionTokenBridge.swift h=10107f1f71ecd03d @6c6cd9cf
+    // @port SubscriptionTokenBridge.init(socketDevice: VZVirtioSocketDevice) h=f31ef90768c197de @6c6cd9cf
     init(udsPath: String, port: UInt32, channel: TokenAgentChannel) throws {
         path = HybridVsockListener.path(uds: udsPath, port: port)
         self.channel = channel
@@ -58,7 +65,13 @@ final class TokenAgentListener {
         src.activate()
     }
 
-    // @port-skip linux-only: the token agents' hybrid-vsock listener
+    // partial: hybrid-vsock accept loop of TokenAgentListener
+    // @port ListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice)@AgentCoding/CodexTokenBridge.swift h=3a2bb595c0f2b1d0 @6c6cd9cf
+    // partial: channel.accept(fd:owner: nil) per hybrid-vsock connection
+    // @port CodexTokenBridge.accept(_: VZVirtioSocketConnection) h=3ed0742573962a5f @6c6cd9cf
+    // partial: TokenAgentListener hands accepted fds to TokenAgentChannel.accept
+    // @port SubscriptionTokenBridge.accept(_: VZVirtioSocketConnection) h=3ed0742573962a5f @6c6cd9cf
+    // @port ListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice)@AgentCoding/SubscriptionTokenBridge.swift h=3a2bb595c0f2b1d0 @6c6cd9cf
     private func acceptAll() {
         while true {
             let fd = accept(listenFD, nil, nil)
@@ -73,7 +86,10 @@ final class TokenAgentListener {
         }
     }
 
-    // @port-skip linux-only: SubscriptionTokenBridge.stop's listener half, over hybrid vsock
+    // partial: TokenAgentListener.stop (plus state.codexBridge?.stop() at teardown)
+    // @port CodexTokenBridge.stop() h=3371982ca0beddf2 @6c6cd9cf
+    // partial: listener half; channel.stop by the registration teardown
+    // @port SubscriptionTokenBridge.stop() h=3371982ca0beddf2 @6c6cd9cf
     func stop() {
         acceptSource?.cancel()
         acceptSource = nil
@@ -87,11 +103,14 @@ final class TokenAgentListener {
 enum TokenAgentRead {
     struct Failed: Error, CustomStringConvertible {
         let reason: String
-        // @port-skip linux-only: the bridges' agentRejected message
+        // partial: only the agentRejected case; notConnected is TokenAgentDisconnected.description
+        // @port SubscriptionTokenBridge.BridgeError.var errorDescription h=5bc91e8a7b22b9dd @6c6cd9cf
         var description: String { "VM agent refused the request: \(reason)" }
     }
 
     // @port SubscriptionTokenBridge.read() h=80c287a2a89df639 @6c6cd9cf
+    // partial: Linux calls the shared TokenAgentChannel.rpc directly
+    // @port SubscriptionTokenBridge.rpc(_: [String:Any]) h=6606a804dd953966 @6c6cd9cf
     static func claude(_ c: TokenAgentChannel) async throws -> (access: String, refresh: String)? {
         let r = try await c.rpc(["op": "read"])
         guard r["ok"] as? Bool == true else { throw Failed(reason: r["reason"] as? String ?? "unknown reason") }
@@ -260,6 +279,8 @@ extension LinuxSessionHost {
     /// pane has been an idle shell for two probes, re-sends a bounded number
     /// of times, and stands down once the login runs or its URL arrives.
     // @port ACAppDelegate.launchRegistrationAgentIfNeeded() h=7a52bb4c49346ab2 @6c6cd9cf
+    // partial: failure handled inline (onEvent + teardown); no local Retry/Cancel alert (screen-only)
+    // @port ACAppDelegate.registrationLaunchFailed(state: ClaudeRegistrationState, failure: RegistrationLaunch.Failure) h=b63e52eaf9e2fb5e @6c6cd9cf
     private func launchRegistrationAgentIfNeeded() {
         guard let state = registration, !state.finished, !state.agentLaunchStarted else { return }
         state.agentLaunchStarted = true
@@ -359,7 +380,8 @@ extension LinuxSessionHost {
     }
 
     /// `~/.grok/auth.json` in the scratch guest, nil until the user signed in.
-    // @port-skip linux-only: ACAppDelegate.readGrokAuthFile(at: URL) reads the host-mounted home; here the guest's file
+    // partial: reads the scratch guest's ~/.grok/auth.json via guestExec, not a host-mounted home
+    // @port ACAppDelegate.static readGrokAuthFile(at: URL) h=60338a0b46e177c8 @6c6cd9cf
     private func readGuestGrokAuth(_ pid: UUID) async
         -> (access: String, refresh: String, expiresAt: Date, scopeKey: String, template: Data)? {
         guard let out = try? await guestExec(profileID: pid, command:
@@ -371,7 +393,8 @@ extension LinuxSessionHost {
 
     /// `~/.kimi-code/credentials/*.json` and `config.toml` in the scratch
     /// guest, nil until the user signed in.
-    // @port-skip linux-only: ACAppDelegate.readKimiCredentials(in: URL) reads the host-mounted home; here the guest's files
+    // partial: reads the scratch guest's ~/.kimi-code via guestExec
+    // @port ACAppDelegate.static readKimiCredentials(in: URL) h=6c5396bbf4a6d8b6 @6c6cd9cf
     private func readGuestKimiCredentials(_ pid: UUID) async
         -> (access: String, refresh: String, name: String, template: Data, configTOML: String?)? {
         // One line per file: `<name>\t<base64>`; `config.toml` as `\t<base64>`.
@@ -397,6 +420,8 @@ extension LinuxSessionHost {
     /// sign-in really is what every workspace reads.
     // partial: remote only (the scope question goes to the client; no completion alert)
     // @port ACAppDelegate.finishClaudeRegistration(state: ClaudeRegistrationState, record: CapturedSubscription) h=df0da3ab0e19ea68 @6c6cd9cf
+    // partial: RegistrationCapture.forgetOverrides called inline when shared everywhere
+    // @port ACAppDelegate.forgetProviderOverrides(_: SubscriptionProvider) h=4e8088469046431d @6c6cd9cf
     private func finishSubscriptionRegistration(state: LinuxRegistrationState,
                                                 record captured: CapturedSubscription) async {
         guard !state.finished, let backend = proxySignInBackend else {

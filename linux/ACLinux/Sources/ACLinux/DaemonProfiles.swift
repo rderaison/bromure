@@ -160,6 +160,8 @@ extension Daemon {
     /// a partial one overlays; blank secrets keep the stored ones). 404 for
     /// a missing workspace, 400 for a bad document.
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onUpdateProfile h=674105853f179a6b @d3ebbda2
+    // partial: re-arms scheduleNextFirewallExpiry after a profile save; no policy-changed notification (no timeline view on a server)
+    // @port ACAppDelegate.firewallProfilesChanged(from: [Profile]) h=1ff5e0865a14e1e2 @f127f8ab
     func updateProfile(_ key: String, _ body: JSONValue) async -> ControlResponse {
         guard var doc = body.foundationObject as? [String: Any] else { return .error(400, "Expected a JSON object") }
         // `_clearApiKey`: a blank key that clears the stored one (`bromure-ac

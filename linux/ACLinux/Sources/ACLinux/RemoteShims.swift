@@ -68,7 +68,8 @@ enum SessionDisk {
 /// is a line there.
 // @port-skip linux-only: stand-in for AppLog (Darwin/MachO-bound)
 enum AppLog {
-    // @port-skip linux-only: see AppLog
+    // partial: a line on stderr (the journal), no date/file
+    // @port AppLog.static stamp(_: String, alsoToTerminal: Bool) h=ebe2401992b47f7d @df9e60bd
     static func stamp(_ text: String, alsoToTerminal: Bool = false) {
         FileHandle.standardError.write(Data("=== \(text)\n".utf8))
     }
@@ -79,11 +80,14 @@ enum AppLog {
 /// disown are no-ops, close is close(2).
 // @port-skip linux-only: stand-in for FDGuard (Darwin guarded fds, os.Logger)
 enum FDGuard {
-    // @port-skip linux-only: stand-in for FDGuard
+    // partial: no-op stand-in
+    // @port FDGuard.static adopt(_: Int32, _: String) h=b1d5b9a767b718c7 @55adf953
     static func adopt(_ fd: Int32, _ owner: String) {}
-    // @port-skip linux-only: stand-in for FDGuard
+    // partial: no-op stand-in
+    // @port FDGuard.static disown(_: Int32, _: String) h=ccfebf39477fe3b1 @55adf953
     static func disown(_ fd: Int32, _ owner: String) {}
-    // @port-skip linux-only: stand-in for FDGuard
+    // partial: plain close(2)
+    // @port FDGuard.static close(_: Int32, _: String) h=a455076ea46215a0 @55adf953
     @discardableResult
     static func close(_ fd: Int32, _ owner: String) -> Int32 { fdClose(fd) }
 }

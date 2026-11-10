@@ -132,7 +132,12 @@ extension MitmProxy {
     /// made); otherwise one is added now. Either way it holds every byte the
     /// guest sends until the upstream connects, then forwards them in order.
     /// Called on the guest channel's event loop.
-    // @port-skip linux-only: MitmPassthrough.splice on NIO
+    // partial: NIO, first address only
+    // @port MitmPassthrough.static splice(appFD: Int32, addresses: [OpenShellPolicy.IPAddress], destPort: Int, profileID: UUID?) h=b096f3b983c5d9b7 @4bd8405e
+    // partial: ByteGlue relays both ways; quarantine cut in spliceRaw
+    // @port MitmPassthrough.static pumpBothWays(appFD: Int32, upstream: Int32, profileID: UUID?) h=a1d16f921c3fbcc4 @4bd8405e
+    // partial: ByteGlue channel handler instead of a read/write thread
+    // @port MitmPassthrough.static pump(from: Int32, to: Int32) h=f9fc97f4f5773e1a @4bd8405e
     func splice(_ guest: Channel, to addresses: [OpenShellPolicy.IPAddress], port: Int, pending: ByteBuffer,
                 glue: ByteGlue? = nil) {
         // An e2e run reaches the local stand-ins only: with no test upstream

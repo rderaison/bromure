@@ -45,7 +45,10 @@ enum Darwin {
 /// writes to the socketpair, never another connection's.
 // @port-skip linux-only: TurnTLSTunnel over NIOSSL (macOS: Network.framework's TLS)
 enum TurnTLSTunnel {
-    // @port-skip linux-only: see TurnTLSTunnel
+    // partial: uplink thread inside connect, NIOSSL
+    // @port TurnTLSTunnel.static startUplink(_: NWConnection, _: Int32) h=95d756df8d008b85 @334cd156
+    // partial: NIOSSL; same keepalive/user-timeout options
+    // @port TurnTLSTunnel.static connect(host: String, port: Int, timeout: TimeInterval) h=8b7d29bec4cfada3 @334cd156
     static func connect(host: String, port: Int, timeout: TimeInterval) -> Int32? {
         guard port > 0, port <= 65535, let context = try? NIOSSLContext(configuration: .makeClientConfiguration()) else { return nil }
         var sp: [Int32] = [-1, -1]
@@ -127,7 +130,10 @@ enum TurnTLSTunnel {
             if case TLSUserEvent.handshakeCompleted = event { handshake.succeed() }
             context.fireUserInboundEventTriggered(event)
         }
-        // @port-skip linux-only: see TurnTLSTunnel
+        // partial: TLSPump handler writes decrypted bytes to the socketpair
+        // @port TurnTLSTunnel.static startDownlink(_: NWConnection, _: Int32) h=f3b27647a20ed91c @334cd156
+        // partial: inline write loop
+        // @port TurnTLSTunnel.static writeAll(_: Int32, _: Data) h=bcf168f084bf499c @334cd156
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             var b = unwrapInboundIn(data)
             while b.readableBytes > 0 {

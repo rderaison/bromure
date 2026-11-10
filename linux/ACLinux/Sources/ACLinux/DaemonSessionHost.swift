@@ -189,6 +189,8 @@ extension Daemon {
     /// A Kimi subscription workspace whose record carries no managed config:
     /// the seed would leave the guest without a `default_model`.
     // @port ACAppDelegate.kimiNeedsProvisioning(_: Profile) h=7c098e19f617b8fc @9ece43f6
+    // partial: calls KimiProvisioner.isProvisioned directly
+    // @port ACAppDelegate.static kimiConfigIsProvisioned(_: String) h=0de015f9727331fe @6c6cd9cf
     func kimiNeedsProvisioning(_ profile: Profile) -> Bool {
         guard let mitm, profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
               let real = mitm.kimiStore.record(for: profile.id) else { return false }

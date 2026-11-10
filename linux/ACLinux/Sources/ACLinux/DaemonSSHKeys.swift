@@ -50,7 +50,8 @@ final class WorkspaceSSHAgent: Sendable {
     let socketPath: String
     private let process: ChildProcess
 
-    // @port-skip linux-only: see WorkspaceSSHAgent
+    // partial: WorkspaceSSHAgent over ChildProcess in the runtime dir (0700)
+    // @port PrivateSSHAgent.init(label: String) h=0b00695be4a0e34b @db93af68
     init(directory: String, label: String) throws {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -70,7 +71,7 @@ final class WorkspaceSSHAgent: Sendable {
     }
 
     /// Its keys die with it.
-    // @port-skip linux-only: see WorkspaceSSHAgent
+    // @port PrivateSSHAgent.terminate() h=f373b1716b689b98 @db93af68
     func terminate() {
         _ = process.signal(SIGTERM)
         try? FileManager.default.removeItem(atPath: socketPath)
@@ -111,7 +112,8 @@ final class WorkspaceSSHAgent: Sendable {
     /// SIGTERM a gone daemon's agents (their keys die with them) and drop
     /// their sockets. Run once at the proxy's start, before any agent of
     /// ours (macOS: the engine's reapOrphans).
-    // @port-skip linux-only: see orphans
+    // partial: reaps by socket owner PID liveness via /proc, not pgrep
+    // @port PrivateSSHAgent.static reapOrphans() h=74de724600ba98cb @db93af68
     static func reapOrphansOfGoneDaemons() {
         func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
         var processes: [(pid: pid_t, argv: [String])] = []

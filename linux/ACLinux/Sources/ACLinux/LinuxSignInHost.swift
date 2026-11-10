@@ -9,7 +9,7 @@ import Foundation
 /// proxySignIns are the session host's.
 extension LinuxSessionHost: ProxySignInHost {
     /// The proxy's side; nil while the daemon has no proxy.
-    // @port-skip linux-only: ACAppDelegate.proxySignInBackend over the daemon's MitmProxy
+    // @port ACAppDelegate.var proxySignInBackend h=b6f41bd41810696e @ff6f7973
     var proxySignInBackend: ProxySignInBackend? {
         guard let mitm = daemon?.mitm else { return nil }
         return ProxySignInBackend(captures: mitm.captures, claude: mitm.claudeStore, codex: mitm.codexStore,

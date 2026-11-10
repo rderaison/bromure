@@ -7,7 +7,8 @@ import Foundation
 extension OpenShellWebSocket {
     /// One raw DEFLATE stream from `input`, as macOS's: ended (its final
     /// block decoded), truncated, corrupt, or too large (`cap` bytes or more).
-    // @port-skip linux-only: macOS's decodeRawDeflate (OpenShellWebSocket+Apple.swift) on zlib
+    // partial: zlib
+    // @port OpenShellWebSocket.static decodeRawDeflate(_: Data, cap: Int) h=1ae0a4612297f4b1 @83fb7191
     static func decodeRawDeflate(_ input: Data, cap: Int) -> RawInflate {
         guard !input.isEmpty else { return .truncated }
         var out: UnsafeMutablePointer<UInt8>?

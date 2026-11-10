@@ -65,6 +65,8 @@ final class PlanStreamListener {
     /// Listens on `<udsPath>_5832`, or on `stored` (a restarted daemon's,
     /// from the fd store), and keeps the listener in the store as `fdStoreName`.
     // @port PlanEventBridge.init(socketDevice: VZVirtioSocketDevice) h=bc0cab646e552cd4 @7a5b82ab
+    // partial: hybrid-vsock listener
+    // @port PlanEventListenerDelegate.init(onConnection: @escaping(VZVirtioSocketConnection)->Void) h=10107f1f71ecd03d @06b3f748
     init(udsPath: String, fdStoreName: String, stored: Int32? = nil, limits: Limits = Limits()) throws {
         self.limits = limits
         path = HybridVsockListener.path(uds: udsPath, port: GuestPorts.planStreamVsockPort)
@@ -107,6 +109,7 @@ final class PlanStreamListener {
 
     /// Accepts until the backlog is empty (one event may stand for several).
     // @port PlanEventBridge.adopt(_: VZVirtioSocketConnection) h=0b8a2afb0f5fe7df @7a5b82ab
+    // @port PlanEventListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=4f290f1ba299eb60 @06b3f748
     private func acceptAll() {
         while true {
             let fd = accept(listenFD, nil, nil)

@@ -183,7 +183,7 @@ final class MitmProxy: @unchecked Sendable {
     /// The CA (`<dir>/cert.pem`, `key.pem`, made on first use) and the
     /// subscription stores the stand-in swaps read, wired where the swaps
     /// look for them (SubscriptionProviders).
-    // @port-skip linux-only: MitmEngine.init's share for the Linux proxy
+    // @port MitmEngine.init() h=ae062a764ea3dfb5 @45a144c8
     init(caDirectory: URL, extraRoots: [NIOSSLCertificate] = [],
          group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) throws {
         ca = try BromureCA.loadOrCreate(at: caDirectory)
@@ -447,7 +447,9 @@ final class MitmProxy: @unchecked Sendable {
 
     /// Serves one VM's `<udsPath>_8443` (or `stored`, a restarted daemon's
     /// listener from the fd store) for workspace `profileID`.
-    // @port-skip linux-only: the per-VM proxy listener (macOS: MitmEngine.register on the VZ socket device)
+    // @port HTTPListenerDelegate.init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper, awsResigner: AWSResigner, traceStore: TraceStore, clientIdentities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry, consent: ConsentBroker, guardrailsBroker: GuardrailsConsentBroker, supplyChainBroker: SupplyChainConsentBroker, osvClient: OSVClient, socketClient: SocketDevClient, publishTimeCache: PublishTimeCache, sessionTraceProvider: @escaping@Sendable()->MitmEngine.SessionTrace?, guardrailsProvider: @escaping@Sendable()->GuardrailsConfig?, supplyChainProvider: @escaping@Sendable()->SupplyChainPolicy?) h=6cb890a5c8d53029 @45a144c8
+    // partial: accept loop inside the listener
+    // @port HTTPListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=022d263598aef924 @45a144c8
     func serve(udsPath: String, profileID: UUID, fdStoreName: String, stored: Int32? = nil) throws -> MitmListener {
         let path = HybridVsockListener.path(uds: udsPath, port: Self.vsockPort)
         let fd: Int32
@@ -464,7 +466,10 @@ final class MitmProxy: @unchecked Sendable {
     }
 
     /// A server context for `host` (http/1.1), minted on a miss.
-    // @port-skip linux-only: NIOSSL leaves from CertCache.mintLeaf (macOS caches SecIdentities)
+    // partial: LRU of NIOSSL contexts instead of cached SecIdentities
+    // @port CertCache.identity(for: String) h=bcd643d8c05c2c52 @ff6f7973
+    // partial: mints via shared CertCache.mintLeaf on a miss
+    // @port CertCache.mint(for: String) h=152ae2c28aa51212 @ff6f7973
     func serverContext(host: String) throws -> NIOSSLContext {
         let hit: NIOSSLContext? = leaves.withLockedValue { s in
             guard let (c, _) = s.map[host] else { return nil }
@@ -512,6 +517,8 @@ final class MitmProxy: @unchecked Sendable {
     /// `local`: the request's routing, decided once by its plan (nil: decide here).
     // partial: emitted once a handshake made with the identity succeeded (NIOSSL can't say whether the server asked for it)
     // @port HTTPMitmConnection.static emitClientCertEvent(_: ClientIdentityRegistry.Entry, host: String, port: Int, profileID: UUID) h=d0b7db658ef87141 @003f61e7
+    // partial: no loopback proxy; NIO connects to the pinned addresses with SNI/cert checks on the real host
+    // @port PinnedUpstreamDialer.init(host: String, port: Int, addresses: [OpenShellPolicy.IPAddress], others: (@Sendable(String,Int)->[OpenShellPolicy.IPAddress]?)?) h=6664020b45e1ef38 @578d196d
     func connectUpstream(host: String, port: Int, tls requestedTLS: Bool, profileID: UUID? = nil,
                          pinned: [IPAddress]? = nil, local: Bool? = nil,
                          identity: OpenShellPolicy.BinaryIdentity? = nil, insecure: Bool = false,
@@ -569,7 +576,10 @@ final class MitmProxy: @unchecked Sendable {
 
     /// Connects to the first of `addresses` that answers, for `host` (its
     /// SNI and certificate name when `tls`).
-    // @port-skip linux-only: NIO upstream (macOS: UpstreamPinning.connect's race over the checked addresses)
+    // partial: tries the checked addresses in order (no parallel race), 15 s per attempt
+    // @port UpstreamPinning.static connect(_: [IPAddress], port: Int) h=ab11c3acd71559c0 @578d196d
+    // partial: returns the last NIO error, no per-address failure list
+    // @port UpstreamPinning.static connectFailure(_: [IPAddress], port: Int, failures: [String]) h=962de51ed1e47b91 @578d196d
     private func dial(host: String, to addresses: [SocketAddress], tls: Bool, ctx: NIOSSLContext,
                       on loop: EventLoop) -> EventLoopFuture<Channel> {
         guard let first = addresses.first else {
@@ -581,7 +591,8 @@ final class MitmProxy: @unchecked Sendable {
         }
     }
 
-    // @port-skip linux-only: NIO upstream (macOS: URLSession / NWConnection)
+    // partial: TCP_NODELAY channel option; SIGPIPE ignored daemon-wide
+    // @port UpstreamPinning.static prepared(_: Int32) h=c7efcd6348fead01 @578d196d
     private func dialOne(host: String, to target: SocketAddress, tls: Bool, ctx: NIOSSLContext,
                          on loop: EventLoop) -> EventLoopFuture<Channel> {
         let isIP = host.contains(":") || host.split(separator: ".").allSatisfy { UInt8($0) != nil }

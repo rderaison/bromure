@@ -1372,6 +1372,12 @@ public actor Daemon {
     // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
     // partial: start, launch and launchVM. No model-download gate (MLX), no window/pane, no virtiofs home migration
     // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=9feccb727553e73f @d3ebbda2
+    // partial: the `starting` set (starting.insert) instead of BootsInFlight.begin
+    // @port BootsInFlight.begin(_: UUID) h=2184acaea508c831 @22b7d4bb
+    // partial: defer { starting.remove } in start
+    // @port BootsInFlight.end(_: UUID) h=f8375ac24198ddbf @22b7d4bb
+    // partial: starting.contains(id) checked inline by callers
+    // @port BootsInFlight.contains(_: UUID) h=d01f88776e3114fa @22b7d4bb
     func start(_ rec: VMRecord, _ body: JSONValue = .object([:]), resumeOnly: Bool = false, partOfReboot: Bool = false,
                unattended: Bool = false, driftResolved: Bool = false) async -> ControlResponse {
         // A workspace made private (a clone of a private one, a save just
@@ -1631,6 +1637,14 @@ public actor Daemon {
     /// swap map and kube trust, and its local engine route.
     // partial: subscription bogus keys aren't unregistered at stop (only when an automation clone is destroyed, DaemonClones.swift); no browser/MCP bridge teardown here (owned by Live)
     // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=b0add8ae1718e68f @d3ebbda2
+    // partial: BinaryIdentityService.shared.dropBridge(pid)?.stop() at session teardown; no VZ listener to remove
+    // @port BinaryIdentityService.detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) h=2557c1fe1aa481a4 @7a039834
+    // partial: KernelSentryService.shared.dropBridge(pid)?.closeChannel() at teardown
+    // @port SentryBridge.stop(socketDevice: VZVirtioSocketDevice?) h=27352edb3fce0e18 @546fa806
+    // partial: dropBridge + closeChannel at session teardown
+    // @port KernelSentryService.detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) h=c09d1f03e8bfafd1 @546fa806
+    // partial: teardown split across this and the session-end block (consent revokes, agent terminate)
+    // @port MitmEngine.unregister(profileID: UUID) h=fdf8cdce0233b744 @45a144c8
     func clearWorkspaceProxyState(_ pid: UUID) async {
         // macOS: cleanupSessionRegistrations' clearSessionTrace.
         mitm?.clearSessionTrace(for: pid)
@@ -2493,7 +2507,10 @@ public actor Daemon {
 
     /// The VM's proxy listener (`stored`: a restarted daemon's); nil without
     /// a proxy or when it can't listen (the guest then has no proxy to reach).
-    // @port-skip linux-only: the per-VM proxy listener (macOS: MitmEngine.register)
+    // partial: one hybrid-vsock listener per port (proxy here; SSH/AWS in DaemonAWS.swift), fd-store survivable
+    // @port MitmEngine.register(socketDevice: VZVirtioSocketDevice, profileID: UUID) h=e7756a824e81beb4 @45a144c8
+    // partial: no holder object; listeners kept per VMRecord
+    // @port ListenerHolder.init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper, sshAgent: SSHAgentServer, awsCreds: AWSCredentialServer, awsResigner: AWSResigner, traceStore: TraceStore, clientIdentities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry, consent: ConsentBroker, guardrailsBroker: GuardrailsConsentBroker, supplyChainBroker: SupplyChainConsentBroker, osvClient: OSVClient, socketClient: SocketDevClient, publishTimeCache: PublishTimeCache, sessionTraceProvider: @escaping@Sendable()->MitmEngine.SessionTrace?, guardrailsProvider: @escaping@Sendable()->GuardrailsConfig?, supplyChainProvider: @escaping@Sendable()->SupplyChainPolicy?) h=ae29c369d294d562 @45a144c8
     private func serveProxy(_ rec: VMRecord, udsPath: String, stored: Int32?) -> MitmListener? {
         guard let mitm else { if let stored { close(stored) }; return nil }
         do {
@@ -2567,7 +2584,8 @@ public actor Daemon {
     static func shutdownGrace(_ rec: VMRecord) -> Duration { rec.kube != nil ? .seconds(60) : .seconds(20) }
 
     /// Each workspace's stop (`suspend` or `shutdown`), from its close action.
-    // @port-skip linux-only: see drainRunningVMs
+    // partial: kube machines suspend on daemon shutdown; folders/scripts/resume passed to prepareKubeMachine; no color/terminal fields
+    // @port ACAppDelegate.static kubeMachineBootProfile(_: KubeClusterEngine.MachineSpec) h=1f5aa0f1a3a130ef @14bff1ec
     static func drainPlan(_ running: [VMRecord], profile: (VMRecord) -> Profile?) -> [(VMRecord, String)] {
         running.compactMap { rec in
             guard rec.registration != true, rec.rescueFor == nil else { return nil }

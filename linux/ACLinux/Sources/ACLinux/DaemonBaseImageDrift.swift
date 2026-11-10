@@ -96,6 +96,7 @@ extension Daemon {
 
     /// The workspace's VM has its disk open (running, or a start under way).
     // @port ACAppDelegate.diskInUse(_: Profile.ID) h=a9a77dd071a6cd22 @d3ebbda2
+    // @port BootsInFlight.diskInUse(_: UUID, running: Bool) h=9d56ce0fbbbbf966 @22b7d4bb
     func diskInUse(_ id: Profile.ID) -> Bool {
         let key = id.uuidString.lowercased()
         return live[key] != nil || starting.contains(key) || repairMarks.contains(key) || hasRescue(for: key)

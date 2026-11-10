@@ -30,6 +30,7 @@ extension Daemon {
     /// (macOS: populateMCPBearerTokens before the models overlay) -- only
     /// where macOS does it (the launch, the live credential push; a reboot
     /// relaunches): a refresh token may be good for one use.
+    // @port ACAppDelegate.stagedProfile(for: Profile) h=b98351dd1128c23d @bd69274f
     func stagedProfile(_ raw: Profile, mcpTokens: Bool = false) async -> Profile {
         let store = profileStore
         // Saved on the main actor, where a client's profile PUT loads, merges
@@ -235,6 +236,10 @@ final class InferenceBridgeListener: @unchecked Sendable {
     private let channel: Channel
 
     // @port InferenceListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=4004f778aeb28137 @4bd8405e
+    // partial: InferenceBridgeListener over Firecracker hybrid vsock
+    // @port InferenceListenerDelegate.init(profileID: UUID?) h=60da58a7004a52c2 @4bd8405e
+    // partial: NIO SpliceHandler pair to the repair proxy instead of a blocking pump thread
+    // @port InferenceVsockBridge.static pump(vsockFD: Int32, host: String, port: Int, beforeClose: ()->Void) h=383d1f26ea9c95e2 @4bd8405e
     init(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.vsockPort)
         self.fdStoreName = fdStoreName
@@ -304,7 +309,8 @@ final class SpliceHandler: ChannelDuplexHandler, @unchecked Sendable {
     private var context: ChannelHandlerContext?
     private var pendingRead = false
 
-    // @port-skip linux-only: NIO plumbing
+    // partial: NIO half-close splice instead of a blocking read/write loop
+    // @port InferenceVsockBridge.static oneWay(from: Int32, to: Int32, group: DispatchGroup) h=60b121ba9a8c68b6 @4bd8405e
     static func matchedPair() -> (SpliceHandler, SpliceHandler) {
         let a = SpliceHandler(), b = SpliceHandler()
         a.partner = b

@@ -15,10 +15,12 @@ enum ConsentPrompt {
     /// macOS's NSAlert.Style, for the callers' `style:`; nothing is drawn here.
     enum Style { case informational, warning, critical }
 
-    // @port-skip linux-only: ConsentPrompt.defaultTimeout without UserDefaults' app domain (120 s, as its default)
+    // partial: fixed 120 s; macOS honours the hidden defaults key consent.timeoutSeconds (>=10) — no Linux knob
+    // @port ConsentPrompt.static var defaultTimeout h=0683ea023b0780a9 @9b4bd329
     static var defaultTimeout: TimeInterval { 120 }
 
-    // @port-skip linux-only: ConsentPrompt.choose without the local panel
+    // partial: .fatClient -> PendingPromptBroker only (no local race), .localAlert -> denied with a log line
+    // @port ConsentPrompt.static choose(profileID: UUID, title: String, message: String, choices: [String], denyIndex: Int, style: NSAlert.Style, detailText: String?, timeout: TimeInterval, token: UUID) h=3a53f13682716717 @9b4bd329
     static func choose(profileID: UUID, title: String, message: String,
                        choices: [String], denyIndex: Int,
                        style: Style = .informational,
@@ -55,7 +57,8 @@ enum ConsentPrompt {
     /// A one-button notice (nothing to decide): the connected fat client's
     /// prompt; a headless terminal session gets none (the caller logs it),
     /// and there's no local panel to show it in.
-    // @port-skip linux-only: ConsentPrompt.notice without the local panel
+    // partial: fat-client route only (no local panel)
+    // @port ConsentPrompt.static notice(profileID: UUID, title: String, message: String) h=6be049a3bb5bbfad @9b4bd329
     static func notice(profileID: UUID, title: String, message: String) {
         guard case .fatClient = RemoteConsent.route(for: profileID) else { return }
         Task { @MainActor in
@@ -67,6 +70,7 @@ enum ConsentPrompt {
     }
 
     /// There is no local panel to take back.
-    // @port-skip linux-only: ConsentPrompt.withdrawLocal (no local panel)
+    // partial: no-op (no local panel)
+    // @port ConsentPrompt.static withdrawLocal(token: UUID) h=66e8c5d1392066e0 @9b4bd329
     static func withdrawLocal(token: UUID) {}
 }

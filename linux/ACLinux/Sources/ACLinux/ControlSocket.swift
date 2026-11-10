@@ -393,7 +393,8 @@ final class ControlConnection: ChannelInboundHandler, @unchecked Sendable {
 public struct ControlClient: Sendable {
     public let socketPath: String
 
-    // @port-skip linux-only: control client
+    // partial: path required (CLI passes the daemon socket)
+    // @port ControlClient.init(socketPath: String?) h=2766d65a1e2c08aa @1b984d09
     public init(socketPath: String) { self.socketPath = socketPath }
 
     // @port-skip linux-only: control client
@@ -405,7 +406,8 @@ public struct ControlClient: Sendable {
     // @port-skip linux-only: control client errors
     public enum ClientError: Error, CustomStringConvertible {
         case connect(String, Int32), protocolError(String), untrusted(String, String)
-        // @port-skip linux-only: control client errors
+        // partial: Linux ClientError cases (connect/protocol/untrusted)
+        // @port ControlClient.ClientError.var errorDescription h=1392d3d833c6d087 @1b984d09
         public var description: String {
             switch self {
             case .connect(let p, let e): return "can't reach the daemon at \(p): \(String(cString: strerror(e)))"
@@ -582,7 +584,8 @@ public enum PTYFrame {
     }
 
     /// Splits complete frames off the front of `buf`; a partial one stays.
-    // @port-skip linux-only: frame parsing (macOS parses inline in InteractiveExec.run)
+    // partial: returns the frames instead of a callback
+    // @port PTYFrame.static drain(_: inout[UInt8], handle: (UInt8,[UInt8])->Void) h=cb5a5e06e680901a @1b984d09
     public static func take(_ buf: inout [UInt8]) -> [(UInt8, [UInt8])] {
         var out: [(UInt8, [UInt8])] = []
         var at = 0

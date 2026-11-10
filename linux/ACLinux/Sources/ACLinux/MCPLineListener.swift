@@ -16,7 +16,9 @@ final class MCPLineListener {
 
     /// Listens on `<udsPath>_<port>`, or on `stored` (a restarted daemon's,
     /// from the fd store), and keeps the listener in the store as `fdStoreName`.
-    // @port-skip linux-only: hybrid vsock MCP listener
+    // @port TaskMCPVsockBridge.init(socketDevice: VZVirtioSocketDevice, profileID: UUID?, server: anyMCPLineHandler, port: UInt32) h=14a7715826e5a6d6 @b91fddfb
+    // partial: no delegate object
+    // @port TaskMCPListenerDelegate.init(onConnection: @escaping(VZVirtioSocketConnection)->Void) h=10107f1f71ecd03d @b91fddfb
     init(udsPath: String, port: UInt32, server: any MCPLineHandler, fdStoreName: String, stored: Int32? = nil) throws {
         path = HybridVsockListener.path(uds: udsPath, port: port)
         self.server = server
@@ -34,7 +36,8 @@ final class MCPLineListener {
     }
 
     /// Accepts until the backlog is empty (one event may stand for several).
-    // @port-skip linux-only: hybrid vsock MCP listener
+    // @port TaskMCPVsockBridge.adopt(_: VZVirtioSocketConnection) h=86428e08f1a52362 @b91fddfb
+    // @port TaskMCPListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=4f290f1ba299eb60 @b91fddfb
     private func acceptAll() {
         while true {
             let fd = accept(listenFD, nil, nil)
@@ -53,7 +56,7 @@ final class MCPLineListener {
     }
 
     /// The VM is gone: the listener and every connection closed, the socket file removed.
-    // @port-skip linux-only: TaskMCPVsockBridge.stop
+    // @port TaskMCPVsockBridge.stop() h=d2ac873b2ad50b13 @b91fddfb
     func stop() {
         acceptSource?.cancel()
         acceptSource = nil
@@ -77,14 +80,14 @@ final class MCPLineListener {
         private var open = true
         private var inFlight = 0
 
-        // @port-skip linux-only: hybrid vsock MCP connection
+        // @port TaskMCPVsockBridge.Connection.init(conn: VZVirtioSocketConnection, server: anyMCPLineHandler, onClose: @escaping(Connection)->Void) h=dbdebfa4b52b53c6 @b91fddfb
         init(fd: Int32, server: any MCPLineHandler, onClose: @escaping (Connection) -> Void) {
             self.fd = fd
             self.server = server
             self.onClose = onClose
         }
 
-        // @port-skip linux-only: hybrid vsock MCP connection
+        // @port TaskMCPVsockBridge.Connection.start() h=4450c673753a61b9 @b91fddfb
         func start() {
             let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
             readSource = src
@@ -93,7 +96,7 @@ final class MCPLineListener {
         }
 
         /// Closed now (the listener stops, or the client is gone for good).
-        // @port-skip linux-only: hybrid vsock MCP connection
+        // @port TaskMCPVsockBridge.Connection.cancel() h=11d33aff786ce484 @b91fddfb
         func cancel() {
             stopReading()
             finish()
@@ -115,7 +118,8 @@ final class MCPLineListener {
 
         /// Reads to EAGAIN (libdispatch on Linux doesn't fire again for an
         /// EOF that arrived with the data), then answers each whole line.
-        // @port-skip linux-only: TaskMCPVsockBridge.Connection.readAvailable on a non-blocking fd
+        // partial: non-blocking fd, bounded
+        // @port TaskMCPVsockBridge.Connection.readAvailable() h=26b4e12476cc107f @b91fddfb
         private func readAvailable() {
             var buf = [UInt8](repeating: 0, count: 65536)
             var eof = false
@@ -153,7 +157,7 @@ final class MCPLineListener {
         }
 
         /// Whether all of it was written (false: the connection is gone).
-        // @port-skip linux-only: TaskMCPVsockBridge.Connection.writeLine on a non-blocking fd
+        // @port TaskMCPVsockBridge.Connection.writeLine(_: String) h=83a6dc6c0a3d2d99 @b91fddfb
         @discardableResult
         private func writeLine(_ s: String) -> Bool {
             guard open else { return false }

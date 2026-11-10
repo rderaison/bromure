@@ -407,7 +407,8 @@ extension Daemon {
 
 
     /// The host's address on its default route (the `connect` hint).
-    // @port-skip linux-only: HostNetwork.primaryIPv4 on macOS
+    // partial: the default-route address (UDP connect trick), not en0-preferred getifaddrs
+    // @port HostNetwork.static primaryIPv4() h=7be3bf00f2ba2858 @beb3be9f
     static func primaryIPv4() -> String? {
         let fd = socket(AF_INET, Int32(SOCK_DGRAM.rawValue), 0)
         guard fd >= 0 else { return nil }

@@ -26,7 +26,7 @@ extension ClassifierQueue {
         func asUnownedSerialExecutor() -> UnownedSerialExecutor { UnownedSerialExecutor(ordinary: self) }
     }
 
-    // @port-skip linux-only: see Executor
+    // @port ClassifierQueue.static make(_: String) h=9f79f0bb3a56789e @19b04b00
     static func make(_ label: String) -> Executor { Executor(label: "io.bromure.classifier.\(label)") }
 }
 
@@ -69,7 +69,8 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
     /// Outputs past this many values are refused (64 Mi floats: 256 MiB).
     static let maxOutput = 64 << 20
 
-    // @port-skip linux-only: see OrtCInjectionSession
+    // partial: onnxruntime C API, no CoreML execution provider
+    // @port ORTInjectionSession.init(modelPath: String, threads: Int32?, output: String?, coreML: Bool) h=aa3d3fd2bef9e9f0 @90004c7f
     init(modelPath: String, threads: Int32 = 0, output: String? = nil) throws {
         _ = try OnnxRuntimeLibrary.load()
         var err = [CChar](repeating: 0, count: 512)
@@ -89,7 +90,7 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
     deinit { acl_ort_session_release(session) }
 
     /// The first output's values for these inputs (int64, all `shape`).
-    // @port-skip linux-only: see OrtCInjectionSession
+    // @port ORTInjectionSession.run(_: [String:[Int64]], shape: [Int]) h=18409a9214b20050 @90004c7f
     func run(_ inputs: [String: [Int64]], shape: [Int]) throws -> [Float] {
         let fed = inputs.sorted { $0.key < $1.key }
         let count = shape.reduce(1, *)
@@ -124,14 +125,14 @@ final class OrtCInjectionSession: InjectionSession, @unchecked Sendable {
 
 enum InjectionRuntime {
     /// The detector session for the model at `modelPath`.
-    // @port-skip linux-only: macOS's InjectionRuntime.session (PromptInjectionClassifier+Apple.swift) on the C API
+    // @port InjectionRuntime.static session(modelPath: String) h=8069851ee440c80b @90004c7f
     static func session(modelPath: String) throws -> any InjectionSession {
         try OrtCInjectionSession(modelPath: modelPath)
     }
 
     /// A token classifier's session (PIIDetector's): on the CPU with
     /// `threads` intra-op threads, reading `output` when the model has it.
-    // @port-skip linux-only: macOS's InjectionRuntime.tokenSession (PromptInjectionClassifier+Apple.swift) on the C API
+    // @port InjectionRuntime.static tokenSession(modelPath: String, threads: Int32, output: String) h=37e4293e846cc074 @90004c7f
     static func tokenSession(modelPath: String, threads: Int32, output: String) throws -> any InjectionSession {
         try OrtCInjectionSession(modelPath: modelPath, threads: threads, output: output)
     }
@@ -143,7 +144,8 @@ extension PromptInjectionClassifier {
     /// a sentence ends at `.`, `!` or `?` followed by whitespace, or at a
     /// line break.
     // partial: an approximation of Foundation's sentence boundaries (abbreviations like "e.g. " end a sentence here); the fine pass's windows can differ slightly from macOS's
-    // @port-skip linux-only: macOS's PromptInjectionClassifier.sentences(in:) (enumerateSubstrings .bySentences)
+    // partial: own splitter instead of enumerateSubstrings(.bySentences)
+    // @port PromptInjectionClassifier.static sentences(in: String) h=7a163982cc701c18 @90004c7f
     static func sentences(in body: String) -> [String] {
         var out: [String] = []
         func push(_ s: String) {

@@ -128,7 +128,14 @@ final class LinuxAccountKeys {
 
 extension Daemon {
     /// `GET /account`: signed in or not, and the last key sync. Never the token.
-    // @port-skip linux-only: macOS shows this in Settings
+    // partial: signedIn in GET /account
+    // @port P2PEnrollmentCoordinator.var signedIn h=8858a5516f5fbaa8 @0151db9d
+    // partial: org slug in GET /account (no "bromure.io" label)
+    // @port P2PEnrollmentCoordinator.var accountLabel h=0437a4c26888d9c7 @0151db9d
+    // partial: source device/enterprise in GET /account; sign-out refuses enterprise
+    // @port P2PEnrollmentCoordinator.var isEnterprise h=9ff78a75310483b6 @0151db9d
+    // partial: re-reads P2PIdentity on every call
+    // @port P2PEnrollmentCoordinator.refresh() h=3e5d79c020e42307 @0151db9d
     func accountStatus() async -> ControlResponse {
         await MainActor.run {
             var o: [String: JSONValue] = ["signedIn": .bool(false)]
@@ -153,6 +160,8 @@ extension Daemon {
     /// (or its bromure://enroll link) and start the key sync. The code is
     /// never logged or echoed back.
     // @port P2PEnrollmentCoordinator.complete(_: EnrollLink, state: String?) h=995666e611256eb7 @0151db9d
+    // partial: no browser on a server; user pastes the enrollment code/link (POST /account/sign-in)
+    // @port P2PEnrollmentCoordinator.signIn() h=3c5e2d83b9522d43 @0151db9d
     func accountSignIn(_ body: JSONValue) async -> ControlResponse {
         guard let raw = body["link"]?.stringValue, let link = EnrollLink(parsing: raw) else {
             return .error(400, "That isn't a bromure.io enrollment code or link")
@@ -193,7 +202,7 @@ extension Daemon {
     }
 
     /// (P2PEnrollmentCoordinator.describe, which lives with the app's UI.)
-    // @port-skip linux-only: CLI text
+    // @port P2PEnrollmentCoordinator.static describe(_: P2PEnroll.EnrollError) h=3f4bb27e3371f968 @0151db9d
     static func describeEnroll(_ e: P2PEnroll.EnrollError) -> String {
         switch e {
         case .badCode: return "The enrollment code is malformed."

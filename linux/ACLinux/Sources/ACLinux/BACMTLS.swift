@@ -16,14 +16,14 @@ import NIOSSL
 /// nothing leaves the host.
 // @port-skip linux-only: the Linux side of CloudMTLSClient.swift's BACMTLS seam
 enum BACMTLS {
-    // @port-skip linux-only: BACMTLS seam
+    // @port BACMTLS.static makeClient(timeout: TimeInterval) h=683f5636311ff079 @4850ee14
     static func makeClient(timeout: TimeInterval) -> BACMTLSClient {
         NIOMTLSHTTPClient(timeout: timeout, identity: { try BACMTLSIdentity.current() },
                           extraRoots: testRoots())
     }
 
     /// The cached identity dropped (a leaf rotation, an unenroll).
-    // @port-skip linux-only: BACMTLS seam
+    // @port BACMTLS.static purgeIdentity() h=e532f36358648a86 @4850ee14
     static func purgeIdentity() { BACMTLSIdentity.purge() }
 
     /// Debug builds, VM e2e only: also trust the test CA in
@@ -50,7 +50,8 @@ enum BACMTLSIdentity {
 
     enum Failure: Error, CustomStringConvertible {
         case missingMaterial, invalidCertificate, invalidPrivateKey
-        // @port-skip linux-only: BACMTLSIdentity.Error's texts
+        // partial: BACMTLSIdentity.Failure (no PKCS#12 cases)
+        // @port BACMTLSIdentity.Error.var errorDescription h=56dbbef13b782f33 @006fcda2
         var description: String {
             switch self {
             case .missingMaterial: return "BAC leaf cert or private key not found"
@@ -62,7 +63,10 @@ enum BACMTLSIdentity {
 
     private static let cache = NIOLockedValueBox<Material?>(nil)
 
-    // @port-skip linux-only: BACMTLSIdentity.current
+    // partial: NIOSSL material, not a SecIdentity
+    // @port BACMTLSIdentity.static current() h=0b566558e942a5b3 @006fcda2
+    // partial: built inline in current() (no PKCS#12 round trip)
+    // @port BACMTLSIdentity.static buildIdentity() h=cae0ab66181b49e9 @006fcda2
     static func current() throws -> Material {
         try cache.withLockedValue { cached in
             if let cached { return cached }
@@ -80,7 +84,7 @@ enum BACMTLSIdentity {
         }
     }
 
-    // @port-skip linux-only: BACMTLSIdentity.purge
+    // @port BACMTLSIdentity.static purge() h=bb9ac22f270360a6 @006fcda2
     static func purge() { cache.withLockedValue { $0 = nil } }
 }
 
@@ -95,7 +99,8 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
     private let open = NIOLockedValueBox<[ObjectIdentifier: Channel]>([:])
     private let closed = NIOLockedValueBox(false)
 
-    // @port-skip linux-only: the mTLS client's HTTP/1.1 framing
+    // partial: NIOMTLSHTTPClient (NIO + NIOSSL) instead of URLSession
+    // @port BACURLSessionMTLSClient.init(timeout: TimeInterval) h=df5f877f7884c8c4 @4850ee14
     init(timeout: TimeInterval, identity: @escaping @Sendable () throws -> BACMTLSIdentity.Material,
          extraRoots: [NIOSSLCertificate] = []) {
         self.timeout = timeout
@@ -107,7 +112,10 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
         let description: String
     }
 
-    // @port-skip linux-only: URLSession.dataTask on NIO
+    // partial: one HTTP/1.1 request per connection
+    // @port BACURLSessionMTLSClient.send(_: URLRequest, completion: @escaping@Sendable(Data?,URLResponse?,Error?)->Void) h=e9c7dd170765256b @4850ee14
+    // partial: client cert presented and server verified by the NIOSSL context, no URLSession challenge delegate
+    // @port BACMTLSDelegate.urlSession(_: URLSession, didReceive: URLAuthenticationChallenge, completionHandler: @escaping(URLSession.AuthChallengeDisposition,URLCredential?)->Void) h=5789bbe6203b349e @4850ee14
     func send(_ req: URLRequest, completion: @escaping @Sendable (Data?, URLResponse?, Error?) -> Void) {
         let done = NIOLockedValueBox(false)
         let finish: @Sendable (Data?, URLResponse?, Error?) -> Void = { d, r, e in
@@ -174,7 +182,7 @@ final class NIOMTLSHTTPClient: BACMTLSClient, @unchecked Sendable {
             }
     }
 
-    // @port-skip linux-only: URLSession.invalidateAndCancel / finishTasksAndInvalidate
+    // @port BACURLSessionMTLSClient.shutdown(cancelling: Bool) h=f561907bac44a6b9 @4850ee14
     func shutdown(cancelling: Bool) {
         closed.withLockedValue { $0 = true }
         guard cancelling else { return }

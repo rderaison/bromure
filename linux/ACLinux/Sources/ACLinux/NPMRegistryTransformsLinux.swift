@@ -8,7 +8,8 @@ import Foundation
 extension NPMRegistryTransforms {
     /// Streaming raw-deflate decode, bounded by `limit` (exactly `limit`
     /// bytes is fine, more fails). nil on error or a truncated stream.
-    // @port-skip linux-only: macOS's inflateRaw (NPMRegistryTransforms+Apple.swift) on zlib
+    // partial: zlib
+    // @port NPMRegistryTransforms.static inflateRaw(_: Data, limit: Int) h=cea4c0eca4322d3b @b657b5de
     static func inflateRaw(_ payload: Data, limit: Int) -> Data? {
         guard !payload.isEmpty else { return nil }
         var out: UnsafeMutablePointer<UInt8>?
@@ -22,7 +23,8 @@ extension NPMRegistryTransforms {
     }
 
     /// Raw deflate (no zlib or gzip wrapper) of all of `data`. nil on error.
-    // @port-skip linux-only: macOS's deflateRaw (NPMRegistryTransforms+Apple.swift) on zlib
+    // partial: zlib
+    // @port NPMRegistryTransforms.static deflateRaw(_: Data) h=10c3b617dbc1c5b7 @b657b5de
     static func deflateRaw(_ data: Data) -> Data? {
         var out: UnsafeMutablePointer<UInt8>?
         var len = 0

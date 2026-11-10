@@ -101,6 +101,8 @@ extension SessionStores {
     /// response body; "error" set = failure.
     // @port ACAppDelegate.watchesCommand(method: String, path: String, body: [String:Any]) h=43b69ba1786f52f5 @32c80445
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onWatchesCommand h=102422d4d1e202d5 @d3ebbda2
+    // partial: POST /watches with scanNow
+    // @port ACAppDelegate.saveWatch(_: WatchedRepo, scanNow: Bool) h=f10b29938a848a4e @977cc122
     func watchesCommand(method: String, path: String, body: [String: Any]) async -> [String: Any] {
         guard let engine = watchEngine, let watchHost else { return ["error": "no watch engine"] }
         let parts = path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
@@ -246,6 +248,8 @@ extension SessionStores {
     /// GitHub token was refused).
     // @port ACAppDelegate.automationSources(_: [String:Any]) h=d307a4bd8fc10bd1 @32c80445
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onAutomationSources h=1ff1d0f916522573 @d3ebbda2
+    // partial: kind "repos"
+    // @port ACAppDelegate.fetchGitHubRepos(profileID: UUID) h=3867fe48cb9b21c9 @977cc122
     func automationSources(_ body: [String: Any]) async -> [String: Any] {
         guard let pid = (body["profile"] as? String).flatMap(UUID.init(uuidString:)),
               let kind = body["kind"] as? String else { return ["error": "profile and kind required"] }

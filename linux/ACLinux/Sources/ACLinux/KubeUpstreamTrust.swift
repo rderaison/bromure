@@ -36,7 +36,10 @@ final class KubeUpstreamTrust: @unchecked Sendable {
     /// client certificate but no CA of its own (as the proxy's default context).
     private let extraRoots: [NIOSSLCertificate]
 
-    // @port-skip linux-only: the Linux proxy's kube upstream trust
+    // partial: KubeUpstreamTrust holds both identities and CAs
+    // @port ClusterCATrustRegistry.init() h=257c1be96ae69f4b @b733b8a1
+    // partial: one registry for identities and cluster CAs
+    // @port ClientIdentityRegistry.init() h=257c1be96ae69f4b @b733b8a1
     init(extraRoots: [NIOSSLCertificate] = []) { self.extraRoots = extraRoots }
 
     /// A workspace's material, swapped in whole (macOS: applyKubeMaterial's
@@ -53,6 +56,8 @@ final class KubeUpstreamTrust: @unchecked Sendable {
 
     // @port ClientIdentityRegistry.replaceAll(_: [(host:String,entry:Entry)], for: UUID) h=ae1ba7f438f50f6d @b733b8a1
     // @port ClusterCATrustRegistry.replaceAll(_: [(pem:String,host:String)], for: UUID) h=63606b0fc89bec34 @b733b8a1
+    // partial: whole-workspace swap only (no per-host set); macOS setIdentity itself has no caller in Sources
+    // @port ClientIdentityRegistry.setIdentity(_: SecIdentity, host: String, profileID: UUID, consentCredentialID: String?, consentDisplayName: String?) h=0f2f94b6bda06b63 @b733b8a1
     func replaceAll(identities: [(host: String, certPEM: String, keyPEM: String,
                                   consentCredentialID: String?, consentDisplayName: String?)],
                     cas: [(pem: String, host: String)], for profileID: UUID) {
@@ -102,6 +107,8 @@ final class KubeUpstreamTrust: @unchecked Sendable {
     /// no client certificate).
     // @port ClientIdentityRegistry.entry(for: String, port: Int, profileID: UUID) h=20e5bac7b230e0cc @b733b8a1
     // @port ClusterCATrustRegistry.ca(for: String, port: Int, profileID: UUID) h=20e5bac7b230e0cc @b733b8a1
+    // partial: returns the endpoint (context + identity), not a bare SecIdentity
+    // @port ClientIdentityRegistry.identity(for: String, port: Int, profileID: UUID) h=c718005d0aff8cc2 @b733b8a1
     func endpoint(for host: String, port: Int, profileID: UUID) -> Endpoint? {
         let key = endpointKey(host: host, port: port)
         return state.withLockedValue { $0[profileID]?.endpoints[key] }
@@ -111,7 +118,10 @@ final class KubeUpstreamTrust: @unchecked Sendable {
     /// client certificate that the context refuses (a key that isn't the
     /// certificate's) is dropped, the CA kept. A CA whose context can't be
     /// made leaves nothing to dial with: that endpoint fails closed.
-    // @port-skip linux-only: NIOSSL client contexts (macOS: ClientCertChallengeDelegate / TLSClientStream)
+    // partial: NIOSSL context with the pinned CA as the only trust root + hostname verification
+    // @port PinnedClusterTrust.static evaluate(_: SecTrust, ca: SecCertificate, host: String) h=3262e9c2052eacfd @b733b8a1
+    // partial: SAN check done by NIOSSL .fullVerification (stricter: a leaf without SANs is not accepted as macOS .noSANs is)
+    // @port PinnedClusterTrust.static hostnameMatch(_: SecCertificate, host: String) h=f831c5a0d9ec83e2 @b733b8a1
     private func makeEndpoint(identity: Identity?, ca: NIOSSLCertificate?, key: String) -> Endpoint? {
         func context(_ id: Identity?) -> NIOSSLContext? {
             var cfg = TLSConfiguration.makeClientConfiguration()
@@ -154,6 +164,8 @@ final class KubeUpstreamTrust: @unchecked Sendable {
     /// The certificate chain (leaf first) and key of a kubeconfig's
     /// client-certificate-data / client-key-data.
     // @port KubeconfigMaterializer.static makeSecIdentity(certPEM: String, keyPEM: String) h=9c514fe7463353b2 @b733b8a1
+    // partial: NIOSSLPrivateKey parses the PEM key directly (no SecKey X9.63/PKCS#1 conversion)
+    // @port KubeconfigMaterializer.static makeSecKey(keyPEM: String) h=8e0f8dcb861a6228 @b733b8a1
     static func makeIdentity(certPEM: String, keyPEM: String) -> (chain: [NIOSSLCertificate], key: NIOSSLPrivateKey)? {
         guard let chain = try? NIOSSLCertificate.fromPEMBytes(Array(certPEM.utf8)), !chain.isEmpty,
               let key = try? NIOSSLPrivateKey(bytes: Array(keyPEM.utf8), format: .pem) else { return nil }
@@ -162,6 +174,8 @@ final class KubeUpstreamTrust: @unchecked Sendable {
 
     /// The first certificate of a PEM bundle, as macOS pins it.
     // @port ClusterCATrustRegistry.static parseFirstCertPEM(_: String) h=00cd1214be6fddb0 @b733b8a1
+    // partial: NIOSSL decodes PEM itself (also used by makeIdentity)
+    // @port KubeconfigMaterializer.static pemDecode(_: String, marker: String) h=0e2551194a91e9ea @b733b8a1
     static func parseFirstCertPEM(_ pem: String) -> NIOSSLCertificate? {
         (try? NIOSSLCertificate.fromPEMBytes(Array(pem.utf8)))?.first
     }

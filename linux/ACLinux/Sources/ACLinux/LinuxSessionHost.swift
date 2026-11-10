@@ -117,6 +117,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// file's date); nil while it isn't running here.
     // partial: mem_psi_some/full read from vmstat.txt on demand
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onVMMemoryPressure h=31997a9579511c59 @d3ebbda2
+    // partial: read from outbox vmstat.txt on demand
+    // @port ACAppDelegate.guestMemoryReport(for: Profile.ID) h=abd82d8412d93dfa @8b218a94
     func guestMemoryReport(for id: Profile.ID) -> GuestMemoryReport? {
         guard Self.running.withLockedValue({ $0.contains(id) }) else { return nil }
         let path = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/vmstat.txt"
@@ -192,7 +194,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// the outbox or its hooks' folder: each tool call before it runs, with
     /// its provider id and the agent's pid, read a bounded window at a time
     /// (AgentToolLog). macOS: UbuntuSandboxVM's outbox poll + onAgentToolCall.
-    // @port-skip linux-only: the agent-tool half of UbuntuSandboxVM.startOutboxPolling, on the host
+    // partial: passes SessionStores.sessions.hostLaunchedWindows to PolicySteering.noteAgent inline
+    // @port ACAppDelegate.hostAgentWindows(profileID: UUID) h=d73139a6d6491a11 @a32a5505
     func readAgentToolCalls() {
         let fm = FileManager.default
         let running = Self.running.withLockedValue { $0 }
@@ -508,6 +511,8 @@ final class LinuxSessionHost: AgentSessionHost {
     /// wrote last); nil when it isn't running.
     // partial: roster from outbox tabs.txt. First-roster checkpoint in Daemon.observeCheckpoints, reboot completion in DaemonGuestReboot.swift, no UI grid reconcile
     // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onTabList h=c3926a661153f354 @d3ebbda2
+    // partial: roster read from the guest outbox tabs.txt
+    // @port ACAppDelegate.tabsModel(for: Profile.ID) h=8745ecceeb5db48a @8b218a94
     func tabsModel(for id: Profile.ID) -> TabsModel? {
         guard Self.running.withLockedValue({ $0.contains(id) }) else { tabs[id] = nil; return nil }
         let file = stateDir + "/vms/" + id.uuidString.lowercased() + "/outbox/tabs.txt"
@@ -516,10 +521,12 @@ final class LinuxSessionHost: AgentSessionHost {
     }
 
     /// Unknown here (macOS reads it from the attached pane's chat view).
-    // @port-skip linux-only: no attached pane on a server
+    // partial: always nil (unknown) - no attached pane on a server
+    // @port ACAppDelegate.chatIsWorking(profileID: Profile.ID, window: Int) h=f17e81e275853616 @8b218a94
     func chatIsWorking(profileID: Profile.ID, window: Int) -> Bool? { nil }
 
-    // @port-skip linux-only: tmux kill-window in the guest (macOS: the pane's close)
+    // partial: tmux kill-window in the guest instead of the pane close
+    // @port ACAppDelegate.requestCloseTab(index: Int, profileID: Profile.ID) h=ea34b9ff2191933e @8b218a94
     func requestCloseTab(index: Int, profileID: Profile.ID) {
         Task { [weak daemon] in
             _ = try? await daemon?.guestExec(profileID: profileID, command: "tmux kill-window -t bromure:\(index)", timeout: 10)
@@ -543,11 +550,12 @@ final class LinuxSessionHost: AgentSessionHost {
 
     // @port-skip linux-only: the daemon's room store
     var agentRoomStore: AgentRoomStore { SessionStores.shared!.rooms }
-    // @port-skip linux-only: the daemon's coding-task engine (ACAppDelegate.codingTaskOwnsLiveTab)
+    // @port ACAppDelegate.codingTaskOwnsLiveTab(profileID: Profile.ID, branch: String) h=7bb37fe2736aa7e8 @8b218a94
     func codingTaskOwnsLiveTab(profileID: Profile.ID, branch: String) -> Bool {
         SessionStores.shared?.codingTaskEngine?.ownsLiveTab(profileID: profileID, branch: branch) ?? false
     }
     /// A server has no window following a session.
-    // @port-skip linux-only: no window to follow a session on a server
+    // partial: no-op (no window to follow on a server)
+    // @port ACAppDelegate.followSucceededSession(old: UUID, new: UUID) h=10e2b1ff0fdde899 @8b218a94
     func followSucceededSession(old: UUID, new: UUID) {}
 }

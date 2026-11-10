@@ -256,7 +256,8 @@ extension MitmProxy {
     /// TLS leaf for `host` when `tls`, then the request pipeline, registered
     /// with the firewall's registry (macOS: runTransparentTLS /
     /// runTransparentHTTP, route "transparent").
-    // @port-skip linux-only: makeConnection + runTransparentTLS / runTransparentHTTP on NIO
+    // partial: NIO handler reads policy from MitmProxy directly
+    // @port MitmEngine.makeConnection(fd: Int32, profileID: UUID, identity: OpenShellPolicy.BinaryIdentity?) h=08bcead14e4cfb85 @45a144c8
     func serveTransparent(appFD: Int32, profileID: UUID, host: String, port: Int, tls: Bool,
                           identity: OpenShellPolicy.BinaryIdentity? = nil) {
         // A quarantine since the entry's checks (the first-byte wait, the
@@ -294,7 +295,10 @@ extension MitmProxy {
     /// exact address the guest chose, never re-resolved, so a pinned host
     /// reaches its real endpoint (macOS: MitmPassthrough.splice). Closes both
     /// when either side ends.
-    // @port-skip linux-only: MitmPassthrough.splice(appFD:destIP:destPort:) on NIO
+    // partial: NIO
+    // @port MitmPassthrough.static splice(appFD: Int32, destIP: String, destPort: Int, profileID: UUID?) h=ac648426c5c022b0 @4bd8405e
+    // partial: NIO ClientBootstrap to the IP literal
+    // @port MitmPassthrough.static connectRawTCP(ip: String, port: Int) h=f75ed440ef40ca29 @4bd8405e
     func spliceRaw(appFD: Int32, destIP: String, destPort: Int, profileID: UUID? = nil) {
         // The relay is in the pipeline from the channel's first read: the
         // bytes the peeks left in the socket (a ClientHello) are held, not lost.

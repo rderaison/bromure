@@ -17,6 +17,8 @@ extension Daemon {
     /// The same, saying how it went: changed, already so, or why it failed.
     // partial: no open editor to tell (no windows on a server)
     // @port ACAppDelegate.commitFirewallRulesResult(_: String, profileID: UUID) h=f3258e46b059b44e @f127f8ab
+    // partial: inline mitm.applyWorkspacePolicies + sw.egress.update when the VM is live
+    // @port ACAppDelegate.applyLiveFirewall(for: Profile, sandbox: UbuntuSandboxVM?) h=74be56fc525a94b7 @f127f8ab
     @discardableResult
     func commitFirewallRulesResult(_ text: String, profileID: UUID) -> FirewallCommitResult {
         var changed = false, name = ""
@@ -47,6 +49,8 @@ extension Daemon {
     /// the workspace's rules as they are now, and saved. A failure says why:
     /// a fat client's drawer must not show an Allow that installed nothing.
     // @port ACAppDelegate.applyFirewallEditResult(_: FirewallRuleActions.Edit, profileID: UUID) h=137b3f8d4496cc84 @f127f8ab
+    // partial: the Bool wrapper isn't separate; callers read .succeeded
+    // @port ACAppDelegate.applyFirewallEdit(_: FirewallRuleActions.Edit, profileID: UUID) h=148f35f2b54c1266 @f127f8ab
     func applyFirewallEditResult(_ edit: FirewallRuleActions.Edit, profileID: UUID) -> FirewallCommitResult {
         // The read the edit applies to and its save, as one write.
         ProfileWrites.locked {

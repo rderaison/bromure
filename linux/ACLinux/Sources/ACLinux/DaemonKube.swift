@@ -281,7 +281,8 @@ extension Daemon {
     /// A cluster machine's record, made (stopped) if it has none, with its
     /// data disk and the scripts it runs in its meta share; a suspended one
     /// that may not resume is shut down (its snapshot dropped).
-    // @port-skip linux-only: the daemon side of LinuxKubeHost.startKubeMachine
+    // partial: the VM record is built from the spec's fields, no synthetic Profile
+    // @port ACAppDelegate.static kubeMachineProfile(_: KubeClusterEngine.MachineSpec) h=e38b204ba58af002 @14bff1ec
     func prepareKubeMachine(id: String, name: String, owner: UUID, cpus: Int, memoryMiB: Int,
                             dataDiskGB: Int?, scripts: [(String, URL)], resume: Bool,
                             folders: [String] = [], rescueFor: String? = nil) async throws {
@@ -593,10 +594,12 @@ final class LinuxKubeHost: KubeEngineHost {
         }
     }
 
-    // @port-skip linux-only: the engine's exec probe is the boot signal here
+    // partial: always true (the engine's exec probe is the boot signal)
+    // @port ACAppDelegate.kubeMachineAnswers(_: UUID) h=25e6cbff44a365fc @14bff1ec
     func kubeMachineAnswers(_ nodeID: UUID) -> Bool { true }
 
-    // @port-skip linux-only: the daemon keeps the lease itself
+    // partial: no-op (the daemon keeps the lease)
+    // @port ACAppDelegate.setKubeMachineIP(_: UUID, _: String) h=22d059054628b7a2 @14bff1ec
     func setKubeMachineIP(_ nodeID: UUID, _ ip: String) {}
 
     // partial: a hard stop, its snapshot dropped
@@ -693,12 +696,13 @@ final class LinuxKubeHost: KubeEngineHost {
         }
     }
 
-    // @port-skip linux-only: the daemon's shutdown of a cluster machine
+    // @port ACAppDelegate.stopKubeMachine(_: UUID) h=b305a96b1a9bb751 @14bff1ec
     func stopKubeMachine(_ nodeID: UUID) async {
         await daemon?.stopKubeMachineVM(id: Self.vmID(nodeID), kill: false)
     }
 
-    // @port-skip linux-only: the daemon's records follow the VM itself
+    // partial: no-op (records follow the VM)
+    // @port ACAppDelegate.kubeMachineStopped(_: UUID) h=fbba8a1e55a0ca75 @14bff1ec
     func kubeMachineStopped(_ nodeID: UUID) {}
 
     // @port-skip linux-only: forwards to the session host
@@ -724,15 +728,15 @@ final class LinuxKubeHost: KubeEngineHost {
         Task { await daemon.refreshWorkspaceKubeconfigs() }
     }
 
-    // @port-skip linux-only: HostNetwork.primaryIPv4 on macOS
+    // @port ACAppDelegate.kubeHostIPv4() h=25fdd799d26a8208 @14bff1ec
     func kubeHostIPv4() -> String? { Daemon.primaryIPv4() }
 
-    // @port-skip linux-only: the load balancer's name for this host (macOS: "this Mac")
+    // @port ACAppDelegate.var kubeHostDisplayName h=5082a84feb57e605 @14bff1ec
     var kubeHostDisplayName: String { "this server" }
 
     /// "a-b", CIDR or single dotted quads, comma-separated (≤ 1024 each),
     /// host order; nil on garbage (macOS: KubeLANPool.parse).
-    // @port-skip linux-only: KubeLANPool.parse (KubeLANAnnouncer.swift is macOS-only)
+    // @port ACAppDelegate.parseKubeLANPool(_: String) h=6dcfef20d7f9bdbe @14bff1ec
     func parseKubeLANPool(_ text: String) -> [UInt32]? { Self.parsePool(text) }
 
     // @port-skip linux-only: KubeLANPool.parse
@@ -770,7 +774,8 @@ final class LinuxKubeHost: KubeEngineHost {
     /// announcer) inside the admin's grant to this user; on a shared one no
     /// host ports at all (the user's decision): every LoadBalancer Service
     /// without a granted LAN address stays pending, saying so.
-    // @port-skip linux-only: ACAppDelegate.makeKubeLoadBalancer's Linux counterpart
+    // partial: shared-server mode has no host ports; LAN pool via the LAN helper
+    // @port ACAppDelegate.makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID, serverIP: String, hostIP: String?, pool: [UInt32]) h=f759b64980beff91 @14bff1ec
     func makeKubeLoadBalancer(engine: KubeClusterEngine, clusterID: UUID, serverNodeID: UUID,
                               serverIP: String, hostIP: String?, pool: [UInt32]) -> (any KubeServicePublisher)? {
         let multiUser = daemon?.config.multiUser == true

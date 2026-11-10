@@ -39,6 +39,8 @@ extension MitmProxy {
     /// so a private or rebinding answer can't redirect a request the policy
     /// allowed by name. A refusal is a Security Timeline event, as on macOS.
     // @port HTTPMitmConnection.checkDestination(host: String, port: Int) h=dd146338138184b2 @32a528c5
+    // partial: async; connectUpstream calls it when nothing was pinned
+    // @port UpstreamPinning.static checkedForDial(host: String, port: Int) h=d11184dafffd7c1d @578d196d
     func checkDestination(host: String, port: Int, profileID: UUID? = nil,
                           identity: OpenShellPolicy.BinaryIdentity? = nil,
                           on loop: EventLoop) -> EventLoopFuture<[IPAddress]> {
@@ -75,7 +77,8 @@ extension MitmProxy {
         }
     }
 
-    // @port-skip linux-only: the static half of checkDestination (tests stub the resolver and the host's addresses)
+    // partial: async on an EventLoop; unresolved name is a typed error the instance method forgives without a policy
+    // @port UpstreamPinning.static checkedAddresses(host: String, port: Int, resolver: (String,Int)->[IPAddress]) h=34ebf574a174d919 @578d196d
     static func checkDestination(host: String, port: Int, hostAddresses: Bool,
                                  openShell: OpenShellPolicy? = nil,
                                  identity: OpenShellPolicy.BinaryIdentity? = nil, enforceBinaries: Bool = false,
@@ -106,7 +109,8 @@ extension MitmProxy {
     /// `host:port`; nil: allowed, or no policy. A Bromure-managed provider
     /// endpoint isn't pinned (UpstreamPinning.pin), but still gets the
     /// always-blocked check every destination gets here.
-    // @port-skip linux-only: UpstreamPinning.pin's policy half, on the answers checkDestination resolved
+    // partial: runs on the answers checkDestination resolved
+    // @port UpstreamPinning.static pin(policy: OpenShellPolicy?, host: String, port: Int, identity: OpenShellPolicy.BinaryIdentity?, enforceBinaries: Bool) h=a927a513c963a90b @578d196d
     static func openShellDenial(_ policy: OpenShellPolicy?, host: String, port: Int, resolved: [IPAddress],
                                 identity: OpenShellPolicy.BinaryIdentity?, enforceBinaries: Bool) -> String? {
         guard let policy else { return nil }
@@ -122,7 +126,10 @@ extension MitmProxy {
     }
 
     /// Why `resolved` (the answers for `host`) may not be dialed; nil: it may.
-    // @port-skip linux-only: the always-blocked half of OpenShellPolicy.validateDestination, applied without a policy (multi-user isolation)
+    // partial: also refuses the server's own addresses (multi-user isolation)
+    // @port UpstreamPinning.static defaultCheck(host: String, port: Int, resolver: (String,Int)->[IPAddress]) h=f8c0b23a8b74a92c @578d196d
+    // partial: inline always-blocked check incl. embedded IPv4
+    // @port UpstreamPinning.static isAlwaysBlocked(_: IPAddress) h=d67867eaf2abd8e5 @578d196d
     static func destinationDenial(host: String, resolved: [IPAddress], hostAddresses: Bool,
                                   hostOwn: (IPAddress) -> Bool = { isHostOwn($0) }) -> String? {
         for ip in resolved {
@@ -156,7 +163,7 @@ extension MitmProxy {
     /// IPv4-compatible (::a.b.c.d), NAT64 (64:ff9b::/96, 64:ff9b:1::/48)
     /// and 6to4 (2002:aabb:ccdd::/48) forms included. Unreachable on most
     /// hosts, but a NAT64 or 6to4 route would make each a path.
-    // @port-skip linux-only: IPv4 inside IPv6 forms
+    // @port UpstreamPinning.static embeddedV4(_: IPAddress) h=12c38e01c6bcfdf7 @578d196d
     static func v4(_ ip: IPAddress) -> UInt32? {
         switch ip {
         case .v4(let v): return v

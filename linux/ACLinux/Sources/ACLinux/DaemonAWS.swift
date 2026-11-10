@@ -142,6 +142,8 @@ final class VsockFDListener: @unchecked Sendable {
     /// The AWS credential_process helper's end (vsock 8445): the server
     /// writes the workspace's key id and a fake secret, and closes.
     // @port AWSCredsListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=e8fd6c0c1f44aa28 @8e2543eb
+    // partial: VsockFDListener closure instead of a VZ delegate object
+    // @port AWSCredsListenerDelegate.init(profileID: UUID, awsCreds: AWSCredentialServer) h=4a07320e3be1aa82 @45a144c8
     static func awsCreds(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID,
                          server: AWSCredentialServer) throws -> VsockFDListener {
         try VsockFDListener(udsPath: udsPath, port: 8445, fdStoreName: fdStoreName, stored: stored) {
@@ -157,6 +159,7 @@ final class VsockFDListener: @unchecked Sendable {
     /// the guest): the host's agent signs with the workspace's keys, which
     /// never enter the VM.
     // @port SSHListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice) h=60c56848b362daa3 @8e2543eb
+    // @port SSHListenerDelegate.init(profileID: UUID, sshAgent: SSHAgentServer) h=4f44dc1175e746df @45a144c8
     static func sshAgent(udsPath: String, fdStoreName: String, stored: Int32?, profileID: UUID,
                          agent: SSHAgentServer) throws -> VsockFDListener {
         try VsockFDListener(udsPath: udsPath, port: 8444, fdStoreName: fdStoreName, stored: stored) {

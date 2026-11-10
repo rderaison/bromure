@@ -28,6 +28,12 @@ extension LinuxSessionHost {
     /// hook reads it), or a typed note is queued.
     // partial: no pid attribution yet (a denied flow names its process only through the kernel sentry, held off by the sandbox guard): a note goes to every agent tab, or to the sole one
     // @port ACAppDelegate.deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) h=3cc12d2d4fe6b0ec @a32a5505
+    // partial: calls shared PolicyNotes.drop inline
+    // @port ACAppDelegate.static dropPolicyNote(in: URL, window: Int, text: String, now: Date) h=9d945777bf1ae425 @a32a5505
+    // partial: calls shared PolicyNotes.typedWindows inline
+    // @port ACAppDelegate.static typedNoteWindows(targets: [(window:Int,tool:Profile.Tool)], attributed: Bool) h=22c98ce234c8f999 @a32a5505
+    // partial: writes into the VM meta dir inline, sequentially
+    // @port ACAppDelegate.writePolicyNote(profileID: UUID, window: Int, text: String) h=5b6b975092e9090f @a32a5505
     @MainActor @discardableResult
     func deliverPolicyNote(profileID: UUID, window: Int?, text: String, soleOnly: Bool) async -> Bool {
         // This server's VMs only (an attached machine runs its own policy).
