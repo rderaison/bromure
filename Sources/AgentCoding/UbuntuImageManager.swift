@@ -179,7 +179,8 @@ public final class UbuntuImageManager {
     /// setup.sh additions. Use `baseImageNeedsUpdate` to gate a nag.
     public var hasBaseImage: Bool {
         let fm = FileManager.default
-        return fm.fileExists(atPath: baseDiskURL.path)
+        return !ImagePromotion.isPending(in: storageDir)
+            && fm.fileExists(atPath: baseDiskURL.path)
             && fm.fileExists(atPath: efiVarsURL.path)
             && fm.fileExists(atPath: versionStampURL.path)
     }
@@ -424,7 +425,7 @@ public final class UbuntuImageManager {
             // step 5, possibly all three with mismatched contents.
             // Either way it can't be trusted to boot. Wipe so the next
             // launch routes back to setup with a clean slate.
-            if !hadCompletePriorImage {
+            if !hadCompletePriorImage, !ImagePromotion.isPending(in: storageDir) {
                 try? fm.removeItem(at: baseDiskURL)
                 try? fm.removeItem(at: efiVarsURL)
                 try? fm.removeItem(at: versionStampURL)

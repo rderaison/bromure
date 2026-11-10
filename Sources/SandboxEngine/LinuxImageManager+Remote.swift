@@ -221,7 +221,9 @@ extension LinuxImageManager {
             text("Base image ready at \(linuxDiskURL.path) (\(image.description))")
         } catch {
             for f in scratches { try? fm.removeItem(at: f) }
-            if !hadCompletePriorImage {
+            // Never while a promotion is pending: its live files may be
+            // the only copy of the previous image.
+            if !hadCompletePriorImage, !ImagePromotion.isPending(in: storageDir) {
                 try? fm.removeItem(at: linuxDiskURL)
                 try? fm.removeItem(at: linuxKernelURL)
                 try? fm.removeItem(at: linuxInitrdURL)

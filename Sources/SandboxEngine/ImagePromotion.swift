@@ -61,14 +61,22 @@ public enum ImagePromotion {
                 promoted.append(live)
             }
         } catch {
-            for live in promoted { try? fm.removeItem(at: live) }
-            for (live, backup) in setAside { try? fm.moveItem(at: backup, to: live) }
-            try? fm.removeItem(at: journal)
+            // Roll back by the journal, as a later launch would. Any restore
+            // that fails keeps the journal (and its backups) for that launch.
+            _ = recoverLocked(in: dir)
             throw error
         }
-        // Committed: the new files are all live.
+        // Committed: the new files are all live. Removing the journal is the
+        // commit point; if it can't go, a later recovery would roll back a
+        // promotion the caller believes done, so roll back now and fail.
         sync(dir)
-        try? fm.removeItem(at: journal)
+        do {
+            try fm.removeItem(at: journal)
+        } catch {
+            _ = recoverLocked(in: dir)
+            throw error
+        }
+        sync(dir)
         for (_, backup) in setAside { try? fm.removeItem(at: backup) }
     }
 
@@ -83,36 +91,59 @@ public enum ImagePromotion {
 
     /// Rolls an interrupted promotion in `dir` back to the previous image.
     /// Nothing to do without a journal; skipped while another process (or
-    /// this one) is promoting.
+    /// this one) is promoting. If a restore fails, the journal stays and
+    /// `isPending` stays true, so the files aren't booted and the next
+    /// launch retries.
     public static func recover(in dir: URL) {
-        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent(journalName).path),
+        guard isPending(in: dir),
               let lock = try? Lock(dir, wait: false) else { return }
         defer { lock.release() }
-        recoverLocked(in: dir)
+        if !recoverLocked(in: dir) {
+            NSLog("Bromure: image promotion rollback in %@ incomplete; will retry at next launch", dir.path)
+        }
+    }
+
+    /// A promotion is under way, or one that was interrupted hasn't been
+    /// fully rolled back: the live files may be a mix of old and new, and
+    /// must be neither booted nor deleted as "no prior image".
+    public static func isPending(in dir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: dir.appendingPathComponent(journalName).path)
     }
 
     /// Each file with a backup gets it back; one that had none and didn't
     /// exist before is the new image's (or nothing) and goes; one that
     /// existed and has no backup was never set aside -- still the old one.
-    private static func recoverLocked(in dir: URL) {
+    ///
+    /// The journal is removed only once every entry is restored. If any
+    /// restore fails, the journal and the remaining backups stay, so a later
+    /// launch retries; entries already restored are no-ops on that retry.
+    /// Returns whether the rollback completed.
+    @discardableResult
+    static func recoverLocked(in dir: URL) -> Bool {
         let fm = FileManager.default
         let journal = dir.appendingPathComponent(journalName)
+        guard fm.fileExists(atPath: journal.path) else { return true }
         // Unreadable (it's written atomically, so not expected): kept, and
         // its backups with it, rather than dropped unrestored.
         guard let data = try? Data(contentsOf: journal),
-              let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return }
+              let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return false }
+        var complete = true
         for e in entries where !e.live.isEmpty && !e.live.contains("/") {
             let live = dir.appendingPathComponent(e.live)
             let prev = backup(live)
             if fm.fileExists(atPath: prev.path) {
-                try? fm.removeItem(at: live)
-                try? fm.moveItem(at: prev, to: live)
-            } else if !e.hadLive {
-                try? fm.removeItem(at: live)
+                // One rename(2) puts the backup over whatever is live (the
+                // new file, or nothing): never a moment with neither.
+                do { try replace(prev, over: live) } catch { complete = false }
+            } else if !e.hadLive, fm.fileExists(atPath: live.path) {
+                do { try fm.removeItem(at: live) } catch { complete = false }
             }
         }
         sync(dir)
-        try? fm.removeItem(at: journal)
+        guard complete else { return false }
+        do { try fm.removeItem(at: journal) } catch { return false }
+        sync(dir)
+        return true
     }
 
     /// fsync, so the journal (and the renames it guards) are on disk in

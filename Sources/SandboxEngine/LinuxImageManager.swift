@@ -52,7 +52,8 @@ public final class LinuxImageManager {
     /// where the version constant needn't match.
     public var hasBootFiles: Bool {
         let fm = FileManager.default
-        return fm.fileExists(atPath: linuxDiskURL.path)
+        return !ImagePromotion.isPending(in: storageDir)
+            && fm.fileExists(atPath: linuxDiskURL.path)
             && fm.fileExists(atPath: linuxKernelURL.path)
             && fm.fileExists(atPath: linuxInitrdURL.path)
     }
@@ -88,7 +89,8 @@ public final class LinuxImageManager {
     /// Whether a valid Linux base image exists and matches the current image version.
     public var baseImageExists: Bool {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: linuxDiskURL.path),
+        guard !ImagePromotion.isPending(in: storageDir),
+              fm.fileExists(atPath: linuxDiskURL.path),
               fm.fileExists(atPath: linuxKernelURL.path),
               fm.fileExists(atPath: linuxInitrdURL.path) else {
             return false

@@ -200,7 +200,7 @@ extension UbuntuImageManager {
             try? fm.removeItem(at: scratchStock)
             try? fm.removeItem(at: scratchDisk)
             try? fm.removeItem(at: scratchEFI)
-            if !hadCompletePriorImage {
+            if !hadCompletePriorImage, !ImagePromotion.isPending(in: storageDir) {
                 try? fm.removeItem(at: baseDiskURL)
                 try? fm.removeItem(at: efiVarsURL)
                 try? fm.removeItem(at: versionStampURL)

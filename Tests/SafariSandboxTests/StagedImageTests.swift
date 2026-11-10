@@ -195,6 +195,45 @@ struct StagedImageTests {
         #expect(try leftovers(dir).isEmpty)
     }
 
+    // Finding "Recovery discards its journal even when restoring a boot
+    // artifact fails" (CWE-459): a failed restore still dropped the journal,
+    // so the next launch saw no marker and booted (or kept) a mix.
+    @Test("A restore that fails keeps the journal and backups, blocks booting, and is retried")
+    func failedRestoreKeepsJournal() throws {
+        let (m, dir) = try makeManager()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        try journal(dir, [("linux-base.img", true), ("vmlinuz", true), ("initrd", true)])
+        for url in [m.linuxDiskURL, m.linuxKernelURL, m.linuxInitrdURL] { try setAside(url) }
+        try Data("new-disk".utf8).write(to: m.linuxDiskURL)
+        // Something rename(2) can't replace sits at the kernel's live path
+        // (a non-empty directory), so restoring vmlinuz.previous fails.
+        try fm.createDirectory(at: m.linuxKernelURL, withIntermediateDirectories: false)
+        try Data("x".utf8).write(to: m.linuxKernelURL.appendingPathComponent("blocker"))
+
+        let relaunched = LinuxImageManager(storageDir: dir)
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent(ImagePromotion.journalName).path))
+        #expect(fm.fileExists(atPath: m.linuxKernelURL.appendingPathExtension("previous").path))
+        #expect(!relaunched.hasBootFiles)
+        #expect(!relaunched.baseImageExists)
+        // The restores that could happen did.
+        #expect(contents(m.linuxDiskURL) == "old-linux-base.img")
+        #expect(contents(m.linuxInitrdURL) == "old-initrd")
+        // A promotion is refused rather than deleting the remaining backup.
+        let staged = dir.appendingPathComponent("staged-disk")
+        try Data("newer".utf8).write(to: staged)
+        #expect(throws: (any Error).self) { try m.promote([(staged, m.linuxDiskURL)]) }
+        #expect(fm.fileExists(atPath: m.linuxKernelURL.appendingPathExtension("previous").path))
+
+        // Obstacle gone: the next launch finishes the rollback.
+        try fm.removeItem(at: m.linuxKernelURL)
+        let again = LinuxImageManager(storageDir: dir)
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent(ImagePromotion.journalName).path))
+        #expect(again.hasBootFiles)
+        #expect(contents(m.linuxKernelURL) == "old-vmlinuz")
+        #expect(try leftovers(dir).isEmpty)
+    }
+
     @Test("An unreadable journal keeps its backups, and blocks a promotion that would delete them")
     func unreadableJournalKept() throws {
         let (m, dir) = try makeManager()
