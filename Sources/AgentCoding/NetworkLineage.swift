@@ -85,6 +85,12 @@ public final class NetworkLineage: @unchecked Sendable {
         BACEventEmitter.shared.emitDetached(profileID: pid, eventType: type, eventData: data)
     }
     var now: @Sendable () -> Date = { Date() }
+    /// The names the guests' DNS answers gave an IP (the switch's snoop
+    /// cache), most likely first. A direct flow carries only its address;
+    /// the switch's decision names the host only when it logged one (its
+    /// report is rate-limited per destination), so an agent's own fetch of a
+    /// page it had just looked up went unmatched.
+    var hostNames: @Sendable (String) -> [String] = { _ in [] }
 
     // MARK: Inputs
 
@@ -134,16 +140,9 @@ public final class NetworkLineage: @unchecked Sendable {
         if let first = (f["chain"] as? [[String: Any]])?.first, let pp = first["pid"] as? Int, pp == p.ppid {
             p.parent = ProcKey(pid: pp, startNs: Self.u64(first["start_ns"]))
         }
-        p.link = Self.matchToolCall(argv: p.argv, calls: vm.toolCalls, at: t)
-        if p.link == nil {
-            // The agent's hook named its own pid: a process it starts right
-            // after a tool call is that call's, even when the agent wrapped the
-            // command beyond recognition. Each call links one such process.
-            let taken = Set(vm.procs.values.compactMap { $0.link?.toolUseID })
-            if let c = vm.toolCalls.reversed().first(where: {
-                $0.agentPid == p.ppid && !taken.contains($0.id) && t.timeIntervalSince($0.at) <= 10
-            }) { p.link = (c.id, "fuzzy") }
-        }
+        // By its words only: a timing link waits for the flow's last look,
+        // when the call a hook line brings late has had its chance.
+        p.link = Self.link(p, in: vm, at: t, timing: false)
         vm.procs[key] = p
         vm.byPid[pid] = key
         if vm.procs.count > Self.maxProcs {
@@ -265,12 +264,16 @@ public final class NetworkLineage: @unchecked Sendable {
 
     private func scheduleResolve(profileID: UUID, flowID: String, frame f: [String: Any], proto: String, dst: String,
                                  dport: Int, processes: [[String: AnyJSON]], link: (call: ToolCall, confidence: String)?,
-                                 polls: Int) {
+                                 polls: Int, hookPolls: Int = 0) {
         DispatchQueue.global().asyncAfter(deadline: .now() + decisionWait) { [weak self] in
             self?.resolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: dst,
-                          dport: dport, processes: processes, link: link, polls: polls)
+                          dport: dport, processes: processes, link: link, polls: polls, hookPolls: hookPolls)
         }
     }
+
+    /// Extra looks a flow gets while its call may still be on its way
+    /// (`hookLag`), `decisionWait` apart.
+    static let maxHookPolls = 3
 
     // MARK: Join
 
@@ -342,6 +345,95 @@ public final class NetworkLineage: @unchecked Sendable {
         return b.startNs != 0 && b.startNs <= k.startNs ? b : nil
     }
 
+    /// How long after a process's exec its tool call may still arrive: an
+    /// agent's hook line comes through the outbox (read every 0.7 s), and
+    /// omp runs its hook without waiting for it, so the command it runs is
+    /// often under way before the host hears of the call.
+    static let hookLag: TimeInterval = 3
+    /// How far a child may precede the call it's tied to by timing alone (no
+    /// words in common): an agent that doesn't wait for its hook starts the
+    /// command at the same moment, never seconds before.
+    static let fuzzyLead: TimeInterval = 2
+
+    /// The tool call `p` runs, from what's known now: the command in its
+    /// argv (a shell the agent started), the command holding its argv (a
+    /// program an in-process shell started), or -- the agent's hook having
+    /// named its pid -- the agent's next child after the call.
+    private static func link(_ p: Proc, in vm: VM, at t: Date, timing: Bool) -> (toolUseID: String, confidence: String)? {
+        // Bromure's own hook runs as the agent's child, right at the call:
+        // never the call's command.
+        guard !p.argv.contains("/.bromure/agent-status.sh") else { return nil }
+        // Nor the agent itself: its argv can quote a command (a prompt given
+        // on its command line), and every flow of its own would inherit it.
+        guard !vm.toolCalls.contains(where: { $0.agentPid == p.key.pid }) else { return nil }
+        let calls = vm.toolCalls.filter { $0.at.timeIntervalSince(p.at) <= hookLag }
+        if let l = matchToolCall(argv: p.argv, calls: calls, at: p.at) { return l }
+        if let l = matchInProcessShell(argv: p.argv, ppid: p.ppid, calls: calls, at: p.at) { return l }
+        guard timing else { return nil }
+        // The agent's hook named its own pid: a process it starts right
+        // after a tool call is that call's, even when the agent wrapped the
+        // command beyond recognition. Each call links one such process.
+        let taken = Set(vm.procs.values.compactMap { $0.key == p.key ? nil : $0.link?.toolUseID })
+        // Only a call that runs a command starts one (a fetch never does).
+        if let c = calls.reversed().first(where: {
+            let after = p.at.timeIntervalSince($0.at)
+            return $0.agentPid == p.ppid && runsCommand($0) && !taken.contains($0.id)
+                && after <= 10 && after >= -fuzzyLead
+        }) { return (c.id, "fuzzy") }
+        return nil
+    }
+
+    /// A call that runs a command: a shell tool by name, or one whose hook
+    /// line holds a command line -- the hook writes any other tool's input
+    /// as its JSON (a fetch's `{"url": …}`).
+    static func runsCommand(_ c: ToolCall) -> Bool {
+        if LLMEventExtractor.isCommandTool(c.tool) { return true }
+        guard let cmd = c.command?.trimmingCharacters(in: .whitespaces), !cmd.isEmpty else { return false }
+        return !(cmd.hasPrefix("{") && (try? JSONSerialization.jsonObject(with: Data(cmd.utf8))) != nil)
+    }
+
+    /// A flow none of whose processes was linked when it started: its tool
+    /// call may have arrived since (see `hookLag`). Links what it can now,
+    /// leaf first, and keeps the links for the processes' later flows.
+    private static func lateLink(_ processes: [[String: AnyJSON]], in vm: inout VM, timing: Bool)
+        -> (toolUseID: String, confidence: String)? {
+        // Words first, over the whole chain: a shell's own command outranks
+        // a timing guess about its parent.
+        if timing, let l = lateLink(processes, in: &vm, timing: false) { return l }
+        // Only what the agent started: the agent and whatever launched it
+        // (a shell whose argv quotes a prompt) would pass a link to every
+        // flow the agent makes.
+        let agents = Set(vm.toolCalls.compactMap(\.agentPid))
+        let below = processes.lastIndex { d in
+            if case .int(let pid)? = d["pid"] { return agents.contains(pid) }
+            return false
+        }.map { processes.index(after: $0) } ?? processes.startIndex
+        for d in processes[below...].reversed() {
+            guard case .int(let pid)? = d["pid"] else { continue }
+            var k = ProcKey(pid: pid, startNs: 0)
+            if case .int(let ns)? = d["start_ns"] { k.startNs = UInt64(truncatingIfNeeded: ns) }
+            guard let key = resolve(k, in: vm), var p = vm.procs[key] else { continue }
+            if let l = p.link { return l }
+            guard let l = link(p, in: vm, at: p.at, timing: timing) else { continue }
+            p.link = l
+            vm.procs[key] = p
+            return l
+        }
+        return nil
+    }
+
+    /// Whether a process of the chain started within `hookLag` of `t`: its
+    /// call may still be on its way.
+    private static func recentlyStarted(_ processes: [[String: AnyJSON]], in vm: VM, at t: Date) -> Bool {
+        processes.contains { d in
+            guard case .int(let pid)? = d["pid"] else { return false }
+            var k = ProcKey(pid: pid, startNs: 0)
+            if case .int(let ns)? = d["start_ns"] { k.startNs = UInt64(truncatingIfNeeded: ns) }
+            guard let key = resolve(k, in: vm), let p = vm.procs[key], p.link == nil else { return false }
+            return t.timeIntervalSince(p.at) < hookLag
+        }
+    }
+
     /// The process that started `p`: the exact identity its exec recorded,
     /// else (an older sentry) the latest process with its ppid, but only one
     /// that started before `p` — a pid reused afterwards isn't its parent.
@@ -354,7 +446,7 @@ public final class NetworkLineage: @unchecked Sendable {
 
     private func resolve(profileID: UUID, flowID: String, frame f: [String: Any], proto: String, dst: String,
                          dport: Int, processes: [[String: AnyJSON]], link: (call: ToolCall, confidence: String)?,
-                         polls: Int = 0) {
+                         polls: Int = 0, hookPolls: Int = 0) {
         let original = (dst, dport)
         let t = now()
         lock.lock()
@@ -386,7 +478,8 @@ public final class NetworkLineage: @unchecked Sendable {
         if viaProxy, decision == nil, polls < proxyDecisionPolls {
             lock.unlock()
             scheduleResolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: original.0,
-                            dport: original.1, processes: processes, link: link, polls: polls + 1)
+                            dport: original.1, processes: processes, link: link, polls: polls + 1,
+                            hookPolls: hookPolls)
             return
         }
         let leafExe = processes.last.flatMap { if case .string(let s)? = $0["exe"] { return s } else { return nil } } ?? "?"
@@ -405,6 +498,8 @@ public final class NetworkLineage: @unchecked Sendable {
             // only once it has read the request — silence isn't a verdict.
         }
         if let host = decision?.host { data["host"] = .string(host) }
+        // No decision named it: what the guest's DNS answers called it.
+        if data["host"] == nil, !viaProxy, let name = hostNames(dst).first { data["host"] = .string(name) }
         if proto == "packet" {
             // A raw packet socket (AF_PACKET): frames built below the socket
             // layer, so no destination here. The switch still filters and
@@ -429,11 +524,32 @@ public final class NetworkLineage: @unchecked Sendable {
         // CWE-670, "Agent-fetch fallback attributes descendant process
         // traffic to the agent's tool call").
         var link = link
+        // Linked late: the call reached the host after the process started.
+        // While a process of the chain is that recent, look again rather
+        // than settle for a timing guess or nothing; the last look allows
+        // the agent's-next-child link too.
+        if link == nil {
+            let last = hookPolls >= Self.maxHookPolls || !Self.recentlyStarted(processes, in: vm, at: t)
+            if let l = Self.lateLink(processes, in: &vm, timing: last),
+               let call = vm.toolCalls.first(where: { $0.id == l.toolUseID }) {
+                link = (call, l.confidence)
+            } else if !last {
+                vms[profileID] = vm
+                lock.unlock()
+                scheduleResolve(profileID: profileID, flowID: flowID, frame: f, proto: proto, dst: original.0,
+                                dport: original.1, processes: processes, link: nil, polls: polls,
+                                hookPolls: hookPolls + 1)
+                return
+            }
+        }
         if link == nil, let leaf = processes.last, case .int(let leafPid)? = leaf["pid"] {
             var leafKey = ProcKey(pid: leafPid, startNs: 0)
             if case .int(let ns)? = leaf["start_ns"] { leafKey.startNs = UInt64(truncatingIfNeeded: ns) }
-            let host = decision?.host ?? dst
-            if let m = Self.matchAgentFetch(host: host, leafPid: leafPid,
+            // Every name the destination goes by: the decision's, the
+            // proxied target, and what the guest's DNS answers called it.
+            var hosts = [decision?.host, dst].compactMap { $0 }
+            if !viaProxy { hosts += hostNames(dst) }
+            if let m = Self.matchAgentFetch(hosts: hosts, leafPid: leafPid,
                                             leafSeenAt: Self.resolve(leafKey, in: vm).flatMap { vm.procs[$0]?.at },
                                             calls: vm.toolCalls, at: t),
                let call = vm.toolCalls.first(where: { $0.id == m.toolUseID }) {
@@ -495,6 +611,38 @@ public final class NetworkLineage: @unchecked Sendable {
         return (best.call.id, best.length >= exactMinLength ? "exact" : "likely")
     }
 
+    /// An agent whose shell runs inside its own process (omp's brush): no
+    /// shell exec carries the command -- each program in it is exec'd by the
+    /// agent with only its own words (`curl -s URL` of `cd /tmp && curl -s
+    /// URL | head`), so the command never appears in an argv. Such a
+    /// process, the agent's own child (its hook named the agent's pid), is
+    /// the call's whose command holds its argv's words, whole and in order;
+    /// the newest such call within `shellWindow` (or `hookLag` before it).
+    /// "exact" from `exactMinLength` characters, as for a shell.
+    static func matchInProcessShell(argv: String, ppid: Int, calls: [ToolCall], at: Date)
+        -> (toolUseID: String, confidence: String)? {
+        var a = words(argv)
+        guard !a.isEmpty else { return nil }
+        let length = a.reduce(0) { $0 + $1.count }
+        guard length >= 2 else { return nil }
+        let candidates = calls.filter { c in
+            guard c.agentPid == ppid, let cmd = c.command else { return false }
+            let age = at.timeIntervalSince(c.at)
+            return age <= shellWindow && age >= -hookLag
+        }
+        func holding(_ argvWords: [String]) -> ToolCall? {
+            candidates.filter { contains(words($0.command!), argvWords) }.max { $0.at < $1.at }
+        }
+        var best = holding(a)
+        // A program run by its path: `/usr/bin/curl` for a command's `curl`.
+        if best == nil, a[0].contains("/"), let base = a[0].split(separator: "/").last {
+            a[0] = String(base)
+            best = holding(a)
+        }
+        guard let best else { return nil }
+        return (best.id, length >= exactMinLength ? "exact" : "likely")
+    }
+
     /// How long after an agent's tool call a connection from the agent's own
     /// process can be that call's fetch (a slow page, a redirect).
     static let agentFetchWindow: TimeInterval = 120
@@ -509,19 +657,40 @@ public final class NetworkLineage: @unchecked Sendable {
     /// reused pid). "likely": the match is by host and time, not by process.
     static func matchAgentFetch(host: String, leafPid: Int, leafSeenAt: Date?, calls: [ToolCall], at: Date)
         -> (toolUseID: String, confidence: String)? {
-        let h = Self.bareHost(host)
-        guard !h.isEmpty, h != "?" else { return nil }
-        let candidates = calls.filter { c in
-            guard let pid = c.agentPid, pid == leafPid, let cmd = c.command else { return false }
-            if let seen = leafSeenAt, seen > c.at.addingTimeInterval(1) { return false }
-            let age = at.timeIntervalSince(c.at)
-            guard age >= -2, age <= agentFetchWindow else { return false }
-            return Self.hostsNamed(in: cmd).contains { named in
-                named == h || h.hasSuffix("." + named) || named.hasSuffix("." + h)
-            }
+        matchAgentFetch(hosts: [host], leafPid: leafPid, leafSeenAt: leafSeenAt, calls: calls, at: at)
+    }
+
+    /// `matchAgentFetch` for a destination known by several names (its
+    /// address, the decision's host, DNS answers): any of them named counts.
+    static func matchAgentFetch(hosts: [String], leafPid: Int, leafSeenAt: Date?, calls: [ToolCall], at: Date)
+        -> (toolUseID: String, confidence: String)? {
+        let hs = Set(hosts.map(Self.bareHost)).subtracting(["", "?"])
+        guard !hs.isEmpty else { return nil }
+        // 2: the host itself named; 1: a subdomain of it, or it of one (a
+        // redirect); 0: neither.
+        func rank(_ c: ToolCall) -> Int {
+            guard let cmd = c.command else { return 0 }
+            return Self.hostsNamed(in: cmd).map { named in
+                hs.contains(named) ? 2
+                    : hs.contains { h in h.hasSuffix("." + named) || named.hasSuffix("." + h) } ? 1 : 0
+            }.max() ?? 0
         }
-        guard let best = candidates.max(by: { $0.at < $1.at }) else { return nil }
-        return (best.id, "likely")
+        let candidates: [(call: ToolCall, rank: Int)] = calls.compactMap { c in
+            guard let pid = c.agentPid, pid == leafPid else { return nil }
+            // A command's traffic is its own processes', never the agent's:
+            // a Bash `curl https://api.github.com` names a host, but the
+            // agent connecting to github.com isn't it.
+            guard !runsCommand(c) else { return nil }
+            if let seen = leafSeenAt, seen > c.at.addingTimeInterval(1) { return nil }
+            let age = at.timeIntervalSince(c.at)
+            guard age >= -2, age <= agentFetchWindow else { return nil }
+            let r = rank(c)
+            return r > 0 ? (c, r) : nil
+        }
+        // The best-named host first, then the newest: a flow the sentry
+        // reported late (repeats folded) still goes to the call naming it.
+        guard let best = candidates.max(by: { ($0.rank, $0.call.at) < ($1.rank, $1.call.at) }) else { return nil }
+        return (best.call.id, "likely")
     }
 
     /// A host as compared: lowercased, no port, brackets, trailing dot or `www.`.

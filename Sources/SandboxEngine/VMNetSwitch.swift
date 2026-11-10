@@ -914,6 +914,15 @@ public final class VMNetSwitch: @unchecked Sendable {
     }
 
     /// Dotted quad of a host-order IPv4.
+    /// The names the guests' DNS answers gave `ip` (dotted IPv4), the most
+    /// likely destination first (`DNSSnoopCache.names`). Empty for an
+    /// address no answer named, or one that isn't IPv4.
+    public func hostnames(forIP ip: String) -> [String] {
+        let parts = ip.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt32($0) }
+        guard parts.count == 4, parts.allSatisfy({ $0 < 256 }) else { return [] }
+        return dnsCache.names(for: parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3])
+    }
+
     public static func ipString(_ v: UInt32) -> String {
         "\((v >> 24) & 0xFF).\((v >> 16) & 0xFF).\((v >> 8) & 0xFF).\(v & 0xFF)"
     }
