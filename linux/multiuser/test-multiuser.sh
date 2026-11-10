@@ -51,6 +51,10 @@ systemctl show -p Environment bromure-ac@$A.service | grep -q 'BROMURE_AC_RESOUR
   && sudo -n -u $A test -r /usr/local/lib/bromure-ac/resources/vm-setup/bromure-k8s-node.sh \
   && sudo -n -u $A test -r /usr/local/lib/bromure-ac/resources/catalog.json \
   && ok "$A's daemon gets the installed resources" || no "$A's daemon has no readable resources"
+# Foundation's home is the state dir whatever the account's passwd home (an
+# existing login's is under /home, hidden by ProtectHome).
+systemctl show -p Environment bromure-ac@$A.service | grep -q "CFFIXED_USER_HOME=/var/lib/bromure-ac/$A" \
+  && ok "$A's daemon has its Foundation home in its state dir" || no "$A's unit lacks CFFIXED_USER_HOME"
 # Same VM name in both; each sees only its own.
 for u in $A $B; do
   R=$(as $u $W/$u POST /vms '{"name":"same","machine":"firecracker"}')

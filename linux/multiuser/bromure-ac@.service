@@ -34,6 +34,11 @@ RuntimeDirectoryMode=0700
 # socket re-activation or an update's stop/start must not re-arm.
 RuntimeDirectoryPreserve=yes
 Environment=HOME=/var/lib/bromure-ac/%i
+# Foundation's own home (NSHomeDirectory, homeDirectoryForCurrentUser) is the
+# account's passwd home, not HOME: an existing login account's (admin add
+# --existing) is under /home, which ProtectHome hides. CFFIXED_USER_HOME moves
+# it here too, as it is for an account admin add made.
+Environment=CFFIXED_USER_HOME=/var/lib/bromure-ac/%i
 Environment=XDG_STATE_HOME=/var/lib/bromure-ac/%i
 Environment=XDG_RUNTIME_DIR=/run/bromure-ac/%i
 Environment=BROMURE_AC_MULTIUSER=1
