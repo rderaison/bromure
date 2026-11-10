@@ -28,6 +28,9 @@ done
 L=/usr/local/lib/bromure-ac
 install -d -m 755 $L/bin $L/lib
 install -m 755 "$BIN" $L/bin/bromure-ac.new && mv -f $L/bin/bromure-ac.new $L/bin/bromure-ac
+# Its build metadata (/state's "build"), beside it.
+"$ROOT/linux/stamp-build-info.sh" $L/bin/bromure-ac.build-info.json.new && chmod 644 $L/bin/bromure-ac.build-info.json.new \
+  && mv -f $L/bin/bromure-ac.build-info.json.new $L/bin/bromure-ac.build-info.json
 install -m 755 "$FC" $L/bin/firecracker.new && mv -f $L/bin/firecracker.new $L/bin/firecracker
 # agentd runs from the resources' vm-setup/ (bromure-ac@.service's
 # BROMURE_AGENTD), beside the guest scripts the daemon stages with it; the
