@@ -103,9 +103,8 @@ pipeline {
             steps {
                 // Release tags pick the older sources to build for. The SCM
                 // credential is only bound during Checkout SCM, so bind the same
-                // deploy key for this fetch (as Jenkinsfile.resolv-stub does for
-                // its push); kube-builder-a is an ephemeral pod with no
-                // known_hosts, hence accept-new.
+                // deploy key for this fetch; kube-builder-a is an ephemeral
+                // pod with no known_hosts, hence accept-new.
                 withCredentials([sshUserPrivateKey(
                     credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
                     keyFileVariable: 'SSH_KEY')]) {

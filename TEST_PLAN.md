@@ -222,7 +222,6 @@
 - [ ] WARP toggle is instant — 3-5s after boot, toggle WARP on, verify `ipconfig.me` shows a different IP; toggle off, verify original IP returns
 - [ ] WARP with <2GB RAM — memory warning dialog, offer to increase
 - [ ] WARP disabled when custom proxy is configured (orange warning)
-- [ ] Verify gcompat + libresolv_stub.so loaded for WARP binary
 
 ### 10.2 Ad Blocking
 - [ ] Block Ads OFF (default) — ads visible on ad-heavy sites

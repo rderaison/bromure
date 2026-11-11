@@ -1726,8 +1726,6 @@ def configure_services(cfg, ca_count):
         # Start warp-svc early so it can boot while Chrome starts
         if os.path.isfile("/bin/warp-svc"):
             warp_env = dict(os.environ, LANG="C", LC_ALL="C", LANGUAGE="C")
-            if os.path.isfile("/usr/lib/libresolv_stub.so"):
-                warp_env["LD_PRELOAD"] = "/usr/lib/libresolv_stub.so"
             svc_log = open("/tmp/bromure/warp-svc.log", "a")
             subprocess.Popen(
                 ["/bin/warp-svc"],
