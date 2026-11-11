@@ -332,36 +332,37 @@ public final class BinaryIdentityService: @unchecked Sendable {
             // the connection was for (a shared CDN address has many): they
             // don't replace the program attested for any of them.
             if let id { self.noteExe(id.exe, profileID: profileID, destinations: hostnames, port: Int(key.dport), replace: false) }
-            self.lock.lock()
-            // Only into a question still pending (not pruned, nor the VM gone).
-            if self.gateResults[profileID]?[key]?.state == .asking {
-                if case .notYet = answer {
-                    // Not decidable yet: forgotten, so the SYN's retransmit
-                    // asks again; never a remembered deny.
-                    self.gateResults[profileID]?[key] = nil
-                } else {
-                    self.gateResults[profileID]?[key]?.state = .answered
-                    self.gateResults[profileID]?[key]?.identity = id
-                    self.gateResults[profileID]?[key]?.at = self.clock()
+            let next: (GateKey, [String])? = self.lock.withLock {
+                // Only into a question still pending (not pruned, nor the VM gone).
+                if self.gateResults[profileID]?[key]?.state == .asking {
+                    if case .notYet = answer {
+                        // Not decidable yet: forgotten, so the SYN's retransmit
+                        // asks again; never a remembered deny.
+                        self.gateResults[profileID]?[key] = nil
+                    } else {
+                        self.gateResults[profileID]?[key]?.state = .answered
+                        self.gateResults[profileID]?[key]?.identity = id
+                        self.gateResults[profileID]?[key]?.at = self.clock()
+                    }
                 }
-            }
-            // The slot passes to the oldest flow still waiting, if any.
-            var next: (GateKey, [String])?
-            while next == nil, var queue = self.gateQueue[profileID], !queue.isEmpty {
-                let k = queue.removeFirst()
-                self.gateQueue[profileID] = queue.isEmpty ? nil : queue
-                if self.gateResults[profileID]?[k]?.state == .queued {
-                    self.gateResults[profileID]?[k]?.state = .asking
-                    self.gateResults[profileID]?[k]?.at = self.clock()
-                    next = (k, self.gateResults[profileID]?[k]?.hostnames ?? [])
-                    self.gateResults[profileID]?[k]?.hostnames = []
+                // The slot passes to the oldest flow still waiting, if any.
+                var handoff: (GateKey, [String])?
+                while handoff == nil, var queue = self.gateQueue[profileID], !queue.isEmpty {
+                    let k = queue.removeFirst()
+                    self.gateQueue[profileID] = queue.isEmpty ? nil : queue
+                    if self.gateResults[profileID]?[k]?.state == .queued {
+                        self.gateResults[profileID]?[k]?.state = .asking
+                        self.gateResults[profileID]?[k]?.at = self.clock()
+                        handoff = (k, self.gateResults[profileID]?[k]?.hostnames ?? [])
+                        self.gateResults[profileID]?[k]?.hostnames = []
+                    }
                 }
+                if handoff == nil {
+                    let left = self.gateQueries[profileID, default: 1] - 1
+                    self.gateQueries[profileID] = left > 0 ? left : nil
+                }
+                return handoff
             }
-            if next == nil {
-                let left = self.gateQueries[profileID, default: 1] - 1
-                self.gateQueries[profileID] = left > 0 ? left : nil
-            }
-            self.lock.unlock()
             if let (k, names) = next { self.startQuery(profileID, k, hostnames: names) }
         }
     }
@@ -400,20 +401,19 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     /// Ask the guest for its sandbox status (stored only if nothing newer
     /// came pushed meanwhile); concurrent asks share one question.
     func askSandboxStatus() async {
-        lock.lock()
-        let task: Task<Void, Never>
-        if let running = statusAsk { task = running } else {
-            task = Task { [weak self] in
+        let task: Task<Void, Never> = lock.withLock {
+            if let running = statusAsk { return running }
+            let task = Task { [weak self] in
                 guard let self else { return }
                 if let reply = await self.query(["op": "sandbox_status"]),
                    reply["ok"] as? Bool == true, let report = reply["status"] as? [String: Any] {
                     GuestSandboxStatusStore.shared.update(profileID: self.profileID, report: report, onlyIfAbsent: true)
                 }
-                self.lock.lock(); self.statusAsk = nil; self.lock.unlock()
+                self.lock.withLock { self.statusAsk = nil }
             }
             statusAsk = task
+            return task
         }
-        lock.unlock()
         await task.value
     }
     /// A strict-sandbox workspace: its attestor's answers count only once
