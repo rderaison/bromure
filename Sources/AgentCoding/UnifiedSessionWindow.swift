@@ -355,6 +355,13 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// running/suspended off-screen. An empty placeholder model backs the host
     /// until a workspace's browser is shown.
     private let browserPlaceholderModel = BrowserPaneModel()
+    /// What the pane shows for a workspace whose browser is turned off.
+    private let browserOffModel: BrowserPaneModel = {
+        let m = BrowserPaneModel()
+        m.placeholderStatus = NSLocalizedString("The web browser is turned off for this workspace.",
+                                                comment: "browser pane, browser disabled in the workspace's settings")
+        return m
+    }()
     private var browserModels: [Profile.ID: BrowserPaneModel] = [:]
     private var browserControllers: [Profile.ID: WorkspaceBrowserController] = [:]
     /// Which workspace's browser the pane currently displays.
@@ -1154,6 +1161,7 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// whose pane the user closed stays closed — later tool calls don't
     /// fight the user's choice.
     func ensureBrowserForMCP(_ id: Profile.ID) {
+        guard !browserIsDisabled(id) else { return }
         let controller = browserController(for: id)
         browserRouteLog("server ensure \(id.uuidString.prefix(8)) onStage=\((liveSessionOnStage?.profileID ?? selectedID) == id) paneOpen=\(browserPaneOpen) state=\(controller.state)")
         if (liveSessionOnStage?.profileID ?? selectedID) == id, !browserPaneOpen, controller.state == .idle {
@@ -1167,6 +1175,16 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
     /// Point the pane at `id`'s browser and mark it visible; hide the
     /// previously-shown one so its collapse timers arm.
     private func showBrowser(for id: Profile.ID) {
+        // Turned off in the workspace's settings: nothing boots, the pane
+        // says so.
+        if browserIsDisabled(id) {
+            if let prev = shownBrowser {
+                browserControllers[prev]?.setVisible(false, teardownWhenHidden: prev == id)
+            }
+            shownBrowser = nil
+            browserPaneHost.rootView = BrowserPaneView(model: browserOffModel)
+            return
+        }
         if shownBrowser == id { browserController(for: id).setVisible(true); return }
         if let prev = shownBrowser, prev != id {
             // Hidden by a workspace switch, not a collapse: suspend-only —
@@ -1243,6 +1261,23 @@ final class UnifiedSessionWindow: NSWindow, SessionPaneHost {
         if wasShown, (liveSessionOnStage?.profileID ?? selectedID) == id {
             showBrowser(for: id)
         }
+    }
+
+    /// The workspace's browser was turned off or on: a running one is torn
+    /// down, and an open pane shows what's now in force (the "turned off"
+    /// placeholder, or a fresh browser).
+    func browserSettingChanged(for id: Profile.ID) {
+        let wasOpen = browserPaneOpenWorkspaces.contains(id)
+        let openSessions = browserPaneOpenSessions.filter { $0.value == id }
+        let onStage = browserPaneOpen && (liveSessionOnStage?.profileID ?? selectedID) == id
+        teardownBrowser(for: id)
+        if wasOpen { browserPaneOpenWorkspaces.insert(id) }
+        browserPaneOpenSessions.merge(openSessions) { a, _ in a }
+        if onStage, !DemoMode.isOn { showBrowser(for: id) }
+    }
+
+    private func browserIsDisabled(_ id: Profile.ID) -> Bool {
+        acDelegate?.profiles.first { $0.id == id }?.browserDisabled == true
     }
 
     /// Tear down one workspace's browser (its session ended).

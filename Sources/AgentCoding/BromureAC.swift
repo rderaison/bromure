@@ -393,6 +393,17 @@ struct BromureAC: ParsableCommand {
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {})
                                   .frame(width: 900, height: 1080))
                 size = NSSize(width: 900, height: 1080)
+            case "browser-settings", "browser-off":
+                // The real workspace editor, opened on Browser: a sandboxed
+                // workspace with its browser on (the warning) or off.
+                setenv("BROMURE_EDITOR_CATEGORY", EditorCategory.browser.rawValue, 1)
+                var p = Profile(name: "Claude Dev", tool: .claude, authMode: .subscription)
+                p.strictSandbox = true
+                p.browserDisabled = which == "browser-off"
+                view = AnyView(ProfileEditorView(profile: p, isNew: false, terminalDefaults: .fallback,
+                                                 storageContext: nil, onSave: { _, _ in }, onCancel: {})
+                                  .frame(width: 900, height: 900))
+                size = NSSize(width: 900, height: 900)
             case "remote-access-off", "remote-access-on":
                 // Remote Access window, offline: stand-in status and account.
                 let on = which == "remote-access-on"
@@ -11721,9 +11732,21 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // immediately instead of on the next teardown. Runs after the
         // `profiles` refresh above so the new controller reads the saved
         // value.
-        if let original = editing, original.browserBootSettingsDiffer(from: profile) {
+        if let original = editing, original.browserDisabled != profile.browserDisabled {
+            // Turned off: the running browser goes and the agents' browser
+            // streams are dropped, so they reconnect to a server that
+            // refuses. Turned on: the pane and the tools come back.
+            unifiedWindow?.browserSettingChanged(for: profile.id)
+            browserMCPBridges[profile.id]?.browserSettingChanged()
+        } else if let original = editing, original.browserBootSettingsDiffer(from: profile) {
             unifiedWindow?.rebootBrowser(for: profile.id)
         }
+    }
+
+    /// The workspace's browser is turned off (`Profile.browserDisabled`).
+    /// An unknown workspace counts as off: the browser MCP server refuses.
+    func browserDisabled(_ id: Profile.ID) -> Bool {
+        profiles.first { $0.id == id }?.browserDisabled ?? true
     }
 
     // MARK: - Headless profile create / edit / export (control socket)
@@ -13491,7 +13514,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let pid = profile.id
                 let mcpServer = BrowserMCPServer(
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
-                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) },
+                    disabled: { [weak self] in self?.browserDisabled(pid) ?? true })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
                 // Coding-board MCP listener (vsock 5831): typed task tools
@@ -17714,7 +17738,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.browserMCPBridges[pid]?.stop()
                 let mcpServer = BrowserMCPServer(
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
-                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) },
+                    disabled: { [weak self] in self?.browserDisabled(pid) ?? true })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer)
                 // Coding-board MCP listener (vsock 5831): typed task tools
