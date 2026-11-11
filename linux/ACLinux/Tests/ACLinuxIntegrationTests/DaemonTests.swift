@@ -397,7 +397,9 @@ struct DaemonTests {
         // An image dir of its own: the image's files linked (read only), its
         // own version stamp.
         let img = w.root + "/image"
-        try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true)
+        // 0755 whatever the umask: the daemon refuses a group-writable image dir.
+        try FileManager.default.createDirectory(atPath: img, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
         for f in try FileManager.default.contentsOfDirectory(atPath: Env.image) where !["base.version", "image-state.json"].contains(f) {
             try FileManager.default.createSymbolicLink(atPath: img + "/" + f, withDestinationPath: Env.image + "/" + f)
         }
