@@ -128,6 +128,58 @@ enum FatForward {
         Darwin.close(sock)
     }
 
+    /// What an accept loop does when `accept` fails with `err`. A closed
+    /// listener (`EBADF`/`EINVAL`: the owner's stop) ends it. Anything else
+    /// is a connection that went wrong before it was taken (`ECONNABORTED`:
+    /// the peer reset mid-handshake) or a passing shortage (`EMFILE`,
+    /// `ENFILE`, `ENOBUFS`, `ENOMEM`): the loop waits a moment and goes on.
+    /// It used to stop on every error but `EINTR` -- and a stopped SOCKS
+    /// loop over a still-open listener left the browser's connections
+    /// queued unanswered: "proxy connection failed" until the app restarted.
+    enum AcceptFailure: Equatable { case retry, backoff, stop }
+    static func acceptFailure(_ err: Int32) -> AcceptFailure {
+        switch err {
+        case EINTR, ECONNABORTED, EAGAIN, EPROTO: return .retry
+        case EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP: return .stop
+        default: return .backoff   // EMFILE, ENFILE, ENOBUFS, ENOMEM, ...
+        }
+    }
+
+    /// Accept one connection on `lfd`, riding out transient failures. nil
+    /// when the listener is closed. `peer` receives the peer's address.
+    static func acceptConnection(_ lfd: Int32, peer: UnsafeMutablePointer<sockaddr_in>? = nil, label: String) -> Int32? {
+        var logged = false
+        while true {
+            var addr = sockaddr_in()
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let cfd = withUnsafeMutablePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(lfd, $0, &len) }
+            }
+            if cfd >= 0 {
+                peer?.pointee = addr
+                return cfd
+            }
+            let err = errno
+            switch acceptFailure(err) {
+            case .retry: continue
+            case .stop: return nil
+            case .backoff:
+                if !logged {
+                    NSLog("[bromure-ac] %@: accept failed (errno %d) — retrying", label, err)
+                    logged = true
+                }
+                usleep(100_000)
+            }
+        }
+    }
+
+    /// A handshake's reads give up after `seconds` (0 = never): a client
+    /// that connects and says nothing held a thread and two fds for good.
+    static func setReadTimeout(_ fd: Int32, seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     /// Bind a local TCP listener on 127.0.0.1 (or 0.0.0.0) : `localPort`.
     static func listen(port: Int, bindAll: Bool) -> Int32 {
         let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)

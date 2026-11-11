@@ -206,13 +206,11 @@ extension LinuxImageManager {
             //    stale to `baseImageExists` (the catalog's exact version,
             //    which may lead or lag the constant around release week,
             //    is recorded in image-state.json instead).
+            //    As one unit: removing each live file before its move left
+            //    a mix, or nothing, on a failure or crash between them.
             try? fm.removeItem(at: graphicsCapabilitiesURL)
-            try? fm.removeItem(at: linuxDiskURL)
-            try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
-            try? fm.removeItem(at: linuxKernelURL)
-            try fm.moveItem(at: scratchKernel, to: linuxKernelURL)
-            try? fm.removeItem(at: linuxInitrdURL)
-            try fm.moveItem(at: scratchInitrd, to: linuxInitrdURL)
+            try promote([(scratchDisk, linuxDiskURL), (scratchKernel, linuxKernelURL),
+                         (scratchInitrd, linuxInitrdURL)])
             try Self.imageVersion.write(to: imageVersionURL, atomically: true, encoding: .utf8)
             if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }
             writeImageState(BaseImageState(
@@ -223,7 +221,9 @@ extension LinuxImageManager {
             text("Base image ready at \(linuxDiskURL.path) (\(image.description))")
         } catch {
             for f in scratches { try? fm.removeItem(at: f) }
-            if !hadCompletePriorImage {
+            // Never while a promotion is pending: its live files may be
+            // the only copy of the previous image.
+            if !hadCompletePriorImage, !ImagePromotion.isPending(in: storageDir) {
                 try? fm.removeItem(at: linuxDiskURL)
                 try? fm.removeItem(at: linuxKernelURL)
                 try? fm.removeItem(at: linuxInitrdURL)
@@ -270,8 +270,7 @@ extension LinuxImageManager {
             )
             progress(.stepDone("Installing recommended packages"))
 
-            try? fm.removeItem(at: linuxDiskURL)
-            try fm.moveItem(at: scratchDisk, to: linuxDiskURL)
+            try ImagePromotion.replace(scratchDisk, over: linuxDiskURL)
 
             try? fm.removeItem(at: graphicsCapabilitiesURL)
             if let graphicsCapabilities { try graphicsCapabilities.write(to: graphicsCapabilitiesURL, options: .atomic) }

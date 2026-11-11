@@ -82,6 +82,11 @@ final class AppState: @unchecked Sendable {
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?
+    /// Asked once, before the pool boots its first VM: the launch window
+    /// picks the profile and network, and the VM boots with that config
+    /// (so a bridged NIC is chosen before anything starts). nil = the
+    /// default warm-up. Cleared once used.
+    var launchConfigProvider: (@MainActor () async -> VMConfig?)?
     var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
     /// Called when UI (settings pane, etc.) wants to open the enrollment
     /// window. Wired up by the app delegate so the same window can be reached
@@ -234,9 +239,9 @@ final class AppState: @unchecked Sendable {
             startPool()
             scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
-            // Image files exist but version mismatch — auto-reinstall
+            // Image files exist but version mismatch — auto-reinstall. The
+            // old image stays in place until the replacement is promoted.
             installReason = .update
-            deleteImageFiles()
             startInit()
         } else {
             phase = .needsSetup
@@ -314,6 +319,19 @@ final class AppState: @unchecked Sendable {
                 self.startPool()
             } catch {
                 guard !Task.isCancelled else { return }
+                // Both install paths promote all boot files as one unit
+                // (ImagePromotion), so a failure leaves the previous image
+                // whole. Keep browsing on it only when the pool can boot it:
+                // files and version stamp, the check the pool itself makes.
+                // An out-of-date image is reported and kept for the next try.
+                if self.installReason != .firstRun, self.imageManager.baseImageExists {
+                    let message = Self.localizedMessage(for: error)
+                    NSLog("Bromure: image install failed, keeping the previous image: %@", message)
+                    self.consoleLog += "\nImage install failed (\(message)); keeping the previous image.\n"
+                    self.phase = .warmingUp
+                    self.startPool()
+                    return
+                }
                 self.phase = .error(Self.localizedMessage(for: error))
             }
         }
@@ -428,7 +446,6 @@ final class AppState: @unchecked Sendable {
         pool = nil
         Task { await oldPool?.shutdown() }
         installReason = .refresh
-        deleteImageFiles()
         startInit()
     }
 
@@ -581,7 +598,15 @@ final class AppState: @unchecked Sendable {
         }
         warmUpTask = Task {
             do {
-                try await pool?.warmUp()
+                var requested: VMConfig?
+                if let provider = launchConfigProvider {
+                    requested = await provider()
+                    // Cancelled (restartPool, a rebuild) while asking: keep
+                    // the provider so the replacement pool asks again.
+                    guard !Task.isCancelled else { return }
+                    launchConfigProvider = nil
+                }
+                try await pool?.warmUp(requestedConfig: requested)
                 guard !Task.isCancelled else { return }
                 poolReady = true
                 phase = .ready
@@ -698,10 +723,8 @@ final class AppState: @unchecked Sendable {
             pool = nil
             poolReady = false
 
-            // Delete old image files
-            deleteImageFiles()
-
-            // Rebuild
+            // Rebuild. The current image is only replaced once the new
+            // one has been downloaded or built.
             startInit()
         }
     }

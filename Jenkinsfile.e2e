@@ -61,7 +61,8 @@ pipeline {
                     pkill -x bromure 2>/dev/null || true
                     pkill -x bromure-ac 2>/dev/null || true
                     sleep 2
-                    BROMURE_DEBUG_CLAUDE=y "$APP_BUNDLE/Contents/MacOS/bromure" &
+                    # No launch picker: the suite waits for the pool to warm.
+                    BROMURE_DEBUG_CLAUDE=y BROMURE_SKIP_LAUNCH_PICKER=1 "$APP_BUNDLE/Contents/MacOS/bromure" &
                     echo $! > .bromure_pid
                     for i in $(seq 1 60); do
                         curl -s http://127.0.0.1:9222/ > /dev/null 2>&1 && break

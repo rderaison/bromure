@@ -9,6 +9,8 @@
  *   - Bromure.app built and running (open .build/.../Bromure.app)
  *   - Base image created (bromure init)
  *   - BROMURE_DEBUG_CLAUDE=1 in the app's environment (for shell tests)
+ *   - BROMURE_SKIP_LAUNCH_PICKER=1 in the app's environment (otherwise the
+ *     pool waits for the launch window's profile/network choice)
  *
  * Usage:
  *   node tests/e2e.mjs              # run all tests

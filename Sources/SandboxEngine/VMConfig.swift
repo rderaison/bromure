@@ -1121,6 +1121,11 @@ public struct VMConfig {
         public let id: String          // e.g. "en0"
         public let localizedName: String? // e.g. "Wi-Fi"
 
+        public init(id: String, localizedName: String?) {
+            self.id = id
+            self.localizedName = localizedName
+        }
+
         public var displayName: String {
             if let name = localizedName {
                 return "\(name) (\(id))"

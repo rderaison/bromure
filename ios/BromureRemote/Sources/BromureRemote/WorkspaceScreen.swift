@@ -397,6 +397,13 @@ private struct TerminalsPane: View {
             feeds[window] = f
             return f
         }
+        /// Forget a window that closed: its feed holds the conversation's
+        /// bytes, and tmux reuses the index for the next window.
+        func drop(_ window: Int) {
+            feeds[window] = nil
+            items[window] = nil
+            everLoaded.remove(window)
+        }
     }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
@@ -447,6 +454,14 @@ private struct TerminalsPane: View {
         var cwd = tab?.cwd ?? tab?.repoRoot
         if cwd?.isEmpty ?? true, window == initialWindow, let s = sessionCwd, s != "~" { cwd = s }
         return (cwd?.isEmpty ?? true) ? nil : cwd
+    }
+
+    /// Which conversation window `w`'s reader may show: its session's own
+    /// (by conversation id), never the folder's newest -- two sessions of one
+    /// agent in one folder would otherwise show each other's.
+    private func transcriptPin(for w: Int) -> TranscriptPin {
+        let s = controller.sessionStore.session(profileID: profileID, windowIndex: w)
+        return controller.sessionStore.chatTranscriptPin(for: s, profileID: profileID)
     }
 
     private var currentTab: TabsModel.Tab? {
@@ -556,6 +571,7 @@ private struct TerminalsPane: View {
                             TranscriptReaderView(controller: controller, profileID: profileID,
                                                  window: win, guestCwd: guestCwd(for: win),
                                                  agent: agentKind(currentTab),
+                                                 pin: transcriptPin(for: win),
                                                  since: transcriptSince, store: transcripts,
                                                  bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                         }
@@ -682,7 +698,7 @@ private struct TerminalsPane: View {
         // fact ("claude" → "Fix the tests (codex)") must rebuild the store
         // locator, or the poll keeps watching the wrong session store.
         return "\(win)-\(isAgentic(currentTab))-\(agentKind(currentTab) ?? "?")-"
-            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
+            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")-\(transcriptPin(for: win).hashValue)"
     }
 
     private func pollTranscriptPresence() async {
@@ -691,7 +707,8 @@ private struct TerminalsPane: View {
               !transcriptPresent.contains(win),
               let cwd = guestCwd(for: win), !cwd.isEmpty,
               let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince,
-                                                               agent: agent)
+                                                               agent: agent, pinnedWindow: win,
+                                                               pin: transcriptPin(for: win))
         else { return }
         while !Task.isCancelled {
             if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
@@ -736,8 +753,7 @@ private struct TerminalsPane: View {
                 // next new-window takes), and these caches are index-keyed — a
                 // reused index must not inherit the previous occupant's rich-mode
                 // transcript or auto-reader state.
-                transcripts.items[w] = nil
-                transcripts.everLoaded.remove(w)
+                transcripts.drop(w)
                 transcriptPresent.remove(w)
             }
             mounted.removeAll { !live.contains($0) }
@@ -838,6 +854,8 @@ private struct TerminalsPane: View {
                 controller.closeTab(profileID, index: closing)
                 store.map[closing]?.stop()
                 store.map[closing] = nil
+                transcripts.drop(closing)
+                transcriptPresent.remove(closing)
             } label: { Label("Close", systemImage: "xmark") }
         }
     }
@@ -860,6 +878,10 @@ private struct TranscriptReaderView: View {
     /// Canonical agent kind of the tool this tab runs — locator + parser
     /// hint; nil searches every session store and sniffs the format.
     let agent: String?
+    /// The window's session's own conversation (`chatTranscriptPin`): read
+    /// that, or the file the window's agent named -- never the folder's
+    /// newest, which may be another session's.
+    let pin: TranscriptPin
     /// Epoch floor (this workspace's boot time) so a pre-reboot pending-question
     /// dump or an older session's transcript isn't tailed as if it were live —
     /// see TerminalsPane.transcriptSince.
@@ -913,7 +935,7 @@ private struct TranscriptReaderView: View {
         // The agent kind re-keys it too — the call site remounts on a kind
         // change anyway (its .id carries the kind), so this is belt and
         // braces for a future caller that doesn't.
-        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")") { await poll() }
+        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")\u{1f}\(pin.hashValue)") { await poll() }
     }
 
     // MARK: Composer + image attach
@@ -1215,9 +1237,10 @@ private struct TranscriptReaderView: View {
     /// The guest command for one read of this tab's transcript.
     private var chunkCommand: TranscriptFeed.Command? {
         guard let cwd = guestCwd, !cwd.isEmpty else { return nil }
-        let since = since, agent = agent
+        let since = since, agent = agent, window = window, pin = pin
         return { known, offset, bytes, earlier in
             CodingTaskEngine.transcriptChunkCommand(guestCwd: cwd, since: since, agent: agent,
+                                                    pinnedWindow: window, pin: pin,
                                                     knownPath: known, knownOffset: offset,
                                                     bytes: bytes, earlier: earlier)
         }
@@ -1349,12 +1372,16 @@ struct SessionFilesPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     let cwd: String
+    /// A sheet of its own (the phone), not the side pane `filePaneOpen`
+    /// toggles: open whenever it's mounted.
+    var standalone = false
     @State private var model = FileExplorerModel()
 
     var body: some View {
         FileExplorerPane(model: model, listModel: controller.listModel,
                          onAutoSetOpen: { _ in },
-                         pinnedContext: (profileID, cwd))
+                         pinnedContext: (profileID, cwd),
+                         standalone: standalone)
             .onAppear { [controller] in
                 model.execProvider = { [weak controller] id, command, timeout in
                     guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
@@ -1376,7 +1403,8 @@ struct SessionFilesButton: View {
             .accessibilityLabel("Files")
             .sheet(isPresented: $shown) {
                 NavigationStack {
-                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd)
+                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd,
+                                     standalone: true)
                         .navigationTitle("Files")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
@@ -1479,6 +1507,14 @@ struct TailFollowingScroll<Content: View>: View {
     private final class Follow {
         var sticky = true
         var lastUserScroll = Date.distantPast
+        /// The scroll view reports the user moving it -- a finger, a
+        /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
+        var userScrolling = false
+        /// How far the user's scroll has moved the offset toward the top
+        /// since it last turned there (`TailFollowRule.upwardRun`, negative,
+        /// never above 0) -- summed, so a slow trackpad scroll of under a
+        /// point a frame still adds up.
+        var scrolledUp: CGFloat = 0
         var tailY: CGFloat?
         /// A snap budget: layout drift can report many times a second, and
         /// each snap is a layout pass -- the watchdog catches what's skipped.
@@ -1522,6 +1558,30 @@ struct TailFollowingScroll<Content: View>: View {
                 follow.lastUserScroll = Date()
                 if v.translation.height > 2 { follow.sticky = false }
             })
+            // A trackpad or mouse wheel scrolls without any drag: the scroll
+            // phase is what says the user moved it, so the end's move it
+            // causes lets go (in `tailMoved`) instead of snapping back.
+            // Only the offset moving up lets go: a streaming row growing
+            // pushes the end down too, mid-scroll, without the user going
+            // anywhere (`TailFollowRule`).
+            .modifier(UserScrollPhase(changed: { scrolling in
+                if scrolling, !follow.userScrolling { follow.scrolledUp = 0 }
+                follow.userScrolling = scrolling
+                follow.lastUserScroll = Date()
+                guard !scrolling else { return }
+                switch TailFollowRule.atRest(sticky: follow.sticky, atBottom: atBottom(follow.tailY)) {
+                case .follow: follow.sticky = true      // stopped at the end: follow again
+                case .snap: snap(proxy)                 // a row grew while scrolling
+                case .none: break
+                }
+            }, offsetMoved: { delta in
+                guard follow.userScrolling else { return }
+                follow.scrolledUp = TailFollowRule.upwardRun(follow.scrolledUp, adding: delta)
+                if TailFollowRule.releases(userScrolling: true, offsetDelta: follow.scrolledUp,
+                                           tailY: follow.tailY, viewport: viewport) {
+                    follow.sticky = false
+                }
+            }))
             .onAppear { snap(proxy) }
             .onChange(of: changeKey) { _, _ in if follow.sticky { snap(proxy) } }
             // The watchdog: a layout pass that reported nothing new still
@@ -1567,6 +1627,14 @@ struct TailFollowingScroll<Content: View>: View {
     private func tailMoved(_ y: CGFloat, _ proxy: ScrollViewProxy) {
         follow.tailY = y
         guard viewport > 0 else { return }
+        if follow.userScrolling {
+            // The user's own scroll, by whatever input: never snapped back
+            // mid-gesture. Whether it let go is the offset's to say
+            // (`offsetMoved`), not the end's position: a row growing moves
+            // that too.
+            follow.lastUserScroll = Date()
+            return
+        }
         if follow.sticky {
             // Not the user: the end moved because rows were measured.
             if !follow.userRecent, !atBottom(y) { snap(proxy) }
@@ -1580,6 +1648,31 @@ struct TailFollowingScroll<Content: View>: View {
         guard Date().timeIntervalSince(follow.lastSnap) > 0.15 else { return }
         follow.lastSnap = Date()
         DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+    }
+}
+
+/// Reports whether the user is moving the scroll view: touch, trackpad and
+/// mouse-wheel scrolling all go through the scroll phase (iOS 18+), where a
+/// `DragGesture` sees only touch. Programmatic scrolls (`.animating`), a
+/// touch that hasn't moved yet (`.tracking`) and rest (`.idle`) aren't the
+/// user scrolling.
+private struct UserScrollPhase: ViewModifier {
+    let changed: (Bool) -> Void
+    /// The scroll offset's change (negative: toward the top).
+    let offsetMoved: (CGFloat) -> Void
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, visionOS 2.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                // Not `.tracking`: a finger resting on the chat while rows
+                // arrive hasn't scrolled anywhere.
+                changed(phase == .interacting || phase == .decelerating)
+            }
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { old, new in
+                offsetMoved(new - old)
+            }
+        } else {
+            content
+        }
     }
 }
 
@@ -1633,102 +1726,3 @@ enum TranscriptWindow {
     }
 }
 
-// MARK: - A transcript read incrementally
-
-/// One transcript file read the way the desktop's chat reads it
-/// (`CodingTaskEngine.transcriptChunkCommand`): a first window from the
-/// end, then only the bytes appended since, and earlier history on
-/// demand. The old reader re-tailed the last 300 KB every poll -- which
-/// tool output fills, so a phone showed only the last few messages and
-/// had no way to reach the rest.
-@MainActor
-final class TranscriptFeed {
-    static let windowBytes = 1_000_000
-
-    private var path: String?
-    private var data = Data()
-    private var base = 0
-    private var end = 0
-    private var pq = Data()
-    private var generation = 0
-    private(set) var items: [TranscriptItem] = []
-    var canLoadEarlier: Bool { path != nil && base > 0 }
-
-    /// Builds the guest command: known path, offset, window bytes, earlier.
-    typealias Command = (String?, Int, Int, Bool) -> String?
-    typealias Exec = (String) async -> String?
-
-    private struct Fetch { let path: String; let pq: Data; let start: Int; let end: Int; let chunk: Data }
-
-    /// Header = 5 lines (path, pending question, size, start, end), then
-    /// the bytes. nil for empty output (no transcript file).
-    private static func parse(_ raw: String) -> Fetch? {
-        let d = Data(raw.utf8)
-        var cuts: [Int] = []
-        var i = d.startIndex
-        while cuts.count < 5, i < d.endIndex, let nl = d[i...].firstIndex(of: 0x0A) {
-            cuts.append(nl)
-            i = nl + 1
-        }
-        guard cuts.count == 5 else { return nil }
-        func field(_ k: Int) -> Data { Data(d[(k == 0 ? d.startIndex : cuts[k - 1] + 1)..<cuts[k]]) }
-        func int(_ k: Int) -> Int? { Int(String(decoding: field(k), as: UTF8.self).trimmingCharacters(in: .whitespaces)) }
-        let path = String(decoding: field(0), as: UTF8.self)
-        guard !path.isEmpty, let start = int(3), let end = int(4) else { return nil }
-        return Fetch(path: path, pq: field(1), start: start, end: end, chunk: Data(d[(cuts[4] + 1)...]))
-    }
-
-    /// The new bytes since the last read. nil when the read failed (keep
-    /// what's on show); otherwise the conversation.
-    func refresh(agent: String?, command: Command, exec: Exec) async -> [TranscriptItem]? {
-        let knownPath = path, knownEnd = end
-        guard let cmd = command(knownPath, knownEnd, Self.windowBytes, false), let raw = await exec(cmd) else { return nil }
-        // Another read (a send's refresh beside the poll) landed meanwhile:
-        // this one's bytes are already held, or would be appended twice.
-        guard path == knownPath, end == knownEnd else { return items }
-        var changed = false
-        if let f = Self.parse(raw) {
-            if f.pq != pq { pq = f.pq; changed = true }
-            if path == f.path, f.start == end {
-                if !f.chunk.isEmpty { data.append(f.chunk); end = f.end; changed = true }
-            } else {
-                // First read, another file, or too far behind: start over.
-                path = f.path; data = f.chunk; base = f.start; end = f.end
-                changed = true
-            }
-        } else if path != nil || !items.isEmpty {
-            path = nil; data = Data(); pq = Data(); base = 0; end = 0
-            changed = true
-        }
-        if changed { await reparse(agent: agent) }
-        return items
-    }
-
-    /// The conversation before what's held, put in front. False when
-    /// nothing came (or the history moved meanwhile).
-    @discardableResult
-    func loadEarlier(agent: String?, command: Command, exec: Exec) async -> Bool {
-        guard let held = path, base > 0, let cmd = command(held, base, Self.windowBytes, true),
-              let raw = await exec(cmd), let f = Self.parse(raw),
-              f.path == path, f.end == base, !f.chunk.isEmpty
-        else { return false }
-        data = f.chunk + data
-        base = f.start
-        await reparse(agent: agent)
-        return true
-    }
-
-    private func reparse(agent: String?) async {
-        generation &+= 1
-        let gen = generation
-        var input = data
-        if !pq.isEmpty { input.append(0x0A); input.append(pq); input.append(0x0A) }
-        let parsed = await Task.detached(priority: .userInitiated) {
-            AgentTranscript.parse(input, agent: agent)
-        }.value
-        // A later read parsed newer history meanwhile: it wins.
-        guard gen == generation else { return }
-        TranscriptMarkdownCache.prewarm(parsed)
-        items = parsed
-    }
-}

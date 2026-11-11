@@ -355,6 +355,9 @@ public final class SecurityTimeline {
         events.removeAll()
         remote.removeAll()
         fetched.removeAll()
+        // The next mirror is news again (it refills the hosts' buckets, as before).
+        lastMirror.removeAll()
+        mirrorRowEvents.removeAll()
         if directory != nil {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
         }
@@ -551,9 +554,37 @@ public final class SecurityTimeline {
     /// only `oldestRetained`, its first row's time.
     public func applyMirror(_ rows: [[String: Any]], host: String, oldestRetained: Date? = nil,
                             oldestSeq: Int? = nil, epoch: String? = nil) {
-        let mirror = Self.events(rows, host: host)
+        let input = MirrorInput(rows: rows as NSArray, oldestRetained: oldestRetained, oldestSeq: oldestSeq,
+                                epoch: epoch, historyVersion: historyVersion[host] ?? 0)
+        if let last = lastMirror[host], last.historyVersion == input.historyVersion,
+           last.oldestRetained == oldestRetained, last.oldestSeq == oldestSeq, last.epoch == epoch,
+           last.rows.isEqual(to: rows) {
+            return
+        }
+        // Decoded afresh only for rows not in the last mirror.
+        let known = mirrorRowEvents[host] ?? [:]
+        var decoded: [NSDictionary: Event] = [:]
+        var mirror: [Event] = []
+        mirror.reserveCapacity(rows.count)
+        for r in rows {
+            let key = r as NSDictionary
+            // A row seen twice in one mirror is two events: one id each.
+            if decoded[key] == nil, let e = known[key] {
+                decoded[key] = e
+                mirror.append(e)
+            } else if let e = Self.events([r], host: host).first {
+                if decoded[key] == nil { decoded[key] = e }
+                mirror.append(e)
+            }
+        }
+        mirrorRowEvents[host] = decoded
+        defer { lastMirror[host] = MirrorInput(rows: input.rows, oldestRetained: oldestRetained, oldestSeq: oldestSeq,
+                                               epoch: epoch, historyVersion: historyVersion[host] ?? 0) }
         // No rows: the host holds none -- its bucket empties, history too.
-        if mirror.isEmpty { fetched[host] = nil; fetchedEpoch[host] = nil }
+        if mirror.isEmpty {
+            if fetched[host] != nil { historyVersion[host, default: 0] += 1 }
+            fetched[host] = nil; fetchedEpoch[host] = nil
+        }
         let retention: Retention
         if let oldestSeq, let epoch {
             // Numbers from another run of the host (it restarted since the
@@ -594,12 +625,34 @@ public final class SecurityTimeline {
     /// The run of the host each fetched history came from.
     @ObservationIgnored private var fetchedEpoch: [String: String] = [:]
 
+    /// The last mirror applied per host, as it came (rows and retention
+    /// words) and against which fetched history: the same again changes
+    /// nothing, so it isn't decoded, merged or published again. A fat client
+    /// gets one with every snapshot, several a second, and rebuilding it each
+    /// time redrew the open timeline window from scratch -- most of the main
+    /// thread while typing.
+    private struct MirrorInput {
+        let rows: NSArray
+        let oldestRetained: Date?
+        let oldestSeq: Int?
+        let epoch: String?
+        let historyVersion: Int
+    }
+    @ObservationIgnored private var lastMirror: [String: MirrorInput] = [:]
+    /// Bumped when a host's fetched history is replaced.
+    @ObservationIgnored private var historyVersion: [String: Int] = [:]
+    /// The events the last mirror's rows decoded to, by row: an unchanged row
+    /// keeps its event -- and its `id`, so the window's table sees one new
+    /// row, not all of them replaced -- and isn't redacted again.
+    @ObservationIgnored private var mirrorRowEvents: [String: [NSDictionary: Event]] = [:]
+
     /// A host's full history for the window's range (fetched): replaces its
     /// bucket. Later mirrors merge into it.
     public func applyHistory(_ rows: [[String: Any]], host: String, epoch: String? = nil) {
         let history = Self.events(rows, host: host)
         fetched[host] = history
         fetchedEpoch[host] = epoch
+        historyVersion[host, default: 0] += 1
         remote[host] = history
     }
 

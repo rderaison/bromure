@@ -3940,6 +3940,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
+        // Host sleep stops the guests' clocks; set them right on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let n = UbuntuSandboxVM.resyncClocksAfterHostWake()
+                if n > 0 {
+                    FileHandle.standardError.write(Data(
+                        "[ac] Mac woke: resyncing the clock of \(n) VM(s)\n".utf8))
+                }
+            }
+        }
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
         // the folder the user knows (~/<name>).
         GuestSharePaths.resolver = { [weak self] id in
@@ -4061,6 +4073,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // calls out through this observer.
         // Read here, on the main thread: the observer runs on the switch's.
         let egressEngine = mitmEngine
+        // Network lineage names a direct flow's address by what the guest's
+        // DNS answers called it (an agent's own fetch names a host).
+        NetworkLineage.shared.hostNames = { VMNetSwitch.shared.hostnames(forIP: $0) }
+        NetworkLineage.shared.queriedHostNames = { VMNetSwitch.shared.queriedHostnames(forIP: $0) }
         VMNetSwitch.shared.setEgressObserver { ev in
             let proto = ev.proto == 6 ? "tcp" : ev.proto == 17 ? "udp" : ev.proto == 41 ? "ipv6" : "ip\(ev.proto)"
             let host = ev.proto == 41 ? "(no IPv6 rules)"
@@ -14279,17 +14295,157 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// still reads after a restart drops the clients' caches. NOT a session
     /// the task was handed to (`assignment`): that conversation is mostly
     /// the session's other work; such a task reports through its delivery.
-    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
-        if let archived = TaskTranscriptArchive.load(task.id) { return archived }
-        if let sid = task.sessionID, let s = agentSessionStore.session(sid),
-           let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty {
-            return String(decoding: data, as: UTF8.self)
+    ///
+    /// `forArchive` (the Done archive, which every later read takes first):
+    /// the guest's full transcript before the session copy -- that copy is a
+    /// cache seeded from a tail plus a live tail, and can lack the start of
+    /// a long conversation; archived, the loss would be permanent. The
+    /// session copy is then only the fallback when no full read answers.
+    func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
+        for source in TaskTranscriptArchive.readOrder(forArchive: forArchive) {
+            let text: String?
+            var pinned: String?
+            switch source {
+            case .archive: text = TaskTranscriptArchive.load(task.id)
+            case .session: text = await taskSessionTranscript(task)
+            case .guest:
+                let full = await fullTaskTranscript(task)
+                text = full?.text
+                pinned = full?.pinnedID
+            }
+            guard let text, !text.isEmpty else { continue }
+            // The full read stops at its cap (the file's first 25 MB): the
+            // archive re-reads the file whole, then joins the session copy's
+            // tail where the two share records. Over the whole read's
+            // ceiling (or unreadable so), sharing none: the head and that
+            // tail both -- the end is where the final report is -- never the
+            // head alone (Finding "Capped transcript head is archived when
+            // the session tail does not overlap") -- and only when the read
+            // was of the session's own conversation (Finding "Capped
+            // archive can append an unrelated session transcript").
+            if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text) {
+                let whole = await wholeGuestTranscript(task, head: text, pinnedID: pinned)
+                let tail = await taskSessionTranscript(task)
+                let same = TaskTranscriptArchive.sameConversation(
+                    pinnedID: pinned, tool: task.tool.rawValue, head: text, sessionTail: tail)
+                let kept = TaskTranscriptArchive.archiveJoin(
+                    whole: whole?.data ?? Data(text.utf8), complete: whole?.complete ?? false,
+                    sessionTail: tail.map { Data($0.utf8) }, sameConversation: same)
+                return String(decoding: kept, as: UTF8.self)
+            }
+            return text
         }
+        return nil
+    }
+
+    /// The guest transcript a capped full read came from, re-read whole in
+    /// exact chunks up to `wholeReadCeiling`. `complete`: it reached the
+    /// file's end. nil when unreadable, or not the same file as `head`.
+    /// `pinnedID`: the conversation `head` was read by -- that file again,
+    /// not the worktree's newest.
+    private func wholeGuestTranscript(_ task: CodingTask, head: String,
+                                      pinnedID: String?) async -> (data: Data, complete: Bool)? {
+        let locate: String
+        if let pinnedID {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: pinnedID, into: "f")
+            guard !pick.isEmpty else { return nil }
+            locate = "f=\"\"; " + pick
+        } else {
+            guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
+                  let byBranch = CodingTaskEngine.taskTranscriptLocate(branch: branch, agent: task.tool)
+            else { return nil }
+            locate = byBranch
+        }
+        let chunk = TaskTranscriptArchive.wholeReadChunk
+        var data = Data()
+        while data.count < TaskTranscriptArchive.wholeReadCeiling {
+            let cmd = locate + TaskTranscriptArchive.chunkEmit(offset: data.count, bytes: chunk)
+            guard let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 60),
+                  let d = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines))
+            else {
+                // The workspace is off (the capped head came from the home
+                // image): the pinned file from there, past the cap (Finding
+                // "Pinned transcript head is truncated when the chunk reader
+                // selects a newer conversation").
+                guard data.isEmpty, let pinnedID else { return nil }
+                return await wholeImageTranscript(task, head: head, conversationID: pinnedID)
+            }
+            if data.isEmpty, !TaskTranscriptArchive.samePrefix(head, d) { return nil }
+            data.append(d)
+            if d.count < chunk { return (data, true) }
+        }
+        return (data, false)
+    }
+
+    /// `wholeGuestTranscript` with the workspace off: conversation `id`'s
+    /// file read from the home image (Claude only, as `fullTaskTranscript`'s
+    /// offline read), up to `wholeReadCeiling`. nil when unreadable, or not
+    /// the file `head` came from.
+    private func wholeImageTranscript(_ task: CodingTask, head: String,
+                                      conversationID id: String) async -> (data: Data, complete: Bool)? {
+        guard task.tool == .claude,
+              let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+        let img = store.homeImageURL(for: profile)
+        guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+        let ceiling = TaskTranscriptArchive.wholeReadCeiling
+        guard let r = await Task.detached(priority: .userInitiated, operation: {
+            Self.ext4TranscriptData(imagePath: img.path, conversationID: id, limit: ceiling)
+        }).value, TaskTranscriptArchive.samePrefix(head, r.data) else { return nil }
+        return (r.data, r.size <= UInt64(r.data.count))
+    }
+
+    /// The host's copy of the task's own session (cache + live tail).
+    private func taskSessionTranscript(_ task: CodingTask) async -> String? {
+        guard let sid = task.sessionID, let s = agentSessionStore.session(sid),
+              let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The task's whole transcript file. Its own session's conversation by
+    /// id when that session learned one -- the guest's file, else (Claude,
+    /// workspace off) the home image's -- and never the worktree's newest
+    /// file then: another conversation started in the same worktree before
+    /// the Done archive ran would be saved as this task's, for good
+    /// (Finding "Archiving can save a newer conversation from the same
+    /// worktree"). Without an id: by branch, as before, but not a file that
+    /// is another session's conversation. `pinnedID`: the conversation id
+    /// the file was read by (nil for the by-branch lookups).
+    private func fullTaskTranscript(_ task: CodingTask) async -> (text: String, pinnedID: String?)? {
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
-        // Kimi: the session's own journal by id, when the task's session
-        // learned it — no folder/slug guessing (Kimi cuts bucket names).
-        if task.tool == .kimi {
+        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
+        let own = task.sessionID.flatMap { agentSessionStore.session($0) }?.agentTranscriptID
+        if let id = own {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: id, into: "f")
+            if !pick.isEmpty {
+                if let out = try? await guestExec(profileID: task.profileID, command: "f=\"\"; " + pick + emit,
+                                                  timeout: 30),
+                   !out.isEmpty {
+                    return (out, id)
+                }
+                guard task.tool == .claude,
+                      let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+                let img = store.homeImageURL(for: profile)
+                guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+                return await Task.detached(priority: .userInitiated) {
+                    Self.ext4Transcript(imagePath: img.path, conversationID: id)
+                }.value.map { ($0, id) }
+            }
+        }
+        let others = Set(agentSessionStore.sessions.compactMap { s -> String? in
+            guard s.id != task.sessionID, s.profileID == task.profileID else { return nil }
+            return s.agentTranscriptID?.lowercased()
+        })
+        func mine(_ text: String) -> (text: String, pinnedID: String?)? {
+            TaskTranscriptArchive.fallbackBelongs(text, tool: task.tool.rawValue, otherConversationIDs: others)
+                ? (text, nil) : nil
+        }
+        // Kimi, a task with no session of its own: the worktree session's
+        // journal by id — no folder/slug guessing (Kimi cuts bucket names).
+        // (A task's own session without an id yet: any other session here
+        // with one is another conversation.)
+        if task.tool == .kimi, task.sessionID == nil {
             let slug = String(branch.dropFirst(3))
             if let id = agentSessionStore.sessions.first(where: { s in
                 s.profileID == task.profileID
@@ -14300,7 +14456,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
                 if let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 30),
                    !out.isEmpty {
-                    return out
+                    return (out, nil)
                 }
             }
         }
@@ -14309,7 +14465,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let out = try? await guestExec(profileID: task.profileID,
                                           command: cmd, timeout: 30),
            !out.isEmpty {
-            return out
+            return mine(out)
         }
         // Offline: read the image directly (read-only; safe even if a VM
         // has the disk attached — same tolerance as the ext4 browser).
@@ -14324,7 +14480,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let guestCwd = ScheduledAutomationEngine.guestPath(task.repoPath)
         return await Task.detached(priority: .userInitiated) {
             Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
-        }.value
+        }.value.flatMap(mine)
     }
 
     /// The folders inside `path` ("~", "~/proj", an absolute guest path)
@@ -14438,6 +14594,36 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// home.img: candidate project dirs are any `*-<slug>` (worktree
     /// sessions) plus the Claude-encoded cwd (plain-tab sessions); the
     /// newest `.jsonl` by inode mtime wins. Pure file IO — run detached.
+    /// Claude conversation `id`'s transcript in the home image, whichever
+    /// project folder holds it.
+    nonisolated static func ext4Transcript(imagePath: String, conversationID id: String) -> String? {
+        guard let r = ext4TranscriptData(imagePath: imagePath, conversationID: id,
+                                         limit: TaskTranscriptArchive.fullReadCap)
+        else { return nil }
+        return String(decoding: r.data, as: UTF8.self)
+    }
+
+    /// Claude conversation `id`'s transcript in the home image: its first
+    /// `limit` bytes, exact, and the file's whole size. nil when absent or
+    /// empty. (The capped archive read continues the pinned file past
+    /// `fullReadCap` this way when the workspace is off.)
+    nonisolated static func ext4TranscriptData(imagePath: String, conversationID id: String,
+                                               limit: Int) -> (data: Data, size: UInt64)? {
+        guard AgentSessionLocator.isConversationUUID(id),
+              let vol = try? Ext4Volume(path: imagePath),
+              let projIno = try? vol.resolve("/.claude/projects"),
+              let entries = try? vol.listDir(projIno) else { return nil }
+        for entry in entries where entry.name != "." && entry.name != ".." {
+            guard let dirInode = try? vol.inode(entry.ino), dirInode.isDir,
+                  let files = try? vol.listDir(entry.ino),
+                  let f = files.first(where: { $0.name == id + ".jsonl" }),
+                  let ino = try? vol.inode(f.ino), ino.isRegular,
+                  let data = try? vol.readData(ino, limit: limit), !data.isEmpty else { continue }
+            return (Data(data.prefix(limit)), ino.size)
+        }
+        return nil
+    }
+
     nonisolated static func ext4Transcript(imagePath: String, slug: String,
                                            guestCwd: String) -> String? {
         guard slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" }),
@@ -15853,7 +16039,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // re-opens. Nothing is added to the session allowlist.
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15872,7 +16058,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                 "scope": .string("session"), "unmanaged": .bool(true)])
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15895,7 +16081,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -16217,9 +16403,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             case 2:
                 sandbox.setNetworkQuarantined(false)
                 AgentWatchdog.shared.release(profileID: pid)
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = sandbox.vm, vm.state == .paused, (try? await vm.resume()) != nil { sandbox.signalClockResync() }
             case 1:
-                if let vm = sandbox.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = sandbox.vm, vm.state == .paused, (try? await vm.resume()) != nil { sandbox.signalClockResync() }
             default:
                 // A forced stop (the guest is paused and untrusted, so no clean
                 // poweroff) fires no delegate callback: finish the teardown here,

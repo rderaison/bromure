@@ -25,6 +25,7 @@ SHARED = [
     # Transport + protocol
     "FatClient.swift",
     "FatClientTypes.swift",
+    "BulkLanePriority.swift",  # the chat on screen reads before background ones (bulk lane)
     "FatClientLinkHealth.swift",  # adaptive timeouts + reconnect hysteresis + link simulation
     "FatClientSSHDial.swift",
     "FatClientNIOSSH.swift",
@@ -91,6 +92,8 @@ SHARED = [
     "AutomationRunWindow.swift",
     "AutomationRunArchive.swift",
     "ClaudeTranscriptView.swift",
+    "TranscriptFeed.swift",      # the iOS readers' bounded incremental transcript feed
+    "TailFollowRule.swift",      # when an iOS chat lets go of its end, and takes it up again
     "TranscriptActivity.swift",
     "MermaidFence.swift",
     "DisplayCards.swift",  # display-MCP cards (show_media / show_chart); vega bundled via gen-ios-project.py  # ```mermaid fences; web view is #if AppKit/UIKit, iOS has no bundle → code-fence fallback

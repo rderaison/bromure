@@ -808,3 +808,12 @@
 /* Profile settings › General: the profile Bromure opens at launch */
 "Default Profile" = "Profil par défaut";
 "Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "Bromure ouvre ce profil lorsque vous le lancez, cliquez sur son icône dans le Dock ou appuyez sur ⌘N sans fenêtre de navigateur au premier plan, au lieu du dernier profil utilisé.";
+
+/* Launch picker: profile + network for the first session */
+"Profile" = "Profil";
+"Shares your Mac's connection" = "Partage la connexion de votre Mac";
+"Bridged on %@ · its own address on that network" = "Pont sur %@ · sa propre adresse sur ce réseau";
+"Start a Browser Session" = "Démarrer une session de navigation";
+"Choose a profile and the network it connects through." = "Choisissez un profil et le réseau par lequel il se connecte.";
+"Shared (NAT)" = "Partagé (NAT)";
+"Bridged — %@" = "Pont — %@";

@@ -75,6 +75,22 @@ The existing `connect` kind can stay for the attestor cross-check, or be retired
    at least 8 characters), `likely` (the same, shorter: `id`, `ls -la`), `fuzzy` (first
    word + timing + agent ancestry), `none`. Of several matching calls, the longest
    command wins (newest on a tie), so a short one never claims a longer one's shell.
+   - **In-process shells** (omp runs Bash in brush, inside its own process): no shell exec
+     carries the command; each program in it is exec'd by the agent with its own words only
+     (`curl -s URL` of `cd /tmp && curl -s URL | head`). A child of the agent (the pid its hook
+     named) is linked to the call whose command holds its argv's words, whole and in order.
+   - **Late calls.** A hook line comes through the outbox (~0.7 s), and omp doesn't wait for its
+     hook, so the command often starts before the host hears of the call. A flow none of whose
+     processes is linked is looked at again (up to 3 more times, `decisionWait` apart) while one
+     of them started within 3 s; only the agent's descendants are considered, never the agent
+     itself or what launched it (their argv can quote a command). The timing link (the agent's
+     next child after a command call) waits for the last look, after every match by words.
+   - **The agent's own fetch** (Claude's WebFetch, omp's `read` of a URL): a flow whose process
+     *is* the agent goes to the agent's recent call that runs no command and names the flow's
+     host: the decision's host, or any name the guest's DNS answers gave the address (the switch's
+     decision report is rate-limited, so a direct flow often carries only its IP). The exact host
+     outranks a subdomain, then the newest. A Bash `curl https://api.github.com` never claims the
+     agent's own connection to github.com.
 4. **Flow ↔ decision.** Match the switch's egress decision on (proto, dst, dport, and sport when
    present) within 5 s; the L7 (MITM) decision for the same 5-tuple when it was inspected.
    ICMP isn't filtered: `decision: "unfiltered"`.

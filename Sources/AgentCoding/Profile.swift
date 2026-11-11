@@ -5827,8 +5827,14 @@ public final class ProfileStore {
                     break
                 stat = proc(pid, "stat").decode(errors="replace")
                 pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
-            argv = proc(pid, "cmdline").replace(b"\0", b" ").decode(errors="replace").lower()
-            agent = next((a for a in ("claude", "codex", "kimi", "grok", "omp") if a in argv), "")
+            raw = proc(pid, "cmdline").split(b"\0")
+            argv = b" ".join(raw).decode(errors="replace").lower()
+            names = ("claude", "codex", "kimi", "grok", "omp")
+            # The program first (bun /usr/bin/omp …): anywhere in argv, the
+            # model of omp (--model anthropic/claude-…) read as Claude.
+            progs = [os.path.basename(w.decode(errors="replace").lower()) for w in raw[:2]]
+            agent = next((a for a in names if any(p == a or p.startswith(a + ".") for p in progs)), "") \
+                or next((a for a in names if a in argv), "")
             if not agent:
                 agent = "grok" if os.environ.get("GROK_HOOK_EVENT") else \
                     ("kimi" if str(e.get("client_type", "")).startswith("kimi") else "")

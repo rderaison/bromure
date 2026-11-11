@@ -8556,10 +8556,11 @@ def task_reapply_binfmt():
 
 
 def resume_watcher_service():
-    """Resume-time clock resync: VZ freezes CLOCK_REALTIME during
-    saveMachineState, so on resume the wall clock lags until timesyncd notices.
-    The host writes the current Unix ts into /mnt/bromure-meta/.resume-signal
-    right after vm.resume(); we set the clock when the signal is AHEAD of our
+    """Clock resync: VZ freezes CLOCK_REALTIME during saveMachineState and
+    while the Mac sleeps, and the image runs no time daemon, so the wall clock
+    stays behind. The host writes the current Unix ts into
+    /mnt/bromure-meta/.resume-signal right after vm.resume() and when the Mac
+    wakes; we set the clock when the signal is AHEAD of our
     own clock. Polling (not inotify): virtiofs doesn't reliably deliver inotify
     for host-side writes. Absorbs both the old root systemd watcher and the
     spice respawner (spice is gone).
@@ -8585,9 +8586,13 @@ def resume_watcher_service():
             ts = ""
         if ts and ts != last:
             last = ts
-            if ts.isdigit() and int(ts) > time.time():
-                _sudo(["date", "-u", "-s", "@" + ts])
-                log("resume", "clock set (target ts=%s)" % ts)
+            if not _have_sudo():
+                pass    # strict: attestd (root) applies it
+            elif ts.isdigit() and int(ts) > time.time():
+                if _sudo(["date", "-u", "-s", "@" + ts]).returncode == 0:
+                    log("resume", "clock set (target ts=%s)" % ts)
+                else:
+                    log("resume", "could not set the clock (target ts=%s)" % ts)
             else:
                 log("resume", "ignoring stale/non-forward signal: %r" % ts)
         time.sleep(2)

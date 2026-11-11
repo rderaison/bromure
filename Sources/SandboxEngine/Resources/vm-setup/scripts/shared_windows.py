@@ -685,26 +685,49 @@ class Controller:
             raise ValueError('physical geometry must align with common display scale')
         bounds = dict(left=rect['x'] // self.scale, top=rect['y'] // self.scale,
                       width=rect['width'] // self.scale, height=rect['height'] // self.scale)
-        deadline = time.monotonic() + 3
         initial = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
         def wait_bounds(phase, matches):
+            deadline = time.monotonic() + 3
             while True:
                 actual = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
                 if matches(actual):
-                    return
+                    return actual
                 if time.monotonic() >= deadline:
                     evidence = dict(windowId=wid, phase=phase, scale=self.scale,
                                     requested=bounds, initial=initial, observed=actual)
                     raise RuntimeError('Chromium window bounds did not converge: ' + json.dumps(evidence, sort_keys=True))
                 time.sleep(.05)
 
+        def at(actual, state):
+            return (actual.get('windowState') == state and
+                    all(actual.get(key) == bounds[key] for key in ('left', 'top', 'width', 'height')))
+
+        def clamped(actual):
+            # The 1px clamp below, which can also nudge the origin by up to
+            # 1px while the window stays inside its output.
+            return (actual.get('windowState') == 'normal' and
+                    actual.get('width') == bounds['width'] - 1 and
+                    actual.get('height') == bounds['height'] - 1 and
+                    actual.get('left') in (bounds['left'], bounds['left'] + 1) and
+                    actual.get('top') in (bounds['top'], bounds['top'] + 1))
+
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
         # Chromium restores a non-normal window INSTEAD of applying numeric
         # bounds. Observe the asynchronous restore before sending geometry.
         wait_bounds('restore', lambda actual: actual.get('windowState') == 'normal')
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
-        wait_bounds('geometry', lambda actual: actual.get('windowState') == 'normal' and
-                    all(actual.get(key) == value for key, value in bounds.items()))
+        actual = wait_bounds('geometry', lambda actual: at(actual, 'normal') or clamped(actual))
+        if at(actual, 'normal'):
+            return
+        # Chromium's X11 backend (X11Window::AdjustSizeForDisplay) shrinks a
+        # normal window whose size equals a display's by 1px on each axis, so
+        # a WM won't take it for fullscreen — and every shared window is
+        # exactly its own RandR output. Whether it fires depends on Chromium
+        # having seen the new mode yet. It skips maximized windows, and
+        # Openbox (no struts in the guest) maximizes to the output's full
+        # rect, so maximize the window on the output it now sits on.
+        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'maximized'}})
+        wait_bounds('maximize', lambda actual: at(actual, 'maximized'))
 
     def apply_topology(self, topology, prospective=None):
         rows, root = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
@@ -850,7 +873,25 @@ class Controller:
             self.bindings[index] = wid
             if cmd == 'attachPrimary':
                 self.active.setdefault(wid, self.groups[wid][0]['id'])
-            self.place(wid, active[index])
+            try:
+                self.place(wid, active[index])
+            except Exception:
+                if cmd != 'resize':
+                    # Free the scanout so the host can retry; a window this
+                    # command created and never placed is closed, not orphaned.
+                    self.bindings.pop(index, None)
+                    if cmd == 'create':
+                        self.active.pop(wid, None)
+                        # Best effort: the placement error is what the host
+                        # must see, never a cleanup failure.
+                        try:
+                            self.refresh()
+                            for target in list(self.groups.get(wid, [])):
+                                self.call('Target.closeTarget', {'targetId': target['id']})
+                            self.refresh()
+                        except Exception:
+                            pass
+                raise
             return {'windowId': wid, 'targetId': self.active.get(wid)}
         integer(wid, 1, SAFE_INTEGER, 'windowId')
         if wid not in self.groups:

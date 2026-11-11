@@ -931,7 +931,7 @@ final class CodingTaskStore {
 /// What ties a read to ONE conversation when the agent's store is keyed by
 /// folder (Kimi): the session id once known, else the earliest moment its
 /// journal may have been begun.
-struct TranscriptPin: Equatable, Sendable {
+struct TranscriptPin: Hashable, Sendable {
     /// Kimi's "session_<uuid>": read that session's journal, nothing else.
     var kimiSession: String? = nil
     /// Epoch seconds: a Kimi journal begun before this is another
@@ -1217,6 +1217,26 @@ enum AgentSessionLocator {
         s.count == 36 && UUID(uuidString: s) != nil
     }
 
+    /// `$varName` = Claude conversation `id`'s transcript, whatever project
+    /// folder it's under (Claude names the file after the conversation).
+    nonisolated static func claudePinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(ls -t \"$HOME\"/.claude/projects/*/\(id).jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = the transcript of conversation `id` for `tool` (a
+    /// `Profile.Tool` raw value), "" for a tool or id no file is named by.
+    nonisolated static func pinnedFragment(tool: String, id: String, into varName: String) -> String {
+        switch tool {
+        case "claude": return claudePinnedFragment(id: id, into: varName)
+        case "kimi": return kimiPinnedFragment(id: id, into: varName)
+        case "grok": return grokPinnedFragment(id: id, into: varName)
+        case "codex": return codexPinnedFragment(id: id, into: varName)
+        case "omp": return ompPinnedFragment(id: id, into: varName)
+        default: return ""
+        }
+    }
+
     /// `$varName` = Grok session `id`'s transcript, whatever folder it's under.
     nonisolated static func grokPinnedFragment(id: String, into varName: String) -> String {
         guard isConversationUUID(id) else { return "" }
@@ -1349,6 +1369,44 @@ enum AgentSessionLocator {
         let ks = field(2)
         let since = Int(field(1)) ?? 0
         return (cwd, since, isKimiSessionID(ks) ? ks : nil, field(3) == "1", Int(field(4)) ?? since)
+    }
+
+    /// The shell that resolves `$f` -- the transcript a tab's agent is
+    /// writing: the session's own conversation by id (`pin`), else the file
+    /// the window's agent named (`pinnedWindow`), else the folder's newest
+    /// (floored by `since`). A pin whose file isn't there yet sets `$pe` and
+    /// the read stays empty: never another session's conversation. One
+    /// copy for the macOS engine and the fat client.
+    nonisolated static func locatePrefix(
+        path: String, since: Int, agent: String?, pinnedWindow: Int?,
+        pin: TranscriptPin = TranscriptPin()) -> String {
+        var cmd = "f=\"\"; pe=\"\"; "
+        // Kimi records no per-window path, so the session's own id (pinned
+        // by the engine once this launch's journal appeared) names its file.
+        if agent == "kimi", let id = pin.kimiSession, isKimiSessionID(id) {
+            cmd += kimiPinnedFragment(id: id, into: "f")
+        } else if agent == "grok", let id = pin.grokSession, isConversationUUID(id) {
+            // The session's own conversation, or nothing yet (`pe`): never
+            // the folder's newest, which may be another session's.
+            cmd += grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "codex", let id = pin.codexSession, isConversationUUID(id) {
+            cmd += codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "omp", let id = pin.ompSession, isConversationUUID(id) {
+            cmd += ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if let w = pinnedWindow {
+            // The transcript the tab's agent itself named (its hook records the
+            // path per window — see agent-status.sh) wins over "the newest file
+            // in the folder": two agents in one folder (a delegate beside its
+            // delegator) would otherwise take turns owning each other's view.
+            // Still floored: a file older than this process is another's.
+            cmd += pinnedPick(window: w, since: since)
+        }
+        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
+            + locateBlock(path: path, since: since, agent: agent,
+                                              kimiCreatedSince: pin.kimiCreatedSince,
+                                              kimiExclude: pin.kimiExclude)
+            + "fi; "
+        return cmd
     }
 
     /// Sets `$varName` to the transcript the agent in tmux window `window`
@@ -3802,33 +3860,8 @@ final class CodingTaskEngine {
     private nonisolated static func transcriptLocatePrefix(
         path: String, since: Int, agent: String?, pinnedWindow: Int?,
         pin: TranscriptPin = TranscriptPin()) -> String {
-        var cmd = "f=\"\"; pe=\"\"; "
-        // Kimi records no per-window path, so the session's own id (pinned
-        // by the engine once this launch's journal appeared) names its file.
-        if agent == "kimi", let id = pin.kimiSession, AgentSessionLocator.isKimiSessionID(id) {
-            cmd += AgentSessionLocator.kimiPinnedFragment(id: id, into: "f")
-        } else if agent == "grok", let id = pin.grokSession, AgentSessionLocator.isConversationUUID(id) {
-            // The session's own conversation, or nothing yet (`pe`): never
-            // the folder's newest, which may be another session's.
-            cmd += AgentSessionLocator.grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if agent == "codex", let id = pin.codexSession, AgentSessionLocator.isConversationUUID(id) {
-            cmd += AgentSessionLocator.codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if agent == "omp", let id = pin.ompSession, AgentSessionLocator.isConversationUUID(id) {
-            cmd += AgentSessionLocator.ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if let w = pinnedWindow {
-            // The transcript the tab's agent itself named (its hook records the
-            // path per window — see agent-status.sh) wins over "the newest file
-            // in the folder": two agents in one folder (a delegate beside its
-            // delegator) would otherwise take turns owning each other's view.
-            // Still floored: a file older than this process is another's.
-            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
-        }
-        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent,
-                                              kimiCreatedSince: pin.kimiCreatedSince,
-                                              kimiExclude: pin.kimiExclude)
-            + "fi; "
-        return cmd
+        AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                         pinnedWindow: pinnedWindow, pin: pin)
     }
 
     /// The beautified view's transcript reader: one round-trip that resolves
@@ -3908,6 +3941,12 @@ final class CodingTaskEngine {
         transcriptCommand(branch: branch, agent: agent,
                           emit: "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" "
                             + "| iconv -f UTF-8 -t UTF-8 -c; fi")
+    }
+
+    /// `taskTranscriptCommand`'s lookup alone: sets `$f`, prints nothing --
+    /// for a caller that reads the file its own way (the archive's chunks).
+    nonisolated static func taskTranscriptLocate(branch: String, agent: Profile.Tool = .claude) -> String? {
+        transcriptCommand(branch: branch, agent: agent, emit: "")
     }
 
     /// Locates the session's transcript as `taskTranscriptCommand` does (into
@@ -4567,7 +4606,7 @@ final class CodingTaskEngine {
             // (same courtesy as the automation pull).
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if !TaskTranscriptArchive.has(taskID),
-               let text = await delegate.fetchTaskTranscriptRaw(task), !text.isEmpty {
+               let text = await delegate.fetchTaskTranscriptRaw(task, forArchive: true), !text.isEmpty {
                 TaskTranscriptArchive.save(text, taskID: taskID)
                 BACDebug.log("tasks", "“\(task.title)”: transcript archived "
                     + "(\(text.utf8.count) bytes)")
@@ -5035,21 +5074,16 @@ enum CodingTaskEngine {
     /// question still surfaces.
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
                                                   agent: String? = nil,
-                                                  pinnedWindow: Int? = nil) -> String? {
+                                                  pinnedWindow: Int? = nil,
+                                                  pin: TranscriptPin = TranscriptPin()) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = "f=\"\"; pe=\"\"; "
-        // The transcript the tab's agent itself named (its hook records the
-        // path per window — see agent-status.sh) wins over "the newest file
-        // in the folder": two agents in one folder (a delegate beside its
-        // delegator) would otherwise take turns owning each other's view.
-        // Still floored: a file older than this process is another's.
-        if let w = pinnedWindow {
-            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
-        }
-        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
-            + "fi; "
+        // Located as the macOS engine does: the session's own conversation
+        // (`pin`), else the file the window's agent named, else the folder's
+        // newest -- two sessions of one agent in one folder would otherwise
+        // read each other's.
+        var cmd = AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                                   pinnedWindow: pinnedWindow, pin: pin)
         cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
         if agent == nil || agent == "claude" {
             // The pq dump is Claude's pending AskUserQuestion — no other
@@ -5075,16 +5109,12 @@ enum CodingTaskEngine {
     /// pending question rides its own header line.
     nonisolated static func transcriptChunkCommand(
         guestCwd: String, since: Int, agent: String? = nil, pinnedWindow: Int? = nil,
+        pin: TranscriptPin = TranscriptPin(),
         knownPath: String?, knownOffset: Int, bytes: Int, earlier: Bool) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = "f=\"\"; pe=\"\"; "
-        if let w = pinnedWindow {
-            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
-        }
-        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
-            + "fi; "
+        var cmd = AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                                   pinnedWindow: pinnedWindow, pin: pin)
         cmd += "if [ -n \"$f\" ]; then printf '%s\\n' \"$f\"; "
         if agent == nil || agent == "claude" {
             let enc2 = path.replacingOccurrences(of: ".", with: "-")
