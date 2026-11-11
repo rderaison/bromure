@@ -55,6 +55,7 @@ SHARED = [
     "Mitm/ConsentCredentialID.swift",
     "FatForward.swift",
     "FDGuard.swift",  # env-gated fd auditor; kernel guard is macOS-only, no-op on iOS
+    "TestRun.swift",  # isTestRun / testRunDirectory (ProfileStore keeps a test run off the user's folder)
     "Terminal/GridLayoutStore.swift",
     "Terminal/TerminalImagePaste.swift",  # pure upload core (AppKit parts #if'd out)
     # Controller + connect flow (models; iOS provides the views)

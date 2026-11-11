@@ -28,8 +28,8 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    /// Hosts whose bodies are captured at the `.aiDetails` level.
-    /// Substring match against the request's `Host` header.
+    /// Hosts whose bodies are captured at the `.aiDetails` level: each
+    /// matches itself and its subdomains (`isAIHost`).
     public static let aiHosts: [String] = [
         "anthropic.com",
         "openai.com",
@@ -50,15 +50,32 @@ public enum TraceLevel: String, Codable, CaseIterable, Sendable {
         InferenceService.localMitmHost,  // local-inference sentinel (routed via the MITM)
     ]
 
+    /// Whether `host` is one of `aiHosts` or under one: the whole name, or
+    /// a suffix on a label boundary (`api.x.ai`; never `relax.ai`, nor
+    /// `google.com.evil.net`, which a substring match took). Case, a
+    /// trailing dot and a port are ignored.
+    public static func isAIHost(_ host: String) -> Bool {
+        aiHosts.contains { self.host(host, isUnder: $0) }
+    }
+
+    /// Whether `host` is `domain` or a subdomain of it (a suffix on a label
+    /// boundary). Case, a trailing dot and a port are ignored.
+    public static func host(_ host: String, isUnder domain: String) -> Bool {
+        var h = host.lowercased()
+        if !h.hasPrefix("["), h.filter({ $0 == ":" }).count == 1, let colon = h.firstIndex(of: ":") {
+            h = String(h[..<colon])
+        }
+        while h.hasSuffix(".") { h.removeLast() }
+        return !h.isEmpty && (h == domain || h.hasSuffix("." + domain))
+    }
+
     /// True if a request to `host` should have its body captured at
     /// this level.
     public func capturesBodyForHost(_ host: String) -> Bool {
         switch self {
         case .off, .activity: return false
         case .all:            return true
-        case .aiDetails:
-            let lower = host.lowercased()
-            return Self.aiHosts.contains { lower.contains($0) }
+        case .aiDetails:      return Self.isAIHost(host)
         }
     }
 

@@ -151,6 +151,10 @@ public enum PromptInjectionModels {
                 progress(min(0.999, Double(base + written) / total))
             }
             let (tmp, resp) = try await downloader.run(url)
+            // A refused download (bad status, short, wrong hash) left its
+            // temp file behind, hundreds of MB a time, and every launch
+            // retries it. Gone whatever happens (moved away on success).
+            defer { try? FileManager.default.removeItem(at: tmp) }
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
                 throw Err.http((resp as? HTTPURLResponse)?.statusCode ?? 0, f.name)
             }
@@ -160,10 +164,17 @@ public enum PromptInjectionModels {
                 let got = SHA256.hash(data: try Data(contentsOf: tmp)).map { String(format: "%02x", $0) }.joined()
                 guard got == want else { throw Err.checksum(f.name) }
             }
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
+            // Into place in two steps: the temp file is usually on another
+            // volume, so the move is a copy that a crash can cut short --
+            // staged beside the model and renamed over it, a partial copy is
+            // never taken for the model (only its size is checked above).
+            let staged = dir.appendingPathComponent(f.name + ".download")
+            try? FileManager.default.removeItem(at: staged)
+            try FileManager.default.moveItem(at: tmp, to: staged)
+            guard rename(staged.path, dest.path) == 0 else {
+                try? FileManager.default.removeItem(at: staged)
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: dest.path])
             }
-            try FileManager.default.moveItem(at: tmp, to: dest)
             completedBytes += Int64(sz)
             progress(min(0.999, Double(completedBytes) / total))
         }

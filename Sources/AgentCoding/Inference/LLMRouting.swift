@@ -1,13 +1,14 @@
 import Foundation
 
 /// Per-profile routing context handed to the MITM proxy: the top-level
-/// routing mode plus the per-agent local-host scoping. One instance per
-/// profile, owned by `MitmEngine`.
-public final class LLMRoutingContext: @unchecked Sendable {
-    public var routing: Profile.Routing
+/// routing mode plus the per-agent local-host scoping. Immutable: a change
+/// publishes a new context (`MitmEngine.setRouting`), so the proxy's
+/// threads never read one being written.
+public final class LLMRoutingContext: Sendable {
+    public let routing: Profile.Routing
     /// Repo/id of the model the local engine serves — used in the
     /// `served-by` marker (§4.4).
-    public var localModelLabel: String
+    public let localModelLabel: String
     /// Base domains (lowercased, e.g. `anthropic.com`) whose owning agent is
     /// itself in `.local` auth mode. A profile can mix agents — e.g. Claude on
     /// a subscription (cloud) alongside Codex on the local engine. Profile-wide
@@ -15,7 +16,7 @@ public final class LLMRoutingContext: @unchecked Sendable {
     /// the proxy only short-circuits / reroutes a real cloud host when that
     /// host belongs to a genuinely-local agent. The local sentinel host is
     /// always engine-bound regardless (see `decide`).
-    public var localCloudHosts: Set<String>
+    public let localCloudHosts: Set<String>
 
     public init(routing: Profile.Routing,
                 localModelLabel: String,

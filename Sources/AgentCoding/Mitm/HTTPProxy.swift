@@ -798,7 +798,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// from cert-minting onward is the shared `driveTLS` body. Closes the FD on
     /// exit, like `run()`.
     @available(macOS, deprecated: 10.15, message: "drives TLSServerStream which wraps SecureTransport")
-    func runTransparentTLS(host: String, port: Int) async {
+    func runTransparentTLS(host rawHost: String, port: Int) async {
+        let host = EgressPolicy.normalizedHost(rawHost)   // the SNI as every decision sees it
         defer { closeFD() }
         do {
             try await trackedForFirewall(host: host, port: port, route: "transparent") {
@@ -814,7 +815,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// for HTTPS, forwarding upstream over `http`. `host` comes from the peeked
     /// `Host` header (the switch has no SNI for cleartext). Closes the FD on exit.
     @available(macOS, deprecated: 10.15, message: "shares driveTLS, which drives SecureTransport for the HTTPS path")
-    func runTransparentHTTP(host: String, port: Int) async {
+    func runTransparentHTTP(host rawHost: String, port: Int) async {
+        let host = EgressPolicy.normalizedHost(rawHost)   // the Host header as every decision sees it
         defer { closeFD() }
         do {
             try await trackedForFirewall(host: host, port: port, route: "transparent") {
@@ -1591,33 +1593,60 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     store and the guest hears what the host decides (an error, or a
         //     reply carrying stand-in tokens). Buffered — a small JSON
         //     document; a pending device-code poll passes through untouched.
+        // One snapshot of the workspace's captures decides: a sign-in that
+        // ends between two reads must not leave an exchange neither refused
+        // nor captured.
         if !insecure, bodyFile == nil,
            let capture = Self.signInCaptureProvider?(profileID),
-           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)),
-           capture.matches(host: host, method: reqMethod, path: reqPath,
-                           body: swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)) {
-            let upstream: Data
-            if let sim = capture.simulatedReply {
-                // The sign-in simulator (e2e): the provider's reply is canned,
-                // everything else — the hook, its hop, its release here — is
-                // the real path.
-                upstream = sim
-            } else {
-                let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
-                noteUpstreamSession(captureSession)
-                defer { captureSession.finishTasksAndInvalidate() }
-                upstream = try await relayUpstreamCollecting(
-                    rawRequest: swap.modified, host: host, port: port,
-                    session: captureSession, scheme: upstreamScheme)
+           let bodyStart = swap.modified.range(of: Data("\r\n\r\n".utf8)) {
+            let exchangeBody = swap.modified.subdata(in: bodyStart.upperBound..<swap.modified.count)
+            // An ended sign-in's late exchange (this agent's or another's in the
+            // same workspace): refused here, the provider never sees the code.
+            if capture.refusesExchange(host: host, method: reqMethod, path: reqPath, body: exchangeBody) {
+                try tls.write(SignInCapture.notKeptReply)
+                FileHandle.standardError.write(Data(
+                    "[mitm] sign-in exchange \(host)\(reqPath) after its sign-in ended: refused, not sent on\n".utf8))
+                return
             }
-            let status = Self.parseStatusCode(upstream)
-            let body = upstream.range(of: Data("\r\n\r\n".utf8))
-                .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
-            let reply = await capture.handle(status, body)
-            try tls.write(reply ?? upstream)
-            FileHandle.standardError.write(Data(
-                "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(reply == nil ? "passed through" : "kept on the host")\n".utf8))
-            return
+            if !capture.spent, capture.matches(host: host, method: reqMethod, path: reqPath, body: exchangeBody) {
+                let upstream: Data
+                if let sim = capture.simulatedReply {
+                    // The sign-in simulator (e2e): the provider's reply is canned,
+                    // everything else — the hook, its hop, its release here — is
+                    // the real path.
+                    upstream = sim
+                } else {
+                    let captureSession = upstreamSession(for: host, port: port, insecure: insecure)
+                    noteUpstreamSession(captureSession)
+                    defer { captureSession.finishTasksAndInvalidate() }
+                    upstream = try await relayUpstreamCollecting(
+                        rawRequest: swap.modified, host: host, port: port,
+                        session: captureSession, scheme: upstreamScheme)
+                }
+                let status = Self.parseStatusCode(upstream)
+                let body = upstream.range(of: Data("\r\n\r\n".utf8))
+                    .map { upstream.subdata(in: $0.upperBound..<upstream.count) } ?? Data()
+                var reply = await capture.handle(status, body)
+                var refused = false, pollError = false
+                // A token reply the host didn't keep -- the sign-in ended as it
+                // landed, its store refused the write, a reply it couldn't read --
+                // is never the guest's to have: it carries the real credential.
+                // Only a reply that isn't one (a pending device-code poll, the
+                // provider's error) goes on; a poll's error a lenient provider
+                // sends as a 200 goes on rebuilt from its allowed fields.
+                if reply == nil, status == 200 {
+                    reply = SignInCapture.pollErrorReply(body)
+                    pollError = reply != nil
+                    if reply == nil {
+                        refused = true
+                        reply = SignInCapture.notKeptReply
+                    }
+                }
+                try tls.write(reply ?? upstream)
+                FileHandle.standardError.write(Data(
+                    "[mitm] sign-in exchange \(host)\(reqPath) → \(status), \(refused ? "not kept, refused to the guest" : pollError ? "a poll's error, passed on rebuilt" : reply == nil ? "passed through" : "kept on the host")\n".utf8))
+                return
+            }
         }
 
         // 6a. WebSocket upgrade — bypass URLSession (which can't
@@ -1626,6 +1655,17 @@ final class HTTPMitmConnection: @unchecked Sendable {
         //     OpenAI's Realtime API and any other agent transport
         //     that rides on WS instead of plain HTTP/SSE.
         if isWebSocketUpgrade(rawRequest: swap.modified) {
+            // A package registry speaks no WebSocket: an upgrade to one
+            // would skip the supply-chain checks below (OSV, the age hold,
+            // the install-script strip) and relay its reply as it is.
+            let (upgradeMethod, upgradePath) = Self.parseRequestLine(swap.modified)
+            if SupplyChainRegistry.isRegistryRequest(host: host, path: upgradePath) {
+                SupplyChainLog.shared.record("[supply-chain] ✗ WebSocket upgrade to \(host)\(upgradePath) refused (a package registry)")
+                rejectBeforePolicy(tls: tls, status: 400, error: "invalid_http_request",
+                                   detail: "Bromure: a WebSocket upgrade to a package registry is refused (its requests go through the supply-chain checks).",
+                                   host: host, port: port, method: upgradeMethod, path: upgradePath)
+                return
+            }
             FileHandle.standardError.write(Data(
                 "[mitm] WebSocket upgrade → \(host):\(port)\n".utf8))
             // Decide body capture *before* the pump so we don't pay
@@ -1849,7 +1889,8 @@ final class HTTPMitmConnection: @unchecked Sendable {
         let resignOutcome: AWSResigner.Outcome = insecure
             ? .unchanged
             : await awsResigner.resign(
-                rawRequest: swap.modified, host: host, profileID: profileID)
+                rawRequest: swap.modified, host: host, profileID: profileID,
+                bodyComplete: bodyFile == nil)
         switch resignOutcome {
         case .unchanged:
             toForward = swap.modified
@@ -2503,7 +2544,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         }
                     case .undecodable(let encoding):
                         Self.recordScanSkipped(host: host, path: reqPath, engines: engines,
-                                               reason: "\(encoding)-compressed request body could not be decoded",
+                                               reason: Self.undecodableReason(encoding),
                                                profileID: profileID, blocked: true)
                         let response = Self.undecodableBodyResponse(encoding: encoding, engines: engines)
                         try? tls.write(response)
@@ -2650,8 +2691,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
            let split = toForward.range(of: Data("\r\n\r\n".utf8)) {
             let head = toForward.subdata(in: 0..<split.upperBound)
             let body = toForward.subdata(in: split.upperBound..<toForward.count)
-            let encoded = Self.headerValue("Content-Encoding",
-                                           inHeaderSection: String(decoding: head, as: UTF8.self)) != nil
+            // Still coded (a coding the decode above didn't undo), not just
+            // marked: a `Content-Encoding: identity` the guest added doesn't
+            // skip the scan.
+            let encoded = Self.decodeRequestContentEncoding(toForward) != .identity
             if !encoded, PIIRewriter.isEligible(host: host, method: reqMethod, body: body,
                                                 localEngineOffMac: offMacEngine != nil) {
                 if await PIIDetector.shared.readiness() == .loading {
@@ -2677,7 +2720,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
                         host, reqPath, outcome.total, body.count, outcome.body.count, ms,
                         outcome.partial ? " (model budget spent: rest by pattern rules)" : "").utf8))
                 }
-            } else if encoded, TraceLevel.aiHosts.contains(where: { host.lowercased().contains($0) }) {
+            } else if encoded, TraceLevel.isAIHost(host) {
                 FileHandle.standardError.write(Data(
                     "[pii] \(host) \(reqPath): compressed request body — not scanned\n".utf8))
             }
@@ -2827,28 +2870,45 @@ final class HTTPMitmConnection: @unchecked Sendable {
     /// `Upgrade` are required by RFC 6455 — but in practice either is
     /// enough to know we should *not* hand this to URLSession.
     ///
-    /// The `Connection: Upgrade` half is deliberately protocol-agnostic:
-    /// `kubectl exec` upgrades to `SPDY/3.1` (and newer kubectl to
-    /// `v5.channel.k8s.io` over WebSocket). Both must reach the raw pump,
-    /// so do NOT tighten this to require the `websocket` token.
+    /// Only the protocols the raw pump is for: `websocket` (agent transports,
+    /// and newer kubectl's `v5.channel.k8s.io`) and `SPDY/3.1` (`kubectl
+    /// exec` / `attach` / `port-forward` against older API servers). Any
+    /// other upgrade -- h2c above all -- isn't pumped: after the 101 every
+    /// later request on the connection would pass unseen by the per-request
+    /// policy (web rules, the PII and leak scans, credential handling). Such
+    /// a request goes on as plain HTTP/1.1 instead, its Upgrade headers
+    /// dropped like any hop-by-hop header.
     private func isWebSocketUpgrade(rawRequest: Data) -> Bool {
         guard let endRange = rawRequest.range(of: Data("\r\n\r\n".utf8)),
               let headerStr = String(data: rawRequest.subdata(in: 0..<endRange.lowerBound),
                                      encoding: .isoLatin1) else {
             return false
         }
-        var sawUpgrade = false
-        var sawConnectionUpgrade = false
-        for line in headerStr.split(separator: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("upgrade:") && lower.contains("websocket") {
-                sawUpgrade = true
-            }
-            if lower.hasPrefix("connection:") && lower.contains("upgrade") {
-                sawConnectionUpgrade = true
-            }
+        return Self.pumpedUpgrade(headerBlock: headerStr)
+    }
+
+    /// True when the header block (a request's, or a 101's) has exactly one
+    /// `Upgrade` header and every protocol it names is one the raw pump
+    /// carries (`websocket`, `SPDY/3.1`). The whole block is sent upstream
+    /// as it is, so `websocket, h2c`, a second Upgrade line, or a folded
+    /// continuation line (which an upstream joins to the header above)
+    /// would still offer h2c: none of them is pumped.
+    static func pumpedUpgrade(headerBlock: String) -> Bool {
+        var protocols: [String]?
+        for (i, line) in headerBlock.split(separator: "\r\n", omittingEmptySubsequences: false).enumerated() where i > 0 {
+            if line.first == " " || line.first == "\t" { return false }   // obs-fold
+            // A bare CR or LF, or a NUL: a lenient upstream may split there.
+            if line.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) { return false }
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" else { continue }
+            guard protocols == nil else { return false }                   // a second Upgrade header
+            protocols = line[line.index(after: colon)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         }
-        return sawUpgrade || sawConnectionUpgrade
+        // One protocol only: with two on offer ("websocket, SPDY/3.1") the
+        // relay can't know which the upstream will pick before its 101.
+        guard let protocols, protocols.count == 1 else { return false }
+        return protocols[0] == "websocket" || protocols[0] == "spdy/3.1"
     }
 
     /// Result of the WebSocket-upgrade fast-path. Populated whether
@@ -3003,6 +3063,18 @@ final class HTTPMitmConnection: @unchecked Sendable {
             respHeaders = respHeaders.subdata(in: respHeaders.startIndex..<end.upperBound)
             upstreamBytes = respHeaders.count
         }
+        // The upstream switched to a protocol the pump isn't for (an h2c
+        // answer to an offer we never forward, by a server that ignores the
+        // request's Upgrade): not relayed, nothing pumped.
+        if statusCode == 101,
+           let end = respHeaders.range(of: Data("\r\n\r\n".utf8)),
+           !Self.pumpedUpgrade(headerBlock: String(decoding: respHeaders.subdata(in: respHeaders.startIndex..<end.lowerBound),
+                                                   as: UTF8.self)) {
+            FileHandle.standardError.write(Data("[mitm] \(host): refused a 101 to a protocol other than websocket or SPDY/3.1\n".utf8))
+            try? serverTLS.write(Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return WebSocketResult(handshakeResponse: respHeaders, transcript: nil, clientBytes: clientBytes,
+                                   upstreamBytes: upstreamBytes, statusCode: 502)
+        }
         try serverTLS.write(respHeaders)
 
         // If upstream didn't switch protocols, drain any trailing
@@ -3109,7 +3181,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
         // Streaming to or from a model provider keeps the tab "working".
         let beatPID = profileID
-        let isModelHost = TraceLevel.aiHosts.contains { host.lowercased().contains($0) }
+        let isModelHost = TraceLevel.isAIHost(host)
         let beat = ActivityBeat(fire: isModelHost ? { Self.liveActivity?(beatPID) } : nil)
         if let g = activeGuard {
             FileHandle.standardError.write(Data(
@@ -3141,9 +3213,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
                     onChunk: { counters.addClient($0.count); c2uCollector?.feed($0); beat.tick($0) },
                     gate: inspector.map { i in { i.feed($0) } },
                     onGateStop: {
-                        // Tell the client why (1008), then end the session both ways.
+                        // Tell the client why (1008, or 1009 for a message too
+                        // big to hold), then end the session both ways.
                         _ = try? server.writeNB(OpenShellWebSocket.policyCloseFrame(
-                            reason: inspector?.closeReason ?? "Bromure: client message not permitted by policy"))
+                            reason: inspector?.closeReason ?? "Bromure: client message not permitted by policy",
+                            code: inspector?.closeCode ?? 1008))
                     })
             }
             group.addTask {   // upstream → client
@@ -3687,10 +3761,7 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
 
     /// An AI provider host (the hosts the conversation scans apply to).
-    static func isAIHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        return TraceLevel.aiHosts.contains { h.contains($0) }
-    }
+    static func isAIHost(_ host: String) -> Bool { TraceLevel.isAIHost(host) }
 
     enum RequestBodyDecoding: Equatable {
         /// No (or `identity`) Content-Encoding — the body is already plain.
@@ -3704,21 +3775,42 @@ final class HTTPMitmConnection: @unchecked Sendable {
         case undecodable(String)
     }
 
+    /// More stacked codings than this aren't decoded (refused).
+    static let maxRequestCodings = 4
+
     /// Decode a content-coded request body (gzip / deflate / br / zstd) so
     /// the content scans can read it. The result is forwarded as identity —
     /// every provider accepts an uncompressed body (Grok's own identity side
     /// requests and the gzip/br path already rely on it).
     static func decodeRequestContentEncoding(_ raw: Data) -> RequestBodyDecoding {
+        // One empty line before the request line is allowed (RFC 9112 §2.2).
+        let raw = raw.starts(with: Data("\r\n".utf8)) ? raw.dropFirst(2) : raw
+        // A header line this can't read with certainty (no colon, an obs-fold
+        // continuation, a bare LF) could hide a coding: undecodable, refused
+        // rather than guessed at.
+        if let header = rawHeaderSection(of: raw),
+           header.components(separatedBy: "\r\n").dropFirst().contains(where: {
+               $0.contains("\n") || $0.contains("\r") || $0.first == " " || $0.first == "\t" || !$0.contains(":")
+           }) {
+            return .undecodable("an unreadable header line")
+        }
         guard let sep = raw.range(of: Data("\r\n\r\n".utf8)),
-              let header = rawHeaderSection(of: raw),
-              let enc = headerValue("content-encoding", inHeaderSection: header)?
-                .trimmingCharacters(in: .whitespaces).lowercased(),
-              !enc.isEmpty, enc != "identity" else { return .identity }
+              let header = rawHeaderSection(of: raw) else { return .identity }
+        // Every Content-Encoding line counts: a later `identity` doesn't make
+        // an earlier `gzip` plain.
+        let codings = header.components(separatedBy: "\r\n").dropFirst().flatMap { line -> [String] in
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "content-encoding" else { return [] }
+            return line[line.index(after: colon)...].split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .filter { !$0.isEmpty && $0 != "identity" }
+        }
+        guard !codings.isEmpty else { return .identity }
+        guard codings.count <= Self.maxRequestCodings else { return .undecodable("\(codings.count) stacked codings") }
         let body = raw.subdata(in: sep.upperBound..<raw.endIndex)
         // Stacked codings ("gzip, br") are applied in order; undo in reverse.
         var plain = body
-        for coding in enc.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).reversed()
-        where !coding.isEmpty && coding != "identity" {
+        for coding in codings.reversed() {
             let next: Data?
             switch coding {
             case "gzip", "x-gzip", "deflate": next = decompressBody(plain, encoding: coding == "x-gzip" ? "gzip" : coding)
@@ -3801,11 +3893,20 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
     static let detectorWarmingRetryAfter = 2
 
+    /// Why a request body couldn't be decoded, for the Security Timeline:
+    /// `encoding` is a coding's name (a content-coding is a token, no spaces)
+    /// or the decoder's own reason ("an unreadable header line").
+    static func undecodableReason(_ encoding: String) -> String {
+        encoding.contains(" ") ? "request body could not be decoded (\(encoding))"
+            : "\(encoding)-compressed request body could not be decoded"
+    }
+
     static func undecodableBodyResponse(encoding: String, engines: [String]) -> Data {
         let names = engines.map { $0 == "pii" ? "PII protection" : "prompt-injection scanning" }
             .joined(separator: " and ")
-        let body = "Bromure blocked this request: its body is \(encoding)-compressed in a way "
-            + "Bromure could not decode, so \(names) could not check it. It was not sent. "
+        let what = encoding.contains(" ") ? "its body could not be decoded (\(encoding))"
+            : "its body is \(encoding)-compressed in a way Bromure could not decode"
+        let body = "Bromure blocked this request: \(what), so \(names) could not check it. It was not sent. "
             + "Retry, or turn the setting off for this workspace if the agent keeps sending it.\n"
         var r = "HTTP/1.1 415 Unsupported Media Type\r\n"
         r += "Content-Type: text/plain; charset=utf-8\r\n"
@@ -4441,11 +4542,13 @@ final class HTTPMitmConnection: @unchecked Sendable {
 
 /// Parse "host:port" → (host, port). Defaults to 443 if missing.
 private func parseHostPort(_ s: String) -> (String, Int) {
+    // The host every decision then sees: lowercased, a fully qualified
+    // name's trailing dots gone (`registry.npmjs.org.` is npm's registry).
     if let colon = s.lastIndex(of: ":"),
        let port = Int(s[s.index(after: colon)...]) {
-        return (String(s[..<colon]), port)
+        return (EgressPolicy.normalizedHost(String(s[..<colon])), port)
     }
-    return (s, 443)
+    return (EgressPolicy.normalizedHost(s), 443)
 }
 
 /// Parse the authority of an `http://` forward-proxy target → (host, port).
@@ -4453,9 +4556,9 @@ private func parseHostPort(_ s: String) -> (String, Int) {
 private func parseHTTPHostPort(_ s: String) -> (String, Int) {
     if let colon = s.lastIndex(of: ":"),
        let port = Int(s[s.index(after: colon)...]) {
-        return (String(s[..<colon]), port)
+        return (EgressPolicy.normalizedHost(String(s[..<colon])), port)
     }
-    return (s, 80)
+    return (EgressPolicy.normalizedHost(s), 80)
 }
 
 /// Lowercase, strip IPv6 brackets and trailing root dots so a host
@@ -4948,7 +5051,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
         let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade":
+             "proxy-connection", "keep-alive", "te", "upgrade", "http2-settings":
             continue
         case "accept-encoding":
             // Only codings we can undo (see mitmSanitizedAcceptEncoding).
@@ -5320,7 +5423,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
         // reaches the upstream (or shows up in logs there).
         switch name.lowercased() {
         case "host", "content-length", "connection", "transfer-encoding",
-             "proxy-connection", "keep-alive", "te", "upgrade", "x-bromure-insecure":
+             "proxy-connection", "keep-alive", "te", "upgrade", "http2-settings", "x-bromure-insecure":
             continue
         case "authorization", "x-api-key":
             if local && !keepGuestKey { continue }   // replaced below for the local engine

@@ -390,6 +390,14 @@ extension ACAppDelegate {
         guard !s.finished else { return }
         s.finished = true
         s.timeout?.cancel()
+        // Its CLI may still exchange a code finished late in the browser:
+        // turned away for a while, never relayed (SignInCapture.spent) --
+        // marked before the live capture goes, so no exchange finds neither.
+        let endpoint = s.simulated
+            ? (hosts: Set([SignInSimulator.host]), path: SignInSimulator.path)
+            : Self.tokenEndpoint(for: s.provider)
+        mitmEngine?.signInCaptures.arm(.spentMarker(profileID: s.profileID, hosts: endpoint.hosts,
+                                                      pathPrefix: endpoint.path))
         mitmEngine?.signInCaptures.disarm(profileID: s.profileID)
         if proxySignIns[s.profileID] === s { proxySignIns[s.profileID] = nil }
         if success {

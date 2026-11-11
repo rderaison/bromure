@@ -30,7 +30,9 @@ enum SquelchSettings {
 /// Persisted in Application Support; a cloud report is a delta since the
 /// last one (`pendingCloudReport`, `SquelchCloud`).
 final class SquelchLedger: @unchecked Sendable {
-    static let shared = SquelchLedger(file: FileManager.default
+    /// Persisted in the support folder, except in a test run (which must
+    /// never write the user's numbers), as SecurityTimeline does.
+    static let shared = SquelchLedger(file: isTestRun() ? nil : FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("BromureAC/squelch/ledger.json"))
 

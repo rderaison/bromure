@@ -366,6 +366,47 @@ struct WebSocketTransformTests {
         #expect(p.truncated && p.payload.count == WSTraceCollector.perMessageCap && p.totalBytes == event.count)
     }
 
+    /// A compressed message's fragments were kept whole until its FIN, with no
+    /// bound: a peer sending a text frame with RSV1 set and then continuation
+    /// frames without end grew the traced connection's memory until the host
+    /// ran out. Past `compressedMessageCap` only the count goes on.
+    @Test("A compressed message's fragments stop being kept past the cap, and the next message still decodes")
+    func compressedFragmentsAreBounded() throws {
+        final class Got: @unchecked Sendable { var msgs: [WSMessage] = [] }
+        let got = Got()
+        let trace = WSTraceCollector(direction: .upstreamToClient, inflater: WSInflater(noContextTakeover: true))
+        trace.onMessage = { got.msgs.append($0) }
+        let chunk = String(repeating: "x", count: 1 << 20)
+        var head = frame(0x1, chunk, fin: false, masked: false)
+        head[head.startIndex] |= 0x40                                                   // RSV1: compressed
+        trace.feed(head)
+        let fragments = WSTraceCollector.compressedMessageCap / (1 << 20) + 4
+        for _ in 0..<fragments { trace.feed(frame(0x0, chunk, fin: false, masked: false)) }
+        trace.feed(frame(0x0, "", masked: false))
+        let big = try #require(got.msgs.first)
+        #expect(big.truncated && big.payload.isEmpty && big.totalBytes == (fragments + 1) << 20)
+
+        // The socket goes on: a later (uncompressed) message is recorded whole.
+        trace.feed(frame(0x1, "after", masked: false))
+        #expect(got.msgs.count == 2 && got.msgs[1].payload == Data("after".utf8))
+
+        // One first frame past the cap on its own is dropped the same way.
+        let huge = String(repeating: "y", count: WSTraceCollector.compressedMessageCap + 1)
+        var one = frame(0x1, huge, masked: false)
+        one[one.startIndex] |= 0x40
+        trace.feed(one)
+        #expect(got.msgs.count == 3 && got.msgs[2].truncated && got.msgs[2].payload.isEmpty
+                && got.msgs[2].totalBytes == huge.utf8.count)
+
+        // A real compressed message under the cap still inflates.
+        let text = String(repeating: "hello ", count: 1000)
+        let deflated = try (Data(text.utf8) as NSData).compressed(using: .zlib) as Data
+        var small = WSFrame.encode(opcode: 0x1, payload: deflated, masked: false)
+        small[small.startIndex] |= 0x40
+        trace.feed(small)
+        #expect(got.msgs.count == 4 && got.msgs[3].payload == Data(text.utf8) && !got.msgs[3].truncated)
+    }
+
     /// Finding (CWE-670): "Squelch stops learning tool calls once a traced
     /// OpenShell WebSocket passes 4096 server messages". Past the trace cap
     /// `feed` parsed one frame per chunk and left the rest of it queued, so a
@@ -600,6 +641,19 @@ struct WebSocketTransformTests {
         h.guestSend(f)
         #expect(h.serverFrames(1).map(\.raw) == [f])
         #expect(rec.events == ["log:1"])
+    }
+
+    @Test("A reserved bit with no extension negotiated ends the relay; nothing goes up", arguments: [0x1, 0x9] as [UInt8])
+    func reservedBitRefused(opcode: UInt8) {
+        let rec = Recorder()
+        let h = WSHarness(guard: makeGuard(pii: false, injection: .log, vault: PIIVault(secret: secret), recorder: rec))
+        defer { h.close() }
+        var f = frame(opcode, opcode == 0x1 ? createWithPII : "", masked: true)
+        f[f.startIndex] |= 0x40   // RSV1
+        // A clean turn behind it never goes either: the relay has ended.
+        h.guestSend(f + frame(0x1, createWithPII, masked: true))
+        #expect(h.serverFrames(1, timeout: 1).isEmpty)
+        #expect(rec.events.isEmpty)
     }
 
     @Test("Close is relayed in both directions after pending data")

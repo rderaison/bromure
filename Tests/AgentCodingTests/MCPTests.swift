@@ -97,6 +97,153 @@ struct MCPSecretsTests {
     }
 }
 
+// MARK: - Refreshed OAuth state persisted
+
+/// A launch refreshed an expiring MCP access token into its own copy only:
+/// the stored refresh token was then spent on a server that rotates them,
+/// and the next launch's refresh failed (invalid_grant).
+@Suite("MCP refreshed OAuth state is saved", .serialized)
+struct MCPOAuthRefreshPersistTests {
+    static func oauth(_ access: String, _ refresh: String, client: String = "c1") -> MCPOAuthState {
+        MCPOAuthState(clientID: client, authorizationEndpoint: "https://mcp.example/authorize",
+                      tokenEndpoint: "https://mcp.example/token", accessToken: access,
+                      refreshToken: refresh, expiresAt: Date().addingTimeInterval(3600))
+    }
+
+    static func workspace() -> Profile {
+        var p = Profile(name: "w", tool: .claude, authMode: .token)
+        p.mcpServers = [
+            MCPServer(name: "a", transport: .http, url: "https://a.example/mcp", oauthState: oauth("a-at1", "a-rt1")),
+            MCPServer(name: "b", transport: .http, url: "https://b.example/mcp", oauthState: oauth("b-at1", "b-rt1")),
+        ]
+        return p
+    }
+
+    @Test("only the refreshed server's state is written; edits saved since stay")
+    func persistsOnlyThatServer() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mcp-oauth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Self.workspace()
+        try store.save(p)
+        let launchCopy = p   // what the launch refreshed from
+
+        // Saved meanwhile (editor / other process): a field, and server b re-authorized.
+        var edited = p
+        edited.comments = "notes saved meanwhile"
+        edited.mcpServers[1].oauthState = Self.oauth("b-at2", "b-rt2")
+        try store.update(edited)
+
+        let old = try #require(launchCopy.mcpServers[0].oauthState)
+        var refreshed = old
+        refreshed.accessToken = "a-at2"
+        refreshed.refreshToken = "a-rt2"
+        #expect(try store.persistRefreshedMCPOAuth(refreshed, from: old,
+                                                   serverID: p.mcpServers[0].id, profileID: p.id))
+
+        let loaded = try #require(store.loadAll().first { $0.id == p.id })
+        #expect(loaded.mcpServers[0].oauthState?.refreshToken == "a-rt2")
+        #expect(loaded.mcpServers[0].oauthState?.accessToken == "a-at2")
+        #expect(loaded.mcpServers[1].oauthState?.refreshToken == "b-rt2")
+        #expect(loaded.comments == "notes saved meanwhile")
+        // On disk it's in the encrypted secrets, not profile.json.
+        let json = try String(contentsOf: store.profileDirectory(for: p).appendingPathComponent("profile.json"), encoding: .utf8)
+        #expect(!json.contains("a-rt2"))
+    }
+
+    @Test("a re-authorization saved meanwhile wins over the refresh")
+    func reauthorizationWins() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mcp-oauth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Self.workspace()
+        try store.save(p)
+        let old = try #require(p.mcpServers[0].oauthState)
+
+        var reauth = p
+        reauth.mcpServers[0].oauthState = Self.oauth("a-fresh", "a-fresh-rt", client: "c2")
+        try store.update(reauth)
+
+        var refreshed = old
+        refreshed.accessToken = "a-at2"
+        refreshed.refreshToken = "a-rt2"
+        #expect(try !store.persistRefreshedMCPOAuth(refreshed, from: old,
+                                                    serverID: p.mcpServers[0].id, profileID: p.id))
+        let loaded = try #require(store.loadAll().first { $0.id == p.id })
+        #expect(loaded.mcpServers[0].oauthState?.refreshToken == "a-fresh-rt")
+        // An unknown server or workspace writes nothing.
+        #expect(try !store.persistRefreshedMCPOAuth(refreshed, from: old, serverID: UUID(), profileID: p.id))
+        #expect(try !store.persistRefreshedMCPOAuth(refreshed, from: old,
+                                                    serverID: p.mcpServers[0].id, profileID: UUID()))
+    }
+
+    @Test("the in-memory merge touches only a copy still on the old state")
+    func mergeHelper() {
+        var p = Self.workspace()
+        let old = p.mcpServers[0].oauthState!
+        var refreshed = old
+        refreshed.refreshToken = "a-rt2"
+        #expect(ProfileStore.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: p.mcpServers[0].id, into: &p))
+        #expect(p.mcpServers[0].oauthState?.refreshToken == "a-rt2")
+        #expect(p.mcpServers[1].oauthState?.refreshToken == "b-rt1")
+        // Applied twice: already current, no change.
+        #expect(!ProfileStore.mergeRefreshedMCPOAuth(refreshed, from: old, serverID: p.mcpServers[0].id, into: &p))
+    }
+
+    @Test("the refresh box: a result delivered before the waiter collects is the waiter's")
+    func boxDeliveredInTime() {
+        let box = MCPRefreshBox()
+        let r = Self.oauth("at2", "rt2")
+        #expect(!box.deliver(r))             // not late: the waiter uses it (and saves it)
+        #expect(box.collect() == r)
+    }
+
+    @Test("the refresh box: a result after the waiter gave up is late, kept by the task")
+    func boxDeliveredLate() {
+        let box = MCPRefreshBox()
+        #expect(box.collect() == nil)        // the 10 s wait timed out: stale token this boot
+        #expect(box.deliver(Self.oauth("at2", "rt2")))   // late: the task saves it itself
+        #expect(box.collect() == nil)        // never handed to the waiter afterwards
+    }
+
+    @Test("the refresh box: a failed refresh hands over nothing")
+    func boxFailed() {
+        let box = MCPRefreshBox()
+        #expect(!box.deliver(nil))
+        #expect(box.collect() == nil)
+    }
+
+    @Test("an open editor's save keeps an OAuth state the launch refreshed, unless the editor changed it")
+    func editorKeepsRefreshed() {
+        let opened = Self.workspace()
+        var current = opened                 // the app's copy after keepRefreshedMCPOAuth
+        current.mcpServers[0].oauthState = Self.oauth("a-at2", "a-rt2")
+
+        var draft = opened
+        draft.memoryGB = 8
+        draft.adoptAppEdits(from: current, opened: opened)
+        #expect(draft.mcpServers[0].oauthState?.refreshToken == "a-rt2")
+        #expect(draft.mcpServers[1].oauthState?.refreshToken == "b-rt1")
+        #expect(draft.memoryGB == 8)
+
+        var reauth = opened                  // Authorize in the editor
+        reauth.mcpServers[0].oauthState = Self.oauth("a-mine", "a-mine-rt", client: "c9")
+        reauth.adoptAppEdits(from: current, opened: opened)
+        #expect(reauth.mcpServers[0].oauthState?.refreshToken == "a-mine-rt")
+
+        var signedOut = opened               // Sign out in the editor
+        signedOut.mcpServers[0].oauthState = nil
+        signedOut.adoptAppEdits(from: current, opened: opened)
+        #expect(signedOut.mcpServers[0].oauthState == nil)
+
+        var added = opened                   // a server added in the editor: untouched
+        added.mcpServers.append(MCPServer(name: "c", transport: .http, url: "https://c.example/mcp",
+                                          oauthState: Self.oauth("c-at", "c-rt")))
+        added.adoptAppEdits(from: current, opened: opened)
+        #expect(added.mcpServers[2].oauthState?.refreshToken == "c-rt")
+    }
+}
+
 // MARK: - Config Generation
 
 @Suite("MCP Config Generation")

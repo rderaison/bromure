@@ -45,6 +45,42 @@ struct ManagedKeysTests {
         #expect(body == Self.manual + "\n" + Self.keyA + " bromure-account:dev1\n")
     }
 
+    @Test("removing a key takes exactly one, or none and says why")
+    func removeTakesOneKey() throws {
+        let (srv, file) = try server()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let all = [Self.keyA + " a", Self.keyB + " b", Self.manual]
+        try (all.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let before = try Data(contentsOf: file)
+        // A number past the list, a part held by several fingerprints, nothing.
+        func refusal(_ sel: String) -> String? {
+            do { try srv.removeAuthorizedKey(sel); return nil } catch { return error.localizedDescription }
+        }
+        for sel in ["5", "0", "", "no-such-fingerprint"] {
+            #expect(refusal(sel)?.hasPrefix("No authorized key matches") == true, "\(sel)")
+        }
+        #expect(refusal("SHA256:")?.contains("matches 3 authorized keys") == true)
+        #expect(try Data(contentsOf: file) == before)
+        // By number.
+        try srv.removeAuthorizedKey("2")
+        #expect(srv.listAuthorizedKeys().map(\.line) == [all[0], all[2]])
+        // By whole fingerprint, and by a part only one holds.
+        let keys = srv.listAuthorizedKeys()
+        try srv.removeAuthorizedKey(keys[0].fingerprint)
+        #expect(srv.listAuthorizedKeys().map(\.line) == [all[2]])
+        try srv.removeAuthorizedKey(String(keys[1].fingerprint.suffix(10)))
+        #expect(srv.listAuthorizedKeys().isEmpty)
+        // A key written twice (by hand): naming it removes every copy, and a
+        // part of it isn't ambiguous.
+        for sel in [nil, "suffix"] as [String?] {
+            try ([Self.keyA + " one", Self.keyA + " two", Self.keyB].joined(separator: "\n") + "\n")
+                .write(to: file, atomically: true, encoding: .utf8)
+            let fp = srv.listAuthorizedKeys()[0].fingerprint
+            try srv.removeAuthorizedKey(sel == nil ? fp : String(fp.suffix(10)))
+            #expect(srv.listAuthorizedKeys().map(\.line) == [Self.keyB])
+        }
+    }
+
     @Test("an authorized_keys that can't be read is left alone, manual keys and all")
     func unreadableFileKept() throws {
         let (srv, file) = try server()

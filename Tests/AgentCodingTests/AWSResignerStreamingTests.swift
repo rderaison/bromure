@@ -86,6 +86,49 @@ struct AWSResignerStreamingTests {
         }
     }
 
+    /// A body past the proxy's inline cap is spooled to disk: the resigner
+    /// sees only a prefix, and hashed that, so S3 refused the upload.
+    @Test("a spooled body keeps the SDK's own payload hash, or goes UNSIGNED-PAYLOAD")
+    func spooledBody() async throws {
+        let (resigner, pid) = Self.resigner()
+        let full = Data(repeating: 0x61, count: 64)
+        let fullHash = SigV4Signer.hexSHA256(full)
+        func put(_ sha: String?) -> Data {
+            var head = "PUT /bucket/big.bin HTTP/1.1\r\nHost: s3.us-east-1.amazonaws.com\r\n"
+                + "Authorization: AWS4-HMAC-SHA256 Credential=AKIAPRIMARY/20261105/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host;x-amz-date, Signature=00\r\nX-Amz-Date: 20261105T000000Z\r\n"
+            if let sha { head += "X-Amz-Content-SHA256: \(sha)\r\n" }
+            head += "Content-Length: \(full.count)\r\n\r\n"
+            return Data(head.utf8) + full.prefix(8)          // only a prefix in memory
+        }
+        func sha(_ out: Outcome) -> String? {
+            guard case .resigned(let bytes) = out else { return nil }
+            let head = String(decoding: bytes, as: UTF8.self).components(separatedBy: "\r\n\r\n")[0]
+            return head.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("x-amz-content-sha256:") }?
+                .split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)
+        }
+        typealias Outcome = AWSResigner.Outcome
+        #expect(sha(await resigner.resign(rawRequest: put(fullHash), host: "s3.us-east-1.amazonaws.com",
+                                          profileID: pid, bodyComplete: false)) == fullHash)
+        #expect(sha(await resigner.resign(rawRequest: put(nil), host: "s3.us-east-1.amazonaws.com",
+                                          profileID: pid, bodyComplete: false)) == "UNSIGNED-PAYLOAD")
+        #expect(sha(await resigner.resign(rawRequest: put("not-a-hash"), host: "s3.us-east-1.amazonaws.com",
+                                          profileID: pid, bodyComplete: false)) == "UNSIGNED-PAYLOAD")
+        // Any other service names its call in the body: a spooled one isn't signed.
+        let sts = Data(("POST / HTTP/1.1\r\nHost: sts.amazonaws.com\r\n"
+            + "Authorization: AWS4-HMAC-SHA256 Credential=AKIAPRIMARY/20261105/us-east-1/sts/aws4_request, "
+            + "SignedHeaders=host;x-amz-date, Signature=00\r\nX-Amz-Date: 20261105T000000Z\r\n"
+            + "X-Amz-Content-SHA256: \(fullHash)\r\nContent-Length: 64\r\n\r\npadding=").utf8)
+        guard case .failed(_, let resp) = await resigner.resign(rawRequest: sts, host: "sts.amazonaws.com",
+                                                                profileID: pid, bodyComplete: false) else {
+            Issue.record("a spooled STS request was signed"); return
+        }
+        #expect(String(decoding: resp, as: UTF8.self).hasPrefix("HTTP/1.1 413"))
+        // A whole body in memory is still hashed by the host, as before.
+        #expect(sha(await resigner.resign(rawRequest: put(fullHash), host: "s3.us-east-1.amazonaws.com",
+                                          profileID: pid)) == SigV4Signer.hexSHA256(full.prefix(8)))
+    }
+
     @Test("the signer takes a payload sentinel as given")
     func signerSentinel() {
         let req = SigV4Signer.Request(method: "PUT", path: "/", query: "",

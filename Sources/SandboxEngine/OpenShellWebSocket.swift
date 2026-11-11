@@ -80,24 +80,84 @@ public enum OpenShellWebSocket {
 
     /// Inflate one permessage-deflate message (no context takeover).
     static func inflate(_ payload: Data) -> Result<Data, OpenShellHTTP.Rejection> {
+        let cap = maxTextMessageBytes + 1
+        let tooLarge = Result<Data, OpenShellHTTP.Rejection>.failure(
+            .init("websocket text message exceeds \(maxTextMessageBytes) byte limit"))
+        let broken = Result<Data, OpenShellHTTP.Rejection>.failure(.init("websocket permessage-deflate decompression failed"))
+        // A message may end with its own final block (RFC 7692 7.2.3.4): it's
+        // whole as it came, and nothing may follow that block. One byte less
+        // must then no longer hold the whole stream; if it still does, bytes
+        // follow the block, which aren't part of the message and aren't
+        // passed on unjudged. (Decoders don't all say where a stream ended:
+        // Compression.framework's doesn't.)
+        switch decodeRawDeflate(payload, cap: cap) {
+        case .tooLarge: return tooLarge
+        case .ended(let out):
+            if case .ended = decodeRawDeflate(payload.dropLast(), cap: cap) {
+                return .failure(.init("websocket permessage-deflate message has data after its final block"))
+            }
+            return .success(out)
+        case .truncated, .corrupt:
+            // The usual form, its sync-flush tail stripped (a decoder may
+            // call an unfinished stream either): decoded with the tail back.
+            break
+        }
         // The sync-flush tail, then an empty final stored block so the raw
         // DEFLATE stream is complete.
         var input = payload
         input.append(contentsOf: [0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff])
-        let cap = maxTextMessageBytes + 1
-        var out = Data(count: cap)
-        let n = out.withUnsafeMutableBytes { dst in
-            input.withUnsafeBytes { src in
-                compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, cap,
-                                          src.bindMemory(to: UInt8.self).baseAddress!, input.count,
-                                          nil, COMPRESSION_ZLIB)
+        switch decodeRawDeflate(input, cap: cap) {
+        case .ended(let out): return .success(out)
+        case .tooLarge: return tooLarge
+        case .truncated, .corrupt: return broken
+        }
+    }
+
+    /// decodeRawDeflate's outcome.
+    enum RawInflate: Equatable {
+        /// The stream reached its final block's end.
+        case ended(Data)
+        /// The input ran out before that.
+        case truncated
+        /// Not a valid stream.
+        case corrupt
+        /// `cap` bytes or more.
+        case tooLarge
+    }
+
+    /// One raw DEFLATE (`COMPRESSION_ZLIB`) stream from `input`, streamed so
+    /// how it ends is known: ended (its final block decoded; what follows it
+    /// isn't reported), truncated, corrupt, or too large (`cap` bytes or
+    /// more). Nothing partial is passed on.
+    static func decodeRawDeflate(_ input: Data, cap: Int) -> RawInflate {
+        let chunk = 64 * 1024
+        let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: chunk)
+        defer { dst.deallocate() }
+        var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
+        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
+            return .corrupt
+        }
+        defer { compression_stream_destroy(&stream) }
+        var out = Data()
+        return input.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> RawInflate in
+            guard let base = src.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return .truncated }
+            stream.src_ptr = base
+            stream.src_size = src.count
+            while true {
+                stream.dst_ptr = dst
+                stream.dst_size = chunk
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                let produced = chunk - stream.dst_size
+                if produced > 0 { out.append(dst, count: produced) }
+                if out.count >= cap { return .tooLarge }
+                switch status {
+                case COMPRESSION_STATUS_END: return .ended(out)
+                case COMPRESSION_STATUS_OK:
+                    if produced == 0 && stream.src_size == 0 { return .truncated }   // stalled: the input ran out
+                default: return .corrupt
+                }
             }
         }
-        if n == 0, !payload.isEmpty, payload != Data([0x00]), payload != Data([0x02, 0x00]) {
-            return .failure(.init("websocket permessage-deflate decompression failed"))
-        }
-        if n >= cap { return .failure(.init("websocket text message exceeds \(maxTextMessageBytes) byte limit")) }
-        return .success(out.prefix(n))
     }
 
     // MARK: client stream
@@ -136,6 +196,10 @@ public enum OpenShellWebSocket {
         /// Payload bytes still to pass through for a streamed binary frame.
         private var passthroughRemaining = 0
         public private(set) var closeReason: String?
+        /// The close code the client is told with `closeReason`: 1008 (policy
+        /// violation), or 1009 (message too big) for a message too large to
+        /// hold while it's assembled.
+        public private(set) var closeCode: UInt16 = 1008
 
         public init(compression: Bool, decide: @escaping (String) -> MessageVerdict,
                     onAudit: @escaping (String) -> Void = { _ in },
@@ -186,6 +250,13 @@ public enum OpenShellWebSocket {
                 textPayload.append(payload)
                 if textPayload.count > OpenShellWebSocket.maxTextMessageBytes, !textCompressed {
                     return fail("websocket text message exceeds \(OpenShellWebSocket.maxTextMessageBytes) byte limit", out)
+                }
+                // A compressed message is judged only once it inflates, so its
+                // compressed form is bounded while it's assembled too: endless
+                // continuations would otherwise grow without limit (1009).
+                if textCompressed, textPayload.count > OpenShellWebSocket.maxRawFramePayloadBytes {
+                    return fail("websocket compressed text message exceeds \(OpenShellWebSocket.maxRawFramePayloadBytes) byte limit",
+                                out, code: 1009)
                 }
                 guard h.fin else { continue }
                 fragment = .none
@@ -239,8 +310,9 @@ public enum OpenShellWebSocket {
             return Data(f)
         }
 
-        private func fail(_ why: String, _ out: Data) -> (forward: Data, stop: Bool) {
+        private func fail(_ why: String, _ out: Data, code: UInt16 = 1008) -> (forward: Data, stop: Bool) {
             closeReason = why
+            closeCode = code
             buffer = Data(); heldFrames = Data(); textPayload = Data()
             return (out, true)
         }
@@ -299,9 +371,10 @@ public enum OpenShellWebSocket {
         }
     }
 
-    /// A server→client close frame (unmasked), 1008 "policy violation".
-    public static func policyCloseFrame(reason: String) -> Data {
-        var payload = Data([0x03, 0xF0])
+    /// A server→client close frame (unmasked), 1008 "policy violation" (or
+    /// another `code`: ClientStream.closeCode).
+    public static func policyCloseFrame(reason: String, code: UInt16 = 1008) -> Data {
+        var payload = Data([UInt8(code >> 8), UInt8(code & 0xFF)])
         payload.append(Data(reason.utf8.prefix(120)))
         var f = Data([0x88, UInt8(payload.count)])
         f.append(payload)

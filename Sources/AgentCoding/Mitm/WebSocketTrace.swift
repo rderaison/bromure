@@ -259,6 +259,11 @@ final class WSTraceCollector: @unchecked Sendable {
     /// below, plus the proxy's overall body cap upstream.
     static let perMessageCap = 1 * 1024 * 1024
     static let maxMessages   = 4096
+    /// The compressed bytes one message may hold while it's assembled. The
+    /// inflater gives up past 32 MB of output anyway, and deflate never
+    /// grows its input by much, so a message past this could never be
+    /// inflated: its fragments are counted, not kept.
+    static let compressedMessageCap = 33 * 1024 * 1024
 
     private let direction: WSMessage.Direction
     private let decoder = WSFrameDecoder()
@@ -274,6 +279,9 @@ final class WSTraceCollector: @unchecked Sendable {
     /// RSV1 of the head frame — when the inflater is set, this
     /// determines whether to inflate before recording the message.
     private var pendingCompressed = false
+    /// The compressed message ran past `compressedMessageCap`: what was
+    /// held is dropped and the message is recorded as truncated.
+    private var pendingOverflow = false
 
     private(set) var messages: [WSMessage] = []
     /// Messages past `maxMessages`: parsed and handed to `onMessage` like
@@ -357,8 +365,19 @@ final class WSTraceCollector: @unchecked Sendable {
         if pendingKind != nil { flushPending() }
         pendingKind = kind
         pendingCompressed = rsv1 && (inflater != nil)
+        pendingOverflow = false
         pendingPayload = pendingCompressed ? first : first.prefix(deliverCap)
         pendingTotal = first.count
+        if pendingCompressed { capCompressed() }
+    }
+
+    /// Past `compressedMessageCap` the held bytes go (a first frame can be
+    /// up to the decoder's 64 MB): the collector never holds more than that.
+    private func capCompressed() {
+        guard pendingCompressed, !pendingOverflow,
+              pendingPayload.count > Self.compressedMessageCap else { return }
+        pendingOverflow = true
+        pendingPayload = Data()
     }
 
     private func extendPending(with payload: Data) {
@@ -370,8 +389,16 @@ final class WSTraceCollector: @unchecked Sendable {
         }
         pendingTotal += payload.count
         if pendingCompressed {
-            // Keep the full compressed payload — inflate after FIN.
-            pendingPayload.append(payload)
+            // Keep the full compressed payload — inflate after FIN — up to
+            // compressedMessageCap; past it, only the count goes on.
+            if !pendingOverflow {
+                if pendingPayload.count + payload.count > Self.compressedMessageCap {
+                    pendingOverflow = true
+                    pendingPayload = Data()
+                } else {
+                    pendingPayload.append(payload)
+                }
+            }
         } else {
             let remaining = deliverCap - pendingPayload.count
             if remaining > 0 {
@@ -393,15 +420,22 @@ final class WSTraceCollector: @unchecked Sendable {
         // tool call was lost to Squelch — finding CWE-670, "Squelch misses a
         // tool call whose server event the trace preview cut at 1MB".)
         var total = pendingTotal
-        if pendingCompressed, let inflater {
+        if pendingOverflow {
+            // Too big to inflate: nothing kept but its size. The inflater's
+            // stream skips this message, so a context-takeover socket's
+            // later messages may not inflate either -- as for any message
+            // the inflater refuses.
+            payload = Data()
+        } else if pendingCompressed, let inflater {
             if let inflated = inflater.inflate(payload) {
                 total = inflated.count
                 payload = inflated.count > deliverCap ? inflated.prefix(deliverCap) : inflated
+            } else if payload.count > deliverCap {
+                // Inflate failed: the still-compressed bytes go on so the
+                // user sees something (the renderer falls back to hex),
+                // cut to the reader's cap like any other message.
+                payload = payload.prefix(deliverCap)
             }
-            // On inflate failure: fall through with the still-
-            // compressed bytes so the user sees something rather
-            // than an empty record. The "looks like text?" branch
-            // in the renderer will fall back to hex.
         }
 
         let now = Date()
@@ -418,6 +452,7 @@ final class WSTraceCollector: @unchecked Sendable {
         pendingPayload = Data()
         pendingTotal = 0
         pendingCompressed = false
+        pendingOverflow = false
     }
 
     private func emitControl(_ kind: WSMessage.Kind, payload: Data) {

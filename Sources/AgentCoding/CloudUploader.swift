@@ -59,11 +59,46 @@ public final class BACCloudUploader: @unchecked Sendable {
         }
     }
 
+    /// Workspaces in private mode: their events are neither queued nor,
+    /// once queued, sent. Guarded by `lock`.
+    private var privateProfileIDs: Set<UUID> = []
+    /// How many of `pending`'s first events a POST has in flight (0: none).
+    /// A purge keeps them so the success path's prefix removal stays exact;
+    /// a failed POST then drops the private ones among them. Guarded by `lock`.
+    private var inFlight = 0
+
+    private func isPrivate(_ e: BACCloudEvent) -> Bool {
+        guard let p = e.profileId else { return false }
+        return privateProfileIDs.contains(p)
+    }
+
+    /// A workspace turned private takes what it had already queued with it.
+    /// (Events were filtered only when emitted, so up to a flush interval of
+    /// them -- and the whole backlog during an outage -- still went out.)
+    public func setPrivateProfiles(_ ids: Set<UUID>) {
+        lock.withLock {
+            privateProfileIDs = ids
+            guard !ids.isEmpty, pending.count > inFlight else { return }
+            pending = Array(pending.prefix(inFlight)) + pending.dropFirst(inFlight).filter { !isPrivate($0) }
+        }
+    }
+
+    /// Tests: the workspaces with events queued.
+    func queuedProfileIDs() -> Set<UUID> {
+        lock.withLock { Set(pending.compactMap(\.profileId)) }
+    }
+
     public func enqueue(_ event: BACCloudEvent) {
         var shouldKick = false
         var pendingAfter = 0
         var dropped = 0
         lock.lock()
+        // The emitter checks private mode before an await; a workspace that
+        // turned private meanwhile is caught here.
+        if isPrivate(event) {
+            lock.unlock()
+            return
+        }
         pending.append(event)
         if pending.count >= flushHighWatermark { shouldKick = true }
         // Hard cap: if a long network outage piles up more than a
@@ -72,8 +107,9 @@ public final class BACCloudUploader: @unchecked Sendable {
         // admin gets at-least-recent visibility either way.
         let drainCap = maxBatch * 4
         if pending.count > drainCap {
-            dropped = pending.count - drainCap / 2
-            pending.removeFirst(dropped)
+            // Oldest first, past the events a POST has in flight.
+            dropped = min(pending.count - drainCap / 2, pending.count - inFlight)
+            pending.removeSubrange(inFlight..<(inFlight + dropped))
         }
         pendingAfter = pending.count
         lock.unlock()
@@ -104,11 +140,15 @@ public final class BACCloudUploader: @unchecked Sendable {
         // serialise enqueue → keep the lock briefly, copy out, then
         // POST without it.
         let (batch, isStopped): ([BACCloudEvent], Bool) = lock.withLock {
+            // One POST at a time: a second flush (the timer and a kick)
+            // would send the same prefix again.
+            guard inFlight == 0 else { return ([], stopped) }
             var b: [BACCloudEvent] = []
             if !pending.isEmpty {
                 let take = min(pending.count, maxBatch)
                 b = Array(pending.prefix(take))
             }
+            if !stopped { inFlight = b.count }
             return (b, stopped)
         }
         if isStopped {
@@ -130,7 +170,8 @@ public final class BACCloudUploader: @unchecked Sendable {
             BACDebug.log("[bac/uploader]",
                          "flushNow drop \(batch.count) events (not enrolled)")
             lock.withLock {
-                pending.removeFirst(min(pending.count, batch.count))
+                pending.removeFirst(min(pending.count, inFlight))
+                inFlight = 0
             }
             return
         }
@@ -144,9 +185,15 @@ public final class BACCloudUploader: @unchecked Sendable {
                          "POST done events=\(batch.count) took=\(BACDebug.ms(postT0))")
             // Success: drop the prefix that matched what we sent.
             lock.withLock {
-                pending.removeFirst(min(pending.count, batch.count))
+                pending.removeFirst(min(pending.count, inFlight))
+                inFlight = 0
             }
         } catch {
+            // Kept for the next flush -- minus what turned private meanwhile.
+            lock.withLock {
+                inFlight = 0
+                if !privateProfileIDs.isEmpty { pending.removeAll { isPrivate($0) } }
+            }
             BACDebug.log("[bac/uploader]",
                          "POST failed events=\(batch.count) took=\(BACDebug.ms(postT0)) error=\(error)")
             // Leave `pending` intact for the next flush. Log so an

@@ -62,6 +62,11 @@ public final class AWSResigner: @unchecked Sendable {
         case failed(reason: String, response: Data)
     }
 
+    /// A SigV4 payload hash: 64 hex digits.
+    static func isHexSHA256(_ s: String) -> Bool {
+        s.utf8.count == 64 && s.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0 | 0x20) }
+    }
+
     /// Every partition's DNS suffix (see `AWSHosts`).
     static var partitionDNSSuffixes: [String] { AWSHosts.partitionDNSSuffixes }
 
@@ -70,7 +75,10 @@ public final class AWSResigner: @unchecked Sendable {
 
     /// Strip and re-sign. Returns `.unchanged` for non-AWS hosts so the
     /// caller can use this as a transparent pass-through filter.
-    public func resign(rawRequest: Data, host: String, profileID: UUID) async -> Outcome {
+    /// `bodyComplete` false: `rawRequest` holds only a bounded prefix of a
+    /// body spooled to disk, so its hash can't be computed here (see below).
+    public func resign(rawRequest: Data, host: String, profileID: UUID,
+                       bodyComplete: Bool = true) async -> Outcome {
         // A Spaces key the guest minted signs for DigitalOcean's
         // S3-compatible hosts too (`MintedCredential.hosts`).
         let isAWS = Self.isAWSHost(host)
@@ -175,8 +183,28 @@ public final class AWSResigner: @unchecked Sendable {
         let dateOnly = String(amzDate.prefix(8))
         // Honor the SDK's intent on UNSIGNED-PAYLOAD and on an unsigned
         // aws-chunked upload; otherwise compute the body hash ourselves.
-        let literalPayload: String? = originalContentSHA == "UNSIGNED-PAYLOAD"
-            || originalContentSHA == Self.unsignedTrailer ? originalContentSHA : nil
+        // A spooled body (past the proxy's inline cap) is here only as a
+        // prefix: hashing it signed the wrong payload, and S3 refused the
+        // upload (XAmzContentSHA256Mismatch). Then the SDK's own hash of the
+        // whole body is kept when it sent one, else UNSIGNED-PAYLOAD.
+        let literalPayload: String?
+        if originalContentSHA == "UNSIGNED-PAYLOAD" || originalContentSHA == Self.unsignedTrailer {
+            literalPayload = originalContentSHA
+        } else if !bodyComplete {
+            // S3 only: its body is the object, never the call. A query-protocol
+            // service (STS, IAM…) names its Action in the body, which past the
+            // prefix nobody here has read -- signing it would let a call the
+            // credential mint and the consent prompt never saw go out signed.
+            guard scope.service == "s3" else {
+                return .failed(reason: "a spooled body to \(scope.service) can't be checked",
+                               response: Self.errorResponse(
+                                    status: 413, reason: "Content Too Large",
+                                    body: "bromure: an AWS \(scope.service) request this large can't be signed on the host\n"))
+            }
+            literalPayload = Self.isHexSHA256(originalContentSHA) ? originalContentSHA.lowercased() : "UNSIGNED-PAYLOAD"
+        } else {
+            literalPayload = nil
+        }
         let payloadHash = literalPayload ?? SigV4Signer.hexSHA256(parsed.body)
 
         // Append the headers we generate. Order doesn't matter for

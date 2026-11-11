@@ -31,7 +31,7 @@ struct PassthroughList {
 
     /// True if `host` equals or is a subdomain of any entry.
     func matches(_ host: String) -> Bool {
-        let h = host.lowercased()
+        let h = EgressPolicy.normalizedHost(host)
         return entries.contains { h == $0 || h.hasSuffix("." + $0) }
     }
 

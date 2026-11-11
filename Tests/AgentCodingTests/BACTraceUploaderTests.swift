@@ -111,4 +111,49 @@ import Testing
         #expect(!out.contains("abc123"))
         #expect(out.contains("true") || out.contains("\"ok\":true") || out.contains("\"ok\": true"))
     }
+
+    // MARK: Private mode
+
+    /// Records were filtered only when recorded: a workspace turned private
+    /// still had what it had already buffered sent at the next flush.
+    @Test("a workspace turned private takes its buffered traces with it")
+    func privateDropsBuffered() {
+        let up = BACTraceUploader(endpoint: URL(string: "https://upload.invalid/ac-http-ingest")!)
+        defer { up.shutdown() }
+        let mine = UUID(), other = UUID()
+        func rec(_ p: UUID) -> TraceRecord {
+            TraceRecord(sessionID: p, profileID: p, timestamp: Date(), host: "example.com", port: 443,
+                        method: "GET", path: "/", statusCode: 200, requestBytes: 1,
+                        responseBytes: 1, latencyMs: 1, swaps: [], leaks: [], bodyStored: false)
+        }
+        up.upload(rec(mine), requestBody: nil, responseBody: nil)
+        up.upload(rec(other), requestBody: nil, responseBody: nil)
+        #expect(up.queuedProfileIDs() == [mine, other])
+        up.setPrivateProfiles([mine])
+        #expect(up.queuedProfileIDs() == [other])
+        // …and what it records from now on is dropped as before.
+        up.upload(rec(mine), requestBody: nil, responseBody: nil)
+        #expect(up.queuedProfileIDs() == [other])
+    }
+
+    /// Same for the event stream: a workspace's events already queued for
+    /// /ac-ingest were sent after it turned private.
+    @Test("a workspace turned private takes its queued events with it")
+    func privateDropsQueuedEvents() {
+        let up = BACCloudUploader(endpoint: URL(string: "https://upload.invalid/ac-ingest")!)
+        defer { up.shutdown() }
+        let mine = UUID(), other = UUID()
+        func ev(_ p: UUID) -> BACCloudEvent {
+            BACCloudEvent(sessionId: UUID(), profileId: p, ts: Date(), eventType: "test.event", eventData: [:])
+        }
+        up.enqueue(ev(mine))
+        up.enqueue(ev(other))
+        #expect(up.queuedProfileIDs() == [mine, other])
+        up.setPrivateProfiles([mine])
+        #expect(up.queuedProfileIDs() == [other])
+        // An event that passed the emitter's check before the switch is
+        // refused when it's queued.
+        up.enqueue(ev(mine))
+        #expect(up.queuedProfileIDs() == [other])
+    }
 }

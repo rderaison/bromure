@@ -35,7 +35,10 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
 
     private weak var socketDevice: VZVirtioSocketDevice?
     private var listenerDelegate: ListenerDelegate?
-    private var connection: VZVirtioSocketConnection?
+    /// What owns `fd` (the VZVirtioSocketConnection), kept alive while it's
+    /// in use; nil: the bridge owns the fd and closes it (tests).
+    private var connection: AnyObject?
+    private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
     private var pending: [(req: Data, cont: CheckedContinuation<[String: Any], Error>)] = []
     private var rxBuffer = Data()
@@ -53,10 +56,16 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
         socketDevice.setSocketListener(listener, forPort: Self.port)
     }
 
+    /// Tests only: no listener; connections come through `attach(fd:owner:)`.
+    init(testingWithoutListener: Void) {
+        super.init()
+    }
+
     public func stop() {
         readSource?.cancel()
         readSource = nil
         connection = nil
+        fd = -1
         isConnected = false
         socketDevice?.removeSocketListener(forPort: Self.port)
         for entry in pending {
@@ -93,7 +102,7 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
     }
 
     private func rpc(_ payload: [String: Any]) async throws -> [String: Any] {
-        guard isConnected, let conn = connection else {
+        guard isConnected, fd >= 0 else {
             throw BridgeError.notConnected
         }
         let body = try JSONSerialization.data(withJSONObject: payload)
@@ -102,7 +111,7 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
 
         return try await withCheckedThrowingContinuation { cont in
             pending.append((req: line, cont: cont))
-            let fd = conn.fileDescriptor
+            let fd = self.fd
             line.withUnsafeBytes { ptr in
                 var offset = 0
                 while offset < line.count {
@@ -115,13 +124,24 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
     }
 
     private func accept(_ conn: VZVirtioSocketConnection) {
+        attach(fd: conn.fileDescriptor, owner: conn)
+    }
+
+    /// A new agent connection replaces the current one (the agent
+    /// reconnects every 2 s after a drop). `owner` keeps the fd open; nil
+    /// hands the fd to the bridge, which closes it when its source ends.
+    func attach(fd: Int32, owner: AnyObject?) {
         readSource?.cancel()
         readSource = nil
-        connection = conn
+        // Requests written to the old connection are only ever answered on
+        // it: fail them now, or the new connection's first reply would be
+        // matched (in order) to one of them.
+        failPending()
+        connection = owner
+        self.fd = fd
         isConnected = true
         rxBuffer = Data()
 
-        let fd = conn.fileDescriptor
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in
             var buf = [UInt8](repeating: 0, count: 64 * 1024)
@@ -131,17 +151,26 @@ public final class CodexTokenBridge: NSObject, @unchecked Sendable {
             self?.drainLines()
         }
         source.setCancelHandler { [weak self] in
-            guard let self else { return }
+            // The fd stays open until its source is gone.
+            if owner == nil { Darwin.close(fd) } else { withExtendedLifetime(owner) {} }
+            // A replaced connection's cancel runs after its successor is
+            // installed: it mustn't end the new one.
+            guard let self, self.readSource === source else { return }
             self.connection = nil
+            self.fd = -1
             self.isConnected = false
-            for entry in self.pending {
-                entry.cont.resume(throwing: BridgeError.notConnected)
-            }
-            self.pending.removeAll()
+            self.failPending()
             self.readSource = nil
         }
         source.resume()
         readSource = source
+    }
+
+    private func failPending() {
+        for entry in pending {
+            entry.cont.resume(throwing: BridgeError.notConnected)
+        }
+        pending.removeAll()
     }
 
     private func drainLines() {

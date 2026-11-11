@@ -12,7 +12,42 @@ import SandboxEngine
 import Darwin
 #endif
 
-enum RemoteSSHError: Error { case invalidChannelType }
+enum RemoteSSHError: Error { case invalidChannelType, tooManyChannels }
+
+/// What one SSH connection's session channels may hold together: how many
+/// are open, and the bytes they keep before an exec or shell opens their fd
+/// (each has its own cap too, SSHPTYSessionHandler.maxPendingInbound). A
+/// client that opens channels and sends without ever asking for one can't
+/// grow them past these. The channel cap is generous: a fat client opens
+/// one per forwarded TCP connection (a browser through its SOCKS proxy).
+final class RemoteConnectionBudget: @unchecked Sendable {
+    static let maxChannels = 256
+    static let maxPendingBytes = 4 << 20
+    private let lock = NSLock()
+    private var channels = 0
+    private var pending = 0
+
+    /// A new session channel, if there's room for it.
+    func openChannel() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard channels < Self.maxChannels else { return false }
+        channels += 1
+        return true
+    }
+    func closeChannel() { lock.lock(); channels = max(0, channels - 1); lock.unlock() }
+
+    /// `n` more bytes held before an exec, if the connection has room for them.
+    func reserve(_ n: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard pending + n <= Self.maxPendingBytes else { return false }
+        pending += n
+        return true
+    }
+    func release(_ n: Int) { lock.lock(); pending = max(0, pending - n); lock.unlock() }
+
+    var openChannels: Int { lock.lock(); defer { lock.unlock() }; return channels }
+    var pendingBytes: Int { lock.lock(); defer { lock.unlock() }; return pending }
+}
 
 /// Close the connection on any pipeline error.
 final class RemoteErrorHandler: ChannelInboundHandler {
@@ -323,8 +358,12 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     /// What this connection may do (a Bromure Agent Host's key: attach only).
     private let grant: RemoteGrant?
     /// Inbound SSH bytes that arrived before the forward fd was ready (the vsock
-    /// connect is async), flushed once it is.
+    /// connect is async), flushed once it is. Capped: a channel that sends
+    /// without ever asking for exec or a shell is closed past it.
     private var pendingInbound: [UInt8] = []
+    /// The connection's share of what its channels hold (RemoteConnectionBudget).
+    private let budget: RemoteConnectionBudget?
+    static let maxPendingInbound = 1 << 20
     private var term = "xterm-256color"
     private var cols: UInt16 = 80
     private var rows: UInt16 = 24
@@ -442,7 +481,9 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
          udpForwardResolver: RemoteAccessServer.UDPForwardResolver? = nil,
          browserMCPResolver: RemoteAccessServer.BrowserMCPResolver? = nil,
          delegationMCPResolver: RemoteAccessServer.StreamResolver? = nil,
-         grant: RemoteGrant? = nil) {
+         grant: RemoteGrant? = nil,
+         budget: RemoteConnectionBudget? = nil) {
+        self.budget = budget
         self.menuExe = menuExe
         self.user = user
         self.controlSocketPath = controlSocketPath
@@ -544,14 +585,27 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         guard let bytes = buf.readBytes(length: buf.readableBytes) else { return }
         // Hand off to the io queue so the write path (buffer + writable-drain)
         // never runs on — or blocks — the SSH event loop.
-        ioQueue.async { [weak self] in self?.deliverInbound(bytes) }
+        let channel = context.channel
+        ioQueue.async { [weak self] in self?.deliverInbound(bytes, channel: channel) }
     }
 
     // MARK: SSH → master write path (non-blocking, backpressure-aware; ioQueue only)
 
-    private func deliverInbound(_ bytes: [UInt8]) {
-        // The forward/control fd opens asynchronously; buffer bytes that beat it.
-        if master < 0 { pendingInbound.append(contentsOf: bytes); return }
+    private func deliverInbound(_ bytes: [UInt8], channel: Channel) {
+        // The forward/control fd opens asynchronously; buffer bytes that beat it
+        // (up to maxPendingInbound: more is a channel that never asked for one).
+        if master < 0 {
+            guard pendingInbound.count + bytes.count <= Self.maxPendingInbound,
+                  budget?.reserve(bytes.count) ?? true else {
+                FatClientLog.log("srv: \(pendingInbound.count + bytes.count) bytes before exec or shell: closing the channel")
+                budget?.release(pendingInbound.count)
+                pendingInbound = []
+                channel.close(promise: nil)
+                return
+            }
+            pendingInbound.append(contentsOf: bytes)
+            return
+        }
         outBuffer.append(contentsOf: bytes)
         drainOut()
     }
@@ -562,6 +616,7 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
         defer { forwardEOFIfDrained() }
         guard master >= 0, !pendingInbound.isEmpty else { return }
         outBuffer.insert(contentsOf: pendingInbound, at: 0)   // pre-fd bytes come first
+        budget?.release(pendingInbound.count)
         pendingInbound = []
         drainOut()
     }
@@ -854,6 +909,13 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
             channel.close(promise: nil)
             return
         }
+        // The channel may have closed while the resolver dialed: its teardown
+        // already ran (with no fd to close), so nothing would ever close this
+        // one. On the event loop, like channelInactive, so the two can't cross.
+        guard channel.isActive else {
+            Darwin.close(fd)
+            return
+        }
         self.master = fd
         self.childPID = -1
         // Non-blocking before flushing pre-fd bytes, so the write path can't block.
@@ -927,6 +989,8 @@ final class SSHPTYSessionHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func teardown(pid: pid_t, master: Int32) {
         guard !terminated else { return }
         terminated = true
+        budget?.release(pendingInbound.count)
+        pendingInbound = []
         cancelReadSource()
         writeSource?.cancel()
         writeSource = nil

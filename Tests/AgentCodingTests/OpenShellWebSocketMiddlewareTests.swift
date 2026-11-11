@@ -6,6 +6,33 @@ import SandboxEngine
 
 @Suite("OpenShell WebSocket text gating + middleware")
 struct OpenShellWebSocketMiddlewareTests {
+    /// Raw deflate of all of `data`, ending with a final block.
+    static func deflateRaw(_ data: Data) -> Data? {
+        let cap = 64 * 1024
+        let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: cap)
+        defer { dst.deallocate() }
+        var stream = compression_stream(dst_ptr: dst, dst_size: 0, src_ptr: dst, src_size: 0, state: nil)
+        guard compression_stream_init(&stream, COMPRESSION_STREAM_ENCODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
+            return nil
+        }
+        defer { compression_stream_destroy(&stream) }
+        var out = Data()
+        let ok: Bool = data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Bool in
+            stream.src_ptr = src.baseAddress?.assumingMemoryBound(to: UInt8.self) ?? UnsafePointer(dst)
+            stream.src_size = src.count
+            while true {
+                stream.dst_ptr = dst
+                stream.dst_size = cap
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                let produced = cap - stream.dst_size
+                if produced > 0 { out.append(dst, count: produced) }
+                if status == COMPRESSION_STATUS_END { return true }
+                if status != COMPRESSION_STATUS_OK { return false }
+            }
+        }
+        return ok ? out : nil
+    }
+
     /// A masked client frame.
     private func frame(opcode: UInt8, _ payload: String, fin: Bool = true) -> Data {
         let p = Array(payload.utf8)
@@ -74,6 +101,66 @@ struct OpenShellWebSocketMiddlewareTests {
         #expect(seen == String(data: text, encoding: .utf8))
         // Without negotiated compression, RSV1 is a protocol error.
         #expect(run(OpenShellWebSocket.ClientStream(compression: false) { _ in .allow }, f).1)
+    }
+
+    /// A masked frame of any size, RSV1 as given.
+    private func bigFrame(opcode: UInt8, _ p: Data, fin: Bool, rsv1: Bool = false) -> Data {
+        var f: [UInt8] = [(fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | opcode]
+        if p.count < 126 { f.append(0x80 | UInt8(p.count)) }
+        else if p.count <= 0xFFFF { f += [0x80 | 126, UInt8(p.count >> 8), UInt8(p.count & 0xFF)] }
+        else { f.append(0x80 | 127); for k in (0..<8).reversed() { f.append(UInt8((UInt64(p.count) >> (8 * UInt64(k))) & 0xFF)) } }
+        let mask: [UInt8] = [5, 6, 7, 8]
+        f += mask
+        var body = [UInt8](p)
+        for i in body.indices { body[i] ^= mask[i & 3] }
+        return Data(f) + Data(body)
+    }
+
+    @Test("A compressed fragmented message is bounded while it's assembled (1009)")
+    func compressedAccumulationIsCapped() {
+        var judged = false
+        let i = OpenShellWebSocket.ClientStream(compression: true) { _ in judged = true; return .allow }
+        let piece = Data(repeating: 0x41, count: OpenShellWebSocket.maxTextMessageBytes)
+        var stopped = false
+        var frames = 0
+        // A compressed start, then continuations, none final.
+        var (fwd, stop) = i.feed(bigFrame(opcode: 0x1, piece, fin: false, rsv1: true))
+        frames += 1
+        while !stop, frames < 10 {
+            (fwd, stop) = i.feed(bigFrame(opcode: 0x0, piece, fin: false))
+            frames += 1
+        }
+        stopped = stop
+        #expect(stopped, "refused before the 10th frame")
+        #expect(frames * piece.count > OpenShellWebSocket.maxRawFramePayloadBytes)
+        #expect(frames * piece.count <= OpenShellWebSocket.maxRawFramePayloadBytes + piece.count, "at the cap, not later")
+        #expect(fwd.isEmpty && !judged, "nothing of it went on")
+        #expect(i.closeCode == 1009 && i.closeReason?.contains("compressed text message exceeds") == true)
+        let close = OpenShellWebSocket.policyCloseFrame(reason: i.closeReason ?? "", code: i.closeCode)
+        #expect(close[close.startIndex + 2] == 0x03 && close[close.startIndex + 3] == 0xF1, "1009 on the wire")
+    }
+
+    @Test("permessage-deflate: a final block may end a message; data after it, or a corrupt stream, is refused")
+    func deflateEndsAndLeftovers() throws {
+        let text = Data("judge me".utf8)
+        func judge(_ payload: Data) -> (stop: Bool, seen: String?) {
+            var seen: String?
+            let i = OpenShellWebSocket.ClientStream(compression: true) { seen = $0; return .allow }
+            return (i.feed(bigFrame(opcode: 0x1, payload, fin: true, rsv1: true)).stop, seen)
+        }
+        // The usual form: a non-final stored block, then the sync flush (an
+        // empty stored block) with its LEN/NLEN (00 00 ff ff) stripped, which
+        // leaves that block's header byte.
+        let n = UInt16(text.count)
+        let stored = Data([0x00, UInt8(n & 0xFF), UInt8(n >> 8), UInt8(~n & 0xFF), UInt8(~n >> 8)]) + text + Data([0x00])
+        #expect(judge(stored) == (false, "judge me"))
+        // Ending with its own final block (RFC 7692 7.2.3.4).
+        let final = try #require(Self.deflateRaw(text))
+        #expect(judge(final) == (false, "judge me"))
+        // Bytes after that final block: not part of the message.
+        #expect(judge(final + Data([0x41, 0x42])).stop)
+        // A stream that breaks mid-way: nothing partial is judged or passed.
+        #expect(judge(Data([0x07, 0xff, 0xff, 0x00])).stop)
     }
 
     @Test("A middleware rewrite is re-judged and forwarded as a fresh uncompressed frame")

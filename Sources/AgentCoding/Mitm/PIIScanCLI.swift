@@ -13,7 +13,9 @@ enum PIIScanCLI {
         var i = 0
         while i < args.count {
             switch args[i] {
-            case "--min": i += 1; minScore = Double(args[i]) ?? minScore
+            case "--min":
+                i += 1
+                if i < args.count { minScore = Double(args[i]) ?? minScore }
             case "--quiet": quiet = true
             case "--plan": planned = true
             default: files.append(args[i])

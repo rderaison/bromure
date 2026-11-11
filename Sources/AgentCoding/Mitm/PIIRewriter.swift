@@ -121,7 +121,7 @@ enum PIIRewriter {
         let first = body.first { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }
         guard method.uppercased() == "POST", body.count > 2, first == UInt8(ascii: "{") else { return false }
         let h = host.lowercased()
-        guard TraceLevel.aiHosts.contains(where: { h.contains($0) }),
+        guard TraceLevel.isAIHost(h),
               !h.contains("huggingface.co"),
               localEngineOffMac || h != InferenceService.localMitmHost else { return false }
         // A conversation: Anthropic `messages`, OpenAI `messages`/`input`,
@@ -731,6 +731,11 @@ final class PIIResponseRestorer {
     private var mode: Mode
     private var buffer = Data()
 
+    /// The most held unrestored: a JSON body read whole, or one SSE event
+    /// still without its blank line. Past it the reply passes through as it
+    /// comes, stand-ins left in place (nothing leaks; the agent reads them).
+    static let maxBuffered = 16 << 20
+
     /// A stream slot (one content block / output item / choice) with text
     /// held back, and the last event that carried it — the template for the
     /// event that releases the tail.
@@ -753,15 +758,30 @@ final class PIIResponseRestorer {
     func feed(_ chunk: Data) -> Data {
         switch mode {
         case .passthrough: return chunk
-        case .json: buffer.append(chunk); return Data()
+        case .json:
+            buffer.append(chunk)
+            guard buffer.count > Self.maxBuffered else { return Data() }
+            mode = .passthrough
+            defer { buffer.removeAll() }
+            return buffer
         case .sse:
+            // Only the new bytes are searched (and the 3 before them: a
+            // boundary may straddle two chunks), not the whole event again.
+            var from = max(0, buffer.count - 3)
             buffer.append(chunk)
             var out = Data()
-            while let r = Self.eventBoundary(in: buffer) {
+            while let r = Self.eventBoundary(in: buffer, from: from) {
                 let event = buffer.subdata(in: 0..<r.lowerBound)
                 let sep = buffer.subdata(in: r)
                 buffer.removeSubrange(0..<r.upperBound)
                 out.append(processEvent(event, separator: sep))
+                from = 0
+            }
+            if buffer.count > Self.maxBuffered {
+                out.append(flushAll())
+                out.append(buffer)
+                buffer.removeAll()
+                mode = .passthrough
             }
             return out
         }
@@ -793,9 +813,9 @@ final class PIIResponseRestorer {
         }
     }
 
-    private static func eventBoundary(in d: Data) -> Range<Int>? {
-        let lf = d.range(of: Data("\n\n".utf8))
-        let crlf = d.range(of: Data("\r\n\r\n".utf8))
+    private static func eventBoundary(in d: Data, from: Int = 0) -> Range<Int>? {
+        let lf = d.range(of: Data("\n\n".utf8), in: from..<d.endIndex)
+        let crlf = d.range(of: Data("\r\n\r\n".utf8), in: from..<d.endIndex)
         switch (lf, crlf) {
         case let (a?, b?): return a.lowerBound < b.lowerBound ? a : b
         case let (a?, nil): return a

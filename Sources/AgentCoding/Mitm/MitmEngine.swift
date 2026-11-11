@@ -293,16 +293,12 @@ public final class MitmEngine {
                                        modelLabel: String,
                                        localCloudHosts: Set<String> = [],
                                        for profileID: UUID) {
+        // A new snapshot, never the old one changed in place: the proxy's
+        // hot path holds contexts outside the lock.
+        let context = LLMRoutingContext(routing: routing, localModelLabel: modelLabel,
+                                        localCloudHosts: localCloudHosts)
         fusionLock.lock()
-        if let existing = routingContexts[profileID] {
-            existing.routing = routing
-            existing.localModelLabel = modelLabel
-            existing.localCloudHosts = localCloudHosts
-        } else {
-            routingContexts[profileID] = LLMRoutingContext(
-                routing: routing, localModelLabel: modelLabel,
-                localCloudHosts: localCloudHosts)
-        }
+        routingContexts[profileID] = context
         fusionLock.unlock()
         SupplyChainLog.shared.record(
             "[routing] \(routing.rawValue) for \(profileID.uuidString.prefix(8))")
@@ -700,7 +696,9 @@ public final class MitmEngine {
     /// host from an absolute-form request target or the `Host:` header, without
     /// consuming the bytes (the connection re-reads them). nil if it doesn't look
     /// like HTTP or carries no host — the caller then falls back to the dest IP.
-    private nonisolated static func peekHTTPHost(fd: Int32) -> String? {
+    /// The host as every decision sees it: lowercased, trailing dots gone
+    /// (`policy.local.` is the advisor).
+    nonisolated static func peekHTTPHost(fd: Int32) -> String? {
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = buf.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, 4096, Int32(MSG_PEEK)) }
         guard n > 0, let text = String(bytes: buf.prefix(n), encoding: .isoLatin1),
@@ -711,14 +709,14 @@ public final class MitmEngine {
         let target = String(parts[1])
         if let schemeSep = target.range(of: "://") {
             let hostPart = target[schemeSep.upperBound...].prefix { $0 != "/" }
-            let host = hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart)
-            if !host.isEmpty { return host.lowercased() }
+            let host = EgressPolicy.normalizedHost(hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart))
+            if !host.isEmpty { return host }
         }
         // origin-form: pull the Host header.
         for line in text.split(separator: "\r\n") where line.lowercased().hasPrefix("host:") {
             let v = line.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
-            let host = v.split(separator: ":").first.map(String.init) ?? v
-            if !host.isEmpty { return host.lowercased() }
+            let host = EgressPolicy.normalizedHost(v.split(separator: ":").first.map(String.init) ?? v)
+            if !host.isEmpty { return host }
         }
         return nil
     }
