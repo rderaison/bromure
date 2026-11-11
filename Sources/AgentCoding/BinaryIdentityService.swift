@@ -205,18 +205,26 @@ public final class BinaryIdentityService: @unchecked Sendable {
         // A strict workspace counts only once the guest has said its
         // revocation applied. Not said yet (no status, or one without
         // `strict_applied`: the guest's status module can come up to ~80 s
-        // after its attestor on a spec-less strict boot): not yet, while the
-        // channel is up or the VM just attached. With no channel past that
-        // (a VM taken back that can't pin, an attestor that died): no
-        // identity, so the deny, its event and the RST happen.
+        // after its attestor on a spec-less strict boot): not yet, for
+        // `statusGrace` after the VM attached, or `connectedStatusDeadline`
+        // while the channel is up. Past that -- no channel (a VM taken back
+        // that can't pin, an attestor that died), or a connected attestor
+        // whose status module never says (it failed, or an older restored
+        // guest without `strict_applied`) -- no identity, so the deny, its
+        // event and the RST happen rather than every SYN held for good.
         if queryOverride == nil, let bridge, bridge.strict, status?.strictApplied != true {
-            if bridge.isConnected || Date().timeIntervalSince(bridge.attachedAt) < AttestorBridge.statusGrace {
+            let connected = bridge.isConnected
+            let deadline = connected ? AttestorBridge.connectedStatusDeadline : AttestorBridge.statusGrace
+            if Date().timeIntervalSince(bridge.attachedAt) < deadline {
                 return .notYet
             }
             if bridge.noteStatusOverdue() {
+                let why = connected
+                    ? "the strict VM's attestor is connected but never reported whether the strict sandbox applied"
+                    : "the strict VM's sandbox status never reached the host (no attestor channel)"
                 BACEventEmitter.shared.emitDetached(profileID: profileID, eventType: "sandbox.status", eventData: [
                     "state": .string("unknown"),
-                    "reason": .string("the strict VM's sandbox status never reached the host (no attestor channel): binary rules fail closed")])
+                    "reason": .string(why + ": binary rules fail closed")])
             }
             return .identity(nil)
         }
@@ -387,6 +395,10 @@ final class AttestorBridge: NSObject, VZVirtioSocketListenerDelegate, @unchecked
     static let refusalReportEvery: TimeInterval = 30
     /// How long after attaching a strict VM may stay undecided with no channel.
     static let statusGrace: TimeInterval = 30
+    /// How long after attaching a strict VM may stay undecided while its
+    /// attestor is connected: past the ~80 s its status module can take on
+    /// a spec-less strict boot, but finite.
+    static let connectedStatusDeadline: TimeInterval = 180
     private var statusOverdueSaid = false
     private var statusAsk: Task<Void, Never>?
 

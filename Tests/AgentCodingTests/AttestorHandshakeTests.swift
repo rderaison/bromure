@@ -209,6 +209,47 @@ struct AttestorHandshakeTests {
         }
     }
 
+    /// A connected attestor whose guest never says `strict_applied` (its
+    /// status module failed, or an older restored guest) isn't held for
+    /// good: past the connected deadline, no identity -- and through the
+    /// gate a decided deny, not a SYN held on every retransmit.
+    @Test func aConnectedStrictVMWithoutStrictAppliedIsDecidedAfterTheDeadline() async throws {
+        let (b, dir) = Self.bridge(strict: true); defer { try? FileManager.default.removeItem(at: dir) }
+        let svc = BinaryIdentityService()
+        svc.adoptBridge(b, for: b.profileID)
+        defer { GuestSandboxStatusStore.shared.reset(profileID: b.profileID); b.closeChannel() }
+        GuestSandboxStatusStore.shared.reset(profileID: b.profileID)
+        GuestSandboxStatusStore.shared.update(profileID: b.profileID, report: ["event": "sandbox_status", "filesystem": "off"])
+        let (g, h) = Self.pair(); defer { close(g) }
+        b.admitHandshake(h)
+        _ = Self.serve(b, h)
+        Self.send(g, Self.hello)
+        Self.fakeAttestd(g, status: nil, asked: NIOLockedCounter())
+        for _ in 0..<50 where !b.isConnected { try await Task.sleep(nanoseconds: 20_000_000) }
+        #expect(b.isConnected)
+        // Past the disconnected grace but within the connected deadline: still waiting.
+        b.attachedAt = Date().addingTimeInterval(-AttestorBridge.statusGrace - 1)
+        guard case .notYet = await svc.attest(profileID: b.profileID, sport: 1, dst: "1.2.3.4", dport: 443) else {
+            Issue.record("decided before the connected deadline"); return
+        }
+        b.attachedAt = Date().addingTimeInterval(-AttestorBridge.connectedStatusDeadline - 1)
+        guard case .identity(nil) = await svc.attest(profileID: b.profileID, sport: 1, dst: "1.2.3.4", dport: 443) else {
+            Issue.record("held forever with the channel up"); return
+        }
+        #expect(!b.noteStatusOverdue(), "the overdue event was said, once")
+
+        var policy = EgressPolicy(openShell: try OpenShellPolicy.parse(BinaryIdentityGateTests.yaml))
+        policy.enforceBinaries = true
+        var decided: (verdict: EgressPolicy.Verdict, exe: String?)?
+        for _ in 0..<100 where decided == nil {
+            decided = svc.gate(profileID: b.profileID, sport: 1002, dstIP: BinaryIdentityGateTests.ip, dport: 443, isn: 9,
+                               hostnames: ["api.github.com"], policy: policy)
+            if decided == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        #expect(decided != nil, "the gate decides instead of holding the SYN")
+        #expect(decided?.verdict != .allow)
+    }
+
     /// A close meant for an older channel leaves the current one alone.
     @Test func aStaleCloseLeavesTheNewChannel() async throws {
         let (b, dir) = Self.bridge(); defer { try? FileManager.default.removeItem(at: dir) }
