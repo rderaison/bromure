@@ -3753,6 +3753,27 @@ struct ProfileEditorView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Toggle(isOn: Binding(get: { !draft.browserDisabled }, set: { draft.browserDisabled = !$0 })) {
+                        Label("Web browser", systemImage: "globe")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    InfoTip("The browser runs in its own VM, outside this workspace's network policy: an agent driving it can reach any website, whatever the policy allows. Turn it off for a sandboxed workspace whose agents must stay inside its allowed list — the browser pane stays empty and the agents' `browser` tools refuse. Takes effect at once; a running browser is closed.")
+                }
+                if draft.browserDisabled {
+                    Text("Off: no browser for the user or the agents.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if draft.effectiveStrictSandbox || draft.usesOpenShellPolicy {
+                    Text("This workspace is sandboxed, but the browser isn't: it can reach any website.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
                 Toggle(isOn: $draft.browserPersistent) {
                     Label("Stay signed in to websites", systemImage: "person.badge.key.fill")
                         .font(.subheadline.weight(.semibold))
@@ -3762,6 +3783,7 @@ struct ProfileEditorView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .disabled(draft.browserDisabled)
 
             Divider()
 
@@ -3790,6 +3812,7 @@ struct ProfileEditorView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .disabled(draft.browserDisabled)
 
             Divider()
 

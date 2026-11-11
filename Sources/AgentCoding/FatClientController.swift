@@ -7298,6 +7298,9 @@ final class RemoteHostWindow: NSWindow {
     /// Lazily create the workspace's browser controller in remote-proxy mode.
     /// Nil until the remote subnet + SOCKS port are both known (first `/state`).
     private func browserController(for id: Profile.ID) -> WorkspaceBrowserController? {
+        // Turned off in the workspace's settings: no browser here either
+        // (the server refuses the agents' browser tools on its side).
+        guard !browserDisabled(id) else { return nil }
         if let c = browserControllers[id] { return c }
         guard let subnet = controller.vmnetSubnet, let port = controller.socks?.port else { return nil }
         let profile = controller.profile(for: id)
@@ -7348,8 +7351,15 @@ final class RemoteHostWindow: NSWindow {
         else { setBrowserOpen(id, true) }
     }
 
+    private func browserDisabled(_ id: Profile.ID) -> Bool {
+        controller.profile(for: id)?.browserDisabled == true
+    }
+
     private func setBrowserOpen(_ id: Profile.ID, _ open: Bool) {
         if open {
+            if browserDisabled(id) {
+                FatClientLog.log("browser: turned off for workspace \(id.uuidString.prefix(8))"); return
+            }
             if shownBrowser == id, browserWidthConstraint.constant > 0 { return }   // already shown
             guard let ctl = browserController(for: id) else {
                 FatClientLog.log("browser: tunnel not ready (no subnet/socks yet)"); return
@@ -7443,12 +7453,13 @@ final class RemoteHostWindow: NSWindow {
     /// VM so we don't spin re-dialing an off workspace.
     private func ensureBrowserRelay(_ id: Profile.ID) {
         guard browserRelays[id] == nil, !controller.isAgentHost,
-              !controller.agentHostWorkspaces.contains(id) else { return }
+              !controller.agentHostWorkspaces.contains(id), !browserDisabled(id) else { return }
         let state = controller.runState(for: id)
         guard state == .running || state == .booting else { return }
         let relay = BrowserMCPRelayClient(
             host: controller.host, vm: id.uuidString,
             browser: { [weak self] in self?.browserControllers[id] },
+            disabled: { [weak self] in self?.browserDisabled(id) ?? true },
             ensureBrowser: { [weak self] in
                 // The remote agent needs a browser that isn't up yet — boot it
                 // here, surfacing the pane the way the local window does.

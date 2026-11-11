@@ -91,8 +91,19 @@ final class BrowserMCPVsockBridge: NSObject {
         relay?.dropAgents()
     }
 
+    /// The workspace's browser was turned off or on: drop every agent
+    /// stream (local or relayed) so the shims reconnect and are served by
+    /// the setting now in force.
+    func browserSettingChanged() {
+        rerouteForConsoleFlip()
+    }
+
     private func adopt(_ conn: VZVirtioSocketConnection) {
-        if let relay, ConsolePresence.shared.remotePreferred {
+        // Browser off: never spliced to a fat client's browser -- the local
+        // server refuses every tool.
+        if server.isDisabled {
+            browserRouteLog("agent → server (the workspace's browser is turned off)")
+        } else if let relay, ConsolePresence.shared.remotePreferred {
             if relay.isAlive {
                 // Every agent of the workspace rides the one channel — the
                 // second agent used to be closed on arrival here, which its
