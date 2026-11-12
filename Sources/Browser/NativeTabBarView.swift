@@ -20,6 +20,10 @@ final class NativeTabBarModel {
     var onDetach: ((String, NSPoint) -> Void)?
     var dragPreview: (() -> NSImage?)?
     @ObservationIgnored let tearOff = TabTearOff()
+    /// With tear-off on, the first click on a tab only selects it (so it
+    /// can still be dragged) and the next click edits its address. Holds
+    /// the tab that has had that first click; cleared when editing ends.
+    @ObservationIgnored var armedTabID: String?
     var pendingAddress: String = ""
     var editingAddress: Bool = false
 
@@ -457,6 +461,7 @@ private struct ActiveTabPill: View {
                 onFocusConsumed: { model.pendingFocusOnActiveChange = false },
                 onFieldAvailable: { model.addressField = $0 },
                 onEndEditing: {
+                    model.armedTabID = nil
                     // User clicked away without submitting. Revert to the
                     // domain display so the field looks like a label again.
                     // Skip when editing ended because the active tab changed
@@ -481,7 +486,14 @@ private struct ActiveTabPill: View {
                 suggestions: model.fetchHistorySuggestions,
                 onSubmit: { model.onNavigate?(model.pendingAddress) },
                 tearOff: model.liquidTabsEnabled
-                    ? { [model, id = tab.id] event, view in model.tearOff.track(event, tabID: id, model: model, in: view) }
+                    ? { [model, id = tab.id] event, view in
+                        let outcome = model.tearOff.track(event, tabID: id, model: model, in: view)
+                        // Safari-style: the first click selects the tab, the
+                        // next one edits its address.
+                        guard case .click = outcome, model.armedTabID != id else { return outcome }
+                        model.armedTabID = id
+                        return .handled
+                    }
                     : nil
             )
             .frame(maxWidth: .infinity)

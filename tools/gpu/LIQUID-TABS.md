@@ -5,8 +5,9 @@ address field and the other tabs sit beside it. Any tab can be dragged out of
 that bar (`Sources/Browser/TabTearOff.swift`): press its pill (or the active
 tab's address field), drag it more than 24 points above or below the bar and
 release. The pill dims and a thumbnail follows the pointer while it is torn;
-dragging back into the bar or pressing Escape cancels. A plain click still
-activates the tab or focuses the address field. Tabs are not reordered.
+dragging back into the bar or pressing Escape cancels. A click on another tab
+switches to it; a click on the current tab selects it, and the next click edits
+its address (so a selected tab can still be dragged). Tabs are not reordered.
 
 Tear-off is enabled only for a macOS 27 shared Metal browser whose guest
 advertises `tabDetachProtocolVersion: 1`. Older hosts/images keep the same tab

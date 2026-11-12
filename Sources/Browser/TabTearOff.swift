@@ -173,6 +173,8 @@ final class TabDragHandleView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard let model else { return }
         if case .click = model.tearOff.track(event, tabID: tabID, model: model, in: self) {
+            // Switching to a tab is its first click: the next one edits.
+            model.armedTabID = tabID
             model.onActivate?(tabID)
         }
     }
