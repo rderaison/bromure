@@ -1936,7 +1936,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.state.sessionCount = self.sessions.count
             if (warm.graphicsSession?.outputCapacity ?? 1) > 1 {
                 do {
-                    try session.startSharedWindows { [weak self] child in
+                    try session.startSharedWindows(restoringSession: restoreSession) { [weak self] child in
                         guard let self else { return }
                         child.enableWindowSizeMemory()
                         self.sessions.append(child)
@@ -2600,6 +2600,7 @@ final class SharedBrowserVMOwner {
     private var prepared = false
     private var supportsTerminalShutdown = false
     private var supportsTabDetach = false
+    var restoringSession = false
     private var focusedID: Int?
     private var resizeTask: Task<Void, Never>?
     private var terminated = false
@@ -2671,12 +2672,28 @@ final class SharedBrowserVMOwner {
             if listing["ok"] as? Bool == true, let rows = listing["windows"] as? [[String: Any]], !rows.isEmpty { break }
             try await Task.sleep(for: .milliseconds(250))
         } while ProcessInfo.processInfo.systemUptime < deadline
+        // A restored session (--restore-last-session) can reopen several
+        // windows, one after another. Wait until the count holds for a
+        // second (at most five) so every one of them gets a Mac window.
+        if restoringSession, listing["ok"] as? Bool == true {
+            let settle = ProcessInfo.processInfo.systemUptime + 5
+            var count = (listing["windows"] as? [[String: Any]])?.count ?? 0
+            var stableSince = ProcessInfo.processInfo.systemUptime
+            while ProcessInfo.processInfo.systemUptime < settle,
+                  ProcessInfo.processInfo.systemUptime - stableSince < 1 {
+                try await Task.sleep(for: .milliseconds(250))
+                guard let next = try? await controller.request("list", fields: ["expectedScanouts": capacity, "rootPixelLimit": 67108864]),
+                      next["ok"] as? Bool == true, let rows = next["windows"] as? [[String: Any]], !rows.isEmpty else { continue }
+                listing = next
+                if rows.count != count { count = rows.count; stableSince = ProcessInfo.processInfo.systemUptime }
+            }
+        }
         try requireOK(listing)
         supportsTerminalShutdown = listing["shutdownProtocolVersion"] as? Int == 1
         supportsTabDetach = listing["tabDetachProtocolVersion"] as? Int == 1
         guard listing["rootPixelLimit"] as? Int == 67108864 else { throw NSError(domain: "BromureSharedWindows", code: 10) }
         guard let connectors = listing["outputs"] as? [[String: Any]], connectors.count == capacity,
-              let rows = listing["windows"] as? [[String: Any]], rows.count == 1,
+              let rows = listing["windows"] as? [[String: Any]], !rows.isEmpty,
               let primary = rows[0]["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 4) }
         for row in connectors {
             guard let index = row["scanout"] as? Int, let name = row["output"] as? String,
@@ -2692,6 +2709,49 @@ final class SharedBrowserVMOwner {
         root.tabBridge?.commandGate = { [weak self] id, action in self?.forward(id: id, needsFocus: true, action: action) }
         installInput(root, index: 0)
         prepared = true
+        // Any other restored window gets its own Mac window, on a free output.
+        for row in rows.dropFirst() {
+            guard let id = row["windowId"] as? Int else { continue }
+            do { try await adoptRestoredWindow(id) } catch { report(error) }
+        }
+    }
+
+    private func adoptRestoredWindow(_ id: Int) async throws {
+        guard !terminated else { return }
+        guard let index = (0..<outputs.count).first(where: { windows[$0] == nil }) else {
+            throw NSError(domain: "BromureSharedWindows", code: 14, userInfo: [NSLocalizedDescriptionKey:
+                "The restored session has more windows than this browser can show; some were left closed"])
+        }
+        sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+        do {
+            try await whileSharedDesktopResizes {
+                let topology = try await publishTopology()
+                try requireOK(try await controller.request("attachPrimary", fields: ["windowId": id, "scanout": index, "topology": topology]))
+            }
+            try showChild(windowID: id, index: index)
+        } catch {
+            sizes[index] = nil
+            throw error
+        }
+    }
+
+    /// Opens the Mac window for guest window `id`, already bound to `index`.
+    @discardableResult
+    private func showChild(windowID id: Int, index: Int) throws -> BrowserSession {
+        guard #available(macOS 27.0, *), let gpu = warm.graphicsSession as? MacOS27GPUSession,
+              let graphics = gpu.outputSession(index: index, onResize: { [weak self] w, h in self?.resize(index: index, width: w, height: h) }) else {
+            throw NSError(domain: "BromureSharedWindows", code: 8)
+        }
+        let child = BrowserSession(warmVM: warm, config: root.sessionConfig, profile: root.profile,
+                                   serviceRoot: root, sharedWindowID: id, graphicsOverride: graphics)
+        child.sharedOwner = self
+        child.onClosed = root.onClosed
+        child.onOpenInProfile = root.onOpenInProfile
+        windows[index] = child
+        installInput(child, index: index)
+        onWindowCreated?(child)
+        child.show()
+        return child
     }
 
     private func whileSharedDesktopResizes<T>(_ operation: @MainActor () async throws -> T) async rethrows -> T {
@@ -2802,20 +2862,8 @@ final class SharedBrowserVMOwner {
                     return try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
                 }
                 try requireOK(reply)
-                guard let id = reply["windowId"] as? Int, #available(macOS 27.0, *),
-                      let gpu = warm.graphicsSession as? MacOS27GPUSession,
-                      let graphics = gpu.outputSession(index: index, onResize: { [weak self] w, h in self?.resize(index: index, width: w, height: h) }) else {
-                    throw NSError(domain: "BromureSharedWindows", code: 8)
-                }
-                let child = BrowserSession(warmVM: warm, config: root.sessionConfig, profile: root.profile,
-                                           serviceRoot: root, sharedWindowID: id, graphicsOverride: graphics)
-                child.sharedOwner = self
-                child.onClosed = root.onClosed
-                child.onOpenInProfile = root.onOpenInProfile
-                windows[index] = child
-                installInput(child, index: index)
-                onWindowCreated?(child)
-                child.show()
+                guard let id = reply["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 8) }
+                let child = try showChild(windowID: id, index: index)
                 if let point {
                     let origin = NSPoint(x: point.x - min(140, child.window.frame.width / 2),
                                          y: point.y - child.window.frame.height + 24)
@@ -4213,12 +4261,16 @@ final class BrowserSession {
         (vmView as? PrecisionScrollVMView)?.gpuFrameView?.presentedFrameCount ?? 0
     }
 
-    @MainActor func startSharedWindows(onWindowCreated: @escaping (BrowserSession) -> Void) throws {
+    /// `restoringSession`: Chromium was started with --restore-last-session,
+    /// so it may reopen more than one window.
+    @MainActor func startSharedWindows(restoringSession: Bool = false,
+                                       onWindowCreated: @escaping (BrowserSession) -> Void) throws {
         guard let warm = warmVM, (warm.graphicsSession?.outputCapacity ?? 1) > 1,
               let socket = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
             throw NSError(domain: "BromureSharedWindows", code: 9)
         }
         let owner = SharedBrowserVMOwner(root: self, warm: warm, socket: socket)
+        owner.restoringSession = restoringSession
         owner.onWindowCreated = onWindowCreated
         owner.begin()
     }
