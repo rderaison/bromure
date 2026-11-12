@@ -2741,9 +2741,9 @@ final class SharedBrowserVMOwner {
                 if !self.reconciliationQueued {
                     self.reconciliationQueued = true
                     self.enqueue { [self] in
-                        defer { reconciliationQueued = false }
-                        guard !terminated else { return }
-                        do { try await reconcileGuestWindows() } catch { report(error, presentAlert: false) }
+                        defer { self.reconciliationQueued = false }
+                        guard !self.terminated else { return }
+                        do { try await self.reconcileGuestWindows() } catch { self.report(error, presentAlert: false) }
                     }
                 }
                 checks += 1
