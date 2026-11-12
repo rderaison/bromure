@@ -1724,13 +1724,33 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
     }
 
-    @MainActor private func showSessionError() {
+    /// A session's VM failed to boot: say why. A network failure (no host
+    /// network, bridged interface gone) offers Try Again and is retried by
+    /// itself when the host network changes.
+    @MainActor private func showSessionError(_ error: Error?, retry: @escaping () -> Void) {
+        let networkFailure = SandboxError.isNetworkFailure(error)
+        if networkFailure { state.retryAfterNetworkChange = retry }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Cannot open browser", comment: "")
-        alert.informativeText = NSLocalizedString("Too many browser sessions are open. Close some windows and try again.", comment: "")
+        if let error, !Self.isSessionLimit(error) {
+            alert.informativeText = AppState.localizedMessage(for: error)
+        } else {
+            alert.informativeText = NSLocalizedString("Too many browser sessions are open. Close some windows and try again.", comment: "")
+        }
         alert.alertStyle = .warning
+        if networkFailure {
+            alert.addButton(withTitle: NSLocalizedString("Try Again", comment: ""))
+        }
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-        alert.runModal()
+        if alert.runModal() == .alertFirstButtonReturn, networkFailure {
+            state.retryAfterNetworkChange = nil
+            retry()
+        }
+    }
+
+    private static func isSessionLimit(_ error: Error) -> Bool {
+        if case .macPoolExhausted? = error as? SandboxError { return true }
+        return false
     }
 
     @MainActor func openNewBrowser(initialURL: URL? = nil) {
@@ -1750,11 +1770,18 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             guard let warm = await state.pool?.claim(config: config, onColdBoot: {
                 startingWindow = self.showBrowserStartingWindow()
             }) else {
-                if let url = initialURL { self.pendingURL = url }
+                let error = self.state.pool?.lastClaimError
+                // A network failure retries with the link; otherwise the
+                // link waits for the next window.
+                if let url = initialURL, !SandboxError.isNetworkFailure(error) { self.pendingURL = url }
                 startingWindow?.orderOut(nil)
-                self.showSessionError()
+                self.showSessionError(error) { [weak self] in
+                    self?.openNewBrowser(initialURL: initialURL)
+                }
                 return
             }
+            // A window opened: an earlier network failure's retry is moot.
+            self.state.retryAfterNetworkChange = nil
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
                 self?.openNewBrowser(initialURL: initialURL)
             }
@@ -1897,10 +1924,14 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             ) else {
                 self.state.isLaunching = false
                 startingWindow?.orderOut(nil)
-                self.showSessionError()
+                self.showSessionError(self.state.pool?.lastClaimError) { [weak self] in
+                    self?.openNewBrowser(with: profile, initialURL: initialURL,
+                                         networkOverride: networkOverride)
+                }
                 return
             }
             self.state.isLaunching = false
+            self.state.retryAfterNetworkChange = nil
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
                 self?.openNewBrowser(with: profile, initialURL: initialURL,
                                      networkOverride: networkOverride)
@@ -2367,7 +2398,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             restoreSession: restore,
             onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
         ) else {
-            print("[Automation] Failed to claim VM")
+            print("[Automation] Failed to claim VM: \(state.pool?.lastClaimError.map { "\($0)" } ?? "no VM")")
             return nil
         }
 
