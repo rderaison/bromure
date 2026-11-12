@@ -133,6 +133,8 @@ final class AppState: @unchecked Sendable {
             if self.selectedProfileID == nil {
                 self.selectedProfileID = self.profileManager.allProfiles.first?.id
             }
+            // The pool may have been waiting on the roster.
+            self.markReadyIfProfilesLoaded()
         }
     }
 
@@ -571,6 +573,16 @@ final class AppState: @unchecked Sendable {
     func startPool() {
         pool = VMPool(config: buildBaseConfig(), storageDir: storageDir,
                       automaticallyReplenishes: false)
+        markReadyIfProfilesLoaded()
+    }
+
+    /// Windows may open once the pool exists AND the profile roster has
+    /// loaded (iCloud discovery can take seconds). Until then the phase
+    /// stays .warmingUp, so anything asking for a window — a link that
+    /// launched the app, ⌘N, the launch chooser — waits instead of
+    /// booting a VM outside the user's profiles. Called from both sides.
+    private func markReadyIfProfilesLoaded() {
+        guard pool != nil, !poolReady, profileManager.isReady else { return }
         poolReady = true
         phase = .ready
         onPoolReady?()
