@@ -112,6 +112,11 @@ final class NativeTabBarModel {
     /// Called when the user clicks the "+" button or presses ⌘T.
     var onNewTab: (() -> Void)?
 
+    /// A click is about to put the address field into editing: the page
+    /// view, which can veto resigning while the guest has keyboard focus,
+    /// is told to give way (as ⌘L does).
+    @ObservationIgnored var onWillFocusAddressField: (() -> Void)?
+
     /// Called when the user confirms the address bar (Enter key).
     var onNavigate: ((String) -> Void)?
 
@@ -486,7 +491,13 @@ private struct ActiveTabPill: View {
                         // Safari-style: the first click selects the tab, the
                         // next one edits its address. (Already editing: a
                         // click just places the caret.)
-                        guard !editing, case .click = outcome, model.armedTabID != id else { return outcome }
+                        guard !editing, case .click = outcome else { return outcome }
+                        guard model.armedTabID != id else {
+                            // This click edits: the page view must let go
+                            // of the keyboard, as for ⌘L.
+                            model.onWillFocusAddressField?()
+                            return outcome
+                        }
                         model.armedTabID = id
                         return .handled
                     }
@@ -1295,9 +1306,20 @@ private final class BromureAddressField: NSTextField {
         case .handled:
             return
         case .click, .passThrough:
+            // Same steps as the ⌘T / ⌘L focus paths. The guard stays up for
+            // every attempt (a press otherwise can't focus this field).
             focusingFromClick = true
             defer { focusingFromClick = false }
-            window.makeFirstResponder(self)
+            if !window.makeFirstResponder(self) {
+                // The current responder refused to resign: force it, retry.
+                _ = window.makeFirstResponder(nil)
+                _ = window.makeFirstResponder(self)
+            }
+            // makeFirstResponder can report success without a field editor
+            // (toolbar-hosted field): selectText installs it and selects
+            // the address, so the user can type. Finding: "Second click can
+            // leave the Liquid Tab address field without a text editor".
+            selectText(nil)
         }
     }
 

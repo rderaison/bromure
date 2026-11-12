@@ -3644,6 +3644,9 @@ final class BrowserSession {
                     guard let bridge else { return [] }
                     return await bridge.fetchCertificate(origin: origin)
                 }
+                tabModel.onWillFocusAddressField = { [weak vmView] in
+                    vmView?.declinesFirstResponder = true
+                }
                 tabModel.onNewTab = { [weak bridge, weak tabModel, weak window, weak vmView] in
                     // Pre-emptively resign current first responder so
                     // vmView isn't holding focus while the new pill is
@@ -4280,10 +4283,16 @@ final class BrowserSession {
         let afterOne = field.currentEditor() != nil
         print("[Liquid click] after one click: editing=\(afterOne) armed=\(model.armedTabID ?? "nil")")
         try await Task.sleep(for: .milliseconds(600))
+        // The page view holds the keyboard, as after clicking in the page:
+        // the editing click must still take focus away from it.
+        window.makeFirstResponder(vmView)
         try await click()
-        let afterTwo = model.addressField?.currentEditor() != nil
-        print("[Liquid click] after second click: editing=\(afterTwo)")
-        print(!afterOne && afterTwo ? "BROMURE_LIQUID_CLICK_PASS" : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo)")
+        let editor = model.addressField?.currentEditor() as? NSTextView
+        let afterTwo = editor != nil && fieldWindow.firstResponder === editor
+        let selectedAll = editor.map { $0.selectedRange().length == ($0.string as NSString).length } ?? false
+        print("[Liquid click] after second click: editing=\(afterTwo) selectedAll=\(selectedAll)")
+        print(!afterOne && afterTwo && selectedAll ? "BROMURE_LIQUID_CLICK_PASS"
+              : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo) selectedAll=\(selectedAll)")
         // Leave the field so the detach check starts from a clean state.
         window.makeFirstResponder(vmView)
         model.armedTabID = nil
