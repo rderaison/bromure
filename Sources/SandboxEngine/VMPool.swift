@@ -209,7 +209,7 @@ public final class VMPool {
     private func bootVM(bridgedInterface: String?, requestedConfig: VMConfig? = nil) async throws -> WarmVM {
         let config = requestedConfig ?? self.config
         let imageOK = requireImageVersion
-            ? imageManager.baseImageExists       // files + version stamp
+            ? imageManager.bootableImageExists   // files + a bootable stamp
             : imageManager.hasBootFiles          // files only (reused image)
         guard imageOK else {
             throw SandboxError.baseImageNotFound

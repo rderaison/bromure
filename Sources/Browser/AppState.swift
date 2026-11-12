@@ -311,10 +311,13 @@ final class AppState: @unchecked Sendable {
                 guard !Task.isCancelled else { return }
                 // Both install paths promote all boot files as one unit
                 // (ImagePromotion), so a failure leaves the previous image
-                // whole. Keep browsing on it only when the pool can boot it:
-                // files and version stamp, the check the pool itself makes.
-                // An out-of-date image is reported and kept for the next try.
-                if self.installReason != .firstRun, self.imageManager.baseImageExists {
+                // whole. Keep browsing on it when the pool can boot it
+                // (bootableImageExists, the pool's own check): the current
+                // image, or the previous one still within
+                // minimumBootableImageVersion — the upgrade is retried at the
+                // next launch. Finding: "A failed 504 upgrade prevents
+                // browsing with an intact 503 image".
+                if self.installReason != .firstRun, self.imageManager.bootableImageExists {
                     let message = Self.localizedMessage(for: error)
                     NSLog("Bromure: image install failed, keeping the previous image: %@", message)
                     self.consoleLog += "\nImage install failed (\(message)); keeping the previous image.\n"
@@ -550,7 +553,7 @@ final class AppState: @unchecked Sendable {
     /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {
         if case .initializing = phase { return }
-        guard imageManager.baseImageExists else {
+        guard imageManager.bootableImageExists else {
             // Image was deleted or never created — show setup screen
             pool = nil
             poolReady = false

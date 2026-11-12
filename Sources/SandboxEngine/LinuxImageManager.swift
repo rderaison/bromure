@@ -21,6 +21,14 @@ public final class LinuxImageManager {
     /// gcompat/resolv-stub compat layer is gone.
     public static let imageVersion = "504"
 
+    /// The oldest image stamp this build can still boot. ``imageVersion`` is
+    /// what gets installed (a mismatch triggers the upgrade); this is what
+    /// may keep running while that upgrade hasn't succeeded. Raise it with
+    /// ``imageVersion`` whenever the host needs the new guest; leave it when
+    /// a bump only refreshes the guest (504 changed nothing the host
+    /// relies on, so 503 still boots).
+    public static let minimumBootableImageVersion = "503"
+
     /// Human description of the image — surfaces in
     /// browser-img-catalog.json (via `bromure init-foss-image`'s
     /// build-info.json) and the setup UI.
@@ -100,6 +108,24 @@ public final class LinuxImageManager {
             return false
         }
         return stored.trimmingCharacters(in: .whitespacesAndNewlines) == Self.imageVersion
+    }
+
+    /// The installed boot files can run with this build: present, no
+    /// promotion pending, and stamped between ``minimumBootableImageVersion``
+    /// and ``imageVersion``. True for an up-to-date image and for the
+    /// previous one kept after a failed upgrade.
+    public var bootableImageExists: Bool {
+        guard hasBootFiles,
+              let stored = try? String(contentsOf: imageVersionURL, encoding: .utf8) else { return false }
+        return Self.isBootable(stamp: stored)
+    }
+
+    /// Whether an image stamped `stamp` boots with this build.
+    public static func isBootable(stamp: String) -> Bool {
+        guard let version = Int(stamp.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let minimum = Int(minimumBootableImageVersion),
+              let current = Int(imageVersion) else { return false }
+        return version >= minimum && version <= current
     }
 
     /// Create a Linux base image: download Alpine netboot, install to disk, add Chromium.
