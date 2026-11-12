@@ -214,6 +214,9 @@ final class RemoteHostController {
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
     var onAppearanceChanged: ((Profile) -> Void)?
+    /// A workspace's browser was turned off or on, or a setting it boots
+    /// with changed, on the host.
+    var onBrowserSettingsChanged: ((Profile.ID) -> Void)?
     /// Fired after every applied /state snapshot — the window controller
     /// re-attempts the browser-MCP relay dial here, because run-state
     /// transitions (off → booting) happen between selections and the relay
@@ -1125,6 +1128,18 @@ final class RemoteHostController {
         onSnapshotApplied?()
     }
 
+    /// The workspace's browser settings from its `/state` row
+    /// (`ACAppDelegate.browserRowFields`). An older host that doesn't send
+    /// them: the defaults, as before.
+    static func applyBrowserFields(from w: [String: Any], to p: inout Profile) {
+        p.browserDisabled = w["browserDisabled"] as? Bool ?? false
+        p.browserPersistent = w["browserPersistent"] as? Bool ?? false
+        p.browserAllowUploads = w["browserAllowUploads"] as? Bool ?? true
+        p.browserAllowDownloads = w["browserAllowDownloads"] as? Bool ?? true
+        p.browserWebcam = w["browserWebcam"] as? Bool ?? false
+        p.browserMicrophone = w["browserMicrophone"] as? Bool ?? false
+    }
+
     private func applyWorkspaces(_ workspaces: [[String: Any]], vms: [[String: Any]]) {
         // ProfileRows (all workspaces) + minimal mirrored Profiles.
         var rows: [SessionListModel.ProfileRow] = []
@@ -1179,6 +1194,7 @@ final class RemoteHostController {
             p.customFontSize = w["fontSize"] as? Int
             p.customBackgroundHex = w["backgroundHex"] as? String
             p.customForegroundHex = w["foregroundHex"] as? String
+            Self.applyBrowserFields(from: w, to: &p)
             newProfiles[id] = p
             if let gh = w["hasGitHubToken"] as? Bool {
                 newCredentials[id] = WorkspaceCredentials(
@@ -1199,7 +1215,15 @@ final class RemoteHostController {
                 onAppearanceChanged?(p)
             }
         }
+        // The browser turned off (or its boot settings changed) on the host:
+        // told once the mirror holds the new values, so the window closes or
+        // restarts this client's browser for it.
+        let browserMoved = newProfiles.compactMap { id, p -> Profile.ID? in
+            guard let old = profilesByID[id] else { return nil }
+            return old.browserDisabled != p.browserDisabled || old.browserBootSettingsDiffer(from: p) ? id : nil
+        }
         profilesByID = newProfiles
+        for id in browserMoved { onBrowserSettingsChanged?(id) }
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
         let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
@@ -3844,6 +3868,9 @@ final class RemoteHostWindow: NSWindow {
             if self.shownWorkspace == id, self.controller.tabsModel(for: id)?.rosterLive != true {
                 self.showBootCue(for: id)
             }
+        }
+        controller.onBrowserSettingsChanged = { [weak self] id in
+            self?.browserSettingsChanged(for: id)
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -7442,6 +7469,23 @@ final class RemoteHostWindow: NSWindow {
             shownBrowser = nil            // clear setBrowserOpen's already-shown guard
             setBrowserOpen(id, true)      // recreate controller + relay, re-show
         }
+    }
+
+    /// The host changed the workspace's browser settings. Turned off: the
+    /// pane closes and this client's browser VM and relay go now -- not at
+    /// the next open (finding "Remote browser ignores the workspace's Browser
+    /// off setting", CWE-863). Otherwise (turned back on, or a boot setting
+    /// changed): an open browser restarts with the new settings.
+    private func browserSettingsChanged(for id: Profile.ID) {
+        guard browserDisabled(id) else { rebootBrowser(for: id); return }
+        if browserOpen.contains(id) || shownBrowser == id { setBrowserOpen(id, false) }
+        browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+        browserControllers[id]?.stop()
+        browserControllers[id] = nil
+        browserRelays[id]?.stop()
+        browserRelays[id] = nil
+        controller.listModel.browserOpenWorkspaces = browserOpen
+        FatClientLog.log("browser: turned off on the host for \(id.uuidString.prefix(8)) -- closed")
     }
 
     /// Start the browser-MCP relay for a workspace so the remote agent's

@@ -7298,6 +7298,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return Int(f.size)
     }
 
+    /// A workspace's browser settings in its `/state` row
+    /// (`RemoteHostController.applyBrowserFields` reads them back).
+    nonisolated static func browserRowFields(_ p: Profile) -> [String: Any] {
+        ["browserDisabled": p.browserDisabled,
+         "browserPersistent": p.browserPersistent,
+         "browserAllowUploads": p.browserAllowUploads,
+         "browserAllowDownloads": p.browserAllowDownloads,
+         "browserWebcam": p.browserWebcam,
+         "browserMicrophone": p.browserMicrophone]
+    }
+
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
@@ -7352,6 +7363,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Its notes: the fat client's dashboard card and row tooltip.
                 "comments": p.comments,
             ]
+            // Its browser settings: a fat client runs the workspace's
+            // browser itself, so it needs them -- the off switch above all.
+            row.merge(Self.browserRowFields(p)) { _, new in new }
             if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
