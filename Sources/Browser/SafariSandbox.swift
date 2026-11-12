@@ -4283,7 +4283,19 @@ final class BrowserSession {
         try await click()
         let afterTwo = model.addressField?.currentEditor() != nil
         print("[Liquid click] after second click: editing=\(afterTwo)")
-        print(!afterOne && afterTwo ? "BROMURE_LIQUID_CLICK_PASS" : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo)")
+        // Leaving the field ends editing (the same model change a submitted
+        // address makes): the tab is no longer armed, so the next single
+        // click selects again instead of editing.
+        _ = fieldWindow.makeFirstResponder(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        print("[Liquid click] after leaving: editing=\(model.editingAddress) armed=\(model.armedTabID ?? "nil") editor=\(model.addressField?.currentEditor() != nil)")
+        let disarmed = model.armedTabID == nil && !model.editingAddress
+        try await Task.sleep(for: .milliseconds(600))
+        try await click()
+        let afterThree = model.addressField?.currentEditor() != nil
+        print("[Liquid click] after leaving and one more click: disarmed=\(disarmed) editing=\(afterThree)")
+        print(!afterOne && afterTwo && disarmed && !afterThree ? "BROMURE_LIQUID_CLICK_PASS"
+              : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo) disarmed=\(disarmed) three=\(afterThree)")
         // Leave the field so the detach check starts from a clean state.
         window.makeFirstResponder(vmView)
         model.armedTabID = nil
