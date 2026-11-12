@@ -2620,6 +2620,9 @@ final class SharedBrowserVMOwner {
     var restoringSession = false
     private var focusedID: Int?
     private var resizeTask: Task<Void, Never>?
+    private var reconciliationTask: Task<Void, Never>?
+    private var reconciliationQueued = false
+    private var reportedUnboundWindows: Set<Int> = []
     private var terminated = false
     var onWindowCreated: ((BrowserSession) -> Void)?
     var presentationSession: BrowserSession? {
@@ -2727,25 +2730,73 @@ final class SharedBrowserVMOwner {
         root.tabBridge?.commandGate = { [weak self] id, action in self?.forward(id: id, needsFocus: true, action: action) }
         installInput(root, index: 0)
         prepared = true
-        // Any other restored window gets its own Mac window, on a free output.
-        for row in rows.dropFirst() {
-            guard let id = row["windowId"] as? Int else { continue }
-            do { try await adoptRestoredWindow(id) } catch { report(error) }
+        startWindowReconciliation()
+    }
+
+    private func startWindowReconciliation() {
+        guard reconciliationTask == nil else { return }
+        reconciliationTask = Task { @MainActor [weak self] in
+            var checks = 0
+            while let self, !Task.isCancelled, !self.terminated {
+                if !self.reconciliationQueued {
+                    self.reconciliationQueued = true
+                    self.enqueue { [self] in
+                        defer { reconciliationQueued = false }
+                        guard !terminated else { return }
+                        do { try await reconcileGuestWindows() } catch { report(error, presentAlert: false) }
+                    }
+                }
+                checks += 1
+                try? await Task.sleep(for: checks < 30 ? .seconds(1) : .seconds(10))
+            }
         }
     }
 
-    private func adoptRestoredWindow(_ id: Int) async throws {
-        guard !terminated else { return }
-        guard let index = (0..<outputs.count).first(where: { windows[$0] == nil }) else {
-            throw NSError(domain: "BromureSharedWindows", code: 14, userInfo: [NSLocalizedDescriptionKey:
-                "The restored session has more windows than this browser can show; some were left closed"])
+    private func reconcileGuestWindows() async throws {
+        let listing = try await controller.request("list")
+        try requireOK(listing)
+        guard let rows = listing["windows"] as? [[String: Any]] else {
+            throw NSError(domain: "BromureSharedWindows", code: 4)
+        }
+        let attached = Set(windows.values.compactMap(\.sharedWindowID))
+        for row in rows.sorted(by: { ($0["windowId"] as? Int ?? 0) < ($1["windowId"] as? Int ?? 0) }) {
+            guard let id = row["windowId"] as? Int, !attached.contains(id) else { continue }
+            guard !terminated else { return }
+            do {
+                try await adoptRestoredWindow(id, boundScanout: row["scanout"] as? Int)
+                reportedUnboundWindows.remove(id)
+            } catch {
+                if reportedUnboundWindows.insert(id).inserted {
+                    report(NSError(domain: "BromureSharedWindows", code: 13,
+                                   userInfo: [NSLocalizedDescriptionKey: "Chromium window \(id) could not be displayed: \(error.localizedDescription). Its tabs remain open in the guest. Free a browser window or retry after the display recovers."]))
+                }
+            }
+        }
+        reportedUnboundWindows.formIntersection(Set(rows.compactMap { $0["windowId"] as? Int }))
+    }
+
+    private func adoptRestoredWindow(_ id: Int, boundScanout: Int?) async throws {
+        guard let index = boundScanout ?? (0..<outputs.count).first(where: { windows[$0] == nil }),
+              windows[index] == nil, outputs[index] != nil else {
+            throw NSError(domain: "BromureSharedWindows", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "No free display output"])
         }
         sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
-        print("[Shared windows] adopting restored window \(id) on output \(index) size=\(String(describing: sizes[index]))")
         do {
-            try await whileSharedDesktopResizes {
-                let topology = try await publishTopology()
-                try requireOK(try await controller.request("attachPrimary", fields: ["windowId": id, "scanout": index, "topology": topology]))
+            if boundScanout == nil {
+                try await whileSharedDesktopResizes {
+                    let topology = try await publishTopology()
+                    do {
+                        try requireOK(try await controller.request("attachPrimary", fields: ["windowId": id, "scanout": index, "topology": topology]))
+                    } catch {
+                        // A timed-out reply may follow a successful attachment. Observe
+                        // the binding before a later poll attempts the mutation again.
+                        let listing = try await controller.request("list")
+                        try requireOK(listing)
+                        guard let rows = listing["windows"] as? [[String: Any]],
+                              rows.contains(where: { $0["windowId"] as? Int == id && $0["scanout"] as? Int == index }) else { throw error }
+                    }
+                }
             }
             try showChild(windowID: id, index: index)
         } catch {
@@ -2997,7 +3048,7 @@ final class SharedBrowserVMOwner {
             guard let index = windows.first(where: { $0.value === session })?.key else { return }
             if windows.keys.allSatisfy({ closingWindows.contains($0) }) {
                 root.markVMResourcesClosing()
-                terminated = true; resizeTask?.cancel()
+                terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                 await stopBrowser()
                 windows.removeAll(); closingWindows.removeAll(); sizes.removeAll(); focusedID = nil
                 session.closeSharedView(); session.sharedOwner = nil
@@ -3030,7 +3081,7 @@ final class SharedBrowserVMOwner {
                 session.closeSharedView()
                 session.sharedOwner = nil
                 if windows.isEmpty {
-                    terminated = true; resizeTask?.cancel()
+                    terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                     root.closing = false
                     root.sharedOwner = nil
                     await root.teardown()
@@ -3045,7 +3096,7 @@ final class SharedBrowserVMOwner {
             enqueue { [self] in
                 guard !terminated else { continuation.resume(); return }
                 root.markVMResourcesClosing()
-                terminated = true; resizeTask?.cancel()
+                terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                 await stopBrowser()
                 for session in windows.values { session.closeSharedView(); session.sharedOwner = nil }
                 windows.removeAll()

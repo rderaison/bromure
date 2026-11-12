@@ -243,6 +243,34 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(reply['windowId'], 10)
         self.assertEqual(reply['targetId'], 'a')
 
+    def test_late_restored_window_can_be_listed_and_attached(self):
+        self.attach()
+        # A second window appears after the initial list and primary attach.
+        self.targets['restored'] = 20
+        self.bounds[20] = dict(left=0, top=0, width=960, height=626, windowState='normal')
+        listing = self.controller.handle(dict(id=3, cmd='list'))
+        self.assertTrue(listing['ok'], listing)
+        self.assertEqual([(row['windowId'], row.get('scanout')) for row in listing['windows']],
+                         [(10, 0), (20, None)])
+        layout = self.layout()
+        layout[0]['windowId'] = 10
+        reply = self.controller.handle(dict(id=4, cmd='attachPrimary', windowId=20,
+                                            scanout=1, topology=layout))
+        self.assertTrue(reply['ok'], reply)
+        listing = self.controller.handle(dict(id=5, cmd='list'))
+        self.assertEqual([(row['windowId'], row.get('scanout')) for row in listing['windows']],
+                         [(10, 0), (20, 1)])
+
+    def test_host_keeps_reconciling_guest_windows_after_startup(self):
+        source = (PATH.parents[4] / 'Browser/SafariSandbox.swift').read_text()
+        prepare = source.split('    func prepare() async throws {', 1)[1].split('    private func whileSharedDesktopResizes', 1)[0]
+        self.assertIn('startWindowReconciliation()', prepare)
+        self.assertIn('while let self, !Task.isCancelled, !self.terminated', prepare)
+        self.assertIn('controller.request("list")', prepare)
+        self.assertIn('!attached.contains(id)', prepare)
+        self.assertIn('adoptRestoredWindow(id, boundScanout:', prepare)
+        self.assertIn('reportedUnboundWindows.insert(id)', prepare)
+
     def test_single_browser_create_focus_new_tab_close_and_idempotence(self):
         self.attach()
         request = dict(id=3, cmd='create', scanout=1, topology=self.layout())
