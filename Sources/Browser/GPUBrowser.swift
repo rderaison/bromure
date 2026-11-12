@@ -276,7 +276,8 @@ struct GPUBrowser: ParsableCommand {
             let original = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL", cancel: true)
             try await Task.sleep(for: .milliseconds(400))
             guard sharedChildren.isEmpty else { throw ValidationError("Escape unexpectedly detached tab") }
-            let target = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL")
+            let draft = "bromure-draft.test/typed"
+            let target = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL", draft: draft)
             guard target == original else { throw ValidationError("Cancel changed target identity") }
             let deadline = ProcessInfo.processInfo.systemUptime + 20
             while sharedChildren.first?.hasDetachedTab(target, from: session) != true {
@@ -284,7 +285,15 @@ struct GPUBrowser: ParsableCommand {
                 try await Task.sleep(for: .milliseconds(100))
             }
             guard let child = sharedChildren.first else { throw ValidationError("Missing detached window") }
-            print("BROMURE_LIQUID_TAB_DETACH_PASS target=\(target) sameVM=true libraryDrag=true escapeCancel=true")
+            // The address being typed travels with the tab.
+            let draftDeadline = ProcessInfo.processInfo.systemUptime + 5
+            while child.addressFieldText != draft {
+                guard ProcessInfo.processInfo.systemUptime < draftDeadline else {
+                    throw ValidationError("Address draft lost in detach: \(child.addressFieldText ?? "nil")")
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            print("BROMURE_LIQUID_TAB_DETACH_PASS target=\(target) sameVM=true libraryDrag=true escapeCancel=true draft=true")
             session.window.performClose(nil)
             try await Task.sleep(for: .seconds(2))
             guard child.window.isVisible, warm.vm.state == .running, child.graphicsPresentedFrameCount > 0 else {

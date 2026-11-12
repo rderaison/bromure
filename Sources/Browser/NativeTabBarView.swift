@@ -47,6 +47,9 @@ final class NativeTabBarModel {
     /// dropped when the guest reports a real navigation in that tab (the
     /// canonical URL takes over) or when the tab itself is closed.
     private var drafts: [String: String] = [:]
+    /// Drafts adopted for tabs this window hasn't been told about yet (a tab
+    /// being dragged in): kept through the guest's earlier reports.
+    @ObservationIgnored private var awaitedDraftIDs: Set<String> = []
 
     /// Set when the user requests a new tab via ⌘T or `+`. The next time
     /// the active tab changes (i.e. the guest acks the new target), we
@@ -191,7 +194,8 @@ final class NativeTabBarModel {
 
         // Drop drafts for tabs that no longer exist.
         let liveIDs = Set(merged.map(\.id))
-        drafts = drafts.filter { liveIDs.contains($0.key) }
+        awaitedDraftIDs.subtract(liveIDs)
+        drafts = drafts.filter { liveIDs.contains($0.key) || awaitedDraftIDs.contains($0.key) }
 
         tabs = merged
 
@@ -250,6 +254,29 @@ final class NativeTabBarModel {
         if !wasEditing, pendingAddress.isEmpty {
             pendingAddress = Self.displayValue(for: activeTab)
         }
+    }
+
+    /// The unsubmitted address typed for `id`: the live field's text when
+    /// it is the active tab being edited, else its stashed draft. nil when
+    /// the address is just the page's own.
+    func addressDraft(for id: String) -> String? {
+        if id == activeTab?.id {
+            guard editingAddress || drafts[id] != nil,
+                  !pendingAddress.isEmpty,
+                  pendingAddress != Self.displayValue(for: activeTab),
+                  pendingAddress != activeTab?.url else { return nil }
+            return pendingAddress
+        }
+        return drafts[id]
+    }
+
+    /// A tab dragged in from another window with an address being typed:
+    /// keep the draft for when the tab is reported here. Like a draft
+    /// restored on a tab switch, it shows in the field unfocused.
+    func adoptAddressDraft(_ text: String, for id: String) {
+        drafts[id] = text
+        if !tabs.contains(where: { $0.id == id }) { awaitedDraftIDs.insert(id) }
+        if activeTab?.id == id { pendingAddress = text }
     }
 
     /// Optimistically mark a tab active without waiting for the guest to
