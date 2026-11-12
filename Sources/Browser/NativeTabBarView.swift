@@ -1275,9 +1275,25 @@ private final class BromureAddressField: NSTextField {
     var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)?
     private var editingPressMonitor: Any?
 
+    /// Set while a click deliberately focuses the field (see mouseDown).
+    private var focusingFromClick = false
+
+    /// With tear-off on, a mouse press must not focus the field by itself:
+    /// NSWindow makes the clicked view first responder before calling its
+    /// mouseDown, which would start editing on the first click. Keyboard
+    /// paths (⌘L, ⌘T, Tab) still focus it as usual.
+    override var acceptsFirstResponder: Bool {
+        // (No window check: in a unified toolbar the event's window and the
+        // field's can be different objects.)
+        if tearOff != nil, !focusingFromClick, NSApp.currentEvent?.type == .leftMouseDown {
+            return false
+        }
+        return super.acceptsFirstResponder
+    }
+
     /// With tear-off on, a press on the field is tracked first: dragging it
-    /// out of the bar tears the tab off, and a click is replayed so the
-    /// field focuses exactly as before.
+    /// out of the bar tears the tab off. A click that should edit (the
+    /// tracker returns .click) focuses the field, selecting its address.
     override func mouseDown(with event: NSEvent) {
         guard currentEditor() == nil, let tearOff, let window else {
             super.mouseDown(with: event); return
@@ -1285,12 +1301,10 @@ private final class BromureAddressField: NSTextField {
         switch tearOff(event, self, false) {
         case .handled:
             return
-        case .click(let up):
-            window.postEvent(up, atStart: true)
-            super.mouseDown(with: event)
-        case .passThrough(let events):
-            for queued in events.reversed() { window.postEvent(queued, atStart: true) }
-            super.mouseDown(with: event)
+        case .click, .passThrough:
+            focusingFromClick = true
+            defer { focusingFromClick = false }
+            window.makeFirstResponder(self)
         }
     }
 

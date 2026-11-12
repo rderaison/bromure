@@ -30,6 +30,8 @@ struct GPUBrowser: ParsableCommand {
     @Flag(name: .long) var sharedQuitCheck = false
     @Flag(name: .long) var sharedMenuCheck = false
     @Flag(name: .long) var liquidTabDetachCheck = false
+    @Flag(name: .long, help: "Check that one click on the current tab does not edit its address.")
+    var liquidClickCheck = false
     @Flag(name: .long) var sharedMenuRootCloseCheck = false
     @Flag(name: .long) var historyCompletionCheck = false
     @Flag(name: .long) var resizeCheck = false
@@ -268,6 +270,9 @@ struct GPUBrowser: ParsableCommand {
         defer { diagnosticTask.cancel() }
         let liquidTask: Task<Void, Error>? = liquidTabDetachCheck ? Task { @MainActor in
             try await Task.sleep(for: .seconds(22))
+            if liquidClickCheck {
+                try await session.checkLiquidClicks(title: "LIQUID DETACH SENTINEL")
+            }
             let original = try await session.checkLiquidTabDrag(title: "LIQUID DETACH SENTINEL", cancel: true)
             try await Task.sleep(for: .milliseconds(400))
             guard sharedChildren.isEmpty else { throw ValidationError("Escape unexpectedly detached tab") }

@@ -4257,6 +4257,54 @@ final class BrowserSession {
         return target
     }
 
+    /// Diagnostic: real clicks (dispatched through the window, so hit
+    /// testing is exercised) on the current tab's address field. One click
+    /// must leave it unedited; a second click must start editing.
+    @MainActor func checkLiquidClicks(title: String) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while nativeTabBar?.model.liquidTabsEnabled != true ||
+              (nativeTabBar?.model.tabs.count ?? 0) < 2 || nativeTabBar?.model.activeTab == nil ||
+              nativeTabBar?.model.tabs.contains(where: { $0.title == title }) != true ||
+              nativeTabBar?.model.addressField?.window == nil {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain: "BromureLiquidTabs", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                    "Click fixture not ready: active=\(nativeTabBar?.model.activeTab?.title ?? "nil")"])
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let model = nativeTabBar?.model, let field = model.addressField, let fieldWindow = field.window else {
+            throw NSError(domain: "BromureLiquidTabs", code: 5)
+        }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        let point = field.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), to: nil)
+        func click() async throws {
+            func event(_ type: NSEvent.EventType) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: fieldWindow.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            // Through the app's event queue, like a real click (the run loop
+            // dispatches it and sets NSApp.currentEvent).
+            NSApp.postEvent(event(.leftMouseDown), atStart: false)
+            NSApp.postEvent(event(.leftMouseUp), atStart: false)
+            try await Task.sleep(for: .milliseconds(400))
+        }
+        let hit = fieldWindow.contentView?.superview?.hitTest(fieldWindow.contentView!.superview!.convert(point, from: nil))
+        print("[Liquid click] field=\(type(of: field)) hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil") editingBefore=\(field.currentEditor() != nil) armed=\(model.armedTabID ?? "nil")")
+        try await click()
+        let afterOne = field.currentEditor() != nil
+        print("[Liquid click] after one click: editing=\(afterOne) armed=\(model.armedTabID ?? "nil")")
+        try await Task.sleep(for: .milliseconds(600))
+        try await click()
+        let afterTwo = model.addressField?.currentEditor() != nil
+        print("[Liquid click] after second click: editing=\(afterTwo)")
+        print(!afterOne && afterTwo ? "BROMURE_LIQUID_CLICK_PASS" : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo)")
+        // Leave the field so the detach check starts from a clean state.
+        window.makeFirstResponder(vmView)
+        model.armedTabID = nil
+    }
+
     @MainActor func hasDetachedTab(_ target: String, from source: BrowserSession) -> Bool {
         sharedOwner === source.sharedOwner && warmVM?.vm === source.warmVM?.vm &&
         sharedWindowID != source.sharedWindowID && nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == true &&
