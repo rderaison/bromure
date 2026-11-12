@@ -522,7 +522,7 @@ private struct ProgressPane: View {
 
     private var subtitle: String {
         if launching {
-            return NSLocalizedString("The image is ready. Warming up the first VM so your browser opens instantly.", comment: "Setup window subtitle while the engine starts")
+            return NSLocalizedString("The image is ready. Starting Bromure\u{2026}", comment: "Setup window subtitle while the engine starts")
         }
         switch reason {
         case .firstRun:

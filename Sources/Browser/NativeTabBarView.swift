@@ -134,20 +134,13 @@ final class NativeTabBarModel {
     var profileIsManaged = false
 
     /// Bumped by the app delegate whenever the profile roster or the set
-    /// of open windows changes, so the chip's menu re-renders with fresh
-    /// entries from ``profileEntries``.
+    /// of open windows changes, so the chip re-renders.
     var profileVersion = 0
-
-    /// Live roster for the chip menu, evaluated when the menu renders —
-    /// a closure rather than a stored array so a stale copy can never
-    /// outlive a create/delete.
-    @ObservationIgnored var profileEntries: () -> [ProfileMenuEntry] = { [] }
 
     /// Chip menu actions. All resolve through the app delegate; the
     /// session only forwards.
-    var onOpenProfile: ((UUID) -> Void)?
+    var onOpenDifferentProfile: (() -> Void)?
     var onManageProfiles: (() -> Void)?
-    var onNewProfile: (() -> Void)?
     var onEditProfile: (() -> Void)?
     var onDeleteProfile: (() -> Void)?
 

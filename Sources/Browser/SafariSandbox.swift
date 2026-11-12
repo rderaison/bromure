@@ -138,15 +138,14 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private enum PendingLaunch {
         /// App launch: ask which profile and network to boot.
         case launchPicker
-        /// No window (Dock click): open the startup profile directly.
+        /// Unattended runs (BROMURE_SKIP_LAUNCH_PICKER): open the startup
+        /// profile directly.
         case startup
         case profile(UUID, URL?, network: String? = nil)
     }
     /// The launch picker, while it is up.
     private var launchPickerWindow: NSWindow?
     private var launchPickerCompletion: ((LaunchChoice?) -> Void)?
-    /// Identifies the pre-boot picker askLaunchChoice is waiting on.
-    private var launchPickerToken: UUID?
     /// File ▸ New Window With Profile — rebuilt on each open.
     private weak var profilesSubmenu: NSMenu?
     private var settingsWindow: NSWindow?
@@ -330,10 +329,10 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             snapshotSetupWindowIfRequested()
             return
         }
-        // BROMURE_SKIP_LAUNCH_PICKER: unattended runs (e2e) keep the old
-        // launch — warm the default VM, open the startup profile.
+        // Nothing boots until the profile chooser is answered.
+        // BROMURE_SKIP_LAUNCH_PICKER: unattended runs (e2e) open the
+        // startup profile directly.
         if ProcessInfo.processInfo.environment["BROMURE_SKIP_LAUNCH_PICKER"] == nil {
-            state.launchConfigProvider = { [weak self] in await self?.askLaunchChoice() }
             pendingLaunch = .launchPicker
         } else {
             pendingLaunch = .startup
@@ -386,11 +385,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 }
                 return
             }
-            if case .launchPicker = launch, showLaunchPicker(completion: { [weak self] choice in
-                guard let self, let choice,
-                      let profile = self.state.profileManager.profile(withID: choice.profileID) else { return }
-                self.openNewBrowser(with: profile, networkOverride: choice.network)
-            }) { return }
+            if case .launchPicker = launch, presentProfileChooser() { return }
             if let profile = startupProfile() {
                 openNewBrowser(with: profile)
             } else {
@@ -403,48 +398,36 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
     }
 
-    /// Before the first VM boots: ask which profile and network to start
-    /// with, and hand the pool that config so its VM boots on the chosen
-    /// NIC. The choice becomes the pending launch, opened on pool-ready.
-    /// Cancel (or no profiles) warms the default VM and opens nothing.
-    @MainActor private func askLaunchChoice() async -> VMConfig? {
-        while !state.profileManager.isReady {
-            try? await Task.sleep(for: .milliseconds(250))
-            if Task.isCancelled { return nil }
+    /// Show the profile chooser; the session it opens boots with the
+    /// chosen profile and network. Fronts the chooser if it's already up.
+    /// Returns false (nothing shown) when there is no profile to choose.
+    @MainActor @discardableResult
+    func presentProfileChooser(preselecting id: UUID? = nil) -> Bool {
+        if let launchPickerWindow {
+            launchPickerWindow.makeKeyAndOrderFront(nil)
+            return true
         }
-        if Task.isCancelled { return nil }
-        hideSetupWindow()
-        // The pool's warm-up can be cancelled while we wait (restartPool,
-        // an image rebuild); take this picker down then — the replacement
-        // pool asks again. The token keeps a late cancel from closing the
-        // replacement's picker.
-        let token = UUID()
-        let choice: LaunchChoice? = await withTaskCancellationHandler {
-            await withCheckedContinuation { cont in
-                if showLaunchPicker(completion: { cont.resume(returning: $0) }) {
-                    launchPickerToken = token
-                } else {
-                    cont.resume(returning: nil)
-                }
-            }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                guard let self, self.launchPickerToken == token else { return }
-                self.finishLaunchPicker(nil)
-            }
+        return showLaunchPicker(initialProfileID: id) { [weak self] choice in
+            guard let self else { return }
+            // A link that arrived while the chooser was up opens in the
+            // chosen session; Cancel drops it.
+            let url = self.pendingURL
+            self.pendingURL = nil
+            guard let choice,
+                  let profile = self.state.profileManager.profile(withID: choice.profileID) else { return }
+            self.openNewBrowser(with: profile, initialURL: url, networkOverride: choice.network)
         }
-        if Task.isCancelled { return nil }
-        guard let choice,
-              let profile = state.profileManager.profile(withID: choice.profileID) else {
-            // Leave a launch some other path queued meanwhile (⌘N) alone.
-            if case .launchPicker? = pendingLaunch { pendingLaunch = nil }
-            return nil
+    }
+
+    /// ⌘N, a Dock click, "Open a Different Profile…": every new VM starts
+    /// at the chooser. Queued while the engine isn't ready yet.
+    @MainActor func chooseProfileAndOpen(preselecting id: UUID? = nil) {
+        guard state.pool != nil, state.poolReady, state.profileManager.isReady else {
+            pendingLaunch = .launchPicker
+            if state.phase != .ready { showSetupWindow() } else { performPendingLaunch() }
+            return
         }
-        pendingLaunch = .profile(profile.id, nil, network: choice.network)
-        if !state.poolReady { showSetupWindow() }
-        var config = state.buildConfig(for: profile)
-        config.networkInterface = choice.network
-        return config
+        if !presentProfileChooser(preselecting: id) { openNewBrowser() }
     }
 
     /// The launch window: pick the profile to boot and the network its
@@ -452,17 +435,24 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// keep running while it waits. `completion` gets the choice, or nil
     /// on Cancel / close. Returns false (completion not called) when
     /// there is no profile to choose.
-    @MainActor private func showLaunchPicker(completion: @escaping (LaunchChoice?) -> Void) -> Bool {
+    @MainActor private func showLaunchPicker(initialProfileID: UUID? = nil,
+                                             completion: @escaping (LaunchChoice?) -> Void) -> Bool {
         let profiles = state.profileManager.allProfiles
         guard !profiles.isEmpty else { return false }
         finishLaunchPicker(nil)  // never two pickers / dangling completions
-        let initial = startupProfile()?.id ?? profiles[0].id
+        let initial = initialProfileID.flatMap { id in profiles.first { $0.id == id }?.id }
+            ?? startupProfile()?.id ?? profiles[0].id
         let window = NSWindow(contentRect: .zero,
                               styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         let view = LaunchPickerView(
             profiles: profiles, initialProfileID: initial,
             interfaces: VMConfig.bridgedInterfaces(),
+            suggestedColor: { [weak self] in self?.profileEditor.suggestedColor() },
+            onCreateProfile: { [weak self] name, color in
+                guard let self else { return Profile(name: name, color: color) }
+                return self.profileEditor.createProfile(name: name, color: color)
+            },
             onOpen: { [weak self] choice in self?.finishLaunchPicker(choice) },
             onCancel: { [weak self] in self?.finishLaunchPicker(nil) }
         )
@@ -489,7 +479,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @MainActor private func finishLaunchPicker(_ choice: LaunchChoice?) {
         let completion = launchPickerCompletion
         launchPickerCompletion = nil
-        launchPickerToken = nil
         if let window = launchPickerWindow {
             launchPickerWindow = nil
             window.orderOut(nil)
@@ -575,6 +564,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 print("[URL] default profile '\(chosen.name)' → new browser")
                 openNewBrowser(with: chosen, initialURL: url)
             }
+            return
+        }
+
+        // The profile chooser is up with no window open (launch, Dock
+        // click): it decides where the link opens — front it, and the
+        // session it starts loads the link.
+        if launchPickerWindow != nil, !sessions.contains(where: { !$0.closing }) {
+            print("[URL] profile chooser is up — link waits for its choice")
+            pendingURL = url
+            launchPickerWindow?.makeKeyAndOrderFront(nil)
             return
         }
 
@@ -1292,20 +1291,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Window / profile actions
 
-    /// ⌘N: another window of the front window's profile; with no browser
-    /// window in front, the start-up profile.
+    /// ⌘N: another window in the front window's VM when it has shared
+    /// windows; otherwise a new VM, chosen in the profile chooser (the
+    /// front window's profile preselected).
     @MainActor @objc func newWindowAction(_ sender: Any?) {
         if let owner = keyWindowSession()?.sharedOwner ?? sessions.last(where: { !$0.closing })?.sharedOwner {
             owner.createWindow()
             return
         }
-        if let profile = keyWindowSession()?.profile
-            ?? sessions.last(where: { !$0.closing })?.profile
-            ?? startupProfile() {
-            openWindow(forProfileID: profile.id)
-        } else {
-            openNewBrowser()
-        }
+        chooseProfileAndOpen(preselecting: keyWindowSession()?.profile?.id
+                             ?? sessions.last(where: { !$0.closing })?.profile?.id)
     }
 
     /// ⇧⌘N: a fresh ephemeral VM.
@@ -1723,7 +1718,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 state.sessionCount = 0
 
                 state.regenerateImage()
-                pendingLaunch = .startup
+                pendingLaunch = .launchPicker
                 showSetupWindow()
             }
         }
@@ -1791,9 +1786,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             session.show()
             self.refreshProfileMenus()
-            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
-                self.state.pool?.scheduleWarmUp()
-            }
         }
     }
 
@@ -1947,9 +1939,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             session.show()
             self.refreshProfileMenus()
-            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
-                self.state.pool?.scheduleWarmUp()
-            }
         }
     }
 
@@ -2398,8 +2387,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         self.state.sessionCount = self.sessions.count
         session.show()
         self.refreshProfileMenus()
-        // Shorter warm-up delay for automation — sessions are created/destroyed rapidly
-        state.pool?.scheduleWarmUp(delay: .seconds(3))
 
         guard let server = automationServer else {
             print("[Automation] Session created but no automation server")
@@ -2525,8 +2512,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             return false
         }
         if sessions.isEmpty {
-            pendingLaunch = .startup
-            performPendingLaunch()
+            chooseProfileAndOpen()
             return false
         }
         return true
@@ -3713,10 +3699,8 @@ final class BrowserSession {
                     let delegate = { NSApp.delegate as? GUIAppDelegate }
                     tabModel.profileIsManaged = delegate()?.state.profileManager.isManaged(profile.id) ?? false
                     let pid = profile.id
-                    tabModel.profileEntries = { delegate()?.profileMenuEntries(current: pid) ?? [] }
-                    tabModel.onOpenProfile = { id in delegate()?.openWindow(forProfileID: id) }
+                    tabModel.onOpenDifferentProfile = { delegate()?.chooseProfileAndOpen() }
                     tabModel.onManageProfiles = { delegate()?.profileEditor.presentPicker() }
-                    tabModel.onNewProfile = { delegate()?.profileEditor.presentNewProfile() }
                     tabModel.onEditProfile = { delegate()?.profileEditor.presentSettings(forProfileID: pid) }
                     tabModel.onDeleteProfile = { delegate()?.profileEditor.confirmDelete(profileID: pid) }
                 }

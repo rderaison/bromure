@@ -55,9 +55,8 @@ enum ProfileSwatch {
 }
 
 /// Safari's toolbar profile pill: a person glyph tinted with the profile
-/// colour, the profile name and a chevron. The menu behind it lists every
-/// profile (current one checked) and the create / edit / delete actions,
-/// so the old launcher window is no longer needed for any of that.
+/// colour, the profile name and a chevron. The menu behind it opens the
+/// profile chooser for another profile, and edits / deletes this one.
 struct ProfileChip: View {
     @Bindable var model: NativeTabBarModel
     /// Shared with Settings › General, so every window's chip agrees.
@@ -73,37 +72,15 @@ struct ProfileChip: View {
     }
 
     var body: some View {
-        // Reading the version ties this view to the delegate's bumps so
-        // the entries closure is re-run after a create / delete / open.
+        // Reading the version re-renders the chip after an edit.
         let _ = model.profileVersion
-        let entries = model.profileEntries()
         let name = model.profileName ?? ""
 
         Menu {
-            ForEach(entries) { entry in
-                if entry.isCurrent {
-                    // A checked, inert row: Safari marks the window's own
-                    // profile the same way.
-                    Toggle(isOn: .constant(true)) {
-                        Label {
-                            Text(entry.name)
-                        } icon: {
-                            Image(nsImage: ProfileSwatch.dotImage(for: entry.color))
-                        }
-                    }
-                } else {
-                    Button {
-                        model.onOpenProfile?(entry.id)
-                    } label: {
-                        Label {
-                            Text(entry.hasOpenWindow && entry.isPersistent
-                                 ? String(format: NSLocalizedString("%@ (open)", comment: "Profile menu row for a profile whose window is already open"), entry.name)
-                                 : entry.name)
-                        } icon: {
-                            Image(nsImage: ProfileSwatch.dotImage(for: entry.color))
-                        }
-                    }
-                }
+            // Every other profile goes through the chooser, which boots
+            // the new VM (and can create a profile on the spot).
+            Button(NSLocalizedString("Open a Different Profile\u{2026}", comment: "Profile menu: show the profile chooser to open another profile in a new window")) {
+                model.onOpenDifferentProfile?()
             }
 
             Divider()
@@ -115,9 +92,6 @@ struct ProfileChip: View {
             }
 
             Button(NSLocalizedString("Manage Profiles…", comment: "")) { model.onManageProfiles?() }
-            Button(NSLocalizedString("New Profile\u{2026}", comment: "")) {
-                model.onNewProfile?()
-            }
             Button(model.profileIsManaged
                    ? String(format: NSLocalizedString("View \u{201C}%@\u{201D} Settings\u{2026}", comment: "Profile menu: read-only settings of a managed profile"), name)
                    : String(format: NSLocalizedString("Edit \u{201C}%@\u{201D}\u{2026}", comment: "Profile menu: edit the current profile"), name)) {

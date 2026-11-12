@@ -100,6 +100,8 @@ enum ManualShots {
                 profiles: profiles, initialProfileID: profiles[1].id,
                 interfaces: [.init(id: "en0", localizedName: "Wi-Fi"),
                              .init(id: "en7", localizedName: "USB 10/100/1000 LAN")],
+                suggestedColor: { .purple },
+                onCreateProfile: { Profile(name: $0, color: $1) },
                 onOpen: { _ in }, onCancel: {})
             let host = hosting(view)
             host.safeAreaRegions = []

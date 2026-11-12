@@ -739,6 +739,7 @@
 "New Private Window" = "\U65B0\U5EFA\U9690\U79C1\U7A97\U53E3";
 "New Window With Profile" = "\U4F7F\U7528\U914D\U7F6E\U6587\U4EF6\U65B0\U5EFA\U7A97\U53E3";
 "New Profile\U2026" = "\U65B0\U5EFA\U914D\U7F6E\U6587\U4EF6\U2026";
+"Open a Different Profile…" = "打开其他配置文件…";
 "Edit Profile\U2026" = "\U7F16\U8F91\U914D\U7F6E\U6587\U4EF6\U2026";
 "Delete Profile\U2026" = "\U5220\U9664\U914D\U7F6E\U6587\U4EF6\U2026";
 "New %@ Window" = "\U65B0\U5EFA\U201C%@\U201D\U7A97\U53E3";
@@ -782,7 +783,7 @@
 "Setting up Bromure" = "\U6B63\U5728\U8BBE\U7F6E Bromure";
 "Rebuilding your browser image" = "\U6B63\U5728\U91CD\U5EFA\U6D4F\U89C8\U5668\U955C\U50CF";
 "Updating your browser image" = "\U6B63\U5728\U66F4\U65B0\U6D4F\U89C8\U5668\U955C\U50CF";
-"The image is ready. Warming up the first VM so your browser opens instantly." = "\U955C\U50CF\U5DF2\U5C31\U7EEA\U3002\U6B63\U5728\U9884\U70ED\U7B2C\U4E00\U53F0\U865A\U62DF\U673A\UFF0C\U4EE5\U4FBF\U6D4F\U89C8\U5668\U7ACB\U5373\U6253\U5F00\U3002";
+"The image is ready. Starting Bromure…" = "映像已就绪。正在启动 Bromure…";
 "Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once." = "\U6B63\U5728\U4E0B\U8F7D Linux + Chromium \U955C\U50CF\U5E76\U9488\U5BF9\U8FD9\U53F0 Mac \U8FDB\U884C\U4E2A\U6027\U5316\U8BBE\U7F6E\U3002\U53EA\U9700\U8FDB\U884C\U4E00\U6B21\U3002";
 "The old image was removed. A fresh copy is being downloaded and personalized for this Mac." = "\U65E7\U955C\U50CF\U5DF2\U5220\U9664\U3002\U6B63\U5728\U4E0B\U8F7D\U65B0\U526F\U672C\U5E76\U9488\U5BF9\U8FD9\U53F0 Mac \U8FDB\U884C\U4E2A\U6027\U5316\U8BBE\U7F6E\U3002";
 "Fetching the latest image, with current Linux and browser security updates." = "\U6B63\U5728\U83B7\U53D6\U6700\U65B0\U955C\U50CF\UFF0C\U5176\U4E2D\U5305\U542B\U6700\U65B0\U7684 Linux \U548C\U6D4F\U89C8\U5668\U5B89\U5168\U66F4\U65B0\U3002";
@@ -801,13 +802,13 @@
 
 /* Open New Windows With */
 "Open New Windows With" = "\U65B0\U7A97\U53E3\U6253\U5F00\U65F6\U4F7F\U7528";
-"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "\U542F\U52A8 Bromure\U3001\U70B9\U6309\U5176\U7A0B\U5E8F\U575E\U56FE\U6807\UFF0C\U6216\U5728\U6CA1\U6709\U6D4F\U89C8\U5668\U7A97\U53E3\U5904\U4E8E\U524D\U53F0\U65F6\U6309\U4E0B \U2318N \U65F6\U6253\U5F00\U7684\U914D\U7F6E\U6587\U4EF6\U3002\U201C\U4E0A\U6B21\U4F7F\U7528\U7684\U914D\U7F6E\U6587\U4EF6\U201D\U4F1A\U9009\U62E9\U4F60\U6700\U8FD1\U4F7F\U7528\U7684\U90A3\U4E2A\U3002\U4F60\U4E5F\U53EF\U4EE5\U5728\U4EFB\U610F\U7A97\U53E3\U7684\U914D\U7F6E\U6587\U4EF6\U83DC\U5355\U4E2D\U8BBE\U7F6E\U3002";
+"The profile preselected in the profile chooser shown before each new browser session. “Last Used Profile” picks the one you used most recently. You can also set this from the profile menu in any window." = "每次新建浏览会话前显示的配置文件选择器中预先选中的配置文件。“上次使用的配置文件”会选择你最近使用的那个。你也可以在任意窗口的配置文件菜单中设置。";
 "Last Used Profile" = "\U4E0A\U6B21\U4F7F\U7528\U7684\U914D\U7F6E\U6587\U4EF6";
 "Open New Windows with \U201C%@\U201D" = "\U65B0\U7A97\U53E3\U4F7F\U7528\U201C%@\U201D\U6253\U5F00";
 
 /* Profile settings › General: the profile Bromure opens at launch */
 "Default Profile" = "默认配置文件";
-"Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "启动 Bromure、点按其程序坞图标，或在没有浏览器窗口位于前台时按下 ⌘N 时，打开此配置文件，而不是上次使用的配置文件。";
+"Preselect this profile in the profile chooser shown before each new browser session — instead of the one you used last." = "在每次新建浏览会话前显示的配置文件选择器中预先选中此配置文件，而不是上次使用的那个。";
 
 /* Launch picker: profile + network for the first session */
 "Profile" = "配置文件";

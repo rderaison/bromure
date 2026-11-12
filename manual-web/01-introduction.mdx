@@ -31,7 +31,7 @@ Bromure puts a hypervisor boundary between the web and your Mac instead. A page 
 
 Because each window is a separate VM, windows are also isolated from each other. A tracker in one window can't see the cookies of another, and two profiles never share a cache.
 
-Bromure keeps this fast by always having one VM booted and waiting (a *pre-warmed* VM). When you open a window, Bromure hands you that VM and immediately starts warming the next one, so a new window appears in about a second. [Concepts & Architecture](04-concepts.mdx) explains the machinery in detail.
+Bromure never boots a VM in advance. When you start a session, you pick a profile and Bromure boots a fresh VM with that profile's settings, which takes a few seconds. Where supported, more windows of the same profile share its running VM and open instantly. [Concepts & Architecture](04-concepts.mdx) explains the machinery in detail.
 
 ## Key features
 

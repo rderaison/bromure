@@ -411,7 +411,7 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Open New Windows With").font(.headline)
-                Text("The profile Bromure opens when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front. \u{201C}Last Used Profile\u{201D} picks the one you used most recently. You can also set this from the profile menu in any window.")
+                Text("The profile preselected in the profile chooser shown before each new browser session. \u{201C}Last Used Profile\u{201D} picks the one you used most recently. You can also set this from the profile menu in any window.")
                     .settingDescription()
                 Picker("", selection: $launchProfileID) {
                     Text("Last Used Profile").tag("")

@@ -739,6 +739,7 @@
 "New Private Window" = "\U65B0\U898F\U30D7\U30E9\U30A4\U30D9\U30FC\U30C8\U30A6\U30A4\U30F3\U30C9\U30A6";
 "New Window With Profile" = "\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U3092\U6307\U5B9A\U3057\U3066\U65B0\U898F\U30A6\U30A4\U30F3\U30C9\U30A6";
 "New Profile\U2026" = "\U65B0\U898F\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U2026";
+"Open a Different Profile…" = "別のプロファイルを開く…";
 "Edit Profile\U2026" = "\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U3092\U7DE8\U96C6\U2026";
 "Delete Profile\U2026" = "\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U3092\U524A\U9664\U2026";
 "New %@ Window" = "%@ \U306E\U65B0\U898F\U30A6\U30A4\U30F3\U30C9\U30A6";
@@ -782,7 +783,7 @@
 "Setting up Bromure" = "Bromure\U3092\U30BB\U30C3\U30C8\U30A2\U30C3\U30D7\U3057\U3066\U3044\U307E\U3059";
 "Rebuilding your browser image" = "\U30D6\U30E9\U30A6\U30B6\U30A4\U30E1\U30FC\U30B8\U3092\U518D\U69CB\U7BC9\U3057\U3066\U3044\U307E\U3059";
 "Updating your browser image" = "\U30D6\U30E9\U30A6\U30B6\U30A4\U30E1\U30FC\U30B8\U3092\U66F4\U65B0\U3057\U3066\U3044\U307E\U3059";
-"The image is ready. Warming up the first VM so your browser opens instantly." = "\U30A4\U30E1\U30FC\U30B8\U306E\U6E96\U5099\U304C\U3067\U304D\U307E\U3057\U305F\U3002\U30D6\U30E9\U30A6\U30B6\U304C\U3059\U3050\U306B\U958B\U304F\U3088\U3046\U3001\U6700\U521D\U306EVM\U3092\U6E96\U5099\U3057\U3066\U3044\U307E\U3059\U3002";
+"The image is ready. Starting Bromure…" = "イメージの準備ができました。Bromureを起動しています…";
 "Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once." = "Linux + Chromium\U30A4\U30E1\U30FC\U30B8\U3092\U30C0\U30A6\U30F3\U30ED\U30FC\U30C9\U3057\U3001\U3053\U306EMac\U306B\U5408\U308F\U305B\U3066\U8A2D\U5B9A\U3057\U3066\U3044\U307E\U3059\U3002\U3053\U306E\U64CD\U4F5C\U306F\U4E00\U5EA6\U3060\U3051\U3067\U3059\U3002";
 "The old image was removed. A fresh copy is being downloaded and personalized for this Mac." = "\U53E4\U3044\U30A4\U30E1\U30FC\U30B8\U306F\U524A\U9664\U3055\U308C\U307E\U3057\U305F\U3002\U65B0\U3057\U3044\U30B3\U30D4\U30FC\U3092\U30C0\U30A6\U30F3\U30ED\U30FC\U30C9\U3057\U3001\U3053\U306EMac\U306B\U5408\U308F\U305B\U3066\U8A2D\U5B9A\U3057\U3066\U3044\U307E\U3059\U3002";
 "Fetching the latest image, with current Linux and browser security updates." = "Linux\U3068\U30D6\U30E9\U30A6\U30B6\U306E\U6700\U65B0\U30BB\U30AD\U30E5\U30EA\U30C6\U30A3\U30A2\U30C3\U30D7\U30C7\U30FC\U30C8\U3092\U542B\U3080\U3001\U6700\U65B0\U306E\U30A4\U30E1\U30FC\U30B8\U3092\U53D6\U5F97\U3057\U3066\U3044\U307E\U3059\U3002";
@@ -801,13 +802,13 @@
 
 /* Open New Windows With */
 "Open New Windows With" = "\U65B0\U3057\U3044\U30A6\U30A3\U30F3\U30C9\U30A6\U3067\U958B\U304F\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB";
-"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "Bromure\U306E\U8D77\U52D5\U6642\U3001Dock\U30A2\U30A4\U30B3\U30F3\U306E\U30AF\U30EA\U30C3\U30AF\U6642\U3001\U307E\U305F\U306F\U30D6\U30E9\U30A6\U30B6\U30A6\U30A3\U30F3\U30C9\U30A6\U304C\U524D\U9762\U306B\U306A\U3044\U3068\U304D\U306B\U2318N\U3092\U62BC\U3057\U305F\U3068\U304D\U306B\U958B\U304F\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U3067\U3059\U3002\U300C\U6700\U5F8C\U306B\U4F7F\U7528\U3057\U305F\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U300D\U3092\U9078\U3076\U3068\U3001\U6700\U8FD1\U4F7F\U7528\U3057\U305F\U3082\U306E\U304C\U958B\U304D\U307E\U3059\U3002\U5404\U30A6\U30A3\U30F3\U30C9\U30A6\U306E\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB\U30E1\U30CB\U30E5\U30FC\U304B\U3089\U3082\U8A2D\U5B9A\U3067\U304D\U307E\U3059\U3002";
+"The profile preselected in the profile chooser shown before each new browser session. “Last Used Profile” picks the one you used most recently. You can also set this from the profile menu in any window." = "新しいブラウザセッションを開始する前に表示されるプロファイル選択で、あらかじめ選択されるプロファイルです。「最後に使用したプロファイル」は直近に使用したものを選びます。どのウインドウのプロファイルメニューからも設定できます。";
 "Last Used Profile" = "\U6700\U5F8C\U306B\U4F7F\U7528\U3057\U305F\U30D7\U30ED\U30D5\U30A1\U30A4\U30EB";
 "Open New Windows with \U201C%@\U201D" = "\U65B0\U3057\U3044\U30A6\U30A3\U30F3\U30C9\U30A6\U3092\U201C%@\U201D\U3067\U958B\U304F";
 
 /* Profile settings › General: the profile Bromure opens at launch */
 "Default Profile" = "デフォルトのプロファイル";
-"Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "Bromure を起動したとき、Dock アイコンをクリックしたとき、またはブラウザウインドウが前面にない状態で ⌘N を押したときに、最後に使ったプロファイルではなくこのプロファイルを開きます。";
+"Preselect this profile in the profile chooser shown before each new browser session — instead of the one you used last." = "新しいブラウザセッションを開始する前に表示されるプロファイル選択で、最後に使用したプロファイルの代わりにこのプロファイルをあらかじめ選択します。";
 
 /* Launch picker: profile + network for the first session */
 "Profile" = "プロファイル";

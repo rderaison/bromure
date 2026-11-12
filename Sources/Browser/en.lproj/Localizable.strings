@@ -739,6 +739,7 @@
 "New Private Window" = "New Private Window";
 "New Window With Profile" = "New Window With Profile";
 "New Profile\U2026" = "New Profile\U2026";
+"Open a Different Profile…" = "Open a Different Profile…";
 "Edit Profile\U2026" = "Edit Profile\U2026";
 "Delete Profile\U2026" = "Delete Profile\U2026";
 "New %@ Window" = "New %@ Window";
@@ -782,7 +783,7 @@
 "Setting up Bromure" = "Setting up Bromure";
 "Rebuilding your browser image" = "Rebuilding your browser image";
 "Updating your browser image" = "Updating your browser image";
-"The image is ready. Warming up the first VM so your browser opens instantly." = "The image is ready. Warming up the first VM so your browser opens instantly.";
+"The image is ready. Starting Bromure…" = "The image is ready. Starting Bromure…";
 "Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once." = "Downloading the Linux + Chromium image and personalizing it for this Mac. This only happens once.";
 "The old image was removed. A fresh copy is being downloaded and personalized for this Mac." = "The old image was removed. A fresh copy is being downloaded and personalized for this Mac.";
 "Fetching the latest image, with current Linux and browser security updates." = "Fetching the latest image, with current Linux and browser security updates.";
@@ -801,13 +802,13 @@
 
 /* Open New Windows With */
 "Open New Windows With" = "Open New Windows With";
-"The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window." = "The profile Bromure opens when you launch it, click its Dock icon, or press \U2318N with no browser window in front. \U201CLast Used Profile\U201D picks the one you used most recently. You can also set this from the profile menu in any window.";
+"The profile preselected in the profile chooser shown before each new browser session. “Last Used Profile” picks the one you used most recently. You can also set this from the profile menu in any window." = "The profile preselected in the profile chooser shown before each new browser session. “Last Used Profile” picks the one you used most recently. You can also set this from the profile menu in any window.";
 "Last Used Profile" = "Last Used Profile";
 "Open New Windows with \U201C%@\U201D" = "Open New Windows with \U201C%@\U201D";
 
 /* Profile settings › General: the profile Bromure opens at launch */
 "Default Profile" = "Default Profile";
-"Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last." = "Bromure opens this profile when you launch it, click its Dock icon, or press ⌘N with no browser window in front — instead of the one you used last.";
+"Preselect this profile in the profile chooser shown before each new browser session — instead of the one you used last." = "Preselect this profile in the profile chooser shown before each new browser session — instead of the one you used last.";
 
 /* Launch picker: profile + network for the first session */
 "Profile" = "Profile";

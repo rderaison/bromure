@@ -11,18 +11,23 @@ struct LaunchChoice {
     let network: String
 }
 
-/// The window Bromure shows at launch, before any VM boots: pick a profile
-/// and the network its session boots on. Styled like the starting splash
-/// (brand band, then content) since it opens the same flow.
+/// The profile chooser Bromure shows before every VM boots (launch, ⌘N,
+/// a Dock click, "Open a Different Profile…"): pick a profile — or create
+/// one — and the network its session boots on. Styled like the starting
+/// splash (brand band, then content) since it opens the same flow.
 struct LaunchPickerView: View {
-    let profiles: [Profile]
     let interfaces: [VMConfig.BridgedInterface]
+    let suggestedColor: () -> ProfileColor?
+    let onCreateProfile: (String, ProfileColor?) -> Profile
     let onOpen: (LaunchChoice) -> Void
     let onCancel: () -> Void
 
+    @State private var profiles: [Profile]
+    @State private var creatingProfile = false
     @State private var profileID: UUID
     @State private var network: String
     @State private var hoveredProfile: UUID?
+    @State private var hoveredNewProfile = false
     @FocusState private var listFocused: Bool
 
     /// Rows shown before the profile list scrolls.
@@ -31,10 +36,14 @@ struct LaunchPickerView: View {
 
     init(profiles: [Profile], initialProfileID: UUID,
          interfaces: [VMConfig.BridgedInterface],
+         suggestedColor: @escaping () -> ProfileColor?,
+         onCreateProfile: @escaping (String, ProfileColor?) -> Profile,
          onOpen: @escaping (LaunchChoice) -> Void,
          onCancel: @escaping () -> Void) {
-        self.profiles = profiles
+        _profiles = State(initialValue: profiles)
         self.interfaces = interfaces
+        self.suggestedColor = suggestedColor
+        self.onCreateProfile = onCreateProfile
         self.onOpen = onOpen
         self.onCancel = onCancel
         _profileID = State(initialValue: initialProfileID)
@@ -105,6 +114,17 @@ struct LaunchPickerView: View {
                                           interfaces: interfaces)
         }
         .onAppear { listFocused = true }
+        .sheet(isPresented: $creatingProfile) {
+            NewProfileForm(initialColor: suggestedColor()) { name, color in
+                let profile = onCreateProfile(name, color)
+                profiles.append(profile)
+                profileID = profile.id
+                creatingProfile = false
+                listFocused = true
+            } onCancel: {
+                creatingProfile = false
+            }
+        }
     }
 
     private func open() {
@@ -131,18 +151,46 @@ struct LaunchPickerView: View {
             ScrollView {
                 VStack(spacing: 2) {
                     ForEach(profiles) { profileRow($0).id($0.id) }
+                    newProfileRow
                 }
                 .padding(4)
             }
-            .scrollDisabled(profiles.count <= Self.visibleRows)
-            .frame(height: CGFloat(min(profiles.count, Self.visibleRows)) * (Self.rowHeight + 2) + 6)
+            .scrollDisabled(profiles.count + 1 <= Self.visibleRows)
+            .frame(height: CGFloat(min(profiles.count + 1, Self.visibleRows)) * (Self.rowHeight + 2) + 6)
             .background(card)
             .focusable()
             .focused($listFocused)
             .focusEffectDisabled()
             .onKeyPress(.upArrow) { moveSelection(-1, proxy); return .handled }
             .onKeyPress(.downArrow) { moveSelection(1, proxy); return .handled }
+            .onChange(of: profileID) { _, id in proxy.scrollTo(id) }
         }
+    }
+
+    /// Last row of the list: create a profile on the spot; it joins the
+    /// list selected, ready to open.
+    private var newProfileRow: some View {
+        let hovered = hoveredNewProfile
+        return HStack(spacing: 10) {
+            Image(systemName: "plus")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Brand.accent)
+                .frame(width: 10, height: 10)
+            Text("New Profile\u{2026}")
+                .font(.system(size: 13))
+                .foregroundStyle(Brand.accent)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: Self.rowHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(hovered ? Color.primary.opacity(0.05) : .clear)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onHover { hoveredNewProfile = $0 }
+        .onTapGesture { creatingProfile = true }
+        .id("new-profile")
     }
 
     private func moveSelection(_ delta: Int, _ proxy: ScrollViewProxy) {

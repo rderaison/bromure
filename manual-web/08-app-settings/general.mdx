@@ -16,20 +16,16 @@ The **General** pane ("App-wide preferences") holds two settings: which profile 
 
 | Setting | Description |
 |---|---|
-| **Open New Windows With** | "The profile Bromure opens when you launch it, click its Dock icon, or press ⌘N with no browser window in front." The menu lists **Last Used Profile** followed by every profile. Default: **Last Used Profile**. |
+| **Open New Windows With** | The profile preselected in the **Start a Browser Session** window. The menu lists **Last Used Profile** followed by every profile. Default: **Last Used Profile**. |
 | **Default Profile for Links** | "When Bromure is your default browser, links clicked in other apps open with this profile. Choose “Ask Every Time” to pick a profile on each click." The menu lists **Ask Every Time** followed by every profile. Default: **Ask Every Time**. |
 
 ## Open New Windows With
 
-Bromure opens a window of this profile whenever it needs a window and none is in front:
+This setting decides which profile is preselected in the **Start a Browser Session** window, which appears before every new VM: at launch, on a Dock click with no window open, and on ⌘N (**File › New Window**). It doesn't open anything by itself; you still click **Open**. When ⌘N shows the chooser from a browser window, *that* window's profile is preselected instead.
 
-- when you launch Bromure, as the profile preselected in the **Start a Browser Session** window;
-- when you click its Dock icon with no window open;
-- when you press ⌘N (**File › New Window**) with no browser window in front. With a window in front, ⌘N opens another window of *that* window's profile.
+**Last Used Profile** (the default) preselects the profile you used most recently, so the choice follows whatever you browsed with last. Pick a profile to always start there instead — for example your **Work** profile, or **Private Browsing** if you'd rather every fresh start keep nothing.
 
-**Last Used Profile** (the default) opens the profile you used most recently, so the choice follows whatever you browsed with last. Pick a profile to always start there instead — for example your **Work** profile, or **Private Browsing** if you'd rather every fresh start keep nothing.
-
-You can also set it from any window: open the profile chip at the left of the tab bar and choose **Open New Windows with “*name*”**. The item is checked while that window's profile is the one new windows open with; choose it again to go back to **Last Used Profile**. Both places change the same setting.
+You can also set it from any window: open the profile chip at the left of the tab bar and choose **Open New Windows with “*name*”**. The item is checked while that window's profile is the preselected one; choose it again to go back to **Last Used Profile**. Both places change the same setting.
 
 If you delete the chosen profile, Bromure goes back to **Last Used Profile**.
 

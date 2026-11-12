@@ -149,17 +149,11 @@ public final class VMPool {
         isWarming = true
         defer { isWarming = false }
 
-        let defaults = UserDefaults.standard
-        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
         let bridgedIface: String?
         if let interface = requestedConfig?.networkInterface, !interface.isEmpty {
             bridgedIface = interface == "nat" ? nil : interface
-        } else if networkMode == "bridged",
-           let ifName = defaults.string(forKey: "vm.bridgedInterface"),
-           !ifName.isEmpty {
-            bridgedIface = ifName
         } else {
-            bridgedIface = nil
+            bridgedIface = Self.defaultBridgedInterface()
         }
 
         let warm = try await bootVM(bridgedInterface: bridgedIface, requestedConfig: requestedConfig)
@@ -197,6 +191,16 @@ public final class VMPool {
                 }
             }
         }
+    }
+
+    /// The app-wide network choice (Settings ▸ Network): the interface to
+    /// bridge on, or nil for shared NAT.
+    private static func defaultBridgedInterface() -> String? {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: "vm.networkMode") == "bridged",
+              let ifName = defaults.string(forKey: "vm.bridgedInterface"),
+              !ifName.isEmpty else { return nil }
+        return ifName
     }
 
     /// Boot a fresh VM with the specified network mode.
@@ -393,29 +397,12 @@ public final class VMPool {
             reportedColdBoot = true
             onColdBoot?()
         }
-        // If no pre-warmed VM is available, warm up on demand.
-        // If another task is already warming up, wait for it to finish.
-        if warmVM == nil {
-            reportColdBoot()
-            if isWarming {
-                // Another task is warming up — poll until it finishes
-                for _ in 0..<300 { // up to 30s
-                    try? await Task.sleep(for: .milliseconds(100))
-                    if warmVM != nil || !isWarming { break }
-                }
-            }
-            if warmVM == nil {
-                try? await warmUp(requestedConfig: config)
-            }
-        }
-        // If the warm VM died (e.g. pool was restarted), discard and warm a fresh one.
-        // Paused is valid (pool suspends after 30s idle).
+        // A parked VM that died (e.g. the pool was restarted) is dropped.
+        // Paused is valid (the pool suspends a parked VM after 30s idle).
         if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
-            reportColdBoot()
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
             _ = await Self.releaseResources(warm)
             warmVM = nil
-            try? await warmUp(requestedConfig: config)
         }
 
         // Check whether the profile needs different networking or rendering than the pool VM.
@@ -431,20 +418,28 @@ public final class VMPool {
                 profileNetwork = profileIface
                 profileBridgedIface = profileIface
             }
-        } else {
-            profileNetwork = warmVM?.bootedNetworkMode ?? "nat"
+        } else if let warm = warmVM {
+            profileNetwork = warm.bootedNetworkMode
             profileBridgedIface = nil  // will use pool VM as-is
+        } else {
+            profileBridgedIface = Self.defaultBridgedInterface()
+            profileNetwork = profileBridgedIface ?? "nat"
         }
 
         let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
-        if let warm = warmVM,
-           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
-            (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
-             config.experimentalGPUCount != warm.graphicsSessions.count) ||
-            (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)) {
+        // Boot a VM for this session when none is parked (the browser
+        // never parks one) or the parked one can't serve this config.
+        let parkedFits = warmVM.map { warm in
+            !(profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
+              (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
+               config.experimentalGPUCount != warm.graphicsSessions.count) ||
+              (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)))
+        } ?? false
+        if !parkedFits {
             reportColdBoot()
-            print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
+            print(warmVM == nil ? "[VMPool] claim: booting a VM for this session"
+                  : "[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             if !automaticallyReplenishes, let unused = warmVM {
                 warmVM = nil
                 suspendTimer?.invalidate()

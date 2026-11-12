@@ -53,7 +53,7 @@ The first pane, headed **WELCOME**, reads **Browse without leaving a trace** —
 
 - **Isolated by design** — "Sites run in a separate VM, never on your Mac."
 - **Fresh every time** — "Each session starts from a clean image — or keep a profile when you want one."
-- **Ready in a second** — "A VM is always warmed up, so new windows open instantly."
+- **Ready in a second** — "Windows share the running browser when supported. New sessions start in a fresh VM."
 
 Click **Get Started** (or press Return) to begin. The caption beside it, "One-time download, personalized for this Mac.", is a fair summary of what happens next.
 
@@ -73,7 +73,7 @@ While the image is being installed, the pane shows:
 
 The rail follows the install: **Download** while the image is fetched, **Install** while it is expanded and its boot files are prepared, and **Personalize** while it is adapted to your Mac.
 
-When the image is ready, the pane changes to **Almost there** — "The image is ready. Warming up the first VM so your browser opens instantly." — and the rail moves to **Launch**. As soon as that first VM is ready, the setup window closes and your first browser window opens.
+When the image is ready, the pane changes to **Almost there** and the rail moves to **Launch**. Then the setup window closes and the **Start a Browser Session** window appears, so you can pick the profile for your first session (see [Starting](#starting)).
 
 You can close the setup window at any time; the install carries on in the background. Click Bromure's Dock icon to bring the window back.
 
@@ -97,16 +97,18 @@ Two errors have their own wording:
 
 ### Starting
 
-Once the image is installed, you won't see the setup layout again during a normal launch. Before it boots any VM, Bromure asks **Start a Browser Session**: pick the **Profile** to open and the **Network** its session connects through, then click **Open** (or press Return).
+Once the image is installed, you won't see the setup layout again during a normal launch. Bromure doesn't boot any VM until you choose what to open: it asks **Start a Browser Session**: pick the **Profile** to open and the **Network** its session connects through, then click **Open** (or press Return).
 
 <p align="center">
   <img src="images/launch-picker.en.jpg" width="400" alt="The Start a Browser Session window: a blue band with the white Bromure mark, the title Start a Browser Session, a Profile list (Private Browsing, Work selected with a check mark, Banking, Research), a Network field reading Shared (NAT) — Shares your Mac's connection, and Cancel and Open buttons" />
 </p>
 
-- **Profile** starts on your most recently used profile (or the one chosen under [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with)); on the very first launch that is the built-in **Private Browsing** profile, which keeps nothing when you close it. Click a profile, or use the ↑ and ↓ keys.
+- **Profile** starts on your most recently used profile (or the one chosen under [Settings › General › Open New Windows With](08-app-settings/general.mdx#open-new-windows-with)); on the very first launch that is the built-in **Private Browsing** profile, which keeps nothing when you close it. Click a profile, or use the ↑ and ↓ keys. The last row, **New Profile…**, creates a profile on the spot (see [Profiles](06-profiles.mdx#creating-a-profile)).
 - **Network** offers **Shared (NAT)** — the VM shares your Mac's connection — and one **Bridged — *adapter*** entry per network adapter (Wi-Fi, Ethernet, …), which puts the VM directly on that network with its own address. It starts on the profile's own setting ([Network Isolation › Network Interface](07-profile-settings/network-isolation.mdx)), or the app-wide [Network](08-app-settings/network.mdx) setting when the profile has none. Your choice applies to this session only; the profile's setting is unchanged.
 
-**Cancel** opens nothing (Bromure still warms a VM on the default network in the background); click the Dock icon or press ⌘N to open a window later.
+**Cancel** opens nothing, and no VM boots; click the Dock icon or press ⌘N to bring the window back later.
+
+The same window appears before every new VM, not just at launch: on a Dock click with no window open, on ⌘N when the front window can't take another window, and from the profile chip's **Open a Different Profile…**. See [Opening a window for a profile](06-profiles.mdx#opening-a-window-for-a-profile).
 
 After **Open**, the VM boots on the network you chose while a small splash reads **Starting Bromure** — "Starting a fresh VM. Your browser will open in a few seconds." The splash disappears as soon as your window opens, usually within seconds.
 

@@ -24,7 +24,7 @@ The left column lists the panes, each with a colored icon; the right column show
 
 The Settings window has no **Save** or **Cancel** button. Every change is stored the moment you make it. What happens next depends on the setting:
 
-- **Applied to the next browser window.** Memory, CPU cores, kernel boot options, display scale, connection mode, bridged interface, and DNS servers. Bromure discards its pre-warmed VM and boots a new one with the new values, so the next window you open uses them. Windows that are already open keep running with the settings they started with; close and reopen a window to pick up the change.
+- **Applied to the next browser window.** Memory, CPU cores, kernel boot options, display scale, connection mode, bridged interface, and DNS servers. Bromure boots no VM in advance, so the next VM it boots uses the new values. Windows that are already open keep running with the settings they started with; close and reopen a window to pick up the change.
 - **Applied when a window is opened.** Appearance and **Use Command as Control** are read each time a browser window is created.
 - **Applied at once.** **Energy Mode** is checked continuously by every open window. **Default Profile for Links** is used for the next link you click in another app. **Enable Automation** starts or stops the automation server right away.
 - **Needs a rebuild of the base image.** **Keyboard Layout** and **Natural Scrolling** are built into the browser image. Changing either asks you to confirm a rebuild first (see [Input](input.mdx)).
@@ -48,7 +48,7 @@ App settings are stored in the `io.bromure.app` preferences domain. The **Storag
 
 Most app settings can also be read and changed with AppleScript (`get app setting` and `set app setting`) or with `defaults`. The keys are listed on each pane's page and in [Automation](../14-automation.mdx#app-setting-keys).
 
-> **Note:** If you change a setting with `defaults write` while Bromure is running, the Settings window reflects it, but a change to the VM hardware settings only reaches new windows once Bromure boots a fresh VM. Use AppleScript's `set app setting`, which restarts the pre-warmed VM for you, or quit and reopen Bromure.
+> **Note:** If you change a setting with `defaults write` while Bromure is running, the Settings window reflects it, but a change to the VM hardware settings only reaches new windows once Bromure boots a fresh VM. Use AppleScript's `set app setting` instead, so the next window uses the new values, or quit and reopen Bromure.
 
 ## Related chapters
 

@@ -62,7 +62,6 @@ final class AppState: @unchecked Sendable {
     private(set) var pool: VMPool?
     private let imageManager: LinuxImageManager
     private let storageDir: URL
-    private var warmUpTask: Task<Void, Never>?
     private var initTask: Task<Void, Never>?
 
     /// Profile management
@@ -82,11 +81,6 @@ final class AppState: @unchecked Sendable {
     /// Called by the app delegate when sessions need to be closed for image rebuild.
     var onCloseAllSessions: (() async -> Void)?
     var onPoolReady: (() -> Void)?
-    /// Asked once, before the pool boots its first VM: the launch window
-    /// picks the profile and network, and the VM boots with that config
-    /// (so a bridged NIC is chosen before anything starts). nil = the
-    /// default warm-up. Cleared once used.
-    var launchConfigProvider: (@MainActor () async -> VMConfig?)?
     var onOpenProfileSettings: ((_ profileID: UUID, _ category: String?) -> Void)?
     /// Called when UI (settings pane, etc.) wants to open the enrollment
     /// window. Wired up by the app delegate so the same window can be reached
@@ -249,10 +243,6 @@ final class AppState: @unchecked Sendable {
     }
 
     func startInit() {
-        // Cancel any in-progress warm-up
-        warmUpTask?.cancel()
-        warmUpTask = nil
-
         phase = .initializing(status: "Preparing...", progress: nil)
         initSteps = []
         consoleLog = ""
@@ -437,10 +427,8 @@ final class AppState: @unchecked Sendable {
         guard response == .alertFirstButtonReturn else { return }
 
         // Same teardown restartPool() uses, then the normal install flow —
-        // open sessions run on clones and keep going; the warm pool VM is
-        // recycled onto the fresh image when startInit finishes.
-        warmUpTask?.cancel()
-        warmUpTask = nil
+        // open sessions run on clones and keep going; new windows boot
+        // from the fresh image once startInit finishes.
         poolReady = false
         let oldPool = pool
         pool = nil
@@ -484,7 +472,7 @@ final class AppState: @unchecked Sendable {
                     self?.handleProgress(event)
                 }
             }
-            // The pool's warm VM was cloned from the old base — recycle it.
+            // New windows boot from the updated base.
             phase = .warmingUp
             restartPool()
         } catch {
@@ -564,15 +552,11 @@ final class AppState: @unchecked Sendable {
         if case .initializing = phase { return }
         guard imageManager.baseImageExists else {
             // Image was deleted or never created — show setup screen
-            warmUpTask?.cancel()
-            warmUpTask = nil
             pool = nil
             poolReady = false
             phase = .needsSetup
             return
         }
-        warmUpTask?.cancel()
-        warmUpTask = nil
         poolReady = false
         Task {
             await pool?.shutdown()
@@ -581,60 +565,22 @@ final class AppState: @unchecked Sendable {
         }
     }
 
+    /// Ready the pool. Nothing boots ahead of time: each window's VM boots
+    /// after the profile chooser, with that profile's config (claim boots
+    /// on demand), so no idle VM sits around in a profile nobody picked.
     func startPool() {
-        let config = buildBaseConfig()
-        let replenish: Bool
-        if #available(macOS 27.0, *) { replenish = false } else { replenish = true }
-        pool = VMPool(config: config, storageDir: storageDir, automaticallyReplenishes: replenish)
-        poolReady = false
-        let env = ProcessInfo.processInfo.environment
-        if env["BROMURE_DEBUG"] != nil && env["BROMURE_DEBUG_PREWARM"] == nil {
-            // Skip pre-warming in debug mode to keep logs clean.
-            // The pool is still needed for bootDedicated() — just don't warm up.
-            // Set BROMURE_DEBUG_PREWARM=1 to re-enable pre-warming in debug mode.
-            poolReady = true
-            phase = .ready
-            return
-        }
-        warmUpTask = Task {
-            do {
-                var requested: VMConfig?
-                if let provider = launchConfigProvider {
-                    requested = await provider()
-                    // Cancelled (restartPool, a rebuild) while asking: keep
-                    // the provider so the replacement pool asks again.
-                    guard !Task.isCancelled else { return }
-                    launchConfigProvider = nil
-                }
-                try await pool?.warmUp(requestedConfig: requested)
-                guard !Task.isCancelled else { return }
-                poolReady = true
-                phase = .ready
-                onPoolReady?()
-            } catch {
-                guard !Task.isCancelled else { return }
-                // Drop the failed pool so Try Again (checkState) and a network
-                // change actually start over — a kept pool made both no-ops.
-                let failed = pool
-                pool = nil
-                Task { await failed?.shutdown() }
-                phase = .error(Self.localizedMessage(for: error))
-            }
-        }
+        pool = VMPool(config: buildBaseConfig(), storageDir: storageDir,
+                      automaticallyReplenishes: false)
+        poolReady = true
+        phase = .ready
+        onPoolReady?()
     }
 
-    /// The host's network changed: a pool that failed for want of a network
-    /// tries again, and an idle pre-warmed VM — booted against the old
-    /// network (its LAN rules, its "no traffic" diagnosis) — is replaced.
+    /// The host's network changed: a pool that failed for want of a
+    /// network tries again.
     func hostNetworkDidChange() {
         if pool == nil, case .error = phase {
             checkState()
-            return
-        }
-        guard poolReady, let pool, pool.hasWarmVM else { return }
-        Task {
-            await pool.discardWarmVM()
-            try? await pool.warmUp()
         }
     }
 
@@ -708,8 +654,6 @@ final class AppState: @unchecked Sendable {
     /// Close all sessions, delete the base image, and rebuild with new settings.
     func regenerateImage() {
         // Cancel any in-progress operations
-        warmUpTask?.cancel()
-        warmUpTask = nil
         initTask?.cancel()
         initTask = nil
         installReason = .rebuild
@@ -731,8 +675,6 @@ final class AppState: @unchecked Sendable {
 
     func resetBaseImage() {
         // Cancel any in-progress operations
-        warmUpTask?.cancel()
-        warmUpTask = nil
         initTask?.cancel()
         initTask = nil
 

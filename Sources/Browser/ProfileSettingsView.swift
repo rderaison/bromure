@@ -408,7 +408,7 @@ struct ProfileSettingsView: View {
 
             settingToggle(
                 "Default Profile",
-                description: "Bromure opens this profile when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front \u{2014} instead of the one you used last.",
+                description: "Preselect this profile in the profile chooser shown before each new browser session \u{2014} instead of the one you used last.",
                 isOn: isDefaultProfile
             )
 

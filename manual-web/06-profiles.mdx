@@ -39,7 +39,7 @@ A persistent profile keeps its data for the next launch. An ephemeral profile's 
 
 ## Creating a profile
 
-1. Choose **File › New Profile…**, or click the profile chip in any window and choose **New Profile…**.
+1. Choose **File › New Profile…**.
 2. In the **New Profile** window, type a **Profile Name**.
 3. Pick a **Color**, or **None**. The color is used for the window border, the profile chip, and the color dots in menus. The picker suggests the first color no other profile uses yet.
 4. Click **Create** (or press Return).
@@ -48,23 +48,37 @@ A persistent profile keeps its data for the next launch. An ephemeral profile's 
   <img src="images/new-profile.en.jpg" width="320" alt="The New Profile window: a name field containing Work, a Color pop-up set to Blue, and Cancel and Create buttons" />
 </p>
 
-A profile created this way is **persistent** (Retain Browsing Data on) and starts with **Shared Clipboard**, **Send Link to Other Session**, **Use macOS Passkeys**, and **Use macOS Passwords** on. Its home page is `https://bromure.io/hello`. Every other setting starts at its default.
+A profile created this way is **persistent** (Retain Browsing Data on) and starts with **Shared Clipboard**, **Send Link to Other Session**, and **Use macOS Passkeys** on; **Use macOS Passwords** stays off. Its home page is `https://bromure.io/hello`. Every other setting starts at its default.
 
 As soon as you click **Create**, the profile's settings window opens so you can adjust it before first use. Click **Save** to keep your changes, or **Cancel** to keep the defaults; the profile exists either way.
 
 The new profile's persistent disk is created the first time you open a window for it.
 
+You can also create a profile from **Start a Browser Session**: choose **New Profile…** at the end of the profile list. The same **New Profile** form appears (**Profile Name**, **Color**, **Cancel** and **Create**). After **Create**, the profile is added to the list and selected, ready to **Open**. Its settings window doesn't open; the profile gets the same defaults as above.
+
 You can also create profiles from AppleScript (`create profile`). See [Automation](14-automation.mdx).
 
 ## Opening a window for a profile
 
-- **The profile chip** in any window lists every profile. Choose one to open a window for it.
+Every new VM starts at the **Start a Browser Session** window, where you pick the **Profile** and the **Network** for the session, then click **Open** ([Installation](02-installation.mdx#starting)). **Cancel** opens nothing, and no VM boots. The window appears:
+
+- when you launch Bromure;
+- when you click its Dock icon with no window open;
+- on **File › New Window** (⌘N) when the front window can't add another window to its running VM. The front window's profile is preselected;
+- when you choose **Open a Different Profile…** in the profile chip.
+
+On macOS 27 with shared windows, ⌘N in a window opens another window in that window's VM instantly, without the chooser.
+
+These open a window directly, without the chooser:
+
 - **File › New Window With Profile** lists every profile as **New *name* Window**.
-- **File › New Window** (⌘N) opens another window of the front window's profile.
+- **File › New Private Window** (⇧⌘N) opens the built-in **Private Browsing** profile.
+- Links from other apps go through the link chooser or **Default Profile for Links** ([below](#opening-links-from-other-apps)).
+- AppleScript and automation, and session restore.
 
-For a persistent profile that already has a window, the chip shows **Work (open)** and the File menu shows **Show Work Window**; choosing it brings the existing window to the front (and un-minimizes it) instead of opening a second one.
+For a persistent profile that already has a window, the File menu shows **Show Work Window**; choosing it, or picking that profile in the chooser, brings the existing window to the front (and un-minimizes it) instead of opening a second one.
 
-When you launch Bromure, it asks which profile to open and which network its session uses, starting on the profile you used most recently ([Installation](02-installation.mdx)). When you click its Dock icon with no window open, or press ⌘N with no window in front, it opens a window of the profile you used most recently. To always start in one profile instead, choose it under **Settings › General › Open New Windows With**, turn on **Default Profile** in its settings ([General](07-profile-settings/general.mdx)), or open the profile chip in that profile's window and choose **Open New Windows with “*name*”**. See [Open New Windows With](08-app-settings/general.mdx#open-new-windows-with).
+With no front window to go by, the chooser preselects the profile you used most recently. To preselect one profile instead, choose it under **Settings › General › Open New Windows With**, turn on **Default Profile** in its settings ([General](07-profile-settings/general.mdx)), or open the profile chip in that profile's window and choose **Open New Windows with “*name*”**. See [Open New Windows With](08-app-settings/general.mdx#open-new-windows-with).
 
 ## Editing a profile
 
