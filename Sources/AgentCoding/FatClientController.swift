@@ -7378,6 +7378,13 @@ final class RemoteHostWindow: NSWindow {
         else { setBrowserOpen(id, true) }
     }
 
+    /// Whether closing `closing`'s browser collapses the shared pane: only
+    /// when it is the one shown, or none is (another workspace's browser on
+    /// screen stays).
+    nonisolated static func closeCollapsesPane(closing: Profile.ID, shown: Profile.ID?) -> Bool {
+        shown == nil || shown == closing
+    }
+
     private func browserDisabled(_ id: Profile.ID) -> Bool {
         controller.profile(for: id)?.browserDisabled == true
     }
@@ -7424,6 +7431,12 @@ final class RemoteHostWindow: NSWindow {
             // host so its VMs are reachable system-wide, not just from the pane.
             offerBrowserVPNIfNeeded()
         } else {
+            // Closing a browser that is only remembered open (another
+            // workspace's browser is on screen) forgets it and stops its
+            // VM, but must leave the shared pane — and the browser in it —
+            // alone. Finding: "Disabling a hidden workspace browser closes
+            // another workspace's visible pane".
+            let collapsePane = Self.closeCollapsesPane(closing: id, shown: shownBrowser)
             browserOpen.remove(id)
             browserOpenSessions = browserOpenSessions.filter { $0.value != id }
             if shownBrowser == id { shownBrowser = nil; controller.listModel.browserPaneOpen = false }
@@ -7434,6 +7447,10 @@ final class RemoteHostWindow: NSWindow {
             // keeps the VM resumable.) Without this the fat client's browser
             // lived forever once opened.
             browserControllers[id]?.setVisible(false, teardownWhenHidden: true)
+            guard collapsePane else {
+                controller.listModel.browserOpenWorkspaces = browserOpen
+                return
+            }
             // Detach the browser content so nothing inside it can resist the
             // width-0 close (a residual SwiftUI/framebuffer minimum was leaving
             // the pane "smaller but not gone"), then animate the collapse with a
