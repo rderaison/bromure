@@ -87,4 +87,16 @@ struct FatClientBrowserSettingsTests {
         #expect(body.contains("browserControllers[id]?.stop()"))
         #expect(body.contains("browserRelays[id]?.stop()"))
     }
+
+    /// Finding: "Disabling a hidden workspace browser closes another
+    /// workspace's visible pane". Closing a browser that is only remembered
+    /// open (B on screen, A turned off on the host) must not collapse the
+    /// shared pane that shows B.
+    @Test("closing a remembered browser leaves another workspace's pane up")
+    func closingHiddenBrowserKeepsShownPane() {
+        let a = UUID(), b = UUID()
+        #expect(!RemoteHostWindow.closeCollapsesPane(closing: a, shown: b))
+        #expect(RemoteHostWindow.closeCollapsesPane(closing: b, shown: b))
+        #expect(RemoteHostWindow.closeCollapsesPane(closing: a, shown: nil))
+    }
 }
