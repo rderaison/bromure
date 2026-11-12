@@ -1,14 +1,16 @@
 # Native tab tear-off (macOS 27)
 
-The browser uses the MIT-licensed `maceip/liquid-tabs` Swift package, pinned in
-`ThirdParty/LiquidTabs/UPSTREAM.txt`. Its AppKit strip supplies drag previews,
-reordering, tear-off and Escape cancellation. The existing address editor,
-history completion and site information stay in the toolbar; the draggable
-strip appears beneath it, like Safari's separate tab layout.
+The browser keeps its compact Safari-style tab bar: the active tab holds the
+address field and the other tabs sit beside it. Any tab can be dragged out of
+that bar (`Sources/Browser/TabTearOff.swift`): press its pill (or the active
+tab's address field), drag it more than 24 points above or below the bar and
+release. The pill dims and a thumbnail follows the pointer while it is torn;
+dragging back into the bar or pressing Escape cancels. A plain click still
+activates the tab or focuses the address field. Tabs are not reordered.
 
-The strip is enabled only for a macOS 27 shared Metal browser whose guest
-advertises `tabDetachProtocolVersion: 1`. Older hosts/images retain their
-existing tab bar. A tear-off must leave at least one tab in its source window.
+Tear-off is enabled only for a macOS 27 shared Metal browser whose guest
+advertises `tabDetachProtocolVersion: 1`. Older hosts/images keep the same tab
+bar without tear-off. A tear-off must leave at least one tab in its source window.
 Display capacity and desktop pixel limits remain unchanged.
 
 The host sends `detach` on the existing per-VM 5832 controller with the exact
@@ -39,6 +41,6 @@ For the signed-app live diagnostic, install the current guest module in a
 private image and run `gpu-browser --native-chrome --shared-native-windows
 --shared-native-window-count 1 --shared-scanouts 2 --liquid-tab-detach-check
 --seconds 65 --guest-probe tools/gpu/guest-liquid-tab-lifecycle.py ...`.
-This drives actual AppKit library handlers with synthetic events, checks Escape
+This drives the tab bar's tear-off tracking with synthetic events, checks Escape
 cancellation, original target/page state, same VM, and source-window close with
 the detached window surviving. It is not a physical mouse/trackpad test.

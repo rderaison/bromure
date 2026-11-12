@@ -2835,7 +2835,7 @@ final class SharedBrowserVMOwner {
                 self.createWindow(detaching: target, from: session, at: point)
             }
             chrome.model.dragPreview = { [weak view] in view?.gpuFrameView?.tabDragPreview() }
-            chrome.enableLiquidTabs(on: session.window)
+            chrome.enableLiquidTabs()
         }
         view.gpuFrameView?.displayHeightAlignment = max(VMConfig.resolvedDisplayScale(), 1)
         view.gpuFrameView?.displaySizeChanged = { [weak self] width, height in self?.resize(index: index, width: width, height: height) }
@@ -4149,7 +4149,9 @@ final class BrowserSession {
         window.delegate = helper
     }
 
-    /// Diagnostic exercises the library's actual AppKit drag state machine.
+    /// Diagnostic: drives the tab bar's real tear-off tracking with
+    /// synthetic events (press the tab, drag it out of the bar, then
+    /// release or press Escape).
     @MainActor func checkLiquidTabDrag(title: String, cancel: Bool = false) async throws -> String {
         print("[Liquid check] enabled=\(nativeTabBar?.model.liquidTabsEnabled ?? false) tabs=\(nativeTabBar?.model.tabs.map { $0.title } ?? [])")
         let deadline = ProcessInfo.processInfo.systemUptime + 15
@@ -4161,41 +4163,41 @@ final class BrowserSession {
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        guard let target = nativeTabBar?.model.tabs.first(where: { $0.title == title })?.id else {
+        guard let model = nativeTabBar?.model,
+              let tab = model.tabs.first(where: { $0.title == title }) else {
             throw NSError(domain: "BromureLiquidTabs", code: 2)
         }
+        let target = tab.id
+        // An inactive tab is pressed on its pill's drag handle, the active
+        // one on its address field (where the pill's tear-off starts).
         func find(_ view: NSView) -> NSView? {
-            if NSStringFromClass(type(of: view)).contains("CompactTabCell"), view.accessibilityIdentifier().replacingOccurrences(of: "-", with: "").caseInsensitiveCompare(target) == .orderedSame { return view }
-            for child in view.subviews { if let cell = find(child) { return cell } }
+            if let handle = view as? TabDragHandleView, handle.tabID == target { return handle }
+            for child in view.subviews { if let found = find(child) { return found } }
             return nil
         }
         window.makeKeyAndOrderFront(nil)
-        for accessory in window.titlebarAccessoryViewControllers {
-            accessory.view.layoutSubtreeIfNeeded()
-            accessory.view.displayIfNeeded()
-        }
         window.displayIfNeeded()
-        guard let cell = window.titlebarAccessoryViewControllers.compactMap({ find($0.view) }).first else {
+        let pressed: NSView? = tab.active ? model.addressField : window.contentView?.superview.flatMap(find)
+        guard let view = pressed, view.window === window else {
             throw NSError(domain: "BromureLiquidTabs", code: 3)
         }
-        let start = cell.convert(NSPoint(x: cell.bounds.midX, y: cell.bounds.midY), to: nil)
+        let start = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
         let end = NSPoint(x: start.x + 20, y: start.y - 180)
         func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
             NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         }
-        cell.mouseDown(with: event(.leftMouseDown, start))
-        cell.mouseDragged(with: event(.leftMouseDragged, end))
+        // The tracking loop reads the queued events, as with a real mouse.
+        window.postEvent(event(.leftMouseDragged, end), atStart: false)
         if cancel {
-            let escape = NSEvent.keyEvent(with: .keyDown, location: end, modifierFlags: [],
-                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                          context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                                          isARepeat: false, keyCode: 53)!
-            NSApp.sendEvent(escape)
-        } else {
-            cell.mouseUp(with: event(.leftMouseUp, end))
+            window.postEvent(NSEvent.keyEvent(with: .keyDown, location: end, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                              context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                              isARepeat: false, keyCode: 53)!, atStart: false)
         }
+        window.postEvent(event(.leftMouseUp, end), atStart: false)
+        view.mouseDown(with: event(.leftMouseDown, start))
         return target
     }
 

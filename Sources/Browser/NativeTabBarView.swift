@@ -10,18 +10,16 @@ import SwiftUI
 @MainActor @Observable
 final class NativeTabBarModel {
     var tabs: [TabInfo] = []
+
+    /// Tab tear-off: drag a tab pill out of the bar to move it into a new
+    /// window. Enabled by the shared-window owner only when the guest
+    /// supports moving a tab between windows.
     var liquidTabsEnabled = false
+    /// The tab currently dragged out of the bar (its pill dims meanwhile).
+    var tearingTabID: String?
     var onDetach: ((String, NSPoint) -> Void)?
     var dragPreview: (() -> NSImage?)?
-    private var visualTabOrder: [String] = []
-
-    func moveTab(_ id: String, to destination: Int) {
-        guard let source = tabs.firstIndex(where: { $0.id == id }) else { return }
-        let tab = tabs.remove(at: source)
-        tabs.insert(tab, at: min(max(0, destination), tabs.count))
-        visualTabOrder = tabs.map(\.id)
-    }
-
+    @ObservationIgnored let tearOff = TabTearOff()
     var pendingAddress: String = ""
     var editingAddress: Bool = false
 
@@ -179,18 +177,7 @@ final class NativeTabBarModel {
     /// detection in tab-agent can miss on title-empty or during navigation
     /// transitions, and without this override the URL bar would point at
     /// nothing and the user would lose their navigation target.
-    func setTabs(_ reportedTabs: [TabInfo]) {
-        var newTabs = reportedTabs
-        if liquidTabsEnabled {
-            let live = Set(reportedTabs.map(\.id))
-            visualTabOrder = visualTabOrder.filter { live.contains($0) }
-            let known = Set(visualTabOrder)
-            visualTabOrder += reportedTabs.map(\.id).filter { !known.contains($0) }
-            let byID = Dictionary(reportedTabs.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-            newTabs = visualTabOrder.compactMap { byID[$0] }
-        } else {
-            visualTabOrder = reportedTabs.map(\.id)
-        }
+    func setTabs(_ newTabs: [TabInfo]) {
         let wasEditing = editingAddress
         let oldActiveID = activeTab?.id
         let oldActiveURL = activeTab?.url
@@ -328,25 +315,19 @@ struct NativeCompactBarView: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 1) {
-                if model.liquidTabsEnabled {
-                    if let tab = model.activeTab {
+                ForEach(model.tabs) { tab in
+                    if tab.active {
                         ActiveTabPill(model: model, tab: tab)
-                            .frame(minWidth: 100, idealWidth: 400, maxWidth: 520)
+                            .opacity(model.tearingTabID == tab.id ? 0.4 : 1)
+                            .frame(minWidth: 100, idealWidth: 280, maxWidth: 320)
+                            .layoutPriority(2)
                             .id(tab.id)
-                    }
-                } else {
-                    ForEach(model.tabs) { tab in
-                        if tab.active {
-                            ActiveTabPill(model: model, tab: tab)
-                                .frame(minWidth: 100, idealWidth: 280, maxWidth: 320)
-                                .layoutPriority(2)
-                                .id(tab.id)
-                        } else {
-                            InactiveTabPill(model: model, tab: tab)
-                                .frame(minWidth: 36, idealWidth: 180, maxWidth: 240)
-                                .layoutPriority(1)
-                                .id(tab.id)
-                        }
+                    } else {
+                        InactiveTabPill(model: model, tab: tab)
+                            .opacity(model.tearingTabID == tab.id ? 0.4 : 1)
+                            .frame(minWidth: 36, idealWidth: 180, maxWidth: 240)
+                            .layoutPriority(1)
+                            .id(tab.id)
                     }
                 }
             }
@@ -498,7 +479,10 @@ private struct ActiveTabPill: View {
                     return url
                 },
                 suggestions: model.fetchHistorySuggestions,
-                onSubmit: { model.onNavigate?(model.pendingAddress) }
+                onSubmit: { model.onNavigate?(model.pendingAddress) },
+                tearOff: model.liquidTabsEnabled
+                    ? { [model, id = tab.id] event, view in model.tearOff.track(event, tabID: id, model: model, in: view) }
+                    : nil
             )
             .frame(maxWidth: .infinity)
 
@@ -659,6 +643,14 @@ private struct InactiveTabPill: View {
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .onTapGesture { model.onActivate?(tab.id) }
+        .overlay {
+            // With tear-off on, an AppKit view takes the clicks so a drag can
+            // never start a window move from the titlebar; a plain click
+            // still just activates the tab.
+            if model.liquidTabsEnabled {
+                TabDragHandle(model: model, tabID: tab.id)
+            }
+        }
     }
 
     private var displayTitle: String {
@@ -1038,6 +1030,8 @@ private struct AddressField: NSViewRepresentable {
     var editValue: (() -> String?)?
     var suggestions: ((String) async -> [TabBridge.HistoryEntry])?
     let onSubmit: () -> Void
+    /// Tab tear-off tracker for the active pill (nil when tear-off is off).
+    var tearOff: ((NSEvent, NSView) -> TabTearOff.Outcome)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1064,6 +1058,7 @@ private struct AddressField: NSViewRepresentable {
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit)
         field.editValueProvider = editValue
+        field.tearOff = tearOff
         onFieldAvailable?(field)
 
         if shouldFocusOnAppear {
@@ -1127,6 +1122,7 @@ private struct AddressField: NSViewRepresentable {
         // and bindings dispatched from delegate callbacks see the current
         // values, not the snapshot taken at makeCoordinator time.
         context.coordinator.parent = self
+        (nsView as? BromureAddressField)?.tearOff = tearOff
 
         // Re-register on every update: when the active tab changes the
         // pill (and field) are recreated, and the new field must win over
@@ -1259,6 +1255,23 @@ private final class BromureAddressField: NSTextField {
     /// the text length under the selection, which left the URL's tail when you
     /// typed.)
     var editValueProvider: (() -> String?)?
+    var tearOff: ((NSEvent, NSView) -> TabTearOff.Outcome)?
+
+    /// With tear-off on, a press on the (not yet editing) field is tracked
+    /// first: dragging it out of the bar tears the tab off, while a click
+    /// is replayed so the field focuses exactly as before.
+    override func mouseDown(with event: NSEvent) {
+        guard currentEditor() == nil, let tearOff, let window else {
+            super.mouseDown(with: event); return
+        }
+        switch tearOff(event, self) {
+        case .handled:
+            return
+        case .click(let up):
+            window.postEvent(up, atStart: true)
+            super.mouseDown(with: event)
+        }
+    }
 
     override func becomeFirstResponder() -> Bool {
         // Swap to the full URL up front, before `super` installs the field
@@ -1303,7 +1316,6 @@ final class NativeTabBarChrome {
     let model: NativeTabBarModel
     let toolbar: NSToolbar
     private let toolbarDelegate: CompactBarToolbarDelegate
-    private var liquidAccessory: NSTitlebarAccessoryViewController?
 
     init(model: NativeTabBarModel) {
         self.model = model
@@ -1320,16 +1332,9 @@ final class NativeTabBarChrome {
         self.toolbar = toolbar
     }
 
-    func enableLiquidTabs(on window: NSWindow) {
-        guard #available(macOS 27.0, *), liquidAccessory == nil else { return }
+    /// Let tabs be dragged out of the bar into their own window.
+    func enableLiquidTabs() {
         model.liquidTabsEnabled = true
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.layoutAttribute = .bottom
-        accessory.view = NSHostingView(rootView: LiquidBrowserTabs(model: model))
-        accessory.view.frame = NSRect(x: 0, y: 0, width: window.frame.width, height: 36)
-        accessory.view.autoresizingMask = [.width]
-        window.addTitlebarAccessoryViewController(accessory)
-        liquidAccessory = accessory
     }
 
     /// Install the native tabs chrome onto `window`. Hides the window title
