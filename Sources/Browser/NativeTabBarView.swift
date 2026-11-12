@@ -486,11 +486,13 @@ private struct ActiveTabPill: View {
                 suggestions: model.fetchHistorySuggestions,
                 onSubmit: { model.onNavigate?(model.pendingAddress) },
                 tearOff: model.liquidTabsEnabled
-                    ? { [model, id = tab.id] event, view in
-                        let outcome = model.tearOff.track(event, tabID: id, model: model, in: view)
+                    ? { [model, id = tab.id] event, view, editing in
+                        let outcome = model.tearOff.track(event, tabID: id, model: model, in: view,
+                                                          editingText: editing)
                         // Safari-style: the first click selects the tab, the
-                        // next one edits its address.
-                        guard case .click = outcome, model.armedTabID != id else { return outcome }
+                        // next one edits its address. (Already editing: a
+                        // click just places the caret.)
+                        guard !editing, case .click = outcome, model.armedTabID != id else { return outcome }
                         model.armedTabID = id
                         return .handled
                     }
@@ -1043,7 +1045,7 @@ private struct AddressField: NSViewRepresentable {
     var suggestions: ((String) async -> [TabBridge.HistoryEntry])?
     let onSubmit: () -> Void
     /// Tab tear-off tracker for the active pill (nil when tear-off is off).
-    var tearOff: ((NSEvent, NSView) -> TabTearOff.Outcome)? = nil
+    var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1267,21 +1269,53 @@ private final class BromureAddressField: NSTextField {
     /// the text length under the selection, which left the URL's tail when you
     /// typed.)
     var editValueProvider: (() -> String?)?
-    var tearOff: ((NSEvent, NSView) -> TabTearOff.Outcome)?
+    /// Tab tear-off tracker for the active pill; the flag says whether the
+    /// field is being edited (nil when tear-off is off).
+    var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)?
+    private var editingPressMonitor: Any?
 
-    /// With tear-off on, a press on the (not yet editing) field is tracked
-    /// first: dragging it out of the bar tears the tab off, while a click
-    /// is replayed so the field focuses exactly as before.
+    /// With tear-off on, a press on the field is tracked first: dragging it
+    /// out of the bar tears the tab off, and a click is replayed so the
+    /// field focuses exactly as before.
     override func mouseDown(with event: NSEvent) {
         guard currentEditor() == nil, let tearOff, let window else {
             super.mouseDown(with: event); return
         }
-        switch tearOff(event, self) {
+        switch tearOff(event, self, false) {
         case .handled:
             return
         case .click(let up):
             window.postEvent(up, atStart: true)
             super.mouseDown(with: event)
+        case .passThrough(let events):
+            for queued in events.reversed() { window.postEvent(queued, atStart: true) }
+            super.mouseDown(with: event)
+        }
+    }
+
+    /// While the field is being edited, presses go to its field editor, not
+    /// to this view. Watch them so a drag up or down off the bar still tears
+    /// the tab off; anything else is put back for the editor (caret, text
+    /// selection) untouched.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let editingPressMonitor { NSEvent.removeMonitor(editingPressMonitor) }
+        editingPressMonitor = nil
+        guard window != nil else { return }
+        editingPressMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, let window = self.window, event.window === window,
+                  let tearOff = self.tearOff, self.currentEditor() != nil,
+                  self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+            switch tearOff(event, self, true) {
+            case .handled:
+                return nil
+            case .click(let up):
+                window.postEvent(up, atStart: true)
+                return event
+            case .passThrough(let events):
+                for queued in events.reversed() { window.postEvent(queued, atStart: true) }
+                return event
+            }
         }
     }
 

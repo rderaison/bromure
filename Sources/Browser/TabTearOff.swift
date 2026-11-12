@@ -13,6 +13,9 @@ final class TabTearOff {
         case click(NSEvent)
         /// The press was consumed (a tear-off, or a cancelled drag).
         case handled
+        /// A sideways drag in an address field that is being edited: replay
+        /// these events (in order) so the field selects text as usual.
+        case passThrough([NSEvent])
     }
 
     /// How far the pointer may move before a press stops being a click.
@@ -26,7 +29,12 @@ final class TabTearOff {
     /// field) until mouse-up or Escape. Runs its own event loop, like
     /// AppKit's control tracking, so the press can never turn into a
     /// window drag.
-    func track(_ down: NSEvent, tabID: String, model: NativeTabBarModel, in view: NSView) -> Outcome {
+    ///
+    /// `editingText`: the press is in an address field being edited. A drag
+    /// that starts mostly sideways is then handed back as text selection;
+    /// one that starts mostly up or down still moves the tab.
+    func track(_ down: NSEvent, tabID: String, model: NativeTabBarModel, in view: NSView,
+               editingText: Bool = false) -> Outcome {
         guard let window = view.window else { return .handled }
         let start = window.convertPoint(toScreen: down.locationInWindow)
         // The bar's row, across the whole window. Leaving it tears the tab off.
@@ -35,6 +43,7 @@ final class TabTearOff {
                           width: window.frame.width, height: row.height + 2 * Self.tearDistance)
         var moved = false
         var torn = false
+        var consumed: [NSEvent] = []
         defer {
             model.tearingTabID = nil
             hidePanel()
@@ -47,7 +56,11 @@ final class TabTearOff {
                 // mouse is down, as in any AppKit tracking loop.
                 if event.keyCode == 53 { drainMouseUp(window); return .handled }
             case .leftMouseDragged:
+                consumed.append(event)
                 if !moved, hypot(point.x - start.x, point.y - start.y) < Self.slop { continue }
+                if !moved, editingText, abs(point.x - start.x) >= abs(point.y - start.y) {
+                    return .passThrough(consumed)
+                }
                 moved = true
                 // A tab can leave only if another stays behind.
                 let canTear = model.liquidTabsEnabled && model.onDetach != nil && model.tabs.count > 1
