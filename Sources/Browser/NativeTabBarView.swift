@@ -20,9 +20,10 @@ final class NativeTabBarModel {
     var onDetach: ((String, NSPoint) -> Void)?
     var dragPreview: (() -> NSImage?)?
     @ObservationIgnored let tearOff = TabTearOff()
-    /// With tear-off on, the first click on a tab only selects it (so it
-    /// can still be dragged) and the next click edits its address. Holds
-    /// the tab that has had that first click; cleared when editing ends.
+    /// With tear-off on, a single click on the current tab never edits it
+    /// (so it can still be dragged): the first click selects it and the
+    /// next click, or a double-click, edits its address. Holds the tab that
+    /// has had that first click; cleared when editing ends.
     @ObservationIgnored var armedTabID: String?
     var pendingAddress: String = ""
     var editingAddress: Bool = false

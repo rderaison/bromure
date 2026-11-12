@@ -2651,6 +2651,7 @@ final class SharedBrowserVMOwner {
 
     private func requireOK(_ reply: [String: Any]) throws {
         guard reply["ok"] as? Bool == true else {
+            print("[Shared windows] guest refused: \(reply)")
             throw NSError(domain: "BromureSharedWindows", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: String(describing: reply["error"] ?? "Guest rejected shared-window operation")])
         }
@@ -2723,6 +2724,7 @@ final class SharedBrowserVMOwner {
                 "The restored session has more windows than this browser can show; some were left closed"])
         }
         sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+        print("[Shared windows] adopting restored window \(id) on output \(index) size=\(String(describing: sizes[index]))")
         do {
             try await whileSharedDesktopResizes {
                 let topology = try await publishTopology()
@@ -2935,6 +2937,12 @@ final class SharedBrowserVMOwner {
 
     func resize(index: Int, width: Int, height: Int) {
         guard windows[index] != nil, !closingWindows.contains(index), !terminated else { return }
+        // A newly shown window reports 0x0 before its first layout. Sent on,
+        // that becomes a 64x64 output Chromium can't shrink a window to.
+        guard width > 0, height > 0 else { return }
+        if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            print("[Shared windows] resize output \(index) to \(width)x\(height)")
+        }
         sizes[index] = (width, height)
         resizeTask?.cancel()
         resizeTask = Task { @MainActor [weak self] in
