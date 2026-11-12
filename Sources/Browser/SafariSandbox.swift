@@ -2822,8 +2822,13 @@ final class SharedBrowserVMOwner {
         return ["ok": true, "windowId": id, "targetId": target]
     }
 
+    /// - Parameter addressDraft: an address being typed in the detached
+    ///   tab, restored in its new window (finding: "Dragging an editing tab
+    ///   into a new window loses the address draft"). The source keeps its
+    ///   own copy, so a failed detach loses nothing.
     func createWindow(url: String = "about:blank", detaching target: String? = nil,
-                      from source: BrowserSession? = nil, at point: NSPoint? = nil) {
+                      from source: BrowserSession? = nil, at point: NSPoint? = nil,
+                      addressDraft: String? = nil) {
         enqueue { [self] in
             guard !terminated else { return }
             do {
@@ -2852,6 +2857,9 @@ final class SharedBrowserVMOwner {
                 try requireOK(reply)
                 guard let id = reply["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 8) }
                 let child = try showChild(windowID: id, index: index)
+                if let target, let addressDraft {
+                    child.nativeTabBar?.model.adoptAddressDraft(addressDraft, for: target)
+                }
                 if let point {
                     let origin = NSPoint(x: point.x - min(140, child.window.frame.width / 2),
                                          y: point.y - child.window.frame.height + 24)
@@ -2868,7 +2876,9 @@ final class SharedBrowserVMOwner {
         if supportsTabDetach, #available(macOS 27.0, *), let chrome = session.nativeTabBar {
             chrome.model.onDetach = { [weak self, weak session] target, point in
                 guard let self, let session else { return }
-                self.createWindow(detaching: target, from: session, at: point)
+                // Captured before the detach changes the source's tabs.
+                let draft = session.nativeTabBar?.model.addressDraft(for: target)
+                self.createWindow(detaching: target, from: session, at: point, addressDraft: draft)
             }
             chrome.model.dragPreview = { [weak view] in view?.gpuFrameView?.tabDragPreview() }
             chrome.enableLiquidTabs()
@@ -4192,7 +4202,13 @@ final class BrowserSession {
     /// Diagnostic: drives the tab bar's real tear-off tracking with
     /// synthetic events (press the tab, drag it out of the bar, then
     /// release or press Escape).
-    @MainActor func checkLiquidTabDrag(title: String, cancel: Bool = false) async throws -> String {
+    /// Diagnostic: the text in this window's address field.
+    @MainActor var addressFieldText: String? { nativeTabBar?.model.pendingAddress }
+
+    /// - Parameter draft: an unsubmitted address left in the tab before the
+    ///   drag; the detached window must still show it.
+    @MainActor func checkLiquidTabDrag(title: String, cancel: Bool = false,
+                                       draft: String? = nil) async throws -> String {
         print("[Liquid check] enabled=\(nativeTabBar?.model.liquidTabsEnabled ?? false) tabs=\(nativeTabBar?.model.tabs.map { $0.title } ?? [])")
         let deadline = ProcessInfo.processInfo.systemUptime + 15
         while nativeTabBar?.model.liquidTabsEnabled != true ||
@@ -4208,6 +4224,22 @@ final class BrowserSession {
             throw NSError(domain: "BromureLiquidTabs", code: 2)
         }
         let target = tab.id
+        if let draft {
+            if tab.active {
+                model.editingAddress = true
+                model.pendingAddress = draft
+            } else if let previous = model.activeTab?.id {
+                // Typed while it was selected, then another tab selected:
+                // the draft is stashed for it.
+                model.markActiveLocally(target)
+                model.pendingAddress = draft
+                model.markActiveLocally(previous)
+            }
+            guard model.addressDraft(for: target) == draft else {
+                throw NSError(domain: "BromureLiquidTabs", code: 6,
+                              userInfo: [NSLocalizedDescriptionKey: "Draft fixture not set"])
+            }
+        }
         // An inactive tab is pressed on its pill's drag handle, the active
         // one on its address field (where the pill's tear-off starts).
         func find(_ view: NSView) -> NSView? {
