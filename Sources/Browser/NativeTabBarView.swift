@@ -23,7 +23,11 @@ final class NativeTabBarModel {
     /// With tear-off on, a single click on the current tab never edits it
     /// (so it can still be dragged): the first click selects it and the
     /// next click, or a double-click, edits its address. Holds the tab that
-    /// has had that first click; cleared when editing ends.
+    /// has had that first click; cleared when the field stops being edited
+    /// (submitted, clicked away, or left untouched) and when another tab
+    /// becomes active, so the next first click
+    /// selects again. Finding: "Stale armed tab lets a later first click
+    /// edit the address".
     @ObservationIgnored var armedTabID: String?
     var pendingAddress: String = ""
     var editingAddress: Bool = false
@@ -214,6 +218,7 @@ final class NativeTabBarModel {
         }
 
         let newActiveID = activeTab?.id
+        if armedTabID != newActiveID { armedTabID = nil }
 
         if oldActiveID != newActiveID {
             // The guest just told us a different tab is active (e.g. it
@@ -268,6 +273,7 @@ final class NativeTabBarModel {
             updated[i].active = (updated[i].id == id)
         }
         tabs = updated
+        if armedTabID != id { armedTabID = nil }
 
         if oldID != id {
             pendingAddress = drafts[id] ?? Self.displayValue(for: activeTab)
@@ -455,7 +461,6 @@ private struct ActiveTabPill: View {
                 onFocusConsumed: { model.pendingFocusOnActiveChange = false },
                 onFieldAvailable: { model.addressField = $0 },
                 onEndEditing: {
-                    model.armedTabID = nil
                     // User clicked away without submitting. Revert to the
                     // domain display so the field looks like a label again.
                     // Skip when editing ended because the active tab changed
@@ -479,6 +484,7 @@ private struct ActiveTabPill: View {
                 },
                 suggestions: model.fetchHistorySuggestions,
                 onSubmit: { model.onNavigate?(model.pendingAddress) },
+                editorClosed: { model.armedTabID = nil },
                 tearOff: model.liquidTabsEnabled
                     ? { [model, id = tab.id] event, view, editing in
                         let outcome = model.tearOff.track(event, tabID: id, model: model, in: view,
@@ -1039,6 +1045,9 @@ private struct AddressField: NSViewRepresentable {
     var suggestions: ((String) async -> [TabBridge.HistoryEntry])?
     let onSubmit: () -> Void
     /// Tab tear-off tracker for the active pill (nil when tear-off is off).
+    /// The field editor went away, however editing ended — unlike
+    /// onEndEditing, also after a submit or when nothing was typed.
+    var editorClosed: (() -> Void)? = nil
     var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1067,6 +1076,7 @@ private struct AddressField: NSViewRepresentable {
         field.action = #selector(Coordinator.submit)
         field.editValueProvider = editValue
         field.tearOff = tearOff
+        field.editorClosed = editorClosed
         onFieldAvailable?(field)
 
         if shouldFocusOnAppear {
@@ -1131,6 +1141,7 @@ private struct AddressField: NSViewRepresentable {
         // values, not the snapshot taken at makeCoordinator time.
         context.coordinator.parent = self
         (nsView as? BromureAddressField)?.tearOff = tearOff
+        (nsView as? BromureAddressField)?.editorClosed = editorClosed
 
         // Re-register on every update: when the active tab changes the
         // pill (and field) are recreated, and the new field must win over
@@ -1266,6 +1277,14 @@ private final class BromureAddressField: NSTextField {
     /// Tab tear-off tracker for the active pill; the flag says whether the
     /// field is being edited (nil when tear-off is off).
     var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)?
+    var editorClosed: (() -> Void)?
+
+    /// Sent whenever the field editor resigns, typed in or not
+    /// (controlTextDidEndEditing only follows an actual edit).
+    override func textDidEndEditing(_ notification: Notification) {
+        super.textDidEndEditing(notification)
+        editorClosed?()
+    }
     private var editingPressMonitor: Any?
 
     /// Set while a click deliberately focuses the field (see mouseDown).
