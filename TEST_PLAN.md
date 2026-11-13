@@ -173,8 +173,8 @@
 - [ ] Enable with persistence ON — Chromium extension loaded, warns on suspicious password entry
 - [ ] Test with a domain NOT in Tranco top-10k — verify warning shown
 - [ ] Test with a domain IN Tranco top-10k — no warning
-- [ ] Navigate to https://travel.secl.io — verify phishing warning banner appears
-- [ ] Click "I trust this site" on https://travel.secl.io — verify warning is dismissed and does NOT reappear on subsequent visits to the same site
+- [ ] On a site not yet trusted (e.g. https://example.com), add a password field — verify phishing warning banner appears
+- [ ] Click "I trust this site" on that site — verify warning is dismissed and does NOT reappear on subsequent visits to the same site
 
 ### 8.3 Block Screen Capture
 - [ ] Block Screen Capture OFF (default) — browser window visible in screenshots and screen recordings

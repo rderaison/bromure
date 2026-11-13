@@ -121,6 +121,24 @@ async function getPage(browser) {
   return pages.find((p) => !p.url().startsWith("about:")) || pages[0];
 }
 
+/** True when `flag` appears as a whole command-line switch (bare or
+ * `flag=value`), so `--disable-gpu` doesn't match `--disable-gpu-compositing`. */
+function hasFlag(flags, flag) {
+  return flags.split(/\s+/).some((arg) => arg === flag || arg.startsWith(flag + "="));
+}
+
+/** Add a password form to the page, the way a login page would render one.
+ * The phishing guard's MutationObserver reports it like a server-rendered
+ * field, so any reachable page on a non-trusted domain can stand in for a
+ * real login page. */
+async function injectPasswordForm(page) {
+  await page.evaluate(() => {
+    const form = document.createElement("form");
+    form.innerHTML = '<input type="text" name="user"><input type="password" name="pass">';
+    document.body.appendChild(form);
+  });
+}
+
 /** Navigate to chrome://version and extract the command-line flags string. */
 async function getChromeFlags(browser) {
   const page = await browser.newPage();
@@ -560,17 +578,14 @@ async function main() {
     );
   });
 
-  await test("3.2 Default user agent presents as Chrome on macOS", async () => {
+  await test("3.2 Default user agent presents as stock Linux Chrome", async () => {
     await withSession("E2E_UA_Default", {},
       async ({ browser }) => {
         const ua = await getUserAgent(browser);
-        // Spoofed to stock macOS Chrome: platform reads Macintosh, the
-        // Chrome version is present, and neither the Linux VM nor the old
-        // Bromure/<version> suffix leaks.
-        assertIncludes(ua, "Macintosh", `UA not macOS: ${ua}`);
-        assertIncludes(ua, "Mac OS X", `UA not macOS: ${ua}`);
+        // Stock Linux Chrome (22b686aa: the compatible identity for the
+        // Linux guest), with no Bromure/<version> suffix.
+        assertIncludes(ua, "X11; Linux x86_64", `UA not stock Linux Chrome: ${ua}`);
         assert(/Chrome\/\d+/.test(ua), `No Chrome version in UA: ${ua}`);
-        assert(!ua.includes("Linux"), `UA leaks Linux: ${ua}`);
         assert(!ua.includes("Bromure"), `UA still carries Bromure tag: ${ua}`);
       }
     );
@@ -601,7 +616,7 @@ async function main() {
         assertIncludes(flags, "--use-angle=gl");
         assertIncludes(flags, "--ignore-gpu-blocklist");
         assertIncludes(flags, "--enable-gpu-rasterization");
-        assert(!flags.includes("--disable-gpu"), "--disable-gpu present when GPU is on");
+        assert(!hasFlag(flags, "--disable-gpu"), "--disable-gpu present when GPU is on");
       }
     );
   });
@@ -610,7 +625,7 @@ async function main() {
     await withSession("E2E_GPU_Off", { gpu: "false" },
       async ({ browser }) => {
         const flags = await getChromeFlags(browser);
-        assertIncludes(flags, "--disable-gpu");
+        assert(hasFlag(flags, "--disable-gpu"), "--disable-gpu missing when GPU is off");
         assert(!flags.includes("--use-gl=angle"), "--use-gl present when GPU is off");
         assert(!flags.includes("--enable-gpu-rasterization"), "--enable-gpu-rasterization present when GPU is off");
       }
@@ -639,7 +654,7 @@ async function main() {
     await withSession("E2E_GPU_Off_WebGL", { gpu: "false", webgl: "true" },
       async ({ browser }) => {
         const flags = await getChromeFlags(browser);
-        assertIncludes(flags, "--disable-gpu");
+        assert(hasFlag(flags, "--disable-gpu"), "--disable-gpu missing when GPU is off");
         assertIncludes(flags, "--disable-webgl", "WebGL should be forced off when GPU is disabled");
       }
     );
@@ -842,21 +857,21 @@ async function main() {
       );
     });
 
-    await test("8.4 Phishing warning — travel.secl.io shows banner", async () => {
+    await test("8.4 Phishing warning — password field on an unknown site shows banner", async () => {
       await withSession(
         "E2E_Phishing",
-        { persistent: "true", phishingWarning: "true", homePage: "https://travel.secl.io" },
+        { persistent: "true", phishingWarning: "true", homePage: "https://example.com" },
         async ({ browser }) => {
           const page = await getPage(browser);
-          // Wait for page to load and phishing extension to inject the banner.
-          // The page has a password field, so the extension should detect it.
+          await page.waitForFunction(() => document.readyState === "complete", { timeout: 15000 });
+          await injectPasswordForm(page);
           try {
             await page.waitForSelector("#bromure-phishing-banner", { timeout: 15000 });
           } catch {
             // Check if the banner is there anyway (race condition)
           }
           const banner = await page.$("#bromure-phishing-banner");
-          assert(banner !== null, "Phishing warning banner not shown on travel.secl.io");
+          assert(banner !== null, "Phishing warning banner not shown for a password field on example.com");
         }
       );
     });
@@ -864,9 +879,11 @@ async function main() {
     await test("8.5 Phishing — 'I trust this site' dismisses permanently", async () => {
       await withSession(
         "E2E_Phishing_Trust",
-        { persistent: "true", phishingWarning: "true", homePage: "https://travel.secl.io" },
+        { persistent: "true", phishingWarning: "true", homePage: "https://example.com" },
         async ({ browser }) => {
           const page = await getPage(browser);
+          await page.waitForFunction(() => document.readyState === "complete", { timeout: 15000 });
+          await injectPasswordForm(page);
 
           // Wait for the warning banner to appear
           await page.waitForSelector("#bromure-phishing-banner", { timeout: 15000 });
@@ -880,9 +897,10 @@ async function main() {
           assert(bannerAfterClick === null, "Banner still visible after clicking trust");
 
           // Navigate away and back — banner should NOT reappear
-          await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
+          await page.goto("https://www.iana.org/help/example-domains", { waitUntil: "load", timeout: 15000 });
           await sleep(1000);
-          await page.goto("https://travel.secl.io", { waitUntil: "load", timeout: 15000 });
+          await page.goto("https://example.com", { waitUntil: "load", timeout: 15000 });
+          await injectPasswordForm(page);
           await sleep(3000);
 
           // Check no banner on return
@@ -1365,7 +1383,7 @@ AllowedIPs = 10.99.0.0/24
       await withSession("E2E_ChromeEnv", { gpu: "false", adBlocking: "true" },
         async ({ sessionId }) => {
           const r = await vmExec(sessionId, "cat /tmp/bromure/chrome-env");
-          assertIncludes(r.stdout, "--disable-gpu");
+          assert(hasFlag(r.stdout, "--disable-gpu"), "--disable-gpu missing from chrome-env");
           assertIncludes(r.stdout, "--proxy-server=http://127.0.0.1:3128");
         }
       );
