@@ -9124,7 +9124,7 @@ extension RemoteHostController: RemoteDelegationLink {
                     }
                     self.securityHistoryFailures = 0
                     self.securityHistoryRetryAt = nil
-                    SecurityTimeline.shared.applyDelta(body, host: key)
+                    SecurityTimeline.shared.applyDelta(body, host: key, base: q.base)
                 }
             }
         }

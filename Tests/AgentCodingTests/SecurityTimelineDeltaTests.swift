@@ -26,7 +26,7 @@ struct SecurityTimelineDeltaTests {
 
     private func sync(_ client: SecurityTimeline, from host: SecurityTimeline, key: String = "ark") {
         let q = client.deltaQuery(host: key)
-        client.applyDelta(wire(host.deltaBody(after: q.after, epoch: q.epoch)), host: key)
+        client.applyDelta(wire(host.deltaBody(after: q.after, epoch: q.epoch)), host: key, base: q.base)
     }
 
     @Test("first a full copy, then only the new rows; held rows keep their ids")
@@ -44,7 +44,7 @@ struct SecurityTimelineDeltaTests {
         let body = host.deltaBody(after: q.after, epoch: q.epoch)
         #expect((body["rows"] as? [[String: Any]])?.count == 2, "only what's new")
         #expect(body["delta"] as? Bool == true)
-        client.applyDelta(wire(body), host: "ark")
+        client.applyDelta(wire(body), host: "ark", base: q.base)
         let after = client.remote["ark"] ?? []
         #expect(after.count == 1002)
         #expect(Array(after.prefix(1000).map(\.id)) == ids)
@@ -84,7 +84,7 @@ struct SecurityTimelineDeltaTests {
         let q = client.deltaQuery(host: "ark")
         let body = restarted.deltaBody(after: q.after, epoch: q.epoch)
         #expect(body["delta"] as? Bool == false)
-        client.applyDelta(wire(body), host: "ark")
+        client.applyDelta(wire(body), host: "ark", base: q.base)
         #expect(client.remote["ark"]?.count == 3)
     }
 
@@ -137,6 +137,32 @@ struct SecurityTimelineDeltaTests {
         #expect(t.blocked == 3 + 1)
     }
 
+    /// Finding: "In-flight delta after Clear permanently skips retained host
+    /// rows". A delta asked for after row N, answered after a Clear, was
+    /// taken as a full copy: only the rows after N, recorded as all of them.
+    @Test("a delta answered after a Clear is dropped; the next fetch is a full copy")
+    func clearDuringDelta() {
+        let host = SecurityTimeline(directory: nil)
+        for i in 0..<10 { host.append(ev(i)) }
+        let client = SecurityTimeline(directory: nil)
+        sync(client, from: host)
+        #expect(client.remote["ark"]?.count == 10)
+
+        host.append(ev(10)); host.append(ev(11))
+        let q = client.deltaQuery(host: "ark")            // asked: after row N
+        let body = wire(host.deltaBody(after: q.after, epoch: q.epoch))
+        #expect(body["delta"] as? Bool == true)
+        client.clear()                                     // pressed while it's under way
+        #expect(!client.applyDelta(body, host: "ark", base: q.base), "relative to a mark that's gone")
+        #expect(client.remote["ark"] == nil)
+        let head = SecurityTimeline.SyncMark(wire(host.head()))!
+        #expect(client.needsDelta(host: "ark", head: head), "the next head asks again")
+
+        sync(client, from: host)
+        #expect(client.remote["ark"]?.count == 12, "every row the host holds, not just the last two")
+        #expect(!client.needsDelta(host: "ark", head: head))
+    }
+
     @Test("wired: the snapshot carries the head, the route answers `after`, the client fetches deltas")
     func wired() throws {
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -148,6 +174,6 @@ struct SecurityTimelineDeltaTests {
         #expect(server.contains("self.onSecurityDelta?(after, afterEpoch)"))
         #expect(app.contains("SecurityTimeline.shared.deltaBody(after: after, epoch: epoch)"))
         #expect(client.contains(#"snapshot["securityTimelineHead"]"#))
-        #expect(client.contains("SecurityTimeline.shared.applyDelta(body, host: key)"))
+        #expect(client.contains("SecurityTimeline.shared.applyDelta(body, host: key, base: q.base)"))
     }
 }

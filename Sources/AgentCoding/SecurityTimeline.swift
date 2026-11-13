@@ -746,10 +746,11 @@ public final class SecurityTimeline {
     /// Whether a host's head says there's something this copy hasn't got.
     func needsDelta(host: String, head: SyncMark) -> Bool { synced[host] != head }
 
-    /// What to ask the host for: the rows after these, of this run.
-    func deltaQuery(host: String) -> (after: Int?, epoch: String?) {
-        guard let m = synced[host] else { return (nil, nil) }
-        return (m.last, m.epoch)
+    /// What to ask the host for: the rows after these, of this run, and the
+    /// mark the reply is relative to (handed back to `applyDelta`).
+    func deltaQuery(host: String) -> (after: Int?, epoch: String?, base: SyncMark?) {
+        guard let m = synced[host] else { return (nil, nil, nil) }
+        return (m.last, m.epoch, m)
     }
 
     /// The hosts' own totals, by range (hours), as their last head said.
@@ -761,8 +762,18 @@ public final class SecurityTimeline {
 
     /// Apply a host's reply to `/security-timeline?after=`. Rows already held
     /// keep their events (and ids: the table sees only what's new).
-    func applyDelta(_ body: [String: Any], host: String) {
-        guard let mark = SyncMark(body), let rows = body["rows"] as? [[String: Any]] else { return }
+    ///
+    /// `base` is the mark the request was made from (`deltaQuery`). A reply
+    /// to a request made before this copy's mark changed -- a Clear, or the
+    /// host dropped, while it was under way -- is dropped: taken as a full
+    /// copy it held only the rows after the old mark and recorded them as
+    /// all, so the older rows the host still holds never came back. The
+    /// next head asks again, from the mark as it is now (Finding: "In-flight
+    /// delta after Clear permanently skips retained host rows").
+    @discardableResult
+    func applyDelta(_ body: [String: Any], host: String, base: SyncMark?) -> Bool {
+        guard synced[host] == base else { return false }
+        guard let mark = SyncMark(body), let rows = body["rows"] as? [[String: Any]] else { return false }
         let delta = (body["delta"] as? Bool) == true && synced[host]?.epoch == mark.epoch
         let new = Self.events(rows, host: host)
         let before = remote[host] ?? []
@@ -781,8 +792,9 @@ public final class SecurityTimeline {
         if bucket.count > Self.cap { bucket.removeFirst(bucket.count - Self.cap) }
         synced[host] = mark
         // Nothing new, nothing dropped: not republished (the window stays).
-        if delta, new.isEmpty, bucket.count == before.count, remote[host] != nil { return }
+        if delta, new.isEmpty, bucket.count == before.count, remote[host] != nil { return true }
         remote[host] = bucket
+        return true
     }
 
     /// What the Overview's tiles count. Shared by the window and the host's
