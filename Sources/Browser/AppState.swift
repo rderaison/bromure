@@ -597,16 +597,15 @@ final class AppState: @unchecked Sendable {
         if pool == nil, case .error = phase {
             checkState()
         }
-        // A window whose VM couldn't get a network tries again.
-        if pool != nil, poolReady, let retry = retryAfterNetworkChange {
-            retryAfterNetworkChange = nil
-            retry()
+        // Every window whose VM couldn't get a network tries again.
+        if pool != nil, poolReady {
+            for retry in networkRetries.takeAll() { retry() }
         }
     }
 
-    /// Reopens a window whose VM failed to boot for want of a network;
-    /// run once on the next host network change.
-    var retryAfterNetworkChange: (() -> Void)?
+    /// Windows whose VM failed to boot for want of a network, one entry per
+    /// launch; each reopens once on the next host network change.
+    var networkRetries = NetworkRetryQueue()
 
     static func localizedMessage(for error: Error) -> String {
         if let sandbox = error as? SandboxError {
