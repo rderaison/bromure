@@ -3002,14 +3002,23 @@ final class SharedBrowserVMOwner {
     private func forward(id: Int, needsFocus: Bool, action: @escaping () -> Void) {
         enqueue(coalescingMotion: needsFocus ? nil : id) { [self] in
             guard !terminated, windows.contains(where: { !closingWindows.contains($0.key) && $0.value.sharedWindowID == id && !$0.value.closing }) else { return }
-            do {
-                if needsFocus && focusedID != id {
-                    focusedID = nil
+            if needsFocus && focusedID != id {
+                focusedID = nil
+                do {
                     try requireOK(try await controller.request("focus", fields: ["windowId": id]))
-                    focusedID = id
+                } catch {
+                    // Unconfirmed focus (a page's JS dialog blocks the
+                    // document probe; a busy renderer misses the deadline)
+                    // must not drop the input or alert: every later click
+                    // and key would fail the same way, in a loop of sheets.
+                    // The activation was still requested, so deliver
+                    // anyway and don't retry until another window is
+                    // focused (windowFocused clears focusedID).
+                    report(error, presentAlert: false)
                 }
-                action()
-            } catch { report(error) }
+                focusedID = id
+            }
+            action()
         }
     }
 
