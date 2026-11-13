@@ -319,6 +319,12 @@ final class ACAutomationServer {
     /// A fat client's Security window: the host's timeline rows for the
     /// last N hours (0 = all it holds), as many as its own window counts.
     var onSecurityHistory: ((Int) -> [[String: Any]])?
+    /// The timeline's head for `/state` (run, last and first row, the host's
+    /// totals by range): a fat client fetches the rows it hasn't got.
+    var onSecurityTimelineHead: (() -> [String: Any])?
+    /// The rows after a number of a run (nil: all it holds), for
+    /// `/security-timeline?after=`.
+    var onSecurityDelta: ((Int?, String?) -> [String: Any])?
     /// Local-model management for the fat client: the SERVER's unified memory
     /// (for the RAM-fit gate), which models are installed there, and any
     /// in-flight download state — the engine + downloads run host-side, so the
@@ -895,11 +901,21 @@ final class ACAutomationServer {
         case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"):
             guard isTrustedLocal else { sendResponse(fd: fd, status: 403, body: ["error": "Local only"]); return }
             var hours = 24
+            var after: Int?
+            var afterEpoch: String?
+            var wantsDelta = false
             if let q = p.split(separator: "?", maxSplits: 1).dropFirst().first {
                 for kv in q.split(separator: "&") {
                     let pair = kv.split(separator: "=", maxSplits: 1)
                     if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
+                    // `after` (empty: none yet) asks for a delta; `epoch` is the run it's from.
+                    if pair.first == "after" { wantsDelta = true; after = pair.count == 2 ? Int(pair[1]) : nil }
+                    if pair.count == 2, pair[0] == "epoch" { afterEpoch = String(pair[1]).removingPercentEncoding }
                 }
+            }
+            if wantsDelta, let body = DispatchQueue.main.sync(execute: { self.onSecurityDelta?(after, afterEpoch) }) {
+                sendResponse(fd: fd, status: 200, body: body)
+                return
             }
             let (rows, epoch) = DispatchQueue.main.sync {
                 (self.onSecurityHistory?(hours) ?? [], self.onSecurityTimelineRetention?().epoch)
@@ -2649,6 +2665,9 @@ final class ACAutomationServer {
                 // times go backwards): its first row's number, and whose.
                 "securityTimelineOldestSeq": (self.onSecurityTimelineRetention?().oldestSeq).map { $0 as Any } ?? NSNull(),
                 "securityTimelineEpoch": (self.onSecurityTimelineRetention?().epoch).map { $0 as Any } ?? NSNull(),
+                // A newer client syncs by deltas from this and ignores the
+                // rows above (kept for older clients for one release).
+                "securityTimelineHead": self.onSecurityTimelineHead?() ?? NSNull(),
                 "localModels": self.onLocalModels?() ?? [:],
                 "kubeClusters": self.onListKubeClusters?() ?? ["clusters": [], "status": [:]],
             ]

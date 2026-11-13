@@ -943,6 +943,21 @@ struct SecurityOverview: View {
         return mine.filter { $0.time >= since }
     }
 
+    /// What the tiles show: a host that counts for itself (it sends its
+    /// totals) is shown as it counts -- the numbers its own window shows --
+    /// and every other machine's rows are counted here.
+    nonisolated static func totals(_ all: [SecurityTimeline.Event], machine: String?, rangeHours: Int,
+                                   remote: [String: [Int: SecurityTimeline.Totals]],
+                                   now: Date = Date()) -> SecurityTimeline.Totals {
+        var served: [String: SecurityTimeline.Totals] = [:]
+        for (host, byRange) in remote where machine == nil || machine == host {
+            if let t = byRange[rangeHours] { served[host] = t }
+        }
+        let counted = shown(all, machine: machine, rangeHours: rangeHours, now: now)
+            .filter { e in e.machine.map { served[$0] == nil } ?? true }
+        return served.values.reduce(SecurityTimeline.Totals.of(counted), +)
+    }
+
     /// A machine's events: nil = all, "" = this Mac's (no machine), else that
     /// host's.
     nonisolated static func events(_ all: [SecurityTimeline.Event], machine: String?) -> [SecurityTimeline.Event] {
@@ -986,6 +1001,8 @@ struct SecurityOverview: View {
 
     var body: some View {
         let recent = recent
+        let totals = Self.totals(timeline.allEvents, machine: machine, rangeHours: rangeHours,
+                                 remote: timeline.remoteTotals)
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -995,32 +1012,26 @@ struct SecurityOverview: View {
                         .foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                    tile(NSLocalizedString("Blocked", comment: "security overview"), recent.filter { $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
+                    // Counted by `Totals` (shared with the host's head): blocks
+                    // and passes by occurrence, swaps and values by count.
+                    tile(NSLocalizedString("Blocked", comment: "security overview"), totals.blocked,
                          "hand.raised.fill", .red, engine: nil, outcome: .blocked)
-                    tile(NSLocalizedString("Allowed", comment: "security overview"), recent.filter { $0.kind == .allowed }.reduce(0) { $0 + $1.occurrences },
+                    tile(NSLocalizedString("Allowed", comment: "security overview"), totals.allowed,
                          "checkmark.seal.fill", .green, engine: nil, outcome: .allowed)
                     // Tiles carry the engine names the Protections columns use.
-                    // Swaps, not rows: a coalesced row carries its repeat count.
-                    tile(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"),
-                         recent.filter { $0.engine == NSLocalizedString("Credential brokering", comment: "Security Timeline engine") }
-                             .reduce(0) { $0 + ($1.count ?? 1) },
+                    tile(NSLocalizedString("Credential brokering", comment: "Security Timeline engine"), totals.credential,
                          "arrow.left.arrow.right", .blue,
                          engine: NSLocalizedString("Credential brokering", comment: "Security Timeline engine"))
-                    tile(NSLocalizedString("Supply chain", comment: "Security Timeline engine"),
-                         recent.filter { $0.engine == NSLocalizedString("Supply chain", comment: "Security Timeline engine") }.count,
+                    tile(NSLocalizedString("Supply chain", comment: "Security Timeline engine"), totals.supplyChain,
                          "shippingbox.fill", .orange,
                          engine: NSLocalizedString("Supply chain", comment: "Security Timeline engine"))
-                    // Values swapped, not requests: each row carries its count.
-                    tile(NSLocalizedString("PII protection", comment: "Security Timeline engine"),
-                         recent.filter { $0.engine == NSLocalizedString("PII protection", comment: "Security Timeline engine") }
-                             .reduce(0) { $0 + ($1.count ?? 1) },
+                    tile(NSLocalizedString("PII protection", comment: "Security Timeline engine"), totals.pii,
                          "person.crop.circle.badge.checkmark", .purple,
                          engine: NSLocalizedString("PII protection", comment: "Security Timeline engine"))
                     // OpenShell workspaces: what the guest sandbox refused.
                     let sandboxEngine = NSLocalizedString("Guest sandbox", comment: "Security Timeline engine")
-                    if postures.contains(where: \.sandbox) || recent.contains(where: { $0.engine == sandboxEngine }) {
-                        tile(sandboxEngine,
-                             recent.filter { $0.engine == sandboxEngine && $0.kind == .blocked }.reduce(0) { $0 + $1.occurrences },
+                    if postures.contains(where: \.sandbox) || totals.sandboxSeen {
+                        tile(sandboxEngine, totals.sandbox,
                              "square.dashed.inset.filled", .teal, engine: sandboxEngine, outcome: .blocked)
                     }
                 }

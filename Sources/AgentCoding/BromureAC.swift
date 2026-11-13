@@ -6420,6 +6420,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onSecurityHistory = { hours in
             MainActor.assumeIsolated { SecurityTimeline.shared.historyRows(hours: hours) }
         }
+        server.onSecurityTimelineHead = {
+            MainActor.assumeIsolated { SecurityTimeline.shared.head() }
+        }
+        server.onSecurityDelta = { after, epoch in
+            MainActor.assumeIsolated { SecurityTimeline.shared.deltaBody(after: after, epoch: epoch) }
+        }
         // Fat-client Local Models: the server owns the engine + the downloads,
         // so it reports its OWN unified memory (the RAM-fit gate), which models
         // are installed here, and any in-flight download state.

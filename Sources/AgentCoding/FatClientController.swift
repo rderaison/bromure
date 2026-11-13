@@ -44,6 +44,8 @@ final class RemoteHostController {
     @ObservationIgnored var securityHistoryInFlight = 0
     @ObservationIgnored var securityHistoryFailures = 0
     @ObservationIgnored var securityHistoryRetryAt: Date?
+    /// The host sends a timeline head in `/state`: it syncs by deltas.
+    @ObservationIgnored var securityDeltaHost = false
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -1098,7 +1100,21 @@ final class RemoteHostController {
         // firewall, guardrails, MiTM) run on the remote host, so the local
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
-        if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+        if let head = snapshot["securityTimelineHead"] as? [String: Any],
+           let mark = SecurityTimeline.SyncMark(head) {
+            // A host that syncs by deltas: its totals as it counts them, and
+            // the rows this copy hasn't got (the mirrored rows are ignored).
+            securityDeltaHost = true
+            SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
+            if let totals = SecurityTimeline.Totals.byRange(wire: head["totals"] as? [String: Any]) {
+                SecurityTimeline.shared.applyRemoteTotals(totals, host: securityMirrorKey)
+            }
+            if SecurityTimeline.shared.needsDelta(host: securityMirrorKey, head: mark),
+               securityHistoryInFlight == 0,
+               securityHistoryRetryAt.map({ Date() >= $0 }) ?? true {
+                fetchSecurityDelta()
+            }
+        } else if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
             // Who the bucket is: its label in the window.
             SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
             let epoch = snapshot["securityTimelineEpoch"] as? String
@@ -9041,6 +9057,8 @@ extension RemoteHostController: RemoteDelegationLink {
     /// rows, so counts made from it fell short of the server's own. A host
     /// without the route (older) keeps the mirror.
     func fetchSecurityHistory(hours: Int) {
+        // A delta host's rows are all here already (it sends what it holds).
+        guard !securityDeltaHost else { return }
         let host = self.host
         let key = securityMirrorKey
         // Each fetch stamped with its range (see `acceptsHistory`).
@@ -9076,6 +9094,37 @@ extension RemoteHostController: RemoteDelegationLink {
                     // From the run it came from: if the host restarted since,
                     // the next snapshot finds it stale and fetches again.
                     SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
+                }
+            }
+        }
+    }
+
+    /// Fetch the host's timeline rows this copy hasn't got (all it holds at
+    /// first, or after the host restarted). One at a time; a failed one is
+    /// tried again by a later snapshot, backing off.
+    func fetchSecurityDelta() {
+        let host = self.host
+        let key = securityMirrorKey
+        let q = SecurityTimeline.shared.deltaQuery(host: key)
+        var path = "/security-timeline?after=\(q.after.map(String.init) ?? "")"
+        if let epoch = q.epoch?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { path += "&epoch=\(epoch)" }
+        securityHistoryInFlight += 1
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resp = try? RemoteTransport.client(for: host).request("GET", path, recvTimeoutSeconds: 30)
+            let body = resp.flatMap { $0.status == 200 && $0.json["rows"] != nil ? $0.json : nil }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)
+                    guard let body else {
+                        self.securityHistoryFailures += 1
+                        self.securityHistoryRetryAt = Date().addingTimeInterval(
+                            Self.historyRetryDelay(failures: self.securityHistoryFailures))
+                        return
+                    }
+                    self.securityHistoryFailures = 0
+                    self.securityHistoryRetryAt = nil
+                    SecurityTimeline.shared.applyDelta(body, host: key)
                 }
             }
         }
