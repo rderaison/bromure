@@ -360,6 +360,12 @@ public final class SecurityTimeline {
         mirrorRowEvents.removeAll()
         // The next delta is a full copy again: it refills the hosts' buckets.
         synced.removeAll()
+        // The hosts' own totals go with their rows: the Overview counted
+        // them after the rows were gone, and kept them while the host was
+        // away. The next head brings them back with the rows (Finding:
+        // "Clear leaves remote security totals visible after events are
+        // removed").
+        remoteTotals.removeAll()
         if directory != nil {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
         }

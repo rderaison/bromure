@@ -137,6 +137,30 @@ struct SecurityTimelineDeltaTests {
         #expect(t.blocked == 3 + 1)
     }
 
+    /// Finding: "Clear leaves remote security totals visible after events
+    /// are removed". The Overview prefers a host's own totals to counting
+    /// its rows; Clear emptied the rows but kept the totals.
+    @Test("Clear drops the hosts' totals with their rows; the next head brings them back")
+    func clearDropsTotals() {
+        let host = SecurityTimeline(directory: nil)
+        for i in 0..<4 { host.append(ev(i)) }
+        let client = SecurityTimeline(directory: nil)
+        sync(client, from: host)
+        let head = wire(host.head())
+        let totals = SecurityTimeline.Totals.byRange(wire: head["totals"] as? [String: Any])!
+        client.applyRemoteTotals(totals, host: "ark")
+        #expect(SecurityOverview.totals(client.allEvents, machine: nil, rangeHours: 24,
+                                        remote: client.remoteTotals).blocked == 4)
+
+        client.clear()
+        #expect(client.remoteTotals.isEmpty)
+        #expect(SecurityOverview.totals(client.allEvents, machine: nil, rangeHours: 24,
+                                        remote: client.remoteTotals).blocked == 0, "nothing left to show")
+
+        client.applyRemoteTotals(totals, host: "ark")
+        #expect(client.remoteTotals["ark"]?[24]?.blocked == 4)
+    }
+
     @Test("wired: the snapshot carries the head, the route answers `after`, the client fetches deltas")
     func wired() throws {
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
