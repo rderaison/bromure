@@ -3002,19 +3002,31 @@ final class SharedBrowserVMOwner {
             guard !terminated, windows.contains(where: { !closingWindows.contains($0.key) && $0.value.sharedWindowID == id && !$0.value.closing }) else { return }
             if needsFocus && focusedID != id {
                 focusedID = nil
+                let outcome: SharedWindowFocusOutcome
                 do {
-                    try requireOK(try await controller.request("focus", fields: ["windowId": id]))
+                    let reply = try await controller.request("focus", fields: ["windowId": id])
+                    outcome = SharedWindowFocusOutcome(reply: reply)
+                    if outcome != .confirmed { print("[shared-window] focus \(outcome): \(reply["error"] ?? "")") }
                 } catch {
-                    // Unconfirmed focus (a page's JS dialog blocks the
-                    // document probe; a busy renderer misses the deadline)
-                    // must not drop the input or alert: every later click
-                    // and key would fail the same way, in a loop of sheets.
-                    // The activation was still requested, so deliver
-                    // anyway and don't retry until another window is
-                    // focused (windowFocused clears focusedID).
+                    outcome = .notActivated
                     report(error, presentAlert: false)
                 }
-                focusedID = id
+                switch outcome {
+                case .confirmed:
+                    focusedID = id
+                case .activatedUnconfirmed:
+                    // The guest activated the window but couldn't confirm
+                    // focus (a page's JS dialog blocks the probe). Deliver,
+                    // and don't retry per event: each retry would stall the
+                    // queue and fail the same way. windowFocused re-arms it.
+                    focusedID = id
+                case .notActivated:
+                    // Guest focus is still on the previous window: drop the
+                    // input rather than type into the wrong page, and leave
+                    // focusedID unset so the next input retries activation.
+                    // Logged, never alerted — an alert per event would loop.
+                    return
+                }
             }
             action()
         }

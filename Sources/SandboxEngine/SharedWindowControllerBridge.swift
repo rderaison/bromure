@@ -132,3 +132,40 @@ public final class SharedWindowControllerBridge {
         NSError(domain: "BromureSharedWindows", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
+
+/// What a shared-window `focus` reply says about the guest's input focus.
+/// Keyboard input may only follow when the guest at least activated the
+/// target window; anything earlier leaves focus on the previous window.
+public enum SharedWindowFocusOutcome: Equatable, Sendable {
+    /// The guest confirmed Chromium document and X focus on the window.
+    case confirmed
+    /// The guest activated the window (Target.activateTarget and
+    /// Page.bringToFront both ran) but couldn't confirm focus before its
+    /// deadline — a page's JavaScript dialog blocks the document probe, or a
+    /// busy renderer answers late. Input belongs to this window.
+    case activatedUnconfirmed
+    /// The request failed before or without activation (transport error,
+    /// paused VM, guest refusal, CDP failure): the guest's focus is unchanged.
+    case notActivated
+
+    /// The guest's errors raised only after both activation calls succeeded
+    /// (shared_windows.py `focus` / `confirm_focus`). Matched by text because
+    /// the script is baked into existing images, which reply with a string.
+    static let postActivationErrors = [
+        "Chromium/X focus did not converge",
+        "focus observation deadline exceeded",
+    ]
+
+    /// Classifies a reply from `SharedWindowControllerBridge.request("focus")`.
+    /// A thrown request is `.notActivated`.
+    public init(reply: [String: Any]) {
+        if reply["ok"] as? Bool == true {
+            self = .confirmed
+        } else if let error = reply["error"] as? String,
+                  Self.postActivationErrors.contains(error) {
+            self = .activatedUnconfirmed
+        } else {
+            self = .notActivated
+        }
+    }
+}
