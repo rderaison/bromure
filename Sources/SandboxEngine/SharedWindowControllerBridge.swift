@@ -139,30 +139,45 @@ public final class SharedWindowControllerBridge {
 public enum SharedWindowFocusOutcome: Equatable, Sendable {
     /// The guest confirmed Chromium document and X focus on the window.
     case confirmed
-    /// The guest activated the window (Target.activateTarget and
-    /// Page.bringToFront both ran) but couldn't confirm focus before its
-    /// deadline — a page's JavaScript dialog blocks the document probe, or a
-    /// busy renderer answers late. Input belongs to this window.
+    /// The guest activated the window (Target.activateTarget succeeded) but
+    /// a later focus check failed or missed its deadline — a page's
+    /// JavaScript dialog blocks the document probe, a busy renderer answers
+    /// late, the X or process probe fails. Input belongs to this window.
     case activatedUnconfirmed
     /// The request failed before or without activation (transport error,
     /// paused VM, guest refusal, CDP failure): the guest's focus is unchanged.
     case notActivated
 
-    /// The guest's errors raised only after both activation calls succeeded
-    /// (shared_windows.py `focus` / `confirm_focus`). Matched by text because
-    /// the script is baked into existing images, which reply with a string.
-    static let postActivationErrors = [
+    /// For guest images whose replies predate `focusActivated`: errors that
+    /// shared_windows.py `focus` / `confirm_focus` raise only after
+    /// Target.activateTarget succeeded. Messages that can also come from the
+    /// activation call itself (CDP transport errors) are left out — those
+    /// stay `.notActivated`, so input never goes to the previous window.
+    static let legacyPostActivationErrors: Set<String> = [
         "Chromium/X focus did not converge",
         "focus observation deadline exceeded",
+        "CDP page focus failed",
+        "cannot identify sole CDP browser process",
+        "CDP call failed: SystemInfo.getProcessInfo",
     ]
 
+    static func isLegacyPostActivationError(_ error: String) -> Bool {
+        legacyPostActivationErrors.contains(error)
+            || error.hasPrefix("X focus observation failed")
+            // subprocess.TimeoutExpired from confirm_focus's probe-focus run.
+            || (error.hasPrefix("Command '") && error.contains("probe-focus") && error.contains("timed out after"))
+    }
+
     /// Classifies a reply from `SharedWindowControllerBridge.request("focus")`.
-    /// A thrown request is `.notActivated`.
+    /// A thrown request is `.notActivated`. Current guests say whether the
+    /// window was activated (`focusActivated`); older ones are classified by
+    /// their error text.
     public init(reply: [String: Any]) {
         if reply["ok"] as? Bool == true {
             self = .confirmed
-        } else if let error = reply["error"] as? String,
-                  Self.postActivationErrors.contains(error) {
+        } else if let activated = reply["focusActivated"] as? Bool {
+            self = activated ? .activatedUnconfirmed : .notActivated
+        } else if let error = reply["error"] as? String, Self.isLegacyPostActivationError(error) {
             self = .activatedUnconfirmed
         } else {
             self = .notActivated

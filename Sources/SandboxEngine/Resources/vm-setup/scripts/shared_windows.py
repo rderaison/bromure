@@ -526,6 +526,21 @@ def browser_alive(identity, proc=Path('/proc')):
         return False
 
 
+class FocusUnconfirmed(RuntimeError):
+    """Chromium activated the target window, but a later focus check failed.
+
+    Input then belongs to that window; the host must not treat it like a
+    failure before activation, where guest focus is still elsewhere."""
+
+
+def focus_reply_fields(request, error):
+    """Extra fields for a failed request's reply: a focus reply says whether
+    the window was activated before the failure."""
+    if isinstance(request, dict) and request.get('cmd') == 'focus':
+        return {'focusActivated': isinstance(error, FocusUnconfirmed)}
+    return {}
+
+
 class Controller:
     def __init__(self, list_targets, browser_call, scale=2, runner=run_command,
                  sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus, page_call=cdp_call,
@@ -804,27 +819,32 @@ class Controller:
         self.focused_window, self.focus_evidence = None, None
         target = next(target for target in targets if target['id'] == tid)
         self.call('Target.activateTarget', {'targetId': tid})
-        # Target.activateTarget only activates the window and can leave the
-        # omnibox focused. Chromium's Page.bringToFront additionally calls
-        # WebContents::Focus, including for a newly created about:blank page.
-        # Keep the independent document/X observations below as the ACK gate.
-        result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
-        if not isinstance(result, dict):
-            raise RuntimeError('CDP page focus failed')
-        processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
-        browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
-        if len(browser_pids) != 1:
-            raise RuntimeError('cannot identify sole CDP browser process')
-        deadline = time.monotonic() + 3
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError('Chromium/X focus did not converge')
-            evidence = self.focus_observer(target, remaining)
-            if evidence and evidence.get('browserPID') == browser_pids[0]:
-                self.focus_evidence = evidence
-                break
-            time.sleep(min(.025, max(0, deadline - time.monotonic())))
+        # From here on Chromium has activated the window: any failure is an
+        # unconfirmed focus (FocusUnconfirmed), not a failed activation.
+        try:
+            # Target.activateTarget only activates the window and can leave the
+            # omnibox focused. Chromium's Page.bringToFront additionally calls
+            # WebContents::Focus, including for a newly created about:blank page.
+            # Keep the independent document/X observations below as the ACK gate.
+            result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
+            if not isinstance(result, dict):
+                raise RuntimeError('CDP page focus failed')
+            processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
+            browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
+            if len(browser_pids) != 1:
+                raise RuntimeError('cannot identify sole CDP browser process')
+            deadline = time.monotonic() + 3
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Chromium/X focus did not converge')
+                evidence = self.focus_observer(target, remaining)
+                if evidence and evidence.get('browserPID') == browser_pids[0]:
+                    self.focus_evidence = evidence
+                    break
+                time.sleep(min(.025, max(0, deadline - time.monotonic())))
+        except Exception as error:
+            raise FocusUnconfirmed(str(error) or type(error).__name__) from error
         self.active[wid] = tid
         self.focused_window = wid
         return tid
@@ -1059,7 +1079,8 @@ class Controller:
                     state, complete = self.state(), True
                 except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
                     state, complete = self.state(observe=False), False
-                reply = dict(state, id=rid, ok=False, error=str(error)[:512], stateComplete=complete)
+                reply = dict(state, **focus_reply_fields(request, error),
+                             id=rid, ok=False, error=str(error)[:512], stateComplete=complete)
             return self.remember_reply(rid, canonical, reply)
 
     def remember_reply(self, rid, canonical, reply):
