@@ -888,8 +888,13 @@ async function main() {
           // Wait for the warning banner to appear
           await page.waitForSelector("#bromure-phishing-banner", { timeout: 15000 });
 
-          // Click "I know this site" button
-          await page.click("#bromure-trust-btn");
+          // Click "I know this site". A DOM click, not a mouse click: the
+          // banner slides in from above the viewport (0.3s animation), and
+          // the session's page may not be the foreground tab, so Puppeteer's
+          // hit-test ("Node is either not clickable or not an Element") can
+          // fail although the button works. The trust handler is what's
+          // under test.
+          await page.$eval("#bromure-trust-btn", (button) => button.click());
           await sleep(1000);
 
           // Banner should be gone
