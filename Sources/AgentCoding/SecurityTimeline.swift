@@ -759,6 +759,17 @@ public final class SecurityTimeline {
         if remoteTotals[host] != totals { remoteTotals[host] = totals }
     }
 
+    /// A host that synced by deltas now sends only the mirror (it was
+    /// downgraded): its totals and sync mark are from that run, and its
+    /// next mirror must apply even if it matches one from before the deltas
+    /// (Finding: "Older host fallback keeps stale delta totals and disables
+    /// history fetching").
+    func forgetDeltaSync(host: String) {
+        if remoteTotals[host] != nil { remoteTotals[host] = nil }
+        synced[host] = nil
+        lastMirror[host] = nil
+    }
+
     /// Apply a host's reply to `/security-timeline?after=`. Rows already held
     /// keep their events (and ids: the table sees only what's new).
     func applyDelta(_ body: [String: Any], host: String) {
