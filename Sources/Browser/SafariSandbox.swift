@@ -2612,8 +2612,7 @@ final class SharedBrowserVMOwner {
     private var closingWindows: Set<Int> = []
     private var sizes: [Int: (width: Int, height: Int)] = [:]
     private var rectangles: [Int: CGRect] = [:]
-    private var operations: [(motion: Int?, body: () async -> Void)] = []
-    private var draining = false
+    private let operationQueue = SharedWindowOperationQueue()
     private var prepared = false
     private var supportsTerminalShutdown = false
     private var supportsTabDetach = false
@@ -2621,7 +2620,6 @@ final class SharedBrowserVMOwner {
     private var focusedID: Int?
     private var resizeTask: Task<Void, Never>?
     private var reconciliationTask: Task<Void, Never>?
-    private var reconciliationQueued = false
     private var reportedUnboundWindows: Set<Int> = []
     private var terminated = false
     var onWindowCreated: ((BrowserSession) -> Void)?
@@ -2643,6 +2641,8 @@ final class SharedBrowserVMOwner {
         windows[0] = root
         sizes[0] = (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
         root.sharedOwner = self
+        operationQueue.resumeVM = { [weak root] in root?.autoSuspend?.resumeForAPIRequest() }
+        operationQueue.isVMSuspended = { [weak root] in root?.autoSuspend?.isVMSuspended ?? false }
         root.autoSuspend?.windowsProvider = { [weak self] in
             guard let self else { return [] }
             return self.windows.filter { !self.closingWindows.contains($0.key) && !$0.value.closing }.map { $0.value.window }
@@ -2656,17 +2656,7 @@ final class SharedBrowserVMOwner {
     }
 
     private func enqueue(coalescingMotion id: Int? = nil, _ operation: @escaping () async -> Void) {
-        if let id, operations.last?.motion == id { operations[operations.count - 1] = (id, operation) }
-        else { operations.append((id, operation)) }
-        guard !draining else { return }
-        draining = true
-        Task { @MainActor in
-            while !operations.isEmpty {
-                root.autoSuspend?.resumeForAPIRequest()
-                await operations.removeFirst().body()
-            }
-            draining = false
-        }
+        operationQueue.enqueue(coalescingMotion: id, operation)
     }
 
     private func requireOK(_ reply: [String: Any]) throws {
@@ -2738,13 +2728,11 @@ final class SharedBrowserVMOwner {
         reconciliationTask = Task { @MainActor [weak self] in
             var checks = 0
             while let self, !Task.isCancelled, !self.terminated {
-                if !self.reconciliationQueued {
-                    self.reconciliationQueued = true
-                    self.enqueue { [self] in
-                        defer { self.reconciliationQueued = false }
-                        guard !self.terminated else { return }
-                        do { try await self.reconcileGuestWindows() } catch { self.report(error, presentAlert: false) }
-                    }
+                // Background: skipped while the VM is idle-suspended, so the
+                // poll never wakes it (the next tick after a resume catches up).
+                self.operationQueue.enqueue(background: true) { [self] in
+                    guard !self.terminated else { return }
+                    do { try await self.reconcileGuestWindows() } catch { self.report(error, presentAlert: false) }
                 }
                 checks += 1
                 try? await Task.sleep(for: checks < 30 ? .seconds(1) : .seconds(10))

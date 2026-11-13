@@ -165,6 +165,9 @@ public final class VMAutoSuspend {
         }
     }
 
+    /// Whether the VM is idle-suspended (paused, or pausing).
+    public var isVMSuspended: Bool { isSuspended }
+
     /// Resume the VM if it is currently suspended (e.g. for an incoming API request).
     public func resumeForAPIRequest() {
         if isSuspended {
