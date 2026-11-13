@@ -819,16 +819,18 @@ class Controller:
         self.focused_window, self.focus_evidence = None, None
         target = next(target for target in targets if target['id'] == tid)
         self.call('Target.activateTarget', {'targetId': tid})
-        # From here on Chromium has activated the window: any failure is an
-        # unconfirmed focus (FocusUnconfirmed), not a failed activation.
+        # Target.activateTarget only activates the window and can leave the
+        # omnibox focused. Chromium's Page.bringToFront additionally calls
+        # WebContents::Focus, including for a newly created about:blank page.
+        # Until it succeeds, typing could land in the omnibox: a failure here
+        # is a failed activation (plain error, focusActivated false).
+        result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
+        if not isinstance(result, dict):
+            raise RuntimeError('CDP page focus failed')
+        # From here on the window and its page contents have focus: any
+        # failure is an unconfirmed focus (FocusUnconfirmed). Keep the
+        # independent document/X observations below as the ACK gate.
         try:
-            # Target.activateTarget only activates the window and can leave the
-            # omnibox focused. Chromium's Page.bringToFront additionally calls
-            # WebContents::Focus, including for a newly created about:blank page.
-            # Keep the independent document/X observations below as the ACK gate.
-            result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
-            if not isinstance(result, dict):
-                raise RuntimeError('CDP page focus failed')
             processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
             browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
             if len(browser_pids) != 1:

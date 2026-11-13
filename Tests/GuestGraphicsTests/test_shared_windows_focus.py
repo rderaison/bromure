@@ -43,8 +43,20 @@ class SharedWindowFocusTests(unittest.TestCase):
         self.assertEqual(shared.focus_reply_fields({"cmd": "focus"}, caught.exception),
                          {"focusActivated": False})
 
-    def test_page_focus_failure_after_activation(self):
-        self.assert_activated_failure(controller(browser(), page_call=lambda *a, **k: None))
+    def assert_not_activated(self, c):
+        with self.assertRaises(Exception) as caught:
+            c.focus(7)
+        self.assertNotIsInstance(caught.exception, shared.FocusUnconfirmed)
+        self.assertEqual(shared.focus_reply_fields({"cmd": "focus"}, caught.exception),
+                         {"focusActivated": False})
+
+    def test_page_focus_failure_is_not_activated(self):
+        # Without Page.bringToFront the omnibox may still hold focus.
+        self.assert_not_activated(controller(browser(), page_call=lambda *a, **k: None))
+
+        def transport_failure(*a, **k):
+            raise TimeoutError("CDP control deadline exceeded")
+        self.assert_not_activated(controller(browser(), page_call=transport_failure))
 
     def test_process_probe_failure_after_activation(self):
         self.assert_activated_failure(controller(browser(process_info=())))

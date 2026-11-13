@@ -14,7 +14,7 @@ struct SharedWindowFocusOutcomeTests {
     @Test("Failures after activation still own the input")
     func activatedUnconfirmed() {
         for error in ["Chromium/X focus did not converge", "focus observation deadline exceeded",
-                      "CDP page focus failed", "cannot identify sole CDP browser process",
+                      "cannot identify sole CDP browser process",
                       "CDP call failed: SystemInfo.getProcessInfo", "X focus observation failed: boom",
                       "Command '['/usr/bin/python3', '/usr/local/bin/shared_windows.py', 'probe-focus']' timed out after 1.5 seconds"] {
             #expect(SharedWindowFocusOutcome(reply: ["ok": false, "error": error]) == .activatedUnconfirmed)
@@ -24,6 +24,7 @@ struct SharedWindowFocusOutcomeTests {
     @Test("Failures before activation leave focus on the previous window")
     func notActivated() {
         for error in ["unknown browser window", "CDP call failed: Target.activateTarget",
+                      "CDP page focus failed",
                       "CDP control deadline exceeded", "CDP closed",
                       "Chromium/X focus did not converge (and something else)"] {
             #expect(SharedWindowFocusOutcome(reply: ["ok": false, "error": error]) == .notActivated)
@@ -40,5 +41,8 @@ struct SharedWindowFocusOutcomeTests {
         #expect(SharedWindowFocusOutcome(reply: ["ok": false, "focusActivated": false,
                                                  "error": "Chromium/X focus did not converge"]) == .notActivated)
         #expect(SharedWindowFocusOutcome(reply: ["ok": true, "focusActivated": false]) == .confirmed)
+        // A failed Page.bringToFront is never input-ready, whatever the flag.
+        #expect(SharedWindowFocusOutcome(reply: ["ok": false, "focusActivated": true,
+                                                 "error": "CDP page focus failed"]) == .notActivated)
     }
 }

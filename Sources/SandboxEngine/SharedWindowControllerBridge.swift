@@ -139,8 +139,9 @@ public final class SharedWindowControllerBridge {
 public enum SharedWindowFocusOutcome: Equatable, Sendable {
     /// The guest confirmed Chromium document and X focus on the window.
     case confirmed
-    /// The guest activated the window (Target.activateTarget succeeded) but
-    /// a later focus check failed or missed its deadline — a page's
+    /// The guest activated the window and focused its page contents
+    /// (Target.activateTarget and Page.bringToFront succeeded) but a later
+    /// focus check failed or missed its deadline — a page's
     /// JavaScript dialog blocks the document probe, a busy renderer answers
     /// late, the X or process probe fails. Input belongs to this window.
     case activatedUnconfirmed
@@ -150,13 +151,14 @@ public enum SharedWindowFocusOutcome: Equatable, Sendable {
 
     /// For guest images whose replies predate `focusActivated`: errors that
     /// shared_windows.py `focus` / `confirm_focus` raise only after
-    /// Target.activateTarget succeeded. Messages that can also come from the
-    /// activation call itself (CDP transport errors) are left out — those
-    /// stay `.notActivated`, so input never goes to the previous window.
+    /// Target.activateTarget and Page.bringToFront succeeded. A failed
+    /// bringToFront ("CDP page focus failed") is not one: the omnibox may
+    /// still hold focus. Messages that can also come from the activation
+    /// calls (CDP transport errors) are left out too — those stay
+    /// `.notActivated`, so input is retried rather than misdirected.
     static let legacyPostActivationErrors: Set<String> = [
         "Chromium/X focus did not converge",
         "focus observation deadline exceeded",
-        "CDP page focus failed",
         "cannot identify sole CDP browser process",
         "CDP call failed: SystemInfo.getProcessInfo",
     ]
@@ -175,6 +177,10 @@ public enum SharedWindowFocusOutcome: Equatable, Sendable {
     public init(reply: [String: Any]) {
         if reply["ok"] as? Bool == true {
             self = .confirmed
+        } else if reply["error"] as? String == "CDP page focus failed" {
+            // Page.bringToFront failed: never input-ready, even from a guest
+            // built while that failure was (wrongly) flagged as activated.
+            self = .notActivated
         } else if let activated = reply["focusActivated"] as? Bool {
             self = activated ? .activatedUnconfirmed : .notActivated
         } else if let error = reply["error"] as? String, Self.isLegacyPostActivationError(error) {
