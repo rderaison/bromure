@@ -1773,10 +1773,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         Task { @MainActor [self] in
             var startingWindow: NSWindow?
             defer { startingWindow?.orderOut(nil) }
-            guard let warm = await state.pool?.claim(config: config, onColdBoot: {
+            let claim = await state.pool?.claimResult(config: config, onColdBoot: {
                 startingWindow = self.showBrowserStartingWindow()
-            }) else {
-                let error = self.state.pool?.lastClaimError
+            })
+            guard let warm = claim?.vm else {
+                let error = claim?.error
                 // A network failure retries with the link; otherwise the
                 // link waits for the next window.
                 if let url = initialURL, !SandboxError.isNetworkFailure(error) { self.pendingURL = url }
@@ -1921,17 +1922,18 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         Task { @MainActor [self] in
             var startingWindow: NSWindow?
             defer { startingWindow?.orderOut(nil) }
-            guard let warm = await state.pool?.claim(
+            let claim = await state.pool?.claimResult(
                 config: config,
                 profileID: profile.id,
                 profileImageDir: profileImageDir,
                 profileDiskKey: profileDiskKey,
                 restoreSession: restoreSession,
                 onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
-            ) else {
+            )
+            guard let warm = claim?.vm else {
                 self.state.isLaunching = false
                 startingWindow?.orderOut(nil)
-                self.showSessionError(self.state.pool?.lastClaimError, launch: launch) { [weak self] in
+                self.showSessionError(claim?.error, launch: launch) { [weak self] in
                     self?.openNewBrowser(with: profile, initialURL: initialURL,
                                          networkOverride: networkOverride, launch: launch)
                 }
@@ -2397,15 +2399,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
         var startingWindow: NSWindow?
         defer { startingWindow?.orderOut(nil) }
-        guard let warm = await state.pool?.claim(
+        let claim = await state.pool?.claimResult(
             config: config,
             profileID: profile.id,
             profileImageDir: profileImageDir,
             profileDiskKey: profileDiskKey,
             restoreSession: restore,
             onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
-        ) else {
-            print("[Automation] Failed to claim VM: \(state.pool?.lastClaimError.map { "\($0)" } ?? "no VM")")
+        )
+        guard let warm = claim?.vm else {
+            print("[Automation] Failed to claim VM: \(claim?.error.map { "\($0)" } ?? "no VM")")
             return nil
         }
 
