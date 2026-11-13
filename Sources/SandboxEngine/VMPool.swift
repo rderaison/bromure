@@ -115,11 +115,16 @@ public final class VMPool {
 
     public var hasWarmVM: Bool { warmVM != nil }
 
-    /// Why the last ``claim(config:profileID:profileImageDir:profileDiskKey:restoreSession:onColdBoot:)``
-    /// returned nil, when a VM failed to boot (nil after a success, or a
-    /// claim cut short by shutdown). Lets the app show the real cause and
-    /// retry network failures when the host network changes.
-    public private(set) var lastClaimError: Error?
+    /// One claim's outcome: the VM, or — when a VM failed to boot — that
+    /// claim's own error (nil when it was cut short by shutdown or had no
+    /// VM to give). Per invocation, never shared: concurrent window launches
+    /// each claim, and a pool-wide "last error" would let one launch read
+    /// (or lose) another's cause. Lets the app show the real cause and retry
+    /// network failures when the host network changes.
+    public struct ClaimResult {
+        public let vm: WarmVM?
+        public let error: Error?
+    }
 
     /// Access the pre-warmed VM (e.g. to install serial handlers before claiming).
     public var currentWarmVM: WarmVM? { warmVM }
@@ -387,7 +392,9 @@ public final class VMPool {
     /// so a compromised guest cannot reach any host files.
     ///
     /// Writes chrome-env, starts services, and touches chrome-ready so xinitrc
-    /// proceeds. Returns nil if no VM is available.
+    /// proceeds. Returns nil if no VM is available; use
+    /// ``claimResult(config:profileID:profileImageDir:profileDiskKey:restoreSession:onColdBoot:)``
+    /// to learn why.
     public func claim(
         config: VMConfig,
         profileID: UUID? = nil,
@@ -396,7 +403,37 @@ public final class VMPool {
         restoreSession: Bool = false,
         onColdBoot: (() -> Void)? = nil
     ) async -> WarmVM? {
-        lastClaimError = nil
+        await claimResult(config: config, profileID: profileID, profileImageDir: profileImageDir,
+                          profileDiskKey: profileDiskKey, restoreSession: restoreSession,
+                          onColdBoot: onColdBoot).vm
+    }
+
+    /// ``claim(config:profileID:profileImageDir:profileDiskKey:restoreSession:onColdBoot:)``,
+    /// also returning this invocation's boot error when it yields no VM.
+    public func claimResult(
+        config: VMConfig,
+        profileID: UUID? = nil,
+        profileImageDir: URL? = nil,
+        profileDiskKey: String? = nil,
+        restoreSession: Bool = false,
+        onColdBoot: (() -> Void)? = nil
+    ) async -> ClaimResult {
+        var failure: Error?
+        let vm = await performClaim(config: config, profileID: profileID, profileImageDir: profileImageDir,
+                                    profileDiskKey: profileDiskKey, restoreSession: restoreSession,
+                                    onColdBoot: onColdBoot, onFailure: { failure = $0 })
+        return ClaimResult(vm: vm, error: vm == nil ? failure : nil)
+    }
+
+    private func performClaim(
+        config: VMConfig,
+        profileID: UUID?,
+        profileImageDir: URL?,
+        profileDiskKey: String?,
+        restoreSession: Bool,
+        onColdBoot: (() -> Void)?,
+        onFailure: (Error) -> Void
+    ) async -> WarmVM? {
         guard !shutdownRequested else { return nil }
         var reportedColdBoot = false
         func reportColdBoot() {
@@ -482,7 +519,7 @@ public final class VMPool {
                 return warm
             } catch {
                 print("[VMPool] claim: dedicated VM boot failed: \(error)")
-                lastClaimError = error
+                onFailure(error)
                 return nil
             }
         }
