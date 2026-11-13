@@ -1727,9 +1727,11 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// A session's VM failed to boot: say why. A network failure (no host
     /// network, bridged interface gone) offers Try Again and is retried by
     /// itself when the host network changes.
-    @MainActor private func showSessionError(_ error: Error?, retry: @escaping () -> Void) {
+    /// `launch` identifies the window launch across its retries, so its
+    /// automatic retry neither replaces nor is cleared by another launch's.
+    @MainActor private func showSessionError(_ error: Error?, launch: UUID, retry: @escaping () -> Void) {
         let networkFailure = SandboxError.isNetworkFailure(error)
-        if networkFailure { state.retryAfterNetworkChange = retry }
+        if networkFailure { state.networkRetries.register(launch, retry) }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Cannot open browser", comment: "")
         if let error, !Self.isSessionLimit(error) {
@@ -1742,8 +1744,12 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             alert.addButton(withTitle: NSLocalizedString("Try Again", comment: ""))
         }
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-        if alert.runModal() == .alertFirstButtonReturn, networkFailure {
-            state.retryAfterNetworkChange = nil
+        // A network change while the alert was up may already have retried
+        // this launch (taking its entry); Try Again then mustn't open a
+        // second window for it.
+        if alert.runModal() == .alertFirstButtonReturn, networkFailure,
+           state.networkRetries.contains(launch) {
+            state.networkRetries.cancel(launch)
             retry()
         }
     }
@@ -1753,7 +1759,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         return false
     }
 
-    @MainActor func openNewBrowser(initialURL: URL? = nil) {
+    @MainActor func openNewBrowser(initialURL: URL? = nil, launch: UUID = UUID()) {
         closeLaunchPicker()
         guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
@@ -1775,15 +1781,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 // link waits for the next window.
                 if let url = initialURL, !SandboxError.isNetworkFailure(error) { self.pendingURL = url }
                 startingWindow?.orderOut(nil)
-                self.showSessionError(error) { [weak self] in
-                    self?.openNewBrowser(initialURL: initialURL)
+                self.showSessionError(error, launch: launch) { [weak self] in
+                    self?.openNewBrowser(initialURL: initialURL, launch: launch)
                 }
                 return
             }
-            // A window opened: an earlier network failure's retry is moot.
-            self.state.retryAfterNetworkChange = nil
+            // This launch's window opened: its own pending retry is moot
+            // (other launches' retries stay queued).
+            self.state.networkRetries.cancel(launch)
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
-                self?.openNewBrowser(initialURL: initialURL)
+                self?.openNewBrowser(initialURL: initialURL, launch: launch)
             }
             guard proceed else { return }
             let session = BrowserSession(warmVM: warm, config: config)
@@ -1819,7 +1826,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// - Parameter networkOverride: "nat" or a bridged interface id for
     ///   this session only (the launch picker); nil keeps the profile's.
     @MainActor func openNewBrowser(with profile: Profile, initialURL: URL? = nil,
-                                   networkOverride: String? = nil) {
+                                   networkOverride: String? = nil, launch: UUID = UUID()) {
         closeLaunchPicker()
         // Re-fetch the profile from the manager to pick up any settings changes
         // that occurred between the UI capture and now (e.g. settings panel save).
@@ -1924,17 +1931,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             ) else {
                 self.state.isLaunching = false
                 startingWindow?.orderOut(nil)
-                self.showSessionError(self.state.pool?.lastClaimError) { [weak self] in
+                self.showSessionError(self.state.pool?.lastClaimError, launch: launch) { [weak self] in
                     self?.openNewBrowser(with: profile, initialURL: initialURL,
-                                         networkOverride: networkOverride)
+                                         networkOverride: networkOverride, launch: launch)
                 }
                 return
             }
             self.state.isLaunching = false
-            self.state.retryAfterNetworkChange = nil
+            self.state.networkRetries.cancel(launch)
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
                 self?.openNewBrowser(with: profile, initialURL: initialURL,
-                                     networkOverride: networkOverride)
+                                     networkOverride: networkOverride, launch: launch)
             }
             guard proceed else { return }
             let session = BrowserSession(
