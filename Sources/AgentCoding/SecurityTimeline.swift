@@ -563,11 +563,12 @@ public final class SecurityTimeline {
         }
         // Decoded afresh only for rows not in the last mirror.
         let known = mirrorRowEvents[host] ?? [:]
-        var decoded: [NSDictionary: Event] = [:]
+        var decoded: [MirrorRowKey: Event] = [:]
+        decoded.reserveCapacity(rows.count)
         var mirror: [Event] = []
         mirror.reserveCapacity(rows.count)
         for r in rows {
-            let key = r as NSDictionary
+            let key = MirrorRowKey(r)
             // A row seen twice in one mirror is two events: one id each.
             if decoded[key] == nil, let e = known[key] {
                 decoded[key] = e
@@ -644,7 +645,34 @@ public final class SecurityTimeline {
     /// The events the last mirror's rows decoded to, by row: an unchanged row
     /// keeps its event -- and its `id`, so the window's table sees one new
     /// row, not all of them replaced -- and isn't redacted again.
-    @ObservationIgnored private var mirrorRowEvents: [String: [NSDictionary: Event]] = [:]
+    @ObservationIgnored private var mirrorRowEvents: [String: [MirrorRowKey: Event]] = [:]
+
+    /// A mirror row as a dictionary key. `NSDictionary.hash` is its entry
+    /// count, so keyed directly every row of a mirror fell in one bucket and
+    /// each lookup compared it with all the others, value by value: hundreds
+    /// of thousands of dictionary comparisons per snapshot, most of the fat
+    /// client's main thread (scrolling the session list barely moved). The
+    /// hash is the row's own identity -- its id, time, number and counts --
+    /// and equality is still the whole row.
+    struct MirrorRowKey: Hashable {
+        let row: NSDictionary
+        private let hash: Int
+
+        init(_ row: [String: Any]) {
+            self.row = row as NSDictionary
+            var h = Hasher()
+            h.combine(row.count)
+            h.combine(row["rid"] as? String)
+            h.combine(row["t"] as? Double)
+            h.combine(row["sq"] as? Int)
+            h.combine(row["count"] as? Int)
+            h.combine(row["dn"] as? Int)
+            hash = h.finalize()
+        }
+
+        static func == (a: Self, b: Self) -> Bool { a.hash == b.hash && a.row.isEqual(b.row) }
+        func hash(into hasher: inout Hasher) { hasher.combine(hash) }
+    }
 
     /// A host's full history for the window's range (fetched): replaces its
     /// bucket. Later mirrors merge into it.

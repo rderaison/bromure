@@ -76,6 +76,40 @@ struct SecurityTimelineMirrorCostTests {
         host.clear()
     }
 
+    @Test("rows key apart: a mirror's rows don't share one hash (NSDictionary's is its count)")
+    func rowKeysSpread() {
+        let host = SecurityTimeline(directory: nil)
+        let r = rows(750, from: host)
+        #expect(Set(r.map { ($0 as NSDictionary).hash }).count == 1, "the trap: NSDictionary hashes by count")
+        let keys = r.map { SecurityTimeline.MirrorRowKey($0) }
+        #expect(Set(keys.map(\.hashValue)).count == 750)
+        #expect(Set(keys).count == 750)
+        // A copy of a row (as the next snapshot brings it) is the same key.
+        let copy = (try? JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: r[7]))) as? [String: Any]
+        #expect(copy.map { SecurityTimeline.MirrorRowKey($0) } == keys[7])
+        host.clear()
+    }
+
+    @Test("a full mirror with one new row applies in well under a frame's worth of lookups")
+    func fullMirrorIsCheap() {
+        let host = SecurityTimeline(directory: nil)
+        var r = rows(750, from: host)
+        let client = SecurityTimeline(directory: nil)
+        client.applyMirror(r, host: "ark", oldestSeq: 1, epoch: "e1")
+        host.append(.init(time: Date(timeIntervalSince1970: 1_756_100_000), engine: "Firewall",
+                          condition: "new.example:443 tcp", decision: "blocked", kind: .blocked, profileID: UUID()))
+        r = host.mirrorRows()
+        let start = Date()
+        client.applyMirror(r, host: "ark", oldestSeq: 1, epoch: "e1")
+        let took = Date().timeIntervalSince(start)
+        // The mirror is capped at 750: the oldest row made room for the new one.
+        #expect(client.remote["ark"]?.count == 750)
+        #expect(client.remote["ark"]?.last?.condition == "new.example:443 tcp")
+        print("fullMirrorIsCheap took \(took)s")
+        #expect(took < 0.25, "took \(took)s")
+        host.clear()
+    }
+
     @Test("two identical rows in one mirror are two events, each its own id")
     func duplicateRows() {
         let host = SecurityTimeline(directory: nil)
