@@ -46,6 +46,11 @@ final class RemoteHostController {
     @ObservationIgnored var securityHistoryRetryAt: Date?
     /// The host sends a timeline head in `/state`: it syncs by deltas.
     @ObservationIgnored var securityDeltaHost = false
+    /// The window asked for the host's history (kept while the host synced
+    /// by deltas, which needs none), and a history fetch is owed: the host
+    /// went back to mirroring after deltas.
+    @ObservationIgnored var securityHistoryRequested = false
+    @ObservationIgnored var securityHistoryOwed = false
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -1115,6 +1120,16 @@ final class RemoteHostController {
                 fetchSecurityDelta()
             }
         } else if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+            // A host that synced by deltas and now only mirrors (an older
+            // version on the same address): its totals and sync mark are
+            // that run's, and the history the window asked for is owed
+            // (Finding: "Older host fallback keeps stale delta totals and
+            // disables history fetching").
+            if securityDeltaHost {
+                securityDeltaHost = false
+                SecurityTimeline.shared.forgetDeltaSync(host: securityMirrorKey)
+                securityHistoryOwed = securityHistoryRequested
+            }
             // Who the bucket is: its label in the window.
             SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
             let epoch = snapshot["securityTimelineEpoch"] as? String
@@ -1126,8 +1141,8 @@ final class RemoteHostController {
             // restarted) or didn't say -- its rows' numbers can't be compared
             // -- or the last one asked for never landed: fetch it (again).
             if Self.shouldFetchHistory(
-                requested: securityHistoryGeneration > 0,
-                outstanding: securityHistoryGeneration > securityHistoryApplied,
+                requested: securityHistoryRequested || securityHistoryGeneration > 0,
+                outstanding: securityHistoryOwed || securityHistoryGeneration > securityHistoryApplied,
                 stale: SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch),
                 inFlight: securityHistoryInFlight > 0, now: Date(), retryAt: securityHistoryRetryAt) {
                 fetchSecurityHistory(hours: securityHistoryHours)
@@ -9057,8 +9072,14 @@ extension RemoteHostController: RemoteDelegationLink {
     /// rows, so counts made from it fell short of the server's own. A host
     /// without the route (older) keeps the mirror.
     func fetchSecurityHistory(hours: Int) {
+        // Asked for: fetched if the host falls back to mirroring.
+        securityHistoryRequested = true
         // A delta host's rows are all here already (it sends what it holds).
-        guard !securityDeltaHost else { return }
+        guard !securityDeltaHost else {
+            securityHistoryHours = max(0, hours)
+            return
+        }
+        securityHistoryOwed = false
         let host = self.host
         let key = securityMirrorKey
         // Each fetch stamped with its range (see `acceptsHistory`).
@@ -9086,6 +9107,8 @@ extension RemoteHostController: RemoteDelegationLink {
                     }
                     self.securityHistoryFailures = 0
                     self.securityHistoryRetryAt = nil
+                    // The host went to deltas meanwhile: they replace it.
+                    guard !self.securityDeltaHost else { return }
                     guard Self.acceptsHistory(generation: generation, hours: range,
                                               requestedHours: self.securityHistoryHours,
                                               applied: self.securityHistoryApplied) else { return }
@@ -9124,6 +9147,8 @@ extension RemoteHostController: RemoteDelegationLink {
                     }
                     self.securityHistoryFailures = 0
                     self.securityHistoryRetryAt = nil
+                    // The host went back to mirroring meanwhile.
+                    guard self.securityDeltaHost else { return }
                     SecurityTimeline.shared.applyDelta(body, host: key, base: q.base)
                 }
             }
