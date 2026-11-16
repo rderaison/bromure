@@ -98,12 +98,58 @@ struct SignInCapture: Sendable {
 
     /// The token exchange — not a refresh, which the guest never needs in
     /// subscription mode and which must not be swallowed if it happens.
+    /// Anything not plainly a refresh is the exchange (captured, or refused
+    /// once spent): see `isRefreshGrant`.
     func matches(host: String, method: String, path: String, body: Data) -> Bool {
         guard method.uppercased() == "POST", hosts.contains(host.lowercased()),
               path.hasPrefix(pathPrefix) else { return false }
-        let b = String(decoding: body, as: UTF8.self).lowercased()
-            .replacingOccurrences(of: " ", with: "")
-        return !b.contains("grant_type=refresh_token") && !b.contains("\"grant_type\":\"refresh_token\"")
+        return !Self.isRefreshGrant(path: path, body: body)
+    }
+
+    /// Whether a token request is plainly a refresh: its one top-level
+    /// `grant_type` is `refresh_token`, read the way the provider reads it,
+    /// with nothing else in it naming a grant. A substring test let an
+    /// authorization-code exchange through with the words in an unrelated
+    /// parameter (`…&x=grant_type=refresh_token`): it skipped the capture
+    /// and the spent markers, and the provider's real tokens reached the
+    /// guest (Finding: "OAuth token capture can be bypassed with an
+    /// unrelated form parameter", CWE-200). Ambiguous -- an escape or a
+    /// percent-encoding in a JSON body, a second grant anywhere, one in the
+    /// URL, a body that is neither -- is not a refresh.
+    static func isRefreshGrant(path: String, body: Data) -> Bool {
+        guard let raw = String(data: body, encoding: .utf8) else { return false }
+        if let q = path.firstIndex(of: "?"),
+           path[path.index(after: q)...].lowercased().contains("grant") { return false }
+        let lower = raw.lowercased()
+        // The words once, wherever they are: a second copy hides a grant
+        // from one reading or the other.
+        guard lower.components(separatedBy: "grant_type").count == 2 else { return false }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("{") {
+            // JSON: nothing escaped or encoded (a key spelled another way,
+            // or a form reading of it finding a different grant).
+            guard !raw.contains("\\"), !raw.contains("%"),
+                  let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return false }
+            return json["grant_type"] as? String == "refresh_token"
+        }
+        // A form: the one pair whose key is grant_type, and no other key or
+        // value naming a grant once decoded.
+        func decode(_ s: Substring) -> String {
+            let plus = s.replacingOccurrences(of: "+", with: " ")
+            return plus.removingPercentEncoding ?? plus
+        }
+        var grants: [String] = []
+        for pair in raw.split(whereSeparator: { $0 == "&" || $0 == ";" }) {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = decode(kv[0]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = kv.count > 1 ? decode(kv[1]) : ""
+            if key == "grant_type" {
+                grants.append(value)
+            } else if key.contains("grant") || value.lowercased().contains("grant_type") {
+                return false
+            }
+        }
+        return grants == ["refresh_token"]
     }
 
     /// A complete JSON response the proxy can write to the guest.
