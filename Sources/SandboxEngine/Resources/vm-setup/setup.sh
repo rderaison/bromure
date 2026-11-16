@@ -922,6 +922,17 @@ for f in manifest.json background.js content.js schema.json; do
 done
 
 # ---------------------------------------------------------------------------
+# Input compatibility extension (always loaded): Mac-style wheelDelta for
+# the host's synthetic trackpad wheel events. See wheel-compat.js.
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/input-compat
+for f in manifest.json wheel-compat.js; do
+    [ -f "$SCRIPT_DIR/extensions/input-compat/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/input-compat/$f" /mnt/opt/bromure/extensions/input-compat/
+done
+
+# ---------------------------------------------------------------------------
 # WebRTC block extension (conditionally loaded at runtime)
 # ---------------------------------------------------------------------------
 

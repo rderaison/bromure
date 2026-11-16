@@ -471,6 +471,12 @@ def write_chrome_env(cfg):
     # dialog. The per-session `fileUploadEnabled` policy written below
     # tells the extension which mode to run in.
     extensions.append("/opt/bromure/extensions/file-picker")
+    # input-compat is always loaded too: the host injects trackpad scrolling
+    # as synthetic wheel events whose wheelDelta reads like a notched mouse
+    # wheel (±120 each), which smooth-scroll libraries hijack. It reports
+    # Chrome-on-macOS values instead (extensions/input-compat).
+    if os.path.isdir("/opt/bromure/extensions/input-compat"):
+        extensions.append("/opt/bromure/extensions/input-compat")
     if cfg.get("fileTransfer"):
         # Only the enabled branch needs chrome.debugger attachment, so
         # only suppress the "extensions are debugging your browser"

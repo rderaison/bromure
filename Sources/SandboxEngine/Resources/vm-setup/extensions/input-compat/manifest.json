@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Bromure Input Compatibility",
+  "version": "1.0.0",
+  "description": "Gives trackpad wheel events the values Chrome on macOS reports.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvqui9Ym0jjNw+Wzx2Ys54Lghj+UavZhYfYjeLUsqxttwA8gTPJoU9YlpfgxouJq3hkG/s31aK/JdkDT6b4n1NKEboooOmwk+bAh4vOSzVpHi7J86FyDSZvug7NI5W/424LTViO3vhRQE/DvTkCjV0H4hSL+LaZXf5XHr5Hp5klQ64dxo727yB41iW9Dk24+FakSR3wwWgGXwoihti9N0CfAjFZKB26CX+AgOv6tj7ig++QaZbuwbp2azxfK/2OivrunANbNWg1q8o92gnd1+g8hi3dhUxvNxGnCjDi85mc2kiJF09cjrRky1HYafD1MsWXyV1ERW7fiLZifEIui+KwIDAQAB",
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "wheel-compat.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "world": "MAIN"
+    }
+  ]
+}

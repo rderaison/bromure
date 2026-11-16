@@ -30,5 +30,9 @@
   "ip-register": {
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsYQEeXDy/r36o3Rg3tdI5MQFJfGb1r5jJTLVHGx9vVDBXeoAkKZBCJ0xhgOM/TvaYw1lRGKRBNkUyBUNUSl92iGlgxLAKzhF6BJ2OTwQ+HxPP5lqJRptUzm7uvkyXY4PEhx+8hhsz1sWAQKoW9EAtMW0ozlEwDLJ+BUbFo65elaJDKP8xpm4o6Ha+OkA8fUnxRRDZ/oG1/ewbgYAjYT7K9yjGX1T1lvRU7dLZ172W42AQA+VkszhnOHE1opjHqRLne3MY6xjEl0ewuncFFSxpc8oaWFYRX2TVPOmTEyJRjZrSOtIROOZLVQBB04DGbkOZYy/tuNT0hqFMmvPkuOcIwIDAQAB",
     "id": "lmfcfbdgkiiagopdmklfgmooolifgmaf"
+  },
+  "input-compat": {
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvqui9Ym0jjNw+Wzx2Ys54Lghj+UavZhYfYjeLUsqxttwA8gTPJoU9YlpfgxouJq3hkG/s31aK/JdkDT6b4n1NKEboooOmwk+bAh4vOSzVpHi7J86FyDSZvug7NI5W/424LTViO3vhRQE/DvTkCjV0H4hSL+LaZXf5XHr5Hp5klQ64dxo727yB41iW9Dk24+FakSR3wwWgGXwoihti9N0CfAjFZKB26CX+AgOv6tj7ig++QaZbuwbp2azxfK/2OivrunANbNWg1q8o92gnd1+g8hi3dhUxvNxGnCjDi85mc2kiJF09cjrRky1HYafD1MsWXyV1ERW7fiLZifEIui+KwIDAQAB",
+    "id": "kkiibemhjobcoaemlbheehanfjnjnpgk"
   }
 }
