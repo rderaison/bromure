@@ -1849,8 +1849,10 @@ public actor Daemon {
                                                defaultGB: Self.resolvedHomeImageGB(override: config.homeImageOverrideGB,
                                                                                    freeBytes: Self.freeBytes(near: dir)))
         try Self.ensureHomeImage(atPath: home, bytes: target)
-        // A size change lands at a boot (agentd's resize2fs grows the mounted ext4).
-        let homeNote = try Self.growHomeImageIfNeeded(atPath: home, target: target, setting: rec.homeGB)
+        // A size change lands at a cold boot (agentd's resize2fs grows the
+        // mounted ext4); a restore keeps the size the state was saved with.
+        let homeNote = try Self.homeImageNoteForLaunch(atPath: home, target: target, setting: rec.homeGB,
+                                                       restoring: restoreFrom != nil)
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': \(homeNote)\n".utf8))
         // The guest's hostname (agentd's task_apply_hostname), from the VM's name.
         try (Self.sanitizeHostname(rec.name) + "\n").write(toFile: dir + "/meta/hostname.txt", atomically: true, encoding: .utf8)
@@ -2465,6 +2467,19 @@ public actor Daemon {
             dir = dir.deletingLastPathComponent()
         }
         return EphemeralDisk.freeBytes(at: dir.path)
+    }
+
+    /// The home's size at a launch, as macOS's boot (UbuntuSandboxVM) does
+    /// it: a restore from a saved state keeps the home at the size the guest
+    /// was saved with (growing the disk under a restored guest that isn't
+    /// told; agentd's resize2fs only runs at boot), so the grow waits for a
+    /// cold boot. Otherwise growHomeImageIfNeeded. The log line either way.
+    // @port-skip linux-only: macOS's inline saved-state check before growHomeImageIfNeeded (UbuntuSandboxVM's boot), same wording
+    static func homeImageNoteForLaunch(atPath path: String, target: UInt64, setting: Int?, restoring: Bool,
+                                       floor: UInt64 = EphemeralDisk.minimumFreeBytes) throws -> String {
+        restoring
+            ? "saved state present — home image kept at its size until a cold boot"
+            : try growHomeImageIfNeeded(atPath: path, target: target, setting: setting, floor: floor)
     }
 
     /// Grows an existing home image to `target` (never shrinks; it stays

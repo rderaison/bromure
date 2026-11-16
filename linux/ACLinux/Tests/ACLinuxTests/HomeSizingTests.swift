@@ -31,6 +31,25 @@ struct HomeSizingTests {
         #expect((here > nested ? here - nested : nested - here) < 1 << 30, "\(here) vs \(nested)")
     }
 
+    /// A home size raised while the VM was suspended: the restore keeps the
+    /// home at the size the guest was saved with (macOS's wording); the next
+    /// cold boot grows it.
+    @Test func aRestoreKeepsTheHomeSizeUntilAColdBoot() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let path = dir + "/home.img"
+        try Daemon.ensureHomeImage(atPath: path, bytes: 8 << 30, floor: 0)
+        let kept = try Daemon.homeImageNoteForLaunch(atPath: path, target: 16 << 30, setting: 16, restoring: true, floor: 0)
+        #expect(kept == "saved state present — home image kept at its size until a cold boot")
+        var st = stat()
+        _ = stat(path, &st)
+        #expect(st.st_size == 8 << 30)
+        let grown = try Daemon.homeImageNoteForLaunch(atPath: path, target: 16 << 30, setting: 16, restoring: false, floor: 0)
+        #expect(grown == "home image grown 8 GiB → 16 GiB (target 16 GiB)")
+        _ = stat(path, &st)
+        #expect(st.st_size == 16 << 30)
+    }
+
     @Test func aDefaultSizedHomeIsntGrownLater() throws {
         let dir = try shortTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
