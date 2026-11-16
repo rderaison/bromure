@@ -8,7 +8,9 @@ protocol CodingTaskHost: AnyObject {
     // The guest.
     func guestExec(profileID: Profile.ID, command: String, timeout: Int) async throws -> String
     func automationWorktreeCommand(profileNameOrID: String, action: String, args: [String]) -> Bool
-    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String?
+    /// `forArchive`: the read the archive keeps (a capped guest read is
+    /// completed from the session's copy) -- macOS's `TaskTranscriptArchive`.
+    func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool) async -> String?
     func pretrustGuestPath(profileID: Profile.ID, dir: String) async
     func waitForSessionQuiet(profileID: Profile.ID, branch: String, tool: Profile.Tool?,
                              quiet: Int, cap: TimeInterval) async -> Bool

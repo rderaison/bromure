@@ -70,6 +70,19 @@ enum MobileSessions {
         model.profileRows.first { $0.id == s.profileID }?.accentHex ?? "#888888"
     }
 
+    /// Paused: the machine is asleep or the agent stopped -- one group, as
+    /// on the desktop; both pick up again with a message.
+    static func isPaused(_ s: AgentSession, _ model: SessionListModel) -> Bool {
+        let b = SessionHome.bucket(for: s, in: model)
+        return b == .asleep || b == .ended
+    }
+
+    /// Whether a session belongs under a bucket's label (Ended files under
+    /// Paused, `.asleep`).
+    static func inGroup(_ s: AgentSession, _ bucket: SessionBucket, _ model: SessionListModel) -> Bool {
+        bucket == .asleep ? isPaused(s, model) : SessionHome.bucket(for: s, in: model) == bucket
+    }
+
     /// "3m" — when the session last did something ("now" while it works);
     /// nil while starting.
     @MainActor
@@ -99,6 +112,9 @@ struct MobileSessionScreen: View {
     @State private var worktreeSheet = false
     /// The session's machine settings (the workspace editor).
     @State private var machineSettings = false
+    /// The software keyboard is up: the navigation bar and the status strip
+    /// step aside so the conversation keeps what room is left.
+    @State private var keyboardUp = false
     @Environment(\.scenePhase) private var scenePhase
 
     private var model: SessionListModel { controller.listModel }
@@ -120,6 +136,8 @@ struct MobileSessionScreen: View {
         }
         .navigationTitle(session?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(keyboardUp ? .hidden : .visible, for: .navigationBar)
+        .modifier(SoftwareKeyboardWatch(up: $keyboardUp))
         .toolbar {
             if let s = session {
                 ToolbarItem(placement: .primaryAction) { menu(s) }
@@ -198,17 +216,22 @@ struct MobileSessionScreen: View {
                               accent: accent, actions: actions)
         } else if !s.hasEnded, !SessionHome.isGone(s, in: model), SessionHome.liveTab(for: s, in: model) != nil {
             VStack(spacing: 0) {
-                MobileSessionHeader(controller: controller, session: s, actions: actions)
+                if !keyboardUp {
+                    MobileSessionHeader(controller: controller, session: s, actions: actions)
+                }
                 // The workspace screen opens on the session's tmux window; an
                 // agent window defaults to its rich transcript reader — the
                 // mobile chat — with the raw terminal one toggle away.
                 WorkspaceScreen(controller: controller, profileID: s.profileID,
-                                initialWindow: s.windowIndex)
+                                initialWindow: s.windowIndex,
+                                sessionTool: s.tool.rawValue, sessionCwd: s.cwd)
                     .id("\(s.id.uuidString)#\(s.windowIndex ?? -1)")
             }
         } else {
             VStack(spacing: 0) {
-                MobileSessionHeader(controller: controller, session: s, actions: actions)
+                if !keyboardUp {
+                    MobileSessionHeader(controller: controller, session: s, actions: actions)
+                }
                 SessionRestView(
                     store: controller.sessionStore, model: model, sessionID: s.id,
                     accent: accent, actions: actions,
@@ -289,6 +312,30 @@ struct MobileSessionScreen: View {
             Image(systemName: "ellipsis.circle")
         }
         .accessibilityLabel("Session actions")
+    }
+}
+
+/// Tracks the software keyboard: `up` while one covers the bottom of the
+/// screen (not a hardware keyboard's slim shortcut bar). The session and
+/// room screens put away everything above the conversation meanwhile -- on
+/// a phone the bars and the keyboard together left almost nothing of it.
+struct SoftwareKeyboardWatch: ViewModifier {
+    @Binding var up: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { note in
+                let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue ?? .zero
+                set(frame.height > 120)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                set(false)
+            }
+    }
+
+    private func set(_ value: Bool) {
+        guard value != up else { return }
+        withAnimation(.easeOut(duration: 0.2)) { up = value }
     }
 }
 
@@ -562,12 +609,15 @@ struct MobileSessionsSection: View {
                 if list.isEmpty && rooms.isEmpty {
                     emptyCard
                 } else {
-                    // Grouped by state, Ended folded away.
-                    ForEach(SessionBucket.allCases) { bucket in
-                        let group = list.filter { SessionHome.bucket(for: $0, in: model) == bucket }
+                    // Grouped by state. Paused is one group, as on the
+                    // desktop -- asleep machines and stopped agents alike
+                    // pick up with a message -- folded away behind its caret.
+                    ForEach(SessionBucket.allCases.filter { $0 != .ended }) { bucket in
+                        let group = list.filter { MobileSessions.inGroup($0, bucket, model) }
                         if !group.isEmpty {
-                            let folded = bucket == .ended && !endedExpanded
-                            bucketLabel(bucket, count: group.count, folded: bucket == .ended ? folded : nil)
+                            let pausedGroup = bucket == .asleep
+                            let folded = pausedGroup && !endedExpanded
+                            bucketLabel(bucket, count: group.count, folded: pausedGroup ? folded : nil)
                             if !folded { ForEach(group) { card($0) } }
                         }
                     }
@@ -772,6 +822,8 @@ struct PadSessionSections<Boards: View>: View {
     @State private var deletingRoom: AgentRoom?
     @AppStorage("sessions.listExpanded") private var expanded = true
     @AppStorage("sessions.archivedExpanded") private var archivedExpanded = false
+    /// The Paused group's caret: folded by default (the phone list shares it).
+    @AppStorage("sessions.endedExpanded") private var pausedExpanded = false
     /// A right-click / long-press Delete on a running agent asks first.
     @State private var pendingDelete: AgentSession?
     /// A right-click / long-press "New worktree…": the session to branch off.
@@ -889,24 +941,16 @@ struct PadSessionSections<Boards: View>: View {
             .modifier(RoomPrompts(controller: controller, newRoomFor: $newRoomFor,
                                   renaming: $renamingRoom, deleting: $deletingRoom,
                                   onCreated: onOpenRoom))
-            ForEach(list) { s in
-                row(s)
-                    .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
-                    .tag(PadSelection.session(s.id))
-                    .contextMenu { rowMenu(s) }
-                    .draggable(s.id.uuidString)
-                    .dropDestination(for: String.self) { items, _ in
-                        let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
-                        guard controller.supportsRooms, !ids.isEmpty else { return false }
-                        for id in ids {
-                            Task {
-                                let r = await controller.roomCommand(
-                                    nil, "group", body: ["dragged": id.uuidString, "onto": s.id.uuidString])
-                                if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onOpenRoom(rid) }
-                            }
-                        }
-                        return true
-                    }
+            // Paused sessions fold away behind one caret, as on the desktop.
+            let paused = list.filter { MobileSessions.isPaused($0, model) }
+            ForEach(list.filter { !MobileSessions.isPaused($0, model) }) { sessionRow($0) }
+            if !paused.isEmpty {
+                pausedToggle(count: paused.count)
+                // Folded, the open session stays listed: its row carries the
+                // List selection, and a hidden one loses the highlight.
+                ForEach(pausedExpanded ? paused : paused.filter { $0.id == model.selectedSessionID }) {
+                    sessionRow($0)
+                }
             }
         } header: {
             HStack(spacing: 6) {
@@ -928,6 +972,45 @@ struct PadSessionSections<Boards: View>: View {
                 }
             }
         }
+    }
+
+    /// The Paused group's caret row: folds the paused sessions in and out.
+    private func pausedToggle(count: Int) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { pausedExpanded.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(SessionBucket.asleep.tint).frame(width: 7, height: 7)
+                Text(SessionBucket.asleep.title).font(.subheadline).foregroundStyle(.secondary)
+                Text("\(count)").font(.footnote.weight(.semibold)).monospacedDigit().foregroundStyle(.tertiary)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(pausedExpanded ? 90 : 0))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pausedExpanded ? "Hide paused sessions" : "Show paused sessions")
+    }
+
+    private func sessionRow(_ s: AgentSession) -> some View {
+                row(s)
+                    .opacity(SessionHome.isGone(s, in: model) ? 0.5 : 1)
+                    .tag(PadSelection.session(s.id))
+                    .contextMenu { rowMenu(s) }
+                    .draggable(s.id.uuidString)
+                    .dropDestination(for: String.self) { items, _ in
+                        let ids = items.compactMap(UUID.init(uuidString:)).filter { $0 != s.id }
+                        guard controller.supportsRooms, !ids.isEmpty else { return false }
+                        for id in ids {
+                            Task {
+                                let r = await controller.roomCommand(
+                                    nil, "group", body: ["dragged": id.uuidString, "onto": s.id.uuidString])
+                                if let rid = (r?["id"] as? String).flatMap(UUID.init(uuidString:)) { onOpenRoom(rid) }
+                            }
+                        }
+                        return true
+                    }
     }
 
     /// Right-click / long-press: the same choices as the session's own menu.

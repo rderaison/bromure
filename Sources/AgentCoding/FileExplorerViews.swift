@@ -26,6 +26,21 @@ struct FileExplorerPane: View {
     /// worktree. Left nil in remote (fat-client) mode, where worktrees are
     /// managed from the sidebar.
     var onWorktreeAction: ((TabAction) -> Void)? = nil
+    /// Browse this machine and folder (a session's), whatever the list
+    /// selection says -- the iOS session and room stages, which don't run
+    /// the sessions-first selection the desktop does.
+    var pinnedContext: (profile: Profile.ID, cwd: String)? = nil
+    /// Shown on its own, not as the side pane: the phone's Files sheet.
+    /// Open (located, polling) while mounted, whatever the shared
+    /// `filePaneOpen` / grid state says, and never auto-opens or -closes
+    /// the side pane.
+    var standalone = false
+
+    /// The pane is on screen: a standalone sheet, the open side pane (not
+    /// covered by the grid), or the pop-out viewer window.
+    private var showing: Bool {
+        standalone || (listModel.filePaneOpen && !listModel.gridSelected) || model.poppedOut
+    }
 
     /// A Finder drag is over the pane.
     @State private var dropTargeted = false
@@ -51,7 +66,9 @@ struct FileExplorerPane: View {
     private var sessionContext: (profile: Profile.ID, cwd: String)? {
         // A room on stage: the focused cell's session.
         let pid: Profile.ID, cwd: String
-        if listModel.sessionsFirst, listModel.selectedRoomID != nil,
+        if let pinned = pinnedContext {
+            pid = pinned.profile; cwd = pinned.cwd
+        } else if listModel.sessionsFirst, listModel.selectedRoomID != nil,
            let p = listModel.roomFocusProfileID, let c = listModel.roomFocusCwd {
             pid = p; cwd = c
         } else {
@@ -81,7 +98,7 @@ struct FileExplorerPane: View {
     /// change re-points the model and restarts the status polling task.
     private var contextKey: String {
         let id = contextProfileID?.uuidString ?? "-"
-        return "\(id)|\(contextCwd ?? "-")|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)|\(model.poppedOut)"
+        return "\(id)|\(contextCwd ?? "-")|\(currentRepoRoot ?? "-")|\(listModel.filePaneOpen)|\(listModel.gridSelected)|\(model.poppedOut)|\(standalone)"
     }
     /// Auto-open watches only (VM, repo) — deliberately NOT filePaneOpen, so
     /// closing the pane doesn't retrigger the transition check.
@@ -143,8 +160,7 @@ struct FileExplorerPane: View {
             // by the grid) — or while the pop-out viewer window is up, which
             // shows this model regardless of the pane. 4s keeps the tree live
             // against agent edits without meaningfully loading the guest.
-            guard (listModel.filePaneOpen && !listModel.gridSelected) || model.poppedOut,
-                  contextCwd != nil else { return }
+            guard showing, contextCwd != nil else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if Task.isCancelled { return }
@@ -155,7 +171,7 @@ struct FileExplorerPane: View {
     }
 
     private func applyContext() {
-        guard listModel.filePaneOpen || model.poppedOut else {
+        guard standalone || listModel.filePaneOpen || model.poppedOut else {
             model.setLocation(profileID: nil, cwd: nil, repoRoot: nil)   // park while closed
             return
         }
@@ -195,7 +211,7 @@ struct FileExplorerPane: View {
     /// Only a live tab with a cwd counts as definitive; unknown states (VM
     /// booting, nothing selected) change nothing in either direction.
     private func handleRepoTransition() {
-        guard let tab = activeTab, let cwd = tab.cwd, !cwd.isEmpty else { return }
+        guard !standalone, let tab = activeTab, let cwd = tab.cwd, !cwd.isEmpty else { return }
         let inRepo = currentRepoRoot != nil
         defer { wasInRepo = inRepo }
         if inRepo {
@@ -695,6 +711,17 @@ private struct FileDetailSection: View {
             .background(Color.platformTextBackground)
         case .code(let text, let language):
             CodePreview(text: text, language: language)
+        case .media(let path, let reader):
+            ScrollView {
+                // A video waits for Play, as in the chat: a click on a
+                // 500 MB movie shouldn't start fetching it.
+                MediaView(path: path, expanded: DisplayMediaKind(path: path) != .video)
+                    .environment(\.displayFileReader, reader)
+                    .padding(10)
+            }
+            // A new file is a new view: its own player and loading state.
+            .id(reader.cacheKey(path))
+            .background(Color.platformTextBackground)
         case .binary:
             centered("Binary file")
         case .tooLarge:

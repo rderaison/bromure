@@ -85,29 +85,39 @@ final class ProfileEditorController {
 
     /// Small name + colour form; on Create the profile is saved and its
     /// settings window opens so the user can tune it before first use.
+    /// Colours aren't exclusive, but defaulting to one not in use keeps
+    /// profiles distinguishable without the user thinking about it.
+    func suggestedColor() -> ProfileColor? {
+        let taken = Set(state.profileManager.allProfiles.compactMap(\.color))
+        return ProfileColor.allCases.first { !taken.contains($0) } ?? ProfileColor.allCases.first
+    }
+
+    /// A new profile with the defaults New Profile gives (persistent,
+    /// clipboard and link sharing, passkeys), saved and announced.
+    @discardableResult
+    func createProfile(name: String, color: ProfileColor?) -> Profile {
+        var settings = ProfileSettings()
+        settings.persistent = true
+        settings.enableClipboardSharing = true
+        settings.enableLinkSender = true
+        settings.keychainPasskeys = true
+        // iCloud Passwords asks for a pairing code each launch: opt-in.
+        settings.keychainPasswords = false
+        let profile = state.profileManager.createProfile(
+            name: name, color: color, settings: settings)
+        state.selectedProfileID = profile.id
+        state.profileVersion += 1
+        return profile
+    }
+
     func presentNewProfile() {
         if let newProfileWindow, newProfileWindow.isVisible {
             newProfileWindow.makeKeyAndOrderFront(nil)
             return
         }
-        // Colours aren't exclusive, but defaulting to one not in use keeps
-        // profiles distinguishable without the user thinking about it.
-        let taken = Set(state.profileManager.allProfiles.compactMap(\.color))
-        let suggested = ProfileColor.allCases.first { !taken.contains($0) } ?? ProfileColor.allCases.first
-
-        let form = NewProfileForm(initialColor: suggested) { [weak self] name, color in
+        let form = NewProfileForm(initialColor: suggestedColor()) { [weak self] name, color in
             guard let self else { return }
-            var settings = ProfileSettings()
-            settings.persistent = true
-            settings.enableClipboardSharing = true
-            settings.enableLinkSender = true
-            settings.keychainPasskeys = true
-            // iCloud Passwords asks for a pairing code each launch: opt-in.
-            settings.keychainPasswords = false
-            let profile = self.state.profileManager.createProfile(
-                name: name, color: color, settings: settings)
-            self.state.selectedProfileID = profile.id
-            self.state.profileVersion += 1
+            let profile = self.createProfile(name: name, color: color)
             self.newProfileWindow?.close()
             self.newProfileWindow = nil
             self.presentSettings(for: profile)

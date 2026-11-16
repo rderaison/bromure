@@ -136,9 +136,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// the pool-ready hook.
     private var pendingLaunch: PendingLaunch?
     private enum PendingLaunch {
+        /// App launch: ask which profile and network to boot.
+        case launchPicker
+        /// Unattended runs (BROMURE_SKIP_LAUNCH_PICKER): open the startup
+        /// profile directly.
         case startup
-        case profile(UUID, URL?)
+        case profile(UUID, URL?, network: String? = nil)
     }
+    /// The launch picker, while it is up.
+    private var launchPickerWindow: NSWindow?
+    private var launchPickerCompletion: ((LaunchChoice?) -> Void)?
     /// File ▸ New Window With Profile — rebuilt on each open.
     private weak var profilesSubmenu: NSMenu?
     private var settingsWindow: NSWindow?
@@ -263,6 +270,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.hideSetupWindow()
             if let url = self.pendingURL {
                 self.pendingURL = nil
+                // A profile/network already picked at launch takes the link.
+                if case .profile(let id, nil, let network)? = self.pendingLaunch,
+                   let profile = self.state.profileManager.profile(withID: id) {
+                    self.pendingLaunch = nil
+                    self.openNewBrowser(with: profile, initialURL: url, networkOverride: network)
+                    return
+                }
                 self.pendingLaunch = nil
                 // Re-enter the normal URL handling flow now that the pool is ready
                 self.application(NSApp, open: [url])
@@ -315,8 +329,15 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             snapshotSetupWindowIfRequested()
             return
         }
+        // Nothing boots until the profile chooser is answered.
+        // BROMURE_SKIP_LAUNCH_PICKER: unattended runs (e2e) open the
+        // startup profile directly.
+        if ProcessInfo.processInfo.environment["BROMURE_SKIP_LAUNCH_PICKER"] == nil {
+            pendingLaunch = .launchPicker
+        } else {
+            pendingLaunch = .startup
+        }
         state.checkState()
-        pendingLaunch = .startup
         if state.poolReady {
             performPendingLaunch()
         } else {
@@ -351,30 +372,133 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard state.poolReady, let launch = pendingLaunch else { return }
         pendingLaunch = nil
         switch launch {
-        case .startup:
+        case .startup, .launchPicker:
             guard sessions.isEmpty else { return }
             // Profiles load asynchronously (iCloud discovery); the pool
             // normally takes longer, but never open a profile-less window
             // just because the roster hasn't landed yet.
             guard state.profileManager.isReady else {
-                pendingLaunch = .startup
+                pendingLaunch = launch
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(250))
                     self.performPendingLaunch()
                 }
                 return
             }
+            if case .launchPicker = launch, presentProfileChooser() { return }
             if let profile = startupProfile() {
                 openNewBrowser(with: profile)
             } else {
                 openNewBrowser()
             }
-        case .profile(let id, let url):
+        case .profile(let id, let url, let network):
             if let profile = state.profileManager.profile(withID: id) {
-                openNewBrowser(with: profile, initialURL: url)
+                openNewBrowser(with: profile, initialURL: url, networkOverride: network)
             }
         }
     }
+
+    /// Show the profile chooser; the session it opens boots with the
+    /// chosen profile and network. Fronts the chooser if it's already up.
+    /// Returns false (nothing shown) when there is no profile to choose.
+    @MainActor @discardableResult
+    func presentProfileChooser(preselecting id: UUID? = nil) -> Bool {
+        if let launchPickerWindow {
+            launchPickerWindow.makeKeyAndOrderFront(nil)
+            return true
+        }
+        return showLaunchPicker(initialProfileID: id) { [weak self] choice in
+            guard let self else { return }
+            // A link that arrived while the chooser was up opens in the
+            // chosen session; Cancel drops it.
+            let url = self.pendingURL
+            self.pendingURL = nil
+            guard let choice,
+                  let profile = self.state.profileManager.profile(withID: choice.profileID) else { return }
+            self.openNewBrowser(with: profile, initialURL: url, networkOverride: choice.network)
+        }
+    }
+
+    /// ⌘N, a Dock click, "Open a Different Profile…": every new VM starts
+    /// at the chooser. Queued while the engine isn't ready yet.
+    @MainActor func chooseProfileAndOpen(preselecting id: UUID? = nil) {
+        guard state.pool != nil, state.poolReady, state.profileManager.isReady else {
+            pendingLaunch = .launchPicker
+            if state.phase != .ready { showSetupWindow() } else { performPendingLaunch() }
+            return
+        }
+        if !presentProfileChooser(preselecting: id) { openNewBrowser() }
+    }
+
+    /// The launch window: pick the profile to boot and the network its
+    /// session uses. Non-modal so the automation server and AppleScript
+    /// keep running while it waits. `completion` gets the choice, or nil
+    /// on Cancel / close. Returns false (completion not called) when
+    /// there is no profile to choose.
+    @MainActor private func showLaunchPicker(initialProfileID: UUID? = nil,
+                                             completion: @escaping (LaunchChoice?) -> Void) -> Bool {
+        let profiles = state.profileManager.allProfiles
+        guard !profiles.isEmpty else { return false }
+        finishLaunchPicker(nil)  // never two pickers / dangling completions
+        let initial = initialProfileID.flatMap { id in profiles.first { $0.id == id }?.id }
+            ?? startupProfile()?.id ?? profiles[0].id
+        let window = NSWindow(contentRect: .zero,
+                              styleMask: [.titled, .closable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        let interfaces = VMConfig.bridgedInterfaces()
+        let view = ObservedLaunchPicker(state: state) { [weak self] version in
+            LaunchPickerView(
+                profiles: profiles, initialProfileID: initial,
+                interfaces: interfaces,
+                suggestedColor: { [weak self] in self?.profileEditor.suggestedColor() },
+                onCreateProfile: { [weak self] name, color in
+                    guard let self else { return Profile(name: name, color: color) }
+                    return self.profileEditor.createProfile(name: name, color: color)
+                },
+                onEditProfile: { [weak self] id in
+                    self?.profileEditor.presentSettings(forProfileID: id)
+                },
+                profileVersion: version,
+                currentProfiles: { [weak self] in
+                    self?.state.profileManager.allProfiles ?? []
+                },
+                onOpen: { [weak self] choice in self?.finishLaunchPicker(choice) },
+                onCancel: { [weak self] in self?.finishLaunchPicker(nil) }
+            )
+        }
+        launchPickerCompletion = completion
+        // Same chrome as the starting splash: the brand band runs up under
+        // the traffic lights.
+        let hosting = NSHostingView(rootView: view)
+        hosting.safeAreaRegions = []
+        window.contentView = hosting
+        window.title = "Bromure"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.delegate = self  // title-bar close clears launchPickerWindow
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        launchPickerWindow = window
+        return true
+    }
+
+    /// Take the launch picker down and report `choice` (nil = cancelled)
+    /// to whoever is waiting on it, exactly once.
+    @MainActor private func finishLaunchPicker(_ choice: LaunchChoice?) {
+        let completion = launchPickerCompletion
+        launchPickerCompletion = nil
+        if let window = launchPickerWindow {
+            launchPickerWindow = nil
+            window.orderOut(nil)
+        }
+        completion?(choice)
+    }
+
+    /// Any other path (⌘N, a link from another app) opening a window
+    /// first dismisses the picker as a cancel.
+    @MainActor private func closeLaunchPicker() { finishLaunchPicker(nil) }
 
     /// Re-run the profile-roster observation: bump every open window's
     /// chip so its menu re-renders, then re-arm (Observation fires once).
@@ -453,6 +577,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             return
         }
 
+        // The profile chooser is up with no window open (launch, Dock
+        // click): it decides where the link opens — front it, and the
+        // session it starts loads the link.
+        if launchPickerWindow != nil, !sessions.contains(where: { !$0.closing }) {
+            print("[URL] profile chooser is up — link waits for its choice")
+            pendingURL = url
+            launchPickerWindow?.makeKeyAndOrderFront(nil)
+            return
+        }
+
         // Show the picker when there's more than one destination to choose
         // from (multiple profiles, or a single profile + at least one
         // external browser installed on the host).
@@ -495,7 +629,13 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         } else {
             print("[URL] storing as pending URL")
             pendingURL = url
-            if state.phase != .ready { showSetupWindow() }
+            // The launch picker is up: the link opens in the profile chosen
+            // there once the VM is ready (onPoolReady), so keep it in front.
+            if let launchPickerWindow {
+                launchPickerWindow.makeKeyAndOrderFront(nil)
+            } else if state.phase != .ready {
+                showSetupWindow()
+            }
         }
     }
 
@@ -878,6 +1018,9 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if (notification.object as? NSWindow) === setupWindow {
             setupWindow = nil
         }
+        if (notification.object as? NSWindow) === launchPickerWindow {
+            finishLaunchPicker(nil)
+        }
     }
 
     @MainActor @objc func showSettings(_ sender: Any?) {
@@ -1158,20 +1301,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     // MARK: - Window / profile actions
 
-    /// ⌘N: another window of the front window's profile; with no browser
-    /// window in front, the start-up profile.
+    /// ⌘N: another window in the front window's VM when it has shared
+    /// windows; otherwise a new VM, chosen in the profile chooser (the
+    /// front window's profile preselected).
     @MainActor @objc func newWindowAction(_ sender: Any?) {
         if let owner = keyWindowSession()?.sharedOwner ?? sessions.last(where: { !$0.closing })?.sharedOwner {
             owner.createWindow()
             return
         }
-        if let profile = keyWindowSession()?.profile
-            ?? sessions.last(where: { !$0.closing })?.profile
-            ?? startupProfile() {
-            openWindow(forProfileID: profile.id)
-        } else {
-            openNewBrowser()
-        }
+        chooseProfileAndOpen(preselecting: keyWindowSession()?.profile?.id
+                             ?? sessions.last(where: { !$0.closing })?.profile?.id)
     }
 
     /// ⇧⌘N: a fresh ephemeral VM.
@@ -1589,22 +1728,49 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 state.sessionCount = 0
 
                 state.regenerateImage()
-                pendingLaunch = .startup
+                pendingLaunch = .launchPicker
                 showSetupWindow()
             }
         }
     }
 
-    @MainActor private func showSessionError() {
+    /// A session's VM failed to boot: say why. A network failure (no host
+    /// network, bridged interface gone) offers Try Again and is retried by
+    /// itself when the host network changes.
+    /// `launch` identifies the window launch across its retries, so its
+    /// automatic retry neither replaces nor is cleared by another launch's.
+    @MainActor private func showSessionError(_ error: Error?, launch: UUID, retry: @escaping () -> Void) {
+        let networkFailure = SandboxError.isNetworkFailure(error)
+        if networkFailure { state.networkRetries.register(launch, retry) }
         let alert = NSAlert()
         alert.messageText = NSLocalizedString("Cannot open browser", comment: "")
-        alert.informativeText = NSLocalizedString("Too many browser sessions are open. Close some windows and try again.", comment: "")
+        if let error, !Self.isSessionLimit(error) {
+            alert.informativeText = AppState.localizedMessage(for: error)
+        } else {
+            alert.informativeText = NSLocalizedString("Too many browser sessions are open. Close some windows and try again.", comment: "")
+        }
         alert.alertStyle = .warning
+        if networkFailure {
+            alert.addButton(withTitle: NSLocalizedString("Try Again", comment: ""))
+        }
         alert.addButton(withTitle: NSLocalizedString("OK", comment: ""))
-        alert.runModal()
+        // A network change while the alert was up may already have retried
+        // this launch (taking its entry); Try Again then mustn't open a
+        // second window for it.
+        if alert.runModal() == .alertFirstButtonReturn, networkFailure,
+           state.networkRetries.contains(launch) {
+            state.networkRetries.cancel(launch)
+            retry()
+        }
     }
 
-    @MainActor func openNewBrowser(initialURL: URL? = nil) {
+    private static func isSessionLimit(_ error: Error) -> Bool {
+        if case .macPoolExhausted? = error as? SandboxError { return true }
+        return false
+    }
+
+    @MainActor func openNewBrowser(initialURL: URL? = nil, launch: UUID = UUID()) {
+        closeLaunchPicker()
         guard state.pool != nil, state.poolReady else {
             if let url = initialURL { pendingURL = url }
             if state.phase != .ready { showSetupWindow() }
@@ -1617,16 +1783,25 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         Task { @MainActor [self] in
             var startingWindow: NSWindow?
             defer { startingWindow?.orderOut(nil) }
-            guard let warm = await state.pool?.claim(config: config, onColdBoot: {
+            let claim = await state.pool?.claimResult(config: config, onColdBoot: {
                 startingWindow = self.showBrowserStartingWindow()
-            }) else {
-                if let url = initialURL { self.pendingURL = url }
+            })
+            guard let warm = claim?.vm else {
+                let error = claim?.error
+                // A network failure retries with the link; otherwise the
+                // link waits for the next window.
+                if let url = initialURL, !SandboxError.isNetworkFailure(error) { self.pendingURL = url }
                 startingWindow?.orderOut(nil)
-                self.showSessionError()
+                self.showSessionError(error, launch: launch) { [weak self] in
+                    self?.openNewBrowser(initialURL: initialURL, launch: launch)
+                }
                 return
             }
+            // This launch's window opened: its own pending retry is moot
+            // (other launches' retries stay queued).
+            self.state.networkRetries.cancel(launch)
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
-                self?.openNewBrowser(initialURL: initialURL)
+                self?.openNewBrowser(initialURL: initialURL, launch: launch)
             }
             guard proceed else { return }
             let session = BrowserSession(warmVM: warm, config: config)
@@ -1656,13 +1831,14 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             session.show()
             self.refreshProfileMenus()
-            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
-                self.state.pool?.scheduleWarmUp()
-            }
         }
     }
 
-    @MainActor func openNewBrowser(with profile: Profile, initialURL: URL? = nil) {
+    /// - Parameter networkOverride: "nat" or a bridged interface id for
+    ///   this session only (the launch picker); nil keeps the profile's.
+    @MainActor func openNewBrowser(with profile: Profile, initialURL: URL? = nil,
+                                   networkOverride: String? = nil, launch: UUID = UUID()) {
+        closeLaunchPicker()
         // Re-fetch the profile from the manager to pick up any settings changes
         // that occurred between the UI capture and now (e.g. settings panel save).
         let profile = state.profileManager.profile(withID: profile.id) ?? profile
@@ -1671,7 +1847,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             if let url = initialURL {
                 pendingURL = url
             } else {
-                pendingLaunch = .profile(profile.id, nil)
+                pendingLaunch = .profile(profile.id, nil, network: networkOverride)
             }
             if state.phase != .ready { showSetupWindow() }
             return
@@ -1692,6 +1868,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         state.isLaunching = true
         state.profileManager.markUsed(id: profile.id)
         var config = state.buildConfig(for: profile)
+        if let networkOverride { config.networkInterface = networkOverride }
         // Override homepage so xinitrc launches Chromium with the URL using
         // all proper flags, instead of a bare navigateTo after the fact.
         if let initialURL { config.homePage = initialURL.absoluteString }
@@ -1755,22 +1932,28 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         Task { @MainActor [self] in
             var startingWindow: NSWindow?
             defer { startingWindow?.orderOut(nil) }
-            guard let warm = await state.pool?.claim(
+            let claim = await state.pool?.claimResult(
                 config: config,
                 profileID: profile.id,
                 profileImageDir: profileImageDir,
                 profileDiskKey: profileDiskKey,
                 restoreSession: restoreSession,
                 onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
-            ) else {
+            )
+            guard let warm = claim?.vm else {
                 self.state.isLaunching = false
                 startingWindow?.orderOut(nil)
-                self.showSessionError()
+                self.showSessionError(claim?.error, launch: launch) { [weak self] in
+                    self?.openNewBrowser(with: profile, initialURL: initialURL,
+                                         networkOverride: networkOverride, launch: launch)
+                }
                 return
             }
             self.state.isLaunching = false
+            self.state.networkRetries.cancel(launch)
             let proceed = await self.presentNetworkRepairIfNeeded(warm: warm) { [weak self] in
-                self?.openNewBrowser(with: profile, initialURL: initialURL)
+                self?.openNewBrowser(with: profile, initialURL: initialURL,
+                                     networkOverride: networkOverride, launch: launch)
             }
             guard proceed else { return }
             let session = BrowserSession(
@@ -1795,7 +1978,7 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self.state.sessionCount = self.sessions.count
             if (warm.graphicsSession?.outputCapacity ?? 1) > 1 {
                 do {
-                    try session.startSharedWindows { [weak self] child in
+                    try session.startSharedWindows(restoringSession: restoreSession) { [weak self] child in
                         guard let self else { return }
                         child.enableWindowSizeMemory()
                         self.sessions.append(child)
@@ -1806,9 +1989,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             session.show()
             self.refreshProfileMenus()
-            if ProcessInfo.processInfo.environment["BROMURE_DEBUG"] == nil {
-                self.state.pool?.scheduleWarmUp()
-            }
         }
     }
 
@@ -2229,15 +2409,16 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
         var startingWindow: NSWindow?
         defer { startingWindow?.orderOut(nil) }
-        guard let warm = await state.pool?.claim(
+        let claim = await state.pool?.claimResult(
             config: config,
             profileID: profile.id,
             profileImageDir: profileImageDir,
             profileDiskKey: profileDiskKey,
             restoreSession: restore,
             onColdBoot: { startingWindow = self.showBrowserStartingWindow() }
-        ) else {
-            print("[Automation] Failed to claim VM")
+        )
+        guard let warm = claim?.vm else {
+            print("[Automation] Failed to claim VM: \(claim?.error.map { "\($0)" } ?? "no VM")")
             return nil
         }
 
@@ -2257,8 +2438,6 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         self.state.sessionCount = self.sessions.count
         session.show()
         self.refreshProfileMenus()
-        // Shorter warm-up delay for automation — sessions are created/destroyed rapidly
-        state.pool?.scheduleWarmUp(delay: .seconds(3))
 
         guard let server = automationServer else {
             print("[Automation] Session created but no automation server")
@@ -2374,13 +2553,17 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     /// Dock click with no window: open one, like Safari. With windows
     /// (visible or minimised) AppKit's default reopen brings them back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // The launch picker is up (before the pool's first boot): front it.
+        if let launchPickerWindow {
+            launchPickerWindow.makeKeyAndOrderFront(nil)
+            return false
+        }
         if state.phase != .ready {
             showSetupWindow()
             return false
         }
         if sessions.isEmpty {
-            pendingLaunch = .startup
-            performPendingLaunch()
+            chooseProfileAndOpen()
             return false
         }
         return true
@@ -2449,12 +2632,15 @@ final class SharedBrowserVMOwner {
     private var closingWindows: Set<Int> = []
     private var sizes: [Int: (width: Int, height: Int)] = [:]
     private var rectangles: [Int: CGRect] = [:]
-    private var operations: [(motion: Int?, body: () async -> Void)] = []
-    private var draining = false
+    private let operationQueue = SharedWindowOperationQueue()
     private var prepared = false
     private var supportsTerminalShutdown = false
+    private var supportsTabDetach = false
+    var restoringSession = false
     private var focusedID: Int?
     private var resizeTask: Task<Void, Never>?
+    private var reconciliationTask: Task<Void, Never>?
+    private var reportedUnboundWindows: Set<Int> = []
     private var terminated = false
     var onWindowCreated: ((BrowserSession) -> Void)?
     var presentationSession: BrowserSession? {
@@ -2475,6 +2661,8 @@ final class SharedBrowserVMOwner {
         windows[0] = root
         sizes[0] = (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
         root.sharedOwner = self
+        operationQueue.resumeVM = { [weak root] in root?.autoSuspend?.resumeForAPIRequest() }
+        operationQueue.isVMSuspended = { [weak root] in root?.autoSuspend?.isVMSuspended ?? false }
         root.autoSuspend?.windowsProvider = { [weak self] in
             guard let self else { return [] }
             return self.windows.filter { !self.closingWindows.contains($0.key) && !$0.value.closing }.map { $0.value.window }
@@ -2488,21 +2676,12 @@ final class SharedBrowserVMOwner {
     }
 
     private func enqueue(coalescingMotion id: Int? = nil, _ operation: @escaping () async -> Void) {
-        if let id, operations.last?.motion == id { operations[operations.count - 1] = (id, operation) }
-        else { operations.append((id, operation)) }
-        guard !draining else { return }
-        draining = true
-        Task { @MainActor in
-            while !operations.isEmpty {
-                root.autoSuspend?.resumeForAPIRequest()
-                await operations.removeFirst().body()
-            }
-            draining = false
-        }
+        operationQueue.enqueue(coalescingMotion: id, operation)
     }
 
     private func requireOK(_ reply: [String: Any]) throws {
         guard reply["ok"] as? Bool == true else {
+            print("[Shared windows] guest refused: \(reply)")
             throw NSError(domain: "BromureSharedWindows", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: String(describing: reply["error"] ?? "Guest rejected shared-window operation")])
         }
@@ -2524,11 +2703,28 @@ final class SharedBrowserVMOwner {
             if listing["ok"] as? Bool == true, let rows = listing["windows"] as? [[String: Any]], !rows.isEmpty { break }
             try await Task.sleep(for: .milliseconds(250))
         } while ProcessInfo.processInfo.systemUptime < deadline
+        // A restored session (--restore-last-session) can reopen several
+        // windows, one after another. Wait until the count holds for a
+        // second (at most five) so every one of them gets a Mac window.
+        if restoringSession, listing["ok"] as? Bool == true {
+            let settle = ProcessInfo.processInfo.systemUptime + 5
+            var count = (listing["windows"] as? [[String: Any]])?.count ?? 0
+            var stableSince = ProcessInfo.processInfo.systemUptime
+            while ProcessInfo.processInfo.systemUptime < settle,
+                  ProcessInfo.processInfo.systemUptime - stableSince < 1 {
+                try await Task.sleep(for: .milliseconds(250))
+                guard let next = try? await controller.request("list", fields: ["expectedScanouts": capacity, "rootPixelLimit": 67108864]),
+                      next["ok"] as? Bool == true, let rows = next["windows"] as? [[String: Any]], !rows.isEmpty else { continue }
+                listing = next
+                if rows.count != count { count = rows.count; stableSince = ProcessInfo.processInfo.systemUptime }
+            }
+        }
         try requireOK(listing)
         supportsTerminalShutdown = listing["shutdownProtocolVersion"] as? Int == 1
+        supportsTabDetach = listing["tabDetachProtocolVersion"] as? Int == 1
         guard listing["rootPixelLimit"] as? Int == 67108864 else { throw NSError(domain: "BromureSharedWindows", code: 10) }
         guard let connectors = listing["outputs"] as? [[String: Any]], connectors.count == capacity,
-              let rows = listing["windows"] as? [[String: Any]], rows.count == 1,
+              let rows = listing["windows"] as? [[String: Any]], !rows.isEmpty,
               let primary = rows[0]["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 4) }
         for row in connectors {
             guard let index = row["scanout"] as? Int, let name = row["output"] as? String,
@@ -2544,6 +2740,96 @@ final class SharedBrowserVMOwner {
         root.tabBridge?.commandGate = { [weak self] id, action in self?.forward(id: id, needsFocus: true, action: action) }
         installInput(root, index: 0)
         prepared = true
+        startWindowReconciliation()
+    }
+
+    private func startWindowReconciliation() {
+        guard reconciliationTask == nil else { return }
+        reconciliationTask = Task { @MainActor [weak self] in
+            var checks = 0
+            while let self, !Task.isCancelled, !self.terminated {
+                // Background: skipped while the VM is idle-suspended, so the
+                // poll never wakes it (the next tick after a resume catches up).
+                self.operationQueue.enqueue(background: true) { [self] in
+                    guard !self.terminated else { return }
+                    do { try await self.reconcileGuestWindows() } catch { self.report(error, presentAlert: false) }
+                }
+                checks += 1
+                try? await Task.sleep(for: checks < 30 ? .seconds(1) : .seconds(10))
+            }
+        }
+    }
+
+    private func reconcileGuestWindows() async throws {
+        let listing = try await controller.request("list")
+        try requireOK(listing)
+        guard let rows = listing["windows"] as? [[String: Any]] else {
+            throw NSError(domain: "BromureSharedWindows", code: 4)
+        }
+        let attached = Set(windows.values.compactMap(\.sharedWindowID))
+        for row in rows.sorted(by: { ($0["windowId"] as? Int ?? 0) < ($1["windowId"] as? Int ?? 0) }) {
+            guard let id = row["windowId"] as? Int, !attached.contains(id) else { continue }
+            guard !terminated else { return }
+            do {
+                try await adoptRestoredWindow(id, boundScanout: row["scanout"] as? Int)
+                reportedUnboundWindows.remove(id)
+            } catch {
+                if reportedUnboundWindows.insert(id).inserted {
+                    report(NSError(domain: "BromureSharedWindows", code: 13,
+                                   userInfo: [NSLocalizedDescriptionKey: "Chromium window \(id) could not be displayed: \(error.localizedDescription). Its tabs remain open in the guest. Free a browser window or retry after the display recovers."]))
+                }
+            }
+        }
+        reportedUnboundWindows.formIntersection(Set(rows.compactMap { $0["windowId"] as? Int }))
+    }
+
+    private func adoptRestoredWindow(_ id: Int, boundScanout: Int?) async throws {
+        guard let index = boundScanout ?? (0..<outputs.count).first(where: { windows[$0] == nil }),
+              windows[index] == nil, outputs[index] != nil else {
+            throw NSError(domain: "BromureSharedWindows", code: 7,
+                          userInfo: [NSLocalizedDescriptionKey: "No free display output"])
+        }
+        sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+        do {
+            if boundScanout == nil {
+                try await whileSharedDesktopResizes {
+                    let topology = try await publishTopology()
+                    do {
+                        try requireOK(try await controller.request("attachPrimary", fields: ["windowId": id, "scanout": index, "topology": topology]))
+                    } catch {
+                        // A timed-out reply may follow a successful attachment. Observe
+                        // the binding before a later poll attempts the mutation again.
+                        let listing = try await controller.request("list")
+                        try requireOK(listing)
+                        guard let rows = listing["windows"] as? [[String: Any]],
+                              rows.contains(where: { $0["windowId"] as? Int == id && $0["scanout"] as? Int == index }) else { throw error }
+                    }
+                }
+            }
+            try showChild(windowID: id, index: index)
+        } catch {
+            sizes[index] = nil
+            throw error
+        }
+    }
+
+    /// Opens the Mac window for guest window `id`, already bound to `index`.
+    @discardableResult
+    private func showChild(windowID id: Int, index: Int) throws -> BrowserSession {
+        guard #available(macOS 27.0, *), let gpu = warm.graphicsSession as? MacOS27GPUSession,
+              let graphics = gpu.outputSession(index: index, onResize: { [weak self] w, h in self?.resize(index: index, width: w, height: h) }) else {
+            throw NSError(domain: "BromureSharedWindows", code: 8)
+        }
+        let child = BrowserSession(warmVM: warm, config: root.sessionConfig, profile: root.profile,
+                                   serviceRoot: root, sharedWindowID: id, graphicsOverride: graphics)
+        child.sharedOwner = self
+        child.onClosed = root.onClosed
+        child.onOpenInProfile = root.onOpenInProfile
+        windows[index] = child
+        installInput(child, index: index)
+        onWindowCreated?(child)
+        child.show()
+        return child
     }
 
     private func whileSharedDesktopResizes<T>(_ operation: @MainActor () async throws -> T) async rethrows -> T {
@@ -2585,7 +2871,54 @@ final class SharedBrowserVMOwner {
         return topology
     }
 
-    func createWindow(url: String = "about:blank") {
+    private func detachReply(target: String, sourceID: Int, index: Int,
+                             topology: [[String: Any]]) async throws -> [String: Any] {
+        do {
+            let reply = try await controller.request("detach", fields: ["windowId": sourceID, "targetId": target,
+                                                                        "scanout": index, "topology": topology])
+            if reply["ok"] as? Bool == true { return reply }
+            print("[Liquid tabs] guest detach refused: \(String(describing: reply["error"] ?? "Unknown refusal"))")
+        } catch {
+            print("[Liquid tabs] detach transport failed: \(error)")
+            // A broken connection may follow an executed move. Never replay it.
+        }
+        let observed = try await controller.request("list")
+        try requireOK(observed)
+        guard let rows = observed["windows"] as? [[String: Any]],
+              rows.contains(where: { $0["windowId"] as? Int == sourceID }),
+              let destination = rows.first(where: {
+                  $0["windowId"] as? Int != sourceID && ($0["targetIds"] as? [String])?.contains(target) == true
+              }), let id = destination["windowId"] as? Int else {
+            // Ownership observation confirms the tab did not move. Return the
+            // unused output to the original topology before reporting failure.
+            sizes[index] = nil
+            let restored = try await publishTopology()
+            if let sourceIndex = windows.first(where: { $0.value.sharedWindowID == sourceID })?.key {
+                try requireOK(try await controller.request("resize", fields: ["windowId": sourceID,
+                                                                             "scanout": sourceIndex, "topology": restored]))
+            }
+            throw NSError(domain: "BromureSharedWindows", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "Chromium could not move this tab into a new window"])
+        }
+        if destination["scanout"] as? Int == index {
+            return ["ok": true, "windowId": id, "targetId": target]
+        }
+        guard destination["scanout"] == nil else {
+            throw NSError(domain: "BromureSharedWindows", code: 13)
+        }
+        let attached = try await controller.request("attachPrimary", fields: ["windowId": id,
+                                                                             "scanout": index, "topology": topology])
+        try requireOK(attached)
+        return ["ok": true, "windowId": id, "targetId": target]
+    }
+
+    /// - Parameter addressDraft: an address being typed in the detached
+    ///   tab, restored in its new window (finding: "Dragging an editing tab
+    ///   into a new window loses the address draft"). The source keeps its
+    ///   own copy, so a failed detach loses nothing.
+    func createWindow(url: String = "about:blank", detaching target: String? = nil,
+                      from source: BrowserSession? = nil, at point: NSPoint? = nil,
+                      addressDraft: String? = nil) {
         enqueue { [self] in
             guard !terminated else { return }
             do {
@@ -2593,32 +2926,53 @@ final class SharedBrowserVMOwner {
                 guard !terminated, let index = (0..<outputs.count).first(where: { windows[$0] == nil }) else {
                     throw NSError(domain: "BromureSharedWindows", code: 7, userInfo: [NSLocalizedDescriptionKey: "No free display output"])
                 }
-                sizes[index] = sizes[0] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
+                if let target {
+                    guard supportsTabDetach, let source, !source.closing,
+                          source.nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == true,
+                          (source.nativeTabBar?.model.tabs.count ?? 0) > 1,
+                          source.sharedWindowID != nil else {
+                        throw NSError(domain: "BromureSharedWindows", code: 11,
+                                      userInfo: [NSLocalizedDescriptionKey: "This tab cannot be detached from its source window"])
+                    }
+                }
+                let sourceIndex = source.flatMap { source in windows.first(where: { $0.value === source })?.key } ?? 0
+                sizes[index] = sizes[sourceIndex] ?? (root.sessionConfig.displayWidth, root.sessionConfig.displayHeight + root.sessionConfig.nativeChromeInset)
                 let reply = try await whileSharedDesktopResizes {
                     let topology = try await publishTopology()
+                    if let target, let sourceID = source?.sharedWindowID {
+                        return try await detachReply(target: target, sourceID: sourceID, index: index, topology: topology)
+                    }
                     return try await controller.request("create", fields: ["scanout": index, "url": url, "topology": topology])
                 }
                 try requireOK(reply)
-                guard let id = reply["windowId"] as? Int, #available(macOS 27.0, *),
-                      let gpu = warm.graphicsSession as? MacOS27GPUSession,
-                      let graphics = gpu.outputSession(index: index, onResize: { [weak self] w, h in self?.resize(index: index, width: w, height: h) }) else {
-                    throw NSError(domain: "BromureSharedWindows", code: 8)
+                guard let id = reply["windowId"] as? Int else { throw NSError(domain: "BromureSharedWindows", code: 8) }
+                let child = try showChild(windowID: id, index: index)
+                if let target, let addressDraft {
+                    child.nativeTabBar?.model.adoptAddressDraft(addressDraft, for: target)
                 }
-                let child = BrowserSession(warmVM: warm, config: root.sessionConfig, profile: root.profile,
-                                           serviceRoot: root, sharedWindowID: id, graphicsOverride: graphics)
-                child.sharedOwner = self
-                child.onClosed = root.onClosed
-                child.onOpenInProfile = root.onOpenInProfile
-                windows[index] = child
-                installInput(child, index: index)
-                onWindowCreated?(child)
-                child.show()
+                if let point {
+                    let origin = NSPoint(x: point.x - min(140, child.window.frame.width / 2),
+                                         y: point.y - child.window.frame.height + 24)
+                    let candidate = NSRect(origin: origin, size: child.window.frame.size)
+                    let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? child.window.screen
+                    child.window.setFrame(child.window.constrainFrameRect(candidate, to: screen), display: true)
+                }
             } catch { report(error) }
         }
     }
 
     private func installInput(_ session: BrowserSession, index: Int) {
         guard let view = session.vmView as? PrecisionScrollVMView else { return }
+        if supportsTabDetach, #available(macOS 27.0, *), let chrome = session.nativeTabBar {
+            chrome.model.onDetach = { [weak self, weak session] target, point in
+                guard let self, let session else { return }
+                // Captured before the detach changes the source's tabs.
+                let draft = session.nativeTabBar?.model.addressDraft(for: target)
+                self.createWindow(detaching: target, from: session, at: point, addressDraft: draft)
+            }
+            chrome.model.dragPreview = { [weak view] in view?.gpuFrameView?.tabDragPreview() }
+            chrome.enableLiquidTabs()
+        }
         view.gpuFrameView?.displayHeightAlignment = max(VMConfig.resolvedDisplayScale(), 1)
         view.gpuFrameView?.displaySizeChanged = { [weak self] width, height in self?.resize(index: index, width: width, height: height) }
         if let frame = view.gpuFrameView {
@@ -2656,19 +3010,46 @@ final class SharedBrowserVMOwner {
     private func forward(id: Int, needsFocus: Bool, action: @escaping () -> Void) {
         enqueue(coalescingMotion: needsFocus ? nil : id) { [self] in
             guard !terminated, windows.contains(where: { !closingWindows.contains($0.key) && $0.value.sharedWindowID == id && !$0.value.closing }) else { return }
-            do {
-                if needsFocus && focusedID != id {
-                    focusedID = nil
-                    try requireOK(try await controller.request("focus", fields: ["windowId": id]))
-                    focusedID = id
+            if needsFocus && focusedID != id {
+                focusedID = nil
+                let outcome: SharedWindowFocusOutcome
+                do {
+                    let reply = try await controller.request("focus", fields: ["windowId": id])
+                    outcome = SharedWindowFocusOutcome(reply: reply)
+                    if outcome != .confirmed { print("[shared-window] focus \(outcome): \(reply["error"] ?? "")") }
+                } catch {
+                    outcome = .notActivated
+                    report(error, presentAlert: false)
                 }
-                action()
-            } catch { report(error) }
+                switch outcome {
+                case .confirmed:
+                    focusedID = id
+                case .activatedUnconfirmed:
+                    // The guest activated the window but couldn't confirm
+                    // focus (a page's JS dialog blocks the probe). Deliver,
+                    // and don't retry per event: each retry would stall the
+                    // queue and fail the same way. windowFocused re-arms it.
+                    focusedID = id
+                case .notActivated:
+                    // Guest focus is still on the previous window: drop the
+                    // input rather than type into the wrong page, and leave
+                    // focusedID unset so the next input retries activation.
+                    // Logged, never alerted — an alert per event would loop.
+                    return
+                }
+            }
+            action()
         }
     }
 
     func resize(index: Int, width: Int, height: Int) {
         guard windows[index] != nil, !closingWindows.contains(index), !terminated else { return }
+        // A newly shown window reports 0x0 before its first layout. Sent on,
+        // that becomes a 64x64 output Chromium can't shrink a window to.
+        guard width > 0, height > 0 else { return }
+        if UserDefaults.standard.bool(forKey: "vm.traceGPUFrames") {
+            print("[Shared windows] resize output \(index) to \(width)x\(height)")
+        }
         sizes[index] = (width, height)
         resizeTask?.cancel()
         resizeTask = Task { @MainActor [weak self] in
@@ -2696,7 +3077,7 @@ final class SharedBrowserVMOwner {
             guard let index = windows.first(where: { $0.value === session })?.key else { return }
             if windows.keys.allSatisfy({ closingWindows.contains($0) }) {
                 root.markVMResourcesClosing()
-                terminated = true; resizeTask?.cancel()
+                terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                 await stopBrowser()
                 windows.removeAll(); closingWindows.removeAll(); sizes.removeAll(); focusedID = nil
                 session.closeSharedView(); session.sharedOwner = nil
@@ -2729,7 +3110,7 @@ final class SharedBrowserVMOwner {
                 session.closeSharedView()
                 session.sharedOwner = nil
                 if windows.isEmpty {
-                    terminated = true; resizeTask?.cancel()
+                    terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                     root.closing = false
                     root.sharedOwner = nil
                     await root.teardown()
@@ -2744,7 +3125,7 @@ final class SharedBrowserVMOwner {
             enqueue { [self] in
                 guard !terminated else { continuation.resume(); return }
                 root.markVMResourcesClosing()
-                terminated = true; resizeTask?.cancel()
+                terminated = true; resizeTask?.cancel(); reconciliationTask?.cancel()
                 await stopBrowser()
                 for session in windows.values { session.closeSharedView(); session.sharedOwner = nil }
                 windows.removeAll()
@@ -3384,6 +3765,9 @@ final class BrowserSession {
                     guard let bridge else { return [] }
                     return await bridge.fetchCertificate(origin: origin)
                 }
+                tabModel.onWillFocusAddressField = { [weak vmView] in
+                    vmView?.declinesFirstResponder = true
+                }
                 tabModel.onNewTab = { [weak bridge, weak tabModel, weak window, weak vmView] in
                     // Pre-emptively resign current first responder so
                     // vmView isn't holding focus while the new pill is
@@ -3439,10 +3823,8 @@ final class BrowserSession {
                     let delegate = { NSApp.delegate as? GUIAppDelegate }
                     tabModel.profileIsManaged = delegate()?.state.profileManager.isManaged(profile.id) ?? false
                     let pid = profile.id
-                    tabModel.profileEntries = { delegate()?.profileMenuEntries(current: pid) ?? [] }
-                    tabModel.onOpenProfile = { id in delegate()?.openWindow(forProfileID: id) }
+                    tabModel.onOpenDifferentProfile = { delegate()?.chooseProfileAndOpen() }
                     tabModel.onManageProfiles = { delegate()?.profileEditor.presentPicker() }
-                    tabModel.onNewProfile = { delegate()?.profileEditor.presentNewProfile() }
                     tabModel.onEditProfile = { delegate()?.profileEditor.presentSettings(forProfileID: pid) }
                     tabModel.onDeleteProfile = { delegate()?.profileEditor.confirmDelete(profileID: pid) }
                 }
@@ -3931,18 +4313,167 @@ final class BrowserSession {
         window.delegate = helper
     }
 
+    /// Diagnostic: drives the tab bar's real tear-off tracking with
+    /// synthetic events (press the tab, drag it out of the bar, then
+    /// release or press Escape).
+    /// Diagnostic: the text in this window's address field.
+    @MainActor var addressFieldText: String? { nativeTabBar?.model.pendingAddress }
+
+    /// - Parameter draft: an unsubmitted address left in the tab before the
+    ///   drag; the detached window must still show it.
+    @MainActor func checkLiquidTabDrag(title: String, cancel: Bool = false,
+                                       draft: String? = nil) async throws -> String {
+        print("[Liquid check] enabled=\(nativeTabBar?.model.liquidTabsEnabled ?? false) tabs=\(nativeTabBar?.model.tabs.map { $0.title } ?? [])")
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while nativeTabBar?.model.liquidTabsEnabled != true ||
+              nativeTabBar?.model.tabs.contains(where: { $0.title == title }) != true {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain: "BromureLiquidTabs", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Liquid tab fixture did not become ready"])
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let model = nativeTabBar?.model,
+              let tab = model.tabs.first(where: { $0.title == title }) else {
+            throw NSError(domain: "BromureLiquidTabs", code: 2)
+        }
+        let target = tab.id
+        if let draft {
+            if tab.active {
+                model.editingAddress = true
+                model.pendingAddress = draft
+            } else if let previous = model.activeTab?.id {
+                // Typed while it was selected, then another tab selected:
+                // the draft is stashed for it.
+                model.markActiveLocally(target)
+                model.pendingAddress = draft
+                model.markActiveLocally(previous)
+            }
+            guard model.addressDraft(for: target) == draft else {
+                throw NSError(domain: "BromureLiquidTabs", code: 6,
+                              userInfo: [NSLocalizedDescriptionKey: "Draft fixture not set"])
+            }
+        }
+        // An inactive tab is pressed on its pill's drag handle, the active
+        // one on its address field (where the pill's tear-off starts).
+        func find(_ view: NSView) -> NSView? {
+            if let handle = view as? TabDragHandleView, handle.tabID == target { return handle }
+            for child in view.subviews { if let found = find(child) { return found } }
+            return nil
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.displayIfNeeded()
+        let pressed: NSView? = tab.active ? model.addressField : window.contentView?.superview.flatMap(find)
+        guard let view = pressed, view.window === window else {
+            throw NSError(domain: "BromureLiquidTabs", code: 3)
+        }
+        let start = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        let end = NSPoint(x: start.x + 20, y: start.y - 180)
+        func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        // The tracking loop reads the queued events, as with a real mouse.
+        window.postEvent(event(.leftMouseDragged, end), atStart: false)
+        if cancel {
+            window.postEvent(NSEvent.keyEvent(with: .keyDown, location: end, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                              context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                              isARepeat: false, keyCode: 53)!, atStart: false)
+        }
+        window.postEvent(event(.leftMouseUp, end), atStart: false)
+        view.mouseDown(with: event(.leftMouseDown, start))
+        return target
+    }
+
+    /// Diagnostic: real clicks (dispatched through the window, so hit
+    /// testing is exercised) on the current tab's address field. One click
+    /// must leave it unedited; a second click must start editing.
+    @MainActor func checkLiquidClicks(title: String) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        while nativeTabBar?.model.liquidTabsEnabled != true ||
+              (nativeTabBar?.model.tabs.count ?? 0) < 2 || nativeTabBar?.model.activeTab == nil ||
+              nativeTabBar?.model.tabs.contains(where: { $0.title == title }) != true ||
+              nativeTabBar?.model.addressField?.window == nil {
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain: "BromureLiquidTabs", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                    "Click fixture not ready: active=\(nativeTabBar?.model.activeTab?.title ?? "nil")"])
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let model = nativeTabBar?.model, let field = model.addressField, let fieldWindow = field.window else {
+            throw NSError(domain: "BromureLiquidTabs", code: 5)
+        }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        let point = field.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), to: nil)
+        func click() async throws {
+            func event(_ type: NSEvent.EventType) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: fieldWindow.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            // Through the app's event queue, like a real click (the run loop
+            // dispatches it and sets NSApp.currentEvent).
+            NSApp.postEvent(event(.leftMouseDown), atStart: false)
+            NSApp.postEvent(event(.leftMouseUp), atStart: false)
+            try await Task.sleep(for: .milliseconds(400))
+        }
+        let hit = fieldWindow.contentView?.superview?.hitTest(fieldWindow.contentView!.superview!.convert(point, from: nil))
+        print("[Liquid click] field=\(type(of: field)) hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil") editingBefore=\(field.currentEditor() != nil) armed=\(model.armedTabID ?? "nil")")
+        try await click()
+        let afterOne = field.currentEditor() != nil
+        print("[Liquid click] after one click: editing=\(afterOne) armed=\(model.armedTabID ?? "nil")")
+        try await Task.sleep(for: .milliseconds(600))
+        // The page view holds the keyboard, as after clicking in the page:
+        // the editing click must still take focus away from it.
+        window.makeFirstResponder(vmView)
+        try await click()
+        let editor = model.addressField?.currentEditor() as? NSTextView
+        let afterTwo = editor != nil && fieldWindow.firstResponder === editor
+        let selectedAll = editor.map { $0.selectedRange().length == ($0.string as NSString).length } ?? false
+        print("[Liquid click] after second click: editing=\(afterTwo) selectedAll=\(selectedAll)")
+        // Leaving the field ends editing (the same model change a submitted
+        // address makes): the tab is no longer armed, so the next single
+        // click selects again instead of editing.
+        _ = fieldWindow.makeFirstResponder(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        print("[Liquid click] after leaving: editing=\(model.editingAddress) armed=\(model.armedTabID ?? "nil") editor=\(model.addressField?.currentEditor() != nil)")
+        let disarmed = model.armedTabID == nil && !model.editingAddress
+        try await Task.sleep(for: .milliseconds(600))
+        try await click()
+        let afterThree = model.addressField?.currentEditor() != nil
+        print("[Liquid click] after leaving and one more click: disarmed=\(disarmed) editing=\(afterThree)")
+        print(!afterOne && afterTwo && selectedAll && disarmed && !afterThree ? "BROMURE_LIQUID_CLICK_PASS"
+              : "BROMURE_LIQUID_CLICK_FAIL one=\(afterOne) two=\(afterTwo) selectedAll=\(selectedAll) disarmed=\(disarmed) three=\(afterThree)")
+        // Leave the field so the detach check starts from a clean state.
+        window.makeFirstResponder(vmView)
+        model.armedTabID = nil
+    }
+
+    @MainActor func hasDetachedTab(_ target: String, from source: BrowserSession) -> Bool {
+        sharedOwner === source.sharedOwner && warmVM?.vm === source.warmVM?.vm &&
+        sharedWindowID != source.sharedWindowID && nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == true &&
+        source.nativeTabBar?.model.tabs.contains(where: { $0.id == target }) == false && graphicsPresentedFrameCount > 0
+    }
+
     @MainActor func createSharedWindow() { sharedOwner?.createWindow() }
 
     @MainActor var graphicsPresentedFrameCount: Int {
         (vmView as? PrecisionScrollVMView)?.gpuFrameView?.presentedFrameCount ?? 0
     }
 
-    @MainActor func startSharedWindows(onWindowCreated: @escaping (BrowserSession) -> Void) throws {
+    /// `restoringSession`: Chromium was started with --restore-last-session,
+    /// so it may reopen more than one window.
+    @MainActor func startSharedWindows(restoringSession: Bool = false,
+                                       onWindowCreated: @escaping (BrowserSession) -> Void) throws {
         guard let warm = warmVM, (warm.graphicsSession?.outputCapacity ?? 1) > 1,
               let socket = warm.vm.socketDevices.first as? VZVirtioSocketDevice else {
             throw NSError(domain: "BromureSharedWindows", code: 9)
         }
         let owner = SharedBrowserVMOwner(root: self, warm: warm, socket: socket)
+        owner.restoringSession = restoringSession
         owner.onWindowCreated = onWindowCreated
         owner.begin()
     }
@@ -5342,15 +5873,8 @@ struct Init: ParsableCommand {
             // path promotes atomically, so only the (in-place) local
             // build pre-deletes the old artifacts.
             func buildLocally() async throws {
-                if manager.hasImageFiles {
-                    print("Removing existing Linux base image...")
-                    let fm = FileManager.default
-                    try? fm.removeItem(at: manager.linuxDiskURL)
-                    try? fm.removeItem(at: manager.linuxKernelURL)
-                    try? fm.removeItem(at: manager.linuxInitrdURL)
-                    try? fm.removeItem(at: manager.imageVersionURL)
-                    try? fm.removeItem(at: manager.imageStateURL)
-                }
+                // createBaseImage builds into staging files and replaces the
+                // existing image only on success, so a failed build keeps it.
                 _ = await catalogStore.refresh()
                 let catalog = catalogStore.effective()
                 try await manager.createBaseImage(

@@ -44,17 +44,11 @@ HOST_CID = 2
 
 WARP_SVC = "/bin/warp-svc"
 WARP_CLI = "/bin/warp-cli"
-RESOLV_STUB = "/usr/lib/libresolv_stub.so"
 WARP_PORT = 40000
 WARP_FLAG = "/tmp/bromure/warp-active"
 
-# On the old musl (Alpine) image WARP was a foreign glibc binary and
-# needed the resolver stub preloaded; on the Ubuntu image the stub
-# doesn't exist and none is needed. Force C locale so warp-cli output
-# is always English.
+# Force C locale so warp-cli output is always English.
 WARP_ENV = dict(os.environ, LANG="C", LC_ALL="C", LANGUAGE="C")
-if os.path.exists(RESOLV_STUB):
-    WARP_ENV["LD_PRELOAD"] = RESOLV_STUB
 
 LOG_FILE = "/tmp/bromure/warp-agent.log"
 
@@ -112,8 +106,7 @@ def warp_installed():
     """Check whether warp-cli and warp-svc binaries exist."""
     svc = os.path.isfile(WARP_SVC)
     cli = os.path.isfile(WARP_CLI)
-    stub = os.path.isfile(RESOLV_STUB)
-    log(f"warp_installed: svc={svc} cli={cli} stub={stub}")
+    log(f"warp_installed: svc={svc} cli={cli}")
     return svc and cli
 
 

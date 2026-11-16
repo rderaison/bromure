@@ -35,6 +35,7 @@ final class BrowserMCPRelayClient {
     /// browser for the workspace on stage, boot hidden otherwise).
     init(host: RemoteHost, vm: String,
          browser: @escaping () -> WorkspaceBrowserController?,
+         disabled: @escaping () -> Bool = { false },
          ensureBrowser: (() -> Void)? = nil) {
         self.host = host
         self.vm = vm
@@ -42,7 +43,8 @@ final class BrowserMCPRelayClient {
                                        ensureBrowser: ensureBrowser ?? { browser()?.ensureRunning() },
                                        // This browser lives on the client's vmnet:
                                        // the server's workspace VM can't reach it.
-                                       cdpViaHost: true)
+                                       cdpViaHost: true,
+                                       disabled: disabled)
     }
 
     func start() {

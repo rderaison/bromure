@@ -16,16 +16,29 @@ struct WorkspaceScreen: View {
     /// When set, open straight to this tmux window's terminal (used by the
     /// "At a Glance" agents-waiting list and the grid).
     var initialWindow: Int? = nil
+    /// Set when this screen is a SESSION's stage (MobileSessionScreen), not the
+    /// machine: the agent the session runs ("claude", "codex", …). The screen
+    /// then shows that one window only, opening on the beautified reader — no
+    /// pane picker, no tabs for the machine's other windows — the same thing
+    /// the desktop's sessions-first stage shows. "Terminal" in the session's
+    /// menu still opens the whole machine.
+    var sessionTool: String? = nil
+    /// The session's folder, for a tab whose cwd the roster hasn't reported.
+    var sessionCwd: String? = nil
+    private var isSessionStage: Bool { sessionTool != nil }
 
     /// Bridges the workspace's browser MCP (an agent's `browser_navigate`) and
     /// the manual port browser to one shared WKWebView + loopback tunnel. Its
     /// relay runs for the life of this screen (started in `.onAppear`).
     @StateObject private var browserBridge: MobileBrowserBridge
 
-    init(controller: RemoteHostController, profileID: Profile.ID, initialWindow: Int? = nil) {
+    init(controller: RemoteHostController, profileID: Profile.ID, initialWindow: Int? = nil,
+         sessionTool: String? = nil, sessionCwd: String? = nil) {
         self.controller = controller
         self.profileID = profileID
         self.initialWindow = initialWindow
+        self.sessionTool = sessionTool
+        self.sessionCwd = sessionCwd
         _browserBridge = StateObject(
             wrappedValue: MobileBrowserBridge(controller: controller, profileID: profileID))
     }
@@ -54,7 +67,8 @@ struct WorkspaceScreen: View {
     /// The repo file pane beside the terminals (iPad, regular width) — the
     /// same `FileExplorerPane` + IDE-style auto-open the macOS window uses.
     /// Open state lives on the shared listModel (`filePaneOpen`), which the
-    /// pane itself flips on repo enter/leave via `onAutoSetOpen`.
+    /// pane would flip on repo enter/leave via `onAutoSetOpen` -- ignored on
+    /// iOS, where only the toolbar button opens it.
     @State private var fileExplorer = FileExplorerModel()
     /// Compact height = the phone is on its side. A terminal is the one pane
     /// that wants every one of those few hundred points, so landscape drops the
@@ -75,7 +89,7 @@ struct WorkspaceScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !terminalFullBleed {
+            if !terminalFullBleed && !isSessionStage {
                 panePicker
                 Divider()
             }
@@ -94,8 +108,7 @@ struct WorkspaceScreen: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationTitle(profileName)
-        .navigationBarTitleDisplayMode(.inline)
+        .modifier(MachineTitle(title: profileName, enabled: !isSessionStage))
         .onChange(of: isRunning) { _, running in
             FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) isRunning=\(running) "
                 + "state=\(runState) connected=\(controller.connected) "
@@ -113,7 +126,9 @@ struct WorkspaceScreen: View {
             stopFallback?.cancel()
             stopFallback = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard !Task.isCancelled, !isRunning, pane != .dashboard else { return }
+                // A session's stage has no pane picker to come back with; the
+                // session screen itself moves on once the window is gone.
+                guard !Task.isCancelled, !isRunning, pane != .dashboard, !isSessionStage else { return }
                 FatClientLog.log("workspace \(profileID.uuidString.prefix(8)) "
                     + "stayed not-running 3s — falling back to Info")
                 pane = .dashboard
@@ -141,7 +156,11 @@ struct WorkspaceScreen: View {
             // Constant item count (iOS 26 leaves ghost buttons behind removed
             // toolbar items) — render nothing when the pane doesn't apply.
             ToolbarItem(placement: .primaryAction) {
-                if hSize == .regular && pane == .terminals && isRunning {
+                if hSize != .regular, isSessionStage, isRunning, let cwd = sessionCwd {
+                    // The phone has no room beside the chat: the session's
+                    // files come up as a sheet.
+                    SessionFilesButton(controller: controller, profileID: profileID, cwd: cwd)
+                } else if hSize == .regular && pane == .terminals && isRunning {
                     Button {
                         withAnimation(.snappy(duration: 0.25)) {
                             controller.listModel.filePaneOpen.toggle()
@@ -156,7 +175,7 @@ struct WorkspaceScreen: View {
         }
         // An agent opened a page (browser_navigate) — bring the Web pane forward.
         .onChange(of: browserBridge.showTick) { _, _ in
-            if isRunning { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
+            if isRunning, !isSessionStage { withAnimation(.snappy(duration: 0.28)) { pane = .web } }
         }
     }
 
@@ -229,7 +248,9 @@ struct WorkspaceScreen: View {
                 HStack(spacing: 0) {
                     TerminalsPane(controller: controller, profileID: profileID,
                                   initialWindow: initialWindow,
-                                  hidesTabStrip: terminalFullBleed,
+                                  sessionTool: sessionTool,
+                                  sessionCwd: sessionCwd,
+                                  hidesTabStrip: terminalFullBleed || isSessionStage,
                                   isVisible: pane == .terminals)
                     // Regular width only: the repo file pane rides beside the
                     // terminal, macOS-style. It stays mounted at width 0 while
@@ -238,11 +259,12 @@ struct WorkspaceScreen: View {
                         FileExplorerPane(
                             model: fileExplorer,
                             listModel: controller.listModel,
-                            onAutoSetOpen: { open in
-                                withAnimation(.snappy(duration: 0.25)) {
-                                    controller.listModel.filePaneOpen = open
-                                }
-                            })
+                            // Never by itself on iOS: the pane takes a third
+                            // of the screen, so only the toolbar button opens
+                            // (or closes) it.
+                            onAutoSetOpen: { _ in },
+                            // A session's stage browses the session's folder.
+                            pinnedContext: sessionCwd.map { (profileID, $0) })
                             .frame(width: controller.listModel.filePaneOpen ? 320 : 0)
                             .clipped()
                     }
@@ -335,6 +357,11 @@ private struct TerminalsPane: View {
     let controller: RemoteHostController
     let profileID: Profile.ID
     var initialWindow: Int? = nil
+    /// A session's stage (see WorkspaceScreen.sessionTool): the window is the
+    /// session's agent, so it opens on the reader straight away and stays
+    /// pinned to `initialWindow`.
+    var sessionTool: String? = nil
+    var sessionCwd: String? = nil
     #if os(visionOS)
     /// Pops a terminal tab out into its own pinnable window (VisionScenes).
     @Environment(\.openWindow) private var openWindow
@@ -358,9 +385,25 @@ private struct TerminalsPane: View {
     /// toggles so re-opening the reader shows the conversation instantly instead
     /// of the slow "Loading transcript…" while it re-tails the guest jsonl.
     @State private var transcripts = TranscriptStore()
-    final class TranscriptStore {
+    @MainActor final class TranscriptStore {
         var items: [Int: [TranscriptItem]] = [:]
         var everLoaded: Set<Int> = []
+        /// The incremental reader per window: a remount continues from
+        /// what's held instead of re-reading the file.
+        private var feeds: [Int: TranscriptFeed] = [:]
+        func feed(_ window: Int) -> TranscriptFeed {
+            if let f = feeds[window] { return f }
+            let f = TranscriptFeed()
+            feeds[window] = f
+            return f
+        }
+        /// Forget a window that closed: its feed holds the conversation's
+        /// bytes, and tmux reuses the index for the next window.
+        func drop(_ window: Int) {
+            feeds[window] = nil
+            items[window] = nil
+            everLoaded.remove(window)
+        }
     }
     /// Every window shown in this pane so far. Their surfaces stay mounted (and
     /// their streams attached) so switching back is instant instead of a fresh
@@ -408,8 +451,17 @@ private struct TerminalsPane: View {
     /// The guest working directory backing a window's Claude transcript.
     private func guestCwd(for window: Int) -> String? {
         let tab = tabs.first { $0.index == window }
-        let cwd = tab?.cwd ?? tab?.repoRoot
+        var cwd = tab?.cwd ?? tab?.repoRoot
+        if cwd?.isEmpty ?? true, window == initialWindow, let s = sessionCwd, s != "~" { cwd = s }
         return (cwd?.isEmpty ?? true) ? nil : cwd
+    }
+
+    /// Which conversation window `w`'s reader may show: its session's own
+    /// (by conversation id), never the folder's newest -- two sessions of one
+    /// agent in one folder would otherwise show each other's.
+    private func transcriptPin(for w: Int) -> TranscriptPin {
+        let s = controller.sessionStore.session(profileID: profileID, windowIndex: w)
+        return controller.sessionStore.chatTranscriptPin(for: s, profileID: profileID)
     }
 
     private var currentTab: TabsModel.Tab? {
@@ -428,6 +480,7 @@ private struct TerminalsPane: View {
     /// desktop sidebar, so both clients agree on what counts as an agent.
     @MainActor private func isAgentic(_ tab: TabsModel.Tab?) -> Bool {
         guard let tab else { return false }
+        if sessionTool != nil, tab.index == initialWindow { return true }
         if tab.agentStatus == .working || tab.agentStatus == .needsInput || tab.isWorktree {
             return true
         }
@@ -440,6 +493,7 @@ private struct TerminalsPane: View {
     /// store and the parser sniff the format, so the reader still works.
     @MainActor private func agentKind(_ tab: TabsModel.Tab?) -> String? {
         tab.flatMap { BromureIcons.agentKind(forLabel: $0.shownLabel) }
+            ?? (tab?.index == initialWindow ? sessionTool : nil)
     }
 
     /// Non-agent tabs are always the raw terminal (and get no toggle). An agent
@@ -451,6 +505,8 @@ private struct TerminalsPane: View {
     @MainActor private var readerMode: Bool {
         guard isAgentic(currentTab) else { return false }
         if let readerOverride { return readerOverride }
+        // A session's stage opens on the reader, like the desktop's.
+        if sessionTool != nil, effectiveWindow == initialWindow { return true }
         return effectiveWindow.map { transcriptPresent.contains($0) } ?? false
     }
 
@@ -515,6 +571,7 @@ private struct TerminalsPane: View {
                             TranscriptReaderView(controller: controller, profileID: profileID,
                                                  window: win, guestCwd: guestCwd(for: win),
                                                  agent: agentKind(currentTab),
+                                                 pin: transcriptPin(for: win),
                                                  since: transcriptSince, store: transcripts,
                                                  bottomInset: keyboardOverlap(with: geo.frame(in: .global)))
                         }
@@ -602,6 +659,7 @@ private struct TerminalsPane: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
+                if sessionTool == nil {
                 Button {
                     controller.newTab(profileID)
                     // Drop the pinned window so the pane follows the roster's
@@ -615,6 +673,7 @@ private struct TerminalsPane: View {
                     Image(systemName: "plus.rectangle.on.rectangle")
                 }
                 .accessibilityLabel("New terminal")
+                }
             }
         }
         .onAppear {
@@ -639,7 +698,7 @@ private struct TerminalsPane: View {
         // fact ("claude" → "Fix the tests (codex)") must rebuild the store
         // locator, or the poll keeps watching the wrong session store.
         return "\(win)-\(isAgentic(currentTab))-\(agentKind(currentTab) ?? "?")-"
-            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")"
+            + "\(effectiveWindow.flatMap { guestCwd(for: $0) } ?? "")-\(transcriptPin(for: win).hashValue)"
     }
 
     private func pollTranscriptPresence() async {
@@ -648,7 +707,8 @@ private struct TerminalsPane: View {
               !transcriptPresent.contains(win),
               let cwd = guestCwd(for: win), !cwd.isEmpty,
               let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: transcriptSince,
-                                                               agent: agent)
+                                                               agent: agent, pinnedWindow: win,
+                                                               pin: transcriptPin(for: win))
         else { return }
         while !Task.isCancelled {
             if let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15) {
@@ -665,6 +725,11 @@ private struct TerminalsPane: View {
     }
 
     private var effectiveWindow: Int? {
+        // A session's stage shows its own window only — never another
+        // session's that happens to be the machine's active tab.
+        if sessionTool != nil, let initialWindow {
+            return tabs.contains(where: { $0.index == initialWindow }) ? initialWindow : nil
+        }
         if let selectedWindow, tabs.contains(where: { $0.index == selectedWindow }) {
             return selectedWindow
         }
@@ -688,8 +753,7 @@ private struct TerminalsPane: View {
                 // next new-window takes), and these caches are index-keyed — a
                 // reused index must not inherit the previous occupant's rich-mode
                 // transcript or auto-reader state.
-                transcripts.items[w] = nil
-                transcripts.everLoaded.remove(w)
+                transcripts.drop(w)
                 transcriptPresent.remove(w)
             }
             mounted.removeAll { !live.contains($0) }
@@ -790,6 +854,8 @@ private struct TerminalsPane: View {
                 controller.closeTab(profileID, index: closing)
                 store.map[closing]?.stop()
                 store.map[closing] = nil
+                transcripts.drop(closing)
+                transcriptPresent.remove(closing)
             } label: { Label("Close", systemImage: "xmark") }
         }
     }
@@ -812,6 +878,10 @@ private struct TranscriptReaderView: View {
     /// Canonical agent kind of the tool this tab runs — locator + parser
     /// hint; nil searches every session store and sniffs the format.
     let agent: String?
+    /// The window's session's own conversation (`chatTranscriptPin`): read
+    /// that, or the file the window's agent named -- never the folder's
+    /// newest, which may be another session's.
+    let pin: TranscriptPin
     /// Epoch floor (this workspace's boot time) so a pre-reboot pending-question
     /// dump or an older session's transcript isn't tailed as if it were live —
     /// see TerminalsPane.transcriptSince.
@@ -834,6 +904,11 @@ private struct TranscriptReaderView: View {
     @State private var showFileImporter = false
     @State private var uploading = false
     @State private var uploadError: String?
+    /// How much of the held conversation is laid out (TranscriptWindow).
+    @State private var renderLimit = TranscriptWindow.step
+    @State private var renderChars = TranscriptWindow.charStep
+    @State private var loadingEarlier = false
+    @FocusState private var composing: Bool
 
     var body: some View {
         // Transcript fills; the composer is pinned beneath it and the WHOLE stack
@@ -860,7 +935,7 @@ private struct TranscriptReaderView: View {
         // The agent kind re-keys it too — the call site remounts on a kind
         // change anyway (its .id carries the kind), so this is belt and
         // braces for a future caller that doesn't.
-        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")") { await poll() }
+        .task(id: "\(guestCwd ?? "")\u{1f}\(since)\u{1f}\(agent ?? "?")\u{1f}\(pin.hashValue)") { await poll() }
     }
 
     // MARK: Composer + image attach
@@ -883,7 +958,17 @@ private struct TranscriptReaderView: View {
                     .font(.system(size: 15))
                     .lineLimit(1...8)
                     .frame(minHeight: 24)
+                    .focused($composing)
                 HStack(spacing: 18) {
+                    if composing {
+                        // Put the keyboard away (Return makes a new line).
+                        Button { composing = false } label: {
+                            Image(systemName: "keyboard.chevron.compact.down")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityLabel("Hide Keyboard")
+                    }
                     Spacer()
                     attachButton
                     Button(action: send) {
@@ -959,47 +1044,47 @@ private struct TranscriptReaderView: View {
             unavailable("No transcript",
                         "No agent session was found for this terminal yet — send a message to get started.")
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        TranscriptRowsView(items: answeredItems)
-                            // A picture the agent shows (display MCP) is read off its machine.
-                            .environment(\.displayFileReader, DisplayFileReader.chunked { op in
-                                try? await controller.guestFileOp(profileID, op: op)
+            let all = answeredItems
+            let shown = TranscriptWindow.visible(all, limit: renderLimit, chars: renderChars)
+            TailFollowingScroll(
+                changeKey: items.count,
+                earlier: TranscriptWindow.earlier(
+                    all: all, shown: shown, feed: store.feed(window), loading: loadingEarlier,
+                    widen: { renderLimit += TranscriptWindow.step; renderChars += TranscriptWindow.charStep },
+                    load: { await loadEarlier() })
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    TranscriptRowsView(items: shown, working: working && openQuestions.isEmpty)
+                        // A picture the agent shows (display MCP) is read off its machine.
+                        .environment(\.displayFileReader, DisplayFileReader.chunked { op in
+                            try? await controller.guestFileOp(profileID, op: op)
+                        })
+                    // The question the agent is asking RIGHT NOW gets the
+                    // interactive card — pick the options here and Submit
+                    // sends the picker's key sequence into the session, the
+                    // same path the desktop plan window uses. Without it the
+                    // phone could see a multiple-choice question but had no
+                    // way to answer one.
+                    if !openQuestions.isEmpty {
+                        TranscriptQuestionBatchCard(
+                            questions: openQuestions,
+                            onSubmit: { keys in
+                                let ok = await submitAnswerKeys(keys)
+                                if ok { await refreshNow() }   // clear the card promptly
+                                return ok
                             })
-                        // The question the agent is asking RIGHT NOW gets the
-                        // interactive card — pick the options here and Submit
-                        // sends the picker's key sequence into the session, the
-                        // same path the desktop plan window uses. Without it the
-                        // phone could see a multiple-choice question but had no
-                        // way to answer one.
-                        if !openQuestions.isEmpty {
-                            TranscriptQuestionBatchCard(
-                                questions: openQuestions,
-                                onSubmit: { keys in
-                                    let ok = await submitAnswerKeys(keys)
-                                    if ok { await refreshNow() }   // clear the card promptly
-                                    return ok
-                                })
-                                // Keyed by the question TEXTS: consecutive
-                                // rounds land at the same item indices (both
-                                // live only in the pq dump), and an index-based
-                                // id would keep the previous round's picks.
-                                .id(openQuestions.map(\.question).joined(separator: "\u{1f}"))
-                        }
+                            // Keyed by the question TEXTS: consecutive
+                            // rounds land at the same item indices (both
+                            // live only in the pq dump), and an index-based
+                            // id would keep the previous round's picks.
+                            .id(openQuestions.map(\.question).joined(separator: "\u{1f}"))
                     }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                // Jump to the newest turn when the reader opens…
-                .onAppear { scrollToBottom(proxy, animated: false) }
-                // …and follow the live tail as new turns arrive.
-                .onChange(of: items.count) { _, _ in scrollToBottom(proxy, animated: true) }
-                // …and when the keyboard shows/hides: the transcript area shrinks
-                // by the keyboard height (bottomInset), which would otherwise clip
-                // the last line behind the composer — re-anchor to the tail.
-                .onChange(of: bottomInset) { _, _ in scrollToBottom(proxy, animated: true) }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Opens on the newest turn and follows the live tail -- through
+            // the keyboard's resize too -- until you scroll up to read.
             .background(Color.platformWindowBackground)
         }
     }
@@ -1059,16 +1144,6 @@ private struct TranscriptReaderView: View {
             timeout: 60)) != nil
     }
 
-    /// Scroll to the last item. The short defer lets the lazy stack realize
-    /// freshly-appended rows first, so the target actually exists.
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard let last = items.last?.id else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            if animated { withAnimation { proxy.scrollTo(last, anchor: .bottom) } }
-            else { proxy.scrollTo(last, anchor: .bottom) }
-        }
-    }
-
     private var sendable: Bool {
         !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -1083,16 +1158,23 @@ private struct TranscriptReaderView: View {
             // Held too: a menu or approval dialog is up in the tab, and a
             // digit or Return would answer it — the draft stays, as it does
             // when typing didn't go through.
+            var execError: String?
             let out = await PaneTypeGuard.runType(target: .index(window), text: text) {
-                try? await controller.guestExec(profileID, command: $0, timeout: 20)
-            } ?? ""
-            let held = PaneTypeGuard.held(in: out)
-            let refused = !PaneTypeGuard.typed(in: out)
+                do { return try await controller.guestExec(profileID, command: $0, timeout: 20) }
+                catch { execError = "\(error)"; return nil }
+            }
+            // Every outcome says what happened: the draft used to stay put
+            // with no word for anything but a dialog, which read as "Send
+            // does nothing" (a refusal, a timeout, an Enter the agent
+            // didn't take).
+            let outcome = ComposerOutcome.of(out)
+            FatClientLog.log("composer win=\(window): \(outcome) chars=\(text.count)"
+                + (execError.map { " execError=\($0)" } ?? "")
+                + " out=\(String((out ?? "").suffix(160)).replacingOccurrences(of: "\n", with: "⏎"))")
             await MainActor.run {
-                if !refused { draft = "" }
-                uploadError = held ? NSLocalizedString(
-                    "Not sent — the agent is asking you something. Answer it first, then send again.",
-                    comment: "iOS composer: held while the agent shows a dialog") : nil
+                // Typed — or typed into the agent's box, where it now sits.
+                if outcome == .typed || outcome == .unconfirmed { draft = "" }
+                uploadError = outcome.message
                 sending = false
             }
             await refreshNow()   // reflect the sent message immediately
@@ -1152,27 +1234,39 @@ private struct TranscriptReaderView: View {
         }
     }
 
+    /// The guest command for one read of this tab's transcript.
+    private var chunkCommand: TranscriptFeed.Command? {
+        guard let cwd = guestCwd, !cwd.isEmpty else { return nil }
+        let since = since, agent = agent, window = window, pin = pin
+        return { known, offset, bytes, earlier in
+            CodingTaskEngine.transcriptChunkCommand(guestCwd: cwd, since: since, agent: agent,
+                                                    pinnedWindow: window, pin: pin,
+                                                    knownPath: known, knownOffset: offset,
+                                                    bytes: bytes, earlier: earlier)
+        }
+    }
+
+    private func exec(_ cmd: String) async -> String? {
+        try? await controller.guestExec(profileID, command: cmd, timeout: 20)
+    }
+
     private func poll() async {
         FatClientLog.log("reader win=\(window) poll start cwd=\(guestCwd ?? "nil") "
             + "agent=\(agent ?? "?")")
-        guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
-                                                               agent: agent)
-        else {
+        guard let cmd = chunkCommand else {
             FatClientLog.log("reader win=\(window) no cwd/cmd → loaded")
             loaded = true; store.everLoaded.insert(window); return
         }
+        let feed = store.feed(window)
         var first = true
         while !Task.isCancelled {
-            if first { FatClientLog.log("reader win=\(window) guestExec…") }
-            let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+            let read = await feed.refresh(agent: agent, command: cmd, exec: exec)
             if first {
-                FatClientLog.log("reader win=\(window) guestExec \(raw == nil ? "FAILED/timeout" : "OK \(raw!.count) chars")")
+                FatClientLog.log("reader win=\(window) read \(read == nil ? "FAILED/timeout" : "OK \(read!.count) items")")
             }
-            if let raw {
-                let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
-                items = parsed
-                store.items[window] = parsed          // survive a reader remount
+            if let read, read != items {
+                items = read
+                store.items[window] = read          // survive a reader remount
             }
             loaded = true
             store.everLoaded.insert(window)
@@ -1183,16 +1277,33 @@ private struct TranscriptReaderView: View {
 
     /// One immediate transcript refresh — used right after sending a message or
     /// answering a question so the reader reflects it without waiting out the
-    /// 2 s poll (the "nothing happens until I toggle" complaint: a toggle just
-    /// forced this same fresh read).
+    /// 2 s poll.
     private func refreshNow() async {
-        guard let cwd = guestCwd, !cwd.isEmpty,
-              let cmd = CodingTaskEngine.planTranscriptCommand(guestCwd: cwd, since: since,
-                                                               agent: agent),
-              let raw = try? await controller.guestExec(profileID, command: cmd, timeout: 15)
+        guard let cmd = chunkCommand,
+              let read = await store.feed(window).refresh(agent: agent, command: cmd, exec: exec)
         else { return }
-        let parsed = AgentTranscript.parse(Data(raw.utf8), agent: agent)
-        await MainActor.run { items = parsed; store.items[window] = parsed }
+        if read != items { items = read; store.items[window] = read }
+    }
+
+    /// Earlier conversation from the file, put in front.
+    private func loadEarlier() async {
+        guard let cmd = chunkCommand, !loadingEarlier else { return }
+        loadingEarlier = true
+        defer { loadingEarlier = false }
+        let feed = store.feed(window)
+        if await feed.loadEarlier(agent: agent, command: cmd, exec: exec) {
+            items = feed.items
+            store.items[window] = feed.items
+        }
+    }
+
+    /// The agent is at work in this tab: its current step (or "Thinking…")
+    /// shows live, as on the desktop.
+    private var working: Bool {
+        guard let s = controller.sessionStore.sessions.first(where: {
+            $0.profileID == profileID && $0.windowIndex == window && !$0.hasEnded
+        }) else { return false }
+        return SessionHome.bucket(for: s, in: controller.listModel) == .working
     }
 }
 
@@ -1237,3 +1348,381 @@ private struct FilesPane: View {
             guestOp: { op in try await controller.guestFileOp(profileID, op: op) })
     }
 }
+
+/// The machine's name as the navigation title — only on the machine's own
+/// screen: on a session's stage the session screen owns the title.
+private struct MachineTitle: ViewModifier {
+    let title: String
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        if enabled {
+            content.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - A session's files
+
+/// The repo file pane for one session -- its machine and folder -- with its
+/// own explorer model. Beside the conversation on a regular width, in a
+/// sheet on the phone (`SessionFilesButton`).
+struct SessionFilesPane: View {
+    let controller: RemoteHostController
+    let profileID: Profile.ID
+    let cwd: String
+    /// A sheet of its own (the phone), not the side pane `filePaneOpen`
+    /// toggles: open whenever it's mounted.
+    var standalone = false
+    @State private var model = FileExplorerModel()
+
+    var body: some View {
+        FileExplorerPane(model: model, listModel: controller.listModel,
+                         onAutoSetOpen: { _ in },
+                         pinnedContext: (profileID, cwd),
+                         standalone: standalone)
+            .onAppear { [controller] in
+                model.execProvider = { [weak controller] id, command, timeout in
+                    guard let controller else { throw ACAppDelegate.GuestExecError.vmNotRunning }
+                    return try await controller.guestExec(id, command: command, timeout: timeout)
+                }
+            }
+    }
+}
+
+/// The phone's way to a session's files: a toolbar button and its sheet.
+struct SessionFilesButton: View {
+    let controller: RemoteHostController
+    let profileID: Profile.ID
+    let cwd: String
+    @State private var shown = false
+
+    var body: some View {
+        Button { shown = true } label: { Image(systemName: "folder") }
+            .accessibilityLabel("Files")
+            .sheet(isPresented: $shown) {
+                NavigationStack {
+                    SessionFilesPane(controller: controller, profileID: profileID, cwd: cwd,
+                                     standalone: true)
+                        .navigationTitle("Files")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("Done") { shown = false } }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
+    }
+}
+
+// MARK: - What a composer send did
+
+/// A guarded type's verdict (`PaneTypeGuard.runType`), as the composer
+/// reports it. Only `typed` is sent; `unconfirmed` sits in the agent's
+/// input box. Same reading as the desktop chat's (`ChatQueueStore.Outcome`).
+enum ComposerOutcome: Equatable, CustomStringConvertible {
+    case typed, unconfirmed, held, dropped, unreachable, failed
+    case refused(PaneRefusal)
+
+    static func of(_ out: String?) -> ComposerOutcome {
+        guard let out else { return .unreachable }
+        if let r = PaneTypeGuard.refusal(in: out) { return .refused(r) }
+        if PaneTypeGuard.held(in: out) { return .held }
+        if PaneTypeGuard.typed(in: out) { return .typed }
+        if PaneTypeGuard.dropped(in: out) { return .dropped }
+        return PaneTypeGuard.unconfirmed(in: out) ? .unconfirmed : .failed
+    }
+
+    var description: String {
+        switch self {
+        case .typed: "typed"
+        case .unconfirmed: "unconfirmed"
+        case .held: "held"
+        case .dropped: "dropped"
+        case .unreachable: "unreachable"
+        case .failed: "failed"
+        case .refused(let r): "refused(\(r.rawValue))"
+        }
+    }
+
+    /// The line under the composer; nil when it went through.
+    var message: String? {
+        switch self {
+        case .typed:
+            return nil
+        case .unconfirmed:
+            return NSLocalizedString("Not delivered — it's in the agent's input box but its Return didn't take. Show the terminal and press Return there.",
+                                     comment: "iOS composer: typed, but the agent never took the Enter")
+        case .held:
+            return NSLocalizedString("Not sent — the agent is asking you something. Answer it first, then send again.",
+                                     comment: "iOS composer: held while the agent shows a dialog")
+        case .dropped:
+            return NSLocalizedString("Not delivered — the agent didn't take it. Send it again.",
+                                     comment: "iOS composer: the agent dropped the text")
+        case .unreachable:
+            return NSLocalizedString("Couldn't reach the machine — check the session before sending again.",
+                                     comment: "iOS composer: the exec failed or timed out")
+        case .failed:
+            return NSLocalizedString("Not sent — typing it into the session failed. Send it again.",
+                                     comment: "iOS composer: the typing command failed")
+        case .refused(.shell):
+            return NSLocalizedString("Not sent — the agent isn't in front in its terminal right now (it may have exited, or be running a command). Try again in a moment.",
+                                     comment: "iOS composer: no agent holds the tab")
+        case .refused:
+            return NSLocalizedString("Not sent — this session's terminal window is gone or changed.",
+                                     comment: "iOS composer: the window is gone or someone else's")
+        }
+    }
+}
+
+// MARK: - A transcript that follows its tail
+
+/// The "earlier" control at a transcript's top: widen the rows on show,
+/// or fetch the conversation before what's held.
+struct TailEarlier {
+    let label: String
+    let loading: Bool
+    /// The first row on show: kept where it is once rows land above it.
+    let anchor: Int?
+    let action: @MainActor () async -> Void
+}
+
+/// A chat's scroll view that stays on the latest message -- the iOS twin of
+/// the desktop's `TailFollow` (BeautifiedSessionView). The rows are EAGER
+/// (the desktop's fix: a lazy stack left the view blank once a row -- a
+/// long answer -- outgrew the viewport, and its estimated heights sent
+/// the tail past the end), so callers bound what they hand it with
+/// `TranscriptWindow`. Once at the tail it keeps following through layout
+/// drift until the user drags it away; scrolling back down to the end
+/// picks the tail up again. New turns only pull the view down while it
+/// follows, never while you read above.
+struct TailFollowingScroll<Content: View>: View {
+    /// Changes when rows arrive (the item count).
+    let changeKey: Int
+    var earlier: TailEarlier? = nil
+    @ViewBuilder let content: () -> Content
+
+    /// A reference: flipping it must not re-render the transcript.
+    private final class Follow {
+        var sticky = true
+        var lastUserScroll = Date.distantPast
+        /// The scroll view reports the user moving it -- a finger, a
+        /// trackpad, a mouse wheel (iOS 18+; before, only a drag tells).
+        var userScrolling = false
+        /// How far the user's scroll has moved the offset toward the top
+        /// since it last turned there (`TailFollowRule.upwardRun`, negative,
+        /// never above 0) -- summed, so a slow trackpad scroll of under a
+        /// point a frame still adds up.
+        var scrolledUp: CGFloat = 0
+        var tailY: CGFloat?
+        /// A snap budget: layout drift can report many times a second, and
+        /// each snap is a layout pass -- the watchdog catches what's skipped.
+        var lastSnap = Date.distantPast
+        var userRecent: Bool { Date().timeIntervalSince(lastUserScroll) < 0.6 }
+    }
+    @State private var follow = Follow()
+    @State private var viewport: CGFloat = 0
+    private static var space: String { "tail-follow-scroll" }
+    private static var tailID: String { "tail-follow-end" }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    if let earlier { earlierButton(earlier, proxy) }
+                    content()
+                    Color.clear.frame(height: 1).id(Self.tailID)
+                        .onGeometryChange(for: CGFloat.self, of: { $0.frame(in: .named(Self.space)).minY }) { y in
+                            tailMoved(y, proxy)
+                        }
+                }
+                // A short chat sits at the bottom by FILLING the viewport, not
+                // by the scroll anchor (which draws it low but hit-tests it
+                // top-aligned -- the desktop's dead-buttons bug).
+                .frame(maxWidth: .infinity, minHeight: max(0, viewport), alignment: .bottom)
+            }
+            .coordinateSpace(name: Self.space)
+            // The opening offset only: anchoring every size change to the
+            // bottom fought the follower (and a reader above).
+            .modifier(InitialBottomAnchor())
+            // A drag on the conversation puts the keyboard away -- and with
+            // it back come the bars that step aside while typing.
+            .scrollDismissesKeyboard(.interactively)
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
+                viewport = h
+                if let y = follow.tailY { tailMoved(y, proxy) }   // the keyboard, a rotation
+            }
+            // The user's own drag decides: toward older turns lets go.
+            .simultaneousGesture(DragGesture(minimumDistance: 4).onChanged { v in
+                follow.lastUserScroll = Date()
+                if v.translation.height > 2 { follow.sticky = false }
+            })
+            // A trackpad or mouse wheel scrolls without any drag: the scroll
+            // phase is what says the user moved it, so the end's move it
+            // causes lets go (in `tailMoved`) instead of snapping back.
+            // Only the offset moving up lets go: a streaming row growing
+            // pushes the end down too, mid-scroll, without the user going
+            // anywhere (`TailFollowRule`).
+            .modifier(UserScrollPhase(changed: { scrolling in
+                if scrolling, !follow.userScrolling { follow.scrolledUp = 0 }
+                follow.userScrolling = scrolling
+                follow.lastUserScroll = Date()
+                guard !scrolling else { return }
+                switch TailFollowRule.atRest(sticky: follow.sticky, atBottom: atBottom(follow.tailY)) {
+                case .follow: follow.sticky = true      // stopped at the end: follow again
+                case .snap: snap(proxy)                 // a row grew while scrolling
+                case .none: break
+                }
+            }, offsetMoved: { delta in
+                guard follow.userScrolling else { return }
+                follow.scrolledUp = TailFollowRule.upwardRun(follow.scrolledUp, adding: delta)
+                if TailFollowRule.releases(userScrolling: true, offsetDelta: follow.scrolledUp,
+                                           tailY: follow.tailY, viewport: viewport) {
+                    follow.sticky = false
+                }
+            }))
+            .onAppear { snap(proxy) }
+            .onChange(of: changeKey) { _, _ in if follow.sticky { snap(proxy) } }
+            // The watchdog: a layout pass that reported nothing new still
+            // gets corrected (the desktop's "stuck blank" fix).
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if follow.sticky, !follow.userRecent, !atBottom(follow.tailY) { snap(proxy) }
+                }
+            }
+        }
+    }
+
+    private func earlierButton(_ e: TailEarlier, _ proxy: ScrollViewProxy) -> some View {
+        Button {
+            follow.sticky = false
+            follow.lastUserScroll = Date()
+            Task { @MainActor in
+                await e.action()
+                // Keep the reading position: the first row stays put.
+                if let a = e.anchor { DispatchQueue.main.async { proxy.scrollTo(a, anchor: .top) } }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if e.loading { ProgressView().controlSize(.small) }
+                Label(e.label, systemImage: "arrow.up.circle")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .disabled(e.loading)
+    }
+
+    /// The end marker sits at the bottom edge (within the content's padding).
+    private func atBottom(_ y: CGFloat?) -> Bool {
+        guard let y, viewport > 0 else { return false }
+        return y <= viewport + 2 && y >= viewport - 40
+    }
+
+    private func tailMoved(_ y: CGFloat, _ proxy: ScrollViewProxy) {
+        follow.tailY = y
+        guard viewport > 0 else { return }
+        if follow.userScrolling {
+            // The user's own scroll, by whatever input: never snapped back
+            // mid-gesture. Whether it let go is the offset's to say
+            // (`offsetMoved`), not the end's position: a row growing moves
+            // that too.
+            follow.lastUserScroll = Date()
+            return
+        }
+        if follow.sticky {
+            // Not the user: the end moved because rows were measured.
+            if !follow.userRecent, !atBottom(y) { snap(proxy) }
+        } else if y <= viewport + 2, !follow.userRecent {
+            // Scrolled (or flung) back down to the end: follow again.
+            follow.sticky = true
+        }
+    }
+
+    private func snap(_ proxy: ScrollViewProxy) {
+        guard Date().timeIntervalSince(follow.lastSnap) > 0.15 else { return }
+        follow.lastSnap = Date()
+        DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+    }
+}
+
+/// Reports whether the user is moving the scroll view: touch, trackpad and
+/// mouse-wheel scrolling all go through the scroll phase (iOS 18+), where a
+/// `DragGesture` sees only touch. Programmatic scrolls (`.animating`), a
+/// touch that hasn't moved yet (`.tracking`) and rest (`.idle`) aren't the
+/// user scrolling.
+private struct UserScrollPhase: ViewModifier {
+    let changed: (Bool) -> Void
+    /// The scroll offset's change (negative: toward the top).
+    let offsetMoved: (CGFloat) -> Void
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, visionOS 2.0, *) {
+            content.onScrollPhaseChange { _, phase in
+                // Not `.tracking`: a finger resting on the chat while rows
+                // arrive hasn't scrolled anywhere.
+                changed(phase == .interacting || phase == .decelerating)
+            }
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { old, new in
+                offsetMoved(new - old)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// Opens at the bottom; on iOS 18+ only the opening offset is anchored.
+private struct InitialBottomAnchor: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, visionOS 2.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
+    }
+}
+
+// MARK: - What a transcript lays out
+
+/// The newest rows, bounded by count and by text -- the desktop's render
+/// window (`BeautifiedSessionView.renderWindow`): eager rows stay cheap
+/// because only a few screens of text are laid out; "Show earlier
+/// messages" widens it.
+enum TranscriptWindow {
+    static let step = 200
+    static let charStep = 30_000
+
+    static func visible(_ items: [TranscriptItem], limit: Int, chars: Int) -> [TranscriptItem] {
+        var n = 0, total = 0
+        for item in items.reversed() {
+            if n >= limit || (n >= 2 && total >= chars) { break }
+            n += 1
+            total += min(item.approximateLength, 6_000)
+        }
+        return Array(items.suffix(n))
+    }
+
+    /// The control above the rows: more of what's held, else earlier
+    /// conversation from the file; nil when it's all on show.
+    @MainActor
+    static func earlier(all: [TranscriptItem], shown: [TranscriptItem], feed: TranscriptFeed,
+                        loading: Bool, widen: @escaping @MainActor () -> Void,
+                        load: @escaping @MainActor () async -> Void) -> TailEarlier? {
+        let hidden = all.count - shown.count
+        guard hidden > 0 || feed.canLoadEarlier else { return nil }
+        let label = loading
+            ? NSLocalizedString("Loading earlier conversation…", comment: "beautified history")
+            : hidden > 0
+            ? NSLocalizedString("Show earlier messages", comment: "beautified history")
+            : NSLocalizedString("Load earlier conversation", comment: "beautified history")
+        return TailEarlier(label: label, loading: loading, anchor: shown.first?.id) {
+            if hidden > 0 { widen() } else { await load(); widen() }
+        }
+    }
+}
+

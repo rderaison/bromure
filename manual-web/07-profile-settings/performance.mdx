@@ -1,6 +1,6 @@
 ---
 title: "Performance"
-description: "How a profile's browser uses your Mac's hardware: GPU acceleration, WebGL, zero-copy rasterization, smooth scrolling and strict site isolation."
+description: "How a profile's browser uses your Mac's hardware: GPU acceleration, WebGL, hardware video decoding, zero-copy rasterization, smooth scrolling and strict site isolation."
 order: 7.2
 ---
 
@@ -18,6 +18,7 @@ The **Performance** category ("Control how the browser uses your Mac’s hardwar
 |---|---|
 | **GPU Acceleration** | Turns on Chromium's accelerated (OpenGL) rendering path inside the VM, which WebGL depends on. Turn it off if you see visual glitches or display problems. Default: on. Turning it off also turns off **WebGL**. |
 | **WebGL** | Lets websites draw 3D graphics and interactive content, which some games, maps and data visualizations need. Default: off. Available only while **GPU Acceleration** is on. |
+| **Hardware Video Decoding** | Decodes video with your Mac's graphics chip, which uses less CPU. Turn it off if videos go black or stop playing; video then decodes on the CPU. Default: on. Available only while **GPU Acceleration** is on. |
 | **Zero-Copy Rasterization** | Reduces memory copies while pages are drawn, which improves performance on most systems. Default: on. |
 | **Smooth Scrolling** | Animates mouse-wheel scrolling. Trackpad scrolling always follows your fingers exactly, whatever this setting. Default: on. |
 | **Strict Site Isolation** | Runs every website in its own process. Default: on. |

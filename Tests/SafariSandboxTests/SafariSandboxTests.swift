@@ -170,7 +170,46 @@ struct ProfileSettingsTests {
         // before the setting existed.
         var expected = ProfileSettings()
         expected.allowPrinting = false
+        expected.userAgent = ""
         #expect(s == expected)
+    }
+
+    @Test("Hardware video decoding is on by default, survives decoding, and reaches the VM config")
+    func hardwareVideoDecodeSetting() throws {
+        let fresh = ProfileSettings()
+        #expect(fresh.hardwareVideoDecode)
+        #expect(fresh.toVMConfig().hardwareVideoDecode)
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8)).hardwareVideoDecode)
+        var off = fresh
+        off.hardwareVideoDecode = false
+        #expect(!off.toVMConfig().hardwareVideoDecode)
+        #expect(!(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(off))).hardwareVideoDecode)
+    }
+
+    @Test("User-agent presets follow the installed browser; custom strings stay verbatim")
+    func userAgentPresets() {
+        #expect(ProfileSettings.userAgentPresets.map(\.name) == ["macOS", "Windows"])
+        #expect(ProfileSettings.userAgentPresets.allSatisfy { $0.userAgent.contains("Chrome/157.0.0.0") })
+        #expect(ProfileSettings.windowsUserAgent.contains("(Windows NT 10.0; Win64; x64)"))
+        #expect(ProfileSettings.userAgentTracksBrowser(ProfileSettings.defaultUserAgent))
+        #expect(ProfileSettings.userAgentTracksBrowser(ProfileSettings.windowsUserAgent))
+        #expect(ProfileSettings.userAgentTracksBrowser(" " + ProfileSettings.defaultUserAgent + " "))
+        #expect(!ProfileSettings.userAgentTracksBrowser(""))
+        #expect(!ProfileSettings.userAgentTracksBrowser(
+            ProfileSettings.defaultUserAgent.replacingOccurrences(of: "157", with: "150")))
+    }
+
+    @Test("New profiles present as Chrome on macOS; older profiles keep their user agent")
+    func userAgentDefault() throws {
+        let fresh = ProfileSettings()
+        #expect(fresh.userAgent == "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36")
+        #expect(fresh.toVMConfig().userAgent == fresh.userAgent)
+        let roundTripped = try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(fresh))
+        #expect(roundTripped.userAgent == fresh.userAgent)
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8)).userAgent == "")
+        var cleared = fresh
+        cleared.userAgent = ""
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(cleared)).userAgent == "")
     }
 
     @Test("New profiles print and keep Keychain passwords off; older profiles keep printing off")

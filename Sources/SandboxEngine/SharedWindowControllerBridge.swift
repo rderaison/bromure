@@ -18,7 +18,7 @@ public final class SharedWindowControllerBridge {
     }
 
     public func request(_ command: String, fields: [String: Any] = [:]) async throws -> [String: Any] {
-        guard ["attachPrimary", "list", "create", "resize", "close", "focus", "shutdown"].contains(command),
+        guard ["attachPrimary", "list", "create", "detach", "resize", "close", "focus", "shutdown"].contains(command),
               !busy, nextID <= 9_007_199_254_740_991, fields["id"] == nil, fields["cmd"] == nil else {
             throw Self.failure("Invalid or overlapping shared-window request")
         }
@@ -130,5 +130,63 @@ public final class SharedWindowControllerBridge {
 
     nonisolated private static func failure(_ message: String) -> NSError {
         NSError(domain: "BromureSharedWindows", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// What a shared-window `focus` reply says about the guest's input focus.
+/// Keyboard input may only follow when the guest at least activated the
+/// target window; anything earlier leaves focus on the previous window.
+public enum SharedWindowFocusOutcome: Equatable, Sendable {
+    /// The guest confirmed Chromium document and X focus on the window.
+    case confirmed
+    /// The guest activated the window and focused its page contents
+    /// (Target.activateTarget and Page.bringToFront succeeded) but a later
+    /// focus check failed or missed its deadline — a page's
+    /// JavaScript dialog blocks the document probe, a busy renderer answers
+    /// late, the X or process probe fails. Input belongs to this window.
+    case activatedUnconfirmed
+    /// The request failed before or without activation (transport error,
+    /// paused VM, guest refusal, CDP failure): the guest's focus is unchanged.
+    case notActivated
+
+    /// For guest images whose replies predate `focusActivated`: errors that
+    /// shared_windows.py `focus` / `confirm_focus` raise only after
+    /// Target.activateTarget and Page.bringToFront succeeded. A failed
+    /// bringToFront ("CDP page focus failed") is not one: the omnibox may
+    /// still hold focus. Messages that can also come from the activation
+    /// calls (CDP transport errors) are left out too — those stay
+    /// `.notActivated`, so input is retried rather than misdirected.
+    static let legacyPostActivationErrors: Set<String> = [
+        "Chromium/X focus did not converge",
+        "focus observation deadline exceeded",
+        "cannot identify sole CDP browser process",
+        "CDP call failed: SystemInfo.getProcessInfo",
+    ]
+
+    static func isLegacyPostActivationError(_ error: String) -> Bool {
+        legacyPostActivationErrors.contains(error)
+            || error.hasPrefix("X focus observation failed")
+            // subprocess.TimeoutExpired from confirm_focus's probe-focus run.
+            || (error.hasPrefix("Command '") && error.contains("probe-focus") && error.contains("timed out after"))
+    }
+
+    /// Classifies a reply from `SharedWindowControllerBridge.request("focus")`.
+    /// A thrown request is `.notActivated`. Current guests say whether the
+    /// window was activated (`focusActivated`); older ones are classified by
+    /// their error text.
+    public init(reply: [String: Any]) {
+        if reply["ok"] as? Bool == true {
+            self = .confirmed
+        } else if reply["error"] as? String == "CDP page focus failed" {
+            // Page.bringToFront failed: never input-ready, even from a guest
+            // built while that failure was (wrongly) flagged as activated.
+            self = .notActivated
+        } else if let activated = reply["focusActivated"] as? Bool {
+            self = activated ? .activatedUnconfirmed : .notActivated
+        } else if let error = reply["error"] as? String, Self.isLegacyPostActivationError(error) {
+            self = .activatedUnconfirmed
+        } else {
+            self = .notActivated
+        }
     }
 }

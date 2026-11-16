@@ -312,6 +312,27 @@ struct QueuedMessage: Identifiable, Equatable, Codable {
     /// it's still waiting to be sent. Never while held: taken back (omp's Esc)
     /// or found lost, it's waiting on Bromure again, whatever happened before.
     var agentHasIt: Bool { !held && (isDelivered || handedOver == true) }
+    /// When the agent got it (typed in by Bromure, or handed to its own
+    /// queue). Optional so an older saved queue decodes.
+    var deliveredAt: Date? = nil
+    /// How long a delivered row stays on the strip at most: the transcript
+    /// doesn't always show the turn in a form the chat recognizes while the
+    /// agent keeps working, and the row stayed for good ("Delivered — queued
+    /// by …" until the user switched sessions).
+    static let deliveredShownFor: TimeInterval = 30
+    /// Delivered long enough ago to leave the strip (`deliveredShownFor`).
+    func deliveredExpired(at now: Date) -> Bool {
+        guard agentHasIt, let at = deliveredAt else { return false }
+        return now.timeIntervalSince(at) >= Self.deliveredShownFor
+    }
+    /// The row offers Edit: never once the agent has it (it's the agent's
+    /// now; editing would send it a second time).
+    func offersEdit(alwaysEditable: Bool) -> Bool {
+        guard !sending else { return false }
+        if failure != nil { return true }
+        if agentHasIt { return false }
+        return editable || alwaysEditable
+    }
     /// Times Bromure typed it in without the agent ever taking it (typed as
     /// a dialog closed, into a screen still redrawing): put back on hold
     /// once, then shown as not delivered — never silently dropped.

@@ -393,6 +393,17 @@ struct BromureAC: ParsableCommand {
                                                  storageContext: nil, onSave: { _, _ in }, onCancel: {})
                                   .frame(width: 900, height: 1080))
                 size = NSSize(width: 900, height: 1080)
+            case "browser-settings", "browser-off":
+                // The real workspace editor, opened on Browser: a sandboxed
+                // workspace with its browser on (the warning) or off.
+                setenv("BROMURE_EDITOR_CATEGORY", EditorCategory.browser.rawValue, 1)
+                var p = Profile(name: "Claude Dev", tool: .claude, authMode: .subscription)
+                p.strictSandbox = true
+                p.browserDisabled = which == "browser-off"
+                view = AnyView(ProfileEditorView(profile: p, isNew: false, terminalDefaults: .fallback,
+                                                 storageContext: nil, onSave: { _, _ in }, onCancel: {})
+                                  .frame(width: 900, height: 900))
+                size = NSSize(width: 900, height: 900)
             case "remote-access-off", "remote-access-on":
                 // Remote Access window, offline: stand-in status and account.
                 let on = which == "remote-access-on"
@@ -1392,6 +1403,8 @@ final class RunningSession {
     /// `vm ls` / the API / SSH can show tabs (incl. worktree metadata) even
     /// while the session is detached.
     var tabs: [GuestTab] = []
+    /// Tab lists stored here from the guest's roster (debug: `roster-state`).
+    var tabListsApplied = 0
     /// Each tab's agent status (working / done / needs you), by window index —
     /// kept here, not only on a pane's tab model, so a session with no local
     /// window (driven from a fat client) still reports it in `/state`.
@@ -3853,6 +3866,18 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         LayoutStats.startIfAsked()
         // Main-queue stalls delay every guest's vsock accepts: log them.
         MainThreadLagMonitor.shared.start()
+        // Host sleep stops the guests' clocks; set them right on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let n = UbuntuSandboxVM.resyncClocksAfterHostWake()
+                if n > 0 {
+                    FileHandle.standardError.write(Data(
+                        "[ac] Mac woke: resyncing the clock of \(n) VM(s)\n".utf8))
+                }
+            }
+        }
         // The chat reads a shared folder's mount (/mnt/bromure-share-N) as
         // the folder the user knows (~/<name>).
         GuestSharePaths.resolver = { [weak self] id in
@@ -3974,6 +3999,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // calls out through this observer.
         // Read here, on the main thread: the observer runs on the switch's.
         let egressEngine = mitmEngine
+        // Network lineage names a direct flow's address by what the guest's
+        // DNS answers called it (an agent's own fetch names a host).
+        NetworkLineage.shared.hostNames = { VMNetSwitch.shared.hostnames(forIP: $0) }
+        NetworkLineage.shared.queriedHostNames = { VMNetSwitch.shared.queriedHostnames(forIP: $0) }
         VMNetSwitch.shared.setEgressObserver { SwitchEgressReport.record($0, engine: egressEngine) }
 
         // Refresh the MLX model catalog from the hosted manifest in the
@@ -4961,6 +4990,32 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          "succeeded": s.succeeded]
                     }
                     return out
+                case "roster-state":
+                    // E2E 34.10: a sandboxed workspace whose tabs.txt listed a
+                    // tab the host never showed. Where the roster stops on the
+                    // way in: the poll, its reads, the session they land in.
+                    let key = (params["profile"] as? String ?? "").lowercased()
+                    guard let profile = self.profiles.first(where: {
+                        $0.name.lowercased() == key || $0.id.uuidString.lowercased() == key })
+                    else { return ["error": "profile required"] }
+                    var out: [String: Any] = ["ok": true, "profileID": profile.id.uuidString]
+                    guard let s = self.runningSessions[profile.id] else {
+                        out["session"] = false
+                        return out
+                    }
+                    let vm = s.sandbox
+                    out["session"] = true
+                    out["sessionTabs"] = s.tabs.map(\.index)
+                    out["tabListsApplied"] = s.tabListsApplied
+                    out["sandboxState"] = String(describing: vm.state)
+                    out["polling"] = vm.isPollingOutbox
+                    out["outbox"] = vm.polledOutboxPath ?? ""
+                    out["rosterReads"] = vm.rosterReads
+                    out["lastRosterCount"] = vm.lastRosterCount
+                    out["rosterReadFailures"] = vm.rosterReadFailures
+                    out["callbackWired"] = vm.onTabList != nil
+                    out["pane"] = self.pane(for: profile.id) != nil
+                    return out
                 case "sign-in-sim", "sign-in-sim-state", "loopback-sim":
                     // E2E hooks exercising the in-session sign-in path: a
                     // simulated capture on the real proxy route, and the
@@ -5131,6 +5186,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // Toggle the Files pane (⌃⌘E).
                     self.unifiedWindow?.toggleFilePane(nil)
                     return ["ok": true, "filePaneOpen": self.unifiedWindow?.filePaneOpen ?? false]
+                case "files-select":
+                    // Show a file (relative to the pane's folder) in the Files
+                    // pane's preview; then `files-detail` says what it shows.
+                    guard let path = params["path"] as? String,
+                          let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "path and a Files pane required"] }
+                    m.select(path)
+                    return ["ok": true]
+                case "files-detail":
+                    guard let m = self.unifiedWindow?.fileExplorerModel else { return ["error": "no Files pane"] }
+                    return ["ok": true, "selected": m.selectedPath ?? "", "detail": m.detailKind]
                 case "browser":
                     // Toggle the agentic browser pane (⌃⌘B) for the selected workspace.
                     self.unifiedWindow?.toggleBrowserPane(nil)
@@ -6215,6 +6280,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         server.onSecurityHistory = { hours in
             MainActor.assumeIsolated { SecurityTimeline.shared.historyRows(hours: hours) }
         }
+        server.onSecurityTimelineHead = {
+            MainActor.assumeIsolated { SecurityTimeline.shared.head() }
+        }
+        server.onSecurityDelta = { after, epoch in
+            MainActor.assumeIsolated { SecurityTimeline.shared.deltaBody(after: after, epoch: epoch) }
+        }
         // Fat-client Local Models: the server owns the engine + the downloads,
         // so it reports its OWN unified memory (the RAM-fit gate), which models
         // are installed here, and any in-flight download state.
@@ -6263,9 +6334,13 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         server.onTaskAnswer = { [weak self] id, body in
             guard let self else { return ["ok": false, "error": "no app"] }
-            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            // Files dropped on a remote client's answer sheet, as its new-session
+            // screen sends them ({name, data (base64), isImage, folder?}).
+            let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+            let text = body["text"] as? String ?? ""
+            guard !text.isEmpty || !files.isEmpty else { return ["ok": false, "error": "text required"] }
             let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-            if await self.taskDispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            if await self.taskDispatcher.answer(id, askID: ask, text: text, attachments: files) { return ["ok": true] }
             return ["ok": false, "error": self.codingTaskStore.task(id)?.lastError
                         ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
         }
@@ -6290,9 +6365,11 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         return ["error": "kind required"]
                     }
                 case "answer":
-                    guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+                    let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+                    let text = body["text"] as? String ?? ""
+                    guard !text.isEmpty || !files.isEmpty else { return ["error": "text required"] }
                     let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text) }
+                    Task { @MainActor in _ = await self.taskDispatcher.answer(id, askID: ask, text: text, attachments: files) }
                 case "recall":
                     self.taskDispatcher.recall(id)
                 case "plan", "plan-start":   // plan-start: legacy alias
@@ -6983,6 +7060,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return Int(f.size)
     }
 
+    /// A workspace's browser settings in its `/state` row
+    /// (`RemoteHostController.applyBrowserFields` reads them back).
+    nonisolated static func browserRowFields(_ p: Profile) -> [String: Any] {
+        ["browserDisabled": p.browserDisabled,
+         "browserPersistent": p.browserPersistent,
+         "browserAllowUploads": p.browserAllowUploads,
+         "browserAllowDownloads": p.browserAllowDownloads,
+         "browserWebcam": p.browserWebcam,
+         "browserMicrophone": p.browserMicrophone]
+    }
+
     @MainActor func automationWorkspaceList() -> [[String: Any]] {
         profiles.map { p in
             let state: String
@@ -7037,6 +7125,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // Its notes: the fat client's dashboard card and row tooltip.
                 "comments": p.comments,
             ]
+            // Its browser settings: a fat client runs the workspace's
+            // browser itself, so it needs them -- the off switch above all.
+            row.merge(Self.browserRowFields(p)) { _, new in new }
             if let sum = SquelchLedger.shared.summary(p.id) { row["squelchSummary"] = Self.codableToDict(sum) }
             // Wedged at boot on filesystem errors (the decision prompt rides
             // pendingPrompts; this lets clients badge the workspace row too).
@@ -12883,7 +12974,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let pid = profile.id
                 let mcpServer = BrowserMCPServer(
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
-                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) },
+                    disabled: { [weak self] in self?.browserDisabled(pid) ?? true })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer, profileID: pid)
                 // Coding-board MCP listener (vsock 5831): typed task tools
@@ -13681,14 +13773,163 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// A finished task's full session transcript: the host archive first
     /// (written when the card reached Done — survives even workspace
     /// deletion), then the guest (live vsock read), then the ext4 home
-    /// image (workspace off).
-    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
-        if let archived = TaskTranscriptArchive.load(task.id) { return archived }
+    /// image (workspace off). Before the guest: the task's own session —
+    /// the `wt/` session its launch bound (`bindSession`) — whose transcript
+    /// the host keeps a copy of, so a task whose worktree was cleaned up
+    /// still reads after a restart drops the clients' caches. NOT a session
+    /// the task was handed to (`assignment`): that conversation is mostly
+    /// the session's other work; such a task reports through its delivery.
+    ///
+    /// `forArchive` (the Done archive, which every later read takes first):
+    /// the guest's full transcript before the session copy -- that copy is a
+    /// cache seeded from a tail plus a live tail, and can lack the start of
+    /// a long conversation; archived, the loss would be permanent. The
+    /// session copy is then only the fallback when no full read answers.
+    func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
+        for source in TaskTranscriptArchive.readOrder(forArchive: forArchive) {
+            let text: String?
+            var pinned: String?
+            switch source {
+            case .archive: text = TaskTranscriptArchive.load(task.id)
+            case .session: text = await taskSessionTranscript(task)
+            case .guest:
+                let full = await fullTaskTranscript(task)
+                text = full?.text
+                pinned = full?.pinnedID
+            }
+            guard let text, !text.isEmpty else { continue }
+            // The full read stops at its cap (the file's first 25 MB): the
+            // archive re-reads the file whole, then joins the session copy's
+            // tail where the two share records. Over the whole read's
+            // ceiling (or unreadable so), sharing none: the head and that
+            // tail both -- the end is where the final report is -- never the
+            // head alone (Finding "Capped transcript head is archived when
+            // the session tail does not overlap") -- and only when the read
+            // was of the session's own conversation (Finding "Capped
+            // archive can append an unrelated session transcript").
+            if forArchive, source == .guest, TaskTranscriptArchive.mayBeCapped(text) {
+                let whole = await wholeGuestTranscript(task, head: text, pinnedID: pinned)
+                let tail = await taskSessionTranscript(task)
+                let same = TaskTranscriptArchive.sameConversation(
+                    pinnedID: pinned, tool: task.tool.rawValue, head: text, sessionTail: tail)
+                let kept = TaskTranscriptArchive.archiveJoin(
+                    whole: whole?.data ?? Data(text.utf8), complete: whole?.complete ?? false,
+                    sessionTail: tail.map { Data($0.utf8) }, sameConversation: same)
+                return String(decoding: kept, as: UTF8.self)
+            }
+            return text
+        }
+        return nil
+    }
+
+    /// The guest transcript a capped full read came from, re-read whole in
+    /// exact chunks up to `wholeReadCeiling`. `complete`: it reached the
+    /// file's end. nil when unreadable, or not the same file as `head`.
+    /// `pinnedID`: the conversation `head` was read by -- that file again,
+    /// not the worktree's newest.
+    private func wholeGuestTranscript(_ task: CodingTask, head: String,
+                                      pinnedID: String?) async -> (data: Data, complete: Bool)? {
+        let locate: String
+        if let pinnedID {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: pinnedID, into: "f")
+            guard !pick.isEmpty else { return nil }
+            locate = "f=\"\"; " + pick
+        } else {
+            guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }),
+                  let byBranch = CodingTaskEngine.taskTranscriptLocate(branch: branch, agent: task.tool)
+            else { return nil }
+            locate = byBranch
+        }
+        let chunk = TaskTranscriptArchive.wholeReadChunk
+        var data = Data()
+        while data.count < TaskTranscriptArchive.wholeReadCeiling {
+            let cmd = locate + TaskTranscriptArchive.chunkEmit(offset: data.count, bytes: chunk)
+            guard let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 60),
+                  let d = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines))
+            else {
+                // The workspace is off (the capped head came from the home
+                // image): the pinned file from there, past the cap (Finding
+                // "Pinned transcript head is truncated when the chunk reader
+                // selects a newer conversation").
+                guard data.isEmpty, let pinnedID else { return nil }
+                return await wholeImageTranscript(task, head: head, conversationID: pinnedID)
+            }
+            if data.isEmpty, !TaskTranscriptArchive.samePrefix(head, d) { return nil }
+            data.append(d)
+            if d.count < chunk { return (data, true) }
+        }
+        return (data, false)
+    }
+
+    /// `wholeGuestTranscript` with the workspace off: conversation `id`'s
+    /// file read from the home image (Claude only, as `fullTaskTranscript`'s
+    /// offline read), up to `wholeReadCeiling`. nil when unreadable, or not
+    /// the file `head` came from.
+    private func wholeImageTranscript(_ task: CodingTask, head: String,
+                                      conversationID id: String) async -> (data: Data, complete: Bool)? {
+        guard task.tool == .claude,
+              let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+        let img = store.homeImageURL(for: profile)
+        guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+        let ceiling = TaskTranscriptArchive.wholeReadCeiling
+        guard let r = await Task.detached(priority: .userInitiated, operation: {
+            Self.ext4TranscriptData(imagePath: img.path, conversationID: id, limit: ceiling)
+        }).value, TaskTranscriptArchive.samePrefix(head, r.data) else { return nil }
+        return (r.data, r.size <= UInt64(r.data.count))
+    }
+
+    /// The host's copy of the task's own session (cache + live tail).
+    private func taskSessionTranscript(_ task: CodingTask) async -> String? {
+        guard let sid = task.sessionID, let s = agentSessionStore.session(sid),
+              let data = await agentSessionEngine.readableTranscript(s), !data.isEmpty
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The task's whole transcript file. Its own session's conversation by
+    /// id when that session learned one -- the guest's file, else (Claude,
+    /// workspace off) the home image's -- and never the worktree's newest
+    /// file then: another conversation started in the same worktree before
+    /// the Done archive ran would be saved as this task's, for good
+    /// (Finding "Archiving can save a newer conversation from the same
+    /// worktree"). Without an id: by branch, as before, but not a file that
+    /// is another session's conversation. `pinnedID`: the conversation id
+    /// the file was read by (nil for the by-branch lookups).
+    private func fullTaskTranscript(_ task: CodingTask) async -> (text: String, pinnedID: String?)? {
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 })
         else { return nil }
-        // Kimi: the session's own journal by id, when the task's session
-        // learned it — no folder/slug guessing (Kimi cuts bucket names).
-        if task.tool == .kimi {
+        let emit = "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
+        let own = task.sessionID.flatMap { agentSessionStore.session($0) }?.agentTranscriptID
+        if let id = own {
+            let pick = AgentSessionLocator.pinnedFragment(tool: task.tool.rawValue, id: id, into: "f")
+            if !pick.isEmpty {
+                if let out = try? await guestExec(profileID: task.profileID, command: "f=\"\"; " + pick + emit,
+                                                  timeout: 30),
+                   !out.isEmpty {
+                    return (out, id)
+                }
+                guard task.tool == .claude,
+                      let profile = profiles.first(where: { $0.id == task.profileID }) else { return nil }
+                let img = store.homeImageURL(for: profile)
+                guard FileManager.default.fileExists(atPath: img.path) else { return nil }
+                return await Task.detached(priority: .userInitiated) {
+                    Self.ext4Transcript(imagePath: img.path, conversationID: id)
+                }.value.map { ($0, id) }
+            }
+        }
+        let others = Set(agentSessionStore.sessions.compactMap { s -> String? in
+            guard s.id != task.sessionID, s.profileID == task.profileID else { return nil }
+            return s.agentTranscriptID?.lowercased()
+        })
+        func mine(_ text: String) -> (text: String, pinnedID: String?)? {
+            TaskTranscriptArchive.fallbackBelongs(text, tool: task.tool.rawValue, otherConversationIDs: others)
+                ? (text, nil) : nil
+        }
+        // Kimi, a task with no session of its own: the worktree session's
+        // journal by id — no folder/slug guessing (Kimi cuts bucket names).
+        // (A task's own session without an id yet: any other session here
+        // with one is another conversation.)
+        if task.tool == .kimi, task.sessionID == nil {
             let slug = String(branch.dropFirst(3))
             if let id = agentSessionStore.sessions.first(where: { s in
                 s.profileID == task.profileID
@@ -13699,7 +13940,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     + "if [ -n \"$f\" ]; then head -c 25000000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi"
                 if let out = try? await guestExec(profileID: task.profileID, command: cmd, timeout: 30),
                    !out.isEmpty {
-                    return out
+                    return (out, nil)
                 }
             }
         }
@@ -13708,7 +13949,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
            let out = try? await guestExec(profileID: task.profileID,
                                           command: cmd, timeout: 30),
            !out.isEmpty {
-            return out
+            return mine(out)
         }
         // Offline: read the image directly (read-only; safe even if a VM
         // has the disk attached — same tolerance as the ext4 browser).
@@ -13723,7 +13964,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let guestCwd = ScheduledAutomationEngine.guestPath(task.repoPath)
         return await Task.detached(priority: .userInitiated) {
             Self.ext4Transcript(imagePath: img.path, slug: slug, guestCwd: guestCwd)
-        }.value
+        }.value.flatMap(mine)
     }
 
     /// The folders inside `path` ("~", "~/proj", an absolute guest path)
@@ -13823,6 +14064,19 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Subfolder names of a directory inside a home.img (HomeImageReader).
     nonisolated static func ext4Folders(imagePath: String, path: String) -> [String]? {
         HomeImageReader.folders(imagePath: imagePath, path: path)
+    }
+
+    /// Claude conversation `id`'s transcript in the home image, whichever
+    /// project folder holds it (HomeImageReader).
+    nonisolated static func ext4Transcript(imagePath: String, conversationID id: String) -> String? {
+        HomeImageReader.claudeTranscript(imagePath: imagePath, conversationID: id)
+    }
+
+    /// Claude conversation `id`'s transcript in the home image: its first
+    /// `limit` bytes and the file's whole size (HomeImageReader).
+    nonisolated static func ext4TranscriptData(imagePath: String, conversationID id: String,
+                                               limit: Int) -> (data: Data, size: UInt64)? {
+        HomeImageReader.claudeTranscriptData(imagePath: imagePath, conversationID: id, limit: limit)
     }
 
     /// A task's newest Claude transcript inside a home.img (HomeImageReader).
@@ -15094,7 +15348,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // re-opens. Nothing is added to the session allowlist.
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15113,7 +15367,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                 "scope": .string("session"), "unmanaged": .bool(true)])
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15136,7 +15390,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 window.setSuspendedTint(false)
                 if vm.state == .paused {
-                    do { try await vm.resume() }
+                    do { try await vm.resume(); sandbox.signalClockResync() }
                     catch {
                         FileHandle.standardError.write(Data(
                             "[ac] compromise: resume failed (\(error))\n".utf8))
@@ -15423,9 +15677,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 current.setNetworkQuarantined(false)
                 WorkspaceQuarantine.shared.set(false, for: pid)
                 AgentWatchdog.shared.release(profileID: pid)
-                if let vm = current.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = current.vm, vm.state == .paused, (try? await vm.resume()) != nil { current.signalClockResync() }
             case 1:
-                if let vm = current.vm, vm.state == .paused { try? await vm.resume() }
+                if let vm = current.vm, vm.state == .paused, (try? await vm.resume()) != nil { current.signalClockResync() }
             default:
                 // A forced stop (the guest is paused and untrusted, so no clean
                 // poweroff) fires no delegate callback: finish the teardown here,
@@ -15584,6 +15838,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 // Mirror for detached `vm ls` / API / SSH, and drive the tab bar.
                 self.runningSessions[pid]?.tabs = tabs
+                self.runningSessions[pid]?.tabListsApplied += 1
                 self.pane(for: pid)?.applyTabList(tabs)
                 // Keep the grid membership in sync even when the grid isn't the
                 // active stage — closing a tab in the workspace must prune its
@@ -16743,7 +16998,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.browserMCPBridges[pid]?.stop()
                 let mcpServer = BrowserMCPServer(
                     browser: { [weak self] in self?.unifiedWindow?.existingBrowserController(for: pid) },
-                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) })
+                    ensureBrowser: { [weak self] in self?.unifiedWindow?.ensureBrowserForMCP(pid) },
+                    disabled: { [weak self] in self?.browserDisabled(pid) ?? true })
                 self.browserMCPBridges[pid] =
                     BrowserMCPVsockBridge(socketDevice: dev, server: mcpServer, profileID: pid)
                 // Coding-board MCP listener (vsock 5831): typed task tools

@@ -35,6 +35,7 @@ private func readSetting(_ s: ProfileSettings, key: String) -> String? {
     case "gpu":             return String(s.enableGPU)
     case "webgl":           return String(s.enableWebGL)
     case "zeroCopy":        return String(s.enableZeroCopy)
+    case "hardwareVideoDecode": return String(s.hardwareVideoDecode)
     case "smoothScrolling": return String(s.enableSmoothScrolling)
     case "audio":           return String(s.enableAudio)
     case "audioVolume":     return String(s.audioVolume)
@@ -103,6 +104,7 @@ private func writeSetting(_ s: inout ProfileSettings, key: String, value: String
     case "gpu":             s.enableGPU = b
     case "webgl":           s.enableWebGL = b
     case "zeroCopy":        s.enableZeroCopy = b
+    case "hardwareVideoDecode": s.hardwareVideoDecode = b
     case "smoothScrolling": s.enableSmoothScrolling = b
     case "audio":           s.enableAudio = b
     case "audioVolume":     s.audioVolume = Int(value) ?? s.audioVolume

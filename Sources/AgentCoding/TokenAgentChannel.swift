@@ -59,6 +59,7 @@ final class TokenAgentChannel {
                 guard let self, (self.readSource as AnyObject?) === (source as AnyObject)
                         || self.readSource == nil else { return }
                 self.owner = nil
+                self.fd = -1
                 self.isConnected = false
                 // Fail any in-flight request — caller can retry once the
                 // agent reconnects.
@@ -74,6 +75,7 @@ final class TokenAgentChannel {
         readSource?.cancel()
         readSource = nil
         owner = nil
+        fd = -1
         isConnected = false
         // Unblock any callers still waiting.
         failPending()

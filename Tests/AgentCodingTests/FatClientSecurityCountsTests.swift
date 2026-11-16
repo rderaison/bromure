@@ -469,6 +469,6 @@ struct FatClientSecurityCountsTests {
         #expect(fc.contains("securityHistoryInFlight += 1"))
         #expect(fc.contains("self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)"))
         #expect(fc.contains("Self.historyRetryDelay(failures: self.securityHistoryFailures))"))
-        #expect(fc.contains("outstanding: securityHistoryGeneration > securityHistoryApplied,"))
+        #expect(fc.contains("outstanding: securityHistoryOwed || securityHistoryGeneration > securityHistoryApplied,"))
     }
 }

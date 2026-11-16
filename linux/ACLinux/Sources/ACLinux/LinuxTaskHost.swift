@@ -12,7 +12,10 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     // @port ACAppDelegate.fetchTaskTranscriptRaw(_: CodingTask) h=b4e71a368ec3c7eb @9936e30c
     // partial: calls HomeImageReader.claudeTranscript inline
     // @port ACAppDelegate.static ext4Transcript(imagePath: String, slug: String, guestCwd: String) h=d0ebf29eb8eb89b3 @d3ebbda2
-    func fetchTaskTranscriptRaw(_ task: CodingTask) async -> String? {
+    // `forArchive` changes nothing here: the archive's read is only asked
+    // for while no archive exists, and this reader has no capped read to
+    // complete (it reads the whole file).
+    func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }) else { return nil }
         // Kimi: the session's own journal by id, when the task's session

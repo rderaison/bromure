@@ -32,12 +32,13 @@ config = load_script("config-agent")
 diagnostics = load_script("graphics-diagnostics")
 
 
-def chrome_env(cfg, virgl_device="/dev/dri/renderD129"):
+def chrome_env(cfg, virgl_device="/dev/dri/renderD129", browser_version=(None, None)):
     stream = io.StringIO()
     # Exercise the actual config writer, without guest filesystem writes or
     # spawning an installed browser.
     with patch("builtins.open") as mocked_open, \
             patch.object(config, "write_chrome_extension_forcelist"), \
+            patch.object(config, "installed_browser_version", return_value=browser_version), \
             patch.object(config, "virgl_video_device", return_value=virgl_device):
         mocked_open.return_value.__enter__.return_value = stream
         config.write_chrome_env(cfg)
@@ -190,6 +191,16 @@ class GuestGraphicsConfigTests(unittest.TestCase):
         self.assertIn("LcdText", disabled[0])
         self.assertIn("PreferV4L2VideoAcceleration", disabled[0])
         self.assertIn("--hardware-video-device-path=/dev/dri/renderD129", flags)
+
+    def test_profile_can_turn_hardware_video_decoding_off(self):
+        with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):
+            backend, _, flags = shell_environment(chrome_env({
+                "graphicsBackend": "virgl", "disableHardwareVideoDecode": True}))
+        self.assertEqual(backend, "virgl")  # GPU rendering stays on
+        self.assertFalse(any("AcceleratedVideoDecode" in f for f in flags))
+        self.assertFalse(any("hardware-video-device-path" in f for f in flags))
+        self.assertIn("--disable-accelerated-video-decode", flags)
+        self.assertIn("--render-node-override=/dev/dri/renderD129", flags)
 
     def test_software_policy_does_not_enable_hardware_movie_bridge(self):
         with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):

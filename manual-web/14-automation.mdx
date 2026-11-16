@@ -431,7 +431,7 @@ A few keys can only be set, not read. They store secrets in the Keychain or mana
 | `automation.port` | [API Port](08-app-settings/automation.mdx) | Integer |
 | `automation.bindAddress` | [Bind Address](08-app-settings/automation.mdx) | `127.0.0.1` or `0.0.0.0` |
 
-Changing `vm.memoryGB`, `vm.cpuCount`, `vm.networkMode`, `vm.bridgedInterface` or `vm.dnsServers` replaces the pre-warmed VM. If windows are open, Bromure asks **Restart sessions?** ("Hardware settings have changed. Restart all browser sessions to apply them?") with **Restart All** and **Later**. `vm.keyboardLayout` and `vm.naturalScrolling` take effect at the next image rebuild (**File › Recreate Base Image…**).
+Changing `vm.memoryGB`, `vm.cpuCount`, `vm.networkMode`, `vm.bridgedInterface` or `vm.dnsServers` applies to the next window that opens. If windows are open, Bromure asks **Restart sessions?** ("Hardware settings have changed. Restart all browser sessions to apply them?") with **Restart All** and **Later**. `vm.keyboardLayout` and `vm.naturalScrolling` take effect at the next image rebuild (**File › Recreate Base Image…**).
 
 ## Command-line tool
 

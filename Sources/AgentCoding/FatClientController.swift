@@ -44,6 +44,13 @@ final class RemoteHostController {
     @ObservationIgnored var securityHistoryInFlight = 0
     @ObservationIgnored var securityHistoryFailures = 0
     @ObservationIgnored var securityHistoryRetryAt: Date?
+    /// The host sends a timeline head in `/state`: it syncs by deltas.
+    @ObservationIgnored var securityDeltaHost = false
+    /// The window asked for the host's history (kept while the host synced
+    /// by deltas, which needs none), and a history fetch is owed: the host
+    /// went back to mirroring after deltas.
+    @ObservationIgnored var securityHistoryRequested = false
+    @ObservationIgnored var securityHistoryOwed = false
     /// The reused source-list model (workspace rows + running entries).
     let listModel = SessionListModel()
     /// Mirror of the remote grid (StageLayout). Persisted to a per-host file so
@@ -69,6 +76,8 @@ final class RemoteHostController {
     /// without the link having gone quiet long enough to call it down): a
     /// calm indicator, content stays live.
     private(set) var linkSlow = false
+    /// The chat on screen reads first on the bulk lane (`BulkLanePriority`).
+    @ObservationIgnored let bulkPriority = BulkLanePriority()
     /// What the user sent that the host hasn't answered yet (an action, a
     /// typed prompt, a new session), since when — the window's "Sending…"
     /// cue. On a slow link (a train, a tunnel) they wait in the queue
@@ -212,6 +221,9 @@ final class RemoteHostController {
     /// (font/colors) change host-side, so the window can restyle its live
     /// surfaces — the remote analog of the local editor's live apply.
     var onAppearanceChanged: ((Profile) -> Void)?
+    /// A workspace's browser was turned off or on, or a setting it boots
+    /// with changed, on the host.
+    var onBrowserSettingsChanged: ((Profile.ID) -> Void)?
     /// Fired after every applied /state snapshot — the window controller
     /// re-attempts the browser-MCP relay dial here, because run-state
     /// transitions (off → booting) happen between selections and the relay
@@ -1189,7 +1201,31 @@ final class RemoteHostController {
         // firewall, guardrails, MiTM) run on the remote host, so the local
         // store is otherwise empty. Only rebuild when the key is present: a
         // partial/truncated snapshot must not wipe the last good timeline.
-        if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+        if let head = snapshot["securityTimelineHead"] as? [String: Any],
+           let mark = SecurityTimeline.SyncMark(head) {
+            // A host that syncs by deltas: its totals as it counts them, and
+            // the rows this copy hasn't got (the mirrored rows are ignored).
+            securityDeltaHost = true
+            SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
+            if let totals = SecurityTimeline.Totals.byRange(wire: head["totals"] as? [String: Any]) {
+                SecurityTimeline.shared.applyRemoteTotals(totals, host: securityMirrorKey)
+            }
+            if SecurityTimeline.shared.needsDelta(host: securityMirrorKey, head: mark),
+               securityHistoryInFlight == 0,
+               securityHistoryRetryAt.map({ Date() >= $0 }) ?? true {
+                fetchSecurityDelta()
+            }
+        } else if let rows = snapshot["securityTimeline"] as? [[String: Any]] {
+            // A host that synced by deltas and now only mirrors (an older
+            // version on the same address): its totals and sync mark are
+            // that run's, and the history the window asked for is owed
+            // (Finding: "Older host fallback keeps stale delta totals and
+            // disables history fetching").
+            if securityDeltaHost {
+                securityDeltaHost = false
+                SecurityTimeline.shared.forgetDeltaSync(host: securityMirrorKey)
+                securityHistoryOwed = securityHistoryRequested
+            }
             // Who the bucket is: its label in the window.
             SecurityTimeline.shared.noteMachine(securityMirrorKey, host: host)
             let epoch = snapshot["securityTimelineEpoch"] as? String
@@ -1201,8 +1237,8 @@ final class RemoteHostController {
             // restarted) or didn't say -- its rows' numbers can't be compared
             // -- or the last one asked for never landed: fetch it (again).
             if Self.shouldFetchHistory(
-                requested: securityHistoryGeneration > 0,
-                outstanding: securityHistoryGeneration > securityHistoryApplied,
+                requested: securityHistoryRequested || securityHistoryGeneration > 0,
+                outstanding: securityHistoryOwed || securityHistoryGeneration > securityHistoryApplied,
                 stale: SecurityTimeline.shared.historyIsStale(host: securityMirrorKey, epoch: epoch),
                 inFlight: securityHistoryInFlight > 0, now: Date(), retryAt: securityHistoryRetryAt) {
                 fetchSecurityHistory(hours: securityHistoryHours)
@@ -1217,6 +1253,18 @@ final class RemoteHostController {
         // Upgrade to push once we learn the server supports it (idempotent).
         if snapshot["supportsPush"] as? Bool == true { startPushSubscription() }
         onSnapshotApplied?()
+    }
+
+    /// The workspace's browser settings from its `/state` row
+    /// (`ACAppDelegate.browserRowFields`). An older host that doesn't send
+    /// them: the defaults, as before.
+    static func applyBrowserFields(from w: [String: Any], to p: inout Profile) {
+        p.browserDisabled = w["browserDisabled"] as? Bool ?? false
+        p.browserPersistent = w["browserPersistent"] as? Bool ?? false
+        p.browserAllowUploads = w["browserAllowUploads"] as? Bool ?? true
+        p.browserAllowDownloads = w["browserAllowDownloads"] as? Bool ?? true
+        p.browserWebcam = w["browserWebcam"] as? Bool ?? false
+        p.browserMicrophone = w["browserMicrophone"] as? Bool ?? false
     }
 
     private func applyWorkspaces(_ workspaces: [[String: Any]], vms: [[String: Any]]) {
@@ -1273,6 +1321,7 @@ final class RemoteHostController {
             p.customFontSize = w["fontSize"] as? Int
             p.customBackgroundHex = w["backgroundHex"] as? String
             p.customForegroundHex = w["foregroundHex"] as? String
+            Self.applyBrowserFields(from: w, to: &p)
             newProfiles[id] = p
             if let gh = w["hasGitHubToken"] as? Bool {
                 newCredentials[id] = WorkspaceCredentials(
@@ -1293,7 +1342,15 @@ final class RemoteHostController {
                 onAppearanceChanged?(p)
             }
         }
+        // The browser turned off (or its boot settings changed) on the host:
+        // told once the mirror holds the new values, so the window closes or
+        // restarts this client's browser for it.
+        let browserMoved = newProfiles.compactMap { id, p -> Profile.ID? in
+            guard let old = profilesByID[id] else { return nil }
+            return old.browserDisabled != p.browserDisabled || old.browserBootSettingsDiffer(from: p) ? id : nil
+        }
         profilesByID = newProfiles
+        for id in browserMoved { onBrowserSettingsChanged?(id) }
         if credentialsByID != newCredentials { credentialsByID = newCredentials }
         let storageMoved = Self.storageChanged(rows: (listModel.profileRows, rows), specs: (specs, newSpecs))
         specs = newSpecs
@@ -1617,7 +1674,15 @@ final class RemoteHostController {
         if let auto = grid["autoFill"] as? Bool { gridStore.setAutoFill(auto) }
     }
 
+    /// The automations section as last applied: the same again changes
+    /// nothing, so it isn't decoded (each item re-encoded first) and pushed
+    /// to the stores -- with every snapshot, several a second.
+    private var lastAutomations: NSDictionary?
+
     private func applyAutomations(_ autos: [String: Any]) {
+        let raw = autos as NSDictionary
+        if let last = lastAutomations, last.isEqual(to: autos) { return }
+        lastAutomations = raw
         let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
         func decode<T: Decodable>(_ arr: [[String: Any]], _ type: T.Type) -> [T] {
             arr.compactMap { dict in
@@ -2862,6 +2927,31 @@ final class RemoteHostController {
         reply?["ok"] as? Bool == true
     }
 
+    /// Most bytes of files a task answer carries to the server: the server
+    /// reads a request body up to 16 MB, and base64 grows them by a third.
+    static let answerAttachmentLimit = 11 * 1024 * 1024
+
+    /// An answer's files as the server reads them (`DroppedFile(wire:)`, a
+    /// folder packed, as a remote new session's); nil when one can't be read
+    /// or they add up to more than `answerAttachmentLimit`.
+    static func answerAttachmentWire(_ files: [DroppedFile]) async -> [[String: Any]]? {
+        var wire: [[String: Any]] = []
+        var total = 0
+        for f in files {
+            var item = f
+            #if os(macOS)
+            if let folder = f.folder {
+                guard let data = try? await FolderUpload.packed(folder) else { return nil }
+                item = DroppedFile(name: f.name, data: data, isImage: false, packedFolder: true)
+            }
+            #endif
+            total += item.data.count
+            guard total <= answerAttachmentLimit else { return nil }
+            wire.append(item.wireDictionary)
+        }
+        return wire
+    }
+
     func taskCommand(_ id: UUID, _ action: String, body: [String: Any]? = nil) {
         send("POST", "/tasks/\(ControlClient.encodeSegment(id.uuidString))/\(action)", body: body)
     }
@@ -2965,12 +3055,20 @@ final class RemoteHostController {
     func fetchTaskTranscript(_ id: UUID) async -> Data? {
         let host = self.host
         let path = "/tasks/\(ControlClient.encodeSegment(id.uuidString))/transcript"
-        let resp = try? await Task.detached(priority: .userInitiated) {
-            try RemoteTransport.bulkClient(for: host).request("GET", path)
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try RemoteTransport.bulkClient(for: host).request("GET", path) }
         }.value
-        guard let resp, resp.status == 200,
-              let b64 = resp.json["transcript"] as? String, !b64.isEmpty else { return nil }
-        return Data(base64Encoded: b64)
+        switch result {
+        case .failure(let error):
+            FatClientLog.log("task transcript \(id.uuidString.prefix(8)): request failed — \(error)")
+            return nil
+        case .success(let resp):
+            let b64 = resp.json["transcript"] as? String ?? ""
+            FatClientLog.log("task transcript \(id.uuidString.prefix(8)): status=\(resp.status) "
+                + "b64=\(b64.count) error=\(resp.json["error"] as? String ?? "-")")
+            guard resp.status == 200, !b64.isEmpty else { return nil }
+            return Data(base64Encoded: b64)
+        }
     }
 
     func upsertAutomation(_ automation: ScheduledAutomation) {
@@ -3219,8 +3317,9 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     private let sessionID: UUID?
 
     init(controller: RemoteHostController, workspaceID: Profile.ID, windowIndex: Int? = nil,
-         sessionID: UUID? = nil, accent: Color) {
+         sessionID: UUID? = nil, accent: Color, background: Bool = false) {
         self.controller = controller
+        self.background = background
         self.workspaceID = workspaceID
         self.windowIndex = windowIndex
         self.sessionID = sessionID
@@ -3255,8 +3354,27 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
         return tabs.activeTab
     }
 
+    /// Read for a chat nobody is looking at (a preload, a chat kept warm off
+    /// stage): it waits while the chat on screen reads (`BulkLanePriority`).
+    private(set) var background: Bool
+
+    func noteBackground(_ on: Bool) { background = on }
+
     func execGuest(_ command: String, timeout: Int) async -> String? {
-        try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+        let controller = controller, workspaceID = workspaceID
+        if background {
+            // Cancelled meanwhile (the chat reopened or gone): no read. The
+            // transport runs detached, so a request sent now would cross the
+            // lane whatever became of its reader.
+            guard (try? await controller.bulkPriority.waitForQuiet()) != nil else { return nil }
+            // Brought on stage while it waited: the user's read now.
+            if background {
+                return try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+            }
+        }
+        return await controller.bulkPriority.foreground {
+            try? await controller.guestExec(workspaceID, command: command, timeout: timeout)
+        }
     }
 
     func typeRemotely(_ target: PaneTarget, _ text: String) async -> RemoteTypeResult {
@@ -3266,7 +3384,10 @@ final class RemoteTranscriptProvider: BeautifiedTranscriptProvider {
     func guestFileOp(_ op: [String: Any]) async -> [String: Any]? {
         // Unpacking a dropped folder can take a while on a big one.
         let timeout = (op["op"] as? String) == "untar" ? 600 : 30
-        return try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
+        let controller = controller, workspaceID = workspaceID
+        return await controller.bulkPriority.foreground {
+            try? await controller.guestFileOp(workspaceID, op: op, timeout: timeout)
+        }
     }
 
     /// Working — unless the server says the session is asking the user
@@ -3874,6 +3995,9 @@ final class RemoteHostWindow: NSWindow {
             if self.shownWorkspace == id, self.controller.tabsModel(for: id)?.rosterLive != true {
                 self.showBootCue(for: id)
             }
+        }
+        controller.onBrowserSettingsChanged = { [weak self] id in
+            self?.browserSettingsChanged(for: id)
         }
         controller.onAppearanceChanged = { [weak self] profile in
             self?.termControllers[profile.id]?.applyProfile(profile)
@@ -5583,16 +5707,23 @@ final class RemoteHostWindow: NSWindow {
                             c.taskCommand(id, "assign", body: ["kind": "none"])
                         }
                     },
-                    answer: { id, ask, text in
+                    answer: { id, ask, text, files in
                         // The server's word on it: refused (the agent asked
                         // again), or not answered — the sheet keeps the text.
                         // The server replies once the answer went (its scan
                         // included): wait for it.
-                        let r = await c.taskCommandReply(
-                            id, "answer", body: ["text": text].merging(ask.map { ["ask": $0.uuidString] } ?? [:]) { a, _ in a },
-                            recvTimeoutSeconds: 180)
+                        var body: [String: Any] = ["text": text]
+                        if let ask { body["ask"] = ask.uuidString }
+                        // Dropped files go with it, as a remote new session's do;
+                        // the server lands them in the asker's inbox.
+                        if !files.isEmpty {
+                            guard let wire = await RemoteHostController.answerAttachmentWire(files) else { return false }
+                            body["attachments"] = wire
+                        }
+                        let r = await c.taskCommandReply(id, "answer", body: body, recvTimeoutSeconds: 180)
                         return RemoteHostController.answerAccepted(r)
                     },
+                    answerAttachmentLimit: RemoteHostController.answerAttachmentLimit,
                     recall: { c.taskCommand($0, "recall") },
                     retryLanding: { c.taskCommand($0, "retry-landing") }),
                 sessionStore: c.sessionStore)
@@ -7312,12 +7443,18 @@ final class RemoteHostWindow: NSWindow {
 
     private func browserModel(for id: Profile.ID) -> BrowserPaneModel {
         if let m = browserModels[id] { return m }
-        let m = BrowserPaneModel(); browserModels[id] = m; return m
+        let m = BrowserPaneModel()
+        m.onRestart = { [weak self] in self?.rebootBrowser(for: id) }
+        browserModels[id] = m
+        return m
     }
 
     /// Lazily create the workspace's browser controller in remote-proxy mode.
     /// Nil until the remote subnet + SOCKS port are both known (first `/state`).
     private func browserController(for id: Profile.ID) -> WorkspaceBrowserController? {
+        // Turned off in the workspace's settings: no browser here either
+        // (the server refuses the agents' browser tools on its side).
+        guard !browserDisabled(id) else { return nil }
         if let c = browserControllers[id] { return c }
         guard let subnet = controller.vmnetSubnet, let port = controller.socks?.port else { return nil }
         let profile = controller.profile(for: id)
@@ -7368,8 +7505,22 @@ final class RemoteHostWindow: NSWindow {
         else { setBrowserOpen(id, true) }
     }
 
+    /// Whether closing `closing`'s browser collapses the shared pane: only
+    /// when it is the one shown, or none is (another workspace's browser on
+    /// screen stays).
+    nonisolated static func closeCollapsesPane(closing: Profile.ID, shown: Profile.ID?) -> Bool {
+        shown == nil || shown == closing
+    }
+
+    private func browserDisabled(_ id: Profile.ID) -> Bool {
+        controller.profile(for: id)?.browserDisabled == true
+    }
+
     private func setBrowserOpen(_ id: Profile.ID, _ open: Bool) {
         if open {
+            if browserDisabled(id) {
+                FatClientLog.log("browser: turned off for workspace \(id.uuidString.prefix(8))"); return
+            }
             if shownBrowser == id, browserWidthConstraint.constant > 0 { return }   // already shown
             guard let ctl = browserController(for: id) else {
                 FatClientLog.log("browser: tunnel not ready (no subnet/socks yet)"); return
@@ -7407,6 +7558,12 @@ final class RemoteHostWindow: NSWindow {
             // host so its VMs are reachable system-wide, not just from the pane.
             offerBrowserVPNIfNeeded()
         } else {
+            // Closing a browser that is only remembered open (another
+            // workspace's browser is on screen) forgets it and stops its
+            // VM, but must leave the shared pane — and the browser in it —
+            // alone. Finding: "Disabling a hidden workspace browser closes
+            // another workspace's visible pane".
+            let collapsePane = Self.closeCollapsesPane(closing: id, shown: shownBrowser)
             browserOpen.remove(id)
             browserOpenSessions = browserOpenSessions.filter { $0.value != id }
             if shownBrowser == id { shownBrowser = nil; controller.listModel.browserPaneOpen = false }
@@ -7417,6 +7574,10 @@ final class RemoteHostWindow: NSWindow {
             // keeps the VM resumable.) Without this the fat client's browser
             // lived forever once opened.
             browserControllers[id]?.setVisible(false, teardownWhenHidden: true)
+            guard collapsePane else {
+                controller.listModel.browserOpenWorkspaces = browserOpen
+                return
+            }
             // Detach the browser content so nothing inside it can resist the
             // width-0 close (a residual SwiftUI/framebuffer minimum was leaving
             // the pane "smaller but not gone"), then animate the collapse with a
@@ -7454,6 +7615,23 @@ final class RemoteHostWindow: NSWindow {
         }
     }
 
+    /// The host changed the workspace's browser settings. Turned off: the
+    /// pane closes and this client's browser VM and relay go now -- not at
+    /// the next open (finding "Remote browser ignores the workspace's Browser
+    /// off setting", CWE-863). Otherwise (turned back on, or a boot setting
+    /// changed): an open browser restarts with the new settings.
+    private func browserSettingsChanged(for id: Profile.ID) {
+        guard browserDisabled(id) else { rebootBrowser(for: id); return }
+        if browserOpen.contains(id) || shownBrowser == id { setBrowserOpen(id, false) }
+        browserOpenSessions = browserOpenSessions.filter { $0.value != id }
+        browserControllers[id]?.stop()
+        browserControllers[id] = nil
+        browserRelays[id]?.stop()
+        browserRelays[id] = nil
+        controller.listModel.browserOpenWorkspaces = browserOpen
+        FatClientLog.log("browser: turned off on the host for \(id.uuidString.prefix(8)) -- closed")
+    }
+
     /// Start the browser-MCP relay for a workspace so the remote agent's
     /// `browser_*` tools (Claude opening a page) are redirected to THIS rich
     /// client's pane instead of opening on the remote's own app. Dialing the
@@ -7463,12 +7641,13 @@ final class RemoteHostWindow: NSWindow {
     /// VM so we don't spin re-dialing an off workspace.
     private func ensureBrowserRelay(_ id: Profile.ID) {
         guard browserRelays[id] == nil, !controller.isAgentHost,
-              !controller.agentHostWorkspaces.contains(id) else { return }
+              !controller.agentHostWorkspaces.contains(id), !browserDisabled(id) else { return }
         let state = controller.runState(for: id)
         guard state == .running || state == .booting else { return }
         let relay = BrowserMCPRelayClient(
             host: controller.host, vm: id.uuidString,
             browser: { [weak self] in self?.browserControllers[id] },
+            disabled: { [weak self] in self?.browserDisabled(id) ?? true },
             ensureBrowser: { [weak self] in
                 // The remote agent needs a browser that isn't up yet — boot it
                 // here, surfacing the pane the way the local window does.
@@ -8550,6 +8729,12 @@ final class RemoteHostWindow: NSWindow {
     /// user is doing.
     private func preloadNextChat() {
         guard !preloading, controller.connected, !controller.linkSlow else { return }
+        // The chat on screen first: no preload while it reads or catches up,
+        // nor on a link too thin for one not to be in its way.
+        guard !controller.bulkPriority.foregroundBusy,
+              beautifiedModel.map({ !$0.loading && !$0.catchingUp }) ?? true,
+              BulkLanePriority.preloadAffordable(bytesPerSecond: controller.linkStats.snapshot().bytesPerSecond)
+        else { return }
         let warm = Set(warmChats.values.compactMap { $0.currentSession?()?.id })
         let running = Set(controller.listModel.profileRows.filter { $0.state == .running }.map(\.id))
         let list = controller.sessionStore.sessions.filter { running.contains($0.profileID) }
@@ -8558,7 +8743,7 @@ final class RemoteHostWindow: NSWindow {
               let w = s.windowIndex else { return }
         preloading = true
         let provider = RemoteTranscriptProvider(controller: controller, workspaceID: s.profileID, windowIndex: w,
-                                                sessionID: s.id, accent: .accentColor)
+                                                sessionID: s.id, accent: .accentColor, background: true)
         let activity = SessionHome.lastActivity(s)
         Task { [weak self] in
             await BeautifiedSessionModel.preloadHistory(provider: provider, agent: s.tool.rawValue, profileID: s.profileID)
@@ -8983,6 +9168,14 @@ extension RemoteHostController: RemoteDelegationLink {
     /// rows, so counts made from it fell short of the server's own. A host
     /// without the route (older) keeps the mirror.
     func fetchSecurityHistory(hours: Int) {
+        // Asked for: fetched if the host falls back to mirroring.
+        securityHistoryRequested = true
+        // A delta host's rows are all here already (it sends what it holds).
+        guard !securityDeltaHost else {
+            securityHistoryHours = max(0, hours)
+            return
+        }
+        securityHistoryOwed = false
         let host = self.host
         let key = securityMirrorKey
         // Each fetch stamped with its range (see `acceptsHistory`).
@@ -9010,6 +9203,8 @@ extension RemoteHostController: RemoteDelegationLink {
                     }
                     self.securityHistoryFailures = 0
                     self.securityHistoryRetryAt = nil
+                    // The host went to deltas meanwhile: they replace it.
+                    guard !self.securityDeltaHost else { return }
                     guard Self.acceptsHistory(generation: generation, hours: range,
                                               requestedHours: self.securityHistoryHours,
                                               applied: self.securityHistoryApplied) else { return }
@@ -9018,6 +9213,39 @@ extension RemoteHostController: RemoteDelegationLink {
                     // From the run it came from: if the host restarted since,
                     // the next snapshot finds it stale and fetches again.
                     SecurityTimeline.shared.applyHistory(rows, host: key, epoch: epoch)
+                }
+            }
+        }
+    }
+
+    /// Fetch the host's timeline rows this copy hasn't got (all it holds at
+    /// first, or after the host restarted). One at a time; a failed one is
+    /// tried again by a later snapshot, backing off.
+    func fetchSecurityDelta() {
+        let host = self.host
+        let key = securityMirrorKey
+        let q = SecurityTimeline.shared.deltaQuery(host: key)
+        var path = "/security-timeline?after=\(q.after.map(String.init) ?? "")"
+        if let epoch = q.epoch?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) { path += "&epoch=\(epoch)" }
+        securityHistoryInFlight += 1
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resp = try? RemoteTransport.client(for: host).request("GET", path, recvTimeoutSeconds: 30)
+            let body = resp.flatMap { $0.status == 200 && $0.json["rows"] != nil ? $0.json : nil }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.securityHistoryInFlight = max(0, self.securityHistoryInFlight - 1)
+                    guard let body else {
+                        self.securityHistoryFailures += 1
+                        self.securityHistoryRetryAt = Date().addingTimeInterval(
+                            Self.historyRetryDelay(failures: self.securityHistoryFailures))
+                        return
+                    }
+                    self.securityHistoryFailures = 0
+                    self.securityHistoryRetryAt = nil
+                    // The host went back to mirroring meanwhile.
+                    guard self.securityDeltaHost else { return }
+                    SecurityTimeline.shared.applyDelta(body, host: key, base: q.base)
                 }
             }
         }

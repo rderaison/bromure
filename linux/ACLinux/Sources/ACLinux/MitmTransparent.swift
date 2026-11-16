@@ -349,14 +349,14 @@ extension MitmProxy {
         let target = String(parts[1])
         if let schemeSep = target.range(of: "://") {
             let hostPart = target[schemeSep.upperBound...].prefix { $0 != "/" }
-            let host = hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart)
-            if !host.isEmpty { return host.lowercased() }
+            let host = EgressPolicy.normalizedHost(hostPart.split(separator: ":").first.map(String.init) ?? String(hostPart))
+            if !host.isEmpty { return host }
         }
         // origin-form: pull the Host header.
         for line in text.split(separator: "\r\n") where line.lowercased().hasPrefix("host:") {
             let v = line.dropFirst("host:".count).trimmingCharacters(in: .whitespaces)
-            let host = v.split(separator: ":").first.map(String.init) ?? v
-            if !host.isEmpty { return host.lowercased() }
+            let host = EgressPolicy.normalizedHost(v.split(separator: ":").first.map(String.init) ?? v)
+            if !host.isEmpty { return host }
         }
         return nil
     }

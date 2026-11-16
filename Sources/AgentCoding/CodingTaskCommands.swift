@@ -20,33 +20,8 @@ extension CodingTaskEngine {
     nonisolated static func transcriptLocatePrefix(
         path: String, since: Int, agent: String?, pinnedWindow: Int?,
         pin: TranscriptPin = TranscriptPin()) -> String {
-        var cmd = "f=\"\"; pe=\"\"; "
-        // Kimi records no per-window path, so the session's own id (pinned
-        // by the engine once this launch's journal appeared) names its file.
-        if agent == "kimi", let id = pin.kimiSession, AgentSessionLocator.isKimiSessionID(id) {
-            cmd += AgentSessionLocator.kimiPinnedFragment(id: id, into: "f")
-        } else if agent == "grok", let id = pin.grokSession, AgentSessionLocator.isConversationUUID(id) {
-            // The session's own conversation, or nothing yet (`pe`): never
-            // the folder's newest, which may be another session's.
-            cmd += AgentSessionLocator.grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if agent == "codex", let id = pin.codexSession, AgentSessionLocator.isConversationUUID(id) {
-            cmd += AgentSessionLocator.codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if agent == "omp", let id = pin.ompSession, AgentSessionLocator.isConversationUUID(id) {
-            cmd += AgentSessionLocator.ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
-        } else if let w = pinnedWindow {
-            // The transcript the tab's agent itself named (its hook records the
-            // path per window — see agent-status.sh) wins over "the newest file
-            // in the folder": two agents in one folder (a delegate beside its
-            // delegator) would otherwise take turns owning each other's view.
-            // Still floored: a file older than this process is another's.
-            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
-        }
-        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent,
-                                              kimiCreatedSince: pin.kimiCreatedSince,
-                                              kimiExclude: pin.kimiExclude)
-            + "fi; "
-        return cmd
+        AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                         pinnedWindow: pinnedWindow, pin: pin)
     }
     /// The beautified view's transcript reader: one round-trip that resolves
     /// the file and returns only what the host doesn't hold yet, so the view
@@ -155,90 +130,8 @@ extension CodingTaskEngine {
     ///   long Claude session).
     /// "Earlier" always makes progress: a line longer than the window comes
     /// back whole rather than as nothing (which stalled "load earlier").
-    nonisolated static let tailJumpFactor = 4
-    nonisolated static let transcriptReaderPython = #"""
-    import sys, os
-    f, known, off, want, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-    try:
-        size = os.path.getsize(f)
-    except OSError:
-        sys.exit(0)
-    want = max(want, 1)
-    BLK = 1 << 16
-    def line_start(fh, pos, limit):
-        # Start of the line holding byte `pos`; None when it begins more
-        # than `limit` bytes back (limit None: no bound).
-        p = pos
-        floor = 0 if limit is None else max(0, pos - limit)
-        while p > floor:
-            q = max(floor, p - BLK)
-            fh.seek(q)
-            b = fh.read(p - q)
-            j = b.rfind(b'\n')
-            if j >= 0:
-                return q + j + 1
-            p = q
-        return 0 if floor == 0 else None
-    def next_line(fh, pos, end):
-        # Offset just past the first newline in [pos, end); None if none.
-        p = pos
-        while p < end:
-            fh.seek(p)
-            b = fh.read(min(BLK, end - p))
-            if not b:
-                break
-            j = b.find(b'\n')
-            if j >= 0:
-                return p + j + 1
-            p += len(b)
-        return None
-    def whole_end(fh, start, end):
-        # Offset just past the last newline in [start, end); start if none.
-        p = end
-        while p > start:
-            q = max(start, p - BLK)
-            fh.seek(q)
-            b = fh.read(p - q)
-            j = b.rfind(b'\n')
-            if j >= 0:
-                return q + j + 1
-            p = q
-        return start
-    with open(f, 'rb') as fh:
-        if mode == 'earlier':
-            end = min(max(off, 0), size)
-            s0 = max(0, end - want)
-            start = 0
-            if s0 > 0:
-                nx = next_line(fh, s0, end)
-                start = nx if nx is not None and nx < end else line_start(fh, max(end - 1, 0), None)
-        else:
-            fresh = (f != known) or off < 0 or off > size or (size - off) > want * TAILJUMP
-            if fresh:
-                s0 = max(0, size - want)
-                start = 0
-                if s0 > 0:
-                    ls = line_start(fh, s0, want)
-                    if ls is not None:
-                        start = ls
-                    else:
-                        we = whole_end(fh, s0, size)
-                        nx = next_line(fh, s0, we)
-                        start = nx if nx is not None and nx < we else line_start(fh, s0, None)
-            else:
-                start = off
-            end = whole_end(fh, start, size)
-        sys.stdout.write('%d\n%d\n%d\n' % (size, start, end))
-        sys.stdout.flush()
-        fh.seek(start)
-        left = end - start
-        while left > 0:
-            b = fh.read(min(1 << 20, left))
-            if not b:
-                break
-            sys.stdout.buffer.write(b)
-            left -= len(b)
-    """#.replacingOccurrences(of: "TAILJUMP", with: String(tailJumpFactor))
+    nonisolated static var tailJumpFactor: Int { TranscriptChunkReader.tailJumpFactor }
+    nonisolated static var transcriptReaderPython: String { TranscriptChunkReader.python }
 
     nonisolated static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"

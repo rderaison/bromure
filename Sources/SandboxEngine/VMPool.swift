@@ -115,6 +115,17 @@ public final class VMPool {
 
     public var hasWarmVM: Bool { warmVM != nil }
 
+    /// One claim's outcome: the VM, or — when a VM failed to boot — that
+    /// claim's own error (nil when it was cut short by shutdown or had no
+    /// VM to give). Per invocation, never shared: concurrent window launches
+    /// each claim, and a pool-wide "last error" would let one launch read
+    /// (or lose) another's cause. Lets the app show the real cause and retry
+    /// network failures when the host network changes.
+    public struct ClaimResult {
+        public let vm: WarmVM?
+        public let error: Error?
+    }
+
     /// Access the pre-warmed VM (e.g. to install serial handlers before claiming).
     public var currentWarmVM: WarmVM? { warmVM }
 
@@ -149,17 +160,11 @@ public final class VMPool {
         isWarming = true
         defer { isWarming = false }
 
-        let defaults = UserDefaults.standard
-        let networkMode = defaults.string(forKey: "vm.networkMode") ?? "nat"
         let bridgedIface: String?
         if let interface = requestedConfig?.networkInterface, !interface.isEmpty {
             bridgedIface = interface == "nat" ? nil : interface
-        } else if networkMode == "bridged",
-           let ifName = defaults.string(forKey: "vm.bridgedInterface"),
-           !ifName.isEmpty {
-            bridgedIface = ifName
         } else {
-            bridgedIface = nil
+            bridgedIface = Self.defaultBridgedInterface()
         }
 
         let warm = try await bootVM(bridgedInterface: bridgedIface, requestedConfig: requestedConfig)
@@ -199,13 +204,23 @@ public final class VMPool {
         }
     }
 
+    /// The app-wide network choice (Settings ▸ Network): the interface to
+    /// bridge on, or nil for shared NAT.
+    private static func defaultBridgedInterface() -> String? {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: "vm.networkMode") == "bridged",
+              let ifName = defaults.string(forKey: "vm.bridgedInterface"),
+              !ifName.isEmpty else { return nil }
+        return ifName
+    }
+
     /// Boot a fresh VM with the specified network mode.
     /// - Parameter bridgedInterface: Interface name for bridged mode, or nil for NAT.
     /// - Returns: A booted WarmVM ready for claim.
     private func bootVM(bridgedInterface: String?, requestedConfig: VMConfig? = nil) async throws -> WarmVM {
         let config = requestedConfig ?? self.config
         let imageOK = requireImageVersion
-            ? imageManager.baseImageExists       // files + version stamp
+            ? imageManager.bootableImageExists   // files + a bootable stamp
             : imageManager.hasBootFiles          // files only (reused image)
         guard imageOK else {
             throw SandboxError.baseImageNotFound
@@ -377,7 +392,9 @@ public final class VMPool {
     /// so a compromised guest cannot reach any host files.
     ///
     /// Writes chrome-env, starts services, and touches chrome-ready so xinitrc
-    /// proceeds. Returns nil if no VM is available.
+    /// proceeds. Returns nil if no VM is available; use
+    /// ``claimResult(config:profileID:profileImageDir:profileDiskKey:restoreSession:onColdBoot:)``
+    /// to learn why.
     public func claim(
         config: VMConfig,
         profileID: UUID? = nil,
@@ -386,6 +403,37 @@ public final class VMPool {
         restoreSession: Bool = false,
         onColdBoot: (() -> Void)? = nil
     ) async -> WarmVM? {
+        await claimResult(config: config, profileID: profileID, profileImageDir: profileImageDir,
+                          profileDiskKey: profileDiskKey, restoreSession: restoreSession,
+                          onColdBoot: onColdBoot).vm
+    }
+
+    /// ``claim(config:profileID:profileImageDir:profileDiskKey:restoreSession:onColdBoot:)``,
+    /// also returning this invocation's boot error when it yields no VM.
+    public func claimResult(
+        config: VMConfig,
+        profileID: UUID? = nil,
+        profileImageDir: URL? = nil,
+        profileDiskKey: String? = nil,
+        restoreSession: Bool = false,
+        onColdBoot: (() -> Void)? = nil
+    ) async -> ClaimResult {
+        var failure: Error?
+        let vm = await performClaim(config: config, profileID: profileID, profileImageDir: profileImageDir,
+                                    profileDiskKey: profileDiskKey, restoreSession: restoreSession,
+                                    onColdBoot: onColdBoot, onFailure: { failure = $0 })
+        return ClaimResult(vm: vm, error: vm == nil ? failure : nil)
+    }
+
+    private func performClaim(
+        config: VMConfig,
+        profileID: UUID?,
+        profileImageDir: URL?,
+        profileDiskKey: String?,
+        restoreSession: Bool,
+        onColdBoot: (() -> Void)?,
+        onFailure: (Error) -> Void
+    ) async -> WarmVM? {
         guard !shutdownRequested else { return nil }
         var reportedColdBoot = false
         func reportColdBoot() {
@@ -393,29 +441,12 @@ public final class VMPool {
             reportedColdBoot = true
             onColdBoot?()
         }
-        // If no pre-warmed VM is available, warm up on demand.
-        // If another task is already warming up, wait for it to finish.
-        if warmVM == nil {
-            reportColdBoot()
-            if isWarming {
-                // Another task is warming up — poll until it finishes
-                for _ in 0..<300 { // up to 30s
-                    try? await Task.sleep(for: .milliseconds(100))
-                    if warmVM != nil || !isWarming { break }
-                }
-            }
-            if warmVM == nil {
-                try? await warmUp(requestedConfig: config)
-            }
-        }
-        // If the warm VM died (e.g. pool was restarted), discard and warm a fresh one.
-        // Paused is valid (pool suspends after 30s idle).
+        // A parked VM that died (e.g. the pool was restarted) is dropped.
+        // Paused is valid (the pool suspends a parked VM after 30s idle).
         if let warm = warmVM, warm.vm.state != .running && warm.vm.state != .paused {
-            reportColdBoot()
             print("[VMPool] claim: discarding dead warm VM (state=\(warm.vm.state.rawValue))")
             _ = await Self.releaseResources(warm)
             warmVM = nil
-            try? await warmUp(requestedConfig: config)
         }
 
         // Check whether the profile needs different networking or rendering than the pool VM.
@@ -431,20 +462,28 @@ public final class VMPool {
                 profileNetwork = profileIface
                 profileBridgedIface = profileIface
             }
-        } else {
-            profileNetwork = warmVM?.bootedNetworkMode ?? "nat"
+        } else if let warm = warmVM {
+            profileNetwork = warm.bootedNetworkMode
             profileBridgedIface = nil  // will use pool VM as-is
+        } else {
+            profileBridgedIface = Self.defaultBridgedInterface()
+            profileNetwork = profileBridgedIface ?? "nat"
         }
 
         let profileWantsMetal = experimentalGPU && config.enableGPU && config.enableMetalRenderer &&
             imageManager.supportsExperimentalVirgl && MetalRendererPreference.isSupported
-        if let warm = warmVM,
-           profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
-            (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
-             config.experimentalGPUCount != warm.graphicsSessions.count) ||
-            (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)) {
+        // Boot a VM for this session when none is parked (the browser
+        // never parks one) or the parked one can't serve this config.
+        let parkedFits = warmVM.map { warm in
+            !(profileNetwork != warm.bootedNetworkMode || profileWantsMetal != warm.requestedMetalRenderer ||
+              (profileWantsMetal && (config.experimentalGPUCount > 1 || warm.graphicsSessions.count > 1) &&
+               config.experimentalGPUCount != warm.graphicsSessions.count) ||
+              (profileWantsMetal && config.sharedWindowScanoutCount != (warm.graphicsSession?.outputCapacity ?? 1)))
+        } ?? false
+        if !parkedFits {
             reportColdBoot()
-            print("[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
+            print(warmVM == nil ? "[VMPool] claim: booting a VM for this session"
+                  : "[VMPool] claim: profile network or renderer differs from pool — booting dedicated VM")
             if !automaticallyReplenishes, let unused = warmVM {
                 warmVM = nil
                 suspendTimer?.invalidate()
@@ -480,6 +519,7 @@ public final class VMPool {
                 return warm
             } catch {
                 print("[VMPool] claim: dedicated VM boot failed: \(error)")
+                onFailure(error)
                 return nil
             }
         }
@@ -618,6 +658,8 @@ public final class VMPool {
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }
         if config.enableZeroCopy { cfg["zeroCopy"] = true }
+        // Opt-out key: hosts that never send it keep hardware decoding.
+        if !config.hardwareVideoDecode { cfg["disableHardwareVideoDecode"] = true }
         if config.enableSmoothScrolling { cfg["smoothScrolling"] = true }
         if config.phishingWarning { cfg["phishingGuard"] = true }
         if config.swapCmdCtrl { cfg["swapCmdCtrl"] = true }
@@ -861,9 +903,15 @@ public final class VMPool {
             cfg["appVersion"] = version
         }
 
-        // User-Agent: empty = guest presents as Chrome on macOS; non-empty
-        // overrides verbatim. Always pass it so the guest knows the choice.
+        // User-Agent: empty = the guest's Linux Chrome identity; non-empty
+        // overrides verbatim, except that a preset's Chrome version follows
+        // the installed browser. Always pass it so the guest knows the choice.
         cfg["userAgent"] = config.userAgent
+        if ProfileSettings.userAgentTracksBrowser(config.userAgent) { cfg["userAgentTracksBrowser"] = true }
+        // A macOS identity's Client Hints report this Mac's OS version, as
+        // Chrome on this Mac would.
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        cfg["hostOSVersion"] = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
 
         // Test suite: inject TEST_SUITE flag and expectations for guest test-runner.sh
         if config.testSuite {

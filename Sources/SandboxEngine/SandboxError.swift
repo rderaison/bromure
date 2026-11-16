@@ -2,6 +2,14 @@ import Foundation
 
 /// Errors specific to the Bromure tool.
 public enum SandboxError: LocalizedError {
+    /// A boot that failed for want of a usable network (no host network,
+    /// or the bridged interface is gone) — worth retrying when the host
+    /// network changes.
+    public static func isNetworkFailure(_ error: Error?) -> Bool {
+        if case .networkFilterFailed? = error as? SandboxError { return true }
+        return false
+    }
+
     case unsupportedHardware
     case baseImageNotFound
     case corruptMetadata(String)

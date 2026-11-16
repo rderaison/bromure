@@ -220,18 +220,40 @@ public struct ProfileSettings: Codable, Equatable {
     public var enableMetalRenderer: Bool = true
     public var enableWebGL: Bool = false
     public var enableZeroCopy: Bool = true
+    /// Decode video in the guest GPU (VA-API over VirGL) instead of on
+    /// the CPU. Only takes effect where the VirGL video device is present.
+    public var hardwareVideoDecode: Bool = true
     public var enableSmoothScrolling: Bool = true
     /// One renderer process per site (Chromium's strict site isolation).
     /// Off = Chromium's partial isolation (sites you log into still get
     /// their own process). Measured on an ad-heavy page: 70 renderer
     /// processes and ~2.1 GB used with it on, 5 and ~1.4 GB with it off.
     public var strictSiteIsolation: Bool = true
-    /// Custom User-Agent override. Empty = present as Chrome on macOS
-    /// (the guest builds the string from its real Chromium version so the
-    /// platform reads "Macintosh" instead of leaking the Linux VM, while
-    /// the Chrome version stays accurate). A non-empty value is sent to
-    /// Chromium verbatim via `--user-agent`.
-    public var userAgent: String = ""
+    /// The User-Agent string the browser presents. New profiles present as
+    /// Chrome on macOS (`defaultUserAgent`). Empty = the guest's built-in
+    /// Linux Chrome identity; profiles saved before the field existed decode
+    /// to that, so they don't change. For a macOS or Windows string the
+    /// guest also makes Client Hints and navigator.platform match
+    /// (config-agent's BROWSER_IDENTITIES + identity-agent.py).
+    public var userAgent: String = ProfileSettings.defaultUserAgent
+    /// The User-Agent every new profile starts with.
+    public static let defaultUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    /// Chrome on Windows, in Chrome's reduced form.
+    public static let windowsUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    /// Identities offered in Profile Settings. The guest keeps these on the
+    /// installed browser's version (Chrome/<major>.0.0.0); any other string
+    /// is applied verbatim.
+    public static let userAgentPresets: [(name: String, userAgent: String)] = [
+        ("macOS", defaultUserAgent),
+        ("Windows", windowsUserAgent),
+    ]
+    /// Whether `userAgent` is one of the presets, whose Chrome version the
+    /// guest replaces with the installed one.
+    public static func userAgentTracksBrowser(_ userAgent: String) -> Bool {
+        userAgentPresets.contains { $0.userAgent == userAgent.trimmingCharacters(in: .whitespaces) }
+    }
     /// Which browser the session launches (Chromium or Google Chrome).
     public var browser: BrowserChoice = .chromium
 
@@ -372,7 +394,7 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableMetalRenderer, enableWebGL, enableZeroCopy, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
+        case homePage, enableGPU, enableMetalRenderer, enableWebGL, enableZeroCopy, hardwareVideoDecode, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
@@ -403,9 +425,10 @@ public struct ProfileSettings: Codable, Equatable {
         enableMetalRenderer = try c.decodeIfPresent(Bool.self, forKey: .enableMetalRenderer) ?? defaults.enableMetalRenderer
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
+        hardwareVideoDecode = try c.decodeIfPresent(Bool.self, forKey: .hardwareVideoDecode) ?? defaults.hardwareVideoDecode
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
         strictSiteIsolation = try c.decodeIfPresent(Bool.self, forKey: .strictSiteIsolation) ?? defaults.strictSiteIsolation
-        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? defaults.userAgent
+        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? ""
         browser = try c.decodeIfPresent(BrowserChoice.self, forKey: .browser) ?? defaults.browser
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
         // Migration: legacy enableWarp bool → vpnMode enum
@@ -488,6 +511,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableMetalRenderer, forKey: .enableMetalRenderer)
         try c.encode(enableWebGL, forKey: .enableWebGL)
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
+        try c.encode(hardwareVideoDecode, forKey: .hardwareVideoDecode)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
         try c.encode(strictSiteIsolation, forKey: .strictSiteIsolation)
         try c.encode(userAgent, forKey: .userAgent)
@@ -624,6 +648,7 @@ public struct ProfileSettings: Codable, Equatable {
             enableMetalRenderer: enableMetalRenderer,
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,
+            hardwareVideoDecode: hardwareVideoDecode,
             enableSmoothScrolling: enableSmoothScrolling,
             strictSiteIsolation: strictSiteIsolation,
             blockMalwareSites: blockMalwareSites,

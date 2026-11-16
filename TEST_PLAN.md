@@ -173,8 +173,8 @@
 - [ ] Enable with persistence ON — Chromium extension loaded, warns on suspicious password entry
 - [ ] Test with a domain NOT in Tranco top-10k — verify warning shown
 - [ ] Test with a domain IN Tranco top-10k — no warning
-- [ ] Navigate to https://travel.secl.io — verify phishing warning banner appears
-- [ ] Click "I trust this site" on https://travel.secl.io — verify warning is dismissed and does NOT reappear on subsequent visits to the same site
+- [ ] On a site not yet trusted (e.g. https://example.com), add a password field — verify phishing warning banner appears
+- [ ] Click "I trust this site" on that site — verify warning is dismissed and does NOT reappear on subsequent visits to the same site
 
 ### 8.3 Block Screen Capture
 - [ ] Block Screen Capture OFF (default) — browser window visible in screenshots and screen recordings
@@ -222,7 +222,6 @@
 - [ ] WARP toggle is instant — 3-5s after boot, toggle WARP on, verify `ipconfig.me` shows a different IP; toggle off, verify original IP returns
 - [ ] WARP with <2GB RAM — memory warning dialog, offer to increase
 - [ ] WARP disabled when custom proxy is configured (orange warning)
-- [ ] Verify gcompat + libresolv_stub.so loaded for WARP binary
 
 ### 10.2 Ad Blocking
 - [ ] Block Ads OFF (default) — ads visible on ad-heavy sites

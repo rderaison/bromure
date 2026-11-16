@@ -12,6 +12,10 @@ DerivedData/
 xcuserdata/
 *.xcscmblueprint
 Package.resolved
+# Except the iOS app's: the TestFlight archive runs package plug-ins without a
+# trust prompt, so it builds only these reviewed pins
+# (scripts/verify-ios-packages.py).
+!ios/BromureRemote/BromureRemote.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 *.provisionprofile
 Tests/node_modules/
 .claude/dev/

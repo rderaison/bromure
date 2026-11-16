@@ -20,9 +20,21 @@ extension ACAppDelegate: ProfileEditHost {
         // immediately instead of on the next teardown. Runs after the
         // `profiles` refresh above so the new controller reads the saved
         // value.
-        if let original = editing, original.browserBootSettingsDiffer(from: profile) {
+        if let original = editing, original.browserDisabled != profile.browserDisabled {
+            // Turned off: the running browser goes and the agents' browser
+            // streams are dropped, so they reconnect to a server that
+            // refuses. Turned on: the pane and the tools come back.
+            unifiedWindow?.browserSettingChanged(for: profile.id)
+            browserMCPBridges[profile.id]?.browserSettingChanged()
+        } else if let original = editing, original.browserBootSettingsDiffer(from: profile) {
             unifiedWindow?.rebootBrowser(for: profile.id)
         }
+    }
+
+    /// The workspace's browser is turned off (`Profile.browserDisabled`).
+    /// An unknown workspace counts as off: the browser MCP server refuses.
+    func browserDisabled(_ id: Profile.ID) -> Bool {
+        profiles.first { $0.id == id }?.browserDisabled ?? true
     }
 
     /// The notes rules (ProfileNotes), by their old names.

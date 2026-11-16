@@ -62,7 +62,6 @@ final class AppState: @unchecked Sendable {
     private(set) var pool: VMPool?
     private let imageManager: LinuxImageManager
     private let storageDir: URL
-    private var warmUpTask: Task<Void, Never>?
     private var initTask: Task<Void, Never>?
 
     /// Profile management
@@ -134,6 +133,8 @@ final class AppState: @unchecked Sendable {
             if self.selectedProfileID == nil {
                 self.selectedProfileID = self.profileManager.allProfiles.first?.id
             }
+            // The pool may have been waiting on the roster.
+            self.markReadyIfProfilesLoaded()
         }
     }
 
@@ -234,9 +235,9 @@ final class AppState: @unchecked Sendable {
             startPool()
             scheduleImageMaintenance()
         } else if imageManager.hasImageFiles {
-            // Image files exist but version mismatch — auto-reinstall
+            // Image files exist but version mismatch — auto-reinstall. The
+            // old image stays in place until the replacement is promoted.
             installReason = .update
-            deleteImageFiles()
             startInit()
         } else {
             phase = .needsSetup
@@ -244,10 +245,6 @@ final class AppState: @unchecked Sendable {
     }
 
     func startInit() {
-        // Cancel any in-progress warm-up
-        warmUpTask?.cancel()
-        warmUpTask = nil
-
         phase = .initializing(status: "Preparing...", progress: nil)
         initSteps = []
         consoleLog = ""
@@ -314,6 +311,22 @@ final class AppState: @unchecked Sendable {
                 self.startPool()
             } catch {
                 guard !Task.isCancelled else { return }
+                // Both install paths promote all boot files as one unit
+                // (ImagePromotion), so a failure leaves the previous image
+                // whole. Keep browsing on it when the pool can boot it
+                // (bootableImageExists, the pool's own check): the current
+                // image, or the previous one still within
+                // minimumBootableImageVersion — the upgrade is retried at the
+                // next launch. Finding: "A failed 504 upgrade prevents
+                // browsing with an intact 503 image".
+                if self.installReason != .firstRun, self.imageManager.bootableImageExists {
+                    let message = Self.localizedMessage(for: error)
+                    NSLog("Bromure: image install failed, keeping the previous image: %@", message)
+                    self.consoleLog += "\nImage install failed (\(message)); keeping the previous image.\n"
+                    self.phase = .warmingUp
+                    self.startPool()
+                    return
+                }
                 self.phase = .error(Self.localizedMessage(for: error))
             }
         }
@@ -419,16 +432,13 @@ final class AppState: @unchecked Sendable {
         guard response == .alertFirstButtonReturn else { return }
 
         // Same teardown restartPool() uses, then the normal install flow —
-        // open sessions run on clones and keep going; the warm pool VM is
-        // recycled onto the fresh image when startInit finishes.
-        warmUpTask?.cancel()
-        warmUpTask = nil
+        // open sessions run on clones and keep going; new windows boot
+        // from the fresh image once startInit finishes.
         poolReady = false
         let oldPool = pool
         pool = nil
         Task { await oldPool?.shutdown() }
         installReason = .refresh
-        deleteImageFiles()
         startInit()
     }
 
@@ -467,7 +477,7 @@ final class AppState: @unchecked Sendable {
                     self?.handleProgress(event)
                 }
             }
-            // The pool's warm VM was cloned from the old base — recycle it.
+            // New windows boot from the updated base.
             phase = .warmingUp
             restartPool()
         } catch {
@@ -545,17 +555,13 @@ final class AppState: @unchecked Sendable {
     /// No-op if an image build is in progress (no base image to warm up).
     func restartPool() {
         if case .initializing = phase { return }
-        guard imageManager.baseImageExists else {
+        guard imageManager.bootableImageExists else {
             // Image was deleted or never created — show setup screen
-            warmUpTask?.cancel()
-            warmUpTask = nil
             pool = nil
             poolReady = false
             phase = .needsSetup
             return
         }
-        warmUpTask?.cancel()
-        warmUpTask = nil
         poolReady = false
         Task {
             await pool?.shutdown()
@@ -564,54 +570,42 @@ final class AppState: @unchecked Sendable {
         }
     }
 
+    /// Ready the pool. Nothing boots ahead of time: each window's VM boots
+    /// after the profile chooser, with that profile's config (claim boots
+    /// on demand), so no idle VM sits around in a profile nobody picked.
     func startPool() {
-        let config = buildBaseConfig()
-        let replenish: Bool
-        if #available(macOS 27.0, *) { replenish = false } else { replenish = true }
-        pool = VMPool(config: config, storageDir: storageDir, automaticallyReplenishes: replenish)
-        poolReady = false
-        let env = ProcessInfo.processInfo.environment
-        if env["BROMURE_DEBUG"] != nil && env["BROMURE_DEBUG_PREWARM"] == nil {
-            // Skip pre-warming in debug mode to keep logs clean.
-            // The pool is still needed for bootDedicated() — just don't warm up.
-            // Set BROMURE_DEBUG_PREWARM=1 to re-enable pre-warming in debug mode.
-            poolReady = true
-            phase = .ready
-            return
-        }
-        warmUpTask = Task {
-            do {
-                try await pool?.warmUp()
-                guard !Task.isCancelled else { return }
-                poolReady = true
-                phase = .ready
-                onPoolReady?()
-            } catch {
-                guard !Task.isCancelled else { return }
-                // Drop the failed pool so Try Again (checkState) and a network
-                // change actually start over — a kept pool made both no-ops.
-                let failed = pool
-                pool = nil
-                Task { await failed?.shutdown() }
-                phase = .error(Self.localizedMessage(for: error))
-            }
-        }
+        pool = VMPool(config: buildBaseConfig(), storageDir: storageDir,
+                      automaticallyReplenishes: false)
+        markReadyIfProfilesLoaded()
     }
 
-    /// The host's network changed: a pool that failed for want of a network
-    /// tries again, and an idle pre-warmed VM — booted against the old
-    /// network (its LAN rules, its "no traffic" diagnosis) — is replaced.
+    /// Windows may open once the pool exists AND the profile roster has
+    /// loaded (iCloud discovery can take seconds). Until then the phase
+    /// stays .warmingUp, so anything asking for a window — a link that
+    /// launched the app, ⌘N, the launch chooser — waits instead of
+    /// booting a VM outside the user's profiles. Called from both sides.
+    private func markReadyIfProfilesLoaded() {
+        guard pool != nil, !poolReady, profileManager.isReady else { return }
+        poolReady = true
+        phase = .ready
+        onPoolReady?()
+    }
+
+    /// The host's network changed: a pool that failed for want of a
+    /// network tries again.
     func hostNetworkDidChange() {
         if pool == nil, case .error = phase {
             checkState()
-            return
         }
-        guard poolReady, let pool, pool.hasWarmVM else { return }
-        Task {
-            await pool.discardWarmVM()
-            try? await pool.warmUp()
+        // Every window whose VM couldn't get a network tries again.
+        if pool != nil, poolReady {
+            for retry in networkRetries.takeAll() { retry() }
         }
     }
+
+    /// Windows whose VM failed to boot for want of a network, one entry per
+    /// launch; each reopens once on the next host network change.
+    var networkRetries = NetworkRetryQueue()
 
     static func localizedMessage(for error: Error) -> String {
         if let sandbox = error as? SandboxError {
@@ -683,8 +677,6 @@ final class AppState: @unchecked Sendable {
     /// Close all sessions, delete the base image, and rebuild with new settings.
     func regenerateImage() {
         // Cancel any in-progress operations
-        warmUpTask?.cancel()
-        warmUpTask = nil
         initTask?.cancel()
         initTask = nil
         installReason = .rebuild
@@ -698,18 +690,14 @@ final class AppState: @unchecked Sendable {
             pool = nil
             poolReady = false
 
-            // Delete old image files
-            deleteImageFiles()
-
-            // Rebuild
+            // Rebuild. The current image is only replaced once the new
+            // one has been downloaded or built.
             startInit()
         }
     }
 
     func resetBaseImage() {
         // Cancel any in-progress operations
-        warmUpTask?.cancel()
-        warmUpTask = nil
         initTask?.cancel()
         initTask = nil
 

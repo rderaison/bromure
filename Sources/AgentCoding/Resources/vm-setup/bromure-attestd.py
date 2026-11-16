@@ -387,6 +387,90 @@ def serve(sock, secret):
         stop.set()
 
 
+# The guest's clock. Virtualization.framework stops it while a VM is saved and
+# while the Mac sleeps, and the image runs no time daemon, so the host writes its
+# own time to the meta share's .resume-signal after a restore, a pause and a
+# wake. agentd applies it with sudo; under the strict sandbox agentd has none,
+# and the image's bromure-resume.path never fires (virtiofs delivers no inotify
+# for host writes). attestd is the root process every strict workspace runs, so
+# it applies the signal there. Forward-only: a ts at or behind the guest clock
+# (stale, or a repeat) does nothing. Only the host can write it: the share is
+# read-only in the guest. clock_settime, not `date`: the kernel sentry logs every
+# root exec, and this polls every 2 s.
+CLOCK_SIGNAL = "/mnt/bromure-meta/.resume-signal"
+CLOCK_POLL_SECONDS = 2
+
+
+def clock_step(ts, now, settime):
+    """Apply one signal value: True if the clock was set."""
+    ts = ts.strip()
+    if not ts.isdigit() or int(ts) <= now:
+        return False
+    settime(time.CLOCK_REALTIME, float(ts))
+    return True
+
+
+def clock_watcher(path=None, sleep=time.sleep, now=time.time,
+                  settime=time.clock_settime, running=lambda: True):
+    path = path or CLOCK_SIGNAL
+    last = ""
+    while running():
+        try:
+            try:
+                with open(path) as f:
+                    ts = f.read().strip()
+            except OSError:
+                ts = ""
+            if ts and ts != last:
+                last = ts
+                if clock_step(ts, now(), settime):
+                    log("clock set (target ts=%s)" % ts)
+        except Exception as e:  # noqa: BLE001 -- one bad read must not end it
+            log("clock watcher: %s" % e)
+        sleep(CLOCK_POLL_SECONDS)
+
+
+# Picking up a new attestd. It is started once, by the strict script, before
+# sudo is revoked, and nothing with root can start anything after that. A
+# workspace restored from a snapshot keeps its old attestd, so a fix to the root
+# side (the clock watcher above was one) never reached it short of a cold boot.
+# So attestd exits when the host stages a different copy of this file: systemd
+# (Restart=always) starts the staged one, and the secret, kept in /run, still
+# matches the host's pin. The binary-scoped rules fail closed for the second
+# that takes.
+UPGRADE_POLL_SECONDS = 3
+
+
+def _file_sha256(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def upgrade_watcher(path=None, sleep=time.sleep, exit=os._exit, running=lambda: True):
+    path = path or os.path.abspath(__file__)
+    running_hash = _file_sha256(path)
+    try:
+        last_mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        last_mtime = None
+    while running():
+        sleep(UPGRADE_POLL_SECONDS)
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            continue
+        if mtime == last_mtime:
+            continue
+        last_mtime = mtime
+        new_hash = _file_sha256(path)
+        if new_hash and running_hash and new_hash != running_hash:
+            log("upgrade: %s -> %s" % (running_hash[:8], new_hash[:8]))
+            exit(0)
+
+
 SECRET_PATH = "/run/bromure-attestd.secret"
 
 
@@ -423,6 +507,9 @@ def main():
       before the loop began;
     * the loop caught only `OSError`, so any other exception type escaped.
 
+    (The one deliberate exit is upgrade_watcher's, to start a newly staged
+    copy: systemd restarts the unit at once.)
+
     Either exit is then multiplied by systemd: `Restart=always` with the default
     start limit means five exits in ten seconds leave the unit **failed and no
     longer restarted**, which turns a transient into a dead attestor for the rest
@@ -432,6 +519,8 @@ def main():
     if os.geteuid() != 0:
         log("must run as root")
         sys.exit(1)
+    for target in (clock_watcher, upgrade_watcher):
+        threading.Thread(target=target, daemon=True).start()
     announced = False
     secret = None
     while True:

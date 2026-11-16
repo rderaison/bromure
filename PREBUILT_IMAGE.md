@@ -258,8 +258,8 @@ Alpine chroot on `/dev/vda`) supplies:
   version. Like every step, it executes inside a chroot on the image
   (`postinstall.sh` mounts `/dev/vda` at /mnt and chroots), so its `/`
   is the image's root — the deb extracts straight to `/bin/warp-cli`.
-  `setup.sh` bakes only WARP's FOSS runtime deps (gcompat, resolver
-  stub).
+  WARP is a glibc binary and runs natively on the Ubuntu image; no
+  compat layer is baked.
 - **macOS fonts** — copied from the user's own Mac via virtiofs (same
   700 MB cap logic as a local build). Never shipped.
 - **Personalisation** — keyboard layout / natural scrolling / locale are

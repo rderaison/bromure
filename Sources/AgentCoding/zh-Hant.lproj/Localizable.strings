@@ -4364,3 +4364,4 @@
 /* Suspend refused for lack of disk space */
 "Couldn't suspend “%@”: the disk is almost full." = "無法暫停「%@」：磁碟幾乎已滿。";
 "The workspace is still running." = "工作區仍在執行中。";
+"Restart Browser" = "重新啟動瀏覽器";

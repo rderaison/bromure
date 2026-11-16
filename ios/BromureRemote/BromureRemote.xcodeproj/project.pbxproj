@@ -42,6 +42,7 @@
 		B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */; };
 		C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */; };
 		B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */; };
+		0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4859F57204F5FFC9440A246F /* BulkLanePriority.swift */; };
 		C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */; };
 		B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */; };
 		31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */; };
@@ -123,13 +124,16 @@
 		5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */; };
 		A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */; };
 		BDF59927FC8BD8E72B801424 /* TaskReviewData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */; };
+		577807738D2EEF47B7223B81 /* TailFollowRule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87E150424947F60AE7784055 /* TailFollowRule.swift */; };
 		4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */; };
 		87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */; };
 		273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */; };
 		B57BFBAA9AF42AE0A6EE14FA /* TerminalAppDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */; };
 		D5FB8187D6511F113AD88886 /* Terminal__GridLayoutStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */; };
 		EA931E8BE8378C062728723A /* Terminal__TerminalImagePaste.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1D36B3B723E8B3AF298639 /* Terminal__TerminalImagePaste.swift */; };
+		4F5A084BA2A4AE6AEAAC476D /* TestRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B0B99A744762520E89BFE2 /* TestRun.swift */; };
 		96D53571EAB894F595C7700A /* TranscriptActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01D9084A99208441F085D679 /* TranscriptActivity.swift */; };
+		88497D78C004AFDD575D9FBA /* TranscriptFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4067297CB4BFF541916ACF2 /* TranscriptFeed.swift */; };
 		6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */; };
 		A96EA517F1904A78B727B1F7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2C9329E02D38A226363A4698 /* Assets.xcassets */; };
 		2007EF1792C302D48BBE3E57 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 8CCEC8DF327861B1EBC5BBD8 /* Settings.bundle */; };
@@ -209,6 +213,7 @@
 		0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "AutomationRunWindow.swift"; path = "Sources/BromureRemote/_shared/AutomationRunWindow.swift"; sourceTree = "<group>"; };
 		5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BACDebug.swift"; path = "Sources/BromureRemote/_shared/BACDebug.swift"; sourceTree = "<group>"; };
 		D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BranchMergeCommands.swift"; path = "Sources/BromureRemote/_shared/BranchMergeCommands.swift"; sourceTree = "<group>"; };
+		4859F57204F5FFC9440A246F /* BulkLanePriority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "BulkLanePriority.swift"; path = "Sources/BromureRemote/_shared/BulkLanePriority.swift"; sourceTree = "<group>"; };
 		000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeAutoMode.swift"; path = "Sources/BromureRemote/_shared/ClaudeAutoMode.swift"; sourceTree = "<group>"; };
 		A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "ClaudeTranscriptView.swift"; path = "Sources/BromureRemote/_shared/ClaudeTranscriptView.swift"; sourceTree = "<group>"; };
 		543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodingKanbanView.swift"; path = "Sources/BromureRemote/_shared/CodingKanbanView.swift"; sourceTree = "<group>"; };
@@ -290,13 +295,16 @@
 		1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionNotifications.swift"; path = "Sources/BromureRemote/_shared/SubscriptionNotifications.swift"; sourceTree = "<group>"; };
 		39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "SubscriptionTokenSwapState.swift"; path = "Sources/BromureRemote/_shared/SubscriptionTokenSwapState.swift"; sourceTree = "<group>"; };
 		059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewData.swift"; path = "Sources/BromureRemote/_shared/TaskReviewData.swift"; sourceTree = "<group>"; };
+		87E150424947F60AE7784055 /* TailFollowRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TailFollowRule.swift"; path = "Sources/BromureRemote/_shared/TailFollowRule.swift"; sourceTree = "<group>"; };
 		11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskReviewWindow.swift"; path = "Sources/BromureRemote/_shared/TaskReviewWindow.swift"; sourceTree = "<group>"; };
 		A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptArchive.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptArchive.swift"; sourceTree = "<group>"; };
 		397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TaskTranscriptWindow.swift"; path = "Sources/BromureRemote/_shared/TaskTranscriptWindow.swift"; sourceTree = "<group>"; };
 		CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TerminalAppDefaults.swift"; path = "Sources/BromureRemote/_shared/TerminalAppDefaults.swift"; sourceTree = "<group>"; };
 		1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Terminal__GridLayoutStore.swift"; path = "Sources/BromureRemote/_shared/Terminal__GridLayoutStore.swift"; sourceTree = "<group>"; };
 		4C1D36B3B723E8B3AF298639 /* Terminal__TerminalImagePaste.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "Terminal__TerminalImagePaste.swift"; path = "Sources/BromureRemote/_shared/Terminal__TerminalImagePaste.swift"; sourceTree = "<group>"; };
+		98B0B99A744762520E89BFE2 /* TestRun.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TestRun.swift"; path = "Sources/BromureRemote/_shared/TestRun.swift"; sourceTree = "<group>"; };
 		01D9084A99208441F085D679 /* TranscriptActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TranscriptActivity.swift"; path = "Sources/BromureRemote/_shared/TranscriptActivity.swift"; sourceTree = "<group>"; };
+		E4067297CB4BFF541916ACF2 /* TranscriptFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "TranscriptFeed.swift"; path = "Sources/BromureRemote/_shared/TranscriptFeed.swift"; sourceTree = "<group>"; };
 		98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "VMDashboard.swift"; path = "Sources/BromureRemote/_shared/VMDashboard.swift"; sourceTree = "<group>"; };
 		F53560B8D470A293B70C0526 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Info.plist"; sourceTree = "<group>"; };
 		2C9329E02D38A226363A4698 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "App/Assets.xcassets"; sourceTree = "<group>"; };
@@ -400,6 +408,7 @@
 				0A403FEFFCFC30C47E37C216 /* AutomationRunWindow.swift */,
 				5AD3DBA7493BB1A19AA66B02 /* BACDebug.swift */,
 				D152E7BAC2775F90A7BE14F8 /* BranchMergeCommands.swift */,
+				4859F57204F5FFC9440A246F /* BulkLanePriority.swift */,
 				000A99AE61EEAD2605024A1C /* ClaudeAutoMode.swift */,
 				A3FFDA83B150809BF0729EEA /* ClaudeTranscriptView.swift */,
 				543F1FBD5CF7A132B224FC30 /* CodingKanbanView.swift */,
@@ -481,13 +490,16 @@
 				1054AEC8AC9CA45D9B14C76E /* SubscriptionNotifications.swift */,
 				39FE1E7BD7F0967BFE964C3E /* SubscriptionTokenSwapState.swift */,
 				059A5141791AC286B7CD1AA4 /* TaskReviewData.swift */,
+				87E150424947F60AE7784055 /* TailFollowRule.swift */,
 				11FEF541E24DB2C62EEC2E6A /* TaskReviewWindow.swift */,
 				A9EAFE4A4D25130FF04AF961 /* TaskTranscriptArchive.swift */,
 				397F71D65F9055561BA4C3D0 /* TaskTranscriptWindow.swift */,
 				CB8D84F5B227BEB930AD0A35 /* TerminalAppDefaults.swift */,
 				1EAFF96DF3D1FA2755C2EECF /* Terminal__GridLayoutStore.swift */,
 				4C1D36B3B723E8B3AF298639 /* Terminal__TerminalImagePaste.swift */,
+				98B0B99A744762520E89BFE2 /* TestRun.swift */,
 				01D9084A99208441F085D679 /* TranscriptActivity.swift */,
+				E4067297CB4BFF541916ACF2 /* TranscriptFeed.swift */,
 				98B2E7296B414B300A8BD7D8 /* VMDashboard.swift */,
 			);
 			name = Sources;
@@ -645,6 +657,7 @@
 				B58C6697BB7653D0D9519480 /* AutomationRunWindow.swift in Sources */,
 				C1A736E1727425CB30914E1E /* BACDebug.swift in Sources */,
 				B5EC8F5B6003B459EC96A963 /* BranchMergeCommands.swift in Sources */,
+				0BFD8CCDBCDB2F917E2CCF51 /* BulkLanePriority.swift in Sources */,
 				C9A36DB880ABDBEB22D05A0B /* ClaudeAutoMode.swift in Sources */,
 				B04161EA9427DB696BC0CB60 /* ClaudeTranscriptView.swift in Sources */,
 				31984E4A30F0A24DC672FA0C /* CodingKanbanView.swift in Sources */,
@@ -726,13 +739,16 @@
 				5A7824EB8C68A0DBDE6D8629 /* SubscriptionNotifications.swift in Sources */,
 				A5E1FADC7FFF52EE930B61F7 /* SubscriptionTokenSwapState.swift in Sources */,
 				BDF59927FC8BD8E72B801424 /* TaskReviewData.swift in Sources */,
+				577807738D2EEF47B7223B81 /* TailFollowRule.swift in Sources */,
 				4BF4E4865F2143314C7662CD /* TaskReviewWindow.swift in Sources */,
 				87E7E20668933BD88F05A9F7 /* TaskTranscriptArchive.swift in Sources */,
 				273ACE71B4D5E451211255EF /* TaskTranscriptWindow.swift in Sources */,
 				B57BFBAA9AF42AE0A6EE14FA /* TerminalAppDefaults.swift in Sources */,
 				D5FB8187D6511F113AD88886 /* Terminal__GridLayoutStore.swift in Sources */,
 				EA931E8BE8378C062728723A /* Terminal__TerminalImagePaste.swift in Sources */,
+				4F5A084BA2A4AE6AEAAC476D /* TestRun.swift in Sources */,
 				96D53571EAB894F595C7700A /* TranscriptActivity.swift in Sources */,
+				88497D78C004AFDD575D9FBA /* TranscriptFeed.swift in Sources */,
 				6552B0D662751610674CFBF1 /* VMDashboard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -177,6 +177,9 @@ public struct VMConfig {
     /// Whether zero-copy rasterization is enabled (reduces memory copies).
     public var enableZeroCopy: Bool
 
+    /// Whether the guest may decode video on its GPU (VA-API over VirGL).
+    public var hardwareVideoDecode: Bool
+
     /// Whether smooth scrolling is enabled.
     public var enableSmoothScrolling: Bool
 
@@ -390,6 +393,7 @@ public struct VMConfig {
         enableMetalRenderer: Bool = true,
         enableWebGL: Bool = false,
         enableZeroCopy: Bool = true,
+        hardwareVideoDecode: Bool = true,
         enableSmoothScrolling: Bool = true,
         strictSiteIsolation: Bool = true,
         blockMalwareSites: Bool = false,
@@ -482,6 +486,7 @@ public struct VMConfig {
         self.enableMetalRenderer = enableMetalRenderer
         self.enableWebGL = enableWebGL
         self.enableZeroCopy = enableZeroCopy
+        self.hardwareVideoDecode = hardwareVideoDecode
         self.enableSmoothScrolling = enableSmoothScrolling
         self.strictSiteIsolation = strictSiteIsolation
         self.blockMalwareSites = blockMalwareSites
@@ -1135,6 +1140,11 @@ public struct VMConfig {
     public struct BridgedInterface: Identifiable {
         public let id: String          // e.g. "en0"
         public let localizedName: String? // e.g. "Wi-Fi"
+
+        public init(id: String, localizedName: String?) {
+            self.id = id
+            self.localizedName = localizedName
+        }
 
         public var displayName: String {
             if let name = localizedName {

@@ -591,3 +591,315 @@ struct NetworkLineageHookTests {
         #expect(l.toolCall(profileID: pid, id: "call_9")?.command == "curl -s https://example.com")
     }
 }
+
+/// Board: "Openshell's lineage doesn't map all commands to reasoning" -- a
+/// built-in fetch was missed entirely, and some `curl`s weren't linked.
+@Suite("Network lineage: in-process shells, late hook lines, a fetch known by its address")
+struct NetworkLineageGapTests {
+    func flow(_ sink: LineageSink) async -> [String: AnyJSON]? {
+        for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        return sink.flows.first
+    }
+    func agent(_ f: [String: AnyJSON]?) -> (id: String?, confidence: String?)? {
+        guard case .object(let a)? = f?["agent"] else { return nil }
+        return (NetworkLineageTests.S(a["tool_use_id"]), NetworkLineageTests.S(a["confidence"]))
+    }
+
+    /// omp runs Bash in brush, a shell inside its own process: `curl` is
+    /// exec'd by omp with only its own words, and omp's hook runs without
+    /// being waited for, so its line lands after `curl` started.
+    @Test("omp: a piped curl from its in-process shell links to the call, though the hook line came after it")
+    func ompPipedCurl() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        l.noteExec(profileID: pid, ["pid": 600, "ppid": 1, "start_ns": 10, "comm": "omp", "path": "/usr/bin/bun", "argv": "omp"])
+        // The hook itself, omp's child, at the call.
+        l.noteExec(profileID: pid, ["pid": 601, "ppid": 600, "start_ns": 20, "comm": "sh", "path": "/usr/bin/sh",
+            "argv": "sh -c echo eyJ9 | base64 -d | TMUX='/tmp/t,1,0' TMUX_PANE='%1' /home/ubuntu/.bromure/agent-status.sh working"])
+        l.noteExec(profileID: pid, ["pid": 602, "ppid": 600, "start_ns": 30, "comm": "curl", "path": "/usr/bin/curl",
+                                    "argv": "curl -s https://pypi.org/simple/"])
+        l.noteExec(profileID: pid, ["pid": 603, "ppid": 600, "start_ns": 31, "comm": "head", "path": "/usr/bin/head", "argv": "head -c 200"])
+        l.noteFlow(profileID: pid, ["pid": 602, "start_ns": 30, "proto": "tcp", "dst": "151.101.0.223", "dport": 443])
+        // Then the hook's line.
+        l.noteToolCall(profileID: pid, id: "call_omp", tool: "bash",
+                       command: "cd /tmp && curl -s https://pypi.org/simple/ | head -c 200", reasoning: "",
+                       agentPid: 600, agent: "omp")
+        let f = await flow(sink)
+        #expect(agent(f)?.id == "call_omp")
+        #expect(agent(f)?.confidence == "exact")
+    }
+
+    @Test("The in-process match: the agent's child whose words the command holds; the newest such call")
+    func inProcessMatch() {
+        let t0 = Date()
+        func call(_ id: String, _ cmd: String, pid: Int? = 600, ago: TimeInterval = 1) -> NetworkLineage.ToolCall {
+            .init(id: id, tool: "bash", command: cmd, reasoning: "", at: t0.addingTimeInterval(-ago), agentPid: pid, agent: "omp")
+        }
+        let c = call("a", "curl -s https://api.github.com/zen | jq .")
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://api.github.com/zen", ppid: 600, calls: [c], at: t0)?.toolUseID == "a")
+        #expect(NetworkLineage.matchInProcessShell(argv: "/usr/bin/curl -s https://api.github.com/zen", ppid: 600, calls: [c], at: t0)?.confidence == "exact")
+        #expect(NetworkLineage.matchInProcessShell(argv: "jq .", ppid: 600, calls: [c], at: t0)?.confidence == "likely")
+        // Another program, another agent, no hook pid, too old.
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://example.com", ppid: 600, calls: [c], at: t0) == nil)
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://api.github.com/zen", ppid: 700, calls: [c], at: t0) == nil)
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://api.github.com/zen", ppid: 600,
+                                                   calls: [call("a", "curl -s https://api.github.com/zen", pid: nil)], at: t0) == nil)
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://api.github.com/zen", ppid: 600,
+                                                   calls: [call("a", "curl -s https://api.github.com/zen", ago: 120)], at: t0) == nil)
+        // Words, not letters: `curl` isn't in `curlie`.
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl x", ppid: 600, calls: [call("a", "curlie x")], at: t0) == nil)
+        let two = [call("old", "curl -s https://api.github.com/zen", ago: 5), call("new", "curl -s https://api.github.com/zen && echo ok", ago: 1)]
+        #expect(NetworkLineage.matchInProcessShell(argv: "curl -s https://api.github.com/zen", ppid: 600, calls: two, at: t0)?.toolUseID == "new")
+    }
+
+    /// A wrapper hides the command (no words in common), and the hook line
+    /// arrives just after the child started: the timing link still holds.
+    @Test("A child started just before its call's hook line is linked when its flow resolves")
+    func lateFuzzy() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        l.noteExec(profileID: pid, ["pid": 500, "ppid": 1, "comm": "codex", "path": "/usr/bin/codex", "argv": "codex"])
+        l.noteExec(profileID: pid, ["pid": 501, "ppid": 500, "comm": "codex-linux-sa", "argv": "codex-linux-sandbox --policy …"])
+        l.noteExec(profileID: pid, ["pid": 502, "ppid": 501, "comm": "curl", "argv": "/usr/bin/curl --silent https://example.com"])
+        l.noteFlow(profileID: pid, ["pid": 502, "proto": "tcp", "dst": "93.184.216.34", "dport": 443])
+        l.noteToolCall(profileID: pid, id: "call_late", tool: "shell", command: "curl -s https://example.com",
+                       reasoning: "", agentPid: 500, agent: "codex")
+        let f = await flow(sink)
+        #expect(agent(f)?.id == "call_late")
+    }
+
+    @Test("Bromure's own hook process and a child started long before the call never take it")
+    func notTheHookNorAnOldChild() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        var clock = Date()
+        l.now = { clock }
+        l.noteExec(profileID: pid, ["pid": 500, "ppid": 1, "comm": "omp", "argv": "omp"])
+        // An MCP server the agent started at launch.
+        l.noteExec(profileID: pid, ["pid": 510, "ppid": 500, "comm": "node", "argv": "node mcp-server.js"])
+        clock = clock.addingTimeInterval(30)
+        l.noteExec(profileID: pid, ["pid": 511, "ppid": 500, "comm": "sh",
+                                    "argv": "sh -c /home/ubuntu/.bromure/agent-status.sh working"])
+        l.noteToolCall(profileID: pid, id: "call_x", tool: "fetch", command: #"{"url":"https://example.org/"}"#,
+                       reasoning: "", agentPid: 500, agent: "omp")
+        l.noteFlow(profileID: pid, ["pid": 510, "proto": "tcp", "dst": "198.51.100.7", "dport": 443])
+        l.noteFlow(profileID: pid, ["pid": 511, "proto": "tcp", "dst": "198.51.100.8", "dport": 443])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(sink.flows.count == 2)
+        #expect(sink.flows.allSatisfy { $0["agent"] == nil })
+    }
+
+    /// The switch logs its decision per destination at a limited rate: a
+    /// page fetched again (or right after a DNS lookup) had only its address.
+    @Test("An agent's own fetch with no decision naming the host is matched by the DNS answer's name")
+    func fetchByDNSName() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        l.hostNames = { $0 == "140.82.112.4" ? ["github.com"] : [] }
+        l.noteExec(profileID: pid, ["pid": 412, "ppid": 1, "start_ns": 100, "comm": "claude", "argv": "claude"])
+        l.noteToolCall(profileID: pid, id: "toolu_wf", tool: "WebFetch",
+                       command: #"{"prompt":"title?","url":"https://github.com/about"}"#, reasoning: "",
+                       agentPid: 412, agent: "claude")
+        // From Bun's "HTTP Client" thread: the process's pid, the thread's name.
+        l.noteFlow(profileID: pid, ["pid": 412, "start_ns": 100, "proto": "tcp", "dst": "140.82.112.4", "dport": 443,
+                                    "comm": "HTTP Client"])
+        let f = await flow(sink)
+        #expect(agent(f)?.id == "toolu_wf")
+        #expect(agent(f)?.confidence == "likely")
+        // Another address no answer named for that host: nothing.
+        let sink2 = LineageSink(), l2 = NetworkLineage()
+        l2.decisionWait = 0.05
+        l2.emit = { _, t, d in sink2.add(t, d) }
+        l2.hostNames = { _ in ["api.anthropic.com"] }
+        l2.noteToolCall(profileID: pid, id: "toolu_wf", tool: "WebFetch",
+                        command: #"{"url":"https://github.com/about"}"#, reasoning: "", agentPid: 412, agent: "claude")
+        l2.noteFlow(profileID: pid, ["pid": 412, "proto": "tcp", "dst": "160.79.104.10", "dport": 443])
+        for _ in 0..<300 where sink2.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(sink2.flows.first?["agent"] == nil)
+    }
+}
+
+@Suite("Network lineage: the agent's own fetch goes to a fetch, the closest-named")
+struct NetworkLineageFetchRankTests {
+    /// Live: two WebFetches of github.com, then a Bash `curl
+    /// https://api.github.com/zen`; the sentry reported the folded fetches
+    /// after the Bash call, and they were tied to it (a subdomain, newest).
+    @Test("A Bash call naming a subdomain never takes the agent's own fetch; the exact host outranks a newer subdomain")
+    func rank() {
+        let t0 = Date()
+        func call(_ id: String, _ tool: String, _ cmd: String, ago: TimeInterval) -> NetworkLineage.ToolCall {
+            .init(id: id, tool: tool, command: cmd, reasoning: "", at: t0.addingTimeInterval(-ago), agentPid: 412, agent: "claude")
+        }
+        let fetch = call("fetch", "WebFetch", #"{"url":"https://github.com/about"}"#, ago: 9)
+        let bash = call("bash", "Bash", "curl -s https://api.github.com/zen", ago: 1)
+        #expect(NetworkLineage.matchAgentFetch(hosts: ["github.com"], leafPid: 412, leafSeenAt: nil, calls: [fetch, bash], at: t0)?.toolUseID == "fetch")
+        #expect(NetworkLineage.matchAgentFetch(hosts: ["api.github.com"], leafPid: 412, leafSeenAt: nil, calls: [bash], at: t0) == nil)
+        // omp's shell tool is "bash": its hook line is a command, not JSON.
+        let ompBash = NetworkLineage.ToolCall(id: "ob", tool: "bash", command: "curl https://example.org", reasoning: "",
+                                              at: t0, agentPid: 412, agent: "omp")
+        #expect(NetworkLineage.matchAgentFetch(hosts: ["example.org"], leafPid: 412, leafSeenAt: nil, calls: [ompBash], at: t0) == nil)
+        let sub = call("sub", "WebFetch", #"{"url":"https://docs.github.com/x"}"#, ago: 1)
+        #expect(NetworkLineage.matchAgentFetch(hosts: ["github.com"], leafPid: 412, leafSeenAt: nil, calls: [fetch, sub], at: t0)?.toolUseID == "fetch")
+        #expect(NetworkLineage.runsCommand(bash) && NetworkLineage.runsCommand(ompBash) && !NetworkLineage.runsCommand(fetch))
+    }
+}
+
+/// Finding CWE-670, "Agent fetch flow can be attributed to a different
+/// fetch on a shared IP": every name the DNS cache holds for a CDN address
+/// counted as the destination, so a still-connecting fetch of site B went
+/// to a newer fetch of site A hosted at the same address.
+@Suite("Network lineage: a shared address's DNS names don't pick the fetch")
+struct NetworkLineageSharedIPTests {
+    let t0 = Date()
+    func fetch(_ id: String, _ url: String, ago: TimeInterval) -> NetworkLineage.ToolCall {
+        .init(id: id, tool: "WebFetch", command: #"{"url":"\#(url)"}"#, reasoning: "", at: t0.addingTimeInterval(-ago),
+              agentPid: 412, agent: "claude")
+    }
+
+    @Test("The decision's host is matched alone; ambiguous DNS aliases attribute nothing; one alias does")
+    func sharedIP() {
+        let b = fetch("b", "https://site-b.example/page", ago: 5)
+        let a = fetch("a", "https://site-a.example/page", ago: 1)
+        let ip = "151.101.1.1", cached = ["site-a.example", "site-b.example"]
+        // B's decision names B: B's call, though A's is newer and A is cached for the address.
+        let byDecision = NetworkLineage.matchAgentFetch(hosts: ["site-b.example"], leafPid: 412, leafSeenAt: nil,
+                                                        calls: [b, a], at: t0)
+        #expect(byDecision?.toolUseID == "b")
+        #expect(byDecision?.host == nil)
+        // No decision host: both cached names are named by a call -- nobody's.
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [b, a], at: t0) == nil)
+        // Only one of them was fetched: that call, and the name it used.
+        let one = NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                                 calls: [b], at: t0)
+        #expect(one?.toolUseID == "b")
+        #expect(one?.host == "site-b.example")
+        // Two fetches of the same site: the newer, as before.
+        let b2 = fetch("b2", "https://site-b.example/other", ago: 2)
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [b, b2], at: t0)?.toolUseID == "b2")
+        // A call naming the address itself beats one naming only an alias.
+        let byIP = fetch("ip", "http://\(ip)/x", ago: 4)
+        #expect(NetworkLineage.matchAgentFetch(hosts: [ip], aliases: cached, leafPid: 412, leafSeenAt: nil,
+                                               calls: [byIP, a], at: t0)?.toolUseID == "ip")
+    }
+
+    @Test("A resolved flow: the decision's host wins over a newer fetch of another site at the same address")
+    func resolved() throws {
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let src = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/NetworkLineage.swift"), encoding: .utf8)
+        #expect(src.contains("let hosts = [decision?.host ?? dst]"))
+        #expect(src.contains("let aliases = decision?.host == nil && !viaProxy ? hostNames(dst) : []"))
+        #expect(!src.contains("hosts += hostNames(dst)"))
+        #expect(src.contains("if names.count == 1, let name = named.first { data[\"host\"] = .string(name) }"))
+    }
+
+    /// Finding "CNAME responses erase the hostname from unlinked network
+    /// flows": a CNAME answer gives the address the site asked for and its
+    /// CDN target; counted as two sites, the flow showed the bare address.
+    @Test("An unlinked flow is named by the one site looked up, not left bare by its CNAME target")
+    func cnameKeepsHost() async throws {
+        func host(cached: [String], queried: [String]?) async -> String? {
+            let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+            l.decisionWait = 0.05
+            l.emit = { _, t, d in sink.add(t, d) }
+            l.hostNames = { $0 == "208.80.154.224" ? cached : [] }
+            if let queried { l.queriedHostNames = { $0 == "208.80.154.224" ? queried : [] } }
+            l.noteFlow(profileID: pid, ["pid": 900, "proto": "tcp", "dst": "208.80.154.224", "dport": 443,
+                                        "comm": "curl"])
+            for _ in 0..<300 where sink.flows.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return NetworkLineageTests.S(sink.flows.first?["host"])
+        }
+        let cname = ["www.wikipedia.org", "dyna.wikimedia.org"]
+        #expect(await host(cached: cname, queried: ["www.wikipedia.org"]) == "www.wikipedia.org")
+        // Two sites looked up for one address: still ambiguous.
+        #expect(await host(cached: cname + ["www.wikimedia.org"],
+                           queried: ["www.wikimedia.org", "www.wikipedia.org"]) == nil)
+        // Only a CNAME target known: the cached names, as before.
+        #expect(await host(cached: ["dyna.wikimedia.org"], queried: []) == "dyna.wikimedia.org")
+        #expect(await host(cached: ["github.com"], queried: nil) == "github.com")
+
+        // The app wires the cache's queried names to lineage.
+        let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("NetworkLineage.shared.queriedHostNames = { VMNetSwitch.shared.queriedHostnames(forIP: $0) }"))
+    }
+}
+
+@Suite("Network lineage: a live sequence replayed")
+struct NetworkLineageReplayTests {
+    /// The stand-in agent's run on a live guest: an omp-style piped curl, two
+    /// fetches, then a Claude-style Bash curl whose hook line lands after its
+    /// flow was first looked at.
+    @Test("A shell's own call, arriving late, beats an older call taken by another command")
+    func replay() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        // Its looks span 0.6 s: the late call (0.2 s) lands within them.
+        l.decisionWait = 0.15
+        l.emit = { _, t, d in sink.add(t, d) }
+        var clock = Date()
+        l.now = { clock }
+        func tick(_ s: TimeInterval) { clock = clock.addingTimeInterval(s) }
+        l.noteExec(profileID: pid, ["pid": 1830, "ppid": 1827, "comm": "python3", "argv": "python3 fakeagent.py"])
+        l.noteExec(profileID: pid, ["pid": 1831, "ppid": 1830, "comm": "sh", "argv": "sh -c /home/ubuntu/.bromure/agent-status.sh working"])
+        l.noteExec(profileID: pid, ["pid": 1833, "ppid": 1830, "comm": "curl", "argv": "curl -s https://pypi.org/simple/"])
+        l.noteExec(profileID: pid, ["pid": 1834, "ppid": 1830, "comm": "head", "argv": "head -c 200"])
+        l.noteFlow(profileID: pid, ["pid": 1833, "proto": "tcp", "dst": "151.101.0.223", "dport": 443])
+        tick(0.7)
+        l.noteToolCall(profileID: pid, id: "omp", tool: "bash", command: "cd /tmp && curl -s https://pypi.org/simple/ | head -c 200",
+                       reasoning: "", agentPid: 1830)
+        for _ in 0..<300 where sink.flows.count < 1 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        tick(9)
+        // The Bash call: its shell and curl start, the flow is seen, the hook line comes later.
+        l.noteExec(profileID: pid, ["pid": 2235, "ppid": 1830, "comm": "bash",
+            "argv": "/bin/bash -c -l shopt -u extglob 2>/dev/null || true && eval 'curl -s https://api.github.com/zen' < /dev/null && pwd -P >| /tmp/lt/cwd"])
+        l.noteExec(profileID: pid, ["pid": 2242, "ppid": 2235, "comm": "curl", "argv": "curl -s https://api.github.com/zen"])
+        l.noteFlow(profileID: pid, ["pid": 2242, "proto": "tcp", "dst": "140.82.113.5", "dport": 443])
+        // Past the flow's first look.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        tick(0.5)
+        l.noteToolCall(profileID: pid, id: "claude", tool: "Bash", command: "curl -s https://api.github.com/zen",
+                       reasoning: "", agentPid: 1830)
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let byDst = Dictionary(uniqueKeysWithValues: sink.flows.map { (NetworkLineageTests.S($0["dst"]) ?? "", $0) })
+        func id(_ d: String) -> String? { if case .object(let a)? = byDst[d]?["agent"] { return NetworkLineageTests.S(a["tool_use_id"]) }; return nil }
+        #expect(id("151.101.0.223") == "omp")
+        #expect(id("140.82.113.5") == "claude", "got \(String(describing: id("140.82.113.5")))")
+    }
+}
+
+@Suite("Network lineage: the agent's own traffic never inherits a command's link")
+struct NetworkLineageAgentArgvTests {
+    /// Live, `claude -p "…1. Bash: curl -s https://api.github.com/zen…"`:
+    /// the agent's argv quoted the command, the late look linked the agent
+    /// itself, and its API traffic and WebFetch all carried the Bash call.
+    @Test("An agent (or its launcher) whose argv quotes a command isn't that command's process")
+    func agentArgv() async throws {
+        let sink = LineageSink(), l = NetworkLineage(), pid = UUID()
+        l.decisionWait = 0.05
+        l.emit = { _, t, d in sink.add(t, d) }
+        l.hostNames = { $0 == "140.82.112.4" ? ["github.com"] : $0 == "160.79.104.10" ? ["api.anthropic.com"] : [] }
+        let prompt = "1. Bash: curl -s https://api.github.com/zen 2. WebFetch https://github.com/about"
+        l.noteExec(profileID: pid, ["pid": 300, "ppid": 1, "comm": "bash", "argv": "bash -c claude -p '\(prompt)'"])
+        l.noteExec(profileID: pid, ["pid": 301, "ppid": 300, "comm": "claude", "argv": "claude -p \(prompt)"])
+        l.noteToolCall(profileID: pid, id: "bash1", tool: "Bash", command: "curl -s https://api.github.com/zen",
+                       reasoning: "", agentPid: 301, agent: "claude")
+        l.noteToolCall(profileID: pid, id: "fetch1", tool: "WebFetch", command: #"{"url":"https://github.com/about"}"#,
+                       reasoning: "", agentPid: 301, agent: "claude")
+        l.noteFlow(profileID: pid, ["pid": 301, "proto": "tcp", "dst": "160.79.104.10", "dport": 443])
+        l.noteFlow(profileID: pid, ["pid": 301, "proto": "tcp", "dst": "140.82.112.4", "dport": 443])
+        for _ in 0..<300 where sink.flows.count < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let byDst = Dictionary(uniqueKeysWithValues: sink.flows.map { (NetworkLineageTests.S($0["dst"]) ?? "", $0) })
+        func id(_ d: String) -> String? { if case .object(let a)? = byDst[d]?["agent"] { return NetworkLineageTests.S(a["tool_use_id"]) }; return nil }
+        #expect(id("160.79.104.10") == nil)
+        #expect(id("140.82.112.4") == "fetch1")
+        // An address no decision named shows the DNS answer's name.
+        #expect(NetworkLineageTests.S(byDst["160.79.104.10"]?["host"]) == "api.anthropic.com")
+    }
+}

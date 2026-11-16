@@ -89,6 +89,16 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
     /// of truth, so the host mirrors this directly as the tab bar; there's no
     /// per-process liveness reconciliation.
     public var onTabList: (([GuestTab]) -> Void)?
+    /// How many times the outbox poll has read tabs.txt, and how many tabs
+    /// the last read held (-1: never read). Debug only (`roster-state`): a
+    /// sandboxed workspace whose roster the host never listed (E2E 34.10).
+    var rosterReads = 0
+    var lastRosterCount = -1
+    /// Reads of a changed tabs.txt that returned nothing (unreadable, too big).
+    var rosterReadFailures = 0
+    /// The outbox poll is running, and on which folder (debug).
+    var isPollingOutbox: Bool { outboxPollTask != nil }
+    var polledOutboxPath: String? { sessionDisk?.outboxDirectory?.path }
 
     /// Called ~every 2s with the guest's container list (from `docker ps -a`,
     /// running + stopped). Empty when docker is absent / the daemon is down.
@@ -740,17 +750,35 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         didRestore = true
         state = .running
         startOutboxPolling()
-        // Touch the resume marker on the meta share — the guest's
-        // bromure-resume.path systemd unit watches it and fires
-        // `rdate -n -s pool.ntp.org` to fix the clock skew that
-        // built up while the VM was paused. Best-effort: if the
-        // meta dir isn't there, the guest just doesn't resync now
-        // and systemd-timesyncd will catch up on its own schedule.
-        if let metaDir = session.metadataDirectory {
-            let signal = metaDir.appendingPathComponent(".resume-signal")
-            let stamp = String(Int(Date().timeIntervalSince1970))
-            try? stamp.write(to: signal, atomically: true, encoding: .utf8)
-        }
+        // The guest's clock stood still while the VM was saved.
+        signalClockResync()
+    }
+
+    /// Tell the guest its clock is behind: write the host's time to the meta
+    /// share's `.resume-signal`. agentd (resume_watcher_service) reads it
+    /// every 2 s and sets the clock to it when it is ahead of the guest's; on
+    /// a strict workspace, where agentd has no sudo, the root bromure-clockd
+    /// does. (The image's bromure-resume.path never fires: virtiofs delivers
+    /// no inotify for host writes.) The guest runs no time daemon, so without
+    /// this the clock stays behind. Best-effort: no meta share, no resync.
+    func signalClockResync() {
+        guard let metaDir = sessionDisk?.metadataDirectory else { return }
+        let signal = metaDir.appendingPathComponent(".resume-signal")
+        let stamp = String(Int(Date().timeIntervalSince1970))
+        try? stamp.write(to: signal, atomically: true, encoding: .utf8)
+    }
+
+    /// The Mac woke from sleep. Virtualization.framework stops a guest's
+    /// clock while the host sleeps and does not set it right on wake, so
+    /// every VM came back behind by the length of the sleep (issue #64):
+    /// AWS SigV4 rejects requests 5 min off, TLS says "certificate not yet
+    /// valid". Resync each running VM, as a restore does. Returns how many
+    /// were told.
+    @discardableResult
+    static func resyncClocksAfterHostWake() -> Int {
+        let running = allLock.withLock { all.allObjects.filter { $0.state == .running } }
+        for vm in running { vm.signalClockResync() }
+        return running.count
     }
 
     /// Pause the VM and write its RAM contents to the per-profile
@@ -805,6 +833,8 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
         guard let vm else { return false }
         if vm.state == .paused {
             do { try await vm.resume() } catch { return false }
+            // Writing a large snapshot can keep it paused for a while.
+            signalClockResync()
         }
         return self.vm === vm && vm.state == .running
     }
@@ -1261,7 +1291,13 @@ public final class UbuntuSandboxVM: NSObject, VZVirtualMachineDelegate, @uncheck
                 lastTabsMTime = mtime
                 if let raw = VM.boundedText(tabsFile) {
                     let roster = VM.parseRoster(raw)
-                    events.append { $0.onTabList?(roster) }
+                    events.append { vm in
+                        vm.rosterReads += 1
+                        vm.lastRosterCount = roster.count
+                        vm.onTabList?(roster)
+                    }
+                } else {
+                    events.append { $0.rosterReadFailures += 1 }
                 }
             }
 

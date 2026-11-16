@@ -852,6 +852,7 @@ install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py  
 install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
 install_config scripts/cdp-lan-forwarder.py /mnt/usr/local/bin/cdp-lan-forwarder.py 755
 install_config scripts/tab-agent.py         /mnt/usr/local/bin/tab-agent.py         755
+install_config scripts/identity-agent.py    /mnt/usr/local/bin/identity-agent.py    755
 install_config scripts/shared_windows.py    /mnt/usr/local/bin/shared_windows.py    755
 install_config scripts/bromure-hostkey      /mnt/usr/local/bin/bromure-hostkey      755
 install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755
@@ -919,6 +920,17 @@ mkdir -p /mnt/opt/bromure/extensions/file-picker
 for f in manifest.json background.js content.js schema.json; do
     [ -f "$SCRIPT_DIR/extensions/file-picker/$f" ] && \
         cp "$SCRIPT_DIR/extensions/file-picker/$f" /mnt/opt/bromure/extensions/file-picker/
+done
+
+# ---------------------------------------------------------------------------
+# Input compatibility extension (always loaded): Mac-style wheelDelta for
+# the host's synthetic trackpad wheel events. See wheel-compat.js.
+# ---------------------------------------------------------------------------
+
+mkdir -p /mnt/opt/bromure/extensions/input-compat
+for f in manifest.json wheel-compat.js; do
+    [ -f "$SCRIPT_DIR/extensions/input-compat/$f" ] && \
+        cp "$SCRIPT_DIR/extensions/input-compat/$f" /mnt/opt/bromure/extensions/input-compat/
 done
 
 # ---------------------------------------------------------------------------

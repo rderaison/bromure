@@ -708,8 +708,38 @@ struct TaskAssigneeChoices: Equatable, Sendable {
         let name: String
         var machine: String? = nil
     }
+    /// Most recently active first (the "@" suggestions show the top few).
     var sessions: [Session] = []
     var rooms: [Room] = []
+
+    /// As the pickers list them: by name, the way Finder sorts ("agent-2"
+    /// before "agent-10", case aside) — a long list read in recency order
+    /// looked random. Equal names keep a steady order: workspace, machine.
+    var byName: TaskAssigneeChoices {
+        func order(_ a: [String], _ b: [String]) -> Bool {
+            for (x, y) in zip(a, b) {
+                let c = x.localizedStandardCompare(y)
+                if c != .orderedSame { return c == .orderedAscending }
+            }
+            return false
+        }
+        var out = self
+        out.sessions = sessions.enumerated().sorted { l, r in
+            let (a, b) = (l.element, r.element)
+            let ka = [a.label.trimmingCharacters(in: CharacterSet(charactersIn: "@")), a.workspace, a.machine ?? ""]
+            let kb = [b.label.trimmingCharacters(in: CharacterSet(charactersIn: "@")), b.workspace, b.machine ?? ""]
+            if order(ka, kb) { return true }
+            if order(kb, ka) { return false }
+            return l.offset < r.offset
+        }.map(\.element)
+        out.rooms = rooms.enumerated().sorted { l, r in
+            let (a, b) = (l.element, r.element)
+            if order([a.name, a.machine ?? ""], [b.name, b.machine ?? ""]) { return true }
+            if order([b.name, b.machine ?? ""], [a.name, a.machine ?? ""]) { return false }
+            return l.offset < r.offset
+        }.map(\.element)
+        return out
+    }
 
     /// The workspace a task queued this way belongs to: the session's, when
     /// it goes to one (nil: a room, the Switchboard, a new agent — keep the
@@ -905,7 +935,7 @@ final class CodingTaskStore {
 /// What ties a read to ONE conversation when the agent's store is keyed by
 /// folder (Kimi): the session id once known, else the earliest moment its
 /// journal may have been begun.
-struct TranscriptPin: Equatable, Sendable {
+struct TranscriptPin: Hashable, Sendable {
     /// Kimi's "session_<uuid>": read that session's journal, nothing else.
     var kimiSession: String? = nil
     /// Epoch seconds: a Kimi journal begun before this is another
@@ -1191,6 +1221,26 @@ enum AgentSessionLocator {
         s.count == 36 && UUID(uuidString: s) != nil
     }
 
+    /// `$varName` = Claude conversation `id`'s transcript, whatever project
+    /// folder it's under (Claude names the file after the conversation).
+    nonisolated static func claudePinnedFragment(id: String, into varName: String) -> String {
+        guard isConversationUUID(id) else { return "" }
+        return "\(varName)=$(ls -t \"$HOME\"/.claude/projects/*/\(id).jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = the transcript of conversation `id` for `tool` (a
+    /// `Profile.Tool` raw value), "" for a tool or id no file is named by.
+    nonisolated static func pinnedFragment(tool: String, id: String, into varName: String) -> String {
+        switch tool {
+        case "claude": return claudePinnedFragment(id: id, into: varName)
+        case "kimi": return kimiPinnedFragment(id: id, into: varName)
+        case "grok": return grokPinnedFragment(id: id, into: varName)
+        case "codex": return codexPinnedFragment(id: id, into: varName)
+        case "omp": return ompPinnedFragment(id: id, into: varName)
+        default: return ""
+        }
+    }
+
     /// `$varName` = Grok session `id`'s transcript, whatever folder it's under.
     nonisolated static func grokPinnedFragment(id: String, into varName: String) -> String {
         guard isConversationUUID(id) else { return "" }
@@ -1323,6 +1373,44 @@ enum AgentSessionLocator {
         let ks = field(2)
         let since = Int(field(1)) ?? 0
         return (cwd, since, isKimiSessionID(ks) ? ks : nil, field(3) == "1", Int(field(4)) ?? since)
+    }
+
+    /// The shell that resolves `$f` -- the transcript a tab's agent is
+    /// writing: the session's own conversation by id (`pin`), else the file
+    /// the window's agent named (`pinnedWindow`), else the folder's newest
+    /// (floored by `since`). A pin whose file isn't there yet sets `$pe` and
+    /// the read stays empty: never another session's conversation. One
+    /// copy for the macOS engine and the fat client.
+    nonisolated static func locatePrefix(
+        path: String, since: Int, agent: String?, pinnedWindow: Int?,
+        pin: TranscriptPin = TranscriptPin()) -> String {
+        var cmd = "f=\"\"; pe=\"\"; "
+        // Kimi records no per-window path, so the session's own id (pinned
+        // by the engine once this launch's journal appeared) names its file.
+        if agent == "kimi", let id = pin.kimiSession, isKimiSessionID(id) {
+            cmd += kimiPinnedFragment(id: id, into: "f")
+        } else if agent == "grok", let id = pin.grokSession, isConversationUUID(id) {
+            // The session's own conversation, or nothing yet (`pe`): never
+            // the folder's newest, which may be another session's.
+            cmd += grokPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "codex", let id = pin.codexSession, isConversationUUID(id) {
+            cmd += codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "omp", let id = pin.ompSession, isConversationUUID(id) {
+            cmd += ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if let w = pinnedWindow {
+            // The transcript the tab's agent itself named (its hook records the
+            // path per window — see agent-status.sh) wins over "the newest file
+            // in the folder": two agents in one folder (a delegate beside its
+            // delegator) would otherwise take turns owning each other's view.
+            // Still floored: a file older than this process is another's.
+            cmd += pinnedPick(window: w, since: since)
+        }
+        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
+            + locateBlock(path: path, since: since, agent: agent,
+                                              kimiCreatedSince: pin.kimiCreatedSince,
+                                              kimiExclude: pin.kimiExclude)
+            + "fi; "
+        return cmd
     }
 
     /// Sets `$varName` to the transcript the agent in tmux window `window`
@@ -3749,6 +3837,12 @@ final class CodingTaskEngine {
                             + "| iconv -f UTF-8 -t UTF-8 -c; fi")
     }
 
+    /// `taskTranscriptCommand`'s lookup alone: sets `$f`, prints nothing --
+    /// for a caller that reads the file its own way (the archive's chunks).
+    nonisolated static func taskTranscriptLocate(branch: String, agent: Profile.Tool = .claude) -> String? {
+        transcriptCommand(branch: branch, agent: agent, emit: "")
+    }
+
     /// Locates the session's transcript as `taskTranscriptCommand` does (into
     /// `$f`), then runs `emit` on it.
     private nonisolated static func transcriptCommand(
@@ -4374,7 +4468,7 @@ final class CodingTaskEngine {
             // (same courtesy as the automation pull).
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if !TaskTranscriptArchive.has(taskID),
-               let text = await delegate.fetchTaskTranscriptRaw(task), !text.isEmpty {
+               let text = await delegate.fetchTaskTranscriptRaw(task, forArchive: true), !text.isEmpty {
                 TaskTranscriptArchive.save(text, taskID: taskID)
                 BACDebug.log("tasks", "“\(task.title)”: transcript archived "
                     + "(\(text.utf8.count) bytes)")
@@ -4703,21 +4797,16 @@ enum CodingTaskEngine {
     // @port-skip other-platform: the fat client's own copy (no TranscriptPin), not the macOS engine's twin
     nonisolated static func planTranscriptCommand(guestCwd: String, since: Int,
                                                   agent: String? = nil,
-                                                  pinnedWindow: Int? = nil) -> String? {
+                                                  pinnedWindow: Int? = nil,
+                                                  pin: TranscriptPin = TranscriptPin()) -> String? {
         guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
         else { return nil }
-        var cmd = "f=\"\"; pe=\"\"; "
-        // The transcript the tab's agent itself named (its hook records the
-        // path per window — see agent-status.sh) wins over "the newest file
-        // in the folder": two agents in one folder (a delegate beside its
-        // delegator) would otherwise take turns owning each other's view.
-        // Still floored: a file older than this process is another's.
-        if let w = pinnedWindow {
-            cmd += AgentSessionLocator.pinnedPick(window: w, since: since)
-        }
-        cmd += "if [ -z \"$f\" ] && [ -z \"$pe\" ]; then "
-            + AgentSessionLocator.locateBlock(path: path, since: since, agent: agent)
-            + "fi; "
+        // Located as the macOS engine does: the session's own conversation
+        // (`pin`), else the file the window's agent named, else the folder's
+        // newest -- two sessions of one agent in one folder would otherwise
+        // read each other's.
+        var cmd = AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                                   pinnedWindow: pinnedWindow, pin: pin)
         cmd += "if [ -n \"$f\" ]; then tail -c 300000 \"$f\" | iconv -f UTF-8 -t UTF-8 -c; fi; "
         if agent == nil || agent == "claude" {
             // The pq dump is Claude's pending AskUserQuestion — no other
@@ -4732,6 +4821,40 @@ enum CodingTaskEngine {
                 + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
                 + "then echo; tr -d '\\n' < \"$q\"; echo; fi"
         }
+        return cmd
+    }
+
+    /// The fat client's twin of the macOS engine's `transcriptChunkCommand`:
+    /// the same incremental reader (header lines, then whole JSONL lines from
+    /// `knownOffset`, or the window before it for "earlier"), so the phone
+    /// keeps the whole conversation instead of re-tailing a small window.
+    /// Located like `planTranscriptCommand` here, pq fallback included; the
+    /// pending question rides its own header line.
+    nonisolated static func transcriptChunkCommand(
+        guestCwd: String, since: Int, agent: String? = nil, pinnedWindow: Int? = nil,
+        pin: TranscriptPin = TranscriptPin(),
+        knownPath: String?, knownOffset: Int, bytes: Int, earlier: Bool) -> String? {
+        guard let path = AgentSessionLocator.sanitized(guestCwd: guestCwd)
+        else { return nil }
+        var cmd = AgentSessionLocator.locatePrefix(path: path, since: since, agent: agent,
+                                                   pinnedWindow: pinnedWindow, pin: pin)
+        cmd += "if [ -n \"$f\" ]; then printf '%s\\n' \"$f\"; "
+        if agent == nil || agent == "claude" {
+            let enc2 = path.replacingOccurrences(of: ".", with: "-")
+                .replacingOccurrences(of: "/", with: "-")
+            let pq = "\"$HOME/.bromure/pq-\(enc2).json\""
+            cmd += "q=\(pq); "
+                + "if [ ! -f \"$q\" ]; then n=$(date +%s); "
+                + "q=$(find \"$HOME/.bromure\" -maxdepth 1 -name 'pq-*.json' "
+                + "-newermt @$((n-300)) 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1); fi; "
+                + "if [ -n \"$q\" ] && [ -n \"$(find \"$q\" -newermt @\(AgentSessionLocator.findEpoch(since)) 2>/dev/null)\" ]; "
+                + "then tr -d '\\n' < \"$q\"; fi; "
+        }
+        cmd += "echo; "
+        let known = "'" + (knownPath ?? "").replacingOccurrences(of: "'", with: "'\\''") + "'"
+        cmd += "python3 - \"$f\" \(known) \(knownOffset) \(bytes) "
+            + (earlier ? "earlier" : "tail")
+            + " <<'BROMURE_PY' | iconv -f UTF-8 -t UTF-8 -c\n" + TranscriptChunkReader.python + "\nBROMURE_PY\nfi"
         return cmd
     }
 
@@ -4869,4 +4992,93 @@ enum TaskDiffParser {
         close()
         return files
     }
+}
+
+/// The guest-side reader behind `transcriptChunkCommand` (macOS and the
+/// fat client both): see the macOS engine's notes on its bounds.
+enum TranscriptChunkReader {
+    nonisolated static let tailJumpFactor = 4
+    nonisolated static let python = #"""
+    import sys, os
+    f, known, off, want, mode = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+    try:
+        size = os.path.getsize(f)
+    except OSError:
+        sys.exit(0)
+    want = max(want, 1)
+    BLK = 1 << 16
+    def line_start(fh, pos, limit):
+        # Start of the line holding byte `pos`; None when it begins more
+        # than `limit` bytes back (limit None: no bound).
+        p = pos
+        floor = 0 if limit is None else max(0, pos - limit)
+        while p > floor:
+            q = max(floor, p - BLK)
+            fh.seek(q)
+            b = fh.read(p - q)
+            j = b.rfind(b'\n')
+            if j >= 0:
+                return q + j + 1
+            p = q
+        return 0 if floor == 0 else None
+    def next_line(fh, pos, end):
+        # Offset just past the first newline in [pos, end); None if none.
+        p = pos
+        while p < end:
+            fh.seek(p)
+            b = fh.read(min(BLK, end - p))
+            if not b:
+                break
+            j = b.find(b'\n')
+            if j >= 0:
+                return p + j + 1
+            p += len(b)
+        return None
+    def whole_end(fh, start, end):
+        # Offset just past the last newline in [start, end); start if none.
+        p = end
+        while p > start:
+            q = max(start, p - BLK)
+            fh.seek(q)
+            b = fh.read(p - q)
+            j = b.rfind(b'\n')
+            if j >= 0:
+                return q + j + 1
+            p = q
+        return start
+    with open(f, 'rb') as fh:
+        if mode == 'earlier':
+            end = min(max(off, 0), size)
+            s0 = max(0, end - want)
+            start = 0
+            if s0 > 0:
+                nx = next_line(fh, s0, end)
+                start = nx if nx is not None and nx < end else line_start(fh, max(end - 1, 0), None)
+        else:
+            fresh = (f != known) or off < 0 or off > size or (size - off) > want * TAILJUMP
+            if fresh:
+                s0 = max(0, size - want)
+                start = 0
+                if s0 > 0:
+                    ls = line_start(fh, s0, want)
+                    if ls is not None:
+                        start = ls
+                    else:
+                        we = whole_end(fh, s0, size)
+                        nx = next_line(fh, s0, we)
+                        start = nx if nx is not None and nx < we else line_start(fh, s0, None)
+            else:
+                start = off
+            end = whole_end(fh, start, size)
+        sys.stdout.write('%d\n%d\n%d\n' % (size, start, end))
+        sys.stdout.flush()
+        fh.seek(start)
+        left = end - start
+        while left > 0:
+            b = fh.read(min(1 << 20, left))
+            if not b:
+                break
+            sys.stdout.buffer.write(b)
+            left -= len(b)
+    """#.replacingOccurrences(of: "TAILJUMP", with: String(tailJumpFactor))
 }

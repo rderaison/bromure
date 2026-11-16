@@ -28,13 +28,9 @@ extension FatForward {
     /// closed (that's the stop signal — `accept` then fails). Unlike `serveSocks`
     /// this never binds, so the owner controls the fd's lifetime.
     static func acceptSocks(lfd: Int32, host: RemoteHost, allow: ((String) -> Bool)? = nil) {
-        while true {
-            var peer = sockaddr_in()
-            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let cfd = withUnsafeMutablePointer(to: &peer) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.accept(lfd, $0, &len) }
-            }
-            if cfd < 0 { if errno == EINTR { continue }; break }   // lfd closed → stop
+        var peer = sockaddr_in()
+        // nil: lfd closed → stop. Transient failures are ridden out.
+        while let cfd = acceptConnection(lfd, peer: &peer, label: "socks") {
             if let allow, !allow(peerIPv4(peer)) {
                 // Always in the log: a browser VM turned away here shows up in
                 // the page as ERR_PROXY_CONNECTION_FAILED with no other trace.
@@ -52,9 +48,7 @@ extension FatForward {
             FileHandle.standardError.write(Data("forward: couldn't bind :\(localPort)\n".utf8)); return
         }
         FileHandle.standardError.write(Data("forward: 127.0.0.1:\(localPort) → \(ip):\(port) via \(host.connectLabel)\n".utf8))
-        while true {
-            let cfd = Darwin.accept(lfd, nil, nil)
-            if cfd < 0 { if errno == EINTR { continue }; break }
+        while let cfd = acceptConnection(lfd, label: "forward") {
             Thread.detachNewThread {
                 guard let rfd = RemoteTransport.forwardDial(host: host, ip: ip, port: port) else {
                     Darwin.close(cfd); return
@@ -74,9 +68,7 @@ extension FatForward {
             FileHandle.standardError.write(Data("socks: couldn't bind :\(localPort)\n".utf8)); return
         }
         FileHandle.standardError.write(Data("socks5: 127.0.0.1:\(localPort) → \(host.connectLabel) (remote subnet)\n".utf8))
-        while true {
-            let cfd = Darwin.accept(lfd, nil, nil)
-            if cfd < 0 { if errno == EINTR { continue }; break }
+        while let cfd = acceptConnection(lfd, label: "socks") {
             Thread.detachNewThread { handleSocks(cfd, host: host) }
         }
     }
@@ -94,6 +86,9 @@ extension FatForward {
         }
         func writeAll(_ bytes: [UInt8]) { var b = bytes; _ = Darwin.write(cfd, &b, b.count) }
         func fail() { Darwin.close(cfd) }
+        // The handshake is a few bytes: a client that sends nothing gives up
+        // here (cleared before the splice, where idle is normal).
+        setReadTimeout(cfd, seconds: 15)
 
         // Greeting: VER=5, NMETHODS, METHODS…
         guard let head = readN(2), head[0] == 5 else { return fail() }
@@ -124,6 +119,7 @@ extension FatForward {
             writeAll([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]); return fail()   // connection refused
         }
         writeAll([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])   // success (BND.ADDR/PORT ignored)
+        setReadTimeout(cfd, seconds: 0)
         splice(cfd, rfd)
     }
 }
@@ -165,6 +161,9 @@ final class RemoteSocksForwarder {
     func stop() {
         guard !stopped else { return }
         stopped = true
+        // Wakes the parked accept with the listener still this fd (a bare
+        // close could leave it to a retry on a number since reused).
+        Darwin.shutdown(lfd, SHUT_RDWR)
         Darwin.close(lfd)
     }
 }

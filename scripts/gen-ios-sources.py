@@ -25,6 +25,7 @@ SHARED = [
     # Transport + protocol
     "FatClient.swift",
     "FatClientTypes.swift",
+    "BulkLanePriority.swift",  # the chat on screen reads before background ones (bulk lane)
     "FatClientLinkHealth.swift",  # adaptive timeouts + reconnect hysteresis + link simulation
     "FatClientSSHDial.swift",
     "FatClientNIOSSH.swift",
@@ -55,6 +56,7 @@ SHARED = [
     "Mitm/ConsentCredentialID.swift",
     "FatForward.swift",
     "FDGuard.swift",  # env-gated fd auditor; kernel guard is macOS-only, no-op on iOS
+    "TestRun.swift",  # isTestRun / testRunDirectory (ProfileStore keeps a test run off the user's folder)
     "Terminal/GridLayoutStore.swift",
     "Terminal/TerminalImagePaste.swift",  # pure upload core (AppKit parts #if'd out)
     # Controller + connect flow (models; iOS provides the views)
@@ -98,6 +100,8 @@ SHARED = [
     "AutomationRunArchive.swift",
     "AgentTranscripts.swift",   # transcript models + parsers (the views are in ClaudeTranscriptView)
     "ClaudeTranscriptView.swift",
+    "TranscriptFeed.swift",      # the iOS readers' bounded incremental transcript feed
+    "TailFollowRule.swift",      # when an iOS chat lets go of its end, and takes it up again
     "TranscriptActivity.swift",
     "ActivitySummary.swift",    # what a run of activity amounts to (TranscriptActivity's model)
     "DisplayRequest.swift",     # a display-MCP call, parsed (DisplayCards' model)

@@ -21,7 +21,7 @@ The **Network** pane ("Connection mode and DNS settings") decides how browser VM
 | **DNS Servers** | "Override which DNS servers the browser uses to look up website addresses. Leave empty to use the default. Set this if you’re on a VPN or security software that breaks internet access in the browser." A comma-separated list of IPv4 addresses, for example `1.1.1.1, 8.8.8.8`. Default: empty. |
 | **Phishing Analysis Server** | "URL of the server used for AI-powered phishing detection. Change this to use a self-hosted instance." Default: `https://bromure.io/api`. A **Reset** button appears when the field differs from the default. |
 
-Connection mode, network interface and DNS servers apply to browser windows opened after the change: Bromure replaces its pre-warmed VM as soon as you change one of them. The phishing server is read when a window starts.
+Connection mode, network interface and DNS servers apply to browser windows opened after the change: the next VM that boots uses them. The phishing server is read when a window starts.
 
 ## NAT or Bridged
 

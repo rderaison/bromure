@@ -68,10 +68,10 @@ As soon as the field differs from the default, the pane shows a red warning, "In
 | **Energy Mode** | `vm.energyMode` | String: `highPower`, `automatic`, `lowPower` | `automatic` |
 | **Kernel Boot Options** | `vm.extraKernelOptions` | String | `arm64.nosme` |
 
-`vm.memoryGB` and `vm.cpuCount` can also be set with AppleScript's `set app setting`, which restarts the pre-warmed VM and offers to restart open windows so they pick up the change. See [Automation](../14-automation.mdx#applescript).
+`vm.memoryGB` and `vm.cpuCount` can also be set with AppleScript's `set app setting`, so the next window uses the new values, and offers to restart open windows so they pick up the change. See [Automation](../14-automation.mdx#applescript).
 
 ## Related chapters
 
-- [Concepts](../04-concepts.mdx) — one VM per window, and the pre-warmed VM.
+- [Concepts](../04-concepts.mdx) — one VM per window, and how a VM starts.
 - [Performance](../07-profile-settings/performance.mdx) — per-profile GPU and rendering options.
 - [Troubleshooting](../15-troubleshooting.mdx) — windows that won't start, and kernel options.

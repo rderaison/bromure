@@ -53,6 +53,10 @@ final class BrowserPaneModel {
     /// after a failure, "Install the Browser…" after a declined prompt).
     var actionLabel: String?
     var onAction: (() -> Void)?
+    /// Throws the browser VM away and boots a fresh one (the toolbar's
+    /// restart button) -- for a browser whose network stopped answering.
+    /// Wired by the window that owns the pane; nil hides the button.
+    var onRestart: (() -> Void)?
 
     /// Stable AppKit view the VM controller mounts the VZVirtualMachineView
     /// into. Kept alive by the model so the SwiftUI side can wrap it without
@@ -246,10 +250,22 @@ struct BrowserPaneView: View {
             // The exact Safari-compact tab bar from Bromure Web. Native-chrome
             // mode crops Chromium's own chrome out of the framebuffer, so this
             // is the browser's only chrome.
-            NativeCompactBarView(model: model.tabBar, downloads: model.downloads)
-                .frame(minHeight: 34)
-                .padding(.vertical, 3)
-                .background(Color.platformWindowBackground)
+            HStack(spacing: 0) {
+                NativeCompactBarView(model: model.tabBar, downloads: model.downloads)
+                if let restart = model.onRestart {
+                    Button(action: restart) {
+                        Image(systemName: "arrow.counterclockwise.circle")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(NSLocalizedString("Restart Browser", comment: "browser pane toolbar: reboot the browser VM"))
+                    .accessibilityLabel(NSLocalizedString("Restart Browser", comment: "browser pane toolbar: reboot the browser VM"))
+                    .padding(.trailing, 8)
+                }
+            }
+            .frame(minHeight: 34)
+            .padding(.vertical, 3)
+            .background(Color.platformWindowBackground)
             Divider()
             content
         }

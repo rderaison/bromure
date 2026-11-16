@@ -360,6 +360,17 @@ public final class SecurityTimeline {
         events.removeAll()
         remote.removeAll()
         fetched.removeAll()
+        // The next mirror is news again (it refills the hosts' buckets, as before).
+        lastMirror.removeAll()
+        mirrorRowEvents.removeAll()
+        // The next delta is a full copy again: it refills the hosts' buckets.
+        synced.removeAll()
+        // The hosts' own totals go with their rows: the Overview counted
+        // them after the rows were gone, and kept them while the host was
+        // away. The next head brings them back with the rows (Finding:
+        // "Clear leaves remote security totals visible after events are
+        // removed").
+        remoteTotals.removeAll()
         if directory != nil {
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.clearedAtKey)
         }
@@ -517,7 +528,11 @@ public final class SecurityTimeline {
     /// the window is a "what just happened" view, not the full 5000-cap history.
     public func mirrorRows(limit: Int = 750, since: Date? = nil) -> [[String: Any]] {
         let pool = since.map { t in events.filter { $0.time >= t } } ?? events
-        return pool.suffix(limit).map { e in
+        return pool.suffix(limit).map(Self.wire)
+    }
+
+    /// A row as the host sends it to a fat client (mirror, history, delta).
+    nonisolated static func wire(_ e: Event) -> [String: Any] {
             var r: [String: Any] = [
                 "t": e.time.timeIntervalSince1970,
                 "engine": e.engine,
@@ -536,7 +551,6 @@ public final class SecurityTimeline {
             if let fw = e.firewall { r["fw"] = fw.wire }
             if let pk = e.package { r["pk"] = pk.allowlistEntry }
             return r
-        }
     }
 
     /// A host's events in the last `hours` (0 = all it holds), as many as its
@@ -556,9 +570,38 @@ public final class SecurityTimeline {
     /// only `oldestRetained`, its first row's time.
     public func applyMirror(_ rows: [[String: Any]], host: String, oldestRetained: Date? = nil,
                             oldestSeq: Int? = nil, epoch: String? = nil) {
-        let mirror = Self.events(rows, host: host)
+        let input = MirrorInput(rows: rows as NSArray, oldestRetained: oldestRetained, oldestSeq: oldestSeq,
+                                epoch: epoch, historyVersion: historyVersion[host] ?? 0)
+        if let last = lastMirror[host], last.historyVersion == input.historyVersion,
+           last.oldestRetained == oldestRetained, last.oldestSeq == oldestSeq, last.epoch == epoch,
+           last.rows.isEqual(to: rows) {
+            return
+        }
+        // Decoded afresh only for rows not in the last mirror.
+        let known = mirrorRowEvents[host] ?? [:]
+        var decoded: [MirrorRowKey: Event] = [:]
+        decoded.reserveCapacity(rows.count)
+        var mirror: [Event] = []
+        mirror.reserveCapacity(rows.count)
+        for r in rows {
+            let key = MirrorRowKey(r)
+            // A row seen twice in one mirror is two events: one id each.
+            if decoded[key] == nil, let e = known[key] {
+                decoded[key] = e
+                mirror.append(e)
+            } else if let e = Self.events([r], host: host).first {
+                if decoded[key] == nil { decoded[key] = e }
+                mirror.append(e)
+            }
+        }
+        mirrorRowEvents[host] = decoded
+        defer { lastMirror[host] = MirrorInput(rows: input.rows, oldestRetained: oldestRetained, oldestSeq: oldestSeq,
+                                               epoch: epoch, historyVersion: historyVersion[host] ?? 0) }
         // No rows: the host holds none -- its bucket empties, history too.
-        if mirror.isEmpty { fetched[host] = nil; fetchedEpoch[host] = nil }
+        if mirror.isEmpty {
+            if fetched[host] != nil { historyVersion[host, default: 0] += 1 }
+            fetched[host] = nil; fetchedEpoch[host] = nil
+        }
         let retention: Retention
         if let oldestSeq, let epoch {
             // Numbers from another run of the host (it restarted since the
@@ -599,12 +642,285 @@ public final class SecurityTimeline {
     /// The run of the host each fetched history came from.
     @ObservationIgnored private var fetchedEpoch: [String: String] = [:]
 
+    /// The last mirror applied per host, as it came (rows and retention
+    /// words) and against which fetched history: the same again changes
+    /// nothing, so it isn't decoded, merged or published again. A fat client
+    /// gets one with every snapshot, several a second, and rebuilding it each
+    /// time redrew the open timeline window from scratch -- most of the main
+    /// thread while typing.
+    private struct MirrorInput {
+        let rows: NSArray
+        let oldestRetained: Date?
+        let oldestSeq: Int?
+        let epoch: String?
+        let historyVersion: Int
+    }
+    @ObservationIgnored private var lastMirror: [String: MirrorInput] = [:]
+    /// Bumped when a host's fetched history is replaced.
+    @ObservationIgnored private var historyVersion: [String: Int] = [:]
+    /// The events the last mirror's rows decoded to, by row: an unchanged row
+    /// keeps its event -- and its `id`, so the window's table sees one new
+    /// row, not all of them replaced -- and isn't redacted again.
+    @ObservationIgnored private var mirrorRowEvents: [String: [MirrorRowKey: Event]] = [:]
+
+    /// A mirror row as a dictionary key. `NSDictionary.hash` is its entry
+    /// count, so keyed directly every row of a mirror fell in one bucket and
+    /// each lookup compared it with all the others, value by value: hundreds
+    /// of thousands of dictionary comparisons per snapshot, most of the fat
+    /// client's main thread (scrolling the session list barely moved). The
+    /// hash is the row's own identity -- its id, time, number and counts --
+    /// and equality is still the whole row.
+    struct MirrorRowKey: Hashable {
+        let row: NSDictionary
+        private let hash: Int
+
+        init(_ row: [String: Any]) {
+            self.row = row as NSDictionary
+            var h = Hasher()
+            h.combine(row.count)
+            h.combine(row["rid"] as? String)
+            h.combine(row["t"] as? Double)
+            h.combine(row["sq"] as? Int)
+            h.combine(row["count"] as? Int)
+            h.combine(row["dn"] as? Int)
+            hash = h.finalize()
+        }
+
+        static func == (a: Self, b: Self) -> Bool { a.hash == b.hash && a.row.isEqual(b.row) }
+        func hash(into hasher: inout Hasher) { hasher.combine(hash) }
+    }
+
+    // MARK: - Fat-client sync: deltas and the host's totals
+
+    /// A fat client used to get the host's last 750 rows with every `/state`
+    /// snapshot, several a second, and to rebuild its counts from them: the
+    /// same rows over and over, and numbers that could differ from the host's
+    /// (its clock, its range, its locale's engine names). Now each snapshot
+    /// carries only `head()`: which run of the host, the last row it numbered,
+    /// the first it still holds, and its own totals for each range. The client
+    /// asks `/security-timeline?after=` for the rows it hasn't got
+    /// (`deltaBody`), and shows the host's totals as they are.
+
+    /// The last row this Mac numbered (nil before the first).
+    public var lastSeq: Int? { nextSeq > 0 ? nextSeq - 1 : nil }
+
+    /// What `/state` says of this Mac's timeline: cheap, and the same while
+    /// nothing changes.
+    public func head(now: Date = Date()) -> [String: Any] {
+        var h: [String: Any] = ["epoch": epoch, "totals": Totals.wire(Totals.byRange(events, now: now))]
+        if let lastSeq { h["last"] = lastSeq }
+        if let first = oldestRetainedSeq { h["oldest"] = first }
+        return h
+    }
+
+    /// The rows numbered after `after` in this run (`epoch`); every row held
+    /// when the client has none, or has another run's (`delta` false: they
+    /// replace its copy). A row folded again (a repeat) moved to the end with
+    /// a new number, so it's sent again and replaces the client's copy by id.
+    /// Rows pruned from the front since: the client drops what's before
+    /// `oldest`.
+    public func deltaBody(after: Int?, epoch asked: String?) -> [String: Any] {
+        let delta = after != nil && asked == epoch
+        var start = 0
+        if delta, let after {
+            // Numbered in order: the first row past `after`.
+            var lo = 0, hi = events.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if (events[mid].seq ?? Int.min) > after { hi = mid } else { lo = mid + 1 }
+            }
+            start = lo
+        }
+        var body: [String: Any] = ["epoch": epoch, "delta": delta, "rows": events[start...].map(Self.wire)]
+        if let lastSeq { body["last"] = lastSeq }
+        if let first = oldestRetainedSeq { body["oldest"] = first }
+        return body
+    }
+
+    /// Where a host's copy stands: its run, last row and first row.
+    struct SyncMark: Equatable {
+        var epoch: String
+        var last: Int?
+        var oldest: Int?
+
+        init(epoch: String, last: Int?, oldest: Int?) {
+            self.epoch = epoch; self.last = last; self.oldest = oldest
+        }
+        /// From a head or a delta body.
+        init?(_ d: [String: Any]) {
+            guard let epoch = d["epoch"] as? String else { return nil }
+            self.init(epoch: epoch, last: d["last"] as? Int, oldest: d["oldest"] as? Int)
+        }
+    }
+    @ObservationIgnored private var synced: [String: SyncMark] = [:]
+
+    /// Whether a host's head says there's something this copy hasn't got.
+    func needsDelta(host: String, head: SyncMark) -> Bool { synced[host] != head }
+
+    /// What to ask the host for: the rows after these, of this run, and the
+    /// mark the reply is relative to (handed back to `applyDelta`).
+    func deltaQuery(host: String) -> (after: Int?, epoch: String?, base: SyncMark?) {
+        guard let m = synced[host] else { return (nil, nil, nil) }
+        return (m.last, m.epoch, m)
+    }
+
+    /// The hosts' own totals, by range (hours), as their last head said.
+    public private(set) var remoteTotals: [String: [Int: Totals]] = [:]
+
+    func applyRemoteTotals(_ totals: [Int: Totals], host: String) {
+        if remoteTotals[host] != totals { remoteTotals[host] = totals }
+    }
+
+    /// A host that synced by deltas now sends only the mirror (it was
+    /// downgraded): its totals and sync mark are from that run, and its
+    /// next mirror must apply even if it matches one from before the deltas
+    /// (Finding: "Older host fallback keeps stale delta totals and disables
+    /// history fetching").
+    func forgetDeltaSync(host: String) {
+        if remoteTotals[host] != nil { remoteTotals[host] = nil }
+        synced[host] = nil
+        lastMirror[host] = nil
+    }
+
+    /// Apply a host's reply to `/security-timeline?after=`. Rows already held
+    /// keep their events (and ids: the table sees only what's new).
+    ///
+    /// `base` is the mark the request was made from (`deltaQuery`). A reply
+    /// to a request made before this copy's mark changed -- a Clear, or the
+    /// host dropped, while it was under way -- is dropped: taken as a full
+    /// copy it held only the rows after the old mark and recorded them as
+    /// all, so the older rows the host still holds never came back. The
+    /// next head asks again, from the mark as it is now (Finding: "In-flight
+    /// delta after Clear permanently skips retained host rows").
+    @discardableResult
+    func applyDelta(_ body: [String: Any], host: String, base: SyncMark?) -> Bool {
+        guard synced[host] == base else { return false }
+        guard let mark = SyncMark(body), let rows = body["rows"] as? [[String: Any]] else { return false }
+        let delta = (body["delta"] as? Bool) == true && synced[host]?.epoch == mark.epoch
+        let new = Self.events(rows, host: host)
+        let before = remote[host] ?? []
+        var bucket = delta ? before : []
+        if delta, !new.isEmpty {
+            let ids = Set(new.map(\.stableID))
+            bucket.removeAll { ids.contains($0.stableID) }
+        }
+        bucket += new
+        // What the host no longer holds goes here too (none held: none here).
+        if let first = mark.oldest {
+            bucket.removeAll { ($0.seq ?? Int.max) < first }
+        } else {
+            bucket.removeAll()
+        }
+        if bucket.count > Self.cap { bucket.removeFirst(bucket.count - Self.cap) }
+        synced[host] = mark
+        // Nothing new, nothing dropped: not republished (the window stays).
+        if delta, new.isEmpty, bucket.count == before.count, remote[host] != nil { return true }
+        remote[host] = bucket
+        return true
+    }
+
+    /// What the Overview's tiles count. Shared by the window and the host's
+    /// head, so a fat client shows the numbers the host's own window does.
+    public struct Totals: Equatable, Sendable {
+        public var blocked = 0
+        public var allowed = 0
+        public var credential = 0
+        public var supplyChain = 0
+        public var pii = 0
+        public var sandbox = 0
+        /// Any Guest sandbox row (blocked or not): its tile is shown.
+        public var sandboxSeen = false
+
+        public init() {}
+
+        struct Engines {
+            let credential = NSLocalizedString("Credential brokering", comment: "Security Timeline engine")
+            let supplyChain = NSLocalizedString("Supply chain", comment: "Security Timeline engine")
+            let pii = NSLocalizedString("PII protection", comment: "Security Timeline engine")
+            let sandbox = NSLocalizedString("Guest sandbox", comment: "Security Timeline engine")
+        }
+
+        mutating func add(_ e: Event, _ engines: Engines) {
+            switch e.kind {
+            case .blocked: blocked += e.occurrences
+            case .allowed: allowed += e.occurrences
+            case .info: break
+            }
+            // Swaps and values, not rows: a coalesced row carries its count.
+            if e.engine == engines.credential { credential += e.count ?? 1 }
+            else if e.engine == engines.supplyChain { supplyChain += 1 }
+            else if e.engine == engines.pii { pii += e.count ?? 1 }
+            else if e.engine == engines.sandbox {
+                sandboxSeen = true
+                if e.kind == .blocked { sandbox += e.occurrences }
+            }
+        }
+
+        static func + (a: Self, b: Self) -> Self {
+            var t = a
+            t.blocked += b.blocked; t.allowed += b.allowed; t.credential += b.credential
+            t.supplyChain += b.supplyChain; t.pii += b.pii; t.sandbox += b.sandbox
+            t.sandboxSeen = a.sandboxSeen || b.sandboxSeen
+            return t
+        }
+
+        static func of<S: Sequence>(_ events: S) -> Self where S.Element == Event {
+            let engines = Engines()
+            var t = Self()
+            for e in events { t.add(e, engines) }
+            return t
+        }
+
+        /// Every range the window offers (`rangeChoices`), in one pass.
+        static func byRange(_ events: [Event], now: Date) -> [Int: Self] {
+            let engines = Engines()
+            var out: [Int: Self] = [:]
+            for h in rangeChoices { out[h] = Self() }
+            for e in events {
+                let age = now.timeIntervalSince(e.time)
+                for h in rangeChoices where h == 0 || age <= Double(h) * 3600 {
+                    out[h]?.add(e, engines)
+                }
+            }
+            return out
+        }
+
+        static func wire(_ byRange: [Int: Self]) -> [String: Any] {
+            var d: [String: Any] = [:]
+            for (h, t) in byRange {
+                d[String(h)] = ["blocked": t.blocked, "allowed": t.allowed, "credential": t.credential,
+                                "supplyChain": t.supplyChain, "pii": t.pii, "sandbox": t.sandbox,
+                                "sandboxSeen": t.sandboxSeen]
+            }
+            return d
+        }
+
+        static func byRange(wire: [String: Any]?) -> [Int: Self]? {
+            guard let wire else { return nil }
+            var out: [Int: Self] = [:]
+            for (k, v) in wire {
+                guard let h = Int(k), let d = v as? [String: Any] else { continue }
+                var t = Self()
+                t.blocked = d["blocked"] as? Int ?? 0
+                t.allowed = d["allowed"] as? Int ?? 0
+                t.credential = d["credential"] as? Int ?? 0
+                t.supplyChain = d["supplyChain"] as? Int ?? 0
+                t.pii = d["pii"] as? Int ?? 0
+                t.sandbox = d["sandbox"] as? Int ?? 0
+                t.sandboxSeen = d["sandboxSeen"] as? Bool ?? false
+                out[h] = t
+            }
+            return out
+        }
+    }
+
     /// A host's full history for the window's range (fetched): replaces its
     /// bucket. Later mirrors merge into it.
     public func applyHistory(_ rows: [[String: Any]], host: String, epoch: String? = nil) {
         let history = Self.events(rows, host: host)
         fetched[host] = history
         fetchedEpoch[host] = epoch
+        historyVersion[host, default: 0] += 1
         remote[host] = history
     }
 
@@ -1364,4 +1680,20 @@ public final class SecurityTimeline {
             return nil
         }
     }
+}
+
+// The row counts the Overview's totals and the Timeline both use (the
+// Linux daemon builds this file, not the view).
+extension SecurityTimeline.Event {
+    /// How many identical routine events this coalesced row stands for, when
+    /// more than one (nil otherwise). `count` on a non-coalesced row means
+    /// something else (PII values in one request) and is not a repeat.
+    var repeats: Int? {
+        guard coalesceKey != nil, let n = count, n > 1 else { return nil }
+        return n
+    }
+
+    /// How many occurrences the row counts for in a total: its folded
+    /// denials (guest sandbox), else its coalesced repeats, else one.
+    var occurrences: Int { denials ?? max(1, repeats ?? 1) }
 }

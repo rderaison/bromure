@@ -114,6 +114,8 @@ public final class UbuntuImageManager {
     public init(storageDir: URL? = nil, setupDir: URL) {
         self.storageDir = storageDir ?? Self.defaultStorageDirectory
         self.setupDir = setupDir
+        // A promotion a crash interrupted: the previous base image back.
+        ImagePromotion.recover(in: self.storageDir)
     }
 
     public static var defaultStorageDirectory: URL {
@@ -177,7 +179,8 @@ public final class UbuntuImageManager {
     /// setup.sh additions. Use `baseImageNeedsUpdate` to gate a nag.
     public var hasBaseImage: Bool {
         let fm = FileManager.default
-        return fm.fileExists(atPath: baseDiskURL.path)
+        return !ImagePromotion.isPending(in: storageDir)
+            && fm.fileExists(atPath: baseDiskURL.path)
             && fm.fileExists(atPath: efiVarsURL.path)
             && fm.fileExists(atPath: versionStampURL.path)
     }
@@ -396,15 +399,12 @@ public final class UbuntuImageManager {
                 options: []
             )
 
-            // 5. Promote — only now do we touch the live files. Disk
-            //    swap is atomic (rename); EFI vars + version stamp are
-            //    individual writes that we sequence so a crash mid-step
-            //    leaves the rebuild restartable from the .partial files
-            //    rather than killing the running image.
-            try? fm.removeItem(at: baseDiskURL)
-            try fm.moveItem(at: scratchDisk, to: baseDiskURL)
-            try? fm.removeItem(at: efiVarsURL)
-            try fm.moveItem(at: scratchEFI, to: efiVarsURL)
+            // 5. Promote — only now do we touch the live files. Disk and
+            //    EFI vars swap as one unit (`ImagePromotion`: a crash
+            //    midway rolls back to the previous image on next launch);
+            //    the version stamp follows.
+            try ImagePromotion.promote([(scratchDisk, baseDiskURL), (scratchEFI, efiVarsURL)],
+                                       in: storageDir)
             try newStamp.write(to: versionStampURL, atomically: true, encoding: .utf8)
             writeImageState(BaseImageState(
                 imageUUID: nil,   // local build — no catalog uuid
@@ -425,7 +425,7 @@ public final class UbuntuImageManager {
             // step 5, possibly all three with mismatched contents.
             // Either way it can't be trusted to boot. Wipe so the next
             // launch routes back to setup with a clean slate.
-            if !hadCompletePriorImage {
+            if !hadCompletePriorImage, !ImagePromotion.isPending(in: storageDir) {
                 try? fm.removeItem(at: baseDiskURL)
                 try? fm.removeItem(at: efiVarsURL)
                 try? fm.removeItem(at: versionStampURL)

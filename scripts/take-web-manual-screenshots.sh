@@ -28,7 +28,7 @@ JOBS="${JOBS:-4}"
 mkdir -p "$OUT"
 
 ALL_SHOTS=(
-    setup-welcome setup-progress setup-error starting new-profile
+    setup-welcome setup-progress setup-error starting launch-picker new-profile
     profile-general profile-performance profile-media profile-file-transfer
     profile-host-isolation profile-network-isolation profile-privacy profile-extensions
     profile-vpn-ads profile-enterprise profile-advanced

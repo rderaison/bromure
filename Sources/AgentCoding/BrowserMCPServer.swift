@@ -30,12 +30,22 @@ final class BrowserMCPServer {
     private let cdpViaHost: Bool
     static let cdpViaHostCode = -32010
 
+    /// The workspace's browser is turned off (`Profile.browserDisabled`),
+    /// read on every request so a change applies at once: no tools are
+    /// listed, every call and the CDP endpoint are refused, and nothing
+    /// boots a browser.
+    private let disabled: () -> Bool
+    var isDisabled: Bool { disabled() }
+    nonisolated static let disabledMessage = "The web browser is turned off for this workspace (Settings › Browser)."
+
     init(browser: @escaping () -> WorkspaceBrowserController?,
          ensureBrowser: @escaping () -> Void,
-         cdpViaHost: Bool = false) {
+         cdpViaHost: Bool = false,
+         disabled: @escaping () -> Bool = { false }) {
         self.browser = browser
         self.ensureBrowser = ensureBrowser
         self.cdpViaHost = cdpViaHost
+        self.disabled = disabled
     }
 
     // MARK: - JSON-RPC line handling
@@ -63,7 +73,11 @@ final class BrowserMCPServer {
         case "ping":
             return respond(id: id, result: [:])
         case "tools/list":
-            return respond(id: id, result: ["tools": Self.toolDefinitions])
+            return respond(id: id, result: ["tools": disabled() ? [] : Self.toolDefinitions])
+        case "tools/call" where disabled():
+            return respond(id: id, result: errorResult(Self.disabledMessage))
+        case "bromure/cdpEndpoint" where disabled():
+            return respondError(id: id, code: -32000, message: Self.disabledMessage)
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
@@ -255,9 +269,12 @@ final class BrowserMCPServer {
     /// first navigate doesn't spuriously time out and retry. Throws if it never
     /// comes up.
     private func readyBrowser() async throws -> WorkspaceBrowserController {
+        // Turned off meanwhile (a call that was already waiting): no browser.
+        if disabled() { throw MCPBrowserError.disabled }
         if browser()?.isReady == true { return browser()! }
         ensureBrowser()
         for _ in 0..<900 {   // ~90s @ 100ms
+            if disabled() { throw MCPBrowserError.disabled }
             if let b = browser(), b.isReady { return b }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -431,8 +448,10 @@ final class BrowserMCPServer {
 enum MCPBrowserError: LocalizedError {
     case missingParam(String)
     case notReady
+    case disabled
     var errorDescription: String? {
         switch self {
+        case .disabled: return BrowserMCPServer.disabledMessage
         case .missingParam(let p): return "Missing required parameter: \(p)"
         case .notReady: return "The browser didn't come up in time."
         }

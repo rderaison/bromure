@@ -12,6 +12,21 @@ import SandboxEngine
 /// It carries the API key (api_key.env), the profile's SSH keys, and an
 /// init script the guest sources on login.
 public final class SessionDisk {
+    /// This session has had a Mac folder shared in (writable): set once
+    /// seen, so a live refresh that drops the folders (a change that needs a
+    /// restart -- the share stays mounted until then) doesn't bring back
+    /// `claudeYoloEnv` over it.
+    private var hadHostShares = false
+    /// Whether api_key.env exports `claudeYoloEnv`: only while nothing of
+    /// the Mac's is writable from the guest. A shared folder is the user's
+    /// real files, mounted read-write at ~/<name>: a dangerous rm there
+    /// isn't undone by discarding the VM, so Claude Code's last check stays
+    /// (Finding "Dangerous rm bypass can delete writable host shared
+    /// folders").
+    var exportsClaudeYoloEnv: Bool {
+        if !sharedFolders.isEmpty { hadHostShares = true }
+        return !hadHostShares
+    }
     /// The profile this session was launched with. Mutable so a live
     /// refresh (env-var / credential / guardrail edit on a running
     /// session) can swap in the edited profile and re-emit the meta
@@ -593,7 +608,8 @@ public final class SessionDisk {
 
         // api_key.env — sourced by .bashrc inside the guest (apiKeyEnvLines,
         // shared with the Linux daemon).
-        try Self.apiKeyEnvLines(profile: profile, tokenPlan: tokenPlan, registrationMode: registrationMode)
+        try Self.apiKeyEnvLines(profile: profile, tokenPlan: tokenPlan, registrationMode: registrationMode,
+                                claudeYolo: exportsClaudeYoloEnv)
             .joined(separator: "\n").appending("\n").writeIfChanged(to: tmp.appendingPathComponent("api_key.env"))
 
         // MITM assets (if configured): CA cert + bridge script +

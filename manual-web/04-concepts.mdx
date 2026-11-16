@@ -1,6 +1,6 @@
 ---
 title: "Concepts & Architecture"
-description: "How Bromure works: the host and the guest, shared windows per profile and the pre-warmed VM pool, the base image and APFS clones, ephemeral and persistent profiles, what persists, the host-guest services and their vsock ports, NAT and bridged networking, and idle suspend."
+description: "How Bromure works: the host and the guest, shared windows per profile and how a VM boots for each session, the base image and APFS clones, ephemeral and persistent profiles, what persists, the host-guest services and their vsock ports, NAT and bridged networking, and idle suspend."
 order: 4
 ---
 
@@ -23,19 +23,17 @@ On macOS 27, with Metal enabled and a compatible guest image, windows of the sam
 
 Older macOS versions, images without shared-window support, and profiles with Metal disabled use the original window model.
 
-### The pre-warmed VM
+### Starting a VM
 
-Booting a Linux VM takes several seconds, so Bromure keeps one VM booted in advance. When a profile needs a new VM, Bromure:
+Bromure never boots a VM in advance. A new VM starts only once you have said what it is for — usually by picking a profile and a network in the **Start a Browser Session** window ([Installation](02-installation.mdx#starting)). Then Bromure:
 
-1. Takes the waiting VM.
-2. Applies the window's profile to it: which browser to start, the home page, the language, which host services to enable, network rules, VPN, and so on.
-3. Attaches the profile's data disk, if the profile is persistent.
-4. Starts the browser and shows the window.
-5. Immediately starts booting a replacement VM for the next window.
+1. Boots a fresh VM from the base image, with the profile's settings and the network you chose: which browser to start, the home page, the language, which host services to enable, network rules, VPN, and so on.
+2. Attaches the profile's data disk, if the profile is persistent.
+3. Starts the browser and shows the window.
 
-That is why a new window usually appears in about a second, and why the first window after launching Bromure takes a little longer (the splash reads "Warming up a fresh VM"). While it waits, the pre-warmed VM is paused after about 30 seconds so it doesn't use CPU.
+This takes a few seconds, during which a small splash reads **Starting Bromure** — "Starting a fresh VM. Your browser will open in a few seconds." When shared windows are available, ⌘N in a window opens another window in that window's running VM instead, which is instant and needs no new VM.
 
-Changing some app-wide settings — memory, CPU cores, display scale, network mode — replaces the waiting VM so the next window gets the new settings. Windows already open keep the settings they started with.
+Changing app-wide VM settings — memory, CPU cores, display scale, network mode, bridged interface, DNS servers, kernel options — applies to the next VM that boots. Windows already open keep the settings they started with.
 
 ### Resources
 

@@ -67,6 +67,10 @@ struct RootView: View {
     @State private var directory: RemoteConnectModel
     /// The host currently being mirrored (saved OR a resolved peer).
     @State private var activeHost: RemoteHost?
+    /// What's open on the active server — a session, room, machine or board —
+    /// shared by the iPhone stack and the iPad split view so an iPhone Duo
+    /// folding or unfolding (which swaps one for the other) keeps your place.
+    @State private var hostFocus: PadSelection?
     /// One RemoteHostController per host, reused while the host is open (across
     /// pushes into its terminals/grid) and torn down the instant the host is
     /// left. Held in a reference type so get-or-create can run during view body
@@ -192,6 +196,7 @@ struct RootView: View {
         // stale cached one (the "stalls until I kill the app" bug, plus the flaky
         // tab commands that a degraded reused connection intermittently dropped).
         .onChange(of: activeHost) { old, new in
+            if old?.id != new?.id { hostFocus = nil }
             if let old, old.id != new?.id { controllers.leave(old) }
         }
         // A tapped notification asks to open the server that's waiting; connect
@@ -255,7 +260,8 @@ struct RootView: View {
                 bootList
                     .navigationDestination(item: $activeHost) { host in
                         HostMirrorScreen(controller: controllers.controller(for: host),
-                                         host: host, openWorkspace: pendingWorkspace).id(host.id)
+                                         host: host, openWorkspace: pendingWorkspace,
+                                         focus: $hostFocus).id(host.id)
                     }
             }
         } else if let host = activeHost {
@@ -266,7 +272,8 @@ struct RootView: View {
             PadHostMirror(controller: controllers.controller(for: host),
                           host: host,
                           openWorkspace: pendingWorkspace,
-                          onClose: { activeHost = nil })
+                          onClose: { activeHost = nil },
+                          selection: $hostFocus)
                 .id(host.id)
         } else {
             // iPad, nothing open: the boot screen (hero or server picker) owns
@@ -300,7 +307,14 @@ struct RootView: View {
     /// once there's an account or a by-address server it's the working list.
     /// (The disconnected state owns the full screen on iPad too, so the hero
     /// renders everywhere — its content column is width-capped below.)
-    private var showHero: Bool { !directory.signedIn && savedHosts.isEmpty }
+    private var showHero: Bool {
+        #if DEBUG
+        // Headless screenshots of the signed-out landing on a signed-in
+        // simulator: `BROMURE_DEBUG_HERO=1`.
+        if ProcessInfo.processInfo.environment["BROMURE_DEBUG_HERO"] == "1" { return true }
+        #endif
+        return !directory.signedIn && savedHosts.isEmpty
+    }
 
     @ViewBuilder private var bootList: some View {
         if showHero {
@@ -334,11 +348,10 @@ struct RootView: View {
             // visionOS: keep the window's glass — an opaque backdrop under the
             // glow reads as a giant white card floating in the room.
             Color(uiColor: .systemBackground).ignoresSafeArea()
+            // The Bromure AC landing page's "bonds" lines, set well back and
+            // drifting.
+            BondsBackdrop().ignoresSafeArea()
             #endif
-            RadialGradient(
-                colors: [Color.blue.opacity(colorScheme == .dark ? 0.30 : 0.15), .clear],
-                center: UnitPoint(x: 0.5, y: 0.30), startRadius: 6, endRadius: 340)
-                .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 Spacer(minLength: 40)
@@ -379,12 +392,11 @@ struct RootView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 15)
-                        .background(
-                            LinearGradient(colors: [Color.blue, Color.indigo],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing),
-                            in: RoundedRectangle(cornerRadius: 15))
+                        // The brand's flat accent -- no gradient, no glow. The
+                        // light-mode indigo in dark mode too: white on the
+                        // dark accent (periwinkle) wouldn't read.
+                        .background(Color(hex: "#5866FE"), in: RoundedRectangle(cornerRadius: 15))
                         .foregroundStyle(.white)
-                        .shadow(color: .blue.opacity(0.35), radius: 12, y: 6)
                     }
                     .disabled(directory.p2pBusy)
                     #endif
@@ -392,6 +404,10 @@ struct RootView: View {
                     Button { showAddServer = true } label: {
                         Text("Add a server by address")
                             .font(.subheadline.weight(.medium))
+                            // Small accent text: the brand's navy on light
+                            // (its indigo is under 4.5:1 on white), periwinkle
+                            // on dark.
+                            .foregroundStyle(Color(hex: colorScheme == .dark ? "#93AEFF" : "#33497B"))
                     }
 
                     if let err = directory.p2pError {
@@ -409,22 +425,16 @@ struct RootView: View {
         }
     }
 
-    /// The real app icon, over a matching blue glow — the exact mark people
-    /// tapped to open the app.
+    /// The real app icon -- the exact mark people tapped to open the app.
+    /// Flat, no glow: the brand's bonds drift behind it (BondsBackdrop).
     private var brandMark: some View {
-        ZStack {
-            Circle()
-                .fill(RadialGradient(colors: [Color.blue.opacity(0.5), .clear],
-                                     center: .center, startRadius: 4, endRadius: 100))
-                .frame(width: 210, height: 210)
-            Image("AppLogo")
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-                .frame(width: 132, height: 132)
-                .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-                .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
-        }
+        Image("AppLogo")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(width: 132, height: 132)
+            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder private var accountSection: some View {
@@ -730,5 +740,121 @@ final class HostControllerStore {
             return
         }
         map.removeValue(forKey: host.id)?.stop()
+    }
+}
+
+// MARK: - The bonds motif, drifting
+
+/// The brand's "bonds" motif -- the wavy lines behind the Bromure AC
+/// landing page's hero (bromure.io: MotifBonds, HeroBackdrop "bonds"),
+/// drawn the way the site does: 16 parallel lanes that each jog sideways
+/// once, a few dashed, two dots; bleeding off the top-right corner, faint
+/// (0.30-0.42), fading out by 96% of its height so it never reaches the
+/// copy. The site holds it still; here the lanes drift down-left along
+/// their own spacing (one lane in 8 s -- a seamless loop) and the dashes
+/// march, while the dots, contact points, only breathe. Reduce Motion:
+/// the site's still frame.
+struct BondsBackdrop: View {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.horizontalSizeClass) private var hSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// One lane, in the artwork's viewBox (2735 x 2705).
+    private static let lane: Path = {
+        var p = Path()
+        p.move(to: CGPoint(x: 2732.03, y: 1242.43))
+        p.addLine(to: CGPoint(x: 2276.97, y: 1822.03))
+        p.addCurve(to: CGPoint(x: 2016.74, y: 1902.86),
+                   control1: CGPoint(x: 2184.64, y: 1939.63), control2: CGPoint(x: 2097.89, y: 1966.57))
+        p.addLine(to: CGPoint(x: 1874.72, y: 1791.36))
+        p.addCurve(to: CGPoint(x: 1674.61, y: 1858.28),
+                   control1: CGPoint(x: 1813.86, y: 1743.57), control2: CGPoint(x: 1747.15, y: 1765.88))
+        p.addLine(to: CGPoint(x: 1229.44, y: 2425.28))
+        return p
+    }()
+    /// From one lane to the next.
+    private static let step = CGSize(width: -81.83, height: -64.25)
+    private static let viewBox = CGSize(width: 2735, height: 2705)
+    /// Lane k's stroke (k = 0...15): solid 5.159 but for the dashed ones.
+    private static func stroke(_ k: Int, dashPhase: CGFloat) -> StrokeStyle {
+        switch k {
+        case 7: return StrokeStyle(lineWidth: 5.159, dash: [10.96, 10.96], dashPhase: dashPhase)
+        case 10, 12: return StrokeStyle(lineWidth: 3.287, dash: [16.44, 16.44], dashPhase: dashPhase)
+        case 14: return StrokeStyle(lineWidth: 3.287, dash: [13.15, 13.15], dashPhase: dashPhase)
+        default: return StrokeStyle(lineWidth: 5.159)
+        }
+    }
+    private static let dots = [CGPoint(x: 1222.72, y: 815.26), CGPoint(x: 1407.89, y: 1233.85)]
+    /// Seconds for the family to move one lane.
+    private static let period: Double = 8
+
+    var body: some View {
+        GeometryReader { geo in
+            let frame = Self.framing(geo.size, regular: hSize == .regular)
+            Group {
+                if reduceMotion {
+                    Canvas { ctx, _ in draw(ctx, frame: frame, t: 0) }
+                } else {
+                    // 30 fps: a lane every 8 s needs no more, at half the cost.
+                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                        Canvas { ctx, _ in
+                            draw(ctx, frame: frame, t: context.date.timeIntervalSinceReferenceDate)
+                        }
+                    }
+                }
+            }
+            // Opaque down to 45% of the motif, gone by 96%.
+            .mask {
+                let h = max(geo.size.height, 1)
+                let top = (frame.minY + 0.45 * frame.height) / h
+                let end = (frame.minY + 0.96 * frame.height) / h
+                LinearGradient(stops: [.init(color: .black, location: min(max(top, 0), 1)),
+                                       .init(color: .clear, location: min(max(end, 0.001), 1))],
+                               startPoint: .top, endPoint: .bottom)
+            }
+            .opacity((hSize == .regular ? 0.40 : 0.30) * (scheme == .dark ? 1.05 : 1))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// Where the artwork sits, as the site frames it: off the top-right
+    /// corner (phone: 150vw wide, right -50vw; wider: 78vmax, right
+    /// -20vmax; top -14vmax).
+    private static func framing(_ size: CGSize, regular: Bool) -> CGRect {
+        let vmax = max(size.width, size.height)
+        let width = regular ? 0.78 * vmax : 1.5 * size.width
+        let right = regular ? 0.20 * vmax : 0.5 * size.width
+        let height = width * viewBox.height / viewBox.width
+        return CGRect(x: size.width + right - width, y: -0.14 * vmax, width: width, height: height)
+    }
+
+    private func draw(_ ctx: GraphicsContext, frame: CGRect, t: Double) {
+        let scale = frame.width / Self.viewBox.width
+        var ctx = ctx
+        ctx.translateBy(x: frame.minX, y: frame.minY)
+        ctx.scaleBy(x: scale, y: scale)
+
+        let cycles = t / Self.period
+        let phase = CGFloat(cycles - cycles.rounded(.down))
+        // A lane keeps its stroke as it drifts: style follows the lane, not
+        // the slot, or a dashed lane would jump back a slot each loop.
+        let shift = Int(cycles.rounded(.down))
+        let dashPhase = CGFloat(-t * 20)
+        let line = GraphicsContext.Shading.color(Color(hex: "#93AEFF").opacity(0.86))
+        // One extra lane each end, so no gap opens at the edges.
+        for k in -1...16 {
+            let o = CGFloat(k) + phase
+            let lane = Self.lane.applying(CGAffineTransform(translationX: o * Self.step.width,
+                                                            y: o * Self.step.height))
+            let style = ((k - shift) % 16 + 16) % 16
+            ctx.stroke(lane, with: line, style: Self.stroke(style, dashPhase: dashPhase))
+        }
+        let breath = 0.8 + 0.2 * cos(t * .pi / 3)   // 1 -> 0.6 -> 1 over 6 s
+        let dot = Color(hex: scheme == .dark ? "#FFFFFF" : "#33497B").opacity(breath)
+        for c in Self.dots {
+            ctx.fill(Path(ellipseIn: CGRect(x: c.x - 21.92, y: c.y - 21.92, width: 43.84, height: 43.84)),
+                     with: .color(dot))
+        }
     }
 }

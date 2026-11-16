@@ -63,6 +63,11 @@ public final class SubscriptionTokenBridge: NSObject, @unchecked Sendable {
         socketDevice.setSocketListener(listener, forPort: Self.port)
     }
 
+    /// Tests only: no listener; connections come through `attach(fd:owner:)`.
+    init(testingWithoutListener: Void) {
+        super.init()
+    }
+
     public func stop() {
         socketDevice?.removeSocketListener(forPort: Self.port)
         channel.stop()
@@ -108,7 +113,14 @@ public final class SubscriptionTokenBridge: NSObject, @unchecked Sendable {
     }
 
     private func accept(_ conn: VZVirtioSocketConnection) {
-        channel.accept(fd: conn.fileDescriptor, owner: conn)
+        attach(fd: conn.fileDescriptor, owner: conn)
+    }
+
+    /// A new agent connection replaces the current one (the agent
+    /// reconnects every 2 s after a drop). `owner` keeps the fd open; nil
+    /// hands the fd to the bridge, which closes it when its source ends.
+    func attach(fd: Int32, owner: AnyObject?) {
+        channel.accept(fd: fd, owner: owner)
     }
 }
 

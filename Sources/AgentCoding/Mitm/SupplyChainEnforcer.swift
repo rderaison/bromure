@@ -114,7 +114,6 @@ public enum SupplyChainRegistry {
         return (parts[0], version)
     }
 
-
     /// A request to a recognised package registry's host (whatever it
     /// classifies as, passthrough included).
     public static func isRegistryRequest(host: String, path: String) -> Bool {

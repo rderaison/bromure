@@ -126,7 +126,11 @@ def cdp_call(ws_url, method, params, timeout=3):
                    (line.split(':', 1) for line in lines[1:] if ':' in line)}
         if lines[0].split()[:2] != ['HTTP/1.1', '101'] or headers.get('sec-websocket-accept') != accept:
             raise ConnectionError('CDP websocket upgrade rejected')
-        send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
+        needs_worker_domain = method in ('ServiceWorker.startWorker', 'ServiceWorker.stopAllWorkers')
+        if needs_worker_domain:
+            send(json.dumps({'id': 0, 'method': 'ServiceWorker.enable', 'params': {}}).encode())
+        else:
+            send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
         chunks = bytearray()
         for _ in range(64):
             first, second = read(2)
@@ -155,6 +159,12 @@ def cdp_call(ws_url, method, params, timeout=3):
                 chunks.clear()
                 if not isinstance(response, dict):
                     raise ValueError('invalid CDP response')
+                if needs_worker_domain and response.get('id') == 0:
+                    if 'error' in response:
+                        raise CDPError('ServiceWorker.enable', response['error'])
+                    needs_worker_domain = False
+                    send(json.dumps({'id': 1, 'method': method, 'params': params}).encode())
+                    continue
                 if response.get('id') == 1:
                     if 'error' in response:
                         raise CDPError(method, response['error'])
@@ -516,6 +526,21 @@ def browser_alive(identity, proc=Path('/proc')):
         return False
 
 
+class FocusUnconfirmed(RuntimeError):
+    """Chromium activated the target window, but a later focus check failed.
+
+    Input then belongs to that window; the host must not treat it like a
+    failure before activation, where guest focus is still elsewhere."""
+
+
+def focus_reply_fields(request, error):
+    """Extra fields for a failed request's reply: a focus reply says whether
+    the window was activated before the failure."""
+    if isinstance(request, dict) and request.get('cmd') == 'focus':
+        return {'focusActivated': isinstance(error, FocusUnconfirmed)}
+    return {}
+
+
 class Controller:
     def __init__(self, list_targets, browser_call, scale=2, runner=run_command,
                  sysfs=Path('/sys/class/drm'), focus_observer=confirm_focus, page_call=cdp_call,
@@ -674,7 +699,7 @@ class Controller:
                 item.update(scanout=index, output=output.get('output'), rect=output.get('rect'))
             windows.append(item)
         active = [row['rect'] for row in self.last_outputs if row.get('rect')]
-        return {'epoch': self.epoch, 'shutdownProtocolVersion': 1,
+        return {'epoch': self.epoch, 'shutdownProtocolVersion': 1, 'tabDetachProtocolVersion': 1,
                 'topologyVersion': self.version, 'windows': windows,
                 'outputs': self.last_outputs, 'rootPixelLimit': self.root_pixel_limit or MAX_ROOT_PIXELS,
                 'root': {'width': max((r['x'] + r['width'] for r in active), default=0),
@@ -685,26 +710,49 @@ class Controller:
             raise ValueError('physical geometry must align with common display scale')
         bounds = dict(left=rect['x'] // self.scale, top=rect['y'] // self.scale,
                       width=rect['width'] // self.scale, height=rect['height'] // self.scale)
-        deadline = time.monotonic() + 3
         initial = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
         def wait_bounds(phase, matches):
+            deadline = time.monotonic() + 3
             while True:
                 actual = self.call('Browser.getWindowBounds', {'windowId': wid}).get('bounds', {})
                 if matches(actual):
-                    return
+                    return actual
                 if time.monotonic() >= deadline:
                     evidence = dict(windowId=wid, phase=phase, scale=self.scale,
                                     requested=bounds, initial=initial, observed=actual)
                     raise RuntimeError('Chromium window bounds did not converge: ' + json.dumps(evidence, sort_keys=True))
                 time.sleep(.05)
 
+        def at(actual, state):
+            return (actual.get('windowState') == state and
+                    all(actual.get(key) == bounds[key] for key in ('left', 'top', 'width', 'height')))
+
+        def clamped(actual):
+            # The 1px clamp below, which can also nudge the origin by up to
+            # 1px while the window stays inside its output.
+            return (actual.get('windowState') == 'normal' and
+                    actual.get('width') == bounds['width'] - 1 and
+                    actual.get('height') == bounds['height'] - 1 and
+                    actual.get('left') in (bounds['left'], bounds['left'] + 1) and
+                    actual.get('top') in (bounds['top'], bounds['top'] + 1))
+
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'normal'}})
         # Chromium restores a non-normal window INSTEAD of applying numeric
         # bounds. Observe the asynchronous restore before sending geometry.
         wait_bounds('restore', lambda actual: actual.get('windowState') == 'normal')
         self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': bounds})
-        wait_bounds('geometry', lambda actual: actual.get('windowState') == 'normal' and
-                    all(actual.get(key) == value for key, value in bounds.items()))
+        actual = wait_bounds('geometry', lambda actual: at(actual, 'normal') or clamped(actual))
+        if at(actual, 'normal'):
+            return
+        # Chromium's X11 backend (X11Window::AdjustSizeForDisplay) shrinks a
+        # normal window whose size equals a display's by 1px on each axis, so
+        # a WM won't take it for fullscreen — and every shared window is
+        # exactly its own RandR output. Whether it fires depends on Chromium
+        # having seen the new mode yet. It skips maximized windows, and
+        # Openbox (no struts in the guest) maximizes to the output's full
+        # rect, so maximize the window on the output it now sits on.
+        self.call('Browser.setWindowBounds', {'windowId': wid, 'bounds': {'windowState': 'maximized'}})
+        wait_bounds('maximize', lambda actual: at(actual, 'maximized'))
 
     def apply_topology(self, topology, prospective=None):
         rows, root = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
@@ -774,24 +822,31 @@ class Controller:
         # Target.activateTarget only activates the window and can leave the
         # omnibox focused. Chromium's Page.bringToFront additionally calls
         # WebContents::Focus, including for a newly created about:blank page.
-        # Keep the independent document/X observations below as the ACK gate.
+        # Until it succeeds, typing could land in the omnibox: a failure here
+        # is a failed activation (plain error, focusActivated false).
         result = self.page_call(target.get('webSocketDebuggerUrl', ''), 'Page.bringToFront', {}, timeout=3)
         if not isinstance(result, dict):
             raise RuntimeError('CDP page focus failed')
-        processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
-        browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
-        if len(browser_pids) != 1:
-            raise RuntimeError('cannot identify sole CDP browser process')
-        deadline = time.monotonic() + 3
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError('Chromium/X focus did not converge')
-            evidence = self.focus_observer(target, remaining)
-            if evidence and evidence.get('browserPID') == browser_pids[0]:
-                self.focus_evidence = evidence
-                break
-            time.sleep(min(.025, max(0, deadline - time.monotonic())))
+        # From here on the window and its page contents have focus: any
+        # failure is an unconfirmed focus (FocusUnconfirmed). Keep the
+        # independent document/X observations below as the ACK gate.
+        try:
+            processes = self.call('SystemInfo.getProcessInfo', {}).get('processInfo', [])
+            browser_pids = [item.get('id') for item in processes if item.get('type') == 'browser']
+            if len(browser_pids) != 1:
+                raise RuntimeError('cannot identify sole CDP browser process')
+            deadline = time.monotonic() + 3
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Chromium/X focus did not converge')
+                evidence = self.focus_observer(target, remaining)
+                if evidence and evidence.get('browserPID') == browser_pids[0]:
+                    self.focus_evidence = evidence
+                    break
+                time.sleep(min(.025, max(0, deadline - time.monotonic())))
+        except Exception as error:
+            raise FocusUnconfirmed(str(error) or type(error).__name__) from error
         self.active[wid] = tid
         self.focused_window = wid
         return tid
@@ -814,12 +869,87 @@ class Controller:
         self.refresh()
         return tid
 
+    def detach_tab(self, wid, tid, index, topology):
+        """Move the actual tab through the already trusted file-picker extension.
+
+        No new permissions, URL navigation or page cloning. The extension's
+        debugger API maps the opaque CDP target to its exact Chromium tab ID.
+        Only read-only ownership observation can be retried after the mutation.
+        """
+        if not isinstance(tid, str) or not re.fullmatch(r'[0-9A-Fa-f]{32}', tid):
+            raise ValueError('invalid targetId')
+        integer(wid, 1, SAFE_INTEGER, 'windowId')
+        integer(index, 0, 15, 'scanout')
+        if self.target_windows.get(tid) != wid or len(self.groups.get(wid, [])) < 2:
+            raise ValueError('detach requires an existing tab and a surviving source tab')
+        if wid not in self.bindings.values() or index in self.bindings:
+            raise ValueError('detach requires a bound source and unused scanout')
+        rows, _ = validate_topology(topology, self.root_pixel_limit or MAX_ROOT_PIXELS)
+        if not any(row['scanout'] == index and row['enabled'] and 'windowId' not in row for row in rows):
+            raise ValueError('detach output must be enabled and unbound')
+        worker_url = 'chrome-extension://dllblhgbnjchoipknlflefkgfjlblkmf/background.js'
+        workers = self.call('Target.getTargets', {}).get('targetInfos', [])
+        worker = next((item for item in workers if item.get('type') == 'service_worker' and item.get('url') == worker_url), None)
+        if worker is None:
+            # MV3 workers can sleep. Chromium can start the existing registered
+            # extension worker; it does not install code or open a page/window.
+            page = next(item for item in self.groups[wid] if item['id'] == tid)
+            self.page_call(page['webSocketDebuggerUrl'], 'ServiceWorker.startWorker',
+                           {'scopeURL': worker_url.rsplit('/', 1)[0] + '/'}, timeout=3)
+            started_deadline = time.monotonic() + 2
+            while True:
+                workers = self.call('Target.getTargets', {}).get('targetInfos', [])
+                worker = next((item for item in workers if item.get('type') == 'service_worker' and item.get('url') == worker_url), None)
+                if worker is not None or time.monotonic() >= started_deadline:
+                    break
+                time.sleep(.025)
+        worker_id = worker.get('targetId') if worker else None
+        if not isinstance(worker_id, str) or not re.fullmatch(r'[0-9A-Fa-f]{32}', worker_id):
+            raise RuntimeError('Bromure tab-control extension is unavailable')
+        active = self.apply_topology(topology)
+        expression = """(async () => {
+            const targets = await chrome.debugger.getTargets();
+            const target = targets.find(t => t.id === %s);
+            if (!target || !Number.isInteger(target.tabId)) throw Error('Target has no Chromium tab');
+            const tab = await chrome.tabs.get(target.tabId);
+            if (tab.windowId !== %s) throw Error('Tab ownership changed');
+            const siblings = await chrome.tabs.query({windowId: tab.windowId});
+            if (siblings.length < 2) throw Error('Source window must retain a tab');
+            const window = await chrome.windows.create({tabId: tab.id, focused: false});
+            return {windowId: window.id};
+        })()""" % (json.dumps(tid), json.dumps(wid))
+        error = None
+        try:
+            answer = self.page_call('ws://127.0.0.1:9222/devtools/page/' + worker_id,
+                                    'Runtime.evaluate', {'expression': expression, 'awaitPromise': True,
+                                                         'returnByValue': True}, timeout=5)
+            if not isinstance(answer, dict) or 'exceptionDetails' in answer:
+                raise RuntimeError('Chromium refused tab detach')
+        except (OSError, ValueError, RuntimeError) as failure:
+            error = failure
+        deadline = time.monotonic() + 3
+        while True:
+            self.refresh()
+            new_wid = self.target_windows.get(tid)
+            if new_wid is not None and new_wid != wid and new_wid not in self.bindings.values():
+                if wid not in self.groups:
+                    raise RuntimeError('source window unexpectedly disappeared')
+                self.bindings[index] = new_wid
+                self.active[new_wid] = tid
+                self.place(new_wid, active[index])
+                return {'windowId': new_wid, 'targetId': tid}
+            if error is not None or time.monotonic() >= deadline:
+                raise RuntimeError('Tab detach did not produce a new window') from error
+            time.sleep(.025)
+
     def execute(self, request):
         cmd = request['cmd']
         if cmd == 'list':
             return {}
         self.refresh()
         wid = request.get('windowId')
+        if cmd == 'detach':
+            return self.detach_tab(wid, request.get('targetId'), request.get('scanout'), request.get('topology'))
         if cmd in ('attachPrimary', 'create', 'resize'):
             index = integer(request.get('scanout'), 0, 15, 'scanout')
             rows, _ = validate_topology(request.get('topology'), self.root_pixel_limit or MAX_ROOT_PIXELS)
@@ -850,7 +980,25 @@ class Controller:
             self.bindings[index] = wid
             if cmd == 'attachPrimary':
                 self.active.setdefault(wid, self.groups[wid][0]['id'])
-            self.place(wid, active[index])
+            try:
+                self.place(wid, active[index])
+            except Exception:
+                if cmd != 'resize':
+                    # Free the scanout so the host can retry; a window this
+                    # command created and never placed is closed, not orphaned.
+                    self.bindings.pop(index, None)
+                    if cmd == 'create':
+                        self.active.pop(wid, None)
+                        # Best effort: the placement error is what the host
+                        # must see, never a cleanup failure.
+                        try:
+                            self.refresh()
+                            for target in list(self.groups.get(wid, [])):
+                                self.call('Target.closeTarget', {'targetId': target['id']})
+                            self.refresh()
+                        except Exception:
+                            pass
+                raise
             return {'windowId': wid, 'targetId': self.active.get(wid)}
         integer(wid, 1, SAFE_INTEGER, 'windowId')
         if wid not in self.groups:
@@ -902,6 +1050,7 @@ class Controller:
                 common = {'id', 'cmd', 'expectedScanouts', 'rootPixelLimit'}
                 fields = {'list': set(), 'attachPrimary': {'scanout', 'windowId', 'topology'},
                           'create': {'scanout', 'url', 'topology'},
+                          'detach': {'scanout', 'windowId', 'targetId', 'topology'},
                           'resize': {'scanout', 'windowId', 'topology'},
                           'close': {'windowId', 'topology'}, 'focus': {'windowId'}}
                 if not isinstance(request.get('cmd'), str) or request['cmd'] not in fields or request.keys() - (common | fields[request['cmd']]):
@@ -932,7 +1081,8 @@ class Controller:
                     state, complete = self.state(), True
                 except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
                     state, complete = self.state(observe=False), False
-                reply = dict(state, id=rid, ok=False, error=str(error)[:512], stateComplete=complete)
+                reply = dict(state, **focus_reply_fields(request, error),
+                             id=rid, ok=False, error=str(error)[:512], stateComplete=complete)
             return self.remember_reply(rid, canonical, reply)
 
     def remember_reply(self, rid, canonical, reply):

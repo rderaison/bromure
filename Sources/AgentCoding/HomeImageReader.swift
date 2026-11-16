@@ -18,6 +18,36 @@ enum HomeImageReader {
         return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
+    /// Claude conversation `id`'s transcript in the home image, whichever
+    /// project folder holds it.
+    static func claudeTranscript(imagePath: String, conversationID id: String) -> String? {
+        guard let r = claudeTranscriptData(imagePath: imagePath, conversationID: id,
+                                           limit: TaskTranscriptArchive.fullReadCap)
+        else { return nil }
+        return String(decoding: r.data, as: UTF8.self)
+    }
+
+    /// Claude conversation `id`'s transcript in the home image: its first
+    /// `limit` bytes, exact, and the file's whole size. nil when absent or
+    /// empty. (The capped archive read continues the pinned file past
+    /// `fullReadCap` this way when the workspace is off.)
+    static func claudeTranscriptData(imagePath: String, conversationID id: String,
+                                     limit: Int) -> (data: Data, size: UInt64)? {
+        guard AgentSessionLocator.isConversationUUID(id),
+              let vol = try? Ext4Volume(path: imagePath),
+              let projIno = try? vol.resolve("/.claude/projects"),
+              let entries = try? vol.listDir(projIno) else { return nil }
+        for entry in entries where entry.name != "." && entry.name != ".." {
+            guard let dirInode = try? vol.inode(entry.ino), dirInode.isDir,
+                  let files = try? vol.listDir(entry.ino),
+                  let f = files.first(where: { $0.name == id + ".jsonl" }),
+                  let ino = try? vol.inode(f.ino), ino.isRegular,
+                  let data = try? vol.readData(ino, limit: limit), !data.isEmpty else { continue }
+            return (Data(data.prefix(limit)), ino.size)
+        }
+        return nil
+    }
+
     /// Locate + read the newest session transcript for a task inside a
     /// home.img: candidate project dirs are any `*-<slug>` (worktree
     /// sessions) plus the Claude-encoded cwd (plain-tab sessions); the

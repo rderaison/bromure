@@ -36,19 +36,72 @@ struct HostMirrorScreen: View {
     @State private var openSessionID: UUID?
     /// A room pushed (its tabs of sessions + Switchboard).
     @State private var openRoomID: UUID?
+    /// A board or the Grid pushed. Like every destination the iPad layout
+    /// can show (`PadSelection`), it goes through state that publishes the
+    /// fold focus -- an inline NavigationLink left the focus on whatever was
+    /// opened before, and an unfold lost the screen.
+    @State private var openBoard: PhoneBoard?
+    enum PhoneBoard: Hashable { case coding, automations, grid }
     /// The room a new session is being started in (nil = none).
     @State private var newSessionRoom: UUID?
     @State private var newSession = false
     @State private var pendingSessionID: UUID?
+    /// What's open on this server, shared with the iPad layout (RootView
+    /// owns it): an iPhone Duo folding or unfolding swaps this screen for
+    /// PadHostMirror and back, and the session, room or machine on screen
+    /// must survive the swap.
+    @Binding private var focus: PadSelection?
+    @State private var didRestoreFocus = false
+    /// The layout this stack is on screen in. RootView swaps it for the iPad
+    /// layout when this turns regular (an unfold), so a pop seen while it's
+    /// regular is that teardown, not the user going Back.
+    @Environment(\.horizontalSizeClass) private var stackSizeClass
+    /// The Virtual Machines caret, shared with the iPad sidebar.
+    @AppStorage("machines.vmExpanded") private var machinesExpanded = false
+    /// The Native Machines caret, shared with the iPad sidebar.
+    @AppStorage("machines.nativeExpanded") private var nativeExpanded = false
     #if DEBUG
     @State private var didDebugRoute = false
     #endif
 
     init(controller: RemoteHostController, host: RemoteHost,
-         openWorkspace: WorkspaceDeepLink? = nil) {
+         openWorkspace: WorkspaceDeepLink? = nil,
+         focus: Binding<PadSelection?> = .constant(nil)) {
         self.controller = controller
         self.host = host
+        self._focus = focus
         self.openWorkspace = openWorkspace
+    }
+
+    /// Coming from the iPad layout (an unfolded iPhone Duo just folded):
+    /// reopen what it showed. Once — afterwards this stack is the truth.
+    private func restoreFocus() {
+        guard !didRestoreFocus else { return }
+        didRestoreFocus = true
+        switch focus {
+        case .session(let id): openSessionID = id
+        case .room(let id): openRoomID = id
+        case .workspace(let pid): deepWorkspace = WorkspaceDeepLink(profileID: pid, window: nil)
+        case .coding: openBoard = .coding
+        case .automations: openBoard = .automations
+        case .grid: openBoard = .grid
+        default: break
+        }
+    }
+
+    /// What was just opened. Going back home doesn't clear it: an unfold
+    /// then shows the last thing open, much as the iPad opens on a session.
+    private func publishFocus(_ f: PadSelection) {
+        guard didRestoreFocus else { return }
+        focus = f
+    }
+
+    /// A session just closed over an open room while this phone stack is on
+    /// screen: the user went Back to the room (not a teardown for the iPad
+    /// layout, which runs with a regular size class).
+    nonisolated static func backToRoom(closedSession: UUID?, openRoom: UUID?,
+                                       sizeClass: UserInterfaceSizeClass?) -> Bool {
+        closedSession != nil && openRoom != nil && sizeClass == .compact
     }
 
     /// Push the deep-linked workspace the moment the mirror knows it exists
@@ -118,7 +171,9 @@ struct HostMirrorScreen: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(host.name.isEmpty ? host.address : host.name)
-        .navigationBarTitleDisplayMode(.large)
+        // Inline: the name rides the Back button's row instead of a large
+        // title on a row of its own.
+        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             // `start()` is idempotent, so re-appearing (popping back from a
             // pushed workspace/grid) is a no-op. Crucially we do NOT stop on
@@ -129,7 +184,37 @@ struct HostMirrorScreen: View {
             // when the mirror is finally popped.
             controller.start()
             AppBadge.set(waitingAgents.count)
+            restoreFocus()
             tryDeepLink()
+        }
+        // Keep the shared focus in step with what this stack opens. Openings,
+        // and one pop: Back from a session pushed over a room shows the room
+        // again, so the room is what's open. Other pops publish nothing: a
+        // switch to the iPad layout tears this stack down, popping its
+        // destinations to nil one by one, and publishing those would walk the
+        // focus back to nothing before the iPad reads it (that teardown runs
+        // with the size class already regular, so it's told apart).
+        .onChange(of: openSessionID) { old, id in
+            if let id {
+                publishFocus(.session(id))
+            } else if Self.backToRoom(closedSession: old, openRoom: openRoomID,
+                                      sizeClass: stackSizeClass), let room = openRoomID {
+                publishFocus(.room(room))
+            }
+        }
+        .onChange(of: openRoomID) { _, id in
+            if let id, openSessionID == nil { publishFocus(.room(id)) }
+        }
+        .onChange(of: deepWorkspace) { _, link in
+            if let link, openSessionID == nil, openRoomID == nil { publishFocus(.workspace(link.profileID)) }
+        }
+        .onChange(of: openBoard) { _, board in
+            switch board {
+            case .coding: publishFocus(.coding)
+            case .automations: publishFocus(.automations)
+            case .grid: publishFocus(.grid)
+            case nil: break
+            }
         }
         // Mirror the "agents waiting for input" count onto the app-icon badge.
         .onChange(of: waitingAgents.count) { _, count in AppBadge.set(count) }
@@ -144,6 +229,13 @@ struct HostMirrorScreen: View {
         .navigationDestination(item: $deepWorkspace) { link in
             WorkspaceScreen(controller: controller, profileID: link.profileID,
                             initialWindow: link.window)
+        }
+        .navigationDestination(item: $openBoard) { board in
+            switch board {
+            case .coding: CodingBoardScreen(controller: controller)
+            case .automations: AutomationsBoardScreen(controller: controller)
+            case .grid: GridScreen(controller: controller)
+            }
         }
         .navigationDestination(item: $openSessionID) { id in
             MobileSessionScreen(controller: controller, sessionID: id,
@@ -270,11 +362,11 @@ struct HostMirrorScreen: View {
 
     private var boardsRow: some View {
         HStack(spacing: 12) {
-            NavigationLink { CodingBoardScreen(controller: controller) } label: {
+            Button { openBoard = .coding } label: {
                 boardCard("Coding Tasks", icon: "checklist",
                           count: controller.taskStore.tasks.count, tint: .blue)
             }.buttonStyle(.plain)
-            NavigationLink { AutomationsBoardScreen(controller: controller) } label: {
+            Button { openBoard = .automations } label: {
                 boardCard("Automations", icon: "bolt.badge.clock.fill",
                           count: controller.automationStore.automations.count, tint: .orange)
             }.buttonStyle(.plain)
@@ -333,9 +425,8 @@ struct HostMirrorScreen: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeader("Needs your input", icon: "exclamationmark.bubble.fill", tint: .red)
             ForEach(waitingAgents) { agent in
-                NavigationLink {
-                    WorkspaceScreen(controller: controller, profileID: agent.profileID,
-                                    initialWindow: agent.windowIndex)
+                Button {
+                    deepWorkspace = WorkspaceDeepLink(profileID: agent.profileID, window: agent.windowIndex)
                 } label: { waitingAgentCard(agent) }
                 .buttonStyle(.plain)
             }
@@ -368,7 +459,21 @@ struct HostMirrorScreen: View {
     @ViewBuilder private var workspacesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Text("Virtual Machines").font(.headline)
+                // Folded away by default, as on the desktop: sessions first.
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) { machinesExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Virtual Machines").font(.headline).foregroundStyle(.primary)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                            .rotationEffect(.degrees(machinesExpanded ? 90 : 0))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(machinesExpanded ? "Hide virtual machines" : "Show virtual machines")
                 Spacer()
                 if !vmRows.isEmpty {
                     Text("\(runningCount(vmRows)) running")
@@ -379,24 +484,26 @@ struct HostMirrorScreen: View {
                 }
                 .accessibilityLabel("New workspace")
             }
-            NavigationLink { GridScreen(controller: controller) } label: { gridCard }
-                .buttonStyle(.plain)
-            if vmRows.isEmpty {
-                Text(controller.hasSnapshot ? "No workspaces on this server."
-                                            : "Loading workspaces…")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                ForEach(vmRows) { row in
-                    NavigationLink {
-                        WorkspaceScreen(controller: controller, profileID: row.id)
-                    } label: { workspaceCard(row) }
+            if machinesExpanded {
+                Button { openBoard = .grid } label: { gridCard }
                     .buttonStyle(.plain)
-                    .contextMenu {
+                if vmRows.isEmpty {
+                    Text(controller.hasSnapshot ? "No workspaces on this server."
+                                                : "Loading workspaces…")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(vmRows) { row in
                         Button {
-                            workspaceEdit = .existing(row.id)
-                        } label: { Label("Workspace Settings…", systemImage: "gearshape") }
+                            deepWorkspace = WorkspaceDeepLink(profileID: row.id, window: nil)
+                        } label: { workspaceCard(row) }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                workspaceEdit = .existing(row.id)
+                            } label: { Label("Workspace Settings…", systemImage: "gearshape") }
+                        }
                     }
                 }
             }
@@ -408,16 +515,32 @@ struct HostMirrorScreen: View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 6) {
-                    Text("Native Machines").font(.headline)
+                    // Folded away by default, like the Virtual Machines.
+                    Button {
+                        withAnimation(.easeOut(duration: 0.18)) { nativeExpanded.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("Native Machines").font(.headline).foregroundStyle(.primary)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.tertiary)
+                                .rotationEffect(.degrees(nativeExpanded ? 90 : 0))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(nativeExpanded ? "Hide native machines" : "Show native machines")
                     Spacer()
                     Text("\(runningCount(rows)) running")
                         .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 }
-                ForEach(rows) { row in
-                    NavigationLink {
-                        WorkspaceScreen(controller: controller, profileID: row.id)
-                    } label: { workspaceCard(row, native: true) }
-                    .buttonStyle(.plain)
+                if nativeExpanded {
+                    ForEach(rows) { row in
+                        Button {
+                            deepWorkspace = WorkspaceDeepLink(profileID: row.id, window: nil)
+                        } label: { workspaceCard(row, native: true) }
+                        .buttonStyle(.plain)
+                    }
                 }
             }
         }
@@ -566,7 +689,9 @@ struct CodingBoardScreen: View {
             actions: CodingKanbanView.Actions(
                 start: { controller.taskCommand($0, "start") },
                 plan: { controller.taskCommand($0, "plan") },
-                openReview: { _ in },
+                // No diff review on iOS yet (the desktop's review window is
+                // AppKit): the agent's final report, the transcript a tap away.
+                openReview: { openedTask = TranscriptTarget(id: $0, report: true) },
                 jumpToRun: { _ in },
                 moveToTesting: { controller.taskCommand($0, "to-testing") },
                 backToInProgress: { controller.taskCommand($0, "to-in-progress") },
@@ -593,13 +718,21 @@ struct CodingBoardScreen: View {
                 title: controller.taskStore.task(t.id)?.title ?? "Task",
                 subtitle: nil,
                 fetch: { await controller.fetchTaskTranscript(t.id) },
-                agent: controller.taskStore.task(t.id)?.tool.rawValue)
+                agent: controller.taskStore.task(t.id)?.tool.rawValue,
+                // What the agent said when it delivered or merged: the
+                // report when no transcript can be read (as on the desktop).
+                fallbackReport: controller.taskStore.task(t.id).flatMap { $0.mergeReport ?? $0.deliverySummary },
+                reportOnly: t.report)
         }
     }
 }
 
-/// A UUID made presentable via `.sheet(item:)`.
-struct TranscriptTarget: Identifiable { let id: UUID }
+/// A UUID made presentable via `.sheet(item:)`; `report` opens a task's
+/// transcript on the agent's final report.
+struct TranscriptTarget: Identifiable {
+    let id: UUID
+    var report = false
+}
 
 /// A fetched-once transcript rendered natively — shared by a finished coding
 /// task and a completed automation run. Both pull the JSONL from the host over
@@ -611,14 +744,22 @@ struct TranscriptScreen: View {
     /// Canonical agent kind of the tool that wrote the transcript (the
     /// task's / automation's tool); nil sniffs the format from the lines.
     var agent: String? = nil
+    /// Shown as the report when the transcript can't be read.
+    var fallbackReport: String? = nil
+    /// Open on the agent's final report (a finished task's "Read Report")
+    /// rather than the whole conversation; the toolbar switches.
+    @State var reportOnly = false
     @Environment(\.dismiss) private var dismiss
     @State private var items: [TranscriptItem]?
+    @State private var report: [TranscriptItem]?
     @State private var failed = false
+
+    private var shown: [TranscriptItem]? { reportOnly ? (report ?? items) : items }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let items {
+                if let items = shown {
                     if items.isEmpty {
                         ContentUnavailableView("Empty transcript", systemImage: "doc.text",
                             description: Text("This run captured no transcript."))
@@ -645,11 +786,23 @@ struct TranscriptScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    if report != nil {
+                        Button(reportOnly ? "Transcript" : "Report") { reportOnly.toggle() }
+                    }
+                }
             }
         }
         .task {
             if let data = await fetch(), !data.isEmpty {
                 items = AgentTranscript.parse(data, agent: agent)
+                if let r = TaskReviewSummary.finalReport(fromTranscript: String(decoding: data, as: UTF8.self),
+                                                         agent: agent), !r.isEmpty {
+                    report = [TranscriptItem(id: 0, kind: .assistantText(r), timestamp: nil)]
+                }
+            } else if let r = fallbackReport, !r.isEmpty {
+                // No transcript, but the agent's own word on what it did.
+                items = [TranscriptItem(id: 0, kind: .assistantText(r), timestamp: nil)]
             } else {
                 failed = true
             }

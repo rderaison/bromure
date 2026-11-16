@@ -10,6 +10,25 @@ import SwiftUI
 @MainActor @Observable
 final class NativeTabBarModel {
     var tabs: [TabInfo] = []
+
+    /// Tab tear-off: drag a tab pill out of the bar to move it into a new
+    /// window. Enabled by the shared-window owner only when the guest
+    /// supports moving a tab between windows.
+    var liquidTabsEnabled = false
+    /// The tab currently dragged out of the bar (its pill dims meanwhile).
+    var tearingTabID: String?
+    var onDetach: ((String, NSPoint) -> Void)?
+    var dragPreview: (() -> NSImage?)?
+    @ObservationIgnored let tearOff = TabTearOff()
+    /// With tear-off on, a single click on the current tab never edits it
+    /// (so it can still be dragged): the first click selects it and the
+    /// next click, or a double-click, edits its address. Holds the tab that
+    /// has had that first click; cleared when the field stops being edited
+    /// (submitted, clicked away, or left untouched) and when another tab
+    /// becomes active, so the next first click
+    /// selects again. Finding: "Stale armed tab lets a later first click
+    /// edit the address".
+    @ObservationIgnored var armedTabID: String?
     var pendingAddress: String = ""
     var editingAddress: Bool = false
 
@@ -32,6 +51,9 @@ final class NativeTabBarModel {
     /// dropped when the guest reports a real navigation in that tab (the
     /// canonical URL takes over) or when the tab itself is closed.
     private var drafts: [String: String] = [:]
+    /// Drafts adopted for tabs this window hasn't been told about yet (a tab
+    /// being dragged in): kept through the guest's earlier reports.
+    @ObservationIgnored private var awaitedDraftIDs: Set<String> = []
 
     /// Set when the user requests a new tab via ⌘T or `+`. The next time
     /// the active tab changes (i.e. the guest acks the new target), we
@@ -97,6 +119,11 @@ final class NativeTabBarModel {
     /// Called when the user clicks the "+" button or presses ⌘T.
     var onNewTab: (() -> Void)?
 
+    /// A click is about to put the address field into editing: the page
+    /// view, which can veto resigning while the guest has keyboard focus,
+    /// is told to give way (as ⌘L does).
+    @ObservationIgnored var onWillFocusAddressField: (() -> Void)?
+
     /// Called when the user confirms the address bar (Enter key).
     var onNavigate: ((String) -> Void)?
 
@@ -119,20 +146,13 @@ final class NativeTabBarModel {
     var profileIsManaged = false
 
     /// Bumped by the app delegate whenever the profile roster or the set
-    /// of open windows changes, so the chip's menu re-renders with fresh
-    /// entries from ``profileEntries``.
+    /// of open windows changes, so the chip re-renders.
     var profileVersion = 0
-
-    /// Live roster for the chip menu, evaluated when the menu renders —
-    /// a closure rather than a stored array so a stale copy can never
-    /// outlive a create/delete.
-    @ObservationIgnored var profileEntries: () -> [ProfileMenuEntry] = { [] }
 
     /// Chip menu actions. All resolve through the app delegate; the
     /// session only forwards.
-    var onOpenProfile: ((UUID) -> Void)?
+    var onOpenDifferentProfile: (() -> Void)?
     var onManageProfiles: (() -> Void)?
-    var onNewProfile: (() -> Void)?
     var onEditProfile: (() -> Void)?
     var onDeleteProfile: (() -> Void)?
 
@@ -183,7 +203,8 @@ final class NativeTabBarModel {
 
         // Drop drafts for tabs that no longer exist.
         let liveIDs = Set(merged.map(\.id))
-        drafts = drafts.filter { liveIDs.contains($0.key) }
+        awaitedDraftIDs.subtract(liveIDs)
+        drafts = drafts.filter { liveIDs.contains($0.key) || awaitedDraftIDs.contains($0.key) }
 
         tabs = merged
 
@@ -206,6 +227,7 @@ final class NativeTabBarModel {
         }
 
         let newActiveID = activeTab?.id
+        if armedTabID != newActiveID { armedTabID = nil }
 
         if oldActiveID != newActiveID {
             // The guest just told us a different tab is active (e.g. it
@@ -244,6 +266,29 @@ final class NativeTabBarModel {
         }
     }
 
+    /// The unsubmitted address typed for `id`: the live field's text when
+    /// it is the active tab being edited, else its stashed draft. nil when
+    /// the address is just the page's own.
+    func addressDraft(for id: String) -> String? {
+        if id == activeTab?.id {
+            guard editingAddress || drafts[id] != nil,
+                  !pendingAddress.isEmpty,
+                  pendingAddress != Self.displayValue(for: activeTab),
+                  pendingAddress != activeTab?.url else { return nil }
+            return pendingAddress
+        }
+        return drafts[id]
+    }
+
+    /// A tab dragged in from another window with an address being typed:
+    /// keep the draft for when the tab is reported here. Like a draft
+    /// restored on a tab switch, it shows in the field unfocused.
+    func adoptAddressDraft(_ text: String, for id: String) {
+        drafts[id] = text
+        if !tabs.contains(where: { $0.id == id }) { awaitedDraftIDs.insert(id) }
+        if activeTab?.id == id { pendingAddress = text }
+    }
+
     /// Optimistically mark a tab active without waiting for the guest to
     /// echo it back. Saves the previous active tab's in-flight draft and
     /// restores any draft already stashed for the newly-selected tab.
@@ -260,6 +305,7 @@ final class NativeTabBarModel {
             updated[i].active = (updated[i].id == id)
         }
         tabs = updated
+        if armedTabID != id { armedTabID = nil }
 
         if oldID != id {
             pendingAddress = drafts[id] ?? Self.displayValue(for: activeTab)
@@ -308,11 +354,13 @@ struct NativeCompactBarView: View {
                 ForEach(model.tabs) { tab in
                     if tab.active {
                         ActiveTabPill(model: model, tab: tab)
+                            .opacity(model.tearingTabID == tab.id ? 0.4 : 1)
                             .frame(minWidth: 100, idealWidth: 280, maxWidth: 320)
                             .layoutPriority(2)
                             .id(tab.id)
                     } else {
                         InactiveTabPill(model: model, tab: tab)
+                            .opacity(model.tearingTabID == tab.id ? 0.4 : 1)
                             .frame(minWidth: 36, idealWidth: 180, maxWidth: 240)
                             .layoutPriority(1)
                             .id(tab.id)
@@ -467,7 +515,26 @@ private struct ActiveTabPill: View {
                     return url
                 },
                 suggestions: model.fetchHistorySuggestions,
-                onSubmit: { model.onNavigate?(model.pendingAddress) }
+                onSubmit: { model.onNavigate?(model.pendingAddress) },
+                editorClosed: { model.armedTabID = nil },
+                tearOff: model.liquidTabsEnabled
+                    ? { [model, id = tab.id] event, view, editing in
+                        let outcome = model.tearOff.track(event, tabID: id, model: model, in: view,
+                                                          editingText: editing)
+                        // Safari-style: the first click selects the tab, the
+                        // next one edits its address. (Already editing: a
+                        // click just places the caret.)
+                        guard !editing, case .click = outcome else { return outcome }
+                        guard model.armedTabID != id else {
+                            // This click edits: the page view must let go
+                            // of the keyboard, as for ⌘L.
+                            model.onWillFocusAddressField?()
+                            return outcome
+                        }
+                        model.armedTabID = id
+                        return .handled
+                    }
+                    : nil
             )
             .frame(maxWidth: .infinity)
 
@@ -628,6 +695,14 @@ private struct InactiveTabPill: View {
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .onTapGesture { model.onActivate?(tab.id) }
+        .overlay {
+            // With tear-off on, an AppKit view takes the clicks so a drag can
+            // never start a window move from the titlebar; a plain click
+            // still just activates the tab.
+            if model.liquidTabsEnabled {
+                TabDragHandle(model: model, tabID: tab.id)
+            }
+        }
     }
 
     private var displayTitle: String {
@@ -1007,6 +1082,11 @@ private struct AddressField: NSViewRepresentable {
     var editValue: (() -> String?)?
     var suggestions: ((String) async -> [TabBridge.HistoryEntry])?
     let onSubmit: () -> Void
+    /// Tab tear-off tracker for the active pill (nil when tear-off is off).
+    /// The field editor went away, however editing ended — unlike
+    /// onEndEditing, also after a submit or when nothing was typed.
+    var editorClosed: (() -> Void)? = nil
+    var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1033,6 +1113,8 @@ private struct AddressField: NSViewRepresentable {
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit)
         field.editValueProvider = editValue
+        field.tearOff = tearOff
+        field.editorClosed = editorClosed
         onFieldAvailable?(field)
 
         if shouldFocusOnAppear {
@@ -1096,6 +1178,8 @@ private struct AddressField: NSViewRepresentable {
         // and bindings dispatched from delegate callbacks see the current
         // values, not the snapshot taken at makeCoordinator time.
         context.coordinator.parent = self
+        (nsView as? BromureAddressField)?.tearOff = tearOff
+        (nsView as? BromureAddressField)?.editorClosed = editorClosed
 
         // Re-register on every update: when the active tab changes the
         // pill (and field) are recreated, and the new field must win over
@@ -1228,6 +1312,88 @@ private final class BromureAddressField: NSTextField {
     /// the text length under the selection, which left the URL's tail when you
     /// typed.)
     var editValueProvider: (() -> String?)?
+    /// Tab tear-off tracker for the active pill; the flag says whether the
+    /// field is being edited (nil when tear-off is off).
+    var tearOff: ((NSEvent, NSView, Bool) -> TabTearOff.Outcome)?
+    var editorClosed: (() -> Void)?
+
+    /// Sent whenever the field editor resigns, typed in or not
+    /// (controlTextDidEndEditing only follows an actual edit).
+    override func textDidEndEditing(_ notification: Notification) {
+        super.textDidEndEditing(notification)
+        editorClosed?()
+    }
+    private var editingPressMonitor: Any?
+
+    /// Set while a click deliberately focuses the field (see mouseDown).
+    private var focusingFromClick = false
+
+    /// With tear-off on, a mouse press must not focus the field by itself:
+    /// NSWindow makes the clicked view first responder before calling its
+    /// mouseDown, which would start editing on the first click. Keyboard
+    /// paths (⌘L, ⌘T, Tab) still focus it as usual.
+    override var acceptsFirstResponder: Bool {
+        // (No window check: in a unified toolbar the event's window and the
+        // field's can be different objects.)
+        if tearOff != nil, !focusingFromClick, NSApp.currentEvent?.type == .leftMouseDown {
+            return false
+        }
+        return super.acceptsFirstResponder
+    }
+
+    /// With tear-off on, a press on the field is tracked first: dragging it
+    /// out of the bar tears the tab off. A click that should edit (the
+    /// tracker returns .click) focuses the field, selecting its address.
+    override func mouseDown(with event: NSEvent) {
+        guard currentEditor() == nil, let tearOff, let window else {
+            super.mouseDown(with: event); return
+        }
+        switch tearOff(event, self, false) {
+        case .handled:
+            return
+        case .click, .passThrough:
+            // Same steps as the ⌘T / ⌘L focus paths. The guard stays up for
+            // every attempt (a press otherwise can't focus this field).
+            focusingFromClick = true
+            defer { focusingFromClick = false }
+            if !window.makeFirstResponder(self) {
+                // The current responder refused to resign: force it, retry.
+                _ = window.makeFirstResponder(nil)
+                _ = window.makeFirstResponder(self)
+            }
+            // makeFirstResponder can report success without a field editor
+            // (toolbar-hosted field): selectText installs it and selects
+            // the address, so the user can type. Finding: "Second click can
+            // leave the Liquid Tab address field without a text editor".
+            selectText(nil)
+        }
+    }
+
+    /// While the field is being edited, presses go to its field editor, not
+    /// to this view. Watch them so a drag up or down off the bar still tears
+    /// the tab off; anything else is put back for the editor (caret, text
+    /// selection) untouched.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let editingPressMonitor { NSEvent.removeMonitor(editingPressMonitor) }
+        editingPressMonitor = nil
+        guard window != nil else { return }
+        editingPressMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self, let window = self.window, event.window === window,
+                  let tearOff = self.tearOff, self.currentEditor() != nil,
+                  self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+            switch tearOff(event, self, true) {
+            case .handled:
+                return nil
+            case .click(let up):
+                window.postEvent(up, atStart: true)
+                return event
+            case .passThrough(let events):
+                for queued in events.reversed() { window.postEvent(queued, atStart: true) }
+                return event
+            }
+        }
+    }
 
     override func becomeFirstResponder() -> Bool {
         // Swap to the full URL up front, before `super` installs the field
@@ -1286,6 +1452,11 @@ final class NativeTabBarChrome {
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
         self.toolbar = toolbar
+    }
+
+    /// Let tabs be dragged out of the bar into their own window.
+    func enableLiquidTabs() {
+        model.liquidTabsEnabled = true
     }
 
     /// Install the native tabs chrome onto `window`. Hides the window title

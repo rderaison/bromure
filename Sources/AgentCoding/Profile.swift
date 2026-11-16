@@ -1485,6 +1485,12 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     public var browserWebcam: Bool
     /// Whether the embedded browser may use the microphone. Default false.
     public var browserMicrophone: Bool
+    /// The workspace has no embedded browser: the pane stays empty and the
+    /// agents' `browser` MCP tools refuse. The browser runs in its own VM,
+    /// outside this workspace's network policy, so an agent driving it
+    /// could reach any site -- a strict workspace may want it off. Default
+    /// false (the browser is available).
+    public var browserDisabled: Bool
 
     /// True when a setting that only applies at browser boot differs from
     /// `other`; a live browser must be restarted to pick the change up.
@@ -2266,6 +2272,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         browserAllowDownloads: Bool = true,
         browserWebcam: Bool = false,
         browserMicrophone: Bool = false,
+        browserDisabled: Bool = false,
         fusionLegs: Set<Tool> = [],
         fusionJudgeProvider: Tool? = nil,
         fusionJudgeModel: String? = nil,
@@ -2351,6 +2358,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         self.browserAllowDownloads = browserAllowDownloads
         self.browserWebcam = browserWebcam
         self.browserMicrophone = browserMicrophone
+        self.browserDisabled = browserDisabled
         self.fusionLegs = fusionLegs
         self.fusionJudgeProvider = fusionJudgeProvider
         self.fusionJudgeModel = fusionJudgeModel
@@ -2443,6 +2451,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case browserAllowDownloads
         case browserWebcam
         case browserMicrophone
+        case browserDisabled
         case fusionEnabled   // legacy; decoded for migration, never encoded
         case fusionLegs
         case fusionJudgeProvider
@@ -2573,6 +2582,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         browserAllowDownloads = try c.decodeIfPresent(Bool.self, forKey: .browserAllowDownloads) ?? true
         browserWebcam = try c.decodeIfPresent(Bool.self, forKey: .browserWebcam) ?? false
         browserMicrophone = try c.decodeIfPresent(Bool.self, forKey: .browserMicrophone) ?? false
+        browserDisabled = try c.decodeIfPresent(Bool.self, forKey: .browserDisabled) ?? false
         // Fusion config. New keys default to empty/nil. Legacy profiles that
         // had `fusionEnabled == true` migrate to fusing whatever providers they
         // had credentials for — resolved lazily by `fusionConfigurable`, so we
@@ -2714,6 +2724,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         if !browserAllowDownloads { try c.encode(browserAllowDownloads, forKey: .browserAllowDownloads) }
         if browserWebcam { try c.encode(browserWebcam, forKey: .browserWebcam) }
         if browserMicrophone { try c.encode(browserMicrophone, forKey: .browserMicrophone) }
+        if browserDisabled { try c.encode(browserDisabled, forKey: .browserDisabled) }
         // Only emit privateMode when true — keeps default-config JSON
         // small for the common (managed-mode-streaming) case.
         if privateMode {
@@ -5842,8 +5853,14 @@ public final class ProfileStore {
                     break
                 stat = proc(pid, "stat").decode(errors="replace")
                 pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
-            argv = proc(pid, "cmdline").replace(b"\0", b" ").decode(errors="replace").lower()
-            agent = next((a for a in ("claude", "codex", "kimi", "grok", "omp") if a in argv), "")
+            raw = proc(pid, "cmdline").split(b"\0")
+            argv = b" ".join(raw).decode(errors="replace").lower()
+            names = ("claude", "codex", "kimi", "grok", "omp")
+            # The program first (bun /usr/bin/omp …): anywhere in argv, the
+            # model of omp (--model anthropic/claude-…) read as Claude.
+            progs = [os.path.basename(w.decode(errors="replace").lower()) for w in raw[:2]]
+            agent = next((a for a in names if any(p == a or p.startswith(a + ".") for p in progs)), "") \
+                or next((a for a in names if a in argv), "")
             if not agent:
                 agent = "grok" if os.environ.get("GROK_HOOK_EVENT") else \
                     ("kimi" if str(e.get("client_type", "")).startswith("kimi") else "")

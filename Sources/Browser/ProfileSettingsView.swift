@@ -408,7 +408,7 @@ struct ProfileSettingsView: View {
 
             settingToggle(
                 "Default Profile",
-                description: "Bromure opens this profile when you launch it, click its Dock icon, or press \u{2318}N with no browser window in front \u{2014} instead of the one you used last.",
+                description: "Preselect this profile in the profile chooser shown before each new browser session \u{2014} instead of the one you used last.",
                 isOn: isDefaultProfile
             )
 
@@ -597,6 +597,16 @@ struct ProfileSettingsView: View {
                 "WebGL",
                 description: "Lets websites display 3D graphics and interactive content. Required by some games, maps, and data visualizations.",
                 isOn: $draft.settings.enableWebGL
+            )
+            .disabled(!draft.settings.enableGPU)
+            .opacity(draft.settings.enableGPU ? 1 : 0.5)
+
+            settingsDivider
+
+            settingToggle(
+                "Hardware Video Decoding",
+                description: "Decodes video with your Mac\u{2019}s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing.",
+                isOn: $draft.settings.hardwareVideoDecode
             )
             .disabled(!draft.settings.enableGPU)
             .opacity(draft.settings.enableGPU ? 1 : 0.5)
@@ -978,8 +988,19 @@ struct ProfileSettingsView: View {
 
             // User Agent
             VStack(alignment: .leading, spacing: 6) {
-                Text("User Agent").font(.headline)
-                Text("How this browser identifies itself to websites. Leave blank to use Bromure’s default Linux Chrome user agent, or enter a custom value to override it.")
+                HStack {
+                    Text("User Agent").font(.headline)
+                    Spacer()
+                    Menu("Presets") {
+                        ForEach(ProfileSettings.userAgentPresets, id: \.userAgent) { preset in
+                            Button(preset.name) { draft.settings.userAgent = preset.userAgent }
+                        }
+                        Button("Linux") { draft.settings.userAgent = "" }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                Text("How this browser identifies itself to websites. New profiles present as Chrome on macOS; a macOS or Windows identity also gets matching client hints. Leave blank to use Bromure’s Linux Chrome user agent.")
                     .settingDescription()
                 TextField(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",

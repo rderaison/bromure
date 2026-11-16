@@ -183,6 +183,27 @@ final class DelegationEngine {
     /// Files a remote parent uploaded for a record here, waiting for the
     /// message they belong to (send / steer / answer).
     private var pendingRemoteFiles: [UUID: [String]] = [:]
+    /// The folder a remote parent's batch of files lands in, one per message
+    /// (`~/.bromure/inbox/<id>/<batch>/`): never an earlier message's file
+    /// overwritten, nor removed with a message that isn't delivered.
+    private var pendingRemoteDir: [UUID: String] = [:]
+
+    /// The files a remote parent landed for the message it now sends; the
+    /// next batch gets a folder of its own.
+    private func takeRemoteBatch(_ delegationID: UUID) -> [String] {
+        pendingRemoteDir[delegationID] = nil
+        return pendingRemoteFiles.removeValue(forKey: delegationID) ?? []
+    }
+
+    /// A batch no message will carry (the request was cancelled, the answer
+    /// refused before it was posted): its folder goes.
+    private func dropRemoteBatch(_ delegationID: UUID) async {
+        let dir = pendingRemoteDir[delegationID]
+        _ = takeRemoteBatch(delegationID)
+        guard let dir, let d = store.delegation(delegationID),
+              let peer = sessions.session(d.childSessionID) else { return }
+        await discardCopies([(peer.profileID, [dir])])
+    }
     /// Files a remote peer attached, once copied onto the local parent's
     /// machine: message id → local paths (the record's paths are the far
     /// host's).
@@ -768,7 +789,13 @@ final class DelegationEngine {
         guard await ensureUp(peer.profileID, quietly: true) else {
             throw DelegationRefusal("The peer's workspace didn't start in time.")
         }
-        let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))"
+        let dest: String
+        if let dir = pendingRemoteDir[delegationID] {
+            dest = dir
+        } else {
+            dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))/\(DelegationNotice.shortID(UUID()))"
+            pendingRemoteDir[delegationID] = dest
+        }
         let target = dest + "/" + safe
         if !append {
             _ = try await self.guestExec(profileID: peer.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
@@ -797,7 +824,7 @@ final class DelegationEngine {
         guard let d = store.delegation(delegationID), d.parentRemote != nil, d.status == .starting else {
             throw DelegationRefusal("Unknown request, or already sent.")
         }
-        let landed = pendingRemoteFiles.removeValue(forKey: delegationID) ?? []
+        let landed = takeRemoteBatch(delegationID)
         let m = DelegationMessage(kind: .brief, from: .parent, to: .child, text: d.brief,
                                   files: landed.isEmpty ? nil : landed)
         store.mutate(d.id) { $0.messages.append(m); $0.status = .working }
@@ -819,22 +846,23 @@ final class DelegationEngine {
             guard let ask = body["ask_id"] as? String, let text = body["text"] as? String else {
                 throw DelegationRefusal("ask_id and text are required")
             }
-            let landed = pendingRemoteFiles.removeValue(forKey: d.id) ?? []
             let mine = store.delegations(parent: parentID)
             guard let (dd, askMsg) = store.message(matching: ask, in: mine), askMsg.kind == .ask, dd.id == d.id else {
+                await dropRemoteBatch(d.id)
                 throw DelegationRefusal("No question “\(ask)” waiting for you.")
             }
+            let landed = takeRemoteBatch(d.id)
             try await post(d.id, from: .parent, kind: .answer, text: text, answering: askMsg.id, landed: landed)
         case "steer":
             guard let text = body["text"] as? String else { throw DelegationRefusal("text is required") }
-            let landed = pendingRemoteFiles.removeValue(forKey: d.id) ?? []
+            let landed = takeRemoteBatch(d.id)
             try await post(d.id, from: .parent, kind: .steer, text: text, landed: landed)
         case "close":
             try await close(from: parentID, delegationKey: key,
                             verdict: body["verdict"] as? String ?? "accepted", note: body["note"] as? String)
         case "cancel":
             try await cancel(from: parentID, delegationKey: key, reason: body["reason"] as? String ?? "")
-            pendingRemoteFiles[d.id] = nil
+            await dropRemoteBatch(d.id)
         case "read":
             let ids = ((body["ids"] as? [String]) ?? []).compactMap(UUID.init(uuidString:))
                 .filter { id in d.messages.contains { $0.id == id && $0.to == .parent } }
@@ -1021,9 +1049,11 @@ final class DelegationEngine {
     /// withholds it (the message stays on the record, marked blocked).
     /// Files are copied into the recipient's inbox first.
     @discardableResult
+    /// `attachments`: files the user dropped (an answer from the board),
+    /// landed in the recipient's inbox once the text has passed the scan.
     func post(_ delegationID: UUID, from: DelegationMessage.Party, kind: DelegationMessage.Kind,
               text: String, answering: UUID? = nil, files: [String] = [],
-              landed: [String] = []) async throws -> DelegationMessage {
+              landed: [String] = [], attachments: [DroppedFile] = []) async throws -> DelegationMessage {
         guard var d = store.delegation(delegationID) else { throw DelegationRefusal("Unknown delegation.") }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw DelegationRefusal("Nothing to say.") }
@@ -1066,24 +1096,49 @@ final class DelegationEngine {
             BACDebug.log("delegation", "withheld a \(kind.rawValue) from \(from.rawValue) on “\(d.title)”")
             throw DelegationRefusal("Your message was withheld: it reads like a prompt injection (“\(DelegationNotice.oneLine(snippet, max: 120))”). Rephrase it as plain facts about the work.")
         }
-        if !files.isEmpty, let sender = sessions.session(to == .parent ? d.childSessionID : d.parentSessionID) {
-            if let recipient = sessions.session(to == .parent ? d.parentSessionID : d.childSessionID) {
-                m.files = try await transfer(files, from: sender, toProfile: recipient.profileID,
-                                             inbox: DelegationNotice.shortID(d.id))
-            } else {
-                // The other end is on another host: it fetches the files off
-                // the sender's machine through its tunnel — the record names
-                // them as they are here.
-                m.files = files.map { Self.resolve($0, cwd: sender.cwd) }
-            }
+        // What this message put in an inbox, by machine: removed if it isn't
+        // recorded after all (closed while the files were copied, the next
+        // copy failed) -- nobody is told of them, and a retry copies again.
+        var copied: [(profileID: UUID, paths: [String])] = []
+        let recipientSession = sessions.session(to == .parent ? d.parentSessionID : d.childSessionID)
+        // Each set is in a folder of its own (`transfer`, `receiveRemoteFile`):
+        // the folder goes, and nothing another message put in the inbox.
+        func folders(_ paths: [String]) -> [String] {
+            Array(Set(paths.map { ($0 as NSString).deletingLastPathComponent })).sorted()
         }
-        // Files a remote parent already landed here for this message.
-        if !landed.isEmpty { m.files = (m.files ?? []) + landed }
-        // Cancelled or closed while the scan or the copy ran: it stays so —
-        // a deliver recorded now made it delivered again.
-        if kind != .note, let now = store.delegation(delegationID),
-           !(now.status.isOpen || (deliversBack && now.goneFrom != nil)) {
-            throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+        if !landed.isEmpty, let r = recipientSession { copied.append((r.profileID, folders(landed))) }
+        do {
+            if !files.isEmpty, let sender = sessions.session(to == .parent ? d.childSessionID : d.parentSessionID) {
+                if let recipient = recipientSession {
+                    let moved = try await transfer(files, from: sender, toProfile: recipient.profileID,
+                                                   inbox: DelegationNotice.shortID(d.id))
+                    copied.append((recipient.profileID, folders(moved)))
+                    m.files = moved
+                } else {
+                    // The other end is on another host: it fetches the files off
+                    // the sender's machine through its tunnel — the record names
+                    // them as they are here.
+                    m.files = files.map { Self.resolve($0, cwd: sender.cwd) }
+                }
+            }
+            // Files a remote parent already landed here for this message.
+            if !landed.isEmpty { m.files = (m.files ?? []) + landed }
+            // The user's own files: after the scan, like a sender's files above --
+            // a withheld message must not have left them in the inbox.
+            if !attachments.isEmpty {
+                let got = try await landAttachments(attachments, for: d)
+                if let dir = got.dir { copied.append((got.profileID, [dir])) }
+                m.files = (m.files ?? []) + got.paths
+            }
+            // Cancelled or closed while the scan or the copy ran: it stays so —
+            // a deliver recorded now made it delivered again.
+            if kind != .note, let now = store.delegation(delegationID),
+               !(now.status.isOpen || (deliversBack && now.goneFrom != nil)) {
+                throw DelegationRefusal("Delegation “\(d.title)” is \(now.status.rawValue).")
+            }
+        } catch {
+            await discardCopies(copied)
+            throw error
         }
         store.mutate(delegationID) { d in
             // A child that speaks has read its brief (a request's, typed as a
@@ -1111,16 +1166,23 @@ final class DelegationEngine {
 
     /// The parent (or the user, for it) answers a child's question.
     @discardableResult
+    /// `attachments`: files the user dropped on the answer (the board's
+    /// sheet), landed in the asker's inbox and named in the answer's notice.
     func answer(from parentID: UUID, askKey: String, text: String,
-                by party: DelegationMessage.Party = .parent) async throws -> DelegationMessage {
+                by party: DelegationMessage.Party = .parent,
+                attachments: [DroppedFile] = []) async throws -> DelegationMessage {
         let mine = store.delegations(parent: parentID)
         if let (d, ask) = store.message(matching: askKey, in: mine), ask.kind == .ask {
-            return try await post(d.id, from: party, kind: .answer, text: text, answering: ask.id)
+            return try await post(d.id, from: party, kind: .answer, text: text, answering: ask.id,
+                                  attachments: attachments)
         }
         // A question from a peer on another host: answered there.
         for link in remoteLinks() {
             let theirs = link.remoteDelegations.delegations(parent: parentID)
             if let (d, ask) = link.remoteDelegations.message(matching: askKey, in: theirs), ask.kind == .ask {
+                guard attachments.isEmpty else {
+                    throw DelegationRefusal("Files can't go with an answer to an agent on another host yet — answer in words, or remove the attachments.")
+                }
                 try await remoteAct(link, d, action: "answer", body: ["ask_id": ask.id.uuidString, "text": text])
                 var m = DelegationMessage(kind: .answer, from: party, to: .child, text: text, answers: ask.id)
                 m.readAt = m.at
@@ -1376,23 +1438,111 @@ final class DelegationEngine {
 
     // MARK: Files between machines
 
+    /// Files the user attached to an answer, written straight into the
+    /// asker's inbox (where `transfer` lands a sender's files), in a folder of
+    /// this answer's own so an earlier file of the same name stays as it was:
+    /// their paths there, for the message's `files`, and that folder (to
+    /// remove if the message isn't recorded).
+    func landAttachments(_ files: [DroppedFile], for d: Delegation) async throws
+        -> (profileID: UUID, dir: String?, paths: [String]) {
+        guard !files.isEmpty else { return (d.profileID, nil, []) }
+        guard files.count <= Self.transferMaxFiles else {
+            throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
+        }
+        guard let recipient = sessions.session(d.childSessionID) else {
+            throw DelegationRefusal("The agent's session isn't on this Mac.")
+        }
+        // This Mac's VMs need the app; a machine on a link only its link.
+        guard delegate != nil || sessions.host(for: recipient.profileID) != nil else {
+            throw DelegationRefusal("Files can't travel without the machines.")
+        }
+        guard await ensureUp(recipient.profileID, quietly: true) else {
+            throw DelegationRefusal("The agent's workspace didn't start in time.")
+        }
+        let dest = "\(Self.inboxBase)/\(DelegationNotice.shortID(d.id))/answer-\(DelegationNotice.shortID(UUID()))"
+        _ = try await guestExec(profileID: recipient.profileID, command: "mkdir -p \(Self.q(dest))", timeout: 15)
+        do {
+            return (recipient.profileID, dest, try await landAttachments(files, in: dest, profileID: recipient.profileID))
+        } catch {
+            // None of a half-landed answer stays: the agent is never told of it.
+            _ = try? await guestExec(profileID: recipient.profileID, command: "rm -rf \(Self.q(dest))", timeout: 30)
+            throw error
+        }
+    }
+
+    private func landAttachments(_ files: [DroppedFile], in dest: String, profileID: UUID) async throws -> [String] {
+        let op: FolderUpload.FileOp = { [weak self] dict in
+            guard let self else { throw DelegationRefusal("Files can't travel without the machines.") }
+            return try await self.guestFileOp(profileID: profileID, op: dict, timeout: 600)
+        }
+        var out: [String] = []
+        for (f, name) in zip(files, Self.attachmentNames(files.map(\.name))) {
+            let target = dest + "/" + name
+            do {
+                #if os(macOS)
+                if let folder = f.folder {
+                    try await FolderUpload.upload(folder, into: target, op: op)
+                    out.append(target)
+                    continue
+                }
+                #endif
+                if f.packedFolder {
+                    try await FolderUpload.unpack(f.data, into: target, op: op)
+                } else {
+                    for w in GuestDrop.writeOps(guestPath: target, data: f.data) { _ = try await op(w) }
+                }
+            } catch let r as DelegationRefusal {
+                throw r
+            } catch {
+                throw DelegationRefusal("Couldn't copy “\(f.name)” to the agent's machine: \(error.localizedDescription)")
+            }
+            out.append(target)
+        }
+        return out
+    }
+
+    /// File names as they land: no path in them, never "." or "..", and two
+    /// of the same name told apart ("2-log.txt").
+    static func attachmentNames(_ names: [String]) -> [String] {
+        var used = Set<String>()
+        return names.enumerated().map { i, raw in
+            var name = (raw as NSString).lastPathComponent
+                .replacingOccurrences(of: "/", with: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty || name == "." || name == ".." { name = "file-\(i + 1)" }
+            var candidate = name
+            var n = 2
+            while used.contains(candidate) { candidate = "\(n)-\(name)"; n += 1 }
+            used.insert(candidate)
+            return candidate
+        }
+    }
+
     /// Copy files (a folder travels as a tarball) from `from`'s machine
-    /// into `inbox` on `toProfile`'s: ~/.bromure/inbox/<id>/<name>. Paths
-    /// relative to the sender's folder are resolved there; "~" is its home.
-    /// Returns the paths as the recipient sees them. On one machine it is a
-    /// plain copy. The recipient's workspace is started if it's off.
+    /// into a folder of its own under `inbox` on `toProfile`'s:
+    /// ~/.bromure/inbox/<id>/<transfer>/<name>. Paths relative to the
+    /// sender's folder are resolved there; "~" is its home. Returns the paths
+    /// as the recipient sees them. On one machine it is a plain copy. The
+    /// recipient's workspace is started if it's off. A copy that fails
+    /// partway removes its folder: only what it put there -- never an earlier
+    /// message's file of the same name (Finding: "Failed transfer deletes an
+    /// earlier inbox file with the same name").
     func transfer(_ paths: [String], from: AgentSession, toProfile: UUID, inbox: String) async throws -> [String] {
-        guard delegate != nil else { throw DelegationRefusal("Files can't travel without the machines.") }
+        // This Mac's VMs need the app; machines on a link only their links.
+        guard delegate != nil || (sessions.host(for: from.profileID) != nil && sessions.host(for: toProfile) != nil) else {
+            throw DelegationRefusal("Files can't travel without the machines.")
+        }
         guard paths.count <= Self.transferMaxFiles else {
             throw DelegationRefusal("At most \(Self.transferMaxFiles) files per message — send a folder, or an archive.")
         }
         guard await ensureUp(toProfile, quietly: true) else {
             throw DelegationRefusal("The recipient's workspace didn't start in time.")
         }
-        let dest = "\(Self.inboxBase)/\(inbox)"
+        let dest = "\(Self.inboxBase)/\(inbox)/\(DelegationNotice.shortID(UUID()))"
         _ = try await self.guestExec(profileID: toProfile, command: "mkdir -p \(Self.q(dest))", timeout: 15)
         var out: [String] = []
         var total: Int64 = 0
+        do {
         for raw in paths {
             let src = Self.resolve(raw, cwd: from.cwd)
             let name = (src as NSString).lastPathComponent
@@ -1433,8 +1583,22 @@ final class DelegationEngine {
             }
             out.append(target)
         }
+        } catch {
+            await discardCopies([(toProfile, [dest])])
+            throw error
+        }
         BACDebug.log("delegation", "moved \(out.count) file(s), \(total) bytes, into \(dest)")
         return out
+    }
+
+    /// Remove what a message copied into an inbox and won't deliver. Best
+    /// effort: a machine that's gone keeps them, as it keeps everything else.
+    func discardCopies(_ copies: [(profileID: UUID, paths: [String])]) async {
+        for (profileID, paths) in copies where !paths.isEmpty {
+            let quoted = paths.map(Self.q).joined(separator: " ")
+            _ = try? await guestExec(profileID: profileID, command: "rm -rf -- \(quoted)", timeout: 60)
+            BACDebug.log("delegation", "discarded \(paths.count) undelivered file(s)")
+        }
     }
 
     /// One file, chunk by chunk through the host; the bytes moved. The next
