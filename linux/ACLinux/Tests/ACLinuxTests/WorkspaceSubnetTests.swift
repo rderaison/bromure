@@ -101,7 +101,9 @@ struct WorkspaceSubnetInUseTests {
         let id = UUID().uuidString.lowercased()
         var suspended = RepairMarksTests.stopped(id)
         suspended.state = .suspended
-        suspended.ip = "172.23.104.2"
+        // As a suspend leaves it: the lease kept, the live ip cleared.
+        suspended.lease = "172.23.104.2"
+        suspended.ip = nil
         try reg.upsert(suspended)
         #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in false }) == nil, "no snapshot: nothing to resume")
         let snap = dir + "/vms/" + id + "/snapshot"
@@ -111,7 +113,7 @@ struct WorkspaceSubnetInUseTests {
                 "a suspended VM holds its subnet, whatever isAlive says")
         var running = RepairMarksTests.stopped(UUID().uuidString.lowercased())
         running.state = .running
-        running.ip = "192.168.64.2"
+        running.lease = "192.168.64.2"
         try reg.upsert(running)
         #expect(VMRegistry.runningGateway(path: path, isAlive: { _ in true }) == "192.168.64.1",
                 "a running VM's subnet wins over a suspended one listed before it")

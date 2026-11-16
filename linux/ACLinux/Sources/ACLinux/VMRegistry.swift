@@ -128,8 +128,10 @@ public struct VMRegistry: Sendable {
         let vmsDir = (path as NSString).deletingLastPathComponent + "/vms/"
         let running = recs.filter { ($0.state == .running || $0.state == .starting) && isAlive($0) }
         let suspended = recs.filter { $0.state == .suspended && FileManager.default.fileExists(atPath: vmsDir + $0.id + "/snapshot/vm.snap") }
+        // The lease: `ip` is cleared at a suspend and at a load (it is the
+        // live switch's view), the lease is what the guest was given.
         for r in running + suspended {
-            let p = (r.ip ?? "").split(separator: ".")
+            let p = (r.lease ?? r.ip ?? "").split(separator: ".")
             if p.count == 4 { return p[0..<3].joined(separator: ".") + ".1" }
         }
         return nil
