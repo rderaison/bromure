@@ -337,7 +337,7 @@ extension MitmProxy {
     /// The HTTP request's host, peeked (not consumed): an absolute-form
     /// target's, else the Host header's, lowercased; nil when the stream
     /// doesn't look like HTTP.
-    // @port MitmEngine.static peekHTTPHost(fd: Int32) h=347205d2f6f9c707 @8e2543eb
+    // @port MitmEngine.static peekHTTPHost(fd: Int32) h=dc2d3c5b62f40e6f @d7bd69f5
     static func peekHTTPHost(fd: Int32) -> String? {
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = buf.withUnsafeMutableBytes { recv(fd, $0.baseAddress, 4096, Int32(MSG_PEEK)) }

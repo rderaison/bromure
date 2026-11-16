@@ -68,9 +68,9 @@ final class TokenAgentListener {
     // partial: hybrid-vsock accept loop of TokenAgentListener
     // @port ListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice)@AgentCoding/CodexTokenBridge.swift h=3a2bb595c0f2b1d0 @6c6cd9cf
     // partial: channel.accept(fd:owner: nil) per hybrid-vsock connection
-    // @port CodexTokenBridge.accept(_: VZVirtioSocketConnection) h=3ed0742573962a5f @6c6cd9cf
+    // @port CodexTokenBridge.accept(_: VZVirtioSocketConnection) h=9dbd7fc186d58049 @d7bd69f5
     // partial: TokenAgentListener hands accepted fds to TokenAgentChannel.accept
-    // @port SubscriptionTokenBridge.accept(_: VZVirtioSocketConnection) h=3ed0742573962a5f @6c6cd9cf
+    // @port SubscriptionTokenBridge.accept(_: VZVirtioSocketConnection) h=9dbd7fc186d58049 @d7bd69f5
     // @port ListenerDelegate.listener(_: VZVirtioSocketListener, shouldAcceptNewConnection: VZVirtioSocketConnection, from: VZVirtioSocketDevice)@AgentCoding/SubscriptionTokenBridge.swift h=3a2bb595c0f2b1d0 @6c6cd9cf
     private func acceptAll() {
         while true {

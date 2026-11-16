@@ -9,12 +9,12 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
 
     /// A task's transcript: its archived copy, else the guest's, else (a
     /// Claude task's, the workspace off) read from its home image.
-    // @port ACAppDelegate.fetchTaskTranscriptRaw(_: CodingTask) h=b4e71a368ec3c7eb @9936e30c
-    // partial: calls HomeImageReader.claudeTranscript inline
+    // @port ACAppDelegate.fetchTaskTranscriptRaw(_: CodingTask, forArchive: Bool) h=9aabd79e89c96fa0 @d7bd69f5
+    // partial: calls HomeImageReader.claudeTranscript inline; no capped-read join (forArchive)
     // @port ACAppDelegate.static ext4Transcript(imagePath: String, slug: String, guestCwd: String) h=d0ebf29eb8eb89b3 @d3ebbda2
-    // `forArchive` changes nothing here: the archive's read is only asked
-    // for while no archive exists, and this reader has no capped read to
-    // complete (it reads the whole file).
+    // `forArchive` isn't acted on here: macOS completes a capped guest read
+    // (past 25 MB) from the session's copy before archiving it; this
+    // reader archives its read as it is.
     func fetchTaskTranscriptRaw(_ task: CodingTask, forArchive: Bool = false) async -> String? {
         if let archived = TaskTranscriptArchive.load(task.id) { return archived }
         guard let branch = task.branch ?? task.branchSlug.map({ "wt/" + $0 }) else { return nil }
