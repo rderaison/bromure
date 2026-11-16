@@ -578,13 +578,13 @@ async function main() {
     );
   });
 
-  await test("3.2 Default user agent presents as stock Linux Chrome", async () => {
+  await test("3.2 New profile's user agent presents as Chrome on macOS", async () => {
     await withSession("E2E_UA_Default", {},
       async ({ browser }) => {
         const ua = await getUserAgent(browser);
-        // Stock Linux Chrome (22b686aa: the compatible identity for the
-        // Linux guest), with no Bromure/<version> suffix.
-        assertIncludes(ua, "X11; Linux x86_64", `UA not stock Linux Chrome: ${ua}`);
+        // New profiles default to Chrome on macOS (ProfileSettings.
+        // defaultUserAgent), with no Bromure/<version> suffix.
+        assertIncludes(ua, "Macintosh; Intel Mac OS X 10_15_7", `UA not Chrome on macOS: ${ua}`);
         assert(/Chrome\/\d+/.test(ua), `No Chrome version in UA: ${ua}`);
         assert(!ua.includes("Bromure"), `UA still carries Bromure tag: ${ua}`);
       }

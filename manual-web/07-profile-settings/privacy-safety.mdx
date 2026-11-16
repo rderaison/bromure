@@ -20,7 +20,7 @@ The **Privacy & Safety** category ("Control what this browser can access and sha
 | **AI Phishing Detection** (Beta) | Analyzes pages with an AI model to catch scams and phishing before you act on them. The page's URL, visible text and form structure are sent to a Bromure analysis server. Default: off. Requires **Retain Browsing Data** and a one-time consent. |
 | **Block Screen Capture** | Hides the profile's windows from screenshots, screen recordings and screen-sharing apps like Zoom. Default: off. |
 | **Send Link to Other Session** | Adds **Send Link to Other Session** to the browser's right-click menu, to open a link in another Bromure profile. Default: off (on for **File › New Profile…** profiles and the built-in **Private Browsing** profile). |
-| **User Agent** | How the browser identifies itself to websites. Leave it empty to use Bromure’s default Linux Chrome user agent, or enter a custom user-agent string. |
+| **User Agent** | How the browser identifies itself to websites. New profiles start with Chrome on macOS; enter any user-agent string to override it, or leave it empty to use Bromure’s Linux Chrome user agent. |
 
 All privacy and safety settings apply to an open window after a restart.
 
@@ -62,7 +62,7 @@ Right-click a link and choose **Send Link to Other Session** to open it in anoth
 
 ## User Agent
 
-An empty field uses `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36` for both Chromium and Google Chrome. Enter a custom string to override it; clear the field to restore this default.
+A new profile starts with `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36`, so websites see Chrome on a Mac. Profiles created before this default keep the user agent they had. Enter a custom string to override it. An empty field uses `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36`, for both Chromium and Google Chrome.
 
 ## Related chapters
 

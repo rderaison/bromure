@@ -170,7 +170,21 @@ struct ProfileSettingsTests {
         // before the setting existed.
         var expected = ProfileSettings()
         expected.allowPrinting = false
+        expected.userAgent = ""
         #expect(s == expected)
+    }
+
+    @Test("New profiles present as Chrome on macOS; older profiles keep their user agent")
+    func userAgentDefault() throws {
+        let fresh = ProfileSettings()
+        #expect(fresh.userAgent == "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36")
+        #expect(fresh.toVMConfig().userAgent == fresh.userAgent)
+        let roundTripped = try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(fresh))
+        #expect(roundTripped.userAgent == fresh.userAgent)
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8)).userAgent == "")
+        var cleared = fresh
+        cleared.userAgent = ""
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(cleared)).userAgent == "")
     }
 
     @Test("New profiles print and keep Keychain passwords off; older profiles keep printing off")

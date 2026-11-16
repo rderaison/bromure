@@ -226,12 +226,14 @@ public struct ProfileSettings: Codable, Equatable {
     /// their own process). Measured on an ad-heavy page: 70 renderer
     /// processes and ~2.1 GB used with it on, 5 and ~1.4 GB with it off.
     public var strictSiteIsolation: Bool = true
-    /// Custom User-Agent override. Empty = present as Chrome on macOS
-    /// (the guest builds the string from its real Chromium version so the
-    /// platform reads "Macintosh" instead of leaking the Linux VM, while
-    /// the Chrome version stays accurate). A non-empty value is sent to
-    /// Chromium verbatim via `--user-agent`.
-    public var userAgent: String = ""
+    /// User-Agent override, sent to Chromium verbatim via `--user-agent`.
+    /// New profiles present as Chrome on macOS (`defaultUserAgent`).
+    /// Empty = the guest's built-in Linux Chrome identity; profiles saved
+    /// before the field existed decode to that, so they don't change.
+    public var userAgent: String = ProfileSettings.defaultUserAgent
+    /// The User-Agent every new profile starts with.
+    public static let defaultUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
     /// Which browser the session launches (Chromium or Google Chrome).
     public var browser: BrowserChoice = .chromium
 
@@ -405,7 +407,7 @@ public struct ProfileSettings: Codable, Equatable {
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
         strictSiteIsolation = try c.decodeIfPresent(Bool.self, forKey: .strictSiteIsolation) ?? defaults.strictSiteIsolation
-        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? defaults.userAgent
+        userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? ""
         browser = try c.decodeIfPresent(BrowserChoice.self, forKey: .browser) ?? defaults.browser
         enableAdBlocking = try c.decodeIfPresent(Bool.self, forKey: .enableAdBlocking) ?? defaults.enableAdBlocking
         // Migration: legacy enableWarp bool → vpnMode enum

@@ -445,17 +445,27 @@ final class GUIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let window = NSWindow(contentRect: .zero,
                               styleMask: [.titled, .closable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        let view = LaunchPickerView(
-            profiles: profiles, initialProfileID: initial,
-            interfaces: VMConfig.bridgedInterfaces(),
-            suggestedColor: { [weak self] in self?.profileEditor.suggestedColor() },
-            onCreateProfile: { [weak self] name, color in
-                guard let self else { return Profile(name: name, color: color) }
-                return self.profileEditor.createProfile(name: name, color: color)
-            },
-            onOpen: { [weak self] choice in self?.finishLaunchPicker(choice) },
-            onCancel: { [weak self] in self?.finishLaunchPicker(nil) }
-        )
+        let interfaces = VMConfig.bridgedInterfaces()
+        let view = ObservedLaunchPicker(state: state) { [weak self] version in
+            LaunchPickerView(
+                profiles: profiles, initialProfileID: initial,
+                interfaces: interfaces,
+                suggestedColor: { [weak self] in self?.profileEditor.suggestedColor() },
+                onCreateProfile: { [weak self] name, color in
+                    guard let self else { return Profile(name: name, color: color) }
+                    return self.profileEditor.createProfile(name: name, color: color)
+                },
+                onEditProfile: { [weak self] id in
+                    self?.profileEditor.presentSettings(forProfileID: id)
+                },
+                profileVersion: version,
+                currentProfiles: { [weak self] in
+                    self?.state.profileManager.allProfiles ?? []
+                },
+                onOpen: { [weak self] choice in self?.finishLaunchPicker(choice) },
+                onCancel: { [weak self] in self?.finishLaunchPicker(nil) }
+            )
+        }
         launchPickerCompletion = completion
         // Same chrome as the starting splash: the brand band runs up under
         // the traffic lights.

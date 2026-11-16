@@ -11,6 +11,16 @@ struct LaunchChoice {
     let network: String
 }
 
+/// Hosts the launch picker so it re-renders when profiles change (an edit
+/// saved from the picker's own edit buttons, a profile deleted elsewhere).
+/// `make` builds the picker with the current `profileVersion`; its @State
+/// survives the rebuilds, so only `profileVersion` matters on later passes.
+struct ObservedLaunchPicker: View {
+    let state: AppState
+    let make: (Int) -> LaunchPickerView
+    var body: some View { make(state.profileVersion) }
+}
+
 /// The profile chooser Bromure shows before every VM boots (launch, ⌘N,
 /// a Dock click, "Open a Different Profile…"): pick a profile — or create
 /// one — and the network its session boots on. Styled like the starting
@@ -19,6 +29,12 @@ struct LaunchPickerView: View {
     let interfaces: [VMConfig.BridgedInterface]
     let suggestedColor: () -> ProfileColor?
     let onCreateProfile: (String, ProfileColor?) -> Profile
+    /// Opens a profile's settings window; nil hides the edit buttons.
+    let onEditProfile: ((UUID) -> Void)?
+    /// Bumped whenever a profile is saved, created or deleted…
+    let profileVersion: Int
+    /// …so the list re-reads the current profiles from here.
+    let currentProfiles: (() -> [Profile])?
     let onOpen: (LaunchChoice) -> Void
     let onCancel: () -> Void
 
@@ -38,12 +54,18 @@ struct LaunchPickerView: View {
          interfaces: [VMConfig.BridgedInterface],
          suggestedColor: @escaping () -> ProfileColor?,
          onCreateProfile: @escaping (String, ProfileColor?) -> Profile,
+         onEditProfile: ((UUID) -> Void)? = nil,
+         profileVersion: Int = 0,
+         currentProfiles: (() -> [Profile])? = nil,
          onOpen: @escaping (LaunchChoice) -> Void,
          onCancel: @escaping () -> Void) {
         _profiles = State(initialValue: profiles)
         self.interfaces = interfaces
         self.suggestedColor = suggestedColor
         self.onCreateProfile = onCreateProfile
+        self.onEditProfile = onEditProfile
+        self.profileVersion = profileVersion
+        self.currentProfiles = currentProfiles
         self.onOpen = onOpen
         self.onCancel = onCancel
         _profileID = State(initialValue: initialProfileID)
@@ -113,6 +135,7 @@ struct LaunchPickerView: View {
             network = Self.defaultNetwork(for: profiles.first { $0.id == newID },
                                           interfaces: interfaces)
         }
+        .onChange(of: profileVersion) { reloadProfiles() }
         .onAppear { listFocused = true }
         .sheet(isPresented: $creatingProfile) {
             NewProfileForm(initialColor: suggestedColor()) { name, color in
@@ -124,6 +147,23 @@ struct LaunchPickerView: View {
             } onCancel: {
                 creatingProfile = false
             }
+        }
+    }
+
+    /// A profile was edited, created or deleted elsewhere (its settings
+    /// window, the profile manager): show the current list. Keeps the
+    /// selection when it still exists, and only re-derives the network
+    /// when the selected profile's own network setting changed, so a
+    /// choice made here isn't thrown away by an unrelated edit.
+    private func reloadProfiles() {
+        guard let fresh = currentProfiles?() else { return }
+        let before = profiles.first { $0.id == profileID }
+        profiles = fresh
+        guard let selected = fresh.first(where: { $0.id == profileID }) ?? fresh.first else { return }
+        if selected.id != profileID {
+            profileID = selected.id  // onChange(of: profileID) resets the network
+        } else if selected.settings.networkInterface != before?.settings.networkInterface {
+            network = Self.defaultNetwork(for: selected, interfaces: interfaces)
         }
     }
 
@@ -215,6 +255,19 @@ struct LaunchPickerView: View {
                 .font(.system(size: 13, weight: selected ? .semibold : .regular))
                 .lineLimit(1)
             Spacer(minLength: 8)
+            if let onEditProfile {
+                Button { onEditProfile(p.id) } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(Text("Edit Profile\u{2026}"))
+                .accessibilityLabel(Text("Edit Profile\u{2026}"))
+                .opacity(selected || hoveredProfile == p.id ? 1 : 0)
+            }
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 14))
                 .foregroundStyle(Brand.accent)

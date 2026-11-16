@@ -979,7 +979,7 @@ struct ProfileSettingsView: View {
             // User Agent
             VStack(alignment: .leading, spacing: 6) {
                 Text("User Agent").font(.headline)
-                Text("How this browser identifies itself to websites. Leave blank to use Bromure’s default Linux Chrome user agent, or enter a custom value to override it.")
+                Text("How this browser identifies itself to websites. New profiles present as Chrome on macOS. Leave blank to use Bromure’s Linux Chrome user agent.")
                     .settingDescription()
                 TextField(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
