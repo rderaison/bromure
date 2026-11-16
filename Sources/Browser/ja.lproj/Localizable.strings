@@ -820,3 +820,6 @@
 "Choose a profile and the network it connects through." = "プロファイルと接続に使うネットワークを選択してください。";
 "Shared (NAT)" = "共有（NAT）";
 "Bridged — %@" = "ブリッジ — %@";
+
+/* ProfileSettingsView — Privacy & Safety: user-agent presets menu */
+"Presets" = "\U30D7\U30EA\U30BB\U30C3\U30C8";

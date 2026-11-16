@@ -852,6 +852,7 @@ install_config scripts/config-agent.py      /mnt/usr/local/bin/config-agent.py  
 install_config scripts/cdp-agent.py         /mnt/usr/local/bin/cdp-agent.py         755
 install_config scripts/cdp-lan-forwarder.py /mnt/usr/local/bin/cdp-lan-forwarder.py 755
 install_config scripts/tab-agent.py         /mnt/usr/local/bin/tab-agent.py         755
+install_config scripts/identity-agent.py    /mnt/usr/local/bin/identity-agent.py    755
 install_config scripts/shared_windows.py    /mnt/usr/local/bin/shared_windows.py    755
 install_config scripts/bromure-hostkey      /mnt/usr/local/bin/bromure-hostkey      755
 install_config scripts/shell-agent.py       /mnt/usr/local/bin/shell-agent.py       755

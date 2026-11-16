@@ -338,11 +338,82 @@ def browser_binary(cfg):
     return "google-chrome-stable" if cfg.get("browser") == "chrome" else "chromium-browser"
 
 
+LINUX_USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+
+# Browser identities the guest can present beyond its native Linux one.
+# Chromium only applies --user-agent to the User-Agent header and
+# navigator.userAgent; User-Agent Client Hints (Sec-CH-UA-*,
+# navigator.userAgentData) and navigator.platform keep reporting Linux.
+# identity-agent.py makes them match by applying this metadata to every
+# page, frame and worker over DevTools. The identity is chosen from the
+# user-agent string itself, so a custom string for one of these platforms
+# gets matching hints too; anything else keeps Chromium's native values.
+# Values are what Chrome itself reports on that platform. Adding a platform
+# is one entry here.
+BROWSER_IDENTITIES = (
+    {"match": r"\(Macintosh;", "platform": "macOS", "navigatorPlatform": "MacIntel",
+     # Apple silicon; the UA string's "Intel Mac OS X 10_15_7" is frozen
+     # by Chrome on every Mac, while the hints carry the real OS version.
+     "architecture": "arm", "bitness": "64", "platformVersion": "15.0.0"},
+    {"match": r"\(Windows NT 10\.0;", "platform": "Windows", "navigatorPlatform": "Win32",
+     # Windows 11 (Chrome reports 13.0.0 and up there; 0.x–10.x are Windows 10).
+     "architecture": "x86", "bitness": "64", "platformVersion": "19.0.0"},
+)
+
+_installed_browser_version = {}
+
+
+def installed_browser_version(binary):
+    """(major, "major.minor.build.patch") of the browser this session
+    launches, from `<binary> --version`; (None, None) if unknown."""
+    if binary not in _installed_browser_version:
+        version = (None, None)
+        try:
+            out = subprocess.run([binary, "--version"], capture_output=True,
+                                 text=True, timeout=15).stdout
+            m = re.search(r"\b(\d+)\.(\d+)\.(\d+)\.(\d+)\b", out)
+            if m:
+                version = (int(m.group(1)), m.group(0))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _installed_browser_version[binary] = version
+    return _installed_browser_version[binary]
+
+
 def resolve_user_agent(cfg):
-    """Use the compatible Linux identity unless the profile overrides it."""
-    return (cfg.get("userAgent") or "").strip() or (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-    )
+    """The User-Agent this session presents.
+
+    A custom string is used verbatim. The Linux default and Bromure's
+    presets (the host sets userAgentTracksBrowser for those) carry the
+    installed browser's major version in Chrome's reduced form
+    (Chrome/<major>.0.0.0), so they never drift from the engine they
+    describe — or from the Client Hints identity-agent reports.
+    """
+    custom = (cfg.get("userAgent") or "").strip()
+    ua = custom or LINUX_USER_AGENT
+    if not custom or cfg.get("userAgentTracksBrowser"):
+        major, _ = installed_browser_version(browser_binary(cfg))
+        if major:
+            ua = re.sub(r"\bChrome/\d+\.0\.0\.0\b", f"Chrome/{major}.0.0.0", ua)
+    return ua
+
+
+def browser_identity(cfg, ua):
+    """Client Hints identity for `ua`, as identity-agent applies it, or None
+    when the browser's native (Linux) values already match."""
+    for entry in BROWSER_IDENTITIES:
+        if re.search(entry["match"], ua):
+            identity = {k: v for k, v in entry.items() if k != "match"}
+            if entry["platform"] == "macOS" and re.fullmatch(r"\d+\.\d+\.\d+", str(cfg.get("hostOSVersion", ""))):
+                identity["platformVersion"] = cfg["hostOSVersion"]
+            m = re.search(r"\bChrome/(\d+)\.", ua)
+            if m:
+                identity["majorVersion"] = int(m.group(1))
+            identity["brands"] = (["Chromium", "Google Chrome"]
+                                  if browser_binary(cfg) == "google-chrome-stable" else ["Chromium"])
+            return identity
+    return None
 
 
 def graphics_backend(cfg):
@@ -386,6 +457,13 @@ def write_chrome_env(cfg):
 
     extra_flags = []
     enable_features = []
+    user_agent = resolve_user_agent(cfg)
+    identity = browser_identity(cfg, user_agent)
+    if identity:
+        # With --user-agent set, report blank Client Hints rather than the
+        # Linux ones until identity-agent applies the identity's. Only the
+        # very first request of a brand-new tab goes out before it can.
+        enable_features.append("UACHOverrideBlank")
     # LcdText: Chromium's subpixel text in compositor layers. macOS Chrome uses
     # grayscale AA; disabling here matches that path and avoids the slight
     # chromatic fringing/blur that subpixel rendering produces on this display.
@@ -699,7 +777,11 @@ def write_chrome_env(cfg):
     # User-Agent. Passed as its own var (not folded into EXTRA_FLAGS, whose
     # values xinitrc word-splits on spaces) so the spaced UA string reaches
     # Chromium as a single --user-agent argument.
-    lines.append(f"CHROME_UA={sh_escape(resolve_user_agent(cfg))}")
+    lines.append(f"CHROME_UA={sh_escape(user_agent)}")
+    # Matching Client Hints / navigator.platform for a non-Linux identity;
+    # xinitrc starts identity-agent.py (and defers the start page to it).
+    if identity:
+        lines.append(f"CHROME_IDENTITY={sh_escape(json.dumps(identity, sort_keys=True))}")
 
     # Test suite: forward TEST_* expectations to chrome-env
     for key, val in cfg.items():

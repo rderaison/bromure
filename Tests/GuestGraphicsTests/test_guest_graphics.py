@@ -32,12 +32,13 @@ config = load_script("config-agent")
 diagnostics = load_script("graphics-diagnostics")
 
 
-def chrome_env(cfg, virgl_device="/dev/dri/renderD129"):
+def chrome_env(cfg, virgl_device="/dev/dri/renderD129", browser_version=(None, None)):
     stream = io.StringIO()
     # Exercise the actual config writer, without guest filesystem writes or
     # spawning an installed browser.
     with patch("builtins.open") as mocked_open, \
             patch.object(config, "write_chrome_extension_forcelist"), \
+            patch.object(config, "installed_browser_version", return_value=browser_version), \
             patch.object(config, "virgl_video_device", return_value=virgl_device):
         mocked_open.return_value.__enter__.return_value = stream
         config.write_chrome_env(cfg)

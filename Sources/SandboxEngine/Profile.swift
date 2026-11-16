@@ -229,14 +229,31 @@ public struct ProfileSettings: Codable, Equatable {
     /// their own process). Measured on an ad-heavy page: 70 renderer
     /// processes and ~2.1 GB used with it on, 5 and ~1.4 GB with it off.
     public var strictSiteIsolation: Bool = true
-    /// User-Agent override, sent to Chromium verbatim via `--user-agent`.
-    /// New profiles present as Chrome on macOS (`defaultUserAgent`).
-    /// Empty = the guest's built-in Linux Chrome identity; profiles saved
-    /// before the field existed decode to that, so they don't change.
+    /// The User-Agent string the browser presents. New profiles present as
+    /// Chrome on macOS (`defaultUserAgent`). Empty = the guest's built-in
+    /// Linux Chrome identity; profiles saved before the field existed decode
+    /// to that, so they don't change. For a macOS or Windows string the
+    /// guest also makes Client Hints and navigator.platform match
+    /// (config-agent's BROWSER_IDENTITIES + identity-agent.py).
     public var userAgent: String = ProfileSettings.defaultUserAgent
     /// The User-Agent every new profile starts with.
     public static let defaultUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    /// Chrome on Windows, in Chrome's reduced form.
+    public static let windowsUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    /// Identities offered in Profile Settings. The guest keeps these on the
+    /// installed browser's version (Chrome/<major>.0.0.0); any other string
+    /// is applied verbatim.
+    public static let userAgentPresets: [(name: String, userAgent: String)] = [
+        ("macOS", defaultUserAgent),
+        ("Windows", windowsUserAgent),
+    ]
+    /// Whether `userAgent` is one of the presets, whose Chrome version the
+    /// guest replaces with the installed one.
+    public static func userAgentTracksBrowser(_ userAgent: String) -> Bool {
+        userAgentPresets.contains { $0.userAgent == userAgent.trimmingCharacters(in: .whitespaces) }
+    }
     /// Which browser the session launches (Chromium or Google Chrome).
     public var browser: BrowserChoice = .chromium
 

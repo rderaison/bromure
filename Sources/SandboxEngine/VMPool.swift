@@ -903,9 +903,15 @@ public final class VMPool {
             cfg["appVersion"] = version
         }
 
-        // User-Agent: empty = guest presents as Chrome on macOS; non-empty
-        // overrides verbatim. Always pass it so the guest knows the choice.
+        // User-Agent: empty = the guest's Linux Chrome identity; non-empty
+        // overrides verbatim, except that a preset's Chrome version follows
+        // the installed browser. Always pass it so the guest knows the choice.
         cfg["userAgent"] = config.userAgent
+        if ProfileSettings.userAgentTracksBrowser(config.userAgent) { cfg["userAgentTracksBrowser"] = true }
+        // A macOS identity's Client Hints report this Mac's OS version, as
+        // Chrome on this Mac would.
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        cfg["hostOSVersion"] = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
 
         // Test suite: inject TEST_SUITE flag and expectations for guest test-runner.sh
         if config.testSuite {

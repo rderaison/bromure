@@ -20,7 +20,7 @@ The **Privacy & Safety** category ("Control what this browser can access and sha
 | **AI Phishing Detection** (Beta) | Analyzes pages with an AI model to catch scams and phishing before you act on them. The page's URL, visible text and form structure are sent to a Bromure analysis server. Default: off. Requires **Retain Browsing Data** and a one-time consent. |
 | **Block Screen Capture** | Hides the profile's windows from screenshots, screen recordings and screen-sharing apps like Zoom. Default: off. |
 | **Send Link to Other Session** | Adds **Send Link to Other Session** to the browser's right-click menu, to open a link in another Bromure profile. Default: off (on for **File › New Profile…** profiles and the built-in **Private Browsing** profile). |
-| **User Agent** | How the browser identifies itself to websites. New profiles start with Chrome on macOS; enter any user-agent string to override it, or leave it empty to use Bromure’s Linux Chrome user agent. |
+| **User Agent** | How the browser identifies itself to websites. New profiles start with Chrome on macOS; **Presets** switches to Chrome on Windows or back to Linux, or enter any user-agent string. |
 
 All privacy and safety settings apply to an open window after a restart.
 
@@ -62,7 +62,17 @@ Right-click a link and choose **Send Link to Other Session** to open it in anoth
 
 ## User Agent
 
-A new profile starts with `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36`, so websites see Chrome on a Mac. Profiles created before this default keep the user agent they had. Enter a custom string to override it. An empty field uses `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36`, for both Chromium and Google Chrome.
+A new profile presents as Chrome on a Mac: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/<version>.0.0.0 Safari/537.36`. The **Presets** menu next to the field switches between:
+
+- **macOS** — Chrome on a Mac (the default for new profiles).
+- **Windows** — Chrome on Windows: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/<version>.0.0.0 Safari/537.36`.
+- **Linux** — empties the field: Bromure's built-in Linux Chrome user agent, `Mozilla/5.0 (X11; Linux x86_64) …`.
+
+For the presets and the empty field, `<version>` is the major version of the browser the session actually runs, so the user agent never claims a different Chrome than the one websites talk to. A string you type yourself is used exactly as written.
+
+Websites don't only read the user agent: they also see the platform through User-Agent Client Hints (the `Sec-CH-UA-Platform` request header and `navigator.userAgentData`) and `navigator.platform`. For a macOS or Windows user agent, Bromure makes all of them match — in pages, frames and workers — so the browser looks like Chrome on that system rather than a Linux machine claiming to be one. On a Mac, the reported OS version is your Mac's. The one exception: the very first request of a brand-new tab goes out with empty Client Hints, before the identity reaches it.
+
+Profiles created before Bromure defaulted to macOS keep the user agent they had.
 
 ## Related chapters
 

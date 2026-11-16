@@ -988,8 +988,19 @@ struct ProfileSettingsView: View {
 
             // User Agent
             VStack(alignment: .leading, spacing: 6) {
-                Text("User Agent").font(.headline)
-                Text("How this browser identifies itself to websites. New profiles present as Chrome on macOS. Leave blank to use Bromure’s Linux Chrome user agent.")
+                HStack {
+                    Text("User Agent").font(.headline)
+                    Spacer()
+                    Menu("Presets") {
+                        ForEach(ProfileSettings.userAgentPresets, id: \.userAgent) { preset in
+                            Button(preset.name) { draft.settings.userAgent = preset.userAgent }
+                        }
+                        Button("Linux") { draft.settings.userAgent = "" }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                Text("How this browser identifies itself to websites. New profiles present as Chrome on macOS; a macOS or Windows identity also gets matching client hints. Leave blank to use Bromure’s Linux Chrome user agent.")
                     .settingDescription()
                 TextField(
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",

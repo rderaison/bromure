@@ -58,6 +58,7 @@ AUDIO_VOLUME=
 PROFILE_DIR=
 CHROME_LANG=
 CHROME_UA=
+CHROME_IDENTITY=
 BROWSER_BIN=
 DISPLAY_SCALE=
 GRAPHICS_BACKEND=software
@@ -190,6 +191,21 @@ LANG_FLAG=
 # and the host clips off the top rows. Chromium itself runs completely
 # unmodified — same launch flags, same maximize behaviour, same window
 # manager rules. tab-agent + the native titlebar handle the visible UI.
+# Browser identity (macOS, Windows, …): --user-agent alone leaves Client
+# Hints and navigator.platform reporting Linux. identity-agent.py applies the
+# matching identity to every tab, frame and worker over DevTools. Chromium
+# starts on about:blank and the agent opens the start page once the identity
+# is in place, so not even the first request reports the Linux guest; if the
+# agent isn't ready in time, the start page opens anyway (see the loop below).
+_IDENTITY_URL=
+if [ -n "$CHROME_IDENTITY" ]; then
+    if [ -n "$CHROME_URL" ]; then
+        _IDENTITY_URL="$CHROME_URL"
+        CHROME_URL=about:blank
+    fi
+    /usr/local/bin/resilient-launch.sh /usr/local/bin/identity-agent.py &
+fi
+
 CHROME_CMD="${BROWSER_BIN:-chromium-browser} --no-first-run --no-default-browser-check --disable-pings $_SHARED_MAXIMIZE --force-device-scale-factor=$DISPLAY_SCALE --disable-vulkan --font-render-hinting=none $LANG_FLAG $EXTRA_FLAGS $CHROME_URL"
 
 # VPN splash: when a VPN is configured to connect at startup, the tunnel
@@ -259,6 +275,18 @@ fi
 start_ts=$(date +%s)
 prefs_backup=
 for attempt in 1 2 3 4 5; do
+    if [ -n "$CHROME_IDENTITY" ]; then
+        # A (re)launched browser gets the start page / restored-tab reload again.
+        rm -f /tmp/bromure/identity-ready /tmp/bromure/identity-start-page-done
+        if [ -n "$_IDENTITY_URL" ]; then
+            # One pending fallback at a time. Same --user-data-dir, so it is
+            # forwarded to the running browser as a new tab.
+            [ -n "$_IDENTITY_FALLBACK" ] && kill "$_IDENTITY_FALLBACK" 2>/dev/null
+            ( sleep 20; [ -f /tmp/bromure/identity-ready ] || \
+                ${BROWSER_BIN:-chromium-browser} $EXTRA_FLAGS --user-agent="$CHROME_UA" "$_IDENTITY_URL" ) &
+            _IDENTITY_FALLBACK=$!
+        fi
+    fi
     # CHROME_UA is applied here, not via $CHROME_CMD, because the UA string
     # has spaces and $CHROME_CMD is word-split on launch. Quoting it as a
     # standalone argument keeps it a single --user-agent value.

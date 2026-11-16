@@ -186,6 +186,19 @@ struct ProfileSettingsTests {
         #expect(!(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(off))).hardwareVideoDecode)
     }
 
+    @Test("User-agent presets follow the installed browser; custom strings stay verbatim")
+    func userAgentPresets() {
+        #expect(ProfileSettings.userAgentPresets.map(\.name) == ["macOS", "Windows"])
+        #expect(ProfileSettings.userAgentPresets.allSatisfy { $0.userAgent.contains("Chrome/157.0.0.0") })
+        #expect(ProfileSettings.windowsUserAgent.contains("(Windows NT 10.0; Win64; x64)"))
+        #expect(ProfileSettings.userAgentTracksBrowser(ProfileSettings.defaultUserAgent))
+        #expect(ProfileSettings.userAgentTracksBrowser(ProfileSettings.windowsUserAgent))
+        #expect(ProfileSettings.userAgentTracksBrowser(" " + ProfileSettings.defaultUserAgent + " "))
+        #expect(!ProfileSettings.userAgentTracksBrowser(""))
+        #expect(!ProfileSettings.userAgentTracksBrowser(
+            ProfileSettings.defaultUserAgent.replacingOccurrences(of: "157", with: "150")))
+    }
+
     @Test("New profiles present as Chrome on macOS; older profiles keep their user agent")
     func userAgentDefault() throws {
         let fresh = ProfileSettings()

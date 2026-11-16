@@ -820,3 +820,6 @@
 "Choose a profile and the network it connects through." = "选择一个配置文件及其连接所用的网络。";
 "Shared (NAT)" = "共享 (NAT)";
 "Bridged — %@" = "桥接 — %@";
+
+/* ProfileSettingsView — Privacy & Safety: user-agent presets menu */
+"Presets" = "\U9884\U8BBE";

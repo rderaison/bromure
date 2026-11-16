@@ -820,3 +820,6 @@
 "Choose a profile and the network it connects through." = "Elige un perfil y la red a través de la cual se conecta.";
 "Shared (NAT)" = "Compartida (NAT)";
 "Bridged — %@" = "Puente — %@";
+
+/* ProfileSettingsView — Privacy & Safety: user-agent presets menu */
+"Presets" = "Preajustes";

@@ -159,6 +159,26 @@ async function getUserAgent(browser) {
   return ua;
 }
 
+/**
+ * The identity a page presents through every channel: navigator.userAgent,
+ * navigator.platform, User-Agent Client Hints (JS), and the same in a worker.
+ */
+async function getIdentity(browser) {
+  const page = await browser.newPage();
+  await page.goto("https://example.com/", { waitUntil: "domcontentloaded" });
+  const id = await page.evaluate(async () => {
+    const u = navigator.userAgentData;
+    const he = u ? await u.getHighEntropyValues(["platformVersion", "architecture"]) : {};
+    const worker = new Worker(URL.createObjectURL(new Blob([
+      "postMessage({platform: navigator.platform, hints: navigator.userAgentData && navigator.userAgentData.platform})"])));
+    const inWorker = await new Promise((r) => { worker.onmessage = (e) => r(e.data); });
+    return { ua: navigator.userAgent, platform: navigator.platform, hints: u && u.platform,
+             brands: u ? u.brands.map((b) => b.brand) : [], architecture: he.architecture, worker: inWorker };
+  });
+  await page.close();
+  return id;
+}
+
 /** Get CDP /json/list targets for a session. Retries on empty/error responses. */
 async function getTargets(sessionId) {
   for (let i = 0; i < 5; i++) {
@@ -587,6 +607,30 @@ async function main() {
         assertIncludes(ua, "Macintosh; Intel Mac OS X 10_15_7", `UA not Chrome on macOS: ${ua}`);
         assert(/Chrome\/\d+/.test(ua), `No Chrome version in UA: ${ua}`);
         assert(!ua.includes("Bromure"), `UA still carries Bromure tag: ${ua}`);
+        // Client Hints and navigator.platform must agree with the UA —
+        // in pages and workers — or the Linux guest shows through.
+        const id = await getIdentity(browser);
+        assert(id.hints === "macOS", `Client Hints platform not macOS: ${JSON.stringify(id)}`);
+        assert(id.platform === "MacIntel", `navigator.platform not MacIntel: ${JSON.stringify(id)}`);
+        assert(id.worker.platform === "MacIntel" && id.worker.hints === "macOS",
+          `Worker identity not macOS: ${JSON.stringify(id.worker)}`);
+        const major = ua.match(/Chrome\/(\d+)/)[1];
+        assert(id.brands.includes("Chromium") || id.brands.includes("Google Chrome"),
+          `No browser brand in Client Hints: ${id.brands}`);
+        assert(JSON.stringify(id).includes(major), `Client Hints version differs from UA ${major}`);
+      }
+    );
+  });
+
+  await test("3.4 Windows preset presents as Chrome on Windows everywhere", async () => {
+    const windows = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+    await withSession("E2E_UA_Windows", { userAgent: windows },
+      async ({ browser }) => {
+        const id = await getIdentity(browser);
+        assertIncludes(id.ua, "Windows NT 10.0; Win64; x64", `UA not Windows: ${id.ua}`);
+        assert(id.hints === "Windows" && id.platform === "Win32" && id.architecture === "x86",
+          `Identity not Windows: ${JSON.stringify(id)}`);
+        assert(id.worker.platform === "Win32", `Worker platform not Win32: ${JSON.stringify(id.worker)}`);
       }
     );
   });
