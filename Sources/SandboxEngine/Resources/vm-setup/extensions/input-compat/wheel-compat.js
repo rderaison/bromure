@@ -13,8 +13,18 @@
 // Chrome on macOS derives wheelDelta from precise pixel deltas instead
 // (ticks = pixels / 40, wheelDelta = ticks × 120, so −3 × delta), which
 // those libraries recognise as a trackpad and leave to native scrolling.
-// Report the same for pixel-mode events; line/page-mode events keep
-// Chromium's own values.
+//
+// Only those injected events are rewritten. Measured in the guest, every
+// real wheel event — a notched mouse through X or evdev/libinput, or a
+// high-resolution wheel's partial notch — has wheelDelta == −delta
+// (±120 for ±120 px, 30 for −30 px), while an injected event has
+// wheelDelta ±120 whatever its pixel delta. So an event is treated as
+// injected only when it is trusted (pages' own `new WheelEvent(...)` keep
+// whatever they were built with), pixel-mode, and on some axis carries
+// the ±120 tick against a pixel delta that isn't ±120. Everything else —
+// physical wheels, line/page modes, synthetic events — keeps Chromium's
+// values. An injected event of exactly ±120 px is indistinguishable from a
+// notch and keeps the notch value, which is also what it amounts to.
 (function () {
   "use strict";
   var proto = window.WheelEvent && WheelEvent.prototype;
@@ -29,17 +39,28 @@
   // trailing `|| 0` turns −0 into 0.
   function macDelta(pixels) { return (-pixels * 3 | 0) || 0; }
 
+  // The ±120 tick Chromium gives an injected event, against a pixel
+  // delta that a real wheel would have reported as ∓delta.
+  function injectedAxis(native, pixels) {
+    return (native === 120 || native === -120) && pixels !== 120 && pixels !== -120;
+  }
+  function isInjected(event) {
+    if (!event.isTrusted || event.deltaMode !== 0) return false;
+    return injectedAxis(original.wheelDeltaY.get.call(event), event.deltaY) ||
+           injectedAxis(original.wheelDeltaX.get.call(event), event.deltaX);
+  }
+
   var getters = {
     get wheelDeltaX() {
-      return this.deltaMode === 0 ? macDelta(this.deltaX)
-                                  : original.wheelDeltaX.get.call(this);
+      return isInjected(this) ? macDelta(this.deltaX)
+                              : original.wheelDeltaX.get.call(this);
     },
     get wheelDeltaY() {
-      return this.deltaMode === 0 ? macDelta(this.deltaY)
-                                  : original.wheelDeltaY.get.call(this);
+      return isInjected(this) ? macDelta(this.deltaY)
+                              : original.wheelDeltaY.get.call(this);
     },
     get wheelDelta() {
-      if (this.deltaMode !== 0) return original.wheelDelta.get.call(this);
+      if (!isInjected(this)) return original.wheelDelta.get.call(this);
       // Blink: wheelDeltaY when non-zero, else wheelDeltaX.
       return macDelta(this.deltaY) || macDelta(this.deltaX);
     },
