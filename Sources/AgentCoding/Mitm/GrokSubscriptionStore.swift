@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -391,7 +392,7 @@ public actor GrokSubscriptionRefresher {
     public init(store: GrokSubscriptionStore,
                 sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
-        self.session = URLSession(configuration: sessionConfiguration)
+        self.session = URLSession(configuration: sessionConfiguration.withoutCookies())
     }
 
     /// A currently-valid access token, refreshing proactively near expiry.
@@ -479,7 +480,6 @@ public actor GrokSubscriptionRefresher {
         let form = "grant_type=refresh_token&refresh_token=\(enc(sent))&client_id=\(enc(Self.clientID))"
         req.httpBody = Data(form.utf8)
 
-        defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: req)
         lastRefreshAt[slot] = Date()
         guard let http = response as? HTTPURLResponse else { throw GrokSubscriptionError.malformedRefreshResponse }

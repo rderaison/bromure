@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -322,7 +323,7 @@ public actor KimiProvisioner {
     /// One session for every provisioning call, never freed (on Linux a freed
     /// session that had an idle HTTP/2 connection crashes the process: see
     /// URLSessionRetirement).
-    private static let session = URLSession(configuration: .ephemeral)
+    private static let session = URLSession(configuration: URLSessionConfiguration.ephemeral.withoutCookies())
 
     /// `GET <base>/models` with the real bearer → the config kimi would write.
     static func provision(token: String, credentialName: String) async throws -> String {

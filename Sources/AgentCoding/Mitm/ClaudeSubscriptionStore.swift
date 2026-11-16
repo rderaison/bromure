@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -446,7 +447,7 @@ public actor ClaudeSubscriptionRefresher {
     public init(store: ClaudeSubscriptionStore,
                 sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
-        self.session = URLSession(configuration: sessionConfiguration)
+        self.session = URLSession(configuration: sessionConfiguration.withoutCookies())
     }
 
     /// A currently-valid access token for `profileID`, refreshing proactively

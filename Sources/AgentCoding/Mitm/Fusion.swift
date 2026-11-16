@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -600,7 +601,7 @@ enum Fusion {
     /// One session for every model listing, never freed (on Linux a freed
     /// session that had an idle HTTP/2 connection crashes the process: see
     /// URLSessionRetirement).
-    private static let modelsSession = URLSession(configuration: .ephemeral)
+    private static let modelsSession = URLSession(configuration: URLSessionConfiguration.ephemeral.withoutCookies())
 
     private static func fetchModels(cred: Cred) async -> [String] {
         let (base, header): (String, (String, String)) = {

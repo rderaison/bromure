@@ -1,4 +1,5 @@
 import Foundation
+import SandboxEngine
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -402,7 +403,7 @@ public actor CodexSubscriptionRefresher {
     public init(store: CodexSubscriptionStore,
                 sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.store = store
-        self.session = URLSession(configuration: sessionConfiguration)
+        self.session = URLSession(configuration: sessionConfiguration.withoutCookies())
     }
 
     /// A currently-valid access token, refreshing proactively near expiry.
@@ -500,7 +501,6 @@ public actor CodexSubscriptionRefresher {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: req)
         lastRefreshAt[slot] = Date()
         guard let http = response as? HTTPURLResponse else { throw CodexSubscriptionError.malformedRefreshResponse }

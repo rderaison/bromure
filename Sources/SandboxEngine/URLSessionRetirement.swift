@@ -32,3 +32,17 @@ public enum URLSessionRetirement {
     private static func keepAlive(_ session: URLSession) {}
     #endif
 }
+
+extension URLSessionConfiguration {
+    /// A copy that neither keeps nor sends cookies. A session shared by every
+    /// call of a long-lived owner (one refresher for all accounts and
+    /// profiles) must not carry one call's cookies into the next, as a
+    /// session per call didn't.
+    public func withoutCookies() -> URLSessionConfiguration {
+        let c = copy() as! URLSessionConfiguration
+        c.httpCookieStorage = nil
+        c.httpShouldSetCookies = false
+        c.httpCookieAcceptPolicy = .never
+        return c
+    }
+}
