@@ -72,6 +72,90 @@ struct SnapshotTests {
         }
         #expect(throws: MachineError.self) { try SnapshotIdentity.verify(state: dir + "/none", overlay: overlay) }
     }
+
+    /// A sparse 8 MiB disk with data at the start, in the middle and at the end.
+    static func makeDisk(_ path: String) throws {
+        FileManager.default.createFile(atPath: path, contents: nil)
+        let h = FileHandle(forWritingAtPath: path)!
+        try h.truncate(atOffset: 8 << 20)
+        for at: UInt64 in [0, 4 << 20, (8 << 20) - 100] {
+            try h.seek(toOffset: at); h.write(Data((0..<100).map { UInt8(truncatingIfNeeded: Int(at) &+ $0) }))
+        }
+        try h.close()
+    }
+    /// `to`'s mtime set to `from`'s, to the nanosecond (as rsync -a / cp -p keep it).
+    static func copyMtime(from: String, to: String) {
+        var st = stat()
+        #expect(stat(from, &st) == 0)
+        var times = [timespec(tv_sec: st.st_atim.tv_sec, tv_nsec: st.st_atim.tv_nsec), st.st_mtim]
+        #expect(utimensat(AT_FDCWD, to, &times, 0) == 0)
+    }
+
+    @Test("a copy of the disk (another inode, the same mtime) verifies: a moved workspace resumes")
+    func copiedDiskVerifies() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let disk = dir + "/disk.raw", state = dir + "/vm.snap", moved = dir + "/moved.raw"
+        try Self.makeDisk(disk)
+        let saved = try SnapshotIdentity.of(overlay: disk)
+        #expect(saved.sampleSHA256 != nil)
+        try saved.write(forState: state)
+        try FileManager.default.copyItem(atPath: disk, toPath: moved)
+        Self.copyMtime(from: disk, to: moved)
+        #expect(try SnapshotIdentity.of(overlay: moved).inode != saved.inode)
+        try SnapshotIdentity.verify(state: state, overlay: moved)
+    }
+
+    @Test("a changed sampled block is refused, even with the mtime put back")
+    func changedSampleRefused() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let disk = dir + "/disk.raw", state = dir + "/vm.snap", ref = dir + "/ref"
+        try Self.makeDisk(disk)
+        FileManager.default.createFile(atPath: ref, contents: nil)
+        Self.copyMtime(from: disk, to: ref)
+        try SnapshotIdentity.of(overlay: disk).write(forState: state)
+        // Inside the last sampled block, past the header: only the samples can see it.
+        let h = FileHandle(forWritingAtPath: disk)!
+        try h.seek(toOffset: (8 << 20) - 50); h.write(Data([0xEE])); try h.close()
+        Self.copyMtime(from: ref, to: disk)
+        let now = try SnapshotIdentity.of(overlay: disk)
+        let saved = try SnapshotIdentity.read(forState: state)
+        #expect(now.size == saved.size && now.mtimeNanoseconds == saved.mtimeNanoseconds && now.headerSHA256 == saved.headerSHA256)
+        #expect(throws: MachineError.snapshotMismatch(state: state, overlay: disk)) {
+            try SnapshotIdentity.verify(state: state, overlay: disk)
+        }
+    }
+
+    @Test("a sidecar from before samples (another device and inode) verifies on size, mtime and header")
+    func legacySidecarVerifies() throws {
+        let dir = try shortTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let disk = dir + "/disk.raw", state = dir + "/vm.snap"
+        try Self.makeDisk(disk)
+        let id = try SnapshotIdentity.of(overlay: disk)
+        let legacy = """
+            {"device": 66306, "headerSHA256": "\(id.headerSHA256)", "inode": 155994079,
+             "mtimeNanoseconds": \(id.mtimeNanoseconds), "size": \(id.size)}
+            """
+        try legacy.write(toFile: SnapshotIdentity.sidecarPath(forState: state), atomically: true, encoding: .utf8)
+        #expect(try SnapshotIdentity.read(forState: state).sampleSHA256 == nil)
+        try SnapshotIdentity.verify(state: state, overlay: disk)
+        // Still refused on what it does record: another size.
+        let h = FileHandle(forWritingAtPath: disk)!; try h.truncate(atOffset: 9 << 20); try h.close()
+        #expect(throws: MachineError.snapshotMismatch(state: state, overlay: disk)) {
+            try SnapshotIdentity.verify(state: state, overlay: disk)
+        }
+    }
+
+    @Test("the samples are bounded: 8 blocks whatever the size, the last block included")
+    func sampleOffsetsBounded() {
+        #expect(SnapshotIdentity.sampleOffsets(size: 1000) == [0])
+        let big: UInt64 = 1 << 40
+        let o = SnapshotIdentity.sampleOffsets(size: big)
+        #expect(o.count == 8 && o.first == 0 && o.last == big - 65536)
+        #expect(o.dropLast().allSatisfy { $0 % 4096 == 0 })
+    }
 }
 
 @Suite("passt uplink", .serialized, .enabled(if: FileManager.default.isExecutableFile(atPath: "/usr/bin/passt")))
