@@ -455,6 +455,8 @@
 "req" = "sol.";
 
 /* ProfileSettingsView — Performance (additional) */
+"Hardware Video Decoding" = "Decodificaci\U00F3n de v\U00EDdeo por hardware";
+"Decodes video with your Mac\U2019s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing." = "Decodifica el v\U00EDdeo con el chip gr\U00E1fico de tu Mac, lo que usa menos CPU. Desact\U00EDvalo si los v\U00EDdeos se ven en negro o se detienen.";
 "Zero-Copy Rasterization" = "Rasterizaci\U00F3n sin copia";
 "Reduces memory copies during page rendering. Improves performance on most systems." = "Reduce las copias de memoria durante el renderizado de p\U00E1ginas. Mejora el rendimiento en la mayor\U00EDa de los sistemas.";
 "Smooth Scrolling" = "Desplazamiento suave";

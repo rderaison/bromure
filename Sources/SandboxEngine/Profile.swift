@@ -220,6 +220,9 @@ public struct ProfileSettings: Codable, Equatable {
     public var enableMetalRenderer: Bool = true
     public var enableWebGL: Bool = false
     public var enableZeroCopy: Bool = true
+    /// Decode video in the guest GPU (VA-API over VirGL) instead of on
+    /// the CPU. Only takes effect where the VirGL video device is present.
+    public var hardwareVideoDecode: Bool = true
     public var enableSmoothScrolling: Bool = true
     /// One renderer process per site (Chromium's strict site isolation).
     /// Off = Chromium's partial isolation (sites you log into still get
@@ -374,7 +377,7 @@ public struct ProfileSettings: Codable, Equatable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case homePage, enableGPU, enableMetalRenderer, enableWebGL, enableZeroCopy, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
+        case homePage, enableGPU, enableMetalRenderer, enableWebGL, enableZeroCopy, hardwareVideoDecode, enableSmoothScrolling, strictSiteIsolation, userAgent, browser
         case enableAdBlocking, enableWarp, warpAutoConnect
         case vpnMode, wireGuardConfig, wireGuardAutoConnect
         case ikev2Server, ikev2RemoteID, ikev2AuthMethod, ikev2Username, ikev2UseDNS, ikev2AutoConnect
@@ -405,6 +408,7 @@ public struct ProfileSettings: Codable, Equatable {
         enableMetalRenderer = try c.decodeIfPresent(Bool.self, forKey: .enableMetalRenderer) ?? defaults.enableMetalRenderer
         enableWebGL = try c.decodeIfPresent(Bool.self, forKey: .enableWebGL) ?? defaults.enableWebGL
         enableZeroCopy = try c.decodeIfPresent(Bool.self, forKey: .enableZeroCopy) ?? defaults.enableZeroCopy
+        hardwareVideoDecode = try c.decodeIfPresent(Bool.self, forKey: .hardwareVideoDecode) ?? defaults.hardwareVideoDecode
         enableSmoothScrolling = try c.decodeIfPresent(Bool.self, forKey: .enableSmoothScrolling) ?? defaults.enableSmoothScrolling
         strictSiteIsolation = try c.decodeIfPresent(Bool.self, forKey: .strictSiteIsolation) ?? defaults.strictSiteIsolation
         userAgent = try c.decodeIfPresent(String.self, forKey: .userAgent) ?? ""
@@ -490,6 +494,7 @@ public struct ProfileSettings: Codable, Equatable {
         try c.encode(enableMetalRenderer, forKey: .enableMetalRenderer)
         try c.encode(enableWebGL, forKey: .enableWebGL)
         try c.encode(enableZeroCopy, forKey: .enableZeroCopy)
+        try c.encode(hardwareVideoDecode, forKey: .hardwareVideoDecode)
         try c.encode(enableSmoothScrolling, forKey: .enableSmoothScrolling)
         try c.encode(strictSiteIsolation, forKey: .strictSiteIsolation)
         try c.encode(userAgent, forKey: .userAgent)
@@ -626,6 +631,7 @@ public struct ProfileSettings: Codable, Equatable {
             enableMetalRenderer: enableMetalRenderer,
             enableWebGL: enableGPU ? enableWebGL : false,  // WebGL requires GPU
             enableZeroCopy: enableZeroCopy,
+            hardwareVideoDecode: hardwareVideoDecode,
             enableSmoothScrolling: enableSmoothScrolling,
             strictSiteIsolation: strictSiteIsolation,
             blockMalwareSites: blockMalwareSites,

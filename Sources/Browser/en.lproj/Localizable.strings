@@ -455,6 +455,8 @@
 "req" = "req";
 
 /* ProfileSettingsView — Performance (additional) */
+"Hardware Video Decoding" = "Hardware Video Decoding";
+"Decodes video with your Mac\U2019s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing." = "Decodes video with your Mac\U2019s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing.";
 "Zero-Copy Rasterization" = "Zero-Copy Rasterization";
 "Reduces memory copies during page rendering. Improves performance on most systems." = "Reduces memory copies during page rendering. Improves performance on most systems.";
 "Smooth Scrolling" = "Smooth Scrolling";

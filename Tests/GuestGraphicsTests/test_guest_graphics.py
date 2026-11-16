@@ -191,6 +191,16 @@ class GuestGraphicsConfigTests(unittest.TestCase):
         self.assertIn("PreferV4L2VideoAcceleration", disabled[0])
         self.assertIn("--hardware-video-device-path=/dev/dri/renderD129", flags)
 
+    def test_profile_can_turn_hardware_video_decoding_off(self):
+        with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):
+            backend, _, flags = shell_environment(chrome_env({
+                "graphicsBackend": "virgl", "disableHardwareVideoDecode": True}))
+        self.assertEqual(backend, "virgl")  # GPU rendering stays on
+        self.assertFalse(any("AcceleratedVideoDecode" in f for f in flags))
+        self.assertFalse(any("hardware-video-device-path" in f for f in flags))
+        self.assertIn("--disable-accelerated-video-decode", flags)
+        self.assertIn("--render-node-override=/dev/dri/renderD129", flags)
+
     def test_software_policy_does_not_enable_hardware_movie_bridge(self):
         with patch.object(config, "virgl_video_device", return_value="/dev/dri/renderD129"):
             _, _, flags = shell_environment(chrome_env({"graphicsBackend": "virgl", "disableGPU": True}))

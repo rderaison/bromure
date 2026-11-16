@@ -658,6 +658,8 @@ public final class VMPool {
         if !config.enableWebGL { cfg["disableWebGL"] = true }
         if config.enableGPU { cfg["gpuAccel"] = true }
         if config.enableZeroCopy { cfg["zeroCopy"] = true }
+        // Opt-out key: hosts that never send it keep hardware decoding.
+        if !config.hardwareVideoDecode { cfg["disableHardwareVideoDecode"] = true }
         if config.enableSmoothScrolling { cfg["smoothScrolling"] = true }
         if config.phishingWarning { cfg["phishingGuard"] = true }
         if config.swapCmdCtrl { cfg["swapCmdCtrl"] = true }

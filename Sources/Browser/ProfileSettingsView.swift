@@ -604,6 +604,16 @@ struct ProfileSettingsView: View {
             settingsDivider
 
             settingToggle(
+                "Hardware Video Decoding",
+                description: "Decodes video with your Mac\u{2019}s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing.",
+                isOn: $draft.settings.hardwareVideoDecode
+            )
+            .disabled(!draft.settings.enableGPU)
+            .opacity(draft.settings.enableGPU ? 1 : 0.5)
+
+            settingsDivider
+
+            settingToggle(
                 "Zero-Copy Rasterization",
                 description: "Reduces memory copies during page rendering. Improves performance on most systems.",
                 isOn: $draft.settings.enableZeroCopy

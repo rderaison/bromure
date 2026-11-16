@@ -455,6 +455,8 @@
 "req" = "\U500B";
 
 /* ProfileSettingsView — Performance (additional) */
+"Hardware Video Decoding" = "\U786C\U9AD4\U5F71\U7247\U89E3\U78BC";
+"Decodes video with your Mac\U2019s graphics chip, which uses less CPU. Turn this off if videos go black or stop playing." = "\U4F7F\U7528 Mac \U7684\U5716\U5F62\U6676\U7247\U89E3\U78BC\U5F71\U7247\UFF0C\U964D\U4F4E CPU \U4F7F\U7528\U91CF\U3002\U82E5\U5F71\U7247\U8B8A\U9ED1\U6216\U505C\U6B62\U64AD\U653E\UFF0C\U8ACB\U95DC\U9589\U6B64\U9078\U9805\U3002";
 "Zero-Copy Rasterization" = "\U96F6\U62F7\U8C9D\U5149\U67F5\U5316";
 "Reduces memory copies during page rendering. Improves performance on most systems." = "\U6E1B\U5C11\U9801\U9762\U7E6A\U88FD\U6642\U7684\U8A18\U61B6\U9AD4\U62F7\U8C9D\U3002\U5728\U5927\U591A\U6578\U7CFB\U7D71\U4E0A\U63D0\U9AD8\U6548\U80FD\U3002";
 "Smooth Scrolling" = "\U5E73\U6ED1\U6372\U52D5";

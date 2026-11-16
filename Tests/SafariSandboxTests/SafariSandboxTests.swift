@@ -174,6 +174,18 @@ struct ProfileSettingsTests {
         #expect(s == expected)
     }
 
+    @Test("Hardware video decoding is on by default, survives decoding, and reaches the VM config")
+    func hardwareVideoDecodeSetting() throws {
+        let fresh = ProfileSettings()
+        #expect(fresh.hardwareVideoDecode)
+        #expect(fresh.toVMConfig().hardwareVideoDecode)
+        #expect(try JSONDecoder().decode(ProfileSettings.self, from: Data("{}".utf8)).hardwareVideoDecode)
+        var off = fresh
+        off.hardwareVideoDecode = false
+        #expect(!off.toVMConfig().hardwareVideoDecode)
+        #expect(!(try JSONDecoder().decode(ProfileSettings.self, from: JSONEncoder().encode(off))).hardwareVideoDecode)
+    }
+
     @Test("New profiles present as Chrome on macOS; older profiles keep their user agent")
     func userAgentDefault() throws {
         let fresh = ProfileSettings()

@@ -392,7 +392,13 @@ def write_chrome_env(cfg):
     disable_features = ["LcdText"]
     if backend == "virgl":
         device = virgl_video_device()
-        if device:
+        # Hardware video decoding is a per-profile opt-out (Performance ▸
+        # Hardware Video Decoding); the render node stays VirGL either way.
+        hw_decode = not cfg.get("disableHardwareVideoDecode")
+        if device and not hw_decode:
+            extra_flags.append("--render-node-override=" + device)
+            extra_flags.append("--disable-accelerated-video-decode")
+        elif device:
             enable_features.extend(["AcceleratedVideoDecoder", "AcceleratedVideoDecodeLinuxGL", "VaapiIgnoreDriverChecks"])
             disable_features.extend(["UseOutOfProcessVideoDecoding", "PreferV4L2VideoAcceleration", "ResolutionBasedDecoderPriority"])
             extra_flags.append("--hardware-video-device-path=" + device)
