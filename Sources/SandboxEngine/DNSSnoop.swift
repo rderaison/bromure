@@ -145,7 +145,7 @@ public final class DNSSnoopCache: @unchecked Sendable {
     /// first -- `names(for:)` without the CNAME targets. One CNAME answer
     /// gives an address two names (`www.wikipedia.org` and its
     /// `dyna.wikimedia.org`), but only one site was looked up.
-    func queriedNames(for ip: UInt32, now: Date = Date()) -> [String] {
+    public func queriedNames(for ip: UInt32, now: Date = Date()) -> [String] {
         let all = names(for: ip, now: now)
         lock.lock(); defer { lock.unlock() }
         guard let e = map[ip], e.expiry > now else { return [] }
