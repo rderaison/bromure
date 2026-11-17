@@ -14,7 +14,7 @@ Four objects make up almost everything you do in the app.
 
 ### Session
 
-A **session** is one conversation with one agent, in one folder, on one machine. You start it from the new-session screen; it has a title (the agent sets one from your first message, and you can rename it), an agent (Claude Code, Codex, Grok, Kimi Code, or Oh My Pi), a machine, and a working folder inside that machine. Sessions are what the sidebar lists and what the chat shows.
+A **session** is one conversation with one agent, in one folder, on one machine. You start it from the new-session screen; it has a title (the agent sets one from your first message, and you can rename it), an agent (Claude Code, Codex, Grok, Kimi Code, Oh My Pi, or Hermes Agent), a machine, and a working folder inside that machine. Sessions are what the sidebar lists and what the chat shows.
 
 Inside the machine, a session is an agent running in its own terminal tab. You rarely need to see that tab, but you can: the **Terminal** pill in the toolbar (⌥⌘U) flips the session between its chat and that tab, and sessions keep opening the way you last chose. **Open in Linux Terminal** in the session's menu takes you to the tab in the Machines list.
 
@@ -71,7 +71,7 @@ The host keeps a copy of each session's conversation (in `~/Library/Application 
 Everything in Bromure Agentic Coding lives on one side of a hard line:
 
 - **The host** is your Mac — macOS 14 or later on Apple Silicon — and the Bromure Agentic Coding app running on it. The host holds everything sensitive: your real credentials (encrypted with a master key in the macOS Keychain), your sign-ins, the MITM proxy that talks to the internet for the agent, the private key of the Bromure root CA, the trace and the Security Timeline, and the app's windows, chats, and terminals. The chat and the terminals you type into are drawn on the host, not inside the VM.
-- **The guest** is the Linux VM where the agent actually runs — Claude Code, Codex, Grok, Kimi Code, Oh My Pi, or plain shell tools, with everything they install and touch: cloned repositories, package caches, Docker containers, virtualenvs. The guest is treated as untrusted by design. It holds no real secrets, only intentionally invalid [fake credentials](18-glossary.mdx), and its outbound web traffic goes through the host's proxy.
+- **The guest** is the Linux VM where the agent actually runs — Claude Code, Codex, Grok, Kimi Code, Oh My Pi, Hermes Agent, or plain shell tools, with everything they install and touch: cloned repositories, package caches, Docker containers, virtualenvs. The guest is treated as untrusted by design. It holds no real secrets, only intentionally invalid [fake credentials](18-glossary.mdx), and its outbound web traffic goes through the host's proxy.
 
 The two sides talk over two narrow channels: [vsock](18-glossary.mdx) (virtio sockets, a host-to-guest channel that needs no network) for control, terminals, MCP servers, and the proxy path; and a private virtual network for ordinary IP traffic. Both are described below.
 

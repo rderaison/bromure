@@ -92,7 +92,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         // key — switching it is a setting, not a route (the launch overlay
         // switches it). Judging it by its default provider alone made a
         // z.ai key "unable to power omp".
-        if agent == .omp, ompProvider != nil { return true }
+        if agent == .omp || agent == .hermes, ompProvider != nil { return true }
         return agent == .claude ? anthropicGatewayBase != nil : openAICompatibleBase != nil
     }
 
@@ -148,7 +148,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
 /// global default. `ModelSettings.tiers` is the default that applies to every
 /// agent; `ModelSettings.agentTiers[agent]` overrides it for one agent.
 public enum ModelAgent: String, Codable, CaseIterable, Sendable {
-    case claude, codex, grok, kimi, omp
+    case claude, codex, grok, kimi, omp, hermes
 
     public var displayName: String {
         switch self {
@@ -157,6 +157,7 @@ public enum ModelAgent: String, Codable, CaseIterable, Sendable {
         case .grok:   return "Grok"
         case .kimi:   return "Kimi"
         case .omp:    return "omp"
+        case .hermes: return "Hermes"
         }
     }
 
@@ -174,7 +175,7 @@ public enum ModelAgent: String, Codable, CaseIterable, Sendable {
         case .codex:  return .openai
         case .grok:   return .xai
         case .kimi:   return .moonshot
-        case .omp:    return nil
+        case .omp, .hermes: return nil
         }
     }
 }

@@ -339,6 +339,42 @@ public struct ManualToken: Codable, Equatable, Sendable, Identifiable {
         !realValue.isEmpty
     }
 
+    /// A third-party service an agent's integrations call with an API key of
+    /// their own: offered as a ready-made credential (its variable and the
+    /// hosts the key goes to), so the guest only ever holds the stand-in.
+    public struct ServicePreset: Equatable, Sendable, Identifiable {
+        public var id: String { envVarName }
+        public let name: String
+        public let envVarName: String
+        /// Exact-or-subdomain scopes the stand-in is swapped on.
+        public let hosts: [String]
+        public var token: ManualToken {
+            ManualToken(name: name, envVarName: envVarName, hostFilters: hosts)
+        }
+    }
+
+    /// Hermes Agent's integrations that take their own API key (web search
+    /// and extraction, browser services, image generation, voice, memory),
+    /// as its docs name the variables, with the API hosts its clients call
+    /// (read from Hermes's source). Each key stays on the host: the agent
+    /// gets a stand-in, swapped back only on these hosts.
+    public static let hermesIntegrationPresets: [ServicePreset] = [
+        .init(name: "Firecrawl (web search & extract)", envVarName: "FIRECRAWL_API_KEY", hosts: ["firecrawl.dev"]),
+        .init(name: "Exa (web search)", envVarName: "EXA_API_KEY", hosts: ["exa.ai"]),
+        .init(name: "Tavily (web search)", envVarName: "TAVILY_API_KEY", hosts: ["tavily.com"]),
+        .init(name: "Parallel (web search)", envVarName: "PARALLEL_API_KEY", hosts: ["parallel.ai"]),
+        .init(name: "Perplexity (web search)", envVarName: "PERPLEXITY_API_KEY", hosts: ["perplexity.ai"]),
+        .init(name: "Brave Search", envVarName: "BRAVE_SEARCH_API_KEY", hosts: ["search.brave.com"]),
+        .init(name: "Browserbase (cloud browser)", envVarName: "BROWSERBASE_API_KEY", hosts: ["browserbase.com"]),
+        .init(name: "Browser Use (cloud browser)", envVarName: "BROWSER_USE_API_KEY", hosts: ["browser-use.com"]),
+        .init(name: "FAL (image generation)", envVarName: "FAL_KEY", hosts: ["fal.run", "fal.ai", "fal.media"]),
+        .init(name: "Krea (image generation)", envVarName: "KREA_API_KEY", hosts: ["krea.ai"]),
+        .init(name: "ElevenLabs (text to speech)", envVarName: "ELEVENLABS_API_KEY", hosts: ["elevenlabs.io"]),
+        .init(name: "Groq (speech to text)", envVarName: "GROQ_API_KEY", hosts: ["groq.com"]),
+        .init(name: "Honcho (memory)", envVarName: "HONCHO_API_KEY", hosts: ["honcho.dev"]),
+        .init(name: "Mem0 (memory)", envVarName: "MEM0_API_KEY", hosts: ["mem0.ai"]),
+    ]
+
     /// The scopes that produce a swap: the non-empty host filters, or a
     /// single "any host" (empty string) sentinel when none are set.
     public var effectiveHostScopes: [String] {
@@ -1060,6 +1096,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case grok
         case kimi
         case omp
+        /// Hermes Agent (Nous Research, the `hermes` CLI). Provider-
+        /// switchable like omp -- it reuses omp's provider fields
+        /// (`ompProvider`/`ompBaseURL`/`ompModel`) -- and API-key only.
+        case hermes
         public var displayName: String {
             switch self {
             case .claude: return "Claude Code"
@@ -1067,8 +1107,18 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .grok:   return "Grok Build"
             case .kimi:   return "Kimi Code"
             case .omp:    return "Oh My Pi"
+            case .hermes: return "Hermes Agent"
             }
         }
+
+        /// An agent that reaches any of `OmpProvider`'s providers natively,
+        /// switched by a setting (omp, Hermes) rather than tied to one.
+        public var switchesProvider: Bool { self == .omp || self == .hermes }
+
+        /// The guest variable carrying Hermes's (stand-in) provider key: the
+        /// bashrc `hermes()` wrapper hands it to Hermes as its provider's
+        /// variable at launch.
+        public static let hermesKeyVariable = "BROMURE_HERMES_API_KEY"
         /// True when this tool reports run completion through its own
         /// per-tab hooks — a trustworthy "the agent is finished" signal the
         /// automation engine can stamp, chain, and tear down a clone on.
@@ -1090,6 +1140,9 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             // automation teardown/chaining — automation uses the worktree-exit
             // reporter fallback until the hook path is hardened.
             case .omp: return false
+            // Hermes has no Bromure status hook yet: the proxy's silence
+            // heuristic and the worktree-exit reporter stand in.
+            case .hermes: return false
             }
         }
 
@@ -1107,6 +1160,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .grok:   return "XAI_API_KEY"
             case .kimi:   return "MOONSHOT_API_KEY"
             case .omp:    return "ANTHROPIC_API_KEY"
+            case .hermes: return "ANTHROPIC_API_KEY"
             }
         }
 
@@ -1195,6 +1249,13 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                     ("OPENAI_API_KEY", key),
                     ("PI_STREAM_FIRST_EVENT_TIMEOUT_MS", "1800000"),
                 ]
+            case .hermes:
+                // Local Hermes runs on a `custom` endpoint (the engine via
+                // the MITM sentinel host), staged into ~/.hermes/config.yaml
+                // with `key_env: OPENAI_API_KEY`; the dummy key rides in
+                // Hermes's own variable (see SessionDisk.hermesKeyVariable).
+                _ = (model, base)
+                return [(Self.hermesKeyVariable, key)]
             }
         }
     }
@@ -2925,17 +2986,20 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// global Models store, the stored specs only hold legacy per-workspace
     /// credentials (which the overlay keeps for unregistered providers).
     public func hasUsableCredential(for tool: Tool) -> Bool {
+        // Hermes isn't a Fusion leg: its providers are the other agents'
+        // (and omp's), already fusable on their own.
+        if tool == .hermes { return false }
         guard let s = allToolSpecs.first(where: { $0.tool == tool }) else { return false }
         switch s.authMode {
         case .token:
             // omp: only on a provider Fusion can call (see fusionOmpProviders).
-            if tool == .omp, !Self.fusionOmpProviders.contains(s.effectiveOmpProvider) { return false }
+            if tool.switchesProvider, !Self.fusionOmpProviders.contains(s.effectiveOmpProvider) { return false }
             return !(s.apiKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .bedrock:
             return tool == .claude && awsCredentials.isUsable
         case .subscription:
             // omp is API-key only — it has no subscription to borrow.
-            return tool != .omp
+            return !tool.switchesProvider
         case .local:
             // A tool in local mode has no *cloud* identity, so it isn't a
             // cloud Fusion leg. The local Fusion leg/judge is a standalone
@@ -2992,7 +3056,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
                 // A local omp is configured against the bromure.llm sentinel
                 // (omp-models.yml `bromure` provider) and never calls its
                 // provider's real host; it claims none.
-                if spec.tool == .omp { continue }
+                if spec.tool.switchesProvider { continue }
                 local.formUnion(Self.providerHosts(spec))
             } else {
                 cloud.formUnion(Self.providerHosts(spec))
@@ -3008,7 +3072,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case .codex:  return ["openai.com", "chatgpt.com"]
         case .grok:   return ["x.ai", "grok.com"]
         case .kimi:   return ["moonshot.ai", "kimi.com", "kimi.ai"]
-        case .omp:
+        case .omp, .hermes:
             switch spec.effectiveOmpProvider {
             case .anthropic: return ["anthropic.com"]
             case .openai:    return ["openai.com", "chatgpt.com"]
@@ -3859,8 +3923,8 @@ public final class ProfileStore {
         if let tool { p.tool = tool }
         if let authMode {
             p.authMode = authMode
-        } else if p.tool == .omp, p.authMode == .subscription {
-            // omp has no OAuth subscription — default it to API-key mode.
+        } else if p.tool.switchesProvider, p.authMode == .subscription {
+            // omp / Hermes have no OAuth subscription — default it to API-key mode.
             p.authMode = .token
         }
         p.createdAt = Date()
@@ -6837,6 +6901,24 @@ public final class ProfileStore {
                 echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
                 return 1
                 ;;
+            hermes)
+                # Hermes Agent (Nous Research) installs per user: its code,
+                # Python and tools under ~/.hermes, the launcher in
+                # ~/.local/bin -- on the workspace's home, so it stays, and
+                # `hermes update` works in place. No bundled Chromium (the
+                # workspace's browser is Bromure's) or computer-use driver.
+                echo "[bromure-ac] hermes not found — installing Hermes Agent (Nous Research); this takes a few minutes…"
+                if curl -fsSL https://hermes-agent.nousresearch.com/install.sh \\
+                        | bash -s -- --non-interactive --skip-browser --skip-computer-use \\
+                        >>/tmp/bromure-tool-install.log 2>&1 \\
+                        && [ -x "$HOME/.local/bin/hermes" ]; then
+                    hash -r 2>/dev/null || true
+                    echo "[bromure-ac] installed Hermes Agent"
+                    return 0
+                fi
+                echo "[bromure-ac] install failed (see /tmp/bromure-tool-install.log)"
+                return 1
+                ;;
             *)
                 return 1
                 ;;
@@ -6898,6 +6980,108 @@ public final class ProfileStore {
             ask|default) command grok --permission-mode default "$@" ;;
             *) command grok "$@" ;;
         esac
+    }
+
+    #  • hermes (Hermes Agent, Nous Research): installed on first use (see
+    #    _bromure_install_tool), then every launch carries the workspace's
+    #    settings. Bromure's provider/model, MCP servers and
+    #    `auth.adopt_external_logins: false` (left on, Hermes borrows Claude
+    #    Code's and Codex's logins -- a subscription used outside its own
+    #    agent) are applied to ~/.hermes/config.yaml with Hermes's own
+    #    `hermes config set`, only when they change. Its provider key comes
+    #    from BROMURE_HERMES_API_KEY (a stand-in the proxy swaps), handed over
+    #    as the variable its provider reads; every other provider key in the
+    #    shared env is unset for Hermes alone, so it can't run -- or bill --
+    #    on a sibling agent's provider.
+    _bromure_hermes_apply() {
+        [ -r /mnt/bromure-meta/hermes-settings.json ] || return 0
+        local _want
+        _want=$(cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json 2>/dev/null \\
+            | sha256sum | cut -c1-32)
+        [ "$(cat "$HOME/.hermes/.bromure-applied" 2>/dev/null)" = "$_want" ] && return 0
+        echo "[bromure-ac] applying this workspace's Hermes settings…" >&2
+        python3 - "$_want" <<'BROMURE_HERMES_APPLY'
+    import json, os, subprocess, sys
+    home = os.path.expanduser("~/.hermes")
+    os.makedirs(home, exist_ok=True)
+    meta = os.environ.get("BROMURE_META_DIR") or "/mnt/bromure-meta"
+    settings = json.load(open(os.path.join(meta, "hermes-settings.json")))
+    try:
+        servers = json.load(open(os.path.join(meta, "mcp", "claude.json"))).get("mcpServers", {}) or {}
+    except Exception:
+        servers = {}
+    done_path = os.path.join(home, ".bromure-mcp.json")
+    try:
+        before = set(json.load(open(done_path)))
+    except Exception:
+        before = set()
+    ok = True
+    def run(*args):
+        global ok
+        r = subprocess.run(["hermes", "config", *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        # Unsetting a key that isn't there is Hermes's "Config key not
+        # set" (exit 1): already the state wanted.
+        if r.returncode != 0 and not (args[0] == "unset" and "not set" in r.stderr):
+            ok = False
+            sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), r.stderr.strip()[-300:]))
+    model = settings.get("model", {})
+    run("set", "model.provider", model.get("provider", "auto"))
+    for key in ("base_url", "key_env"):
+        if model.get(key):
+            run("set", "model." + key, model[key])
+        else:
+            run("unset", "model." + key)
+    if model.get("default"):
+        run("set", "model.default", model["default"])
+    run("set", "auth.adopt_external_logins", "false")
+    def esc(name):
+        return name.replace("\\\\", "\\\\\\\\").replace(".", "\\\\.")
+    names = []
+    for name, s in servers.items():
+        if not isinstance(s, dict) or not name:
+            continue
+        if s.get("url"):
+            v = {"url": s["url"]}
+            if s.get("headers"):
+                v["headers"] = s["headers"]
+            if s.get("type") == "sse":
+                v["transport"] = "sse"
+        elif s.get("command"):
+            v = {"command": s["command"], "args": s.get("args") or []}
+            if s.get("env"):
+                v["env"] = s["env"]
+        else:
+            continue
+        run("set", "mcp_servers." + esc(name), json.dumps(v))
+        names.append(name)
+    for name in sorted(before - set(names)):
+        run("unset", "mcp_servers." + esc(name))
+    if ok:
+        json.dump(names, open(done_path, "w"))
+        with open(os.path.join(home, ".bromure-applied"), "w") as f:
+            f.write(sys.argv[1])
+    BROMURE_HERMES_APPLY
+    }
+    hermes() {
+        if ! type -P hermes >/dev/null 2>&1; then
+            _bromure_install_tool hermes || return 127
+        fi
+        case "${1:-}" in
+            uninstall|--version|-V|help|-h|--help) command hermes "$@"; return ;;
+        esac
+        _bromure_hermes_apply
+        local _u=() _v _k=""
+        if [ -r /mnt/bromure-meta/hermes-env-unset ]; then
+            while IFS= read -r _v; do
+                [ -n "$_v" ] && _u+=(-u "$_v")
+            done < /mnt/bromure-meta/hermes-env-unset
+        fi
+        [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
+        if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
+        else
+            command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@"
+        fi
     }
 
     # Auto-launch the agent on the FIRST interactive shell of this VM
@@ -7046,6 +7230,14 @@ public final class ProfileStore {
                     else
                         "$_wt_tool" $_wt_flags -- "$_wt_prompt"
                     fi
+                    _wt_rc=$?
+                elif [ "$_wt_tool" = "hermes" ]; then
+                    # Hermes takes its opening message as `chat --query`: on a
+                    # terminal it's sent as the first turn and the session
+                    # stays open. Its global flags ($_wt_flags: --yolo, -c) go
+                    # before the subcommand; the `=` form keeps a prompt
+                    # starting with "-" the query's value.
+                    "$_wt_tool" $_wt_flags chat --query="$_wt_prompt"
                     _wt_rc=$?
                 else
                     # "--" ends option parsing, so the prompt is unambiguously the
@@ -7539,7 +7731,7 @@ public extension Profile {
             // host so the credential stays valid whichever the user picks.
             // The precise per-request swap host comes from SessionTokenPlan,
             // which has the ToolSpec.
-            case .omp:    return ["anthropic.com", "openai.com", "x.ai", "z.ai"]
+            case .omp, .hermes: return ["anthropic.com", "openai.com", "x.ai", "z.ai"]
             }
         }
         switch ref {

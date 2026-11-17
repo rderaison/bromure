@@ -145,6 +145,7 @@ Each agent reaches its own provider natively. It can also be pointed at some oth
 | **Grok** | xAI | Amazon Bedrock, OpenRouter, Moonshot (repair proxy); custom server; on-device |
 | **Kimi** | Moonshot | Amazon Bedrock, OpenRouter, xAI (repair proxy); custom server; on-device |
 | **omp** | Anthropic, API key only | Amazon Bedrock, OpenRouter, xAI, Moonshot (repair proxy); z.ai when omp itself is switched to it; custom server; on-device |
+| **Hermes** | Anthropic, API key only | Like omp: switched natively to OpenAI, xAI or z.ai when one of their models is picked for it; Amazon Bedrock, OpenRouter, Moonshot (repair proxy); custom server; on-device |
 
 For the repair-proxy route, the agent inside the VM talks to the host, which translates the agent's wire format, holds the real key (or signs for Bedrock) and forwards the request. The key never enters the VM. Claude Code's OpenRouter and z.ai routes instead point the agent straight at the provider's Anthropic-compatible endpoint (`https://openrouter.ai/api`, `https://api.z.ai/api/anthropic`) with a stand-in key that the host swaps for the real one on the wire, as it does for every cloud credential (see [Credentials & the Wire Boundary](08-credentials.mdx)).
 
@@ -153,6 +154,8 @@ An agent's model menu offers only the providers it can reach. Claude Code speaks
 A choice stored before it stopped being reachable — or inherited from the **Default** row by an agent that can't use it — shows in orange, struck through, with **· unavailable** after it. Its tooltip explains: "*Agent* can’t use *provider* models, so it runs on its own provider instead. Pick another model."
 
 omp has no provider of its own on the board and cannot use a subscription; give it an API key-based provider.
+
+Hermes Agent is the same: API keys only, on the provider its model is picked from. Bromure writes that provider and model into the machine's `~/.hermes/config.yaml` (with Hermes's own `hermes config set`) the next time Hermes starts, with the machine's MCP servers, and turns off Hermes's habit of borrowing Claude Code's and Codex's sign-ins. Its key reaches it as a stand-in under the variable its provider reads; every other provider's key in the machine is hidden from it.
 
 ## Per-machine overrides
 

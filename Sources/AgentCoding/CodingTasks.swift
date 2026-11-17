@@ -1470,7 +1470,7 @@ enum AgentPaneProbe {
     /// Agent names as they show in a process's arguments (path or
     /// interpreter script), whole words only — "omp" inside "compile" is no
     /// agent.
-    nonisolated static let agentNames = "claude|codex|kimi|grok|omp|aider|goose|opencode|gemini"
+    nonisolated static let agentNames = "claude|codex|kimi|grok|omp|hermes|aider|goose|opencode|gemini"
     nonisolated static let shellLines = "^-?([^ ]*/)?(bash|sh|zsh|dash|fish|login|tmux)( |$)"
 
     /// One line: `pane gone`, `pane none`, or `pane <agent>`.
@@ -4061,6 +4061,10 @@ final class CodingTaskEngine {
             let newest: String = "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 1 -name '*.jsonl' 2>/dev/null "
                 + "| xargs -r ls -t 2>/dev/null | head -1); "
             return markerCwd + byCwd + bySlug + newest + emit
+        case .hermes:
+            // Hermes keeps its sessions in a SQLite store (~/.hermes/state.db),
+            // not a transcript file: no file to read here yet.
+            return nil
         }
     }
 
@@ -4098,6 +4102,9 @@ final class CodingTaskEngine {
                     + "[ -n \"$m\" ] && echo $(( $(date +%s) - m )); fi")
         case nil, .claude?, .kimi?:
             break
+        case .hermes?:
+            // No transcript file (see `transcriptCommand`): nothing to probe.
+            return nil
         }
         // Kimi Code's session store is keyed by an opaque workspace id
         // `wd_<dir-basename-slug>_<hash>` under ~/.kimi-code/sessions — and a

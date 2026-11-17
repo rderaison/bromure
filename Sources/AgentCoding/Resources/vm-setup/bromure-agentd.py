@@ -3878,6 +3878,10 @@ _YOLO_FLAGS = {
     # grok: without it a fix/automation run asks before every command (the
     # .bashrc wrapper's Ask default) — it passes --always-approve through.
     "grok": "--always-approve",
+    # hermes: --yolo bypasses its dangerous-command approval prompts (a
+    # global flag, before the `chat` subcommand the launcher adds). Its
+    # hardline blocklist still applies.
+    "hermes": "--yolo",
 }
 
 
@@ -5081,6 +5085,7 @@ _RESUME_FLAGS = {
     "codex": "resume --last",
     "kimi": "-c",
     "omp": "--continue",
+    "hermes": "-c",
 }
 
 
@@ -6026,7 +6031,7 @@ def _agent_title(pane_title, agent):
 # Mirrors the shell case: node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx
 _INTERP_RE = re.compile(
     r"^(node|node[0-9].*|deno|bun|python|python[0-9.].*|ruby|uv|tsx)$")
-_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co", "omp",
+_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co", "omp", "hermes",
            "aider", "goose", "amp", "opencode",
            "gemini", "cursor")
 _AGENTS_SET = frozenset(_AGENTS)
@@ -6064,6 +6069,17 @@ def _foreground_script(tty):
     return ""
 
 
+def _foreground_args(tty):
+    """The whole command line of the tty's FOREGROUND process, or ''."""
+    dev = tty[len("/dev/"):] if tty.startswith("/dev/") else tty
+    out = _sys_capture(["ps", "-ww", "-t", dev, "-o", "stat=,args="], "pty process table")
+    for line in out.splitlines():
+        toks = line.split(None, 1)
+        if len(toks) == 2 and "+" in toks[0]:
+            return toks[1]
+    return ""
+
+
 def _resolve_tab_name(label, cmd, tty, pane_title=""):
     """Resolve a window's tab label (port of the roster shell name logic).
 
@@ -6088,6 +6104,11 @@ def _resolve_tab_name(label, cmd, tty, pane_title=""):
                     if ag in script:
                         name = ag
                         break
+                else:
+                    # Hermes's launcher runs its Python with `-I -c "...
+                    # hermes_bootstrap ..."`: no script to name it.
+                    if "hermes_bootstrap" in _foreground_args(tty):
+                        name = "hermes"
         if name in _AGENTS_SET:
             resolved_agent = name
     elif name in _AGENTS_SET:

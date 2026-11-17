@@ -16,7 +16,7 @@ public extension ModelProvider {
         case .codex:  return .openai
         case .grok:   return .xai
         case .kimi:   return .moonshot
-        case .omp:    return .anthropic   // omp's own provider is resolved separately
+        case .omp, .hermes: return .anthropic   // their own provider is resolved separately
         }
     }
 
@@ -58,7 +58,7 @@ public extension ModelSettings {
                 case .token:
                     let key = spec.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard let key, !key.isEmpty else { continue }
-                    if spec.tool == .omp {
+                    if spec.tool.switchesProvider {
                         let prov = ModelProvider.from(omp: spec.effectiveOmpProvider)
                         registerProvider(prov, apiKey: key,
                                          baseURL: prov == .custom ? spec.ompBaseURL : nil)

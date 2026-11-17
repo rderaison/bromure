@@ -51,6 +51,10 @@ public struct SessionTokenPlan: Sendable {
         /// single-provider purposes so `fakeForOmp()` is unambiguous even when
         /// a Claude/OpenAI/… tool is also configured in the same profile.
         case ompAPIKey(host: String)
+        /// Hermes Agent's provider API key: like omp's, the host is the
+        /// provider it's switched to (or a custom base URL's host). Its own
+        /// purpose, so omp and Hermes on different providers each get theirs.
+        case hermesAPIKey(host: String)
         /// Amazon Bedrock API key — AWS_BEARER_TOKEN_BEDROCK in Claude Code's
         /// settings env; sent as `Authorization: Bearer` to that region's
         /// bedrock-runtime host, which is the only host the swap applies to.
@@ -191,6 +195,13 @@ public struct SessionTokenPlan: Sendable {
         return nil
     }
 
+    public func fakeForHermes() -> String? {
+        for e in entries {
+            if case .hermesAPIKey = e.purpose { return e.fakeValue }
+        }
+        return nil
+    }
+
     /// Fake gateway key for `host` (Claude Code's ANTHROPIC_AUTH_TOKEN).
     public func fakeForCloud(host: String) -> String? {
         for e in entries {
@@ -232,6 +243,7 @@ public struct SessionTokenPlan: Sendable {
         case .xaiAPIKey:              return "x.ai"
         case .moonshotAPIKey:         return "moonshot.ai"
         case .ompAPIKey(let host):    return host.isEmpty ? nil : host
+        case .hermesAPIKey(let host): return host.isEmpty ? nil : host
         case .bedrockAPIKey(let region): return Bedrock.runtimeHost(region: region)
         case .cloudAPIKey(let host):  return host.isEmpty ? nil : host
         case .gitHTTPS(let host, _):  return host
@@ -455,8 +467,8 @@ public extension Profile {
                     purpose: .moonshotAPIKey,
                     consentCredentialID: consentID,
                     consentDisplayName: displayName))
-            case .omp:
-                // omp reads the key from its provider's env var and sends it to
+            case .omp, .hermes:
+                // omp / Hermes read the key from its provider's env var and send it to
                 // that provider's host; the fake is swapped for the real one on
                 // that host only. Fake prefix mimics the provider's key shape so
                 // omp accepts it.
@@ -478,7 +490,7 @@ public extension Profile {
                     realValue: real,
                     fakeValue: SessionTokenPlan.deriveFake(prefix: prefix,
                                                            real: real, salt: salt),
-                    purpose: .ompAPIKey(host: host),
+                    purpose: spec.tool == .hermes ? .hermesAPIKey(host: host) : .ompAPIKey(host: host),
                     consentCredentialID: consentID,
                     consentDisplayName: displayName))
             }

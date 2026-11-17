@@ -60,6 +60,9 @@ extension Profile {
             case .grok:   domains = ["x.ai"]
             case .kimi:   domains = ["kimi.ai", "kimi.com", "moonshot.ai", "moonshot.cn"]
             case .omp:    domains = []          // provider-switchable: covered by its credential host
+            // Provider-switchable too; nousresearch.com serves its installer,
+            // model catalog and assets.
+            case .hermes: domains = ["nousresearch.com"]
             }
             groups.append((spec.tool.rawValue, domains.flatMap(Self.domainEndpoints)))
         }

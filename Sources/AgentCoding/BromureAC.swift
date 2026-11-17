@@ -10845,7 +10845,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     private func registerImportedAgentKeys(_ keys: [(tool: Profile.Tool, value: String)]) {
         let models = ModelSettingsStore.shared
-        for (tool, value) in keys where tool != .omp {
+        for (tool, value) in keys where !tool.switchesProvider {
             let provider = ModelProvider.native(for: tool)
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -10947,7 +10947,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let preference: [Profile.Tool] = [.claude, .codex, .grok, .kimi, .omp]
         if !ready.contains(p.tool), let pick = preference.first(where: ready.contains) {
             p.tool = pick
-            if p.tool == .omp, p.authMode == .subscription { p.authMode = .token }
+            if p.tool.switchesProvider, p.authMode == .subscription { p.authMode = .token }
         }
         do { try store.save(p) } catch {
             FileHandle.standardError.write(Data(
@@ -15107,7 +15107,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let nameField = NSTextField(frame: NSRect(x: 0, y: 68, width: 320, height: 24))
         nameField.placeholderString = NSLocalizedString("Task name (e.g. Website refactoring)", comment: "")
         let toolPopup = NSPopUpButton(frame: NSRect(x: 0, y: 36, width: 320, height: 24))
-        let tools = ["claude", "codex", "grok", "kimi", "omp"]
+        let tools = ["claude", "codex", "grok", "kimi", "omp", "hermes"]
         toolPopup.addItems(withTitles: tools)
         toolPopup.selectItem(withTitle: tools.contains(defaultTool) ? defaultTool : "claude")
         let promptField = NSTextField(frame: NSRect(x: 0, y: 4, width: 320, height: 24))

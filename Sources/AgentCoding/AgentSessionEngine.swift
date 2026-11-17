@@ -22,6 +22,7 @@ extension Profile.Tool {
         case .kimi:   return "-c"
         case .omp:    return "--continue"
         case .grok:   return "-c"
+        case .hermes: return "-c"
         }
     }
 }
@@ -1177,7 +1178,7 @@ final class AgentSessionEngine {
 
     /// The tty process probe, one window: is an agent in its foreground?
     /// nil when the guest can't be asked.
-    static let agentNames = "(claude|codex|kimi|grok|omp|aider|goose|amp|opencode|gemini|cursor)"
+    static let agentNames = "(claude|codex|kimi|grok|omp|hermes|aider|goose|amp|opencode|gemini|cursor)"
     private static let shellNames = "^-?(bash|sh|zsh|dash|login|tmux)( |$)"
     /// `shellNames` on a `pid args` line.
     private static let procShellNames = "^[0-9]+ -?(bash|sh|zsh|dash|login|tmux)( |$)"
@@ -1500,7 +1501,9 @@ final class AgentSessionEngine {
         case .omp:    return "--append-system-prompt \(path)"
         case .codex:  return "-c developer_instructions=" + tomlSpacelessString(text)
         case .kimi:   return resuming ? "" : "--agent-file \(path)"
-        case .grok:   return ""
+        // Hermes: no system-prompt flag -- like Grok, the instructions ride
+        // on the opening message.
+        case .grok, .hermes: return ""
         }
     }
 

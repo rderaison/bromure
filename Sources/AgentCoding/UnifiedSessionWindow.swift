@@ -91,7 +91,7 @@ enum TabActivity {
     case shell      // an idle shell / other program
 
     private static let agentBinaries: Set<String> = [
-        "claude", "codex", "grok", "kimi", "omp", "kimi-code", "kimi-co",
+        "claude", "codex", "grok", "kimi", "omp", "hermes", "kimi-code", "kimi-co",
         "aider", "goose", "amp", "opencode",
         "gemini", "cursor", "llm", "ollama", "node", "python", "python3",
     ]
@@ -4601,7 +4601,7 @@ private struct RailTabButton: View {
     private var agentKind: String? { BromureIcons.agentKind(forLabel: tab.shownLabel) }
     private var iconName: String {
         switch agentKind {
-        case "claude", "codex", "grok", "kimi", "omp": return agentKind ?? "robot"
+        case "claude", "codex", "grok", "kimi", "omp", "hermes": return agentKind ?? "robot"
         default: return "robot"
         }
     }
@@ -5515,7 +5515,7 @@ private struct TabRow: View {
     /// (aider/goose/…) keep the generic robot.
     private var agentIconName: String {
         switch agentKind {
-        case "claude", "codex", "grok", "kimi", "omp": return agentKind ?? "robot"
+        case "claude", "codex", "grok", "kimi", "omp", "hermes": return agentKind ?? "robot"
         default: return "robot"
         }
     }

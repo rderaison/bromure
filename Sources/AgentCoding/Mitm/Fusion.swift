@@ -213,7 +213,7 @@ enum Fusion {
             guard let (_, r) = HTTPMitmConnection.kimiSubscriptionProvider?(),
                   let tok = try? await r.accessToken(for: profileID) else { return nil }
             return .kimiSubscription(tok)
-        case (.omp, .token):
+        case (.omp, .token), (.hermes, .token):
             // omp is API-key only and speaks whichever provider it's switched
             // to; its key is swapped on that provider's host, so read it there.
             // z.ai / custom endpoints aren't wire shapes Fusion speaks.
@@ -572,7 +572,7 @@ enum Fusion {
                let t = try? await r.accessToken(for: profileID) { cred = .kimiSubscription(t) }
         case (.kimi, _):
             cred = apiKey.map(Cred.kimiKey)
-        case (.omp, _):
+        case (.omp, _), (.hermes, _):
             // omp is API-key only (no subscription). The Fusion judge picker
             // only has the Tool here, not the ompProvider, so it uses the
             // default provider (Anthropic). Provider-specific omp routing is
@@ -590,7 +590,7 @@ enum Fusion {
         case .codex:  return ["gpt-5.5-2026-04-23", "gpt-5", "gpt-4o"]
         case .grok:   return ["grok-build", "grok-4", "grok-3"]
         case .kimi:   return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
-        case .omp:    return ["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
+        case .omp, .hermes: return ["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]
         }
     }
 
@@ -1043,8 +1043,8 @@ enum Fusion {
         case .codex:  return authMode == .subscription ? "gpt-5.5" : "gpt-5.5-2026-04-23"
         case .grok:   return "grok-build"
         case .kimi:   return "kimi-k2.5"
-        case .omp:
-            // The default of the provider omp speaks to (same as that
+        case .omp, .hermes:
+            // The default of the provider omp / Hermes speaks to (same as that
             // provider's own agent leg, in API-key mode).
             switch ompProvider {
             case .openai: return defaultLegModel(.codex, .token)

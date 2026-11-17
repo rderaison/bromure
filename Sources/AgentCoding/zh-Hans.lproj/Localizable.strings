@@ -4362,3 +4362,8 @@
 "Couldn't suspend “%@”: the disk is almost full." = "无法挂起“%@”：磁盘几乎已满。";
 "The workspace is still running." = "工作区仍在运行。";
 "Restart Browser" = "重新启动浏览器";
+
+/* Hermes Agent integration keys (credentials editor) */
+"Hermes integration" = "Hermes 集成";
+"Add the API key of a service Hermes Agent's tools use (web search, cloud browser, images, voice, memory). Hermes only ever sees a stand-in." = "添加 Hermes Agent 工具所用服务（网页搜索、云浏览器、图像、语音、记忆）的 API 密钥。Hermes 只会看到替身值。";
+"Hermes Agent runs on the provider you pick here, with its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "Hermes Agent 使用此处选择的提供商及下方的 API 密钥——或在上方选择**本地模型**以在这台 Mac 上运行。可随时切换。";
