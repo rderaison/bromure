@@ -2214,7 +2214,7 @@ enum SessionHome {
         t = unstatused
         let lower = t.lowercased()
         guard !lower.isEmpty else { return nil }
-        let agentNames: Set<String> = [agent, "claude code", "codex", "kimi code", "oh my pi", "omp", "grok", "grok build", "bash", "shell", "tmux"]
+        let agentNames: Set<String> = [agent, "claude code", "codex", "kimi code", "oh my pi", "omp", "hermes agent", "hermes", "grok", "grok build", "bash", "shell", "tmux"]
         if agentNames.contains(lower) { return nil }
         // The agent's name tacked on ("… - grok", "codex · resume"): a
         // title of the conversation never carries the program's name.
@@ -2254,7 +2254,7 @@ enum SessionHome {
             return String(t.dropLast(sep.count)).trimmingCharacters(in: .whitespaces)
         }
         let own = agent.lowercased()
-        let others = ["claude code", "claude", "codex", "kimi code", "kimi", "oh my pi", "omp", "grok build", "grok"]
+        let others = ["claude code", "claude", "codex", "kimi code", "kimi", "oh my pi", "omp", "hermes agent", "hermes", "grok build", "grok"]
         for sep in [" - ", " – ", " — ", " | ", " · "] {
             guard let r = t.range(of: sep, options: .backwards) else { continue }
             let tail = t[r.upperBound...].trimmingCharacters(in: .whitespaces).lowercased()
@@ -3109,6 +3109,7 @@ struct AgentAvatar: View {
         case .grok:   return Color(hex: "#4B5563")
         case .kimi:   return Color(hex: "#4F46E5")
         case .omp:    return Color(hex: "#0E9F6E")
+        case .hermes: return Color(hex: "#7C5CFF")
         }
     }
 

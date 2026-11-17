@@ -2290,7 +2290,7 @@ struct NewSessionView: View {
                                 .font(.system(size: 13, weight: selected ? .semibold : .medium))
                             Text(configured
                                  ? NSLocalizedString("Ready", comment: "new session agent")
-                                 : t == .omp
+                                 : t.switchesProvider
                                  ? NSLocalizedString("Pick a model provider when it starts", comment: "new session agent")
                                  : NSLocalizedString("Sign in when it starts", comment: "new session agent"))
                                 .font(.system(size: 11))

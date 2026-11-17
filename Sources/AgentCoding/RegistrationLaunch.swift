@@ -28,8 +28,18 @@ enum RegistrationLaunch {
         case .codex:  return "codex login"
         case .grok:   return "grok login"
         case .kimi:   return "kimi login"
+        case .nous:   return nousLoginCommand
         }
     }
+
+    /// Hermes's Nous Portal sign-in (a device code; the page opens in this
+    /// Mac's browser through the guest URL relay). The shared copy Hermes
+    /// keeps of its last Nous login goes first: with one there, `auth add`
+    /// stops to ask "Import these credentials? [Y/n]" — nobody answers that
+    /// in a hidden tab, and importing a stand-in would skip the sign-in. It
+    /// only ever holds stand-ins in a Bromure machine.
+    static let nousLoginCommand =
+        "rm -f ~/.hermes/shared/nous_auth.json; hermes auth add nous --type oauth"
 
     /// ERE (`ps -eo args= | grep -E`) matching the running login process (native binary or a
     /// `node …/bin/<tool> login` script). The bracketed first letter keeps the
@@ -40,6 +50,8 @@ enum RegistrationLaunch {
         case .codex:  return "(^|/)[c]odex login"
         case .grok:   return "(^|/)[g]rok login"
         case .kimi:   return "(^|/)[k]imi login"
+        // Hermes runs as `python -I -c <bootstrap> auth add nous …`.
+        case .nous:   return "[a]uth add nous"
         }
     }
 

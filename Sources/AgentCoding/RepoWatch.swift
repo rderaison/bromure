@@ -739,7 +739,7 @@ enum RepoWatchPrompts {
         switch tool {
         case .claude:
             return "The findings_* tools are on the Bromure MCP server named `automations` (in your tool list: mcp__automations__findings_list, mcp__automations__findings_report, mcp__automations__findings_resolve, mcp__automations__findings_done)."
-        case .codex, .grok, .kimi, .omp:
+        case .codex, .grok, .kimi, .omp, .hermes:
             return "The findings_* tools are on the Bromure MCP server named `automations`; your tool list may show them with the server name as a prefix (for example automations__findings_report, automations.findings_report or mcp__automations__findings_report) — they are the same tools. Call them as MCP tools, not as shell commands."
         }
     }

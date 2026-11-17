@@ -295,11 +295,11 @@ struct ProfileModelOverlayTests {
         let before = p.overlaidWithGlobalModels(s)
         #expect(LiveModelRefresh.agentsNeedingRestart(from: before, to: before).isEmpty)
 
-        // A new Anthropic key: Claude — and omp, whose default provider is
-        // Anthropic too; Codex, Grok, Kimi stay put.
+        // A new Anthropic key: Claude — and omp and Hermes, whose default
+        // provider is Anthropic too; Codex, Grok, Kimi stay put.
         s.providers[0].apiKey = "k2"
         let keyed = p.overlaidWithGlobalModels(s)
-        #expect(LiveModelRefresh.agentsNeedingRestart(from: before, to: keyed) == [.claude, .omp])
+        #expect(LiveModelRefresh.agentsNeedingRestart(from: before, to: keyed) == [.claude, .omp, .hermes])
 
         // Codex moved to a local server: Codex only (Claude stays cloud).
         s.localServer = LocalServer(baseURL: "http://box:8000/v1")

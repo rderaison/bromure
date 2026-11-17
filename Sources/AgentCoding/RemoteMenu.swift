@@ -160,7 +160,7 @@ final class RemoteMenuApp {
             switch sel {
             case 0: _ = editField(&doc, key: "name", label: "Workspace name", kind: .text(secret: false))
             case 1: _ = editField(&doc, key: "tool", label: "Primary tool",
-                                  kind: .pick(["claude", "codex", "grok", "kimi", "omp"]))
+                                  kind: .pick(["claude", "codex", "grok", "kimi", "omp", "hermes"]))
             case 2:
                 _ = editField(&doc, key: "authMode", label: "Auth mode",
                               kind: .pick(["token", "subscription", "bedrock", "local"]))
@@ -1581,7 +1581,7 @@ final class RemoteMenuApp {
         guard let rawName = tui.prompt("Task name (e.g. Website refactoring)"),
               !rawName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         let taskName = rawName.trimmingCharacters(in: .whitespaces)
-        let tools = ["claude", "codex", "grok", "kimi", "omp"]
+        let tools = ["claude", "codex", "grok", "kimi", "omp", "hermes"]
         let initial = tools.firstIndex(of: defaultTool) ?? 0
         guard let ti = tui.menu(title: "Tool for the worktree", items: tools, initial: initial) else { return }
         let tool = tools[ti]

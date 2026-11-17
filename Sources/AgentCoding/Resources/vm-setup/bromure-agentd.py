@@ -3878,6 +3878,10 @@ _YOLO_FLAGS = {
     # grok: without it a fix/automation run asks before every command (the
     # .bashrc wrapper's Ask default) — it passes --always-approve through.
     "grok": "--always-approve",
+    # hermes: --yolo bypasses its dangerous-command approval prompts (a
+    # global flag, before the `chat` subcommand the launcher adds). Its
+    # hardline blocklist still applies.
+    "hermes": "--yolo",
 }
 
 
@@ -4540,6 +4544,11 @@ def _task_mcp_setup(branch, tool, workdir):
       - kimi:   the same idea against .kimi-code/mcp.json, kimi's
                 project-scope MCP declaration file (identical mcpServers
                 shape), likewise git-excluded.
+      - hermes: `--bromure-task=<branch>`, which the guest's `hermes`
+                wrapper (.bashrc) turns into a Hermes home of the task's
+                own (profile bt-<slug>) carrying the board server: Hermes
+                has no project-scope MCP, and one gateway serves every
+                session of a home.
 
     Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
     and kimi are wired purely through their settings files). Flag strings
@@ -4574,6 +4583,8 @@ def _task_mcp_setup(branch, tool, workdir):
         # pre-trusts its folder (see _pretrust).
         _project_mcp_add(tool, workdir, "bromure-board", _TASK_MCP_SHIM, [branch])
         return ""
+    if tool == "hermes":
+        return " --bromure-task=" + branch
     if tool == "omp":
         # omp reads a project-root `.mcp.json` (Claude-Code-compatible
         # `mcpServers`). Merge (don't clobber a user's file) and git-exclude it.
@@ -5081,6 +5092,7 @@ _RESUME_FLAGS = {
     "codex": "resume --last",
     "kimi": "-c",
     "omp": "--continue",
+    "hermes": "-c",
 }
 
 
@@ -6026,7 +6038,7 @@ def _agent_title(pane_title, agent):
 # Mirrors the shell case: node|node[0-9]*|deno|bun|python|python[0-9.]*|ruby|uv|tsx
 _INTERP_RE = re.compile(
     r"^(node|node[0-9].*|deno|bun|python|python[0-9.].*|ruby|uv|tsx)$")
-_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co", "omp",
+_AGENTS = ("claude", "codex", "grok", "kimi", "kimi-code", "kimi-co", "omp", "hermes",
            "aider", "goose", "amp", "opencode",
            "gemini", "cursor")
 _AGENTS_SET = frozenset(_AGENTS)
@@ -6064,6 +6076,17 @@ def _foreground_script(tty):
     return ""
 
 
+def _foreground_args(tty):
+    """The whole command line of the tty's FOREGROUND process, or ''."""
+    dev = tty[len("/dev/"):] if tty.startswith("/dev/") else tty
+    out = _sys_capture(["ps", "-ww", "-t", dev, "-o", "stat=,args="], "pty process table")
+    for line in out.splitlines():
+        toks = line.split(None, 1)
+        if len(toks) == 2 and "+" in toks[0]:
+            return toks[1]
+    return ""
+
+
 def _resolve_tab_name(label, cmd, tty, pane_title=""):
     """Resolve a window's tab label (port of the roster shell name logic).
 
@@ -6088,6 +6111,11 @@ def _resolve_tab_name(label, cmd, tty, pane_title=""):
                     if ag in script:
                         name = ag
                         break
+                else:
+                    # Hermes's launcher runs its Python with `-I -c "...
+                    # hermes_bootstrap ..."`: no script to name it.
+                    if "hermes_bootstrap" in _foreground_args(tty):
+                        name = "hermes"
         if name in _AGENTS_SET:
             resolved_agent = name
     elif name in _AGENTS_SET:

@@ -64,6 +64,18 @@ enum AgentConfigScan {
             "agent.db", "agent.db-wal", "agent.db-shm", "models.db",
             "sessions", "logs", "log", "run", "cache", "gpu_cache.json",
         ]),
+        // Hermes Agent keeps its keys in ~/.hermes/.env and auth.json — and
+        // config.yaml may hold literal ones (`model.api_key`, a provider's
+        // `api_key`), so it stays too: Bromure sets the model up itself.
+        // What carries is the persona, memories and skills (SOUL.md,
+        // memories/, skills/). The code checkout, the session store,
+        // OAuth tokens of MCP servers and per-profile homes are data.
+        Source(tool: .hermes, dir: ".hermes", deny: [
+            ".env", "auth.json", "config.yaml", "mcp-tokens", "profiles",
+            "state.db", "state.db-wal", "state.db-shm", "sessions", "logs", "log", "cache",
+            "hermes-agent", "environments", "checkpoints", "telemetry", "terminal-sessions",
+            "shell-hooks-allowlist.json", "backups",
+        ]),
     ]
 
     /// Extensions worth carrying. Everything an agent treats as configuration

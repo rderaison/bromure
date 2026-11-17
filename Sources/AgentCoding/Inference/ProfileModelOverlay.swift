@@ -82,13 +82,16 @@ public extension Profile {
             // Anthropic, a custom server): switch it there natively, on the
             // model chosen — its auth then comes from that provider's key
             // below, like any agent on its own provider.
-            if tool == .omp, let ref, case .provider(let prov) = ref.source,
-               let op = prov.ompProvider, let cred = settings.credential(prov), cred.isUsable {
+            if tool.switchesProvider, let ref, case .provider(let prov) = ref.source,
+               let op = prov.ompProvider, op != .nous || tool == .hermes,
+               let cred = settings.credential(prov), cred.isUsable {
                 ompProvider = op
                 if op == .custom, let base = cred.baseURL, !base.isEmpty {
                     ompBaseURL = base
-                    ompContext = ref.capabilities.contextWindow.flatMap { $0 > 0 ? $0 : nil }
-                        ?? Self.contextWindow(ofModel: ref.modelID, in: settings)
+                    if tool == .omp {
+                        ompContext = ref.capabilities.contextWindow.flatMap { $0 > 0 ? $0 : nil }
+                            ?? Self.contextWindow(ofModel: ref.modelID, in: settings)
+                    }
                 }
                 if !ref.modelID.isEmpty { ompModel = ref.modelID }
             }
@@ -358,7 +361,7 @@ public extension Profile {
 
     /// The provider an agent reaches natively (omp: the one it's switched to).
     static func nativeProvider(tool: Tool, ompProvider: OmpProvider?) -> ModelProvider {
-        tool == .omp ? ModelProvider.from(omp: ompProvider ?? .default) : ModelProvider.native(for: tool)
+        tool.switchesProvider ? ModelProvider.from(omp: ompProvider ?? .default) : ModelProvider.native(for: tool)
     }
 
     /// Whether this (launch-time) profile reaches Amazon Bedrock with AWS
@@ -401,7 +404,7 @@ public extension Profile {
                                        settings: ModelSettings,
                                        subscribed: Set<ModelProvider>,
                                        workspaceOwnKey: Set<ModelProvider> = []) -> SubscriptionResolution? {
-        guard workspaceMode == .subscription, tool != .omp else { return nil }
+        guard workspaceMode == .subscription, !tool.switchesProvider else { return nil }
         let provider = ModelProvider.native(for: tool)
         guard provider.supportsSubscription, !workspaceOwnKey.contains(provider) else { return nil }
         let cred = settings.credential(provider)
@@ -435,7 +438,7 @@ public extension Profile {
                                   ompBaseURL: String?,
                                   settings: ModelSettings,
                                   subscribed: Set<ModelProvider>) -> (AuthMode, String?)? {
-        let provider: ModelProvider = (tool == .omp)
+        let provider: ModelProvider = tool.switchesProvider
             ? ModelProvider.from(omp: ompProvider ?? .default)
             : ModelProvider.native(for: tool)
         let cred = settings.credential(provider)
@@ -469,6 +472,7 @@ public extension ModelAgent {
         case .grok:   return .grok
         case .kimi:   return .kimi
         case .omp:    return .omp
+        case .hermes: return .hermes
         }
     }
 
@@ -489,7 +493,7 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
-        case .zai, .bedrock, .openrouter, .custom: return nil
+        case .zai, .bedrock, .openrouter, .custom, .nous: return nil
         }
     }
 
@@ -503,6 +507,8 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
+        // Signing in to Nous pre-fills Hermes, its only agent.
+        case .nous:      return .hermes
         case .zai, .openrouter, .custom: return nil
         }
     }
