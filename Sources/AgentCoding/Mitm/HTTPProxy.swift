@@ -4996,9 +4996,13 @@ private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
 /// sends `anthropic-beta` twice lost all but the last -- auto mode's
 /// server-side checks among them, which the API then never ran
 /// (code.claude.com/docs/en/auto-mode-classifier-billing). Repeats join as
-/// HTTP folds them: with ", " (a cookie's with "; ").
+/// HTTP folds them: with ", " (a cookie's with "; "). A single-valued header
+/// (credentials, the body's type) still keeps its last line, as before.
 func mitmForwardHeader(_ req: inout URLRequest, name: String, value: String) {
-    guard let existing = req.value(forHTTPHeaderField: name), !existing.isEmpty else {
+    let singleValued: Set<String> = ["authorization", "proxy-authorization", "x-api-key",
+                                     "content-type", "user-agent", "host"]
+    guard !singleValued.contains(name.lowercased()),
+          let existing = req.value(forHTTPHeaderField: name), !existing.isEmpty else {
         req.setValue(value, forHTTPHeaderField: name)
         return
     }

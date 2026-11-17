@@ -86,6 +86,9 @@ struct AutoModeSafeguardsPassthroughTests {
         mitmForwardHeader(&req, name: "Cookie", value: "a=1")
         mitmForwardHeader(&req, name: "cookie", value: "b=2")
         #expect(req.value(forHTTPHeaderField: "Cookie") == "a=1; b=2")
+        mitmForwardHeader(&req, name: "Authorization", value: "Bearer a")
+        mitmForwardHeader(&req, name: "authorization", value: "Bearer b")
+        #expect(req.value(forHTTPHeaderField: "Authorization") == "Bearer b", "credentials aren't joined")
     }
 
     @Test("Both relays forward headers through the merging helper")
