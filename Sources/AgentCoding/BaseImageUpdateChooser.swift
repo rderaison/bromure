@@ -102,10 +102,14 @@ struct BaseImageUpdateChooserView: View {
                             }
                         }
                         .font(.callout)
+                        .frame(minHeight: 28)
                     }
                 }
             }
-            .frame(maxHeight: 320)
+            // An explicit height: a sheet sizes to its content's ideal size,
+            // and a ScrollView's ideal height is next to nothing — the rows
+            // collapsed out of sight, leaving only Keep All / Update All.
+            .frame(height: Self.listHeight(rows: model.rows.count))
             HStack {
                 Button(NSLocalizedString("Keep All", comment: "base image chooser")) { model.setAll(false) }
                 Button(NSLocalizedString("Update All", comment: "base image chooser")) { model.setAll(true) }
@@ -116,6 +120,13 @@ struct BaseImageUpdateChooserView: View {
         }
         .padding(20)
         .frame(width: 520)
+    }
+
+    /// Room for every row up to 12, then the list scrolls.
+    static func listHeight(rows: Int) -> CGFloat {
+        let row: CGFloat = 28, gap: CGFloat = 6
+        let shown = CGFloat(min(max(rows, 1), 12))
+        return shown * row + (shown - 1) * gap
     }
 
     private func stateLabel(_ s: BaseImageUpdateChoice.State) -> String {

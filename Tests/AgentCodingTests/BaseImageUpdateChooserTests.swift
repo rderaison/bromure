@@ -92,6 +92,13 @@ struct BaseImageUpdateChooserTests {
         #expect(reset.lowerBound < drift.lowerBound)
     }
 
+    @Test("the list has room for its rows (a bare ScrollView collapses to nothing in a sheet)")
+    func listHeight() {
+        #expect(BaseImageUpdateChooserView.listHeight(rows: 1) >= 28)
+        #expect(BaseImageUpdateChooserView.listHeight(rows: 3) == CGFloat(3 * 28 + 2 * 6))
+        #expect(BaseImageUpdateChooserView.listHeight(rows: 40) == BaseImageUpdateChooserView.listHeight(rows: 12))
+    }
+
     @Test("peeking at the restore plan leaves it for the restore to take")
     func peek() throws {
         let url = FileManager.default.temporaryDirectory
