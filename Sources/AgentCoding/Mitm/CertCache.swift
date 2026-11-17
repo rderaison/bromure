@@ -10,9 +10,18 @@ public final class CertCache: @unchecked Sendable {
     private let ca: BromureCA
     private var cache: [String: SecIdentity] = [:]
     private let lock = NSLock()
+    /// The CA's Subject Key Identifier, carried as every leaf's Authority
+    /// Key Identifier. Strict X.509 verification (Python 3.13+'s default
+    /// context sets VERIFY_X509_STRICT) refuses a non-self-issued
+    /// certificate without one ("Missing Authority Key Identifier"), so
+    /// every urllib/httpx/requests download through the proxy would fail.
+    /// nil only for a CA without an SKI, which then gets no AKI: a key id
+    /// that matches nothing would break chain building everywhere.
+    private let issuerKeyID: ArraySlice<UInt8>?
 
     public init(ca: BromureCA) {
         self.ca = ca
+        self.issuerKeyID = (try? ca.certificate.extensions.subjectKeyIdentifier)??.keyIdentifier
     }
 
     /// SecIdentity = cert + private key, ready for SecureTransport's
@@ -48,11 +57,16 @@ public final class CertCache: @unchecked Sendable {
             ? .ipAddress(ASN1OctetString(contentBytes: ArraySlice(Self.ipBytes(host))))
             : .dnsName(host)
 
+        let issuerKeyID = self.issuerKeyID
         let extensions = try Certificate.Extensions {
             Critical(BasicConstraints.notCertificateAuthority)
             Critical(KeyUsage(digitalSignature: true, keyEncipherment: true))
             try ExtendedKeyUsage([.serverAuth])
             SubjectAlternativeNames([san])
+            SubjectKeyIdentifier(keyIdentifier: ArraySlice(Insecure.SHA1.hash(data: Array(leafPub.subjectPublicKeyInfoBytes))))
+            if let issuerKeyID {
+                AuthorityKeyIdentifier(keyIdentifier: issuerKeyID)
+            }
         }
 
         let now = Date()
