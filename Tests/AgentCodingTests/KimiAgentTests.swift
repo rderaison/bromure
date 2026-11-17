@@ -283,6 +283,9 @@ struct KimiAgentTests {
         #expect(Profile.Tool.grok.hasReliableDoneSignal)
         // omp's turn hook isn't trusted for teardown yet.
         #expect(!Profile.Tool.omp.hasReliableDoneSignal)
+        // Nor Hermes's (its hooks run in a shared gateway; the worktree-exit
+        // reporter ends its runs).
+        #expect(!Profile.Tool.hermes.hasReliableDoneSignal)
     }
 
     /// An agent whose tab status comes from its hooks gets no proxy-silence
