@@ -626,6 +626,9 @@ enum AgentScreen {
         var paths: Set<String>
         var clientIDs: Set<String>? = nil
         var codePages: Set<String> = []
+        /// A device page that is also an ordinary page of the site counts
+        /// only with this query item set (the device code it approves).
+        var requiredQuery: String? = nil
     }
 
     /// Claude Code's OAuth client.
@@ -659,9 +662,11 @@ enum AgentScreen {
                        paths: ["/device", "/authorize_device", "/code/authorize_device", "/api/oauth/authorize_device"]),
         ],
         // Hermes's Nous Portal sign-in (device code): the Portal's own
-        // approval page, `verification_uri_complete` carrying the code.
+        // approval page, `verification_uri_complete` carrying the code —
+        // without one it is the account's subscription page: ask first.
         "hermes": [
-            SignInPage(kind: .device, hosts: ["portal.nousresearch.com"], paths: ["/manage-subscription"]),
+            SignInPage(kind: .device, hosts: ["portal.nousresearch.com"], paths: ["/manage-subscription"],
+                       requiredQuery: "user_code"),
         ],
         "omp": claudePages + codexPages + [
             SignInPage(kind: .authorize, hosts: ["accounts.google.com"],
@@ -681,6 +686,8 @@ enum AgentScreen {
         let path = u.path.lowercased()
         let pages = agent.flatMap { signInPages[$0] } ?? signInPages.values.flatMap { $0 }
         for page in pages where page.hosts.contains(host) && page.paths.contains(path) {
+            if let q = page.requiredQuery,
+               (u.queryItems?.first { $0.name == q }?.value ?? "").isEmpty { continue }
             switch page.kind {
             case .device:
                 return page

@@ -613,6 +613,9 @@ struct AgentScreenTests {
         #expect(!AgentScreen.isSignInURL(page, agent: "claude"))
         for bad in ["http://portal.nousresearch.com/manage-subscription?user_code=X",
                     "https://portal.nousresearch.com/billing",
+                    "https://portal.nousresearch.com/manage-subscription",
+                    "https://portal.nousresearch.com/manage-subscription?user_code=",
+                    "https://portal.nousresearch.com/manage-subscription?plan=pro",
                     "https://evil.nousresearch.com/manage-subscription?user_code=X",
                     "https://portal.nousresearch.com.evil.com/manage-subscription"] {
             #expect(!AgentScreen.isSignInURL(bad, agent: nil), "\(bad)")
