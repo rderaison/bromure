@@ -16,6 +16,11 @@ public final class SessionDisk {
     /// without a prompt. Exported from api_key.env (the process env every
     /// guest launch sources; Claude Code won't take it from settings.json).
     static let claudeYoloEnv = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+    /// Claude Code 2.1.281+: `0` keeps auto mode's classifier checks in
+    /// Claude Code (its own requests) instead of asking the API to run them
+    /// server-side, and the request carries no `safeguards` field
+    /// (code.claude.com/docs/en/auto-mode-classifier-billing).
+    static let claudeAutoModeServerEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
     /// This session has had a Mac folder shared in (writable): set once
     /// seen, so a live refresh that drops the folders (a change that needs a
     /// restart -- the share stays mounted until then) doesn't bring back
@@ -789,6 +794,12 @@ public final class SessionDisk {
         // from the commands it runs. No effect in auto mode, the interactive
         // default.
         if exportsClaudeYoloEnv { lines.append("export \(Self.claudeYoloEnv)=1") }
+        // PII swapping on: the MITM passes the server-side checks' fields
+        // through untouched (they must arrive as sent), so whatever Claude
+        // Code put in `safeguards` would reach the API unswapped. Its own
+        // classifier requests are ordinary model requests, swapped like the
+        // rest -- at the price of billed classifier tokens on an API key.
+        if profile.pii.isActive { lines.append("export \(Self.claudeAutoModeServerEnv)=0") }
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
         if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }
