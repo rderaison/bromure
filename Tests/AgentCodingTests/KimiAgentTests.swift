@@ -288,11 +288,14 @@ struct KimiAgentTests {
     /// An agent whose tab status comes from its hooks gets no proxy-silence
     /// .done either, so if it can't complete a run its run never ends: a
     /// Codex automation read "running" for days (its tab never closed).
-    @Test("Every hook-driven agent but omp completes an automation run")
+    /// omp and Hermes are the exceptions: their hooks' "done" drives the
+    /// tab's dot but not automation teardown, which the worktree-exit
+    /// reporter does for them (Profile.Tool.hasReliableDoneSignal).
+    @Test("Every hook-driven agent but omp and Hermes completes an automation run")
     @MainActor
     func hookDrivenAgentsCompleteRuns() {
         for tool in Profile.Tool.allCases where ACAppDelegate.hookDrivenAgents.contains(tool.rawValue) {
-            #expect(tool.hasReliableDoneSignal == (tool != .omp), "\(tool.rawValue)")
+            #expect(tool.hasReliableDoneSignal == (tool != .omp && tool != .hermes), "\(tool.rawValue)")
         }
     }
 
