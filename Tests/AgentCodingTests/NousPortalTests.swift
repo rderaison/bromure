@@ -113,8 +113,19 @@ struct NousPortalTests {
         #expect(NousRegion.isSubscriptionHost("WELCOME-API.nousresearch.com"))
         #expect(NousRegion.isSubscriptionHost("portal.nousresearch.com"))
         for h in ["telemetry.nousresearch.com", "hermes-agent.nousresearch.com", "nousresearch.com",
-                  "inference-api.nousresearch.com.evil.example", "evilinference-api.nousresearch.com"] {
+                  "inference-api.nousresearch.com.evil.example", "evilinference-api.nousresearch.com",
+                  "-gateway.nousresearch.com", "a.firecrawl-gateway.nousresearch.com",
+                  "firecrawl-gateway.nousresearch.com.evil.example", "firecrawl-gateway.evil.example",
+                  "gateway.nousresearch.com", "--gateway.nousresearch.com"] {
             #expect(!NousRegion.isSubscriptionHost(h), "\(h)")
+            #expect(!NousRegion.isSubscriptionRequest(host: h, method: "POST", path: "/v1/x"), "\(h)")
+        }
+        // The Tool Gateway's vendor hosts: every request, as on inference.
+        for h in ["firecrawl-gateway.nousresearch.com", "openai-audio-gateway.nousresearch.com",
+                  "TOOL-GATEWAY.nousresearch.com", "browser-use-gateway.nousresearch.com"] {
+            #expect(NousRegion.isToolGatewayHost(h), "\(h)")
+            #expect(NousRegion.isSubscriptionHost(h), "\(h)")
+            #expect(NousRegion.isSubscriptionRequest(host: h, method: "POST", path: "/api/vendorx/generations"), "\(h)")
         }
         // On the Portal, only the account read: its other endpoints act on the
         // account with the same bearer (charges, cloud agents, OAuth clients).

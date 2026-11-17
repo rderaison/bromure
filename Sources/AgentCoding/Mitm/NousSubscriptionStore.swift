@@ -34,16 +34,32 @@ public enum NousRegion {
         "welcome-api.nousresearch.com",
     ]
 
+    /// The Nous Tool Gateway: a Portal subscription's managed tools (web
+    /// search, image generation, voice, …) go to Nous's own vendor
+    /// passthroughs, `<vendor>-gateway.nousresearch.com`, with the same
+    /// bearer (Hermes `tools/managed_tool_gateway.py`, built with
+    /// `build_vendor_gateway_url`); Nous calls the vendor with its own keys.
+    /// Exactly one label ending in `-gateway`: no other Nous host, and no
+    /// deeper name under one.
+    public static func isToolGatewayHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        let suffix = "-gateway.nousresearch.com"
+        guard h.hasSuffix(suffix) else { return false }
+        let vendor = h.dropLast(suffix.count)
+        return !vendor.isEmpty && vendor.first != "-"
+            && vendor.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-" }
+    }
+
     /// The hosts a Nous stand-in may be swapped on (exact names). Which
     /// requests there actually get the real token: `isSubscriptionRequest`.
     public static func isSubscriptionHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        return inferenceHosts.contains(h) || h == portalHost
+        return inferenceHosts.contains(h) || h == portalHost || isToolGatewayHost(h)
     }
 
     /// Whether this request gets the real access token in place of the
-    /// stand-in: anything on the inference hosts (that's what the token is
-    /// for), and on the Portal only Hermes's account read
+    /// stand-in: anything on the inference hosts and the Tool Gateway's
+    /// vendor hosts (that's what the token is for), and on the Portal only Hermes's account read
     /// (`GET /api/oauth/account`). Every other Portal endpoint takes the
     /// same bearer to act on the account — charges, upgrades, cloud agents,
     /// OAuth client registration — and one of them handing back a credential
@@ -51,7 +67,7 @@ public enum NousRegion {
     /// stand-in and refuse it.
     public static func isSubscriptionRequest(host: String, method: String, path: String) -> Bool {
         let h = host.lowercased()
-        if inferenceHosts.contains(h) { return true }
+        if inferenceHosts.contains(h) || isToolGatewayHost(h) { return true }
         guard h == portalHost, method.uppercased() == "GET" else { return false }
         let bare = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path
         return bare == "/api/oauth/account"
