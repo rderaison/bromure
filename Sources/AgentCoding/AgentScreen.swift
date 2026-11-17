@@ -1098,6 +1098,17 @@ enum AgentInputBox {
             while idx < text.endIndex, text[idx] == " " || "│┃|".contains(text[idx]) {
                 idx = text.index(after: idx); off += 1
             }
+            // Hermes marks its input row with "☤ " while a turn runs
+            // ("☤ ❯ type to redirect this turn"): still the input row. Not
+            // taken for one, the scan went on up to Hermes's echo of the
+            // message just sent -- "❯ <message>" between two rules, an input
+            // box to the eye -- and read it as a draft left in the box.
+            if idx < text.endIndex, text[idx] == "☤" {
+                let next = text.index(after: idx)
+                if next < text.endIndex, text[next] == " " {
+                    idx = text.index(after: next); off += 2
+                }
+            }
             guard idx < text.endIndex, promptGlyphs.contains(text[idx]) else { continue }
             // A status bar whose segments are split by `>` (omp's) is chrome.
             guard !isStatusBar(text) else { continue }

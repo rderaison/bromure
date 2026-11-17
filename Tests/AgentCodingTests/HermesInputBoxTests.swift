@@ -33,7 +33,28 @@ struct HermesInputBoxTests {
     @Test("while a turn runs, its italic hint holds nothing")
     func busy() {
         let busy = screen("\u{1B}[3m\u{1B}[38;5;136m☤ ❯ type to redirect this turn · Tab queues it for after\u{1B}[0m")
+        #expect(AgentInputBox.content(busy) == .empty)
         #expect(!PaneTypeGuard.boxHolds(busy))
+    }
+
+    /// Captured live just after Enter: Hermes echoes the message as
+    /// "❯ <message>" between two orange rules, then a spinner row, then its
+    /// busy input row. The echo is not the input box.
+    @Test("the echo of the message just sent is not a draft; the busy row is the box")
+    func echoAfterEnter() {
+        let orange = "\u{1B}[38;5;214m" + String(repeating: "─", count: 40) + "\u{1B}[39m"
+        let spinner = "\u{1B}[38;5;102m── \u{1B}[1m\u{1B}[38;5;214m⠇ \u{1B}[0m◉_◉ cogitating...\u{1B}[38;5;101m · 1s\u{1B}[38;5;102m "
+            + String(repeating: "─", count: 30) + " \u{1B}[38;5;178mWhat is 6 times 7?\u{1B}[38;5;102m ─"
+        let cap = [
+            "\u{1B}[38;5;230mWelcome to Hermes Agent! Type your message or /help for commands.\u{1B}[39m",
+            "", orange,
+            "\u{1B}[1m\u{1B}[38;5;214m❯\u{1B}[0m \u{1B}[1mWhat is 6 times 7? Answer with just the number.\u{1B}[0m",
+            orange, spinner,
+            "\u{1B}[3m\u{1B}[38;5;136m☤ ❯ type to redirect this turn · Tab queues it for after\u{1B}[0m",
+            rule, bar,
+        ].joined(separator: "\n")
+        #expect(AgentInputBox.content(cap) == .empty)
+        #expect(!PaneTypeGuard.boxHolds(cap))
     }
 
     @Test("italic ends with SGR 23 or a reset: text after it counts")
