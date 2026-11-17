@@ -3933,8 +3933,9 @@ public final class ProfileStore {
         if let tool { p.tool = tool }
         if let authMode {
             p.authMode = authMode
-        } else if p.tool.switchesProvider, p.authMode == .subscription {
-            // omp / Hermes have no OAuth subscription — default it to API-key mode.
+        } else if p.tool == .omp, p.authMode == .subscription {
+            // omp has no OAuth subscription — default it to API-key mode.
+            // (Hermes's subscription is its Nous Portal sign-in: kept.)
             p.authMode = .token
         }
         p.createdAt = Date()

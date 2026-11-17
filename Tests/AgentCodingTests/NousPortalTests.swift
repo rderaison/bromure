@@ -516,6 +516,16 @@ struct NousPortalTests {
         #expect(manifest.contains("d\t-\t\(Profile.hermesNousSidecar)"))
     }
 
+    @Test("a workspace made from a Hermes-on-Nous template stays on Nous; omp's still drops to a key")
+    func templateKeepsNous() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("nous-tpl-\(UUID().uuidString)")
+        let store = ProfileStore(rootDir: root)
+        try store.saveTemplate(Profile(name: "t", tool: .hermes, authMode: .subscription))
+        #expect(store.newProfileFromTemplate(name: "h").authMode == .subscription)
+        try store.saveTemplate(Profile(name: "t", tool: .omp, authMode: .subscription))
+        #expect(store.newProfileFromTemplate(name: "o").authMode == .token)
+    }
+
     @Test("a sign-in machine for Hermes starts its Nous login, not a chat")
     func registrationAutoLaunch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("nous-rc-\(UUID().uuidString)")
