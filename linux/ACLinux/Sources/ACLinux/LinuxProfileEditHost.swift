@@ -120,15 +120,29 @@ extension LinuxSessionHost: ProfileEditHost {
     /// applies them to a running workspace (the credential restage is
     /// applyLiveEditToRunningSession's).
     // partial: didSet funnel split across this + Daemon.updateProfile (refreshSquelchSettings, scheduleNextFirewallExpiry); no sidebar/dashboard
+    /// The workspace's browser is turned off (`Profile.browserDisabled`).
+    /// An unknown workspace counts as off.
+    // @port ACAppDelegate.browserDisabled(_: Profile.ID) h=9469efdbcbc0ddde @d7bd69f5
+    func browserDisabled(_ id: Profile.ID) -> Bool {
+        profile(for: id)?.browserDisabled ?? true
+    }
+
     // @port ACAppDelegate.var profiles h=2645ec771dff4d93 @d3ebbda2
     // partial: no sidebar/browser reboot (screen-only); boot-at-startup handled by DaemonBootAtStartup
-    // @port ACAppDelegate.profilesDidChange(saved: Profile?, editing: Profile?) h=b3ec16137564c7de @7057d502
+    // @port ACAppDelegate.profilesDidChange(saved: Profile?, editing: Profile?) h=b9c5f326a372bba7 @d7bd69f5
     func profilesDidChange(saved: Profile?, editing: Profile?) {
         // Private mode, as macOS's profiles.didSet: what is sent to bromure.io.
         Daemon.refreshStreamingState(store: daemon?.mitm?.traces.withLockedValue { $0 })
         // A running workspace's only: a stopped one's comes with its launch
         // (and a stop clears it).
         guard let saved, LinuxSessionHost.running.withLockedValue({ $0.contains(saved.id) }) else { return }
+        // Browser turned off: the agents' browser streams are dropped, so
+        // they reconnect to a bridge that refuses them. Turned on: they come
+        // back (no pane to show or reboot on a server).
+        if let editing, editing.browserDisabled != saved.browserDisabled, let daemon {
+            let id = saved.id.uuidString.lowercased()
+            Task { await daemon.browserSettingChanged(id) }
+        }
         daemon?.mitm?.applyWorkspacePolicies(saved)
         daemon?.sw.egress.update(.init(saved))
         Daemon.refreshWatchdogModes()

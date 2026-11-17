@@ -24,7 +24,7 @@ public enum ImageInstall {
     /// partial files beside the image; the live one is replaced only by the
     /// bake's promotion.
     // partial: no stock.img checkpoint (each install downloads, then runs every step); no provisioner (the installer is the Alpine netboot)
-    // @port UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void) h=213f4adbcc46f72b @84e171b8
+    // @port UbuntuImageManager.downloadBaseImage(catalogStore: ImageCatalogStore, fresh: Bool, progress: @escaping(String)->Void, output: @escaping(String)->Void) h=0308e22859fb7f05 @7bae22e1
     public static func download(_ o: InterimBake.Options, store: ImageCatalogStore, steps: Bool = true,
                                 progress: @escaping @Sendable (String) -> Void = { _ in },
                                 output: @escaping @Sendable (Data) -> Void = { _ in }) async throws -> InterimBake.Result {

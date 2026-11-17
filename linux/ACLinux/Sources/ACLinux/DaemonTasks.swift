@@ -86,15 +86,19 @@ extension Daemon {
 
     /// `POST /tasks/<id>/answer`: answered once the board actually took the
     /// answer (or refused it, with why).
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskAnswer h=b83ac739078242b6 @dd7ba30d
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskAnswer h=bf0a3b0819201acf @d7bd69f5
     private func taskAnswer(_ id: UUID, _ body: [String: Any]) async -> ControlResponse {
         let r: [String: Any] = await { @MainActor in
             guard let stores = SessionStores.shared, let dispatcher = stores.taskDispatcher else {
                 return ["ok": false, "error": "no dispatcher"]
             }
-            guard let text = body["text"] as? String, !text.isEmpty else { return ["ok": false, "error": "text required"] }
+            // Files dropped on a remote client's answer sheet, as its new-session
+            // screen sends them ({name, data (base64), isImage, folder?}).
+            let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+            let text = body["text"] as? String ?? ""
+            guard !text.isEmpty || !files.isEmpty else { return ["ok": false, "error": "text required"] }
             let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-            if await dispatcher.answer(id, askID: ask, text: text) { return ["ok": true] }
+            if await dispatcher.answer(id, askID: ask, text: text, attachments: files) { return ["ok": true] }
             return ["ok": false, "error": stores.codingTasks.task(id)?.lastError
                         ?? NSLocalizedString("The answer couldn't be sent.", comment: "coding task: answer refused")]
         }()
@@ -151,7 +155,7 @@ extension SessionStores {
     /// `DELETE /tasks/<id>`): macOS's, less what needs its task dispatcher
     /// (assign, answer, recall, locate); the plan stream's relay is
     /// DaemonPlanStreams.swift's.
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=09891b7729777755 @9936e30c
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onTaskCommand h=0e9e12973aa766f8 @d7bd69f5
     func taskCommand(_ id: UUID, _ action: String, _ body: [String: Any]) -> [String: Any] {
         guard let engine = codingTaskEngine else { return ["error": "no task engine"] }
         guard codingTasks.task(id) != nil else { return ["error": "unknown task"] }
@@ -173,9 +177,11 @@ extension SessionStores {
                 return ["error": "kind required"]
             }
         case "answer":
-            guard let text = body["text"] as? String, !text.isEmpty else { return ["error": "text required"] }
+            let files = ((body["attachments"] as? [[String: Any]]) ?? []).compactMap(DroppedFile.init(wire:))
+            let text = body["text"] as? String ?? ""
+            guard !text.isEmpty || !files.isEmpty else { return ["error": "text required"] }
             let ask = (body["ask"] as? String).flatMap(UUID.init(uuidString:))
-            Task { @MainActor [weak self] in _ = await self?.taskDispatcher?.answer(id, askID: ask, text: text) }
+            Task { @MainActor [weak self] in _ = await self?.taskDispatcher?.answer(id, askID: ask, text: text, attachments: files) }
         case "recall":
             taskDispatcher?.recall(id)
         case "locate":

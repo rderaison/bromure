@@ -59,7 +59,7 @@ extension Daemon {
     /// values), the agents it can run, whether something restricts its
     /// traffic, Squelch, a boot failure, terminal appearance overrides.
     // partial: cpuCount is the VM record's; no attached Mac's agents (a server lists only its own)
-    // @port ACAppDelegate.automationWorkspaceList() h=eae7cd8d00c7143c @d3ebbda2
+    // @port ACAppDelegate.automationWorkspaceList() h=bf14708a370a2c45 @d7bd69f5
     // @port ACAppDelegate.static homeImageBytes(_: URL) h=0a65e360ff407aee @d3ebbda2
     func compromisedRow(_ rec: VMRecord, profile: Profile?, ready: [Profile.ToolSpec]?) -> JSONValue {
         guard case .object(var o) = rec.workspaceJSON else { return rec.workspaceJSON }
@@ -93,6 +93,9 @@ extension Daemon {
             if let v = profile.customFontSize { o["fontSize"] = .number(Double(v)) }
             if let v = profile.customBackgroundHex { o["backgroundHex"] = .string(v) }
             if let v = profile.customForegroundHex { o["foregroundHex"] = .string(v) }
+            // Its browser settings: a fat client runs the workspace's
+            // browser itself, so it needs them -- the off switch above all.
+            for (k, v) in Self.browserRowFields(profile) { o[k] = .bool(v) }
         }
         // Squelch's setting and what it saved (macOS: the workspace row's
         // squelch / squelchSummary).
@@ -104,6 +107,18 @@ extension Daemon {
         // pendingPrompts; this lets clients badge the workspace row too).
         if let failure = activeBootFailures[rec.id] { o["bootFailure"] = .string(failure) }
         return .object(o)
+    }
+
+    /// A workspace's browser settings in its `/state` row
+    /// (`RemoteHostController.applyBrowserFields` reads them back).
+    // @port ACAppDelegate.static browserRowFields(_: Profile) h=9e28c43995ed2af3 @d7bd69f5
+    static func browserRowFields(_ p: Profile) -> [String: Bool] {
+        ["browserDisabled": p.browserDisabled,
+         "browserPersistent": p.browserPersistent,
+         "browserAllowUploads": p.browserAllowUploads,
+         "browserAllowDownloads": p.browserAllowDownloads,
+         "browserWebcam": p.browserWebcam,
+         "browserMicrophone": p.browserMicrophone]
     }
 
     /// The firewall's proxy-route cut, to the guest: agentd resets the
@@ -152,7 +167,7 @@ extension Daemon {
     /// ask the same; their Allow lets exactly those credentials through for
     /// the session, to any host (macOS's semantics).
     // partial: Save for Investigation needs a local folder picker (macOS-only, as on a headless Mac)
-    // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=e4f537275a5a956e @a0266d0e
+    // @port ACAppDelegate.handleCompromise(_: CompromiseEvent) h=7d6443976f44e527 @d7bd69f5
     func handleCompromise(_ event: CompromiseEvent, session raised: UInt64? = nil) async {
         let pid = event.profileID
         // The workspace's session (a stop starts the next): the event's, or

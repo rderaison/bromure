@@ -98,7 +98,8 @@ extension Daemon {
         // Resumed unless it's known to be running (an API that didn't
         // answer must not leave it paused for ever).
         if paused != false {
-            try? await vm.resume()
+            // Its clock stood still while it was paused.
+            if (try? await vm.resume()) != nil { signalClockResync(id) }
             // A question that came during the resume holds it again.
             if pauseHolds[id] != nil { try? await vm.pause() }
         }
@@ -155,7 +156,7 @@ extension Daemon {
             return
         }
         FileHandle.standardError.write(Data("bromure-ac daemon: '\(rec.name)': taken back paused with no question up: resumed\n".utf8))
-        try? await vm.resume()
+        if (try? await vm.resume()) != nil { signalClockResync(id) }
     }
 
     /// A tripped watchdog in quarantine mode: the VM's port drops every IP
@@ -164,7 +165,7 @@ extension Daemon {
     /// Keep quarantined (resumed, network still cut), or Release (network
     /// back, resumed, then a fresh window). No answer in 180 s keeps it
     /// quarantined. Alert mode only records (the watchdog's own event).
-    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=8a916fc950a690a3 @4bd8405e
+    // @port ACAppDelegate.handleWatchdogTrip(_: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) h=d826e390f4843f1e @d7bd69f5
     func handleWatchdogTrip(_ pid: UUID, mode: AgentWatchdogMode, signals: [AgentWatchdog.Signal]) async {
         guard mode == .quarantine else { return }
         await quarantineAndAsk(pid, signals: signals)

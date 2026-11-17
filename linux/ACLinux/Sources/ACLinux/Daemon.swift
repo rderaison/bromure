@@ -372,7 +372,7 @@ public actor Daemon {
     }
 
     // partial: server-side launch is spread over Daemon.start/startSessionEngine. Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (macOS-legacy data)
-    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=540dd0292f7c75d9 @d3ebbda2
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=88766907426512a3 @d7bd69f5
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
         // A state dir with no registry and no workspaces yet: a new user's
@@ -437,6 +437,8 @@ public actor Daemon {
         await d.wireSentryModules()
         await d.wireOpenShellAdvisor()
         await d.wirePolicySteering()
+        // Host sleep stops the guests' clocks; set them right on wake.
+        await d.startHostWakeWatch()
         refreshSquelchSettings()
         wireSquelchLedger()
         // The shared code's secrets (the enrollment's token and leaf key)
@@ -584,6 +586,11 @@ public actor Daemon {
         if let mitm {
             sw.egress.observer = { [weak mitm] ev in SwitchEgressReport.record(ev, engine: mitm) }
         }
+        // Network lineage names a direct flow's address by what the guest's
+        // DNS answers called it (an agent's own fetch names a host).
+        let dns = sw.egress.dnsCache
+        NetworkLineage.shared.hostNames = { ip in Self.ipv4(ip).map { dns.names(for: $0) } ?? [] }
+        NetworkLineage.shared.queriedHostNames = { ip in Self.ipv4(ip).map { dns.queriedNames(for: $0) } ?? [] }
         if ProcessInfo.processInfo.environment["BROMURE_NO_TRANSPARENT"] == nil, let mitm {
             let egress = sw.egress
             let interceptor = SwitchInterceptor(proxy: mitm, guestMTU: passt.mtu) { portID, ip in
@@ -591,6 +598,14 @@ public actor Daemon {
             }
             egress.setInterception(.init(interceptor: interceptor, ports: [80, 443]))
         }
+    }
+
+    /// A dotted IPv4 in host order (VMNetSwitch.hostnames(forIP:)'s parse).
+    // @port-skip linux-only: the parse VMNetSwitch.hostnames(forIP:) does inline
+    static func ipv4(_ ip: String) -> UInt32? {
+        let parts = ip.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt32($0) }
+        guard parts.count == 4, parts.allSatisfy({ $0 < 256 }) else { return nil }
+        return parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]
     }
 
     /// Debug builds, VM e2e only: every upstream connection goes to a test
@@ -650,7 +665,7 @@ public actor Daemon {
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("POST", let p) where p.hasPrefix("/agent-sessions/"): h=9957be93026cb9f1 @f127f8ab
     // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / default: h=be4becd88b5244ad @f127f8ab
     // partial: router calls daemon functions directly
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=656451da0f54eeeb @d3ebbda2
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) h=98d6aa483c3d82e9 @d7bd69f5
     public func handle(_ req: ControlRequest) async -> ControlResponse {
         // A mutating request moves /state's generation on as it starts and
         // as its response goes out (macOS: route's noteMutation pair).
@@ -751,17 +766,28 @@ public actor Daemon {
     /// `GET /security-timeline?hours=N` (default 24): this host's rows of the
     /// last N hours, for a fat client's Security window (the live mirror in
     /// /state carries only the most recent), and which run numbered them.
-    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=38a02ee17b6a23e7 @f127f8ab
+    /// `?after=<seq>&epoch=<run>` (`after` empty: none yet) asks instead for
+    /// the rows past what the client holds (`SecurityTimeline.deltaBody`).
+    // @port ACAutomationServer.route(fd: Int32, method: String, path: String, bodyJSON: [String:Any], acceptGzip: Bool, stateDelta: Bool) / case ("GET", let p) where p == "/security-timeline" || p.hasPrefix("/security-timeline?"): h=b0a52cfa857baf84 @d7bd69f5
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSecurityHistory h=a9a9fc7e99ac7ebd @d3ebbda2
     func securityTimelineHistory(_ fullPath: String) async -> ControlResponse {
         var hours = 24
+        var after: Int?
+        var afterEpoch: String?
+        var wantsDelta = false
         if let q = fullPath.split(separator: "?", maxSplits: 1).dropFirst().first {
             for kv in q.split(separator: "&") {
                 let pair = kv.split(separator: "=", maxSplits: 1)
                 if pair.count == 2, pair[0] == "hours", let h = Int(pair[1]), h >= 0 { hours = h }
+                if pair.first == "after" { wantsDelta = true; after = pair.count == 2 ? Int(pair[1]) : nil }
+                if pair.count == 2, pair[0] == "epoch" { afterEpoch = String(pair[1]).removingPercentEncoding }
             }
         }
-        let (rows, epoch) = await MainActor.run { (SecurityTimeline.shared.historyRows(hours: hours), SecurityTimeline.shared.epoch) }
+        if wantsDelta {
+            let body = await MainActor.run { [after, afterEpoch] in SecurityTimeline.shared.deltaBody(after: after, epoch: afterEpoch) }
+            return ControlResponse(200, JSONValue(foundation: body) ?? .object([:]))
+        }
+        let (rows, epoch) = await MainActor.run { [hours] in (SecurityTimeline.shared.historyRows(hours: hours), SecurityTimeline.shared.epoch) }
         return ControlResponse(200, ["rows": JSONValue(foundation: rows) ?? .array([]), "epoch": .string(epoch)])
     }
 
@@ -923,7 +949,7 @@ public actor Daemon {
     /// macOS's entry carries them (RunningSession's mirrors: a container's
     /// stats and arch merged by short id).
     // partial: the outbox read when /state is built and by the daemon's 500 ms loop; no ip.txt (the DHCP lease is the IP) nor home migration (ext4 homes)
-    // @port UbuntuSandboxVM.OutboxScanner.scan() h=f2b49fb3b91a59b1 @132bb730
+    // @port UbuntuSandboxVM.OutboxScanner.scan() h=09bed435a028cccb @d7bd69f5
     // @port UbuntuSandboxVM.static parseListeningPorts(_: String) h=61192d9f084c50da @132bb730
     // partial: merged per /state build from outbox files
     // @port RunningSession.mirrorDockerList(_: [DockerContainer]) h=6271e800e20e457d @d3ebbda2
@@ -1023,6 +1049,9 @@ public actor Daemon {
                     "securityTimelineOldestSeq": SecurityTimeline.shared.oldestRetainedSeq
                         .map { .number(Double($0)) } ?? .null,
                     "securityTimelineEpoch": .string(SecurityTimeline.shared.epoch),
+                    // A newer client syncs by deltas from this and ignores the
+                    // rows above (kept for older clients for one release).
+                    "securityTimelineHead": JSONValue(foundation: SecurityTimeline.shared.head()) ?? .null,
                     "kubeClusters": JSONValue(foundation: SessionStores.shared?.kube.snapshot() ?? ["clusters": [], "status": [:]]) ?? .object([:]),
                 ]) { a, _ in a },
                     LinuxSessionHost.shared?.tabStatuses() ?? [:])
@@ -1454,7 +1483,7 @@ public actor Daemon {
     // partial: the `starting` set holds the disk (a stop during the boot is deferred: deferStop)
     // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
     // partial: start, launch and launchVM. No model-download gate (MLX), no window/pane, no virtiofs home migration
-    // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=9feccb727553e73f @d3ebbda2
+    // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=7865cdaae06b3a79 @d7bd69f5
     // partial: the `starting` set (starting.insert) instead of BootsInFlight.begin
     // @port BootsInFlight.begin(_: UUID) h=2184acaea508c831 @22b7d4bb
     // partial: defer { starting.remove } in start
@@ -1803,10 +1832,10 @@ public actor Daemon {
     }
 
     // @port UbuntuSandboxVM.start() h=343c52a5aa429cc0 @132bb730
-    // @port UbuntuSandboxVM.restore() h=5e1c0505692c05a0 @132bb730
+    // @port UbuntuSandboxVM.restore() h=fe3ded51f1b8091c @d7bd69f5
     // partial: the meta share is restaged file by file each launch, not emptied first; the home is always ext4 (no virtiofs or migrate home); agentd alone (its five predecessors and the welcome text have no guest reader); no ssh/ copy (keys are signed through the SSH agent); no X11 markers
     // @port SessionDisk.MitmSessionAssets.init(caCertificatePEM: String, bridgeScriptURL: URL, awsCredsHelperURL: URL?, claudeTokenAgentURL: URL?, codexTokenAgentURL: URL?, shellAgentURL: URL?, loopbackRelayAgentURL: URL?, agentdURL: URL?) h=0bbb00048673d166 @e81ff085
-    // @port SessionDisk.prepareMetadataShare(forRestore: Bool) h=5b555fba82f7f244 @e81ff085
+    // @port SessionDisk.prepareMetadataShare(forRestore: Bool) h=7b416687326c6cad @d7bd69f5
     // @port SessionDisk.var homeAttachMode h=896ac6c0ec07ab75 @e81ff085
     // @port SessionDisk.var homeImageURL h=8d68ba4704c340ae @e81ff085
     // @port SessionDisk.var homeSeedDirectory h=c511b8b45faf2da2 @e81ff085
@@ -1895,8 +1924,9 @@ public actor Daemon {
             // (macOS: launch's kimiNeedsProvisioning gate).
             if rec.registration != true { await provisionKimiIfNeeded(profile) }
             let kubeYAML = rec.registration == true ? nil : await kubeconfig(for: profile, plan: plan)
+            noteHostShares(rec)
             try writeCredentialFiles(profile, plan: plan, registration: rec.registration == true,
-                                     meta: meta, kubeYAML: kubeYAML)
+                                     meta: meta, kubeYAML: kubeYAML, claudeYolo: exportsClaudeYoloEnv(rec))
             if rec.registration != true {
                 pushAWSCredentials(for: profile, meta: meta.path)
                 // The workspace's SSH keys, signing for the guest through the
@@ -1944,9 +1974,10 @@ public actor Daemon {
         var browser: BrowserMCPBridge?
         do {
             if rec.kube == nil {
+                let browserOff = Self.browserDisabledCheck(rec.id)
                 browser = try await MainActor.run { [qc] in
                     try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
-                                         profileID: UUID(uuidString: rec.id))
+                                         profileID: UUID(uuidString: rec.id), disabled: browserOff)
                 }
             }
         } catch {
@@ -2058,7 +2089,7 @@ public actor Daemon {
             // The resumed guest sets its clock from this (agentd's resume
             // watcher; its clock stood still while it was saved), and the
             // snapshot is spent: its memory file is the guest's memory now.
-            try? "\(Int(Date().timeIntervalSince1970))".write(toFile: dir + "/meta/.resume-signal", atomically: true, encoding: .utf8)
+            signalClockResync(rec.id)
             try? FileManager.default.removeItem(atPath: restoreFrom)
         } else {
             rec.bootedAt = Date()
@@ -2178,7 +2209,8 @@ public actor Daemon {
                     if rec.kube == nil {
                         browser = try await MainActor.run { [qc] in
                             try BrowserMCPBridge(udsPath: qc.firecrackerVsockPath, fdStoreName: "bmcp-" + rec.shortId,
-                                                 stored: storedBrowser, profileID: UUID(uuidString: rec.id))
+                                                 stored: storedBrowser, profileID: UUID(uuidString: rec.id),
+                                                 disabled: Self.browserDisabledCheck(rec.id))
                         }
                     } else if let storedBrowser {
                         close(storedBrowser)

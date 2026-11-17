@@ -22,14 +22,19 @@ final class BrowserMCPBridge {
     /// The workspace, whose quarantine drops every agent and refuses new ones.
     private let profileID: UUID?
     private var quarantineCut: UUID?
+    /// The workspace's browser is turned off (`Profile.browserDisabled`):
+    /// no agent is relayed to a client's browser.
+    private let disabled: @MainActor () -> Bool
 
     /// Listens on `<udsPath>_5830`, or on `stored` (a restarted daemon's,
     /// from the fd store), and keeps the listener in the store as `fdStoreName`.
     // partial: listens on the hybrid vsock's <v.sock>_5830 (macOS: the VZ socket device); no browser of its own to serve from
     // @port BrowserMCPVsockBridge.init(socketDevice: VZVirtioSocketDevice, server: BrowserMCPServer, profileID: UUID?) h=74542c36cb76379d @b91fddfb
-    init(udsPath: String, fdStoreName: String, stored: Int32? = nil, profileID: UUID? = nil) throws {
+    init(udsPath: String, fdStoreName: String, stored: Int32? = nil, profileID: UUID? = nil,
+         disabled: @escaping @MainActor () -> Bool = { false }) throws {
         path = HybridVsockListener.path(uds: udsPath, port: Self.port)
         self.profileID = profileID
+        self.disabled = disabled
         if let stored {
             listenFD = stored
         } else {
@@ -59,6 +64,14 @@ final class BrowserMCPBridge {
         waiting.removeAll()
     }
 
+    /// The workspace's browser was turned off or on: every agent stream
+    /// (waiting or relayed) goes, so the shims reconnect and are served by
+    /// the setting now in force.
+    // @port BrowserMCPVsockBridge.browserSettingChanged() h=0c1a46e3148d6734 @d7bd69f5
+    func browserSettingChanged() {
+        dropAgents()
+    }
+
     /// Accepts until the backlog is empty (one event may stand for several).
     // @port-skip linux-only: Linux browser MCP bridge
     private func acceptAll() {
@@ -73,10 +86,16 @@ final class BrowserMCPBridge {
         }
     }
 
-    // partial: an accepted hybrid-vsock fd; it waits for a client's channel (no local browser)
-    // @port BrowserMCPVsockBridge.adopt(_: VZVirtioSocketConnection) h=514c51f6513bee17 @b91fddfb
+    // partial: an accepted hybrid-vsock fd; it waits for a client's channel (no local browser). Browser off: closed (macOS's local server answers each tool with a refusal; the guest's MCP config already leaves the browser out)
+    // @port BrowserMCPVsockBridge.adopt(_: VZVirtioSocketConnection) h=b0fa1db29846eeb5 @d7bd69f5
     private func adopt(_ fd: Int32) {
         if let profileID, WorkspaceQuarantine.shared.contains(profileID) {
+            Glibc.close(fd)
+            return
+        }
+        // Browser off: never spliced to a fat client's browser.
+        if disabled() {
+            FatClientLog.log("browser-mcp: agent refused (the workspace's browser is turned off)")
             Glibc.close(fd)
             return
         }
@@ -120,5 +139,23 @@ final class BrowserMCPBridge {
         for w in waiting { Glibc.close(w) }
         waiting.removeAll()
         try? FileManager.default.removeItem(atPath: path)
+    }
+}
+
+extension Daemon {
+    /// The bridge's browser-off check for VM `id`: its workspace's setting
+    /// as stored now (a VM with no workspace, a sign-in's, never is).
+    // @port-skip linux-only: the BrowserMCPServer `disabled:` closure ACAppDelegate.launch passes
+    static func browserDisabledCheck(_ id: String) -> @MainActor () -> Bool {
+        let pid = UUID(uuidString: id)
+        return { pid.flatMap { p in ProfileStore().loadAll().first { $0.id == p } }?.browserDisabled ?? false }
+    }
+
+    /// A workspace's browser was turned off or on: its running VM's bridge
+    /// drops the agents' streams.
+    // @port-skip linux-only: profilesDidChange's browserMCPBridges[...]?.browserSettingChanged(), on the daemon's VM
+    func browserSettingChanged(_ id: String) async {
+        guard let bridge = live[id]?.browser else { return }
+        await MainActor.run { bridge.browserSettingChanged() }
     }
 }

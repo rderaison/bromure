@@ -38,7 +38,7 @@ extension Daemon {
     /// as a reboot (a `--rm` workspace survives it) until the boot is done.
     // @port ACAppDelegate.relaunchAfterGuestReboot(_: Profile.ID) h=a54abd48d1aae658 @4bd8405e
     // partial: a cold start() after the stop's teardown (plan bridges, browser VM, ports); no pane, overlay or native terminals
-    // @port ACAppDelegate.relaunchVM(in: SessionPane) h=37bb04f7169e154d @4237c02e
+    // @port ACAppDelegate.relaunchVM(in: SessionPane) h=52ed6e681a96f5c1 @d7bd69f5
     func relaunchAfterGuestReboot(_ id: String) async {
         defer { rebooting.remove(id); stopsDuringReboot.remove(id) }
         for _ in 0..<200 where live[id] != nil || stopping[id] != nil {

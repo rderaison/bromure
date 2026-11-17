@@ -510,7 +510,7 @@ final class LinuxSessionHost: AgentSessionHost {
     /// The running workspace's roster, read now from its outbox (what agentd
     /// wrote last); nil when it isn't running.
     // partial: roster from outbox tabs.txt. First-roster checkpoint in Daemon.observeCheckpoints, reboot completion in DaemonGuestReboot.swift, no UI grid reconcile
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onTabList h=c3926a661153f354 @d3ebbda2
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onTabList h=93f94e42ccd5b1ca @d7bd69f5
     // partial: roster read from the guest outbox tabs.txt
     // @port ACAppDelegate.tabsModel(for: Profile.ID) h=8745ecceeb5db48a @8b218a94
     func tabsModel(for id: Profile.ID) -> TabsModel? {

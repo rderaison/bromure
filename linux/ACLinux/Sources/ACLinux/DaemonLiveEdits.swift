@@ -160,7 +160,8 @@ extension Daemon {
         pushAWSCredentials(for: profile, meta: meta.path)
         var ok = true
         do {
-            try writeCredentialFiles(profile, plan: plan, registration: false, meta: meta, kubeYAML: kubeYAML)
+            try writeCredentialFiles(profile, plan: plan, registration: false, meta: meta, kubeYAML: kubeYAML,
+                                     claudeYolo: exportsClaudeYoloEnv(rec))
             HomeSeed.bumpGenerationCounter(named: "seed.generation", in: meta)
         } catch {
             ok = false
@@ -185,15 +186,38 @@ extension Daemon {
     /// api_key.env (the plan's fakes under their variables).
     // @port-skip linux-only: the home-seed and meta-share steps of ACAppDelegate.launch / pushLiveCredentials on the Linux meta share
     func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
-                              meta: URL, kubeYAML: String?) throws {
+                              meta: URL, kubeYAML: String?, claudeYolo: Bool = false) throws {
         try Self.writeCredentialFiles(profile, plan: plan, registration: registration, meta: meta, kubeYAML: kubeYAML,
-                                      store: profileStore,
+                                      claudeYolo: claudeYolo, store: profileStore,
                                       setupDir: setupDir, sentryModules: sentryModules) { profile, files in
             seedCodexAuthFile(for: profile, homeRoot: files)
             seedGrokAuthFile(for: profile, homeRoot: files)
             seedKimiAuthFile(for: profile, homeRoot: files)
         }
     }
+
+    /// Whether `rec`'s api_key.env exports `GuestEnv.claudeYoloEnv` (Claude
+    /// Code's bypass mode then skips its dangerous-rm prompt): only while no
+    /// host folder is shared in, writable, now or since the VM started --
+    /// a disposable VM's files go with it, a shared folder's don't.
+    // @port SessionDisk.var exportsClaudeYoloEnv h=cf026dd455c73f02 @d7bd69f5
+    func exportsClaudeYoloEnv(_ rec: VMRecord) -> Bool {
+        shareFolders(rec).isEmpty && !FileManager.default.fileExists(atPath: hostSharesMarker(rec.id))
+    }
+
+    /// Marks a VM launched with a host folder shared in (its folder's
+    /// `host-shares`), so a live edit that drops the folders -- they stay
+    /// attached until a restart -- doesn't bring `claudeYoloEnv` back. On
+    /// disk, so a daemon restart that re-adopts the VM keeps it.
+    // @port-skip linux-only: SessionDisk.hadHostShares, kept beside the VM
+    func noteHostShares(_ rec: VMRecord) {
+        let marker = hostSharesMarker(rec.id)
+        if shareFolders(rec).isEmpty { try? FileManager.default.removeItem(atPath: marker) }
+        else { _ = FileManager.default.createFile(atPath: marker, contents: Data()) }
+    }
+
+    // @port-skip linux-only: see noteHostShares
+    func hostSharesMarker(_ id: String) -> String { vmDir(id) + "/host-shares" }
 
     /// The meta-share files writeAgentConfigs may write.
     // @port-skip linux-only: the Linux meta share's restage (macOS writes a fresh share each time)
@@ -206,7 +230,8 @@ extension Daemon {
     /// sandbox (nil: none, a test's).
     // @port-skip linux-only: writeCredentialFiles' body
     static func writeCredentialFiles(_ profile: Profile, plan: SessionTokenPlan?, registration: Bool,
-                                     meta: URL, kubeYAML: String?, store: ProfileStore, setupDir: URL? = nil,
+                                     meta: URL, kubeYAML: String?, claudeYolo: Bool = false,
+                                     store: ProfileStore, setupDir: URL? = nil,
                                      sentryModules: SentryModuleStore? = nil,
                                      seedStandIns: (Profile, URL) -> Void) throws {
         let seed = meta.appendingPathComponent("home-seed", isDirectory: true)
@@ -243,7 +268,7 @@ extension Daemon {
         // The guest's credential environment, sourced by its .bashrc, as
         // macOS's session disk writes it.
         try SessionDisk.apiKeyEnvLines(profile: Self.envProfile(profile, plan: plan), tokenPlan: plan,
-                                       registrationMode: registration)
+                                       registrationMode: registration, claudeYolo: claudeYolo)
             .joined(separator: "\n").appending("\n")
             .write(to: meta.appendingPathComponent("api_key.env"), atomically: true, encoding: .utf8)
     }
