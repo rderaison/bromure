@@ -1,0 +1,65 @@
+{
+  "formatVersion": 1,
+  "image": {
+    "uuid": "00000000-0000-4000-8000-000000000001",
+    "version": "201",
+    "description": "test image",
+    "builtAt": "2026-11-17T00:00:00Z",
+    "disk": {
+      "path": "images/201/x/base.img.gz",
+      "sha256": "abcdef",
+      "compressedBytes": 10,
+      "uncompressedBytes": 20,
+      "compression": "gzip"
+    }
+  },
+  "postinstall": [
+    {
+      "uuid": "7c9f1a2e-3b4d-4e5f-8a6b-1c2d3e4f5a6b",
+      "seq": 10,
+      "description": "Claude Code (Anthropic)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @anthropic-ai/claude-code"
+    },
+    {
+      "uuid": "2e8b4c6d-9f1a-4b3c-9d5e-6f7a8b9c0d1e",
+      "seq": 20,
+      "description": "Codex CLI (OpenAI)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @openai/codex"
+    },
+    {
+      "uuid": "5a1c3e5b-7d9f-4a2b-8c4d-0e1f2a3b4c5d",
+      "seq": 30,
+      "description": "Grok CLI (x.ai)",
+      "command": "curl -fsSL https://x.ai/cli/install.sh | bash\nif [ -d /root/.grok ]; then\n    rm -rf /opt/grok\n    mv /root/.grok /opt/grok\n    chmod -R a+rX /opt/grok\n    ln -sf /opt/grok/bin/grok /usr/local/bin/grok\nfi\ncommand -v grok >/dev/null 2>&1 || echo 'WARNING: grok not on PATH after install'"
+    },
+    {
+      "uuid": "1a04a579-a8f6-43ab-a53a-25c2edbec2cf",
+      "seq": 35,
+      "description": "Kimi Code CLI (Moonshot AI)",
+      "command": "npx --yes @socketsecurity/cli npm install -g --silent @moonshot-ai/kimi-code\ncommand -v kimi >/dev/null 2>&1 || echo 'WARNING: kimi not on PATH after install'"
+    },
+    {
+      "uuid": "8252d02e-bac1-4702-9d5f-7a9a3d01928a",
+      "seq": 37,
+      "description": "Oh My Pi CLI (omp) + bun runtime",
+      "command": "export BUN_INSTALL=/opt/bun\ncurl -fsSL https://bun.sh/install | bash\nif [ -x /opt/bun/bin/bun ]; then\n    chmod -R a+rX /opt/bun\n    ln -sf /opt/bun/bin/bun /usr/local/bin/bun\nfi\ncommand -v bun >/dev/null 2>&1 || echo 'WARNING: bun not on PATH after install (omp needs it)'\nnpx --yes @socketsecurity/cli npm install -g --silent @oh-my-pi/pi-coding-agent || npm install -g --silent @oh-my-pi/pi-coding-agent\ncommand -v omp >/dev/null 2>&1 || echo 'WARNING: omp not on PATH after install'"
+    },
+    {
+      "uuid": "a1d9965e-6446-42ce-bf03-b8e107e7d4e8",
+      "seq": 38,
+      "description": "Hermes Agent (Nous Research) in /opt/hermes",
+      "command": "# Hermes Agent (Nous Research): code, managed Python and tools in\n# /opt/hermes, root-owned. Each user's shell builds that user's own\n# dependency environment from it (`hermes pm repair`: seconds, offline).\n# Best effort: a failed install leaves nothing behind, and hermes then\n# installs itself per user on first use, as on older images.\nok=\nfor i in 1 2; do\n    if curl -fsSL https://hermes-agent.nousresearch.com/install.sh \\\n            | bash -s -- --non-interactive --skip-browser --skip-computer-use \\\n                --dir /opt/hermes/hermes-agent --hermes-home /opt/hermes \\\n            && [ -x /opt/hermes/hermes-agent/.hermes/bin/hermes ]; then\n        ok=1; break\n    fi\ndone\nif [ -n \"$ok\" ]; then\n    # Readable by all, but not root's own data root (its .env stays 0600).\n    # A layout change upstream must not fail the image build (bash -e).\n    chmod a+rx /opt/hermes\n    for d in /opt/hermes/hermes-agent /opt/hermes/tools /opt/hermes/installs; do\n        if [ -d \"$d\" ]; then chmod -R a+rX \"$d\"; fi\n    done\n    if [ -f /opt/hermes/config.yaml ]; then chmod a+r /opt/hermes/config.yaml; fi\n    ln -sf /opt/hermes/hermes-agent/.hermes/bin/hermes /usr/local/bin/hermes\nelse\n    rm -rf /opt/hermes /usr/local/bin/hermes\n    echo 'WARNING: Hermes Agent not installed in /opt; hermes installs itself per user instead'\nfi",
+      "min_version": "5.4.5"
+    },
+    {
+      "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
+      "seq": 40,
+      "description": "Google Cloud SDK (gcloud)",
+      "command": "ARCH=$(uname -m)\ncase \"$ARCH\" in aarch64|arm64) K=arm ;; x86_64) K=x86_64 ;; *) echo \"unsupported arch $ARCH\"; exit 0 ;; esac\nURL=\"https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-${K}.tar.gz\"\nTMP=$(mktemp -d)\ncurl -fsSL \"$URL\" -o \"$TMP/gcloud.tar.gz\"\ntar -xzf \"$TMP/gcloud.tar.gz\" -C /opt\n/opt/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=false --command-completion=false || true\nln -sf /opt/google-cloud-sdk/bin/gcloud  /usr/local/bin/gcloud\nln -sf /opt/google-cloud-sdk/bin/gsutil  /usr/local/bin/gsutil\nln -sf /opt/google-cloud-sdk/bin/bq      /usr/local/bin/bq\nrm -rf \"$TMP\""
+    }
+  ],
+  "signature": {
+    "signedAt": "2026-11-17T20:52:57.281Z",
+    "edSignature": "9OI4EfQ+OgO2txoNP3Jb3xHIIpqrMmvW1E0qT0kX4VvZxgzphy1TOqXOh34ObuUyV+zqyQiVF2Pw6jRQUxecDA=="
+  }
+}

@@ -50,20 +50,50 @@ public struct PostinstallStep: Codable, Sendable, Equatable, Identifiable {
     /// personalisation) unless the step opts in with `"bromureac": true`.
     /// nil/absent = Web only.
     public var bromureac: Bool?
+    /// The app versions (CFBundleShortVersionString, inclusive) that run
+    /// the step; nil = no bound. Only in a catalog the app reads by its
+    /// v2 name (`ImageDistribution.catalogFileName`): the publisher leaves
+    /// a step with a `min_version` out of the legacy img-catalog.json that
+    /// older apps read, so they never run it.
+    public var minVersion: String?
+    public var maxVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case uuid, seq, description, command, bromureac
+        case minVersion = "min_version"
+        case maxVersion = "max_version"
+    }
 
     public var id: String { uuid }
+
+    /// Whether an app at `appVersion` runs this step: within
+    /// `minVersion`...`maxVersion`. A bound that isn't a dotted number, or
+    /// an app version that isn't one, never matches a bounded step.
+    public func applies(toAppVersion appVersion: String) -> Bool {
+        guard minVersion != nil || maxVersion != nil else { return true }
+        guard let app = ImageCatalog.versionComponents(appVersion) else { return false }
+        if let lo = minVersion {
+            guard let v = ImageCatalog.versionComponents(lo), !app.lexicographicallyPrecedes(v) else { return false }
+        }
+        if let hi = maxVersion {
+            guard let v = ImageCatalog.versionComponents(hi), !v.lexicographicallyPrecedes(app) else { return false }
+        }
+        return true
+    }
 
     /// True when Bromure Agentic Coding's browser-image install should
     /// execute this step.
     public var appliesToAgentCoding: Bool { bromureac == true }
 
     public init(uuid: String, seq: Int, description: String, command: String,
-                bromureac: Bool? = nil) {
+                bromureac: Bool? = nil, minVersion: String? = nil, maxVersion: String? = nil) {
         self.uuid = uuid
         self.seq = seq
         self.description = description
         self.command = command
         self.bromureac = bromureac
+        self.minVersion = minVersion
+        self.maxVersion = maxVersion
     }
 }
 
@@ -243,13 +273,47 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
             if let ac = step.bromureac {
                 lines.append("step.\(step.uuid).bromureac=\(ac)")
             }
+            // Likewise only when present (a legacy catalog has none): they
+            // decide which apps run the step, so the CDN can't widen them.
+            if let v = step.minVersion {
+                lines.append("step.\(step.uuid).min_version=\(v)")
+            }
+            if let v = step.maxVersion {
+                lines.append("step.\(step.uuid).max_version=\(v)")
+            }
         }
         return Data(lines.joined(separator: "\n").utf8)
     }
 
-    /// Steps in execution order.
+    /// This app's version (CFBundleShortVersionString), what step ranges
+    /// are checked against. "0" when it can't be read (a bare binary): no
+    /// bounded step applies.
+    public static let runningAppVersion: String =
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
+
+    /// "5.4.5" -> [5, 4, 5], trailing zeros dropped ("5.4.0" == "5.4");
+    /// nil unless it's dot-separated non-negative integers.
+    public static func versionComponents(_ s: String) -> [Int]? {
+        let parts = s.trimmingCharacters(in: .whitespaces).split(separator: ".", omittingEmptySubsequences: false)
+        guard !parts.isEmpty else { return nil }
+        var out: [Int] = []
+        for p in parts {
+            guard !p.isEmpty, p.count <= 9, p.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(p) else { return nil }
+            out.append(n)
+        }
+        while out.count > 1, out.last == 0 { out.removeLast() }
+        return out
+    }
+
+    /// The steps an app at `appVersion` runs, in execution order.
+    public func steps(forAppVersion appVersion: String) -> [PostinstallStep] {
+        postinstall.filter { $0.applies(toAppVersion: appVersion) }
+            .sorted { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }
+    }
+
+    /// Steps in execution order, for this app (`runningAppVersion`).
     public var sortedSteps: [PostinstallStep] {
-        postinstall.sorted { ($0.seq, $0.uuid) < ($1.seq, $1.uuid) }
+        steps(forAppVersion: Self.runningAppVersion)
     }
 
     /// The steps not yet applied to the local image, in execution order.
@@ -286,9 +350,14 @@ public struct ImageCatalog: Codable, Sendable, Equatable {
 /// shared; a distribution supplies the CDN prefix, the signing-payload
 /// domain separator, the cache file name, and the bundled baseline.
 public struct ImageDistribution: Sendable {
-    /// CDN path prefix the channel publishes under: `<prefix>/img-catalog.json`
+    /// CDN path prefix the channel publishes under: `<prefix>/<catalogFileName>`
     /// and `<prefix>/<uuid>/<artifact>`.
     public let catalogPrefix: String
+    /// The catalog's file name under the prefix. Bromure Agentic Coding
+    /// 5.4.5+ reads `img-catalog-v2.json` (steps with version ranges);
+    /// older apps keep reading `img-catalog.json`, which the publisher
+    /// writes without the steps they mustn't run.
+    public let catalogFileName: String
     /// First line of the signing payload — a domain separator so a
     /// catalog signed for one channel can't be replayed on another
     /// (both channels sign with the same Sparkle key).
@@ -305,10 +374,12 @@ public struct ImageDistribution: Sendable {
     /// offline fallback).
     public let loadBaseline: @Sendable () -> ImageCatalog
 
-    public init(catalogPrefix: String, signingMagic: String, cacheFileName: String,
+    public init(catalogPrefix: String, catalogFileName: String = "img-catalog.json",
+                signingMagic: String, cacheFileName: String,
                 defaultSupportDirName: String,
                 loadBaseline: @escaping @Sendable () -> ImageCatalog) {
         self.catalogPrefix = catalogPrefix
+        self.catalogFileName = catalogFileName
         self.signingMagic = signingMagic
         self.cacheFileName = cacheFileName
         self.defaultSupportDirName = defaultSupportDirName
@@ -369,7 +440,7 @@ public final class ImageCatalogStore: @unchecked Sendable {
 
     /// The manifest URL actually in effect for this channel (override-aware).
     public var refreshURL: URL {
-        let path = "\(distribution.catalogPrefix)/img-catalog.json"
+        let path = "\(distribution.catalogPrefix)/\(distribution.catalogFileName)"
         return Self.overrideBase.flatMap { URL(string: path, relativeTo: $0)?.absoluteURL }
             ?? URL(string: path, relativeTo: Self.defaultPublicBase)!.absoluteURL
     }

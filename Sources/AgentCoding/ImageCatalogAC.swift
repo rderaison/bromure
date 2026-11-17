@@ -23,14 +23,19 @@ extension ImageDistribution {
     /// Apps before 5.0.0 read the unversioned `images/img-catalog.json`,
     /// which stays frozen at the last 200.x publish.
     ///
-    /// `signingMagic` predates the multi-channel split — it MUST stay
-    /// "bromure-img-catalog-v1" so already-published AC catalogs keep
-    /// verifying; the browser channel uses its own magic so a validly
-    /// signed catalog can never be replayed across channels.
+    /// From 5.4.5 the app reads `img-catalog-v2.json`, whose steps may
+    /// carry an app-version range (`min_version` / `max_version`); the
+    /// publisher keeps writing `img-catalog.json` for older apps, without
+    /// the steps whose range starts above them (tools/make-img-catalog.mjs
+    /// --legacy-out). Each file has one signature, under its own magic:
+    /// "bromure-img-catalog-v2" here, so the legacy file -- same key, fewer
+    /// steps -- can't be served in its place; "bromure-img-catalog-v1"
+    /// stays the legacy file's, and the browser channel has its own.
     public static let agentCoding = ImageDistribution(
         catalogPrefix: "images/\(UbuntuImageManager.imageVersion)",
-        signingMagic: "bromure-img-catalog-v1",
-        cacheFileName: "img-catalog.json",
+        catalogFileName: "img-catalog-v2.json",
+        signingMagic: "bromure-img-catalog-v2",
+        cacheFileName: "img-catalog-v2.json",
         defaultSupportDirName: "BromureAC",
         loadBaseline: {
             ImageCatalog.loadBaseline(bundle: acResourceBundle, resource: "img-catalog")
