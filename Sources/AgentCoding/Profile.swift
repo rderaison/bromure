@@ -7206,7 +7206,8 @@ public final class ProfileStore {
             esac
         done
         set -- "${_a[@]}"
-        case "$_t" in *[!a-z0-9/-]*) _t="" ;; esac
+        case "$_t" in wt/[a-z0-9]*) ;; *) _t="" ;; esac
+        case "${_t#wt/}" in *[!a-z0-9-]*) _t="" ;; esac
         if [ -n "$_t" ]; then
             local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")

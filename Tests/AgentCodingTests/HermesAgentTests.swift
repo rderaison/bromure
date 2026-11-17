@@ -301,6 +301,9 @@ struct HermesAgentTests {
         // The wrapper reads the flag, keeps it from Hermes, and runs the task there.
         #expect(rc.contains("--bromure-task=wt/*) _t=\"${_v#--bromure-task=}\" ;;"))
         #expect(rc.contains("local -x HERMES_HOME BROMURE_HERMES_TASK=\"$_t\""))
+        // Only wt/<slug>: no other slash, nothing outside [a-z0-9-].
+        let wrapper = try #require(rc.range(of: "--bromure-task=wt/*) _t=").map { String(rc[$0.lowerBound...].prefix(600)) })
+        #expect(wrapper.contains("case \"${_t#wt/}\" in *[!a-z0-9-]*) _t=\"\" ;; esac"))
     }
 
     // MARK: - Status hook + transcript mirror

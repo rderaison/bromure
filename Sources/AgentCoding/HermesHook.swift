@@ -49,7 +49,7 @@ extension Profile {
     static let hermesHookScript = #"""
     #!/usr/bin/python3 -I
     # Bromure Agentic Coding — Hermes status hook + transcript mirror (managed; do not edit).
-    import datetime, fcntl, json, os, pwd, re, sqlite3, subprocess, sys
+    import datetime, fcntl, json, os, pwd, re, sqlite3, subprocess, sys, urllib.parse
 
     HOME = pwd.getpwuid(os.getuid()).pw_dir
     STATUS = os.path.join(HOME, ".bromure", "agent-status.sh")
@@ -236,7 +236,7 @@ extension Profile {
         db = os.path.join(home, "state.db")
         if not os.path.exists(db):
             return None
-        return sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=3)
+        return sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(db), uri=True, timeout=3)
 
 
     def session_row(con, sid):
