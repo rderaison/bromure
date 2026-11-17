@@ -94,6 +94,16 @@ enum PIIRewriter {
         "reasoning", "text", "generationConfig", "safetySettings", "toolConfig", "thinking",
     ]
 
+    /// Subtrees the API pairs with the session and reads back as they were
+    /// sent: auto mode's server-side classifier checks (`safeguards` with its
+    /// `anthropic-beta`, or Bedrock's `anthropic_beta` body field, in the
+    /// request; `safeguard_results` in the response). A gateway that edits
+    /// them -- a swapped or restored value inside -- keeps the checks from
+    /// reaching the session, and Claude Code bills its own classifier
+    /// requests instead (code.claude.com/docs/en/auto-mode-classifier-billing).
+    /// Never scanned or rewritten, at any depth.
+    static let opaqueKeys: Set<String> = ["safeguards", "safeguard_results", "anthropic_beta"]
+
     /// Keys whose string value is itself a JSON document (OpenAI tool-call
     /// arguments). Its inner strings are the unit of detection and swapping:
     /// read as plain text, an escape (`\n`) glues to the next word and a
@@ -155,7 +165,7 @@ enum PIIRewriter {
     static func rewriteRequest(_ body: Data, policy: PIIPolicy, vault: PIIVault,
                                detector: PIIDetector = .shared) async -> Outcome {
         let bytes = [UInt8](body)
-        guard let refs = JSONStrings.scan(bytes) else { return Outcome(body: body) }
+        guard let refs = JSONStrings.scan(bytes, opaqueKeys: opaqueKeys) else { return Outcome(body: body) }
         // Decode each eligible string once; detect over the distinct ones.
         // A string holding a JSON document (tool-call arguments) contributes
         // its inner strings instead.
@@ -167,6 +177,7 @@ enum PIIRewriter {
         func eligible(_ r: JSONStrings.Ref) -> Bool {
             if let k = r.key, skipKeys.contains(k) { return false }
             if let t = r.top, skipTopKeys.contains(t) { return false }
+            if r.opaque { return false }
             return r.range.count >= 5                    // "" plus 3 chars
         }
         var items: [Item] = []
@@ -654,9 +665,11 @@ enum JSONStrings {
         let key: String?
         /// The root object's key this value sits under ("messages", "tools"…).
         var top: String? = nil
+        /// Under one of the `opaqueKeys` the scan was given, at any depth.
+        var opaque = false
     }
 
-    static func scan(_ b: [UInt8]) -> [Ref]? {
+    static func scan(_ b: [UInt8], opaqueKeys: Set<String> = []) -> [Ref]? {
         enum Frame { case object(expectKey: Bool, key: String?), array(key: String?) }
         var stack: [Frame] = []
         var refs: [Ref] = []
@@ -693,7 +706,15 @@ enum JSONStrings {
                 } else {
                     var top: String? = nil
                     if case .object(_, let k)? = stack.first { top = k }
-                    refs.append(Ref(range: start..<i, key: contextKey(), top: top))
+                    var opaque = false
+                    if !opaqueKeys.isEmpty {
+                        opaque = stack.contains { f in
+                            switch f {
+                            case .object(_, let k), .array(let k): return k.map(opaqueKeys.contains) ?? false
+                            }
+                        }
+                    }
+                    refs.append(Ref(range: start..<i, key: contextKey(), top: top, opaque: opaque))
                 }
             default:
                 i += 1
@@ -792,10 +813,10 @@ final class PIIResponseRestorer {
         case .passthrough: return Data()
         case .json:
             let b = [UInt8](buffer)
-            guard let refs = JSONStrings.scan(b) else { return buffer }
+            guard let refs = JSONStrings.scan(b, opaqueKeys: PIIRewriter.opaqueKeys) else { return buffer }
             var out = Data(capacity: b.count)
             var cursor = 0
-            for r in refs {
+            for r in refs where !r.opaque {
                 if let k = r.key, PIIRewriter.skipKeys.contains(k) { continue }
                 let s = JSONStrings.decode(b, r.range)
                 let restored = Self.restoreValue(s, key: r.key, vault: vault)
@@ -1003,7 +1024,8 @@ final class PIIResponseRestorer {
         var changed = false
         if let d = o as? NSMutableDictionary {
             for k in d.allKeys {
-                guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks) else { continue }
+                guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks),
+                      !PIIRewriter.opaqueKeys.contains(ks) else { continue }
                 if let s = d[ks] as? String {
                     let r = restoreValue(s, key: ks, vault: vault)
                     if r != s { d[ks] = r; changed = true }

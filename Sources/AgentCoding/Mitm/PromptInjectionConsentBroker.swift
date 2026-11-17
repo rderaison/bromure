@@ -189,7 +189,8 @@ final class PromptInjectionRedactions: @unchecked Sendable {
             }
             if let d = v as? [String: Any] {
                 var out: [String: Any] = [:]
-                for (k, x) in d { out[k] = walk(x) }
+                // Auto mode's server checks travel as sent (see `opaqueKeys`).
+                for (k, x) in d { out[k] = PIIRewriter.opaqueKeys.contains(k) ? x : walk(x) }
                 return out
             }
             return v

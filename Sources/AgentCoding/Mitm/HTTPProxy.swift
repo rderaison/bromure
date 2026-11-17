@@ -4991,6 +4991,21 @@ private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
                          truncatedForTrace: false)
 }
 
+/// Forward one of the client's header lines. A header sent on several lines
+/// arrives whole: each line used to replace the one before, so a client that
+/// sends `anthropic-beta` twice lost all but the last -- auto mode's
+/// server-side checks among them, which the API then never ran
+/// (code.claude.com/docs/en/auto-mode-classifier-billing). Repeats join as
+/// HTTP folds them: with ", " (a cookie's with "; ").
+func mitmForwardHeader(_ req: inout URLRequest, name: String, value: String) {
+    guard let existing = req.value(forHTTPHeaderField: name), !existing.isEmpty else {
+        req.setValue(value, forHTTPHeaderField: name)
+        return
+    }
+    let sep = name.lowercased() == "cookie" ? "; " : ", "
+    req.setValue(existing + sep + value, forHTTPHeaderField: name)
+}
+
 /// Filter a client's `Accept-Encoding` down to the codings the relay can
 /// undo — gzip / deflate / br (what URLSession decodes) and identity. Anything else (zstd, compress, `*`)
 /// is dropped so the upstream can't answer with a body we'd hand to the
@@ -5057,7 +5072,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
             // Only codings we can undo (see mitmSanitizedAcceptEncoding).
             if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
-            req.setValue(value, forHTTPHeaderField: name)
+            mitmForwardHeader(&req, name: name, value: value)
         }
     }
     if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
@@ -5436,7 +5451,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             // (and decodes) its own gzip/deflate/br.
             if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
-            req.setValue(value, forHTTPHeaderField: name)
+            mitmForwardHeader(&req, name: name, value: value)
         }
     }
     if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
