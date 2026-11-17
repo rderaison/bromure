@@ -116,6 +116,16 @@ struct NousPortalTests {
                   "inference-api.nousresearch.com.evil.example", "evilinference-api.nousresearch.com"] {
             #expect(!NousRegion.isSubscriptionHost(h), "\(h)")
         }
+        // On the Portal, only the account read: its other endpoints act on the
+        // account with the same bearer (charges, cloud agents, OAuth clients).
+        #expect(NousRegion.isSubscriptionRequest(host: "inference-api.nousresearch.com", method: "POST", path: "/v1/chat/completions"))
+        #expect(NousRegion.isSubscriptionRequest(host: "portal.nousresearch.com", method: "GET", path: "/api/oauth/account?x=1"))
+        for (m, path) in [("POST", "/api/billing/charge"), ("POST", "/api/oauth/self-hosted-client"),
+                          ("GET", "/api/cloud/agents"), ("POST", "/api/oauth/account"),
+                          ("GET", "/api/oauth/account/../../billing/state"), ("GET", "/api/oauth/accounts")] {
+            #expect(!NousRegion.isSubscriptionRequest(host: "portal.nousresearch.com", method: m, path: path), "\(m) \(path)")
+        }
+        #expect(!NousRegion.isSubscriptionRequest(host: "telemetry.nousresearch.com", method: "GET", path: "/api/oauth/account"))
         #expect(NousRegion.allowedInferenceBaseURL("https://welcome-api.nousresearch.com/v1/") == "https://welcome-api.nousresearch.com/v1")
         #expect(NousRegion.allowedInferenceBaseURL("http://inference-api.nousresearch.com/v1") == nil)
         #expect(NousRegion.allowedInferenceBaseURL("https://attacker.example/v1") == nil)

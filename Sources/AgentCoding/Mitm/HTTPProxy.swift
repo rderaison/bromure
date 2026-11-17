@@ -1501,10 +1501,11 @@ final class HTTPMitmConnection: @unchecked Sendable {
         // 5g. Nous Portal (Hermes Agent) subscription auth: the guest's
         //     ~/.hermes/auth.json holds a stand-in invoke JWT (far-future
         //     exp, so Hermes never refreshes); swap it for the live token on
-        //     the inference hosts and the Portal (exact names, NousRegion).
+        //     the inference hosts, and on the Portal for the account read
+        //     alone (exact names and paths: NousRegion.isSubscriptionRequest).
         var nousSubStaleAccess: String? = nil
         if !insecure,
-           NousRegion.isSubscriptionHost(host),
+           NousRegion.isSubscriptionRequest(host: host, method: reqMethod, path: reqPath),
            let provider = Self.nousSubscriptionProvider, let (_, refresher) = provider(),
            let headerSection = Self.rawHeaderSection(of: swap.modified),
            let bearer = Self.bearerToken(inHeaderSection: headerSection),
