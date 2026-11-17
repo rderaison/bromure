@@ -156,7 +156,7 @@ INSTALLED_VERSION=$(tr -d '[:space:]' < "$CLIENT/base.version")
 
 node -e '
 const fs = require("fs");
-const [statePath, expectedUuid, baselinePath, appVersion] = process.argv.slice(1);
+const [statePath, expectedUuid, baselinePath] = process.argv.slice(1);
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
 if (state.imageUUID !== expectedUuid) {
@@ -164,30 +164,14 @@ if (state.imageUUID !== expectedUuid) {
   process.exit(1);
 }
 const applied = new Set(state.appliedStepUUIDs);
-// Plus the versioned steps whose range holds this app version (and none
-// outside it): ImageCatalog.steps(forAppVersion:).
-const parts = (v) => { const o = String(v).split(".").map(Number); while (o.length > 1 && o[o.length - 1] === 0) o.pop(); return o; };
-const less = (a, b) => { for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i]; return a.length < b.length; };
-const app = parts(appVersion);
-const inRange = (s) => (s.min_version === undefined || !less(app, parts(s.min_version)))
-  && (s.max_version === undefined || !less(parts(s.max_version), app));
-const versioned = baseline.postinstall_versioned ?? [];
-const wrong = versioned.filter((s) => !inRange(s) && applied.has(s.uuid));
-if (wrong.length) {
-  console.error(`ERROR: versioned steps outside the range of app ${appVersion} were applied: ` +
-    wrong.map((s) => s.description).join(", "));
-  process.exit(1);
-}
-const expected = [...baseline.postinstall, ...versioned.filter(inRange)];
-const missing = expected.filter((s) => !applied.has(s.uuid));
+const missing = baseline.postinstall.filter((s) => !applied.has(s.uuid));
 if (missing.length) {
   console.error("ERROR: postinstall steps not recorded as applied: " +
     missing.map((s) => s.description).join(", "));
   process.exit(1);
 }
-console.log(`image-state OK: uuid matches, ${expected.length} step(s) applied (app ${appVersion})`);
-' "$CLIENT/image-state.json" "$UUID" "Sources/AgentCoding/Resources/img-catalog.json" \
-  "$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Sources/AgentCoding/Info.plist)"
+console.log(`image-state OK: uuid matches, ${baseline.postinstall.length} step(s) applied`);
+' "$CLIENT/image-state.json" "$UUID" "Sources/AgentCoding/Resources/img-catalog.json"
 
 # The expanded image should be sparse — physical footprint well under the
 # 24 GB logical size. Informational (compression/OS variance), not a gate.

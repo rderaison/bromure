@@ -92,41 +92,8 @@ if (!Array.isArray(baseline.postinstall)) {
   console.error("make-img-catalog: baseline has no postinstall array");
   process.exit(1);
 }
-// Steps for a range of app versions (min_version / max_version, the app's
-// CFBundleShortVersionString, inclusive), under a key apps that predate it
-// ignore -- so they never run them, and still verify `signature`, which
-// covers `postinstall` only. `signature_versioned` covers both.
-const versioned = baseline.postinstall_versioned ?? [];
-if (!Array.isArray(versioned)) {
-  console.error("make-img-catalog: baseline postinstall_versioned must be an array");
-  process.exit(1);
-}
-// Same rule as ImageCatalog.versionComponents: dotted non-negative integers.
-function versionParts(v) {
-  if (typeof v !== "string" || !/^[0-9]{1,9}(\.[0-9]{1,9})*$/.test(v.trim())) return null;
-  const out = v.trim().split(".").map(Number);
-  while (out.length > 1 && out[out.length - 1] === 0) out.pop();
-  return out;
-}
-function versionLess(a, b) {
-  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i];
-  return a.length < b.length;
-}
-for (const s of versioned) {
-  const lo = s.min_version, hi = s.max_version;
-  if (lo === undefined && hi === undefined) {
-    console.error(`make-img-catalog: versioned step ${s.uuid} has neither min_version nor max_version`);
-    process.exit(1);
-  }
-  const plo = lo === undefined ? null : versionParts(lo), phi = hi === undefined ? null : versionParts(hi);
-  if ((lo !== undefined && !plo) || (hi !== undefined && !phi) || (plo && phi && versionLess(phi, plo))) {
-    console.error(`make-img-catalog: versioned step ${s.uuid} has a malformed range (${lo} .. ${hi})`);
-    process.exit(1);
-  }
-}
-// Guard the invariant the client relies on: stable, unique step uuids --
-// across both lists (an app applies them as one).
-const uuids = [...baseline.postinstall, ...versioned].map((s) => s.uuid);
+// Guard the invariant the client relies on: stable, unique step uuids.
+const uuids = baseline.postinstall.map((s) => s.uuid);
 if (new Set(uuids).size !== uuids.length || uuids.some((u) => !u)) {
   console.error("make-img-catalog: baseline postinstall uuids must be present and unique");
   process.exit(1);
@@ -180,7 +147,6 @@ const catalog = {
     ...(bootFiles.length ? { boot: bootFiles } : {}),
   },
   postinstall: baseline.postinstall,
-  ...(versioned.length ? { postinstall_versioned: versioned } : {}),
 };
 
 if (!catalog.image.version || !catalog.image.description) {
@@ -245,26 +211,6 @@ function signingPayload(cat, signedAt, magic) {
   return Buffer.from(lines.join("\n"), "utf8");
 }
 
-// What `signature_versioned` covers -- keep byte-identical to
-// ImageCatalog.versionedSigningPayload(signedAt:magic:): the legacy payload,
-// a count line, then every versioned step with its range.
-function versionedSigningPayload(cat, signedAt, magic) {
-  const steps = [...(cat.postinstall_versioned ?? [])]
-    .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
-  const lines = [`postinstall_versioned.count=${steps.length}`];
-  for (const s of steps) {
-    lines.push(`vstep.${s.uuid}.seq=${s.seq}`);
-    lines.push(`vstep.${s.uuid}.description.b64=${b64(s.description)}`);
-    lines.push(`vstep.${s.uuid}.command.b64=${b64(s.command)}`);
-    lines.push(`vstep.${s.uuid}.min_version=${s.min_version ?? ""}`);
-    lines.push(`vstep.${s.uuid}.max_version=${s.max_version ?? ""}`);
-    if (s.bromureac !== undefined && s.bromureac !== null) {
-      lines.push(`vstep.${s.uuid}.bromureac=${s.bromureac}`);
-    }
-  }
-  return Buffer.concat([signingPayload(cat, signedAt, magic), Buffer.from("\n" + lines.join("\n"), "utf8")]);
-}
-
 if (args.includes("--allow-unsigned")) {
   console.log("make-img-catalog: --allow-unsigned — catalog will NOT carry a signature (test use only; clients reject unsigned production catalogs)");
 } else {
@@ -297,17 +243,8 @@ if (args.includes("--allow-unsigned")) {
     process.exit(1);
   }
   catalog.signature = { signedAt, edSignature: signature.toString("base64") };
-  if (catalog.postinstall_versioned) {
-    const vpayload = versionedSigningPayload(catalog, signedAt, payloadMagic);
-    const vsig = sign(null, vpayload, key);
-    if (!verify(null, vpayload, createPublicKey(key), vsig)) {
-      console.error("make-img-catalog: internal error — versioned signature failed self-verify");
-      process.exit(1);
-    }
-    catalog.signature_versioned = { signedAt, edSignature: vsig.toString("base64") };
-  }
 }
 
 const out = req("out");
 writeFileSync(out, JSON.stringify(catalog, null, 2) + "\n");
-console.log(`make-img-catalog: wrote ${out} (image ${catalog.image.uuid}, v${catalog.image.version}, ${catalog.postinstall.length} postinstall step(s), ${versioned.length} versioned)`);
+console.log(`make-img-catalog: wrote ${out} (image ${catalog.image.uuid}, v${catalog.image.version}, ${catalog.postinstall.length} postinstall step(s))`);

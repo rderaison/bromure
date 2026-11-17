@@ -315,16 +315,11 @@ struct HermesAgentTests {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json")
         struct Step: Decodable { var uuid: String; var description: String; var command: String }
-        // In the versioned list (5.4.5 and later): older apps don't run it.
-        struct Catalog: Decodable {
-            var postinstall: [Step]
-            var postinstall_versioned: [Step]?
-        }
+        struct Catalog: Decodable { var postinstall: [Step] }
         let cat = try JSONDecoder().decode(Catalog.self, from: Data(contentsOf: url))
-        let uuids = (cat.postinstall + (cat.postinstall_versioned ?? [])).map(\.uuid)
+        let uuids = cat.postinstall.map(\.uuid)
         #expect(Set(uuids).count == uuids.count)
-        #expect(!cat.postinstall.contains { $0.description.contains("Hermes") })
-        let step = try #require(cat.postinstall_versioned?.first { $0.description.contains("Hermes") })
+        let step = try #require(cat.postinstall.first { $0.description.contains("Hermes") })
         let cmd = step.command
         #expect(cmd.contains("--non-interactive --skip-browser --skip-computer-use"))
         #expect(cmd.contains("--dir /opt/hermes/hermes-agent --hermes-home /opt/hermes"))
