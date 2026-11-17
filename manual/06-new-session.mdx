@@ -40,7 +40,7 @@ Along the bottom of the composer, three chips show what the session will run wit
 
 ### Agent
 
-The agent that runs the session ("The agent that runs this session"): **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, **Oh My Pi** or **Hermes Agent**. Every agent can be picked on every machine; Hermes Agent installs itself into the machine the first time it starts there (a few minutes), and stays. Under each name, the list says whether it is ready to go:
+The agent that runs the session ("The agent that runs this session"): **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, **Oh My Pi** or **Hermes Agent**. Every agent can be picked on every machine; Hermes Agent comes with the base image, and each machine sets it up the first time it starts there (a few seconds). On an older image it installs itself instead (a few minutes), and stays. Under each name, the list says whether it is ready to go:
 
 - **Ready** — the machine already has what the agent needs to reach its model (a sign-in or an API key, from [Preferences › Models](13-models.mdx) or the machine's own settings).
 - **Sign in when it starts** — nothing is set up yet. Start anyway: the agent's sign-in appears in the chat as a card, and Bromure signs you in on the Mac. See [The Chat](06a-chat.mdx#sign-in-and-status-cards).

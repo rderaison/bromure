@@ -154,7 +154,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Heartbeat** — A background check-in with the enrollment server every ten minutes, which keeps the Mac's "last seen" time current and renews its certificate when due. See [Enterprise](15-enterprise.mdx).
 
-**Hermes Agent** — Nous Research's agent (the `hermes` command), one of the bundled agents. It installs itself into a machine the first time it starts there, and works with several providers but only with API keys, not subscriptions. Its tools' own keys (web search, images, voice…) are added from the **Hermes integration** menu of the Credentials pane. See [Models & Providers](13-models.mdx) and [Credentials & the Wire Boundary](08-credentials.mdx#hermes-agents-integrations).
+**Hermes Agent** — Nous Research's agent (the `hermes` command), one of the bundled agents. It comes with the base image (in `/opt/hermes`), and `hermes update` installs your own newer copy in the machine. It works with several providers' API keys, and with a Nous Portal subscription. Its tools' own keys (web search, images, voice…) are added from the **Hermes integration** menu of the Credentials pane. See [Models & Providers](13-models.mdx) and [Credentials & the Wire Boundary](08-credentials.mdx#hermes-agents-integrations).
 
 **Hidden-Unicode signals** — Invisible characters used to hide instructions from human readers: zero-width characters, text-direction overrides and Unicode tag characters. Bromure detects them with simple, near-certain rules. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 

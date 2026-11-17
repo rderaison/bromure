@@ -6983,12 +6983,14 @@ public final class ProfileStore {
                 return 1
                 ;;
             hermes)
-                # Hermes Agent (Nous Research) installs per user: its code,
-                # Python and tools under ~/.hermes, the launcher in
-                # ~/.local/bin -- on the workspace's home, so it stays, and
-                # `hermes update` works in place. No bundled Chromium (the
-                # workspace's browser is Bromure's) or computer-use driver.
-                echo "[bromure-ac] hermes not found — installing Hermes Agent (Nous Research); this takes a few minutes…"
+                # Hermes Agent (Nous Research) for this user alone, when the
+                # image has none in /opt (an older image) or on `hermes
+                # update`: its code, Python and tools under ~/.hermes, the
+                # launcher in ~/.local/bin (first on PATH) -- on the
+                # workspace's home, so it stays, and `hermes update` works in
+                # place. No bundled Chromium (the workspace's browser is
+                # Bromure's) or computer-use driver.
+                echo "[bromure-ac] installing Hermes Agent (Nous Research) for this user; this takes a few minutes…"
                 if curl -fsSL https://hermes-agent.nousresearch.com/install.sh \\
                         | bash -s -- --non-interactive --skip-browser --skip-computer-use \\
                         >>/tmp/bromure-tool-install.log 2>&1 \\
@@ -7063,7 +7065,8 @@ public final class ProfileStore {
         esac
     }
 
-    #  • hermes (Hermes Agent, Nous Research): installed on first use (see
+    #  • hermes (Hermes Agent, Nous Research): from the image's /opt/hermes,
+    #    or installed on first use on older images (see
     #    _bromure_install_tool), then every launch carries the workspace's
     #    settings. Bromure's provider/model, MCP servers and
     #    `auth.adopt_external_logins: false` (left on, Hermes borrows Claude
@@ -7251,10 +7254,52 @@ public final class ProfileStore {
         fi
         printf '%s' "$HOME/.hermes/profiles/$_p"
     }
+    #    The base image carries Hermes in /opt/hermes, installed as root
+    #    when the image was built. Its code and runtime are shared, but each
+    #    data root needs a dependency environment of its own, which Hermes's
+    #    first-launch sync refuses to build for a user who doesn't own the
+    #    checkout. `hermes pm repair` builds it from /opt's runtime instead:
+    #    seconds, no network, nothing written under /opt. Done once per data
+    #    root, and again when the image brings another Hermes.
+    _bromure_hermes_opt() {
+        case "$(readlink -f "$(type -P hermes)" 2>/dev/null)" in
+            /opt/hermes/*) return 0 ;;
+        esac
+        return 1
+    }
+    _bromure_hermes_opt_ready() {
+        _bromure_hermes_opt || return 0
+        local _h="${HERMES_HOME:-$HOME/.hermes}" _s
+        _s=$(cat /opt/hermes/hermes-agent/install-stamp.json /opt/hermes/hermes-agent/.hermes-bootstrap-complete 2>/dev/null | sha256sum | cut -c1-64)
+        [ "$(cat "$_h/.bromure-opt-repaired" 2>/dev/null)" = "$_s" ] && return 0
+        mkdir -p "$_h" || return 1
+        # The image's default config, so a fresh data root reads Hermes's
+        # defaults rather than nothing.
+        if [ ! -e "$_h/config.yaml" ] && [ -r /opt/hermes/config.yaml ]; then
+            install -m 600 /opt/hermes/config.yaml "$_h/config.yaml"
+        fi
+        echo "[bromure-ac] preparing Hermes Agent for this workspace…"
+        if command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1; then
+            printf '%s\\n' "$_s" > "$_h/.bromure-opt-repaired"
+            return 0
+        fi
+        echo "[bromure-ac] Hermes setup failed (see /tmp/bromure-tool-install.log)"
+        return 1
+    }
     hermes() {
         if ! type -P hermes >/dev/null 2>&1; then
             _bromure_install_tool hermes || return 127
         fi
+        case "${1:-}" in
+            update|upgrade)
+                # /opt's Hermes is root's, and its updater refuses anyone
+                # else: install this user's own copy, which takes over (its
+                # launcher is first on PATH) and updates itself from then on.
+                if _bromure_hermes_opt; then
+                    _bromure_install_tool hermes; return
+                fi ;;
+        esac
+        _bromure_hermes_opt_ready || return 1
         case "${1:-}" in
             uninstall|--version|-V|help|-h|--help) command hermes "$@"; return ;;
         esac

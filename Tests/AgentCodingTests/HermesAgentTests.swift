@@ -306,6 +306,122 @@ struct HermesAgentTests {
         #expect(wrapper.contains("case \"${_t#wt/}\" in *[!a-z0-9-]*) _t=\"\" ;; esac"))
     }
 
+    // MARK: - Hermes in the base image (/opt/hermes)
+
+    @Test("the base image installs Hermes into /opt as root, best effort, keeping root's data private")
+    func imageStep() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json")
+        struct Step: Decodable { var uuid: String; var description: String; var command: String }
+        struct Catalog: Decodable { var postinstall: [Step] }
+        let cat = try JSONDecoder().decode(Catalog.self, from: Data(contentsOf: url))
+        let uuids = cat.postinstall.map(\.uuid)
+        #expect(Set(uuids).count == uuids.count)
+        let step = try #require(cat.postinstall.first { $0.description.contains("Hermes") })
+        let cmd = step.command
+        #expect(cmd.contains("--non-interactive --skip-browser --skip-computer-use"))
+        #expect(cmd.contains("--dir /opt/hermes/hermes-agent --hermes-home /opt/hermes"))
+        #expect(cmd.contains("ln -sf /opt/hermes/hermes-agent/.hermes/bin/hermes /usr/local/bin/hermes"))
+        // Never the whole data root: root's .env must stay 0600.
+        #expect(!cmd.contains("chmod -R a+rX /opt/hermes\n"))
+        #expect(!cmd.contains("chmod -R a+rX /opt/hermes "))
+        #expect(cmd.contains("chmod -R a+rX /opt/hermes/hermes-agent /opt/hermes/tools /opt/hermes/installs"))
+        // A failed install leaves nothing, so hermes falls back to installing itself.
+        #expect(cmd.contains("rm -rf /opt/hermes /usr/local/bin/hermes"))
+        let url2 = try tempDir().appendingPathComponent("step.sh")
+        try cmd.write(to: url2, atomically: true, encoding: .utf8)
+        let (status, diag) = try run("/bin/bash", ["-n", url2.path])
+        #expect(status == 0, Comment(rawValue: diag))
+    }
+
+    @Test("an /opt Hermes gets `hermes pm repair` once per data root, again for another image's Hermes")
+    func optReady() throws {
+        let rc = try renderBashrc()
+        let lines = rc.components(separatedBy: "\n")
+        func fn(_ name: String) throws -> String {
+            let start = try #require(lines.firstIndex { $0.hasSuffix(name + "() {") })
+            let end = try #require(lines[start...].firstIndex { $0 == "}" })
+            return lines[start...end].joined(separator: "\n")
+        }
+        // Resolved: readlink -f spells macOS's /var as /private/var.
+        let dir = URL(fileURLWithPath: try #require(realpath(try tempDir().path, nil).map {
+            defer { free($0) }; return String(cString: $0) }), isDirectory: true)
+        let opt = dir.appendingPathComponent("opt/hermes")
+        let fns = (try fn("_bromure_hermes_opt") + "\n" + fn("_bromure_hermes_opt_ready"))
+            .replacingOccurrences(of: "/opt/hermes", with: opt.path)
+        let launcherDir = opt.appendingPathComponent("hermes-agent/.hermes/bin")
+        try FileManager.default.createDirectory(at: launcherDir, withIntermediateDirectories: true)
+        let log = dir.appendingPathComponent("calls.log")
+        let failFlag = dir.appendingPathComponent("fail")
+        let launcher = launcherDir.appendingPathComponent("hermes")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> '\(log.path)'
+        [ -e '\(failFlag.path)' ] && exit 1
+        exit 0
+        """.write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        let stamp = opt.appendingPathComponent("hermes-agent/install-stamp.json")
+        try #"{"commit": "a"}"#.write(to: stamp, atomically: true, encoding: .utf8)
+        try "model: {}\n".write(to: opt.appendingPathComponent("config.yaml"), atomically: true, encoding: .utf8)
+        let bin = dir.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: bin.appendingPathComponent("hermes").path,
+                                                   withDestinationPath: launcher.path)
+        let home = dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        func ready(_ extra: [String: String] = [:]) throws -> Int32 {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["-c", fns + "\n_bromure_hermes_opt_ready\n"]
+            var env = ["HOME": home.path, "PATH": bin.path + ":/usr/bin:/bin:/sbin"]
+            for (k, v) in extra { env[k] = v }
+            proc.environment = env
+            proc.standardOutput = Pipe()
+            try proc.run(); proc.waitUntilExit()
+            return proc.terminationStatus
+        }
+        func calls() -> [String] {
+            ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        }
+        // A failed repair fails the wrapper and leaves no marker: retried next time.
+        FileManager.default.createFile(atPath: failFlag.path, contents: nil)
+        #expect(try ready() == 1)
+        try FileManager.default.removeItem(at: failFlag)
+        #expect(try ready() == 0)
+        #expect(try ready() == 0)
+        #expect(calls() == ["pm repair", "pm repair"], "once after the failed try")
+        let cfg = home.appendingPathComponent(".hermes/config.yaml")
+        #expect((try? String(contentsOf: cfg, encoding: .utf8)) == "model: {}\n")
+        let mode = try FileManager.default.attributesOfItem(atPath: cfg.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
+        // The image brings another Hermes: repaired again; a user's config stays.
+        try "user: 1\n".write(to: cfg, atomically: true, encoding: .utf8)
+        try #"{"commit": "b"}"#.write(to: stamp, atomically: true, encoding: .utf8)
+        #expect(try ready() == 0)
+        #expect(calls().count == 3)
+        #expect((try? String(contentsOf: cfg, encoding: .utf8)) == "user: 1\n")
+        // Another data root is a root of its own.
+        #expect(try ready(["HERMES_HOME": dir.appendingPathComponent("other").path]) == 0)
+        #expect(calls().count == 4)
+        // A per-user install (not under /opt) is left alone.
+        try FileManager.default.removeItem(at: bin.appendingPathComponent("hermes"))
+        try FileManager.default.copyItem(at: launcher, to: bin.appendingPathComponent("hermes"))
+        try #"{"commit": "c"}"#.write(to: stamp, atomically: true, encoding: .utf8)
+        #expect(try ready() == 0)
+        #expect(calls().count == 4)
+        // The wrapper readies /opt's Hermes before any call, and sends
+        // `hermes update` to a per-user install instead.
+        let wrapper = try fn("hermes")
+        let update = try #require(wrapper.range(of: "update|upgrade)"))
+        let readyCall = try #require(wrapper.range(of: "_bromure_hermes_opt_ready || return 1"))
+        #expect(update.lowerBound < readyCall.lowerBound)
+        let flat = wrapper.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        #expect(flat.contains("update|upgrade) # /opt's") && flat.contains("if _bromure_hermes_opt; then _bromure_install_tool hermes; return fi ;;"))
+        #expect(readyCall.lowerBound < (try #require(wrapper.range(of: "_bromure_hermes_apply"))).lowerBound)
+    }
+
     // MARK: - Status hook + transcript mirror
 
     /// The hook script with its entry point stripped, its paths pointed at
