@@ -193,6 +193,9 @@ private struct WorkspaceRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // Clicking the icon or name flips the switch too — not the
+            // switch itself, which would then flip twice.
+            HStack(spacing: 12) {
             ZStack(alignment: .bottomTrailing) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(tint.opacity(0.15))
@@ -218,6 +221,9 @@ private struct WorkspaceRow: View {
                     .contentTransition(.opacity)
             }
             Spacer(minLength: 12)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { if row.decides { withAnimation(.snappy(duration: 0.2)) { row.update.toggle() } } }
             if row.decides {
                 Toggle(NSLocalizedString("Update", comment: "base image chooser: reset the workspace onto the new base"),
                        isOn: $row.update.animation(.snappy(duration: 0.2)))
@@ -235,8 +241,6 @@ private struct WorkspaceRow: View {
         }
         .padding(.horizontal, 14)
         .opacity(row.decides ? 1 : 0.7)
-        .contentShape(Rectangle())
-        .onTapGesture { if row.decides { withAnimation(.snappy(duration: 0.2)) { row.update.toggle() } } }
     }
 
     private var tint: Color {
