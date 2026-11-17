@@ -1041,13 +1041,15 @@ enum AgentSessionLocator {
         case "kimi": cmd += kimiFragment(since: since, createdSince: kimiCreatedSince,
                                          exclude: kimiExclude, into: "f")
         case "omp": cmd += ompFragment(since: since, into: "f")
+        case "hermes": cmd += hermesFragment(since: since, into: "f")
         default:
             cmd += claudeFragment(path: path, since: since, into: "tc")
             cmd += codexFragment(since: since, into: "tx")
             cmd += grokFragment(path: path, since: since, into: "tg")
             cmd += kimiFragment(since: since, into: "tk")
             cmd += ompFragment(since: since, into: "to")
-            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\" \"$to\"; do "
+            cmd += hermesFragment(since: since, into: "th")
+            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\" \"$to\" \"$th\"; do "
                 + "[ -n \"$c\" ] && set -- \"$@\" \"$c\"; done; "
                 + "f=\"\"; [ $# -gt 0 ] && f=$(ls -t \"$@\" 2>/dev/null | head -1); "
         }
@@ -1076,6 +1078,23 @@ enum AgentSessionLocator {
             + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) "
             + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
     }
+
+    /// Hermes Agent: its conversations live in SQLite; the hook Bromure
+    /// installs (`Profile.hermesHookScript`) mirrors each session to
+    /// ~/.hermes/bromure-transcripts/<cwd, non-alphanumerics as '-'>/<id>.jsonl
+    /// in Claude Code's JSONL shape — Claude's folder rule, so the same
+    /// `$d`/`$r` encodings find it.
+    nonisolated static func hermesFragment(since: Int, into varName: String) -> String {
+        "h1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "h2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "\(varName)=$(find \"\(hermesTranscriptRoot)/$h1\" \"\(hermesTranscriptRoot)/$h2\" "
+            + "-maxdepth 1 -name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) "
+            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// Where `Profile.hermesHookScript` mirrors Hermes's sessions (a shell
+    /// word, `$HOME`-relative).
+    nonisolated static let hermesTranscriptRoot = "$HOME/.hermes/bromure-transcripts"
 
     /// Codex CLI: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, date-keyed
     /// rather than cwd-keyed — but line 1 (session_meta) records the cwd,
@@ -4062,9 +4081,21 @@ final class CodingTaskEngine {
                 + "| xargs -r ls -t 2>/dev/null | head -1); "
             return markerCwd + byCwd + bySlug + newest + emit
         case .hermes:
-            // Hermes keeps its sessions in a SQLite store (~/.hermes/state.db),
-            // not a transcript file: no file to read here yet.
-            return nil
+            // The mirror its hook keeps (`hermesFragment`): the folder named
+            // after the tab's cwd while the tab exists, else the one named
+            // after the worktree (its basename is the slug, "-N" when
+            // deduped). Never the newest session anywhere.
+            let root = AgentSessionLocator.hermesTranscriptRoot
+            return markerCwd
+                + "d=\"\"; f=\"\"; if [ -n \"$cwd\" ]; then "
+                + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+                + "h1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "h2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "d=$(ls -td \"\(root)/$h1\" \"\(root)/$h2\" 2>/dev/null | head -1); fi; "
+                + "[ -z \"$d\" ] && d=$(ls -td \"\(root)\"/*-\(slug) \"\(root)\"/*-\(slug)-[0-9]* 2>/dev/null | head -1); "
+                + "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 1 -name '*.jsonl' 2>/dev/null "
+                + "| xargs -r ls -t 2>/dev/null | head -1); "
+                + emit
         }
     }
 
@@ -4095,16 +4126,13 @@ final class CodingTaskEngine {
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
         switch agent {
-        case .codex?, .grok?, .omp?:
+        case .codex?, .grok?, .omp?, .hermes?:
             return transcriptCommand(
                 branch: "wt/" + slug, agent: agent!,
                 emit: "if [ -n \"$f\" ]; then m=$(date -r \"$f\" +%s 2>/dev/null); "
                     + "[ -n \"$m\" ] && echo $(( $(date +%s) - m )); fi")
         case nil, .claude?, .kimi?:
             break
-        case .hermes?:
-            // No transcript file (see `transcriptCommand`): nothing to probe.
-            return nil
         }
         // Kimi Code's session store is keyed by an opaque workspace id
         // `wd_<dir-basename-slug>_<hash>` under ~/.kimi-code/sessions — and a

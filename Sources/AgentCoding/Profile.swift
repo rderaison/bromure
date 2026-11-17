@@ -1140,8 +1140,11 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             // automation teardown/chaining — automation uses the worktree-exit
             // reporter fallback until the hook path is hardened.
             case .omp: return false
-            // Hermes has no Bromure status hook yet: the proxy's silence
-            // heuristic and the worktree-exit reporter stand in.
+            // Hermes reports through its shell hooks (hermes-hook.py), but
+            // they run in its shared gateway and find their tab through
+            // Hermes's session registry: like omp's, its "done" drives the
+            // dot, not yet automation teardown/chaining (the worktree-exit
+            // reporter does that).
             case .hermes: return false
             }
         }
@@ -5895,7 +5898,8 @@ public final class ProfileStore {
                 except Exception:
                     return b""
             # The agent: the first ancestor that is not the shell running the hook.
-            pid = int(os.environ.get("BROMURE_HOOK_PPID") or 0)
+            # Hermes's hook names its agent (the gateway running its tools).
+            pid = int(os.environ.get("BROMURE_HOOK_AGENT_PID") or os.environ.get("BROMURE_HOOK_PPID") or 0)
             for _ in range(6):
                 comm = proc(pid, "comm").decode(errors="replace").strip()
                 if pid <= 1 or comm not in ("sh", "bash", "dash", "zsh"):
@@ -5904,7 +5908,7 @@ public final class ProfileStore {
                 pid = int(stat.rsplit(")", 1)[-1].split()[1]) if ")" in stat else 0
             raw = proc(pid, "cmdline").split(b"\0")
             argv = b" ".join(raw).decode(errors="replace").lower()
-            names = ("claude", "codex", "kimi", "grok", "omp")
+            names = ("claude", "codex", "kimi", "grok", "omp", "hermes")
             # The program first (bun /usr/bin/omp …): anywhere in argv, the
             # model of omp (--model anthropic/claude-…) read as Claude.
             progs = [os.path.basename(w.decode(errors="replace").lower()) for w in raw[:2]]
@@ -6064,6 +6068,18 @@ public final class ProfileStore {
                                   ofItemAtPath: ompHookURL.path)
         }
         do {
+            // Hermes's status hook + transcript mirror (see
+            // `Profile.hermesHookScript`), registered in ~/.hermes/config.yaml
+            // by the bashrc. Written for every profile, inert where Hermes
+            // never runs, like agent-status.sh beside it.
+            let bromureDir = home.appendingPathComponent(".bromure", isDirectory: true)
+            try? fm.createDirectory(at: bromureDir, withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: NSNumber(value: 0o755)])
+            let url = bromureDir.appendingPathComponent("hermes-hook.py")
+            try? Profile.hermesHookScript.write(to: url, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: url.path)
+        }
+        do {
             // Grok's turn-end hooks it has and Claude Code doesn't. A turn
             // the user cancels (Ctrl+C / Esc) fires `StopCancelled` INSTEAD
             // of `Stop` (Grok ≥ 1.0.46), so the tab read "working" until
@@ -6187,7 +6203,7 @@ public final class ProfileStore {
         ".kimi-code/credentials/kimi-code.json", ".claude/.credentials.json",
     ]
     /// Relpaths chmod 755 (scripts).
-    private static let seed755: Set<String> = [".bromure/agent-status.sh"]
+    private static let seed755: Set<String> = [".bromure/agent-status.sh", ".bromure/hermes-hook.py"]
     /// Directories created 0700 (everything else 0755).
     private static let seedDir700: Set<String> = [
         ".kube", ".aws", ".claude", ".docker", ".ssh", ".codex", ".grok",
@@ -6998,19 +7014,25 @@ public final class ProfileStore {
     #    can't run, or bill, on a sibling agent's provider. Hermes's .env
     #    overrides the environment: a stand-in for one of those keys left
     #    there is dropped.
+    #    The Hermes home is $HERMES_HOME when set (a board task's own
+    #    profile, below), else ~/.hermes.
     _bromure_hermes_stamp() {
+        local _h="${HERMES_HOME:-$HOME/.hermes}"
         { cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json \\
               /mnt/bromure-meta/hermes-env-unset 2>/dev/null | sha256sum | cut -c1-32
-          cat "$HOME/.hermes/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
-          cat "$HOME/.hermes/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
+          printf '%s' "${BROMURE_HERMES_TASK:-}" | sha256sum | cut -c1-32
+          cat "$_h/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
+          cat "$_h/shell-hooks-allowlist.json" 2>/dev/null | sha256sum | cut -c1-32
+          cat "$_h/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
     }
     _bromure_hermes_apply() {
         [ -r /mnt/bromure-meta/hermes-settings.json ] || return 0
-        [ "$(cat "$HOME/.hermes/.bromure-applied" 2>/dev/null)" = "$(_bromure_hermes_stamp)" ] && return 0
+        local _h="${HERMES_HOME:-$HOME/.hermes}"
+        [ "$(cat "$_h/.bromure-applied" 2>/dev/null)" = "$(_bromure_hermes_stamp)" ] && return 0
         echo "[bromure-ac] applying this workspace's Hermes settings…" >&2
         command env "$@" -u BROMURE_HERMES_API_KEY python3 - <<'BROMURE_HERMES_APPLY' || return 0
-    import json, os, re, subprocess, sys
-    home = os.path.expanduser("~/.hermes")
+    import datetime, json, os, re, subprocess, sys
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     os.makedirs(home, exist_ok=True)
     meta = os.environ.get("BROMURE_META_DIR") or "/mnt/bromure-meta"
     settings = json.load(open(os.path.join(meta, "hermes-settings.json")))
@@ -7088,13 +7110,81 @@ public final class ProfileStore {
             continue
         run("set", "mcp_servers." + esc(name), json.dumps(v))
         names.append(name)
+    # A board task's own Hermes home (BROMURE_HERMES_TASK = its branch): its
+    # board tools. Hermes has no per-project MCP, and its MCP servers live
+    # in the one gateway a Hermes home shares, so the task gets a home.
+    task = os.environ.get("BROMURE_HERMES_TASK") or ""
+    if re.match(r"^wt/[a-z0-9][a-z0-9-]*$", task) and os.path.exists(meta + "/bromure-task-mcp.py"):
+        run("set", "mcp_servers.bromure-board",
+            json.dumps({"command": "python3", "args": [meta + "/bromure-task-mcp.py", task]}))
+        names.append("bromure-board")
     for name in sorted(before - set(names)):
         run("unset", "mcp_servers." + esc(name))
     json.dump(names, open(done_path, "w"))
+    # Bromure's status hook (hermes-hook.py) on each event it reports,
+    # after the hooks the user set there themselves; then approved in the
+    # home's shell-hooks-allowlist.json, the way Hermes records a hook the
+    # user accepted (exact command per event).
+    hooks = settings.get("hooks") or {}
+    hook, events = hooks.get("command") or "", hooks.get("events") or []
+    if hook:
+        r = subprocess.run(["hermes", "config", "get", "hooks", "--json", "--raw"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            current = json.loads(r.stdout) if r.returncode == 0 else {}
+        except ValueError:
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        def ours(h):
+            return isinstance(h, dict) and str(h.get("command") or "").split(" ")[0] == hook
+        for ev in sorted(set(events) | {e for e, v in current.items() if isinstance(v, list) and any(ours(h) for h in v)}):
+            have = current.get(ev) if isinstance(current.get(ev), list) else []
+            want = [h for h in have if not ours(h)]
+            if ev in events:
+                want.append({"command": hook, "timeout": 20})
+            if have != want:
+                if want:
+                    run("set", "hooks." + ev, json.dumps(want))
+                else:
+                    run("unset", "hooks." + ev)
+        allow_path = os.path.join(home, "shell-hooks-allowlist.json")
+        try:
+            allow = json.load(open(allow_path))
+        except (OSError, ValueError):
+            allow = {}
+        if not isinstance(allow, dict) or not isinstance(allow.get("approvals"), list):
+            allow = {"approvals": []}
+        have = {(a.get("event"), a.get("command")) for a in allow["approvals"] if isinstance(a, dict)}
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        missing = [{"event": ev, "command": hook, "approved_at": now} for ev in events if (ev, hook) not in have]
+        if missing:
+            allow["approvals"] += missing
+            tmp = allow_path + ".bromure-tmp"
+            with open(tmp, "w") as f:
+                json.dump(allow, f, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, allow_path)
     sys.exit(0 if ok else 3)
     BROMURE_HERMES_APPLY
         # Stamped with config.yaml and .env as the apply left them.
-        _bromure_hermes_stamp > "$HOME/.hermes/.bromure-applied"
+        _bromure_hermes_stamp > "$_h/.bromure-applied"
+    }
+    #    A board task (`--bromure-task=wt/<slug>`, from agentd): its own
+    #    Hermes profile, bt-<slug> (cloned from the user's on first use),
+    #    which carries the task's board tools.
+    _bromure_hermes_task_home() {
+        local _s="${1#wt/}" _p
+        _p="bt-$_s"
+        if [ ${#_p} -gt 64 ]; then
+            _p="bt-${_s:0:52}-$(printf '%s' "$_s" | sha256sum | cut -c1-8)"
+        fi
+        if [ ! -e "$HOME/.hermes/profiles/$_p" ]; then
+            shift
+            command env "$@" -u BROMURE_HERMES_API_KEY hermes profile create "$_p" --clone >/dev/null 2>&1 \\
+                || mkdir -p "$HOME/.hermes/profiles/$_p"
+        fi
+        printf '%s' "$HOME/.hermes/profiles/$_p"
     }
     hermes() {
         if ! type -P hermes >/dev/null 2>&1; then
@@ -7103,11 +7193,23 @@ public final class ProfileStore {
         case "${1:-}" in
             uninstall|--version|-V|help|-h|--help) command hermes "$@"; return ;;
         esac
-        local _u=() _v _k=""
+        local _u=() _v _k="" _a=() _t=""
         if [ -r /mnt/bromure-meta/hermes-env-unset ]; then
             while IFS= read -r _v; do
                 [ -n "$_v" ] && _u+=(-u "$_v")
             done < /mnt/bromure-meta/hermes-env-unset
+        fi
+        for _v in "$@"; do
+            case "$_v" in
+                --bromure-task=wt/*) _t="${_v#--bromure-task=}" ;;
+                *) _a+=("$_v") ;;
+            esac
+        done
+        set -- "${_a[@]}"
+        case "$_t" in *[!a-z0-9/-]*) _t="" ;; esac
+        if [ -n "$_t" ]; then
+            local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
+            HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
         fi
         _bromure_hermes_apply "${_u[@]}"
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)

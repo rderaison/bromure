@@ -2348,7 +2348,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///   - codex:  `[[hooks.*]]` + pre-seeded trust in ~/.codex/config.toml
     ///             (agentd `_seed_codex_hooks`)
     ///   - omp:    the --hook module ~/.omp/agent/hooks/agent-status.ts
-    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
+    ///   - hermes: shell hooks in ~/.hermes/config.yaml calling
+    ///             ~/.bromure/hermes-hook.py (Profile.hermesHookScript)
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp", "hermes"]
 
     func noteAgentActivity(_ id: Profile.ID) {
         setNonClaudeAgentTabs(id, .working)

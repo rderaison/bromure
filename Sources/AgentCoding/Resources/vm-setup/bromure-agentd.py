@@ -4544,6 +4544,11 @@ def _task_mcp_setup(branch, tool, workdir):
       - kimi:   the same idea against .kimi-code/mcp.json, kimi's
                 project-scope MCP declaration file (identical mcpServers
                 shape), likewise git-excluded.
+      - hermes: `--bromure-task=<branch>`, which the guest's `hermes`
+                wrapper (.bashrc) turns into a Hermes home of the task's
+                own (profile bt-<slug>) carrying the board server: Hermes
+                has no project-scope MCP, and one gateway serves every
+                session of a home.
 
     Returns the extra CLI flags for BROMURE_AC_WT_FLAGS (may be "" — grok
     and kimi are wired purely through their settings files). Flag strings
@@ -4578,6 +4583,8 @@ def _task_mcp_setup(branch, tool, workdir):
         # pre-trusts its folder (see _pretrust).
         _project_mcp_add(tool, workdir, "bromure-board", _TASK_MCP_SHIM, [branch])
         return ""
+    if tool == "hermes":
+        return " --bromure-task=" + branch
     if tool == "omp":
         # omp reads a project-root `.mcp.json` (Claude-Code-compatible
         # `mcpServers`). Merge (don't clobber a user's file) and git-exclude it.

@@ -2352,7 +2352,11 @@ public final class SessionDisk {
         // it from `hermesKeyVariable` for the launch.
         let keyVar = (spec.authMode == .local || spec.effectiveOmpProvider == .custom)
             ? "OPENAI_API_KEY" : spec.effectiveOmpProvider.apiKeyEnvVar
-        return ["model": model, "adopt_external_logins": false, "key_var": keyVar]
+        // The status hook + transcript mirror (`Profile.hermesHookScript`),
+        // registered and approved by the bashrc's apply.
+        let hooks: [String: Any] = ["command": Profile.hermesHookGuestPath,
+                                    "events": Profile.hermesHookEvents]
+        return ["model": model, "adopt_external_logins": false, "key_var": keyVar, "hooks": hooks]
     }
 
     /// Provider key variables in the shared guest env that Hermes must not
