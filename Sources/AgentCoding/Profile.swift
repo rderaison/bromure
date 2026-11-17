@@ -5909,7 +5909,7 @@ public final class ProfileStore {
                 except Exception:
                     return b""
             # The agent: the first ancestor that is not the shell running the hook.
-            # Hermes's hook names its agent (the gateway running its tools).
+            # The Hermes hook names its agent (the gateway running its tools).
             pid = int(os.environ.get("BROMURE_HOOK_AGENT_PID") or os.environ.get("BROMURE_HOOK_PPID") or 0)
             for _ in range(6):
                 comm = proc(pid, "comm").decode(errors="replace").strip()

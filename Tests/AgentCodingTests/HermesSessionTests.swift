@@ -57,4 +57,33 @@ struct HermesSessionTests {
         #expect(!loose.contains("/*/"))
         #expect(TranscriptPin.conversation(tool: "hermes", id: "../x").hermesSession == nil)
     }
+
+    /// A "Hermes's" in a comment inside agent-status.sh's single-quoted
+    /// `python3 -c '…'` closed the quote: bash stopped at a syntax error,
+    /// so no agent's turn status or transcript record was ever written.
+    @Test("the staged hook scripts and .bashrc parse (bash -n)")
+    func scriptsParse() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-sh-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .hermes, authMode: .token)
+        let seed = root.appendingPathComponent("seed")
+        try store.writeHomeSeedFiles(for: p, into: seed, terminalDefaults: .fallback)
+        let files = seed.appendingPathComponent("files")
+        var checked = 0
+        for rel in [".bromure/agent-status.sh", ".bashrc"] {
+            let url = files.appendingPathComponent(rel)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["-n", url.path]
+            let err = Pipe()
+            proc.standardError = err
+            try proc.run(); proc.waitUntilExit()
+            let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            #expect(proc.terminationStatus == 0, "\(rel): \(msg)")
+            checked += 1
+        }
+        #expect(checked == 2)
+    }
 }
