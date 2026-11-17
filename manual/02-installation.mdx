@@ -283,7 +283,16 @@ An image that is newer than the app expects still works and doesn't trigger the 
 
 ### Upgrading each machine
 
-Installing a new base image doesn't change your existing machines: each machine keeps the system disk it was cloned from. The next time you start a machine whose disk came from an older base, the app asks **A newer base image is available.** — "This workspace runs base v201; v201.1 is on disk. Upgrade it now? Upgrading resets the workspace disk — anything installed inside the VM is wiped; your project folder is untouched."
+Installing a new base image doesn't change your existing machines by itself: each machine keeps the system disk it was cloned from.
+
+Right after an install you accepted at launch, the app asks **Move workspaces to the new base image?** It lists every workspace, and for each one with a disk from an older base you pick **Update** or **Keep** (Keep is the default; **Update All** and **Keep All** set every row):
+
+- **Update** resets the machine's system disk onto the new base at its next start, without asking again. A running machine restarts now; the home disk and project folders are kept.
+- **Keep** leaves the machine as it is and counts as **No** below: it won't ask again for this base.
+
+Workspaces set to come back with **Restore at next start** are restored only after you choose, so an updated one comes back on the new base, and a kept one resumes as it was.
+
+For a machine nobody chose for (an image installed another way), the next time you start a machine whose disk came from an older base, the app asks **A newer base image is available.** — "This workspace runs base v201; v201.1 is on disk. Upgrade it now? Upgrading resets the workspace disk — anything installed inside the VM is wiped; your project folder is untouched."
 
 - **Yes, upgrade** resets the machine's system disk onto the new base, then starts it. The home disk (and everything in `/home/ubuntu`) is kept.
 - **No** starts the machine as it is and doesn't ask again until a different base image is installed.
@@ -293,9 +302,9 @@ The answer is remembered per machine.
 
 ### New recommended packages
 
-When the catalog lists setup steps that aren't yet applied to your image, the app asks **New recommended packages** at launch, listing them: "New packages are recommended to be installed: … Bromure installs them into the base image (a few minutes, in the background VM). Existing workspaces keep running; each one's drift prompt will offer a reset to pick them up."
+When the catalog lists setup steps that aren't yet applied to your image, the app asks **New recommended packages** at launch, listing them: "New packages are recommended to be installed: … Bromure installs them into the base image (a few minutes, in the background VM). Then you choose which workspaces move to it, and which keep running as they are."
 
-- **Install** applies the steps to a copy-on-write clone of `base.img` and swaps the amended image in when it's done; running machines keep running. The version stamp gets a dot-revision (for example `201` → `201.1`), so each machine then offers the upgrade described above.
+- **Install** applies the steps to a copy-on-write clone of `base.img` and swaps the amended image in when it's done; running machines keep running. The version stamp gets a dot-revision (for example `201` → `201.1`), and the app then asks which workspaces move to it, as described above.
 - **Later** asks again at the next launch.
 
 Nothing runs without this consent — setup steps run as root inside the base image.

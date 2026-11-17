@@ -3063,6 +3063,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// otherwise the Task keeps pushing model updates after the window
     /// is gone and the autorelease pool over-releases on the next tick.
     private var installTask: Task<Void, Never>?
+    /// The launch's base-image check: its questions, an install the user
+    /// accepts, and the workspace chooser after it. The launch restore waits
+    /// for it, so no workspace is brought back on a base about to change.
+    private var launchImageCheck: Task<Void, Never>?
     private var ssoRefreshTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Strong references to the dispatch sources catching abnormal-
@@ -4204,8 +4208,14 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // seconds in, once the switch + control plane are settled.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.kubeClusterEngine.startAutoStartClusters()
-            // What the last quit asked to bring back (its checkbox).
-            self?.restoreAtLaunch()
+            // What the last quit asked to bring back (its checkbox) — once
+            // the base-image check is over: a base the user chose to update
+            // must be in place, and each workspace's answer recorded, before
+            // anything is restored on it.
+            Task { @MainActor [weak self] in
+                await self?.launchImageCheck?.value
+                self?.restoreAtLaunch()
+            }
         }
         // Planning sessions that were in flight when the app last quit must
         // not spin forever — re-arm their watchdogs (which abort with a
@@ -4402,7 +4412,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             //      image version → offer to download the new image.
             //   2. New postinstall steps published since this image was
             //      installed → ask consent, then amend base.img.
-            Task { @MainActor in
+            // Either install, once done, asks which workspaces move to the
+            // new base (`chooseWorkspacesForNewBase`).
+            launchImageCheck = Task { @MainActor in
                 self.imageManager.migrateLegacyImageStateIfNeeded()
                 let remote = await ImageCatalogStore.shared.refresh()
                 let installedMajor = self.imageManager.installedImageVersion
@@ -4418,18 +4430,23 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     if let c = Int(cat), let i = Int(inst) { return c > i }
                     return cat != inst
                 }()
+                let before = self.readCurrentBaseVersion()
                 if self.imageManager.baseImageNeedsUpdate || catalogIsNewer {
                     // A full update re-applies every catalog step, so
                     // don't also nag about new steps underneath it.
-                    await self.promptBaseImageUpdate(
-                        catalogVersion: catalogIsNewer ? catalogMajor : nil)
-                    return
+                    guard await self.promptBaseImageUpdate(
+                        catalogVersion: catalogIsNewer ? catalogMajor : nil) else { return }
+                } else {
+                    let catalog = remote ?? ImageCatalogStore.shared.effective()
+                    let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
+                    let pending = catalog.pendingSteps(appliedUUIDs: applied)
+                    guard !pending.isEmpty, await self.promptNewPostinstallSteps(pending) else { return }
                 }
-                let catalog = remote ?? ImageCatalogStore.shared.effective()
-                let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
-                let pending = catalog.pendingSteps(appliedUUIDs: applied)
-                if !pending.isEmpty {
-                    await self.promptNewPostinstallSteps(pending)
+                // The install runs on (its window shows it); the restore
+                // waits for it, then for the user's choice per workspace.
+                await self.installTask?.value
+                if let after = self.readCurrentBaseVersion(), after != before {
+                    await self.chooseWorkspacesForNewBase(after)
                 }
             }
         } else if ProcessInfo.processInfo.environment["BROMURE_FATCLIENT_OPEN"] != nil {
@@ -10530,7 +10547,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (`catalogVersion`). "Later" dismisses for this launch only — we'll
     /// ask again next time the app starts so the user keeps the option
     /// without being blocked from running stale images.
-    private func promptBaseImageUpdate(catalogVersion: String? = nil) async {
+    @discardableResult
+    private func promptBaseImageUpdate(catalogVersion: String? = nil) async -> Bool {
         let alert = NSAlert()
         let installed = imageManager.installedImageVersion ?? "?"
         let target = catalogVersion ?? UbuntuImageManager.imageVersion
@@ -10542,9 +10560,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             installed, target)
         alert.addButton(withTitle: NSLocalizedString("Update Now", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
-            startInit(force: true)
-        }
+        guard await presentStartupPrompt(alert) == .alertFirstButtonReturn else { return false }
+        startInit(force: true)
+        return true
     }
 
     /// A prompt raised at startup, as a sheet on the home window and never a
@@ -10564,20 +10582,20 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// after this image was installed. They run as root inside the base
     /// image, so nothing executes until the user explicitly accepts.
     /// "Later" asks again next launch.
-    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async {
+    private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async -> Bool {
         let alert = NSAlert()
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
         alert.messageText = NSLocalizedString("New recommended packages", comment: "")
         alert.informativeText = String(
             format: NSLocalizedString(
-                "New packages are recommended to be installed:\n\n%@\n\nBromure installs them into the base image (a few minutes, in the background VM). Existing workspaces keep running; each one's drift prompt will offer a reset to pick them up.",
+                "New packages are recommended to be installed:\n\n%@\n\nBromure installs them into the base image (a few minutes, in the background VM). Then you choose which workspaces move to it, and which keep running as they are.",
                 comment: ""),
             list)
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        if await presentStartupPrompt(alert) == .alertFirstButtonReturn {
-            startPostinstall(steps)
-        }
+        guard await presentStartupPrompt(alert) == .alertFirstButtonReturn else { return false }
+        startPostinstall(steps)
+        return true
     }
 
 
@@ -12691,8 +12709,31 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
               let recorded = profile.baseImageVersionAtClone,
               let current, recorded != current else { return false }
         if profile.baseImageUpgradeDeclinedFor == current { return false }
+        if profile.baseImageUpgradeAcceptedFor == current { return false }
         if let until = profile.baseImageUpgradeRemindAfter, until > Date() { return false }
         return true
+    }
+
+    /// The user already chose to move this workspace to the base on disk (the
+    /// chooser after a base-image install), and its disk is still from an
+    /// older one: this boot resets it, without asking.
+    func acceptedBaseImageUpgradeDue(_ profile: Profile, current: String?) -> Bool {
+        guard let current, profile.baseImageUpgradeAcceptedFor == current,
+              let recorded = profile.baseImageVersionAtClone, recorded != current,
+              FileManager.default.fileExists(atPath: store.diskURL(for: profile).path) else { return false }
+        return true
+    }
+
+    /// The chooser's answers, on the STORED record: "Update" (`accepted`)
+    /// resets the disk at the next boot; "Keep" is the drift prompt's "No"
+    /// for this base. Either one clears the other and any "Remind me later".
+    func recordBaseImageUpdateChoice(profileID: UUID, current: String, update: Bool) {
+        guard var p = store.loadAll().first(where: { $0.id == profileID }) else { return }
+        p.baseImageUpgradeAcceptedFor = update ? current : nil
+        p.baseImageUpgradeDeclinedFor = update ? nil : current
+        p.baseImageUpgradeRemindAfter = nil
+        try? store.save(p)
+        profiles = store.loadAll()
     }
 
     /// The upgrade offer's buttons, in order — shared by the local alert
@@ -13075,10 +13116,27 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         var profile = profile
 
+        let currentBaseVersion = readCurrentBaseVersion()
+        // The user chose "Update" for this workspace after a base-image
+        // install: reset its disk onto the new base now, unasked — attended
+        // or not, it was the owner's answer. Another boot holding the disk
+        // owns the workspace: this launch stops, as after the drift prompt.
+        if acceptedBaseImageUpgradeDue(profile, current: currentBaseVersion),
+           let current = currentBaseVersion {
+            if case .diskInUse = applyBaseImageUpgradeAnswer(0, profile: &profile, current: current) {
+                return
+            }
+            profile.baseImageUpgradeAcceptedFor = nil
+            if var stored = store.loadAll().first(where: { $0.id == profile.id }) {
+                stored.baseImageUpgradeAcceptedFor = nil
+                try? store.save(stored)
+                profiles = store.loadAll()
+            }
+        }
+
         // Drift check: if the base image has been rebuilt since this
         // profile's disk was cloned, offer the upgrade — unless the user
         // already answered for this base or asked to be reminded later.
-        let currentBaseVersion = readCurrentBaseVersion()
         if !preflightResolved, baseImageUpgradeOfferDue(profile, current: currentBaseVersion),
            let recorded = profile.baseImageVersionAtClone,
            let current = currentBaseVersion {

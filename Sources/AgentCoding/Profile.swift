@@ -2038,6 +2038,10 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
     /// "Remind me later": the offer stays quiet until this moment has
     /// passed — so the next boot after it, whichever comes last.
     public var baseImageUpgradeRemindAfter: Date?
+    /// The base version the user chose to move this workspace to (the
+    /// chooser after a base-image install): its next boot resets the disk
+    /// onto that base without asking.
+    public var baseImageUpgradeAcceptedFor: String?
     /// Which workspaces agents here may reach — delegate work into, ask a
     /// session of by @nickname. nil = every workspace (and remote hosts):
     /// what a new workspace starts with (`newProfileFromTemplate`). A list
@@ -2424,7 +2428,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case folderPath  // legacy: single folder, migrated to folderPaths
         case folderPaths
         case createdAt, lastUsedAt, baseImageVersionAtClone, agentReach, color, comments
-        case baseImageUpgradeDeclinedFor, baseImageUpgradeRemindAfter
+        case baseImageUpgradeDeclinedFor, baseImageUpgradeRemindAfter, baseImageUpgradeAcceptedFor
         case memoryGB, nativeTerminal, gitUserName, gitUserEmail, importedConfigFiles
         case useTerminalAppDefaults, customFontFamily, customFontSize
         case customBackgroundHex, customForegroundHex, fontLigatures
@@ -2526,6 +2530,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         baseImageVersionAtClone = try c.decodeIfPresent(String.self, forKey: .baseImageVersionAtClone)
         baseImageUpgradeDeclinedFor = try c.decodeIfPresent(String.self, forKey: .baseImageUpgradeDeclinedFor)
         baseImageUpgradeRemindAfter = try c.decodeIfPresent(Date.self, forKey: .baseImageUpgradeRemindAfter)
+        baseImageUpgradeAcceptedFor = try c.decodeIfPresent(String.self, forKey: .baseImageUpgradeAcceptedFor)
         agentReach      = try c.decodeIfPresent([UUID].self, forKey: .agentReach)
         color           = try c.decodeIfPresent(ProfileColor.self, forKey: .color) ?? .blue
         comments        = try c.decodeIfPresent(String.self, forKey: .comments) ?? ""
@@ -2665,6 +2670,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         try c.encodeIfPresent(baseImageVersionAtClone, forKey: .baseImageVersionAtClone)
         try c.encodeIfPresent(baseImageUpgradeDeclinedFor, forKey: .baseImageUpgradeDeclinedFor)
         try c.encodeIfPresent(baseImageUpgradeRemindAfter, forKey: .baseImageUpgradeRemindAfter)
+        try c.encodeIfPresent(baseImageUpgradeAcceptedFor, forKey: .baseImageUpgradeAcceptedFor)
         try c.encodeIfPresent(agentReach, forKey: .agentReach)
         try c.encode(color, forKey: .color)
         try c.encode(comments, forKey: .comments)
