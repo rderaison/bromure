@@ -994,14 +994,17 @@ enum AgentInputBox {
         var content: [Bool] = []
     }
 
-    /// Splits an `-e` capture into rows, tracking SGR state: dim (2), grey
-    /// foregrounds (90, 256-colour greys, near-grey truecolor) and inverse
-    /// video (7) mark characters as not-content.
+    /// Splits an `-e` capture into rows, tracking SGR state: dim (2), italic
+    /// (3), grey foregrounds (90, 256-colour greys, near-grey truecolor) and
+    /// inverse video (7) mark characters as not-content. Hermes draws its
+    /// placeholder suggestions in italic yellow ("❯ Draft a reply to the
+    /// last email in my inbox"): read as typed, every message to it looked
+    /// stuck in the box — Enter again, then "Not delivered".
     static func rows(_ capture: String) -> [Row] {
         var rows: [Row] = []
         for rawLine in capture.split(separator: "\n", omittingEmptySubsequences: false) {
             var row = Row()
-            var dim = false, grey = false, inverse = false
+            var dim = false, grey = false, inverse = false, italic = false
             var it = rawLine.unicodeScalars.makeIterator()
             var pending: Unicode.Scalar? = nil
             func next() -> Unicode.Scalar? {
@@ -1019,7 +1022,7 @@ enum AgentInputBox {
                             params.unicodeScalars.append(p)
                         }
                         if final == "m" {
-                            applySGR(params, dim: &dim, grey: &grey, inverse: &inverse)
+                            applySGR(params, dim: &dim, grey: &grey, inverse: &inverse, italic: &italic)
                         }
                     } else if k == "]" {
                         // OSC: up to BEL or ST.
@@ -1034,7 +1037,7 @@ enum AgentInputBox {
                 row.text.unicodeScalars.append(c)
                 // Content per Character: combining scalars ride on the last.
                 if row.content.count < row.text.count {
-                    row.content.append(!(dim || grey || inverse))
+                    row.content.append(!(dim || grey || inverse || italic))
                 }
             }
             rows.append(row)
@@ -1042,15 +1045,18 @@ enum AgentInputBox {
         return rows
     }
 
-    private static func applySGR(_ params: String, dim: inout Bool, grey: inout Bool, inverse: inout Bool) {
+    private static func applySGR(_ params: String, dim: inout Bool, grey: inout Bool, inverse: inout Bool,
+                                 italic: inout Bool) {
         let p = params.isEmpty ? [0] : params.split(separator: ";", omittingEmptySubsequences: false)
             .map { Int($0) ?? 0 }
         var i = 0
         while i < p.count {
             switch p[i] {
-            case 0: dim = false; grey = false; inverse = false
+            case 0: dim = false; grey = false; inverse = false; italic = false
             case 2: dim = true
             case 22: dim = false
+            case 3: italic = true
+            case 23: italic = false
             case 7: inverse = true
             case 27: inverse = false
             case 90: grey = true
