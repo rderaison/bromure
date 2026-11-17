@@ -492,6 +492,33 @@ struct HermesAgentTests {
         #expect(items.allSatisfy { $0.timestamp != nil })
     }
 
+    /// A session leased to a Hermes CLI with no tab (a one-shot
+    /// `hermes chat -Q`) fell through to "the one Hermes in a tab": its
+    /// transcript was reported to that tab, which then pinned -- and resumed
+    /// -- a conversation that wasn't its own.
+    @Test("a session leased to a CLI without a tab belongs to no tab; only an unleased one is guessed")
+    func hookFindTab() throws {
+        let dir = try tempDir()
+        let out = try runHook("DIR = \(String(reflecting: dir.path))\n" + #"""
+        import json, os
+        home = os.path.join(DIR, "home"); os.makedirs(os.path.join(home, "runtime"), exist_ok=True)
+        TAB = {"pid": 11, "TMUX": "/tmp/tmux-1000/default,1,0", "TMUX_PANE": "%2"}
+        pane_of = lambda pid: TAB if pid == 11 else None
+        json.dump({"entries": [
+            {"session_id": "s-tab", "pid": 11},
+            {"session_id": "s-oneshot", "pid": 22},
+            {"session_id": "other", "pid": 33, "metadata": {"live_session_id": "s-live"}},
+        ]}, open(os.path.join(home, "runtime", "active_sessions.json"), "w"))
+        listdir = os.listdir
+        os.listdir = lambda p: [] if p == "/proc" else listdir(p)
+        for sid in ("s-tab", "s-oneshot", "s-live", "s-unknown"):
+            tab, leased = find_tab(home, sid)
+            print(sid, tab["TMUX_PANE"] if tab else None, leased)
+        """#, dir: dir)
+        #expect(out.split(separator: "\n").map(String.init) == [
+            "s-tab %2 True", "s-oneshot None True", "s-live None True", "s-unknown None False"])
+    }
+
     @Test("the hook reports the tab's state from the session's own CLI; a subagent's session reports nothing")
     func hookStatus() throws {
         let dir = try tempDir()

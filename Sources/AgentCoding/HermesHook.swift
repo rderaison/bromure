@@ -101,17 +101,24 @@ extension Profile {
         except (OSError, ValueError, AttributeError):
             entries = []
         if sid:
+            named = False
             for e in entries:
                 if not isinstance(e, dict):
                     continue
                 meta = e.get("metadata") if isinstance(e.get("metadata"), dict) else {}
                 if sid in (str(e.get("session_id") or ""), str(meta.get("live_session_id") or "")):
+                    named = True
                     try:
                         tab = pane_of(int(e.get("pid")))
                     except (TypeError, ValueError):
                         tab = None
                     if tab:
                         return tab, True
+            # Leased to a CLI with no tab (a one-shot `hermes chat -Q`, a
+            # script, a cron run): no tab's chat. Guessing "the one tab"
+            # pinned that session to whichever tab was open.
+            if named:
+                return None, True
         # No record: the one Hermes CLI with a pane, if only one.
         found, me = {}, os.getpid()
         try:
