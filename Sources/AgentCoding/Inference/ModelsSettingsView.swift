@@ -1176,11 +1176,17 @@ private struct ProviderConfigPopover: View {
                     .buttonStyle(.borderedProminent).controlSize(.regular)
                     Text("Interactive login in a temporary VM — no API key needed.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("or paste an API key").font(.caption2).foregroundStyle(.tertiary)
+                    if !provider.isSignInOnly {
+                        Text("or paste an API key").font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
 
-            SecureField("API key", text: $apiKey).textFieldStyle(.roundedBorder)
+            if provider.isSignInOnly {
+                Text("Powers Hermes Agent only.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                SecureField("API key", text: $apiKey).textFieldStyle(.roundedBorder)
+            }
 
             if apiKey.isEmpty, saved == nil {
                 Text("Not configured yet.").font(.caption).foregroundStyle(.tertiary)
@@ -1344,6 +1350,8 @@ enum ProviderModels {
         case .xai:      return ["grok-4", "grok-4-fast", "grok-3"]
         case .zai:      return ["glm-5.3", "glm-5.3-flash", "glm-4.6"]
         case .moonshot: return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
+        // The Portal carries OpenRouter-style ids (Hermes's curated list).
+        case .nous:     return ["anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "openai/gpt-5.5"]
         // OpenRouter's catalog is fetched live (its /models endpoint); these
         // are the ids its API docs use as examples, so the picker is never empty.
         case .openrouter: return ["anthropic/claude-sonnet-4.6", "openai/gpt-5.2"]

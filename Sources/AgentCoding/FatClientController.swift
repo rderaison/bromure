@@ -4715,6 +4715,10 @@ final class RemoteHostWindow: NSWindow {
                 kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
                 onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
+                nousAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["hermes"]?.registeredAt },
+                nousReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["hermes"]?.reauthRequiredAt },
+                onRegisterNous: { [weak self] in self?.beginRemoteRegistration(.nous, id) },
+                onForgetNous: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "hermes", profileID: id) },
                 localModelsRemoteAny: modelBackend,
                 modelsPane: .workspace(global: remoteGlobalModels),
                 initialCategory: pane)

@@ -1943,6 +1943,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if engine.kimiSubscriptionStore.hasProfileRecord(baseID) {
                     try? engine.kimiSubscriptionStore.alias(clone.id, to: baseID)
                 }
+                if engine.nousSubscriptionStore.hasProfileRecord(baseID) {
+                    try? engine.nousSubscriptionStore.alias(clone.id, to: baseID)
+                }
             }
             profiles = store.loadAll()
             refreshSidebar()
@@ -1987,10 +1990,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     try? engine.codexSubscriptionStore.forget(for: id)
                     try? engine.grokSubscriptionStore.forget(for: id)
                     try? engine.kimiSubscriptionStore.forget(for: id)
+                    try? engine.nousSubscriptionStore.forget(for: id)
                     engine.claudeSubscriptionStore.unregisterBogusKeys(for: id)
                     engine.codexSubscriptionStore.unregisterBogusKeys(for: id)
                     engine.grokSubscriptionStore.unregisterBogusKeys(for: id)
                     engine.kimiSubscriptionStore.unregisterBogusKeys(for: id)
+                    engine.nousSubscriptionStore.unregisterBogusKeys(for: id)
                 }
                 self.profiles = self.store.loadAll()
                 self.refreshSidebar()
@@ -3305,6 +3310,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if e.codexSubscriptionStore.hasCredential(for: profile.id)  { s.insert(.openai) }
         if e.grokSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.xai) }
         if e.kimiSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.moonshot) }
+        if e.nousSubscriptionStore.hasCredential(for: profile.id)   { s.insert(.nous) }
         return s
     }
 
@@ -6812,6 +6818,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                  engine.kimiSubscriptionStore.reauthRequiredAt(for: pid),
                                  health: engine.kimiSubscriptionStore.health(for: pid),
                                  hasOwn: engine.kimiSubscriptionStore.hasProfileRecord) { out["kimi"] = e }
+                if let e = entry(engine.nousSubscriptionStore.record(for: pid)?.savedAt,
+                                 engine.nousSubscriptionStore.reauthRequiredAt(for: pid),
+                                 health: engine.nousSubscriptionStore.health(for: pid),
+                                 hasOwn: engine.nousSubscriptionStore.hasProfileRecord) { out["hermes"] = e }
                 // How each subscription agent authenticated at the workspace's
                 // last launch — "api_key_fallback" / "sign_in_needed" make a
                 // signed-out subscription visible instead of silently billed.
@@ -6851,6 +6861,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
         case .kimi:
             let s = e.kimiSubscriptionStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .nous:
+            let s = e.nousSubscriptionStore
             try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
         }
         FileHandle.standardError.write(Data(
@@ -10411,6 +10424,15 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 try? self?.mitmEngine?.kimiSubscriptionStore.forget(for: nil)
                 NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
             },
+            nousAccountSavedAt: { [weak self] in self?.mitmEngine?.nousSubscriptionStore.record(for: nil)?.savedAt },
+            nousReauthRequiredAt: { [weak self] in self?.mitmEngine?.nousSubscriptionStore.reauthRequiredAt(for: nil) },
+            onRegisterNous: { [weak self] in
+                self?.beginSubscriptionRegistration(provider: .nous, scope: .alwaysShared)
+            },
+            onForgetNous: { [weak self] in
+                try? self?.mitmEngine?.nousSubscriptionStore.forget(for: nil)
+                NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+            },
             onFetchFusionModels: { provider, authMode, apiKey, completion in
                 Task {
                     let m = await Fusion.listModels(provider: provider, authMode: authMode,
@@ -10471,6 +10493,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             kimiAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["kimi"]?.registeredAt },
             onRegisterKimi: { [weak window] in window?.beginRemoteRegistration(.kimi, nil) },
             onForgetKimi: { [weak controller] in controller?.forgetRemoteSubscription(provider: "kimi", profileID: nil) },
+            nousAccountSavedAt: { [weak controller] in controller?.subscriptionStatus["hermes"]?.registeredAt },
+            nousReauthRequiredAt: { [weak controller] in controller?.subscriptionStatus["hermes"]?.reauthRequiredAt },
+            onRegisterNous: { [weak window] in window?.beginRemoteRegistration(.nous, nil) },
+            onForgetNous: { [weak controller] in controller?.forgetRemoteSubscription(provider: "hermes", profileID: nil) },
             localModelsRemoteAny: controller?.modelBackend(),
             // The remote's Preferences → Models: edited as a draft here, PUT
             // back on Save (keys the user didn't retype stay redacted → kept).
@@ -11136,6 +11162,26 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // per-profile login if it has one, otherwise the shared/global
                     // one it was inheriting (so "Log out" is never a no-op).
                     let store = self?.mitmEngine?.kimiSubscriptionStore
+                    if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
+                    else { try? store?.forget(for: nil) }
+                    NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
+                }
+            },
+            nousAccountSavedAt: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    self?.mitmEngine?.nousSubscriptionStore.record(for: p.id)?.savedAt
+                        ?? self?.mitmEngine?.nousSubscriptionStore.record(for: nil)?.savedAt
+                }
+            },
+            nousReauthRequiredAt: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.mitmEngine?.nousSubscriptionStore.reauthRequiredAt(for: p.id) }
+            },
+            onRegisterNous: (editing ?? initialDraft).map { p in
+                { [weak self] in self?.beginSubscriptionRegistration(provider: .nous, scope: .askPerSession(p.id)) }
+            },
+            onForgetNous: (editing ?? initialDraft).map { p in
+                { [weak self] in
+                    let store = self?.mitmEngine?.nousSubscriptionStore
                     if store?.hasProfileRecord(p.id) == true { try? store?.forget(for: p.id) }
                     else { try? store?.forget(for: nil) }
                     NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
@@ -12583,6 +12629,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             seedCodexAuthFile(for: profile)
             seedGrokAuthFile(for: profile)
             seedKimiAuthFile(for: profile)
+            seedNousAuthFile(for: profile)
         }
 
         // Rewrite api_key.env / proxy.env / MCP configs into the stable
@@ -12609,6 +12656,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 seedCodexAuthFile(for: profile, homeRoot: files)
                 seedGrokAuthFile(for: profile, homeRoot: files)
                 seedKimiAuthFile(for: profile, homeRoot: files)
+                seedNousAuthFile(for: profile, homeRoot: files)
                 try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -13242,6 +13290,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             seedCodexAuthFile(for: profile)
             seedGrokAuthFile(for: profile)
             seedKimiAuthFile(for: profile)
+            seedNousAuthFile(for: profile)
         }
         if let engine = mitmEngine {
             // Tell the trace store what level + session id to record
@@ -13418,6 +13467,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         seedCodexAuthFile(for: profile, homeRoot: files)
                         seedGrokAuthFile(for: profile, homeRoot: files)
                         seedKimiAuthFile(for: profile, homeRoot: files)
+                        seedNousAuthFile(for: profile, homeRoot: files)
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -16819,6 +16869,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: profile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: profile.id)
         mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: profile.id)
+        mitmEngine?.nousSubscriptionStore.unregisterBogusKeys(for: profile.id)
         shellBridges[profile.id]?.stop()
         shellBridges.removeValue(forKey: profile.id)
         BinaryIdentityService.shared.detach(profileID: profile.id, socketDevice: nil)
@@ -17667,6 +17718,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 self.seedCodexAuthFile(for: profile)
                 self.seedGrokAuthFile(for: profile)
                 self.seedKimiAuthFile(for: profile)
+                self.seedNousAuthFile(for: profile)
             }
             if let engine = self.mitmEngine, let scriptURL = self.bridgeScriptURL {
                 sessionDisk.mitmAssets = SessionDisk.MitmSessionAssets(
@@ -17697,6 +17749,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         self.seedCodexAuthFile(for: profile, homeRoot: files)
                         self.seedGrokAuthFile(for: profile, homeRoot: files)
                         self.seedKimiAuthFile(for: profile, homeRoot: files)
+                        self.seedNousAuthFile(for: profile, homeRoot: files)
                         try store.finalizeHomeSeed(
                             for: profile, seedDir: seedDir,
                             anthropicEnvKey: plan.fakeForAnthropic()
@@ -18553,6 +18606,59 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Hermes on Nous Portal: the login, as stand-ins, for the guest's
+    /// `~/.hermes/auth.json` (`providers.nous`), so its Hermes runs without
+    /// signing in. The access stand-in is the invoke JWT re-minted with a
+    /// far-future `exp` (Hermes never refreshes); the proxy swaps it on the
+    /// Nous hosts and answers a refresh itself. Seeded as a sidecar
+    /// (`Profile.hermesNousSidecar`) the managed .bashrc merges into
+    /// auth.json — that file also holds the user's other Hermes logins, so
+    /// the seed (which overwrites what it manages) never owns it. A live
+    /// (virtiofs) home also gets the merge here, at once. Either way an
+    /// auth.json already holding a Bromure stand-in is left alone (it stays
+    /// good: the proxy knows the mark). `homeRoot`: see seedCodexAuthFile.
+    func seedNousAuthFile(for profile: Profile, homeRoot: URL? = nil) {
+        let home = homeRoot ?? store.homeDirectory(for: profile)
+        let dir = home.appendingPathComponent(".hermes", isDirectory: true)
+        let sidecar = home.appendingPathComponent(Profile.hermesNousSidecar)
+        guard let engine = mitmEngine, SessionDisk.hermesUsesNous(profile),
+              let real = engine.nousSubscriptionStore.record(for: profile.id) else {
+            // Off Nous (or signed out): no stand-ins left behind. (An ext4
+            // seed's manifest deletes it in the guest.)
+            if homeRoot == nil { try? FileManager.default.removeItem(at: sidecar) }
+            return
+        }
+        let fresh = NousStandIn.authFile(existing: nil, record: real, profileID: profile.id)
+        guard let nous = (fresh["providers"] as? [String: Any])?["nous"] as? [String: Any],
+              let access = nous["access_token"] as? String else { return }
+        engine.nousSubscriptionStore.registerBogusKey(access, for: profile.id)
+        func write(_ obj: [String: Any], to url: URL) {
+            guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+            else { return }
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: url.path)
+        }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: dir.path)
+        write(nous, to: sidecar)
+        guard homeRoot == nil else { return }
+        let url = dir.appendingPathComponent("auth.json")
+        var existing: [String: Any]? = nil
+        if let data = try? Data(contentsOf: url) {
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return   // a file we can't read: never written over
+            }
+            if let held = (obj["providers"] as? [String: Any])?["nous"] as? [String: Any],
+               let a = held["access_token"] as? String, NousStandIn.isAccess(a) {
+                return
+            }
+            existing = obj
+        }
+        write(NousStandIn.authFile(existing: existing, record: real, profileID: profile.id), to: url)
+    }
+
     func seedKimiAuthFile(for profile: Profile, homeRoot: URL? = nil) {
         guard let engine = mitmEngine,
               profile.allToolSpecs.contains(where: { $0.tool == .kimi && $0.authMode == .subscription }),
@@ -19084,6 +19190,7 @@ extension ModelProvider {
         case .openai:    return "codex"
         case .xai:       return "grok"
         case .moonshot:  return "kimi"
+        case .nous:      return "hermes"
         case .zai, .bedrock, .openrouter, .custom: return nil
         }
     }
@@ -19106,6 +19213,7 @@ extension ACAppDelegate {
         case .openai:    return e.codexSubscriptionStore.health(for: profileID)
         case .xai:       return e.grokSubscriptionStore.health(for: profileID)
         case .moonshot:  return e.kimiSubscriptionStore.health(for: profileID)
+        case .nous:      return e.nousSubscriptionStore.health(for: profileID)
         case .zai, .bedrock, .openrouter, .custom: return nil
         }
     }

@@ -2317,7 +2317,29 @@ public final class SessionDisk {
         case .xai:       return "xai"
         case .zai:       return "zai"
         case .custom:    return "custom"
+        case .nous:      return "nous"
         }
+    }
+
+    /// Whether this workspace's Hermes runs on its Nous Portal sign-in: the
+    /// Models pane switched it to Nous, or the workspace picked Hermes's
+    /// subscription (Nous is its only one). Never in local mode.
+    static func hermesUsesNous(_ profile: Profile) -> Bool {
+        guard let spec = profile.allToolSpecs.first(where: { $0.tool == .hermes }) else { return false }
+        return hermesUsesNous(spec)
+    }
+
+    static func hermesUsesNous(_ spec: Profile.ToolSpec) -> Bool {
+        guard spec.tool == .hermes, spec.authMode != .local else { return false }
+        return spec.authMode == .subscription || spec.effectiveOmpProvider == .nous
+    }
+
+    /// The variable Hermes reads its provider key from ("" on Nous: a
+    /// sign-in, kept in auth.json — no key at all).
+    static func hermesKeyVar(_ spec: Profile.ToolSpec) -> String {
+        if hermesUsesNous(spec) { return "" }
+        return (spec.authMode == .local || spec.effectiveOmpProvider == .custom)
+            ? "OPENAI_API_KEY" : spec.effectiveOmpProvider.apiKeyEnvVar
     }
 
     /// What Hermes runs on in this workspace, as the `model.*` keys of its
@@ -2337,6 +2359,10 @@ public final class SessionDisk {
             model["key_env"] = "OPENAI_API_KEY"
             let local = chosen.isEmpty ? (profile.localAgentModelName ?? spec.localModelID ?? "") : chosen
             if !local.isEmpty { model["default"] = local }
+        } else if hermesUsesNous(spec) {
+            // The Portal's own base URL comes with the login (auth.json).
+            model["provider"] = hermesProviderID(.nous)
+            if !chosen.isEmpty { model["default"] = chosen }
         } else {
             let prov = spec.effectiveOmpProvider
             model["provider"] = hermesProviderID(prov)
@@ -2350,9 +2376,7 @@ public final class SessionDisk {
         }
         // The variable Hermes reads its provider's key from: the wrapper sets
         // it from `hermesKeyVariable` for the launch.
-        let keyVar = (spec.authMode == .local || spec.effectiveOmpProvider == .custom)
-            ? "OPENAI_API_KEY" : spec.effectiveOmpProvider.apiKeyEnvVar
-        return ["model": model, "adopt_external_logins": false, "key_var": keyVar]
+        return ["model": model, "adopt_external_logins": false, "key_var": hermesKeyVar(spec)]
     }
 
     /// Provider key variables in the shared guest env that Hermes must not
@@ -2363,8 +2387,7 @@ public final class SessionDisk {
     /// generation, …) stay. Pure -- see `HermesAgentTests`.
     static func hermesHiddenKeyEnvVars(profile: Profile) -> [String] {
         guard let spec = profile.allToolSpecs.first(where: { $0.tool == .hermes }) else { return [] }
-        let used: String = (spec.authMode == .local || spec.effectiveOmpProvider == .custom)
-            ? "OPENAI_API_KEY" : spec.effectiveOmpProvider.apiKeyEnvVar
+        let used = hermesKeyVar(spec)
         var all: [String] = []
         for v in Profile.Tool.allCases.map(\.apiKeyEnvVar)
             + Profile.OmpProvider.allCases.map(\.apiKeyEnvVar)

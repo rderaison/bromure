@@ -1274,8 +1274,14 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
         case xai
         case zai
         case custom
+        /// Nous Portal (a subscription sign-in) — Hermes only: omp has no
+        /// such provider, and the omp picker leaves it out (`ompChoices`).
+        case nous
 
         public static let `default`: OmpProvider = .anthropic
+
+        /// The providers omp itself can be switched to.
+        public static var ompChoices: [OmpProvider] { allCases.filter { $0 != .nous } }
 
         public var displayName: String {
             switch self {
@@ -1284,6 +1290,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .xai:       return "xAI (Grok)"
             case .zai:       return "z.ai (GLM)"
             case .custom:    return "Custom (OpenAI-compatible)"
+            case .nous:      return "Nous Portal"
             }
         }
 
@@ -1294,6 +1301,8 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .openai, .custom:  return "OPENAI_API_KEY"
             case .xai:              return "XAI_API_KEY"
             case .zai:              return "ZAI_API_KEY"
+            // A sign-in, not a key: Hermes reads its login from auth.json.
+            case .nous:             return ""
             }
         }
 
@@ -1305,7 +1314,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .openai:    return "api.openai.com"
             case .xai:       return "api.x.ai"
             case .zai:       return "api.z.ai"
-            case .custom:    return ""
+            case .custom, .nous: return ""
             }
         }
 
@@ -1317,7 +1326,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .openai:    return "gpt-5.2"
             case .xai:       return "grok"
             case .zai:       return "glm-5.3-flash"
-            case .custom:    return nil
+            case .custom, .nous: return nil
             }
         }
 
@@ -3078,6 +3087,7 @@ public struct Profile: Codable, Identifiable, Equatable, Sendable {
             case .openai:    return ["openai.com", "chatgpt.com"]
             case .xai:       return ["x.ai", "grok.com"]
             case .zai:       return ["z.ai"]
+            case .nous:      return ["nousresearch.com"]
             case .custom:
                 if let h = spec.ompBaseURL.flatMap({ URL(string: $0)?.host }) { return [h.lowercased()] }
                 return []
@@ -6185,13 +6195,14 @@ public final class ProfileStore {
         ".aws/config", ".docker/config.json", ".config/gh/hosts.yml",
         ".config/glab-cli/config.yml", ".codex/auth.json", ".grok/auth.json",
         ".kimi-code/credentials/kimi-code.json", ".claude/.credentials.json",
+        Profile.hermesNousSidecar,
     ]
     /// Relpaths chmod 755 (scripts).
     private static let seed755: Set<String> = [".bromure/agent-status.sh"]
     /// Directories created 0700 (everything else 0755).
     private static let seedDir700: Set<String> = [
         ".kube", ".aws", ".claude", ".docker", ".ssh", ".codex", ".grok",
-        ".kimi-code", ".kimi-code/credentials",
+        ".kimi-code", ".kimi-code/credentials", ".hermes",
     ]
 
     /// Stage the managed dotfiles into `<seedDir>/files`. Clears previous
@@ -6300,6 +6311,10 @@ public final class ProfileStore {
         }
         if !present.contains(".docker/config.json") {
             cleanupLines.append("j\t-\t.docker/config.json\t_bromureManaged")
+        }
+        // Hermes's Nous stand-ins, once Hermes is off Nous Portal.
+        if !present.contains(Profile.hermesNousSidecar) {
+            cleanupLines.append("d\t-\t\(Profile.hermesNousSidecar)")
         }
         // Claude's OAuth stand-in, when account features are off again.
         if !present.contains(".claude/.credentials.json") {
@@ -6827,6 +6842,55 @@ public final class ProfileStore {
     BROMURE_OMP_MODELS
     fi
 
+    # Hermes on Nous Portal: the host seeds the login's stand-ins (never the
+    # real tokens) as ~/\(Profile.hermesNousSidecar); they go into Hermes's
+    # own ~/.hermes/auth.json, next to whatever else it holds, unless that
+    # already has a Bromure Nous stand-in (an older one is still good: the
+    # proxy knows its mark). An auth.json it can't read is never written over.
+    if [ -r "$HOME/\(Profile.hermesNousSidecar)" ]; then
+        python3 - "$HOME/.hermes/auth.json" "$HOME/\(Profile.hermesNousSidecar)" <<'BROMURE_NOUS_AUTH' 2>/dev/null || true
+    import json, os, sys
+    dest, side = sys.argv[1], sys.argv[2]
+    try:
+        with open(side) as f:
+            nous = json.load(f)
+    except Exception:
+        sys.exit(0)
+    if not isinstance(nous, dict) or not nous.get("access_token"):
+        sys.exit(0)
+    try:
+        with open(dest) as f:
+            doc = json.load(f)
+    except FileNotFoundError:
+        doc = {"version": 1}
+    except Exception:
+        sys.exit(0)
+    if not isinstance(doc, dict):
+        sys.exit(0)
+    providers = doc.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+    held = providers.get("nous")
+    cur = held.get("access_token") if isinstance(held, dict) else ""
+    cur = cur if isinstance(cur, str) else ""
+    if cur.startswith("nous-brm-") or cur.rsplit(".", 1)[-1].startswith("\(SubscriptionFakeMint.jwtSignatureMarker)"):
+        sys.exit(0)
+    providers["nous"] = nous
+    doc["providers"] = providers
+    if not doc.get("active_provider"):
+        doc["active_provider"] = "nous"
+    pool = doc.get("credential_pool")
+    if isinstance(pool, dict):
+        pool.pop("nous", None)
+    os.makedirs(os.path.dirname(dest), mode=0o700, exist_ok=True)
+    tmp = dest + ".bromure.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(doc, f, indent=2)
+    os.replace(tmp, dest)
+    BROMURE_NOUS_AUTH
+    fi
+
     # Stay in $HOME (~ubuntu) on shell start. Shared folders are
     # available as ~/<basename> symlinks if you want them.
 
@@ -7342,6 +7406,8 @@ public final class ProfileStore {
                 codex)  codex login ;;
                 grok)   grok login ;;
                 kimi)   kimi login ;;
+                # Hermes signs in to Nous Portal (RegistrationLaunch.nousLoginCommand).
+                hermes) rm -f ~/.hermes/shared/nous_auth.json; hermes auth add nous --type oauth ;;
                 *)      "$BROMURE_AC_TOOL" ;;
             esac
         fi

@@ -716,6 +716,11 @@ struct ProfileEditorView: View {
     let kimiAccountSavedAt: (() -> Date?)?
     let onRegisterKimi: (() -> Void)?
     let onForgetKimi: (() -> Void)?
+    /// Nous Portal (Hermes Agent) counterparts.
+    let nousAccountSavedAt: (() -> Date?)?
+    let nousReauthRequiredAt: (() -> Date?)?
+    let onRegisterNous: (() -> Void)?
+    let onForgetNous: (() -> Void)?
     /// Fat client only: a `RemoteModelBackend` (macOS) routing the Local Models
     /// pane to the remote server (RAM gate, downloads, installed state). Stored
     /// type-erased because Swift forbids `#if` in an init parameter list and
@@ -756,6 +761,10 @@ struct ProfileEditorView: View {
         kimiAccountSavedAt: (() -> Date?)? = nil,
         onRegisterKimi: (() -> Void)? = nil,
         onForgetKimi: (() -> Void)? = nil,
+        nousAccountSavedAt: (() -> Date?)? = nil,
+        nousReauthRequiredAt: (() -> Date?)? = nil,
+        onRegisterNous: (() -> Void)? = nil,
+        onForgetNous: (() -> Void)? = nil,
         onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil,
         localModelsRemoteAny: Any? = nil,
         modelsPane: ModelsPaneMode? = nil,
@@ -791,6 +800,10 @@ struct ProfileEditorView: View {
         self.kimiAccountSavedAt = kimiAccountSavedAt
         self.onRegisterKimi = onRegisterKimi
         self.onForgetKimi = onForgetKimi
+        self.nousAccountSavedAt = nousAccountSavedAt
+        self.nousReauthRequiredAt = nousReauthRequiredAt
+        self.onRegisterNous = onRegisterNous
+        self.onForgetNous = onForgetNous
         self.onFetchFusionModels = onFetchFusionModels
         self.localModelsRemoteAny = localModelsRemoteAny
         self.modelsPane = modelsPane
@@ -1337,6 +1350,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexAccountSavedAt?()
                 case .xai:       return grokAccountSavedAt?()
                 case .moonshot:  return kimiAccountSavedAt?()
+                case .nous:      return nousAccountSavedAt?()
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
@@ -1346,6 +1360,7 @@ struct ProfileEditorView: View {
                 case .openai:    onRegisterCodex?()
                 case .xai:       onRegisterGrok?()
                 case .moonshot:  onRegisterKimi?()
+                case .nous:      onRegisterNous?()
                 case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
@@ -1355,6 +1370,7 @@ struct ProfileEditorView: View {
                 case .openai:    onForgetCodex?()
                 case .xai:       onForgetGrok?()
                 case .moonshot:  onForgetKimi?()
+                case .nous:      onForgetNous?()
                 case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
@@ -1375,6 +1391,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexReauthRequiredAt?()
                 case .xai:       return grokReauthRequiredAt?()
                 case .moonshot:  return kimiReauthRequiredAt?()
+                case .nous:      return nousReauthRequiredAt?()
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
@@ -1384,6 +1401,7 @@ struct ProfileEditorView: View {
                 case .openai:    return onForgetCodex != nil
                 case .xai:       return onForgetGrok != nil
                 case .moonshot:  return onForgetKimi != nil
+                case .nous:      return onForgetNous != nil
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
             },
@@ -1702,8 +1720,11 @@ struct ProfileEditorView: View {
                               onRegisterGrok, onForgetGrok)
         case .kimi:   return (kimiAccountSavedAt?(), kimiReauthRequiredAt?(),
                               onRegisterKimi, onForgetKimi)
+        // Hermes's subscription is Nous Portal's sign-in.
+        case .hermes: return (nousAccountSavedAt?(), nousReauthRequiredAt?(),
+                              onRegisterNous, onForgetNous)
         // omp is API-key only (no OAuth subscription) — nothing to register.
-        case .omp, .hermes: return (nil, nil, nil, nil)
+        case .omp: return (nil, nil, nil, nil)
         }
     }
 
@@ -1774,7 +1795,7 @@ struct ProfileEditorView: View {
         case .workspace(let global): settings = draft.modelOverride?.resolved(over: global) ?? global
         }
         let hooks = modelsSubscriptionHooks
-        let subscribed = Set([ModelProvider.anthropic, .openai, .xai, .moonshot]
+        let subscribed = Set([ModelProvider.anthropic, .openai, .xai, .moonshot, .nous]
             .filter { hooks.savedAt($0) != nil })
         return draft.overlaidWithGlobalModels(settings, subscribed: subscribed)
         #else
@@ -6713,7 +6734,8 @@ private struct ToolConfigCard: View {
         Picker(NSLocalizedString("Provider", comment: "omp upstream provider"),
                selection: Binding(get: { spec.effectiveOmpProvider },
                                   set: { spec.ompProvider = $0 })) {
-            ForEach(Profile.OmpProvider.allCases, id: \.self) { p in
+            ForEach(spec.tool == .hermes ? Profile.OmpProvider.allCases : Profile.OmpProvider.ompChoices,
+                    id: \.self) { p in
                 Text(p.displayName).tag(p)
             }
         }
@@ -6789,8 +6811,9 @@ private struct ToolConfigCard: View {
                     ForEach(Profile.AuthMode.allCases, id: \.self) { m in
                         if m == .bedrock && tool != .claude {
                             EmptyView()
-                        } else if m == .subscription && tool.switchesProvider {
-                            // omp / Hermes are API-key only (no OAuth subscription).
+                        } else if m == .subscription && tool == .omp {
+                            // omp is API-key only (no OAuth subscription);
+                            // Hermes's subscription is its Nous Portal sign-in.
                             EmptyView()
                         } else {
                             let localDisabled = (m == .local && localModels.isEmpty
