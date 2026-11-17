@@ -25,7 +25,11 @@
 # from Sources/AgentCoding/Resources/img-catalog.json (the canonical
 # source) — that's where the non-free software (Claude Code, Codex, Grok,
 # gcloud) is declared, since the published image must contain free
-# software only.
+# software only. Steps under `postinstall_versioned` (with `min_version` /
+# `max_version`, app versions, inclusive) are published in the same file
+# under a key older apps ignore -- only the apps in range run them -- and
+# are covered by a second signature, `signature_versioned`; `signature`
+# keeps covering `postinstall` alone, so older apps keep verifying.
 #
 # Sequence (mirrors the design):
 #   1. Build the image with the latest Ubuntu packages
