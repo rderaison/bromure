@@ -7328,13 +7328,49 @@ public final class ProfileStore {
             local -x HERMES_HOME BROMURE_HERMES_TASK="$_t"
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
         fi
-        _bromure_hermes_apply "${_u[@]}"
+        # A sign-in machine only runs `hermes auth add nous`: the workspace
+        # settings (provider, MCP servers, hooks) are a dozen `hermes config`
+        # runs for nothing there, ahead of the sign-in page.
+        [ "${BROMURE_AC_REGISTER:-}" = 1 ] || _bromure_hermes_apply "${_u[@]}"
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
         else
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY hermes "$@"
         fi
+    }
+
+    #  • The Nous Portal sign-in (RegistrationLaunch.nousLoginCommand). The
+    #    shared copy Hermes keeps of its last Nous login goes first: with one
+    #    there, `auth add` stops to ask "Import these credentials? [Y/n]" --
+    #    nobody answers that in a hidden tab. In a throwaway sign-in machine
+    #    the home is a folder shared from the Mac, and Hermes's first run
+    #    from /opt writes its per-user runtime (~470 MB) into its data root:
+    #    over that share, a minute or more before the sign-in page. There it
+    #    gets a data root on the machine's own disk, and the login is copied
+    #    to ~/.hermes/auth.json, where the Mac picks it up, as it lands.
+    _bromure_nous_signin() {
+        rm -f ~/.hermes/shared/nous_auth.json
+        if [ "${BROMURE_AC_REGISTER:-}" != 1 ] || ! _bromure_hermes_opt; then
+            hermes auth add nous --type oauth; return
+        fi
+        local -x HERMES_HOME=/var/tmp/bromure-hermes-signin
+        local _rc _w
+        mkdir -p "$HERMES_HOME" ~/.hermes && chmod 700 "$HERMES_HOME" || return 1
+        rm -f "$HERMES_HOME/shared/nous_auth.json"
+        ( while sleep 1; do
+              if [ -s "$HERMES_HOME/auth.json" ] && [ "$HERMES_HOME/auth.json" -nt ~/.hermes/auth.json ]; then
+                  install -m 600 "$HERMES_HOME/auth.json" ~/.hermes/auth.json
+              fi
+          done ) &
+        _w=$!
+        hermes auth add nous --type oauth
+        _rc=$?
+        kill "$_w" 2>/dev/null; wait "$_w" 2>/dev/null
+        if [ -s "$HERMES_HOME/auth.json" ] && [ "$HERMES_HOME/auth.json" -nt ~/.hermes/auth.json ]; then
+            install -m 600 "$HERMES_HOME/auth.json" ~/.hermes/auth.json
+        fi
+        return $_rc
     }
 
     # Auto-launch the agent on the FIRST interactive shell of this VM
@@ -7562,7 +7598,7 @@ public final class ProfileStore {
                 grok)   grok login ;;
                 kimi)   kimi login ;;
                 # Hermes signs in to Nous Portal (RegistrationLaunch.nousLoginCommand).
-                hermes) rm -f ~/.hermes/shared/nous_auth.json; hermes auth add nous --type oauth ;;
+                hermes) _bromure_nous_signin ;;
                 *)      "$BROMURE_AC_TOOL" ;;
             esac
         fi

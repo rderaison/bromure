@@ -33,13 +33,15 @@ enum RegistrationLaunch {
     }
 
     /// Hermes's Nous Portal sign-in (a device code; the page opens in this
-    /// Mac's browser through the guest URL relay). The shared copy Hermes
-    /// keeps of its last Nous login goes first: with one there, `auth add`
-    /// stops to ask "Import these credentials? [Y/n]" — nobody answers that
-    /// in a hidden tab, and importing a stand-in would skip the sign-in. It
-    /// only ever holds stand-ins in a Bromure machine.
-    static let nousLoginCommand =
-        "rm -f ~/.hermes/shared/nous_auth.json; hermes auth add nous --type oauth"
+    /// Mac's browser through the guest URL relay): `hermes auth add nous
+    /// --type oauth`, wrapped by the guest `.bashrc` (`_bromure_nous_signin`).
+    /// It drops the shared copy Hermes keeps of its last Nous login first —
+    /// with one there, `auth add` stops to ask "Import these credentials?
+    /// [Y/n]", which nobody answers in a hidden tab — and in a throwaway
+    /// sign-in machine runs Hermes from a data root on the machine's own
+    /// disk, not the home shared from the Mac (Hermes's first run writes
+    /// ~470 MB there), copying the login to `~/.hermes/auth.json`.
+    static let nousLoginCommand = "_bromure_nous_signin"
 
     /// ERE (`ps -eo args= | grep -E`) matching the running login process (native binary or a
     /// `node …/bin/<tool> login` script). The bracketed first letter keeps the
@@ -65,7 +67,11 @@ enum RegistrationLaunch {
         return "if ! tmux has-session -t bromure 2>/dev/null; then echo nosession; exit 0; fi; "
             + "if ps -eo args= 2>/dev/null | grep -qE \(pat); then echo running; exit 0; fi; "
             + "cur=$(tmux display-message -p -t bromure '#{pane_current_command}' 2>/dev/null); "
-            + "case \"$cur\" in bash|sh|zsh|dash|fish|-bash|-sh|-zsh) echo shell ;; "
+            + "case \"$cur\" in bash|sh|zsh|dash|fish|-bash|-sh|-zsh) "
+            // A shell with a child is running something (the wrapper's
+            // own subshells and helpers read as `bash`): not idle.
+            + "pp=$(tmux display-message -p -t bromure '#{pane_pid}' 2>/dev/null); "
+            + "if [ -n \"$pp\" ] && pgrep -P \"$pp\" >/dev/null 2>&1; then echo busy:$cur; else echo shell; fi ;; "
             + "*) echo \"busy:$cur\" ;; esac"
     }
 

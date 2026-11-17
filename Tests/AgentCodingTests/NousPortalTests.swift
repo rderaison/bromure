@@ -387,8 +387,8 @@ struct NousPortalTests {
     @MainActor
     func loginCommand() {
         let cmd = RegistrationLaunch.loginCommand(for: .nous)
-        #expect(cmd.contains("hermes auth add nous --type oauth"))
-        #expect(cmd.hasPrefix("rm -f ~/.hermes/shared/nous_auth.json;"))
+        #expect(cmd == "_bromure_nous_signin")
+        // The guest function itself: HermesAgentTests.nousSignin.
         #expect(ACAppDelegate.loginCommand(for: .nous) == cmd)
         let pattern = RegistrationLaunch.processPattern(for: .nous)
         let re = try! NSRegularExpression(pattern: pattern)
@@ -545,6 +545,6 @@ struct NousPortalTests {
         let seedDir = root.appendingPathComponent("seed")
         try store.writeHomeSeedFiles(for: p, into: seedDir, terminalDefaults: .fallback)
         let rc = try String(contentsOf: seedDir.appendingPathComponent("files/.bashrc"), encoding: .utf8)
-        #expect(rc.contains("hermes) rm -f ~/.hermes/shared/nous_auth.json; hermes auth add nous --type oauth ;;"))
+        #expect(rc.contains("hermes) _bromure_nous_signin ;;"))
     }
 }
