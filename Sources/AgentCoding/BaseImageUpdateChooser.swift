@@ -102,7 +102,7 @@ struct BaseImageUpdateChooserView: View {
                             }
                         }
                         .font(.callout)
-                        .frame(minHeight: 28)
+                        .frame(minHeight: 30)
                     }
                 }
             }
@@ -124,7 +124,7 @@ struct BaseImageUpdateChooserView: View {
 
     /// Room for every row up to 12, then the list scrolls.
     static func listHeight(rows: Int) -> CGFloat {
-        let row: CGFloat = 28, gap: CGFloat = 6
+        let row: CGFloat = 30, gap: CGFloat = 6
         let shown = CGFloat(min(max(rows, 1), 12))
         return shown * row + (shown - 1) * gap
     }
