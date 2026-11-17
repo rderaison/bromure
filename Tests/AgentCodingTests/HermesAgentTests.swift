@@ -326,7 +326,8 @@ struct HermesAgentTests {
         // Never the whole data root: root's .env must stay 0600.
         #expect(!cmd.contains("chmod -R a+rX /opt/hermes\n"))
         #expect(!cmd.contains("chmod -R a+rX /opt/hermes "))
-        #expect(cmd.contains("chmod -R a+rX /opt/hermes/hermes-agent /opt/hermes/tools /opt/hermes/installs"))
+        #expect(cmd.contains("for d in /opt/hermes/hermes-agent /opt/hermes/tools /opt/hermes/installs; do"))
+        #expect(cmd.contains("if [ -d \"$d\" ]; then chmod -R a+rX \"$d\"; fi"))
         // A failed install leaves nothing, so hermes falls back to installing itself.
         #expect(cmd.contains("rm -rf /opt/hermes /usr/local/bin/hermes"))
         let url2 = try tempDir().appendingPathComponent("step.sh")
