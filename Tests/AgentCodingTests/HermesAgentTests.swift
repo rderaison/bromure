@@ -65,7 +65,8 @@ struct HermesAgentTests {
     /// The settings step the wrapper runs, lifted out of the .bashrc and run
     /// against a stand-in `hermes` that logs each `hermes config …` call.
     private func runApply(settings: [String: Any], servers: [String: Any],
-                          home: URL, failing: Bool = false) throws -> [String] {
+                          home: URL, failing: Bool = false, hidden: [String] = [],
+                          status expected: Int32 = 0) throws -> [String] {
         let rc = try renderBashrc()
         let lines = rc.components(separatedBy: "\n")
         let start = try #require(lines.firstIndex { $0.contains("<<'BROMURE_HERMES_APPLY'") })
@@ -77,6 +78,8 @@ struct HermesAgentTests {
         try JSONSerialization.data(withJSONObject: settings).write(to: meta.appendingPathComponent("hermes-settings.json"))
         try JSONSerialization.data(withJSONObject: ["mcpServers": servers])
             .write(to: meta.appendingPathComponent("mcp/claude.json"))
+        try hidden.map { $0 + "\n" }.joined().write(to: meta.appendingPathComponent("hermes-env-unset"),
+                                                     atomically: true, encoding: .utf8)
         let bin = dir.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let log = dir.appendingPathComponent("calls.log")
@@ -90,11 +93,11 @@ struct HermesAgentTests {
         exit 0
         """.write(to: fake, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
-        let (status, diag) = try run("/usr/bin/python3", ["-c", script, "HASH"], env: [
+        let (status, diag) = try run("/usr/bin/python3", ["-c", script], env: [
             "HOME": home.path, "BROMURE_META_DIR": meta.path,
             "PATH": bin.path + ":/usr/bin:/bin",
         ])
-        #expect(status == 0, Comment(rawValue: diag))
+        #expect(status == expected, Comment(rawValue: diag))
         return ((try? String(contentsOf: log, encoding: .utf8)) ?? "")
             .split(separator: "\n").map(String.init)
     }
@@ -117,28 +120,59 @@ struct HermesAgentTests {
         #expect(calls.contains { $0.hasPrefix("config set mcp_servers.browser {") && $0.contains("bromure-browser-mcp.py") })
         // A dotted server name is escaped for Hermes's dotted paths.
         #expect(calls.contains { $0.hasPrefix("config set mcp_servers.docs\\.v2 {\"url\": \"https://mcp.example/x\"") })
-        let marker = home.appendingPathComponent(".hermes/.bromure-applied")
-        #expect((try? String(contentsOf: marker, encoding: .utf8)) == "HASH")
-
         // Next time: a cloud provider (no base URL any more), one server gone.
-        try FileManager.default.removeItem(at: marker)
         let again = try runApply(settings: ["model": ["provider": "anthropic"], "key_var": "ANTHROPIC_API_KEY"],
                                  servers: ["browser": ["command": "python3", "args": ["x"]]], home: home)
         #expect(again.contains("config set model.provider anthropic"))
         #expect(again.contains("config unset model.base_url"))
         #expect(again.contains("config unset model.key_env"))
+        #expect(again.contains("config unset model.api_key"))
         #expect(!again.contains { $0.hasPrefix("config set model.default") })
         #expect(again.contains("config unset mcp_servers.docs\\.v2"))
         #expect(!again.contains("config unset mcp_servers.browser"))
-        // Unsetting what was never set doesn't hold the settings back.
-        #expect((try? String(contentsOf: marker, encoding: .utf8)) == "HASH")
+        // (Unsetting what was never set didn't fail the run: status 0.)
     }
 
-    @Test("a failed `hermes config` leaves the settings to be applied again")
+    @Test("a failed `hermes config` fails the step, so the wrapper doesn't stamp it done")
     func applyFailureRetries() throws {
         let home = try tempDir()
-        _ = try runApply(settings: ["model": ["provider": "xai"]], servers: [:], home: home, failing: true)
-        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".hermes/.bromure-applied").path))
+        _ = try runApply(settings: ["model": ["provider": "xai"]], servers: [:], home: home,
+                         failing: true, status: 3)
+        let rc = try renderBashrc()
+        // Only a successful step is stamped -- with config.yaml and .env as
+        // it left them, so an edit to either re-applies the settings.
+        #expect(rc.contains("python3 - <<'BROMURE_HERMES_APPLY' || return 0"))
+        #expect(rc.contains("_bromure_hermes_stamp > \"$HOME/.hermes/.bromure-applied\""))
+        #expect(rc.contains("cat \"$HOME/.hermes/config.yaml\" 2>/dev/null | sha256sum"))
+        #expect(rc.contains("cat \"$HOME/.hermes/.env\" 2>/dev/null | sha256sum"))
+        // The step's own `hermes config` runs see no other provider's key.
+        #expect(rc.contains("_bromure_hermes_apply \"${_u[@]}\""))
+        #expect(rc.contains("command env \"$@\" -u BROMURE_HERMES_API_KEY python3 -"))
+    }
+
+    @Test("a stand-in for a hidden key left in Hermes's .env is dropped; the user's own keys stay")
+    func envScrub() throws {
+        let home = try tempDir()
+        let hermes = home.appendingPathComponent(".hermes")
+        try FileManager.default.createDirectory(at: hermes, withIntermediateDirectories: true)
+        let env = hermes.appendingPathComponent(".env")
+        try """
+        ANTHROPIC_API_KEY=sk-ant-api03-brm-AbC123
+        export OPENAI_API_KEY="sk-brm-xyz"
+        OPENROUTER_API_KEY=sk-or-v1-users-own
+        FIRECRAWL_API_KEY=brm_fake
+        TELEGRAM_BOT_TOKEN=123:abc
+
+        """.write(to: env, atomically: true, encoding: .utf8)
+        _ = try runApply(settings: ["model": ["provider": "xai"]], servers: [:], home: home,
+                         hidden: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"])
+        let after = try String(contentsOf: env, encoding: .utf8)
+        #expect(!after.contains("ANTHROPIC_API_KEY") && !after.contains("OPENAI_API_KEY"))
+        #expect(after.contains("OPENROUTER_API_KEY=sk-or-v1-users-own"))
+        #expect(after.contains("FIRECRAWL_API_KEY=brm_fake"))   // not a hidden variable
+        #expect(after.contains("TELEGRAM_BOT_TOKEN=123:abc"))
+        let mode = try FileManager.default.attributesOfItem(atPath: env.path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
     }
 
     // MARK: - Host side

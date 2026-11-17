@@ -771,7 +771,7 @@ final class RemoteMenuApp {
             }
             switch sel {
             case 0:
-                let tools = ["claude", "codex", "grok", "kimi", "omp", "hermes"]
+                let tools = ["claude", "codex", "grok", "kimi", "omp"]
                 let on = Set(legs.compactMap { tools.firstIndex(of: $0) })
                 if let picked = tui.checklist(title: "Models to fuse (≥2 to engage)",
                                               items: ["Claude", "Codex", "Grok", "Kimi", "Oh My Pi"], initiallyOn: on) {
@@ -779,7 +779,7 @@ final class RemoteMenuApp {
                     changed = true
                 }
             case 1: if editField(&doc, key: "fusionJudgeProvider", label: "Provider",
-                                 kind: .pick(["claude", "codex", "grok", "kimi", "omp", "hermes"])) { changed = true }
+                                 kind: .pick(["claude", "codex", "grok", "kimi", "omp"])) { changed = true }
             case 2: if editField(&doc, key: "fusionJudgeModel", label: "Model",
                                  kind: .text(secret: false)) { changed = true }
             case 3: if editField(&doc, key: "fusionJudgeLocal", label: "Judge on local engine",

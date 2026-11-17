@@ -6987,21 +6987,29 @@ public final class ProfileStore {
     #    settings. Bromure's provider/model, MCP servers and
     #    `auth.adopt_external_logins: false` (left on, Hermes borrows Claude
     #    Code's and Codex's logins -- a subscription used outside its own
-    #    agent) are applied to ~/.hermes/config.yaml with Hermes's own
-    #    `hermes config set`, only when they change. Its provider key comes
-    #    from BROMURE_HERMES_API_KEY (a stand-in the proxy swaps), handed over
-    #    as the variable its provider reads; every other provider key in the
-    #    shared env is unset for Hermes alone, so it can't run -- or bill --
-    #    on a sibling agent's provider.
+    #    agent, whose single-use refresh tokens it would rotate) are applied to
+    #    ~/.hermes/config.yaml with Hermes's own `hermes config`. Skipped only
+    #    while neither the staged settings nor config.yaml / .env changed
+    #    since the last apply (an edit to either, by hand or by an agent,
+    #    re-applies them). Its provider key comes from BROMURE_HERMES_API_KEY
+    #    (a stand-in the proxy swaps), handed over as the variable its
+    #    provider reads; every other provider key in the shared env is unset
+    #    for Hermes alone -- and for the apply's `hermes config` runs -- so it
+    #    can't run, or bill, on a sibling agent's provider. Hermes's .env
+    #    overrides the environment: a stand-in for one of those keys left
+    #    there is dropped.
+    _bromure_hermes_stamp() {
+        { cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json \\
+              /mnt/bromure-meta/hermes-env-unset 2>/dev/null | sha256sum | cut -c1-32
+          cat "$HOME/.hermes/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
+          cat "$HOME/.hermes/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
+    }
     _bromure_hermes_apply() {
         [ -r /mnt/bromure-meta/hermes-settings.json ] || return 0
-        local _want
-        _want=$(cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json 2>/dev/null \\
-            | sha256sum | cut -c1-32)
-        [ "$(cat "$HOME/.hermes/.bromure-applied" 2>/dev/null)" = "$_want" ] && return 0
+        [ "$(cat "$HOME/.hermes/.bromure-applied" 2>/dev/null)" = "$(_bromure_hermes_stamp)" ] && return 0
         echo "[bromure-ac] applying this workspace's Hermes settings…" >&2
-        python3 - "$_want" <<'BROMURE_HERMES_APPLY'
-    import json, os, subprocess, sys
+        command env "$@" -u BROMURE_HERMES_API_KEY python3 - <<'BROMURE_HERMES_APPLY' || return 0
+    import json, os, re, subprocess, sys
     home = os.path.expanduser("~/.hermes")
     os.makedirs(home, exist_ok=True)
     meta = os.environ.get("BROMURE_META_DIR") or "/mnt/bromure-meta"
@@ -7010,6 +7018,10 @@ public final class ProfileStore {
         servers = json.load(open(os.path.join(meta, "mcp", "claude.json"))).get("mcpServers", {}) or {}
     except Exception:
         servers = {}
+    try:
+        hidden = {l.strip() for l in open(os.path.join(meta, "hermes-env-unset")) if l.strip()}
+    except Exception:
+        hidden = set()
     done_path = os.path.join(home, ".bromure-mcp.json")
     try:
         before = set(json.load(open(done_path)))
@@ -7024,9 +7036,31 @@ public final class ProfileStore {
         if r.returncode != 0 and not (args[0] == "unset" and "not set" in r.stderr):
             ok = False
             sys.stderr.write("[bromure-ac] hermes config %s: %s\\n" % (" ".join(args[:2]), r.stderr.strip()[-300:]))
+    # A Bromure stand-in for a key Hermes must not see, left in its .env
+    # (which overrides the environment): dropped. A key the user put
+    # there themselves is theirs.
+    env_path = os.path.join(home, ".env")
+    try:
+        lines = open(env_path).read().splitlines(True)
+    except OSError:
+        lines = None
+    if lines is not None:
+        standin = re.compile(r"(^|[^A-Za-z0-9])(brm_|[A-Za-z0-9]+-brm-)")
+        def stale(line):
+            m = re.match(r"\\s*(?:export\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*=(.*)", line)
+            return bool(m) and m.group(1) in hidden and bool(standin.search(m.group(2)))
+        kept = [l for l in lines if not stale(l)]
+        if len(kept) != len(lines):
+            tmp = env_path + ".bromure-tmp"
+            with open(tmp, "w") as f:
+                f.writelines(kept)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, env_path)
     model = settings.get("model", {})
     run("set", "model.provider", model.get("provider", "auto"))
-    for key in ("base_url", "key_env"):
+    # A literal `model.api_key` would win over the key handed over at
+    # launch: Bromure never sets one, so none stays.
+    for key in ("base_url", "key_env", "api_key"):
         if model.get(key):
             run("set", "model." + key, model[key])
         else:
@@ -7056,11 +7090,11 @@ public final class ProfileStore {
         names.append(name)
     for name in sorted(before - set(names)):
         run("unset", "mcp_servers." + esc(name))
-    if ok:
-        json.dump(names, open(done_path, "w"))
-        with open(os.path.join(home, ".bromure-applied"), "w") as f:
-            f.write(sys.argv[1])
+    json.dump(names, open(done_path, "w"))
+    sys.exit(0 if ok else 3)
     BROMURE_HERMES_APPLY
+        # Stamped with config.yaml and .env as the apply left them.
+        _bromure_hermes_stamp > "$HOME/.hermes/.bromure-applied"
     }
     hermes() {
         if ! type -P hermes >/dev/null 2>&1; then
@@ -7069,13 +7103,13 @@ public final class ProfileStore {
         case "${1:-}" in
             uninstall|--version|-V|help|-h|--help) command hermes "$@"; return ;;
         esac
-        _bromure_hermes_apply
         local _u=() _v _k=""
         if [ -r /mnt/bromure-meta/hermes-env-unset ]; then
             while IFS= read -r _v; do
                 [ -n "$_v" ] && _u+=(-u "$_v")
             done < /mnt/bromure-meta/hermes-env-unset
         fi
+        _bromure_hermes_apply "${_u[@]}"
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
