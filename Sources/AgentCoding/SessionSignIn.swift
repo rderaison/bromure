@@ -68,6 +68,7 @@ extension ACAppDelegate {
         case .codex:  return "codex login"
         case .grok:   return "grok login"
         case .kimi:   return "kimi login"
+        case .nous:   return RegistrationLaunch.nousLoginCommand
         }
     }
 
@@ -81,6 +82,9 @@ extension ACAppDelegate {
         // International (auth.kimi.ai) is what Bromure uses now; keep the
         // China default (auth.kimi.com) too so a login on either is captured.
         case .kimi:   return (["auth.kimi.ai", "auth.kimi.com"], "/api/oauth/token")
+        // The device-code poll; a refresh on the same path is never captured
+        // (`SignInCapture.matches` passes a plain refresh by).
+        case .nous:   return ([NousRegion.portalHost], NousRegion.tokenPath)
         }
     }
 
@@ -254,6 +258,22 @@ extension ACAppDelegate {
                 }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
+            case .nous:
+                // Saved before the reply, so the very next request Hermes
+                // makes on the stand-in (its model list) is swapped. Hermes
+                // writes ~/.hermes/auth.json itself from what it hears.
+                guard let rec = NousSubscriptionRecord.from(tokenReply: json) else { return nil }
+                if engine.nousSubscriptionStore.hasProfileRecord(pid) {
+                    try engine.nousSubscriptionStore.setOverride(rec, for: pid)
+                } else {
+                    try engine.nousSubscriptionStore.setShared(rec)
+                }
+                let standInAccess = NousStandIn.access(realAccess: rec.accessToken, profileID: pid)
+                engine.nousSubscriptionStore.registerBogusKey(standInAccess, for: pid)
+                endProxySignIn(s, success: true, message: nil)
+                return SignInCapture.response(status: 200, reason: "OK", json: NousStandIn.reply(
+                    from: json, access: standInAccess,
+                    refresh: NousStandIn.refresh(realRefresh: rec.refreshToken, profileID: pid)))
             case .grok, .kimi:
                 let standIn = Self.standInTokens(for: s.provider, profileID: pid, access: access, refresh: refresh)
                 var out = json

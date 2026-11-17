@@ -26,6 +26,7 @@ extension ACAppDelegate {
                 case .openai:    return e.codexSubscriptionStore.record(for: nil)?.savedAt
                 case .xai:       return e.grokSubscriptionStore.record(for: nil)?.savedAt
                 case .moonshot:  return e.kimiSubscriptionStore.record(for: nil)?.savedAt
+                case .nous:      return e.nousSubscriptionStore.record(for: nil)?.savedAt
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
@@ -37,6 +38,7 @@ extension ACAppDelegate {
                 case .openai:    try? e.codexSubscriptionStore.forget(for: nil)
                 case .xai:       try? e.grokSubscriptionStore.forget(for: nil)
                 case .moonshot:  try? e.kimiSubscriptionStore.forget(for: nil)
+                case .nous:      try? e.nousSubscriptionStore.forget(for: nil)
                 case .zai, .bedrock, .openrouter, .custom: return
                 }
                 NotificationCenter.default.post(name: .bromureSubscriptionStoresChanged, object: nil)
@@ -60,6 +62,7 @@ extension ACAppDelegate {
                 case .openai:    return e.codexSubscriptionStore.reauthRequiredAt(for: nil)
                 case .xai:       return e.grokSubscriptionStore.reauthRequiredAt(for: nil)
                 case .moonshot:  return e.kimiSubscriptionStore.reauthRequiredAt(for: nil)
+                case .nous:      return e.nousSubscriptionStore.reauthRequiredAt(for: nil)
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             })
@@ -76,6 +79,7 @@ extension ACAppDelegate {
         case .openai:    sub = .codex
         case .xai:       sub = .grok
         case .moonshot:  sub = .kimi
+        case .nous:      sub = .nous
         case .zai, .bedrock, .openrouter, .custom: return
         }
         wizard.signIn = OnboardingWizardModel.SignIn(

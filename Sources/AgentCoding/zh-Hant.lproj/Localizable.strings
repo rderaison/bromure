@@ -4370,3 +4370,6 @@
 "Hermes integration" = "Hermes 整合";
 "Add the API key of a service Hermes Agent's tools use (web search, cloud browser, images, voice, memory). Hermes only ever sees a stand-in." = "新增 Hermes Agent 工具所用服務（網頁搜尋、雲端瀏覽器、圖片、語音、記憶）的 API 金鑰。Hermes 只會看到替身值。";
 "Hermes Agent runs on the provider you pick here, with its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "Hermes Agent 使用此處選擇的供應商及下方的 API 金鑰——或在上方選擇**本機模型**以在這台 Mac 上執行。可隨時切換。";
+
+/* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
+"Powers Hermes Agent only." = "僅供 Hermes Agent 使用。";

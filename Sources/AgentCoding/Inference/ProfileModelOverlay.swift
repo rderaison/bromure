@@ -83,7 +83,8 @@ public extension Profile {
             // model chosen — its auth then comes from that provider's key
             // below, like any agent on its own provider.
             if tool.switchesProvider, let ref, case .provider(let prov) = ref.source,
-               let op = prov.ompProvider, let cred = settings.credential(prov), cred.isUsable {
+               let op = prov.ompProvider, op != .nous || tool == .hermes,
+               let cred = settings.credential(prov), cred.isUsable {
                 ompProvider = op
                 if op == .custom, let base = cred.baseURL, !base.isEmpty {
                     ompBaseURL = base
@@ -492,7 +493,7 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
-        case .zai, .bedrock, .openrouter, .custom: return nil
+        case .zai, .bedrock, .openrouter, .custom, .nous: return nil
         }
     }
 
@@ -506,6 +507,8 @@ public extension ModelProvider {
         case .openai:    return .codex
         case .xai:       return .grok
         case .moonshot:  return .kimi
+        // Signing in to Nous pre-fills Hermes, its only agent.
+        case .nous:      return .hermes
         case .zai, .openrouter, .custom: return nil
         }
     }

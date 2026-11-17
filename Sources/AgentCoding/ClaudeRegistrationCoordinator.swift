@@ -24,6 +24,11 @@ public enum SubscriptionProvider: String, Sendable, CaseIterable {
     case codex
     case grok
     case kimi
+    /// Nous Portal, signed in through Hermes Agent (its only agent). The raw
+    /// value is the TOOL's, like every other case's: a session's tool names
+    /// its sign-in (`SubscriptionProvider(rawValue: tool.rawValue)`), and the
+    /// `/state` subscription map is keyed by tool.
+    case nous = "hermes"
 
     var displayName: String {
         switch self {
@@ -31,6 +36,7 @@ public enum SubscriptionProvider: String, Sendable, CaseIterable {
         case .codex:  return "ChatGPT"
         case .grok:   return "Grok"
         case .kimi:   return "Kimi"
+        case .nous:   return "Nous Portal"
         }
     }
     var scratchTool: Profile.Tool {
@@ -39,13 +45,14 @@ public enum SubscriptionProvider: String, Sendable, CaseIterable {
         case .codex:  return .codex
         case .grok:   return .grok
         case .kimi:   return .kimi
+        case .nous:   return .hermes
         }
     }
     /// True for providers with no vsock token agent, whose credentials are
     /// read straight out of the (host-mounted) home dir instead.
     var capturesFromHomeDir: Bool {
         switch self {
-        case .grok, .kimi: return true
+        case .grok, .kimi, .nous: return true
         case .claude, .codex: return false
         }
     }
@@ -395,7 +402,7 @@ extension ACAppDelegate {
             switch provider {
             case .claude: state.claudeBridge = SubscriptionTokenBridge(socketDevice: dev)
             case .codex:  state.codexBridge = CodexTokenBridge(socketDevice: dev)
-            case .grok, .kimi: break  // no vsock agent — captured from the home-dir file
+            case .grok, .kimi, .nous: break  // no vsock agent — captured from the home-dir file
             }
 
             // Window 0 of the guest tmux session sources .bashrc, whose
@@ -613,6 +620,7 @@ extension ACAppDelegate {
         let home = store.homeDirectory(for: state.scratchProfile)
         let grokAuthURL = home.appendingPathComponent(".grok/auth.json")
         let kimiHome = home.appendingPathComponent(".kimi-code", isDirectory: true)
+        let hermesAuthURL = home.appendingPathComponent(".hermes/auth.json")
         state.pollTask = Task { @MainActor in
             // Bridge providers connect ~15–60s after boot; Grok/Kimi have none.
             if !state.provider.capturesFromHomeDir {
@@ -652,6 +660,10 @@ extension ACAppDelegate {
                                       template: k.template, configTOML: k.configTOML))
                     return
                 }
+                if state.provider == .nous, let n = Self.readNousAuthFile(at: hermesAuthURL) {
+                    await self.finishClaudeRegistration(state: state, record: .nous(n))
+                    return
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if Task.isCancelled { return }
@@ -680,6 +692,28 @@ extension ACAppDelegate {
         case grok(access: String, refresh: String, scopeKey: String, template: Data)
         case kimi(access: String, refresh: String, name: String, template: Data,
                   configTOML: String?)
+        case nous(NousSubscriptionRecord)
+    }
+
+    /// The real Nous Portal login Hermes wrote to `~/.hermes/auth.json`
+    /// (`providers.nous`), or nil until the sign-in lands. Bromure's own
+    /// stand-ins are never taken for one. The expiry is the JWT's own: the
+    /// sign-in machine's Hermes still holds the refresh token until the
+    /// machine goes, so the host doesn't spend it on first use.
+    static func readNousAuthFile(at url: URL) -> NousSubscriptionRecord? {
+        guard let data = try? Data(contentsOf: url),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let nous = (obj["providers"] as? [String: Any])?["nous"] as? [String: Any],
+              let access = nous["access_token"] as? String, !access.isEmpty,
+              !NousStandIn.isAccess(access),
+              let refresh = nous["refresh_token"] as? String, !refresh.isEmpty,
+              !NousStandIn.isRefresh(refresh) else { return nil }
+        return NousSubscriptionRecord(
+            accessToken: access, refreshToken: refresh,
+            expiresAt: NousSubscriptionRecord.jwtExpiry(access, fallback: .distantPast),
+            savedAt: Date(),
+            inferenceBaseURL: NousRegion.allowedInferenceBaseURL(nous["inference_base_url"] as? String),
+            scope: nous["scope"] as? String)
     }
 
     /// Read real Grok tokens from a freshly-written `~/.grok/auth.json`, or nil
@@ -783,6 +817,8 @@ extension ACAppDelegate {
                 if engine.grokSubscriptionStore.hasProfileRecord(p.id) { try? engine.grokSubscriptionStore.forget(for: p.id) }
             case .kimi:
                 if engine.kimiSubscriptionStore.hasProfileRecord(p.id) { try? engine.kimiSubscriptionStore.forget(for: p.id) }
+            case .nous:
+                if engine.nousSubscriptionStore.hasProfileRecord(p.id) { try? engine.nousSubscriptionStore.forget(for: p.id) }
             }
         }
     }
@@ -872,6 +908,9 @@ extension ACAppDelegate {
                     scopeKey: scopeKey, templateJSON: template)
                 if let pid = overrideProfile { try engine.grokSubscriptionStore.setOverride(rec, for: pid) }
                 else { try engine.grokSubscriptionStore.setShared(rec) }
+            case .nous(let rec):
+                if let pid = overrideProfile { try engine.nousSubscriptionStore.setOverride(rec, for: pid) }
+                else { try engine.nousSubscriptionStore.setShared(rec) }
             }
             if sharedEverywhere { forgetProviderOverrides(state.provider) }
         } catch {
@@ -961,6 +1000,7 @@ extension ACAppDelegate {
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
+        mitmEngine?.nousSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
 
         // Retire the pane's native terminal surfaces up front, while the view
         // is still alive, so closing the window below can't leave libghostty

@@ -4367,3 +4367,6 @@
 "Hermes integration" = "Hermes の連携";
 "Add the API key of a service Hermes Agent's tools use (web search, cloud browser, images, voice, memory). Hermes only ever sees a stand-in." = "Hermes Agent のツールが使うサービス（ウェブ検索、クラウドブラウザ、画像、音声、メモリ）の API キーを追加します。Hermes に渡るのは代替値だけです。";
 "Hermes Agent runs on the provider you pick here, with its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "Hermes Agent はここで選んだプロバイダを下の API キーで使います。この Mac で動かすには上の**ローカルモデル**を選んでください。いつでも切り替えられます。";
+
+/* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
+"Powers Hermes Agent only." = "Hermes Agent 専用です。";

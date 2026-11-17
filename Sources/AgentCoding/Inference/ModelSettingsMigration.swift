@@ -28,6 +28,7 @@ public extension ModelProvider {
         case .xai:       return .xai
         case .zai:       return .zai
         case .custom:    return .custom
+        case .nous:      return .nous
         }
     }
 }

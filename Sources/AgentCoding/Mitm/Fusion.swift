@@ -221,7 +221,7 @@ enum Fusion {
             case .anthropic: return realFor(["anthropic.com"], swapper, profileID).map(Cred.anthropicKey)
             case .openai:    return realFor(["openai.com"], swapper, profileID).map(Cred.openAIKey)
             case .xai:       return realFor(["x.ai"], swapper, profileID).map(Cred.grokKey)
-            case .zai, .custom: return nil
+            case .zai, .custom, .nous: return nil
             }
         case (_, .local):
             // Any tool in local mode → the engine serving this profile's local
@@ -1049,7 +1049,7 @@ enum Fusion {
             switch ompProvider {
             case .openai: return defaultLegModel(.codex, .token)
             case .xai:    return defaultLegModel(.grok, .token)
-            case .anthropic, .zai, .custom: return defaultLegModel(.claude, .token)
+            case .anthropic, .zai, .custom, .nous: return defaultLegModel(.claude, .token)
             }
         }
     }

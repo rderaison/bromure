@@ -484,7 +484,8 @@ public extension Profile {
                 switch prov {
                 case .anthropic:        prefix = "sk-ant-api03-brm-"
                 case .xai:              prefix = "xai-brm-"
-                case .openai, .zai, .custom: prefix = "sk-brm-"
+                // .nous never gets here: no key, no host (the guard above).
+                case .openai, .zai, .custom, .nous: prefix = "sk-brm-"
                 }
                 entries.append(.init(
                     realValue: real,
