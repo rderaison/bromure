@@ -166,7 +166,7 @@ final class PromptInjectionRedactions: @unchecked Sendable {
         guard !set.isEmpty || !bodies.isEmpty,
               let root = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) else { return nil }
         var count = 0
-        func walk(_ v: Any) -> Any {
+        func walk(_ v: Any, root: Bool = false) -> Any {
             if var s = v as? String {
                 if !set.isEmpty, set.contains(Self.fingerprint(s)) { count += 1; return Self.placeholder }
                 for b in bodies where s.contains(b) {
@@ -185,17 +185,19 @@ final class PromptInjectionRedactions: @unchecked Sendable {
                     count += 1
                     return [first]
                 }
-                return a.map(walk)
+                return a.map { walk($0) }
             }
             if let d = v as? [String: Any] {
                 var out: [String: Any] = [:]
-                // Auto mode's server checks travel as sent (see `opaqueKeys`).
-                for (k, x) in d { out[k] = PIIRewriter.opaqueKeys.contains(k) ? x : walk(x) }
+                // Auto mode's server checks travel as sent -- the request's
+                // own fields, at its root only (`opaqueRequestKeys`): the same
+                // names inside the conversation are redacted like the rest.
+                for (k, x) in d { out[k] = root && PIIRewriter.opaqueRequestKeys.contains(k) ? x : walk(x) }
                 return out
             }
             return v
         }
-        let rewritten = walk(root)
+        let rewritten = walk(root, root: true)
         guard count > 0,
               let data = try? JSONSerialization.data(withJSONObject: rewritten,
                                                      options: [.fragmentsAllowed, .withoutEscapingSlashes])

@@ -101,8 +101,17 @@ enum PIIRewriter {
     /// them -- a swapped or restored value inside -- keeps the checks from
     /// reaching the session, and Claude Code bills its own classifier
     /// requests instead (code.claude.com/docs/en/auto-mode-classifier-billing).
-    /// Never scanned or rewritten, at any depth.
-    static let opaqueKeys: Set<String> = ["safeguards", "safeguard_results", "anthropic_beta"]
+    /// Never scanned or rewritten -- but only where the protocol puts them:
+    /// the same names anywhere else (a tool's `input`, a message's text) are
+    /// conversation data like the rest, scanned and swapped (Finding: "Nested
+    /// `safeguards` fields bypass PII protection in conversation data").
+    ///
+    /// The request's own fields: at its root.
+    static let opaqueRequestKeys: Set<String> = ["safeguards", "anthropic_beta"]
+    /// The response's: at the root of a reply or of a stream event, or of the
+    /// message a `message_start` event carries -- objects the API writes,
+    /// not the model.
+    static let opaqueResponseRoots: [[String]] = [["safeguard_results"], ["message", "safeguard_results"]]
 
     /// Keys whose string value is itself a JSON document (OpenAI tool-call
     /// arguments). Its inner strings are the unit of detection and swapping:
@@ -165,7 +174,7 @@ enum PIIRewriter {
     static func rewriteRequest(_ body: Data, policy: PIIPolicy, vault: PIIVault,
                                detector: PIIDetector = .shared) async -> Outcome {
         let bytes = [UInt8](body)
-        guard let refs = JSONStrings.scan(bytes, opaqueKeys: opaqueKeys) else { return Outcome(body: body) }
+        guard let refs = JSONStrings.scan(bytes) else { return Outcome(body: body) }
         // Decode each eligible string once; detect over the distinct ones.
         // A string holding a JSON document (tool-call arguments) contributes
         // its inner strings instead.
@@ -177,7 +186,7 @@ enum PIIRewriter {
         func eligible(_ r: JSONStrings.Ref) -> Bool {
             if let k = r.key, skipKeys.contains(k) { return false }
             if let t = r.top, skipTopKeys.contains(t) { return false }
-            if r.opaque { return false }
+            if let t = r.top, opaqueRequestKeys.contains(t) { return false }
             return r.range.count >= 5                    // "" plus 3 chars
         }
         var items: [Item] = []
@@ -665,11 +674,14 @@ enum JSONStrings {
         let key: String?
         /// The root object's key this value sits under ("messages", "tools"…).
         var top: String? = nil
-        /// Under one of the `opaqueKeys` the scan was given, at any depth.
+        /// Under one of the `opaqueRoots` the scan was given.
         var opaque = false
     }
 
-    static func scan(_ b: [UInt8], opaqueKeys: Set<String> = []) -> [Ref]? {
+    /// `opaqueRoots`: paths of object keys from the root, each object
+    /// directly in the one before (no array between); a value under one is
+    /// marked `opaque`.
+    static func scan(_ b: [UInt8], opaqueRoots: [[String]] = []) -> [Ref]? {
         enum Frame { case object(expectKey: Bool, key: String?), array(key: String?) }
         var stack: [Frame] = []
         var refs: [Ref] = []
@@ -706,12 +718,10 @@ enum JSONStrings {
                 } else {
                     var top: String? = nil
                     if case .object(_, let k)? = stack.first { top = k }
-                    var opaque = false
-                    if !opaqueKeys.isEmpty {
-                        opaque = stack.contains { f in
-                            switch f {
-                            case .object(_, let k), .array(let k): return k.map(opaqueKeys.contains) ?? false
-                            }
+                    let opaque = opaqueRoots.contains { path in
+                        stack.count >= path.count && path.indices.allSatisfy { i in
+                            if case .object(_, let k?) = stack[i] { return k == path[i] }
+                            return false
                         }
                     }
                     refs.append(Ref(range: start..<i, key: contextKey(), top: top, opaque: opaque))
@@ -813,7 +823,7 @@ final class PIIResponseRestorer {
         case .passthrough: return Data()
         case .json:
             let b = [UInt8](buffer)
-            guard let refs = JSONStrings.scan(b, opaqueKeys: PIIRewriter.opaqueKeys) else { return buffer }
+            guard let refs = JSONStrings.scan(b, opaqueRoots: PIIRewriter.opaqueResponseRoots) else { return buffer }
             var out = Data(capacity: b.count)
             var cursor = 0
             for r in refs where !r.opaque {
@@ -1019,17 +1029,20 @@ final class PIIResponseRestorer {
     }
 
     /// Restore every string in a whole event (skipping signed/opaque keys).
-    /// Returns whether anything changed.
-    private static func restoreAll(_ o: Any, vault: PIIVault, key: String? = nil) -> Bool {
+    /// Returns whether anything changed. `path`: the object keys from the
+    /// event's root to `o`, while no array lies between (nil past one) --
+    /// where `opaqueResponseRoots` are matched.
+    private static func restoreAll(_ o: Any, vault: PIIVault, key: String? = nil, path: [String]? = []) -> Bool {
         var changed = false
         if let d = o as? NSMutableDictionary {
             for k in d.allKeys {
-                guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks),
-                      !PIIRewriter.opaqueKeys.contains(ks) else { continue }
+                guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks) else { continue }
+                let here = path.map { $0 + [ks] }
+                if let here, PIIRewriter.opaqueResponseRoots.contains(here) { continue }
                 if let s = d[ks] as? String {
                     let r = restoreValue(s, key: ks, vault: vault)
                     if r != s { d[ks] = r; changed = true }
-                } else if let v = d[ks], restoreAll(v, vault: vault, key: ks) {
+                } else if let v = d[ks], restoreAll(v, vault: vault, key: ks, path: here) {
                     changed = true
                 }
             }
@@ -1038,7 +1051,7 @@ final class PIIResponseRestorer {
                 if let s = a[i] as? String {
                     let r = vault.restore(s)
                     if r != s { a[i] = r; changed = true }
-                } else if restoreAll(a[i], vault: vault, key: key) {
+                } else if restoreAll(a[i], vault: vault, key: key, path: nil) {
                     changed = true
                 }
             }
