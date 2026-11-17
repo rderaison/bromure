@@ -266,6 +266,7 @@ struct HermesAgentTests {
         let lines = rc.components(separatedBy: "\n")
         let start = try #require(lines.firstIndex { $0.hasSuffix("_bromure_hermes_task_home() {") })
         let end = try #require(lines[start...].firstIndex { $0 == "}" })
+        #expect(rc.contains("hermes) _bromure_nous_signin ;;"), "the sign-in machine's auto-launch")
         let fn = lines[start...end].joined(separator: "\n")
         let dir = try tempDir()
         let bin = dir.appendingPathComponent("bin")
@@ -683,5 +684,59 @@ struct HermesAgentTests {
         for d in [".env", "auth.json", "config.yaml", "state.db", "mcp-tokens", "hermes-agent", "profiles"] {
             #expect(src.deny.contains(d), "\(d) not denied")
         }
+    }
+
+    @Test("the Nous sign-in: a sign-in machine's data root on local disk, its login copied where the Mac reads it")
+    func nousSignin() throws {
+        let rc = try renderBashrc()
+        let lines = rc.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.hasSuffix("_bromure_nous_signin() {") })
+        let end = try #require(lines[start...].firstIndex { $0 == "}" })
+        let dir = try tempDir()
+        let local = dir.appendingPathComponent("local-root")
+        let home = dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".hermes/shared"),
+                                                withIntermediateDirectories: true)
+        let fn = lines[start...end].joined(separator: "\n")
+            .replacingOccurrences(of: "/var/tmp/bromure-hermes-signin", with: local.path)
+        // Stubs: /opt's Hermes, whose login writes auth.json in its data root.
+        let stubs = """
+        _bromure_hermes_opt() { return 0; }
+        hermes() {
+            printf '%s|%s\\n' "${HERMES_HOME:-unset}" "$*" > "$HOME/call"
+            [ -n "${HERMES_HOME:-}" ] && printf '{"providers":{"nous":{}}}' > "$HERMES_HOME/auth.json"
+            return 0
+        }
+        """
+        func run(register: Bool) throws -> Int32 {
+            FileManager.default.createFile(atPath: home.appendingPathComponent(".hermes/shared/nous_auth.json").path,
+                                           contents: Data("x".utf8))
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["-c", stubs + "\n" + fn + "\n_bromure_nous_signin\n"]
+            var env = ["HOME": home.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+            if register { env["BROMURE_AC_REGISTER"] = "1" }
+            proc.environment = env
+            proc.standardOutput = Pipe(); proc.standardError = Pipe()
+            try proc.run(); proc.waitUntilExit()
+            return proc.terminationStatus
+        }
+        func call() -> String { (try? String(contentsOf: home.appendingPathComponent("call"), encoding: .utf8)) ?? "" }
+        let shared = home.appendingPathComponent(".hermes/shared/nous_auth.json").path
+        let landed = home.appendingPathComponent(".hermes/auth.json")
+
+        // In a workspace: Hermes's own data root, nothing copied.
+        #expect(try run(register: false) == 0)
+        #expect(call() == "unset|auth add nous --type oauth\n")
+        #expect(!FileManager.default.fileExists(atPath: shared))
+        #expect(!FileManager.default.fileExists(atPath: landed.path))
+
+        // In a sign-in machine: the local data root; the login lands in ~/.hermes.
+        #expect(try run(register: true) == 0)
+        #expect(call() == "\(local.path)|auth add nous --type oauth\n")
+        #expect(!FileManager.default.fileExists(atPath: shared))
+        #expect((try? String(contentsOf: landed, encoding: .utf8)) == #"{"providers":{"nous":{}}}"#)
+        let mode = try FileManager.default.attributesOfItem(atPath: landed.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
     }
 }
