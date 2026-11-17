@@ -45,6 +45,17 @@
  * ImageCatalog.signingPayload(signedAt:magic:) in
  * Sources/SandboxEngine/ImageCatalog.swift.
  *
+ * Version ranges: a step may carry `min_version` / `max_version` (the app's
+ * CFBundleShortVersionString, inclusive, either optional); they're signed.
+ * Apps that can't read them must never get such a step, so a step with a
+ * `min_version` is refused in a catalog signed under the legacy AC magic.
+ * Bromure Agentic Coding 5.4.5+ reads images/<major>/img-catalog-v2.json
+ * (--payload-magic bromure-img-catalog-v2, every step); --legacy-out
+ * <path> also writes the img-catalog.json older apps read: the same image,
+ * without the steps that have a `min_version` (a `max_version` alone is
+ * dropped there -- older apps can't check it), signed under
+ * --legacy-payload-magic (default bromure-img-catalog-v1), same signedAt.
+ *
  * Inspect mode (used to find the previous build to delete):
  *   node tools/make-img-catalog.mjs --print-image-uuid <prev-catalog.json>
  *     → prints the image uuid, or nothing when absent/unparseable.
@@ -92,16 +103,8 @@ if (!Array.isArray(baseline.postinstall)) {
   console.error("make-img-catalog: baseline has no postinstall array");
   process.exit(1);
 }
-// Steps for a range of app versions (min_version / max_version, the app's
-// CFBundleShortVersionString, inclusive), under a key apps that predate it
-// ignore -- so they never run them, and still verify `signature`, which
-// covers `postinstall` only. `signature_versioned` covers both.
-const versioned = baseline.postinstall_versioned ?? [];
-if (!Array.isArray(versioned)) {
-  console.error("make-img-catalog: baseline postinstall_versioned must be an array");
-  process.exit(1);
-}
-// Same rule as ImageCatalog.versionComponents: dotted non-negative integers.
+// Version ranges -- same rule as ImageCatalog.versionComponents: dotted
+// non-negative integers, trailing zeros dropped.
 function versionParts(v) {
   if (typeof v !== "string" || !/^[0-9]{1,9}(\.[0-9]{1,9})*$/.test(v.trim())) return null;
   const out = v.trim().split(".").map(Number);
@@ -112,21 +115,19 @@ function versionLess(a, b) {
   for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i];
   return a.length < b.length;
 }
-for (const s of versioned) {
+for (const s of baseline.postinstall) {
   const lo = s.min_version, hi = s.max_version;
-  if (lo === undefined && hi === undefined) {
-    console.error(`make-img-catalog: versioned step ${s.uuid} has neither min_version nor max_version`);
-    process.exit(1);
-  }
+  if (lo === undefined && hi === undefined) continue;
   const plo = lo === undefined ? null : versionParts(lo), phi = hi === undefined ? null : versionParts(hi);
   if ((lo !== undefined && !plo) || (hi !== undefined && !phi) || (plo && phi && versionLess(phi, plo))) {
-    console.error(`make-img-catalog: versioned step ${s.uuid} has a malformed range (${lo} .. ${hi})`);
+    console.error(`make-img-catalog: step ${s.uuid} has a malformed version range (${lo} .. ${hi})`);
     process.exit(1);
   }
 }
-// Guard the invariant the client relies on: stable, unique step uuids --
-// across both lists (an app applies them as one).
-const uuids = [...baseline.postinstall, ...versioned].map((s) => s.uuid);
+const LEGACY_AC_MAGIC = "bromure-img-catalog-v1";
+
+// Guard the invariant the client relies on: stable, unique step uuids.
+const uuids = baseline.postinstall.map((s) => s.uuid);
 if (new Set(uuids).size !== uuids.length || uuids.some((u) => !u)) {
   console.error("make-img-catalog: baseline postinstall uuids must be present and unique");
   process.exit(1);
@@ -162,6 +163,18 @@ if (new Set(bootFiles.map((f) => f.name)).size !== bootFiles.length) {
 }
 
 const payloadMagic = opt("payload-magic") ?? "bromure-img-catalog-v1";
+const legacyOut = opt("legacy-out");
+const legacyMagic = opt("legacy-payload-magic") ?? LEGACY_AC_MAGIC;
+// Apps that verify under the legacy AC magic can't read ranges: a ranged
+// step there would run on every one of them.
+if (payloadMagic === LEGACY_AC_MAGIC && baseline.postinstall.some((s) => s.min_version !== undefined || s.max_version !== undefined)) {
+  console.error(`make-img-catalog: steps with a version range can't be signed under ${LEGACY_AC_MAGIC} (older apps would run them) -- use --payload-magic bromure-img-catalog-v2 and --legacy-out`);
+  process.exit(1);
+}
+if (legacyOut && legacyMagic === payloadMagic) {
+  console.error("make-img-catalog: --legacy-payload-magic must differ from --payload-magic");
+  process.exit(1);
+}
 
 const catalog = {
   formatVersion: baseline.formatVersion ?? 1,
@@ -180,8 +193,16 @@ const catalog = {
     ...(bootFiles.length ? { boot: bootFiles } : {}),
   },
   postinstall: baseline.postinstall,
-  ...(versioned.length ? { postinstall_versioned: versioned } : {}),
 };
+
+// The legacy catalog older apps read: no step with a min_version, no
+// range keys at all (they can't check them).
+const legacy = legacyOut ? {
+  ...catalog,
+  postinstall: catalog.postinstall
+    .filter((s) => s.min_version === undefined)
+    .map(({ min_version, max_version, ...rest }) => rest),
+} : null;
 
 if (!catalog.image.version || !catalog.image.description) {
   console.error("make-img-catalog: build-info.json must carry version + description");
@@ -241,28 +262,15 @@ function signingPayload(cat, signedAt, magic) {
     if (s.bromureac !== undefined && s.bromureac !== null) {
       lines.push(`step.${s.uuid}.bromureac=${s.bromureac}`);
     }
-  }
-  return Buffer.from(lines.join("\n"), "utf8");
-}
-
-// What `signature_versioned` covers -- keep byte-identical to
-// ImageCatalog.versionedSigningPayload(signedAt:magic:): the legacy payload,
-// a count line, then every versioned step with its range.
-function versionedSigningPayload(cat, signedAt, magic) {
-  const steps = [...(cat.postinstall_versioned ?? [])]
-    .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
-  const lines = [`postinstall_versioned.count=${steps.length}`];
-  for (const s of steps) {
-    lines.push(`vstep.${s.uuid}.seq=${s.seq}`);
-    lines.push(`vstep.${s.uuid}.description.b64=${b64(s.description)}`);
-    lines.push(`vstep.${s.uuid}.command.b64=${b64(s.command)}`);
-    lines.push(`vstep.${s.uuid}.min_version=${s.min_version ?? ""}`);
-    lines.push(`vstep.${s.uuid}.max_version=${s.max_version ?? ""}`);
-    if (s.bromureac !== undefined && s.bromureac !== null) {
-      lines.push(`vstep.${s.uuid}.bromureac=${s.bromureac}`);
+    // Likewise only when present; they decide which apps run the step.
+    if (s.min_version !== undefined && s.min_version !== null) {
+      lines.push(`step.${s.uuid}.min_version=${s.min_version}`);
+    }
+    if (s.max_version !== undefined && s.max_version !== null) {
+      lines.push(`step.${s.uuid}.max_version=${s.max_version}`);
     }
   }
-  return Buffer.concat([signingPayload(cat, signedAt, magic), Buffer.from("\n" + lines.join("\n"), "utf8")]);
+  return Buffer.from(lines.join("\n"), "utf8");
 }
 
 if (args.includes("--allow-unsigned")) {
@@ -288,26 +296,25 @@ if (args.includes("--allow-unsigned")) {
   });
 
   const signedAt = new Date().toISOString();
-  const payload = signingPayload(catalog, signedAt, payloadMagic);
-  const signature = sign(null, payload, key);
-  // Self-check: guards against silent key-format bugs producing
-  // signatures every client would then reject.
-  if (!verify(null, payload, createPublicKey(key), signature)) {
-    console.error("make-img-catalog: internal error — signature failed self-verify");
-    process.exit(1);
-  }
-  catalog.signature = { signedAt, edSignature: signature.toString("base64") };
-  if (catalog.postinstall_versioned) {
-    const vpayload = versionedSigningPayload(catalog, signedAt, payloadMagic);
-    const vsig = sign(null, vpayload, key);
-    if (!verify(null, vpayload, createPublicKey(key), vsig)) {
-      console.error("make-img-catalog: internal error — versioned signature failed self-verify");
+  function signInto(cat, magic) {
+    const payload = signingPayload(cat, signedAt, magic);
+    const signature = sign(null, payload, key);
+    // Self-check: guards against silent key-format bugs producing
+    // signatures every client would then reject.
+    if (!verify(null, payload, createPublicKey(key), signature)) {
+      console.error("make-img-catalog: internal error — signature failed self-verify");
       process.exit(1);
     }
-    catalog.signature_versioned = { signedAt, edSignature: vsig.toString("base64") };
+    cat.signature = { signedAt, edSignature: signature.toString("base64") };
   }
+  signInto(catalog, payloadMagic);
+  if (legacy) signInto(legacy, legacyMagic);
 }
 
 const out = req("out");
 writeFileSync(out, JSON.stringify(catalog, null, 2) + "\n");
-console.log(`make-img-catalog: wrote ${out} (image ${catalog.image.uuid}, v${catalog.image.version}, ${catalog.postinstall.length} postinstall step(s), ${versioned.length} versioned)`);
+if (legacy) {
+  writeFileSync(legacyOut, JSON.stringify(legacy, null, 2) + "\n");
+  console.log(`make-img-catalog: wrote ${legacyOut} (legacy, ${legacy.postinstall.length} of ${catalog.postinstall.length} step(s))`);
+}
+console.log(`make-img-catalog: wrote ${out} (image ${catalog.image.uuid}, v${catalog.image.version}, ${catalog.postinstall.length} postinstall step(s))`);

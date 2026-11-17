@@ -25,11 +25,14 @@
 # from Sources/AgentCoding/Resources/img-catalog.json (the canonical
 # source) — that's where the non-free software (Claude Code, Codex, Grok,
 # gcloud) is declared, since the published image must contain free
-# software only. Steps under `postinstall_versioned` (with `min_version` /
-# `max_version`, app versions, inclusive) are published in the same file
-# under a key older apps ignore -- only the apps in range run them -- and
-# are covered by a second signature, `signature_versioned`; `signature`
-# keeps covering `postinstall` alone, so older apps keep verifying.
+# software only.
+#
+# Two catalogs, one image: Bromure Agentic Coding 5.4.5+ reads
+# images/<major>/img-catalog-v2.json, whose steps may carry an app-version
+# range (`min_version` / `max_version`) and which is signed under
+# "bromure-img-catalog-v2"; older apps keep reading img-catalog.json,
+# written without the steps whose range starts above them and signed under
+# "bromure-img-catalog-v1" (make-img-catalog.mjs --legacy-out).
 #
 # Sequence (mirrors the design):
 #   1. Build the image with the latest Ubuntu packages
@@ -192,8 +195,11 @@ else
     echo "no previous catalog (first publish?)"
 fi
 
-# --- 5. Generate the new catalog ------------------------------------------
-echo "=== Generating img-catalog.json ==="
+# --- 5. Generate the new catalogs -----------------------------------------
+# img-catalog-v2.json for 5.4.5+, img-catalog.json (no step an older app
+# mustn't run) for the rest -- same image, one signature each.
+echo "=== Generating img-catalog-v2.json + img-catalog.json ==="
+NEW_CATALOG_V2="$STAGING/img-catalog-v2.json"
 NEW_CATALOG="$STAGING/img-catalog.json"
 node tools/make-img-catalog.mjs \
     --baseline "Sources/AgentCoding/Resources/img-catalog.json" \
@@ -204,12 +210,15 @@ node tools/make-img-catalog.mjs \
     --compressed-bytes "$COMPRESSED_BYTES" \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
     "${BOOT_ARGS[@]}" \
-    --out "$NEW_CATALOG"
+    --payload-magic bromure-img-catalog-v2 \
+    --out "$NEW_CATALOG_V2" \
+    --legacy-out "$NEW_CATALOG"
 
-# --- 6. Upload the catalog (1s cache expiry) ------------------------------
+# --- 6. Upload the catalogs (1s cache expiry) -----------------------------
 # The 1s TTL is what makes "always download the latest catalog first"
 # meaningful for clients — a weekly publish is visible immediately.
-echo "=== Uploading img-catalog.json (1s CDN TTL) ==="
+echo "=== Uploading img-catalog-v2.json + img-catalog.json (1s CDN TTL) ==="
+put "$NEW_CATALOG_V2" "$CHANNEL/img-catalog-v2.json" "application/json" "public, max-age=1, must-revalidate"
 put "$NEW_CATALOG" "$CHANNEL/img-catalog.json" "application/json" "public, max-age=1, must-revalidate"
 
 # --- 7. Smoke-test ---------------------------------------------------------
@@ -227,9 +236,11 @@ catalog_uuid() {  # url → prints the catalog's image uuid, or nothing
 # uploads themselves landed. Fails fast — nothing here is eventually
 # consistent enough to warrant retries.
 ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
-ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/$CHANNEL/img-catalog.json")
-[ "$ORIGIN_UUID" = "$UUID" ] \
-    || { echo "ERROR: origin doesn't serve the new catalog (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
+for name in img-catalog-v2.json img-catalog.json; do
+    ORIGIN_UUID=$(catalog_uuid "$ORIGIN_BASE/$CHANNEL/$name")
+    [ "$ORIGIN_UUID" = "$UUID" ] \
+        || { echo "ERROR: origin doesn't serve the new $name (got '${ORIGIN_UUID:-<empty>}')"; exit 1; }
+done
 for key in "$DISK_KEY" "$CHANNEL/$UUID/provisioner-vmlinuz.gz" "$CHANNEL/$UUID/provisioner-initrd.gz"; do
     curl -fsSIL "$ORIGIN_BASE/$key" >/dev/null \
         || { echo "ERROR: artifact not reachable at origin ($ORIGIN_BASE/$key)"; exit 1; }
@@ -243,12 +254,14 @@ echo "origin OK ($ORIGIN_BASE)."
 # wait. If this regularly takes long, a Cloudflare cache rule bypassing
 # the edge cache for images/*/img-catalog.json is the real fix.
 CATALOG_URL="$DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json"
+CATALOG_V2_URL="$DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog-v2.json"
 OK=""
 CDN_ATTEMPTS=120   # × 30s = 1 hour
 for i in $(seq 1 "$CDN_ATTEMPTS"); do
     LIVE_UUID=$(catalog_uuid "$CATALOG_URL")
-    if [ "$LIVE_UUID" = "$UUID" ]; then OK=1; break; fi
-    echo "  CDN not propagated yet (got '${LIVE_UUID:-<empty>}'), attempt $i/$CDN_ATTEMPTS — retrying in 30s…"
+    LIVE_V2_UUID=$(catalog_uuid "$CATALOG_V2_URL")
+    if [ "$LIVE_UUID" = "$UUID" ] && [ "$LIVE_V2_UUID" = "$UUID" ]; then OK=1; break; fi
+    echo "  CDN not propagated yet (got '${LIVE_UUID:-<empty>}' / v2 '${LIVE_V2_UUID:-<empty>}'), attempt $i/$CDN_ATTEMPTS — retrying in 30s…"
     sleep 30
 done
 [ -n "$OK" ] || { echo "ERROR: CDN still serves the old catalog after 1 hour"; exit 1; }
@@ -270,5 +283,6 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "Catalog: $DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json"
+echo "Catalog: $DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog-v2.json (5.4.5+)"
+echo "         $DO_SPACES_PUBLIC_BASE/$CHANNEL/img-catalog.json (older apps)"
 echo "Image:   $DO_SPACES_PUBLIC_BASE/$DISK_KEY"
