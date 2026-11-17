@@ -86,4 +86,53 @@ struct HermesSessionTests {
         }
         #expect(checked == 2)
     }
+
+    /// A resumed Hermes session runs on the model it was stored with:
+    /// one begun on a local model, resumed after the workspace moved to
+    /// Nous Portal, asked for the hidden local key ("No API key for the
+    /// custom endpoint"). Bromure's bare resume opens with Hermes's
+    /// session-only `/model` for the workspace's model.
+    @Test("a bare resume opens on the workspace's model; anything else is left alone")
+    func resumeModel() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-rm-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .hermes, authMode: .token)
+        let seed = root.appendingPathComponent("seed")
+        try store.writeHomeSeedFiles(for: p, into: seed, terminalDefaults: .fallback)
+        let rc = try String(contentsOf: seed.appendingPathComponent("files/.bashrc"), encoding: .utf8)
+        let lines = rc.components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.hasSuffix("_bromure_hermes_resume_model() {") })
+        let end = try #require(lines[start...].firstIndex { $0 == "}" })
+        let settings = root.appendingPathComponent("hermes-settings.json")
+        let fn = lines[start...end].joined(separator: "\n")
+            .replacingOccurrences(of: "/mnt/bromure-meta/hermes-settings.json", with: settings.path)
+        func run(_ args: String, model: [String: String]) throws -> String? {
+            try JSONSerialization.data(withJSONObject: ["model": model]).write(to: settings)
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = ["-c", fn + "\n_bromure_hermes_resume_model " + args]
+            let out = Pipe()
+            proc.standardOutput = out
+            proc.standardError = Pipe()
+            try proc.run(); proc.waitUntilExit()
+            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return proc.terminationStatus == 0 ? text : nil
+        }
+        let nous = ["provider": "nous", "default": "openai/gpt-5.5"]
+        let want = "/model openai/gpt-5.5 --provider nous --session"
+        #expect(try run("--resume local-abc123", model: nous) == want)
+        #expect(try run("--yolo -r local-abc123", model: nous) == want)
+        #expect(try run("-c", model: nous) == want)
+        #expect(try run("--resume=local-abc123 --yolo", model: nous) == want)
+        // Not a bare resume, or nothing to switch to: untouched.
+        #expect(try run("", model: nous) == nil)
+        #expect(try run("--resume", model: nous) == nil)
+        #expect(try run("--resume x chat --query=hi", model: nous) == nil)
+        #expect(try run("-c -m other", model: nous) == nil)
+        #expect(try run("sessions list", model: nous) == nil)
+        #expect(try run("-c", model: ["provider": "auto", "default": "x"]) == nil)
+        #expect(try run("-c", model: ["provider": "nous"]) == nil)
+        #expect(try run("-c", model: ["provider": "nous", "default": "a b; rm -rf ~"]) == nil)
+    }
 }

@@ -7286,6 +7286,32 @@ public final class ProfileStore {
         echo "[bromure-ac] Hermes setup failed (see /tmp/bromure-tool-install.log)"
         return 1
     }
+    #    The `/model` that puts a resumed session on the workspace's model
+    #    (printed; fails when there's nothing to do): only for a bare resume
+    #    (`--resume <id>`, `-r <id>`, `-c`, `--continue`, with or without
+    #    --yolo) -- anything else on the line is the user's own.
+    _bromure_hermes_resume_model() {
+        local _r="" _v
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --resume|-r) [ $# -ge 2 ] || return 1; _r=1; shift ;;
+                --resume=*|-c|--continue) _r=1 ;;
+                --yolo) ;;
+                *) return 1 ;;
+            esac
+            shift
+        done
+        [ -n "$_r" ] && [ -r /mnt/bromure-meta/hermes-settings.json ] || return 1
+        _v=$(python3 -c '
+    import json, re
+    m = json.load(open("/mnt/bromure-meta/hermes-settings.json")).get("model") or {}
+    model, prov = str(m.get("default") or ""), str(m.get("provider") or "")
+    ok = re.compile("[A-Za-z0-9._/:@+-]+")
+    if model and prov not in ("", "auto") and ok.fullmatch(model) and ok.fullmatch(prov):
+        print("/model " + model + " --provider " + prov + " --session")
+    ' 2>/dev/null) && [ -n "$_v" ] || return 1
+        printf '%s' "$_v"
+    }
     hermes() {
         if ! type -P hermes >/dev/null 2>&1; then
             _bromure_install_tool hermes || return 127
@@ -7323,6 +7349,16 @@ public final class ProfileStore {
             HERMES_HOME=$(_bromure_hermes_task_home "$_t" "${_u[@]}")
         fi
         _bromure_hermes_apply "${_u[@]}"
+        # A resumed session runs on the model it was stored with, not
+        # config.yaml's, and Hermes refuses --provider / -m on a resume. A
+        # session begun on another provider (a local model, before the
+        # workspace moved to Nous Portal) then wanted that provider's key,
+        # hidden from it: "No API key for the custom endpoint". Bromure's
+        # own resume (nothing but the resume and --yolo) opens on the
+        # workspace's model instead, with Hermes's session-only /model as
+        # its first input; no model call, nothing persisted.
+        local _rm
+        _rm=$(_bromure_hermes_resume_model "$@") && set -- "$@" chat --query="$_rm"
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
