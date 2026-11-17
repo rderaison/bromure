@@ -160,14 +160,19 @@ struct HermesAgentTests {
         ANTHROPIC_API_KEY=sk-ant-api03-brm-AbC123
         export OPENAI_API_KEY="sk-brm-xyz"
         OPENROUTER_API_KEY=sk-or-v1-users-own
+        CLAUDE_CODE_OAUTH_TOKEN=eyJhbGciOiJ.eyJzdWIiOiJ4In0.brm-cdX-sigAbC
+        ANTHROPIC_TOKEN=sk-ant-oat01-brmCLA-xyz
         FIRECRAWL_API_KEY=brm_fake
         TELEGRAM_BOT_TOKEN=123:abc
 
         """.write(to: env, atomically: true, encoding: .utf8)
         _ = try runApply(settings: ["model": ["provider": "xai"]], servers: [:], home: home,
-                         hidden: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"])
+                         hidden: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+                                  "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_TOKEN"])
         let after = try String(contentsOf: env, encoding: .utf8)
         #expect(!after.contains("ANTHROPIC_API_KEY") && !after.contains("OPENAI_API_KEY"))
+        #expect(!after.contains("CLAUDE_CODE_OAUTH_TOKEN"))   // an OAuth stand-in (JWT) too
+        #expect(!after.contains("ANTHROPIC_TOKEN"))           // Claude's subscription stand-in
         #expect(after.contains("OPENROUTER_API_KEY=sk-or-v1-users-own"))
         #expect(after.contains("FIRECRAWL_API_KEY=brm_fake"))   // not a hidden variable
         #expect(after.contains("TELEGRAM_BOT_TOKEN=123:abc"))

@@ -7045,7 +7045,7 @@ public final class ProfileStore {
     except OSError:
         lines = None
     if lines is not None:
-        standin = re.compile(r"(^|[^A-Za-z0-9])(brm_|[A-Za-z0-9]+-brm-)")
+        standin = re.compile(r"(^|[^A-Za-z0-9])brm[-_]|-brm[A-Za-z]*-")
         def stale(line):
             m = re.match(r"\\s*(?:export\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*=(.*)", line)
             return bool(m) and m.group(1) in hidden and bool(standin.search(m.group(2)))
