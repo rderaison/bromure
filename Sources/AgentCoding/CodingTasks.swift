@@ -949,6 +949,10 @@ struct TranscriptPin: Hashable, Sendable {
     /// omp's session (`~/.omp/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`):
     /// that file only, never the folder's newest (another session's).
     var ompSession: String? = nil
+    /// Hermes's session (its hook's mirror, `<root>/<cwd>/<id>.jsonl`): that
+    /// file, in whichever folder — never the cwd folder's newest, which
+    /// after Hermes resumed a session begun elsewhere was another's, or none.
+    var hermesSession: String? = nil
     /// Grok / Codex conversations (lowercased uuids) other sessions on the
     /// machine own, for a session not pinned to its own yet: the folder's
     /// newest is then never one of those — Codex A's header took B's token
@@ -965,6 +969,7 @@ struct TranscriptPin: Hashable, Sendable {
         case "grok" where AgentSessionLocator.isConversationUUID(id): p.grokSession = id
         case "codex" where AgentSessionLocator.isConversationUUID(id): p.codexSession = id
         case "omp" where AgentSessionLocator.isConversationUUID(id): p.ompSession = id
+        case "hermes" where AgentSessionLocator.isHermesSessionID(id): p.hermesSession = id
         default: break
         }
         return p
@@ -1226,6 +1231,16 @@ enum AgentSessionLocator {
     /// A Kimi session id as its store names the session's folder
     /// ("session_<uuid>") — what `kimi -S` resumes and what pins a
     /// session's transcript.
+    /// A Hermes session id (`state.db`'s `sessions.id`, e.g. `local-<hex>`
+    /// or `20261117_140352_ab12cd`), as its hook names the mirrored
+    /// transcript: letters, digits, `_`, `.`, `-`, never leading `-` or
+    /// `.` — safe to splice into a glob, a path, and `hermes --resume`.
+    nonisolated static func isHermesSessionID(_ s: String) -> Bool {
+        guard (6...128).contains(s.count), let f = s.first, f.isASCII, f.isLetter || f.isNumber,
+              !s.contains("..") else { return false }
+        return s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }
+    }
+
     nonisolated static func isKimiSessionID(_ s: String) -> Bool {
         s.hasPrefix("session_") && s.count == 44 && UUID(uuidString: String(s.dropFirst(8))) != nil
     }
@@ -1273,6 +1288,14 @@ enum AgentSessionLocator {
     nonisolated static func ompPinnedFragment(id: String, into varName: String) -> String {
         guard isConversationUUID(id) else { return "" }
         return "\(varName)=$(ls -t \"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}\"/sessions/*/*_\(id).jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = Hermes session `id`'s mirrored transcript, whatever
+    /// folder its hook filed it under (the session's recorded cwd, which a
+    /// resumed session carries over from wherever it began).
+    nonisolated static func hermesPinnedFragment(id: String, into varName: String) -> String {
+        guard isHermesSessionID(id) else { return "" }
+        return "\(varName)=$(ls -t \"\(hermesTranscriptRoot)\"/*/\(id).jsonl 2>/dev/null | head -1); "
     }
 
     /// The Kimi session id in a journal's path, nil when it isn't one.
@@ -1412,6 +1435,8 @@ enum AgentSessionLocator {
             cmd += codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if agent == "omp", let id = pin.ompSession, isConversationUUID(id) {
             cmd += ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "hermes", let id = pin.hermesSession, isHermesSessionID(id) {
+            cmd += hermesPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if let w = pinnedWindow {
             // The transcript the tab's agent itself named (its hook records the
             // path per window — see agent-status.sh) wins over "the newest file
