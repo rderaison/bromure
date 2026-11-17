@@ -603,4 +603,19 @@ struct AgentScreenTests {
             #expect(!line.contains(regex), "\(line)")
         }
     }
+
+    @Test("Hermes's Nous Portal approval page opens unasked; nothing else on the Portal does")
+    func nousSignInPage() {
+        let page = "https://portal.nousresearch.com/manage-subscription?user_code=84RM-5NER"
+        #expect(AgentScreen.isSignInURL(page, agent: "hermes"))
+        #expect(AgentScreen.isSignInURL(page, agent: nil))
+        #expect(GuestURLGate.disposition(for: URL(string: page)!) == .open)
+        #expect(!AgentScreen.isSignInURL(page, agent: "claude"))
+        for bad in ["http://portal.nousresearch.com/manage-subscription?user_code=X",
+                    "https://portal.nousresearch.com/billing",
+                    "https://evil.nousresearch.com/manage-subscription?user_code=X",
+                    "https://portal.nousresearch.com.evil.com/manage-subscription"] {
+            #expect(!AgentScreen.isSignInURL(bad, agent: nil), "\(bad)")
+        }
+    }
 }

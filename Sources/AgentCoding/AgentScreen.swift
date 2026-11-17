@@ -658,6 +658,11 @@ enum AgentScreen {
                        hosts: ["auth.kimi.ai", "kimi.ai", "www.kimi.ai", "auth.kimi.com", "kimi.com", "www.kimi.com"],
                        paths: ["/device", "/authorize_device", "/code/authorize_device", "/api/oauth/authorize_device"]),
         ],
+        // Hermes's Nous Portal sign-in (device code): the Portal's own
+        // approval page, `verification_uri_complete` carrying the code.
+        "hermes": [
+            SignInPage(kind: .device, hosts: ["portal.nousresearch.com"], paths: ["/manage-subscription"]),
+        ],
         "omp": claudePages + codexPages + [
             SignInPage(kind: .authorize, hosts: ["accounts.google.com"],
                        paths: ["/o/oauth2/auth", "/o/oauth2/v2/auth"]),
