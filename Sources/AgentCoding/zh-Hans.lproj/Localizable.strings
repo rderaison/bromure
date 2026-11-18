@@ -4375,3 +4375,7 @@
 "Signing in to %@…" = "正在登录 %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "正在 %@ 上启动一台私有登录机器。准备就绪后，登录页面会在你的浏览器中打开，通常在一分钟内。";
 "Hide" = "隐藏";
+
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "此机器上尚未为 %@ 设置模型。请在机器的设置 › 模型 中选择一个。";
+"No model set up (settings › Models)" = "未设置模型（设置 › 模型）";

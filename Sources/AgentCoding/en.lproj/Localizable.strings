@@ -4409,3 +4409,7 @@
 "Signing in to %@…" = "Signing in to %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute.";
 "Hide" = "Hide";
+
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ has no model set up on this machine. Choose one in the machine's settings › Models.";
+"No model set up (settings › Models)" = "No model set up (settings › Models)";

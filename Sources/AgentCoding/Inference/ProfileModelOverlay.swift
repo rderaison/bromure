@@ -356,7 +356,26 @@ public extension Profile {
                 ready.insert(tool)
             }
         }
+        // An agent that needs a model named (Hermes) isn't ready without one,
+        // even one the workspace lists: it would start on no model.
+        let launched = overlaidWithGlobalModels(settings, subscribed: subscribed)
+        for tool in ready where tool.needsModelToStart {
+            if !(launched.allToolSpecs.first { $0.tool == tool }.map(launched.hasModel(for:)) ?? false) {
+                ready.remove(tool)
+            }
+        }
         return ready
+    }
+
+    /// Whether `spec` (of this launch-time profile) names the model its agent
+    /// runs on: the one picked for it, else, on the local engine, the
+    /// engine's. Only an agent that `needsModelToStart` asks.
+    func hasModel(for spec: ToolSpec) -> Bool {
+        let chosen = (spec.ompModel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !chosen.isEmpty { return true }
+        guard spec.authMode == .local else { return false }
+        let local = (localAgentModelName ?? spec.localModelID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return !local.isEmpty
     }
 
     /// The provider an agent reaches natively (omp: the one it's switched to).

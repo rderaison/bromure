@@ -4375,3 +4375,7 @@
 "Signing in to %@…" = "Connexion à %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Démarrage d’une machine de connexion privée sur %@. La page de connexion s’ouvrira dans votre navigateur dès qu’elle sera prête, en général en moins d’une minute.";
 "Hide" = "Masquer";
+
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ n’a aucun modèle configuré sur cette machine. Choisissez-en un dans les réglages de la machine › Modèles.";
+"No model set up (settings › Models)" = "Aucun modèle configuré (réglages › Modèles)";

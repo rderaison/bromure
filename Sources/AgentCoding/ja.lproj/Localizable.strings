@@ -4375,3 +4375,7 @@
 "Signing in to %@…" = "%@ にサインインしています…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "%@ でプライベートなサインイン用マシンを起動しています。準備ができるとブラウザでサインインページが開きます。通常 1 分以内です。";
 "Hide" = "隠す";
+
+/* New session: an agent with no model set up can't start */
+"%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "このマシンでは %@ のモデルが設定されていません。マシンの設定 › モデル で選択してください。";
+"No model set up (settings › Models)" = "モデル未設定（設定 › モデル）";
