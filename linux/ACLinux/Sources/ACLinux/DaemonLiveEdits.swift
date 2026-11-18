@@ -139,7 +139,7 @@ extension Daemon {
     /// The credential half: the policies, the plan and swap map, and the
     /// guest's files, as the launch stages them, with the map merged.
     // partial: no PII model download, fusion, or 1Password error prompt (not on Linux yet)
-    // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=12a93ff58499be07 @0e28fd20
+    // @port ACAppDelegate.pushLiveCredentials(for: Profile, terminalDefaults: TerminalAppDefaults, sandbox: UbuntuSandboxVM?) h=ee4f0331d681e11d @d7bd69f51
     // @port SessionDisk.refreshMetadataShare(profile: Profile, tokenPlan: SessionTokenPlan?) h=5b64b7f1093111b6 @e81ff085
     // @port UbuntuSandboxVM.applyEgressPolicy(_: EgressPolicy?) h=871ee8ef54b551a8 @132bb730
     @discardableResult
@@ -193,6 +193,7 @@ extension Daemon {
             seedCodexAuthFile(for: profile, homeRoot: files)
             seedGrokAuthFile(for: profile, homeRoot: files)
             seedKimiAuthFile(for: profile, homeRoot: files)
+            seedNousAuthFile(for: profile, homeRoot: files)
         }
     }
 
@@ -222,7 +223,8 @@ extension Daemon {
     /// The meta-share files writeAgentConfigs may write.
     // @port-skip linux-only: the Linux meta share's restage (macOS writes a fresh share each time)
     static let agentConfigFiles = ["codex-local.toml", "grok-local.toml", "kimi.toml", "omp-model", "omp-models.yml",
-                                   "omp-config.yml", SessionDisk.ompEnvUnsetMetaFile, SessionDisk.kimiApprovalsMetaFile]
+                                   "omp-config.yml", SessionDisk.ompEnvUnsetMetaFile, SessionDisk.kimiApprovalsMetaFile,
+                                   SessionDisk.hermesSettingsMetaFile, SessionDisk.hermesEnvUnsetMetaFile, SessionDisk.hermesKeyVarMetaFile]
 
     /// writeCredentialFiles over a given store (testable); `seedStandIns`
     /// adds the subscription CLIs' stand-in files to the seed's files/;

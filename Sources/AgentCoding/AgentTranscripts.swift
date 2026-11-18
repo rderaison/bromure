@@ -656,7 +656,11 @@ enum AgentTranscript {
     /// `/clear`): what came before isn't part of it.
     static func parseNotingClear(_ data: Data, agent: String? = nil) -> (items: [TranscriptItem], cleared: Bool) {
         let kind: String
-        if let agent, ["claude", "codex", "grok", "kimi", "omp"].contains(agent) {
+        if agent == "hermes" {
+            // Hermes's hook mirrors its SQLite sessions in Claude Code's
+            // JSONL shape (`Profile.hermesHookScript`).
+            kind = "claude"
+        } else if let agent, ["claude", "codex", "grok", "kimi", "omp"].contains(agent) {
             kind = agent
         } else {
             kind = sniff(data)

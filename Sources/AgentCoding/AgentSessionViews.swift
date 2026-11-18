@@ -33,6 +33,7 @@ struct AgentAvatar: View {
         case .grok:   return Color(hex: "#4B5563")
         case .kimi:   return Color(hex: "#4F46E5")
         case .omp:    return Color(hex: "#0E9F6E")
+        case .hermes: return Color(hex: "#7C5CFF")
         }
     }
 

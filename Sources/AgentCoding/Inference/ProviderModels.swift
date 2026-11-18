@@ -33,6 +33,8 @@ enum ProviderModels {
         case .xai:      return ["grok-4", "grok-4-fast", "grok-3"]
         case .zai:      return ["glm-5.3", "glm-5.3-flash", "glm-4.6"]
         case .moonshot: return ["kimi-k2.5", "kimi-k2", "kimi-k2-turbo-preview"]
+        // The Portal carries OpenRouter-style ids (Hermes's curated list).
+        case .nous:     return ["anthropic/claude-sonnet-5.5", "anthropic/claude-opus-5.5", "openai/gpt-5.5"]
         // OpenRouter's catalog is fetched live (its /models endpoint); these
         // are the ids its API docs use as examples, so the picker is never empty.
         case .openrouter: return ["anthropic/claude-sonnet-4.6", "openai/gpt-5.2"]

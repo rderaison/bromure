@@ -347,6 +347,12 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
+    /// The provider this client asked the host to sign in to
+    /// (`beginRemoteRegistration`): its device page, code and all, opens
+    /// here unasked; any other run's doesn't (`GuestURLGate.disposition`).
+    private var requestedRegistrationProvider: String?
+    /// The host has shown that run in flight: its end clears the request.
+    private var sawRequestedRegistration = false
     /// Sign-ins this client started, by the host's run id, each told how it
     /// ended (/state's `registrationEnded`): a refused or failed run
     /// otherwise just left /state, its reason shown only on the host.
@@ -436,6 +442,8 @@ final class RemoteHostController {
     /// `ended` hears how it ends (a host too old to say never calls it).
     func beginRemoteRegistration(provider: String, profileID: UUID?,
                                  ended: ((_ success: Bool, _ message: String?) -> Void)? = nil) {
+        requestedRegistrationProvider = provider
+        sawRequestedRegistration = false
         var body: [String: Any] = ["provider": provider]
         if let profileID { body["profileId"] = profileID.uuidString }
         let host = self.host
@@ -534,6 +542,10 @@ final class RemoteHostController {
     /// up as soon as we know the VM + port, then open the sign-in page here.
     private func applyPendingRegistration(_ reg: [String: Any]?) {
         guard let reg else {
+            if sawRequestedRegistration {
+                requestedRegistrationProvider = nil
+                sawRequestedRegistration = false
+            }
             // Flow ended (captured or cancelled) — drop the listener + terminal.
             registrationCallback?.stop()
             registrationCallback = nil
@@ -562,7 +574,9 @@ final class RemoteHostController {
         // and no callback tunnel stands up for it. An older server published
         // such URLs, and Bromure Remote (iPhone, iPad, Vision Pro) opened them
         // unchecked. The VM's terminal (shown above) still has the URL.
-        if let s = reg["url"] as? String, let url = URL(string: s), GuestURLGate.disposition(for: url) != .open {
+        if requestedRegistrationProvider != nil { sawRequestedRegistration = true }
+        if let s = reg["url"] as? String, let url = URL(string: s),
+           GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) != .open {
             if openedRegistrationURLs.insert(s).inserted {
                 FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
             }
@@ -595,7 +609,7 @@ final class RemoteHostController {
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
         // Checked above, before the tunnel.
-        guard GuestURLGate.disposition(for: url) == .open else { return }
+        guard GuestURLGate.disposition(for: url, signInFor: requestedRegistrationProvider) == .open else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
@@ -4811,6 +4825,10 @@ final class RemoteHostWindow: NSWindow {
                 kimiAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["kimi"]?.registeredAt },
                 onRegisterKimi: { [weak self] in self?.beginRemoteRegistration(.kimi, id) },
                 onForgetKimi: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "kimi", profileID: id) },
+                nousAccountSavedAt: { [weak self] in self?.controller.subscriptionStatus["hermes"]?.registeredAt },
+                nousReauthRequiredAt: { [weak self] in self?.controller.subscriptionStatus["hermes"]?.reauthRequiredAt },
+                onRegisterNous: { [weak self] in self?.beginRemoteRegistration(.nous, id) },
+                onForgetNous: { [weak self] in self?.controller.forgetRemoteSubscription(provider: "hermes", profileID: id) },
                 localModelsRemoteAny: modelBackend,
                 modelsPane: .workspace(global: remoteGlobalModels),
                 initialCategory: pane)

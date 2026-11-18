@@ -143,6 +143,10 @@ final class HTTPMitmConnection: @unchecked Sendable {
         get { SubscriptionProviders.kimi }
         set { SubscriptionProviders.kimi = newValue }
     }
+    static var nousSubscriptionProvider: (@Sendable () -> (NousSubscriptionStore, NousSubscriptionRefresher)?)? {
+        get { SubscriptionProviders.nous }
+        set { SubscriptionProviders.nous = newValue }
+    }
     // The subscription sign-in helpers (SubscriptionAuthRewrite.swift), by
     // their old names.
     static func shouldLogTokenInjection(_ key: String, now: Date = Date(), interval: TimeInterval = 60) -> Bool {
@@ -179,6 +183,9 @@ final class HTTPMitmConnection: @unchecked Sendable {
     }
     static func isKimiStandIn(_ bearer: String, profileID: UUID) -> Bool {
         SubscriptionAuthRewrite.isKimiStandIn(bearer, profileID: profileID)
+    }
+    static func isNousStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        SubscriptionAuthRewrite.isNousStandIn(bearer, profileID: profileID)
     }
     static func standInRefreshToken(in rawRequest: Data, matching: (String) -> Bool) -> String? {
         SubscriptionAuthRewrite.standInRefreshToken(in: rawRequest, matching: matching)
@@ -3250,6 +3257,25 @@ private func relayUpstreamBuffered(rawRequest: Data, host: String, port: Int,
                          truncatedForTrace: false)
 }
 
+/// Forward one of the client's header lines. A header sent on several lines
+/// arrives whole: each line used to replace the one before, so a client that
+/// sends `anthropic-beta` twice lost all but the last -- auto mode's
+/// server-side checks among them, which the API then never ran
+/// (code.claude.com/docs/en/auto-mode-classifier-billing). Repeats join as
+/// HTTP folds them: with ", " (a cookie's with "; "). A single-valued header
+/// (credentials, the body's type) still keeps its last line, as before.
+func mitmForwardHeader(_ req: inout URLRequest, name: String, value: String) {
+    let singleValued: Set<String> = ["authorization", "proxy-authorization", "x-api-key",
+                                     "content-type", "user-agent", "host"]
+    guard !singleValued.contains(name.lowercased()),
+          let existing = req.value(forHTTPHeaderField: name), !existing.isEmpty else {
+        req.setValue(value, forHTTPHeaderField: name)
+        return
+    }
+    let sep = name.lowercased() == "cookie" ? "; " : ", "
+    req.setValue(existing + sep + value, forHTTPHeaderField: name)
+}
+
 /// Filter a client's `Accept-Encoding` down to the codings the relay can
 /// undo — gzip / deflate / br (what URLSession decodes) and identity. Anything else (zstd, compress, `*`)
 /// is dropped so the upstream can't answer with a body we'd hand to the
@@ -3316,7 +3342,7 @@ private func relayUpstreamCollecting(rawRequest: Data, host: String, port: Int,
             // Only codings we can undo (see mitmSanitizedAcceptEncoding).
             if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
-            req.setValue(value, forHTTPHeaderField: name)
+            mitmForwardHeader(&req, name: name, value: value)
         }
     }
     if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }
@@ -3670,7 +3696,7 @@ private func relayUpstream(rawRequest: Data, host: String, port: Int,
             // (and decodes) its own gzip/deflate/br.
             if let v = mitmSanitizedAcceptEncoding(value) { req.setValue(v, forHTTPHeaderField: name) }
         default:
-            req.setValue(value, forHTTPHeaderField: name)
+            mitmForwardHeader(&req, name: name, value: value)
         }
     }
     if mitmFetchesIdentity(url) { req.setValue("identity", forHTTPHeaderField: "Accept-Encoding") }

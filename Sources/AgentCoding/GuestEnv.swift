@@ -9,6 +9,11 @@ extension SessionDisk {
     /// without a prompt. Exported from api_key.env (the process env every
     /// guest launch sources; Claude Code won't take it from settings.json).
     static let claudeYoloEnv = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+    /// Claude Code 2.1.281+: `0` keeps auto mode's classifier checks in
+    /// Claude Code (its own requests) instead of asking the API to run them
+    /// server-side, and the request carries no `safeguards` field
+    /// (code.claude.com/docs/en/auto-mode-classifier-billing).
+    static let claudeAutoModeServerEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
 
     // api_key.env — sourced by .bashrc inside the guest. Exports
     // the env var for every enabled tool in token mode. The values
@@ -56,11 +61,21 @@ extension SessionDisk {
                 value = tokenPlan?.fakeForKimi() ?? real
             case .omp:
                 value = tokenPlan?.fakeForOmp() ?? real
+            case .hermes:
+                // Under a variable of its own: the bashrc `hermes()` wrapper
+                // hands it to Hermes as its provider's variable at launch, so
+                // a sibling agent's export of that variable (a Claude
+                // subscription's ANTHROPIC_API_KEY stand-in, Codex's
+                // OPENAI_API_KEY) never becomes Hermes's key, nor Hermes's
+                // theirs.
+                let fake = tokenPlan?.fakeForHermes() ?? real
+                lines.append("export \(Self.hermesKeyVariable)=\(shellQuote(fake))")
+                continue
             }
             // omp is provider-agnostic: write the SELECTED provider's env var
             // (ANTHROPIC_API_KEY by default, OPENAI_API_KEY/XAI_API_KEY/… when
             // switched), not the tool's default.
-            let envVar = spec.tool == .omp
+            let envVar = spec.tool.switchesProvider
                 ? spec.effectiveOmpProvider.apiKeyEnvVar
                 : spec.tool.apiKeyEnvVar
             lines.append("export \(envVar)=\(shellQuote(value))")
@@ -146,6 +161,12 @@ extension SessionDisk {
         // from the commands it runs. No effect in auto mode, the interactive
         // default.
         if claudeYolo { lines.append("export \(Self.claudeYoloEnv)=1") }
+        // PII swapping on: the MITM passes the server-side checks' fields
+        // through untouched (they must arrive as sent), so whatever Claude
+        // Code put in `safeguards` would reach the API unswapped. Its own
+        // classifier requests are ordinary model requests, swapped like the
+        // rest -- at the price of billed classifier tokens on an API key.
+        if profile.pii.isActive { lines.append("export \(Self.claudeAutoModeServerEnv)=0") }
         lines.append("export BROMURE_AC_TOOL=\(profile.tool.rawValue)")
         lines.append("export BROMURE_AC_AUTH=\(profile.authMode.rawValue)")
         if registrationMode { lines.append("export BROMURE_AC_REGISTER=1") }

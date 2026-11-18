@@ -94,6 +94,25 @@ enum PIIRewriter {
         "reasoning", "text", "generationConfig", "safetySettings", "toolConfig", "thinking",
     ]
 
+    /// Subtrees the API pairs with the session and reads back as they were
+    /// sent: auto mode's server-side classifier checks (`safeguards` with its
+    /// `anthropic-beta`, or Bedrock's `anthropic_beta` body field, in the
+    /// request; `safeguard_results` in the response). A gateway that edits
+    /// them -- a swapped or restored value inside -- keeps the checks from
+    /// reaching the session, and Claude Code bills its own classifier
+    /// requests instead (code.claude.com/docs/en/auto-mode-classifier-billing).
+    /// Never scanned or rewritten -- but only where the protocol puts them:
+    /// the same names anywhere else (a tool's `input`, a message's text) are
+    /// conversation data like the rest, scanned and swapped (Finding: "Nested
+    /// `safeguards` fields bypass PII protection in conversation data").
+    ///
+    /// The request's own fields: at its root.
+    static let opaqueRequestKeys: Set<String> = ["safeguards", "anthropic_beta"]
+    /// The response's: at the root of a reply or of a stream event, or of the
+    /// message a `message_start` event carries -- objects the API writes,
+    /// not the model.
+    static let opaqueResponseRoots: [[String]] = [["safeguard_results"], ["message", "safeguard_results"]]
+
     /// Keys whose string value is itself a JSON document (OpenAI tool-call
     /// arguments). Its inner strings are the unit of detection and swapping:
     /// read as plain text, an escape (`\n`) glues to the next word and a
@@ -167,6 +186,7 @@ enum PIIRewriter {
         func eligible(_ r: JSONStrings.Ref) -> Bool {
             if let k = r.key, skipKeys.contains(k) { return false }
             if let t = r.top, skipTopKeys.contains(t) { return false }
+            if let t = r.top, opaqueRequestKeys.contains(t) { return false }
             return r.range.count >= 5                    // "" plus 3 chars
         }
         var items: [Item] = []
@@ -654,9 +674,14 @@ enum JSONStrings {
         let key: String?
         /// The root object's key this value sits under ("messages", "tools"…).
         var top: String? = nil
+        /// Under one of the `opaqueRoots` the scan was given.
+        var opaque = false
     }
 
-    static func scan(_ b: [UInt8]) -> [Ref]? {
+    /// `opaqueRoots`: paths of object keys from the root, each object
+    /// directly in the one before (no array between); a value under one is
+    /// marked `opaque`.
+    static func scan(_ b: [UInt8], opaqueRoots: [[String]] = []) -> [Ref]? {
         enum Frame { case object(expectKey: Bool, key: String?), array(key: String?) }
         var stack: [Frame] = []
         var refs: [Ref] = []
@@ -693,7 +718,13 @@ enum JSONStrings {
                 } else {
                     var top: String? = nil
                     if case .object(_, let k)? = stack.first { top = k }
-                    refs.append(Ref(range: start..<i, key: contextKey(), top: top))
+                    let opaque = opaqueRoots.contains { path in
+                        stack.count >= path.count && path.indices.allSatisfy { i in
+                            if case .object(_, let k?) = stack[i] { return k == path[i] }
+                            return false
+                        }
+                    }
+                    refs.append(Ref(range: start..<i, key: contextKey(), top: top, opaque: opaque))
                 }
             default:
                 i += 1
@@ -792,10 +823,10 @@ final class PIIResponseRestorer {
         case .passthrough: return Data()
         case .json:
             let b = [UInt8](buffer)
-            guard let refs = JSONStrings.scan(b) else { return buffer }
+            guard let refs = JSONStrings.scan(b, opaqueRoots: PIIRewriter.opaqueResponseRoots) else { return buffer }
             var out = Data(capacity: b.count)
             var cursor = 0
-            for r in refs {
+            for r in refs where !r.opaque {
                 if let k = r.key, PIIRewriter.skipKeys.contains(k) { continue }
                 let s = JSONStrings.decode(b, r.range)
                 let restored = Self.restoreValue(s, key: r.key, vault: vault)
@@ -1005,11 +1036,13 @@ final class PIIResponseRestorer {
     /// Returns whether anything changed. Nested containers are rebuilt and
     /// written back, not edited in place: corelibs Foundation hands an
     /// NSDictionary's nested containers back as Swift values (copies).
+    /// `opaqueResponseRoots` are matched on the object keys from the root.
     private static func restoreAll(_ o: NSMutableDictionary, vault: PIIVault) -> Bool {
         var changed = false
         for k in o.allKeys {
-            guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks), let v = o[ks],
-                  let r = restored(v, vault: vault, key: ks) else { continue }
+            guard let ks = k as? String, !PIIRewriter.skipKeys.contains(ks),
+                  !PIIRewriter.opaqueResponseRoots.contains([ks]), let v = o[ks],
+                  let r = restored(v, vault: vault, key: ks, path: [ks]) else { continue }
             o[ks] = r
             changed = true
         }
@@ -1018,7 +1051,9 @@ final class PIIResponseRestorer {
 
     /// `v` with every string restored (skipping signed/opaque keys), or nil
     /// when nothing changed.
-    private static func restored(_ v: Any, vault: PIIVault, key: String?) -> Any? {
+    /// `path`: the object keys from the event's root to `v`, while no array
+    /// lies between (nil past one) -- where `opaqueResponseRoots` are matched.
+    private static func restored(_ v: Any, vault: PIIVault, key: String?, path: [String]?) -> Any? {
         if let s = v as? String {
             let r = key == nil ? vault.restore(s) : restoreValue(s, key: key, vault: vault)
             return r != s ? r : nil
@@ -1026,14 +1061,16 @@ final class PIIResponseRestorer {
         if var d = v as? [String: Any] {
             var changed = false
             for (k, x) in d where !PIIRewriter.skipKeys.contains(k) {
-                if let r = restored(x, vault: vault, key: k) { d[k] = r; changed = true }
+                let here = path.map { $0 + [k] }
+                if let here, PIIRewriter.opaqueResponseRoots.contains(here) { continue }
+                if let r = restored(x, vault: vault, key: k, path: here) { d[k] = r; changed = true }
             }
             return changed ? d : nil
         }
         if var a = v as? [Any] {
             var changed = false
             for i in a.indices {
-                if let r = restored(a[i], vault: vault, key: (a[i] is String) ? nil : key) { a[i] = r; changed = true }
+                if let r = restored(a[i], vault: vault, key: (a[i] is String) ? nil : key, path: nil) { a[i] = r; changed = true }
             }
             return changed ? a : nil
         }

@@ -953,6 +953,10 @@ struct TranscriptPin: Hashable, Sendable {
     /// omp's session (`~/.omp/agent/sessions/<cwd>/<ts>_<uuid>.jsonl`):
     /// that file only, never the folder's newest (another session's).
     var ompSession: String? = nil
+    /// Hermes's session (its hook's mirror, `<root>/<cwd>/<id>.jsonl`): that
+    /// file, in whichever folder — never the cwd folder's newest, which
+    /// after Hermes resumed a session begun elsewhere was another's, or none.
+    var hermesSession: String? = nil
     /// Grok / Codex conversations (lowercased uuids) other sessions on the
     /// machine own, for a session not pinned to its own yet: the folder's
     /// newest is then never one of those — Codex A's header took B's token
@@ -969,6 +973,7 @@ struct TranscriptPin: Hashable, Sendable {
         case "grok" where AgentSessionLocator.isConversationUUID(id): p.grokSession = id
         case "codex" where AgentSessionLocator.isConversationUUID(id): p.codexSession = id
         case "omp" where AgentSessionLocator.isConversationUUID(id): p.ompSession = id
+        case "hermes" where AgentSessionLocator.isHermesSessionID(id): p.hermesSession = id
         default: break
         }
         return p
@@ -1045,13 +1050,15 @@ enum AgentSessionLocator {
         case "kimi": cmd += kimiFragment(since: since, createdSince: kimiCreatedSince,
                                          exclude: kimiExclude, into: "f")
         case "omp": cmd += ompFragment(since: since, into: "f")
+        case "hermes": cmd += hermesFragment(since: since, into: "f")
         default:
             cmd += claudeFragment(path: path, since: since, into: "tc")
             cmd += codexFragment(since: since, into: "tx")
             cmd += grokFragment(path: path, since: since, into: "tg")
             cmd += kimiFragment(since: since, into: "tk")
             cmd += ompFragment(since: since, into: "to")
-            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\" \"$to\"; do "
+            cmd += hermesFragment(since: since, into: "th")
+            cmd += "set --; for c in \"$tc\" \"$tx\" \"$tg\" \"$tk\" \"$to\" \"$th\"; do "
                 + "[ -n \"$c\" ] && set -- \"$@\" \"$c\"; done; "
                 + "f=\"\"; [ $# -gt 0 ] && f=$(ls -t \"$@\" 2>/dev/null | head -1); "
         }
@@ -1080,6 +1087,23 @@ enum AgentSessionLocator {
             + "\(legacy) -maxdepth 1 -name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) "
             + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
     }
+
+    /// Hermes Agent: its conversations live in SQLite; the hook Bromure
+    /// installs (`Profile.hermesHookScript`) mirrors each session to
+    /// ~/.hermes/bromure-transcripts/<cwd, non-alphanumerics as '-'>/<id>.jsonl
+    /// in Claude Code's JSONL shape — Claude's folder rule, so the same
+    /// `$d`/`$r` encodings find it.
+    nonisolated static func hermesFragment(since: Int, into varName: String) -> String {
+        "h1=$(printf %s \"$d\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "h2=$(printf %s \"$r\" | tr -c 'a-zA-Z0-9' '-'); "
+            + "\(varName)=$(find \"\(hermesTranscriptRoot)/$h1\" \"\(hermesTranscriptRoot)/$h2\" "
+            + "-maxdepth 1 -name '*.jsonl' -newermt @\(AgentSessionLocator.findEpoch(since)) "
+            + "2>/dev/null | sort -u | xargs -r ls -t 2>/dev/null | head -1); "
+    }
+
+    /// Where `Profile.hermesHookScript` mirrors Hermes's sessions (a shell
+    /// word, `$HOME`-relative).
+    nonisolated static let hermesTranscriptRoot = "$HOME/.hermes/bromure-transcripts"
 
     /// Codex CLI: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl, date-keyed
     /// rather than cwd-keyed — but line 1 (session_meta) records the cwd,
@@ -1211,6 +1235,16 @@ enum AgentSessionLocator {
     /// A Kimi session id as its store names the session's folder
     /// ("session_<uuid>") — what `kimi -S` resumes and what pins a
     /// session's transcript.
+    /// A Hermes session id (`state.db`'s `sessions.id`, e.g. `local-<hex>`
+    /// or `20261117_140352_ab12cd`), as its hook names the mirrored
+    /// transcript: letters, digits, `_`, `.`, `-`, never leading `-` or
+    /// `.` — safe to splice into a glob, a path, and `hermes --resume`.
+    nonisolated static func isHermesSessionID(_ s: String) -> Bool {
+        guard (6...128).contains(s.count), let f = s.first, f.isASCII, f.isLetter || f.isNumber,
+              !s.contains("..") else { return false }
+        return s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }
+    }
+
     nonisolated static func isKimiSessionID(_ s: String) -> Bool {
         s.hasPrefix("session_") && s.count == 44 && UUID(uuidString: String(s.dropFirst(8))) != nil
     }
@@ -1258,6 +1292,14 @@ enum AgentSessionLocator {
     nonisolated static func ompPinnedFragment(id: String, into varName: String) -> String {
         guard isConversationUUID(id) else { return "" }
         return "\(varName)=$(ls -t \"${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}\"/sessions/*/*_\(id).jsonl 2>/dev/null | head -1); "
+    }
+
+    /// `$varName` = Hermes session `id`'s mirrored transcript, whatever
+    /// folder its hook filed it under (the session's recorded cwd, which a
+    /// resumed session carries over from wherever it began).
+    nonisolated static func hermesPinnedFragment(id: String, into varName: String) -> String {
+        guard isHermesSessionID(id) else { return "" }
+        return "\(varName)=$(ls -t \"\(hermesTranscriptRoot)\"/*/\(id).jsonl 2>/dev/null | head -1); "
     }
 
     /// The Kimi session id in a journal's path, nil when it isn't one.
@@ -1397,6 +1439,8 @@ enum AgentSessionLocator {
             cmd += codexPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if agent == "omp", let id = pin.ompSession, isConversationUUID(id) {
             cmd += ompPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
+        } else if agent == "hermes", let id = pin.hermesSession, isHermesSessionID(id) {
+            cmd += hermesPinnedFragment(id: id, into: "f") + "[ -z \"$f\" ] && pe=1; "
         } else if let w = pinnedWindow {
             // The transcript the tab's agent itself named (its hook records the
             // path per window — see agent-status.sh) wins over "the newest file
@@ -1474,7 +1518,7 @@ enum AgentPaneProbe {
     /// Agent names as they show in a process's arguments (path or
     /// interpreter script), whole words only — "omp" inside "compile" is no
     /// agent.
-    nonisolated static let agentNames = "claude|codex|kimi|grok|omp|aider|goose|opencode|gemini"
+    nonisolated static let agentNames = "claude|codex|kimi|grok|omp|hermes|aider|goose|opencode|gemini"
     nonisolated static let shellLines = "^-?([^ ]*/)?(bash|sh|zsh|dash|fish|login|tmux)( |$)"
 
     /// One line: `pane gone`, `pane none`, or `pane <agent>`.
@@ -3955,6 +3999,22 @@ final class CodingTaskEngine {
             let newest: String = "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 1 -name '*.jsonl' 2>/dev/null "
                 + "| xargs -r ls -t 2>/dev/null | head -1); "
             return markerCwd + byCwd + bySlug + newest + emit
+        case .hermes:
+            // The mirror its hook keeps (`hermesFragment`): the folder named
+            // after the tab's cwd while the tab exists, else the one named
+            // after the worktree (its basename is the slug, "-N" when
+            // deduped). Never the newest session anywhere.
+            let root = AgentSessionLocator.hermesTranscriptRoot
+            return markerCwd
+                + "d=\"\"; f=\"\"; if [ -n \"$cwd\" ]; then "
+                + "rc=$(readlink -f \"$cwd\" 2>/dev/null || printf %s \"$cwd\"); "
+                + "h1=$(printf %s \"$cwd\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "h2=$(printf %s \"$rc\" | tr -c 'a-zA-Z0-9' '-'); "
+                + "d=$(ls -td \"\(root)/$h1\" \"\(root)/$h2\" 2>/dev/null | head -1); fi; "
+                + "[ -z \"$d\" ] && d=$(ls -td \"\(root)\"/*-\(slug) \"\(root)\"/*-\(slug)-[0-9]* 2>/dev/null | head -1); "
+                + "[ -n \"$d\" ] && f=$(find \"$d\" -maxdepth 1 -name '*.jsonl' 2>/dev/null "
+                + "| xargs -r ls -t 2>/dev/null | head -1); "
+                + emit
         }
     }
 
@@ -3985,7 +4045,7 @@ final class CodingTaskEngine {
               slug.allSatisfy({ $0.isLowercase || $0.isNumber || $0 == "-" })
         else { return nil }
         switch agent {
-        case .codex?, .grok?, .omp?:
+        case .codex?, .grok?, .omp?, .hermes?:
             return transcriptCommand(
                 branch: "wt/" + slug, agent: agent!,
                 emit: "if [ -n \"$f\" ]; then m=$(date -r \"$f\" +%s 2>/dev/null); "

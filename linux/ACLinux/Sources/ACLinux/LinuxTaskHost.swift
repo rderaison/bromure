@@ -146,7 +146,7 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     /// filesystem without them, and the run fails with the engine's
     /// "couldn't clone"). A running source is cloned live, crash-consistent,
     /// after a guest `sync`, as on macOS.
-    // @port ACAppDelegate.cloneWorkspaceForAutomation(_: Profile.ID, runSlug: String) h=257b4270865422a3 @641863f2
+    // @port ACAppDelegate.cloneWorkspaceForAutomation(_: Profile.ID, runSlug: String) h=abef7f23e3400941 @d7bd69f51
     func cloneWorkspaceForAutomation(_ baseID: Profile.ID, runSlug: String) async -> Profile? {
         guard let daemon else { return nil }
         if LinuxSessionHost.running.withLockedValue({ $0.contains(baseID) }) {
@@ -156,7 +156,7 @@ extension LinuxSessionHost: CodingTaskHost, AutomationHost {
     }
 
     /// The run's clone goes once it's stopped (Daemon.destroyClone).
-    // @port ACAppDelegate.destroyAutomationClone(_: Profile.ID) h=dc6672c36db37645 @641863f2
+    // @port ACAppDelegate.destroyAutomationClone(_: Profile.ID) h=f939dc0b5504c416 @d7bd69f51
     func destroyAutomationClone(_ id: Profile.ID) {
         guard let daemon else { return }
         Task { await daemon.destroyClone(id) }

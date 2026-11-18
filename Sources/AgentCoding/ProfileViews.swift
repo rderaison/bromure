@@ -33,6 +33,7 @@ extension Profile.Tool {
         case .grok:   "bolt.fill"
         case .kimi:   "moon.stars.fill"
         case .omp:    "option"   // ⌥ — Oh My Pi's brand mark
+        case .hermes: "paperplane"   // the messenger
         }
     }
 }
@@ -702,6 +703,11 @@ struct ProfileEditorView: View {
     let kimiAccountSavedAt: (() -> Date?)?
     let onRegisterKimi: (() -> Void)?
     let onForgetKimi: (() -> Void)?
+    /// Nous Portal (Hermes Agent) counterparts.
+    let nousAccountSavedAt: (() -> Date?)?
+    let nousReauthRequiredAt: (() -> Date?)?
+    let onRegisterNous: (() -> Void)?
+    let onForgetNous: (() -> Void)?
     /// Fat client only: a `RemoteModelBackend` (macOS) routing the Local Models
     /// pane to the remote server (RAM gate, downloads, installed state). Stored
     /// type-erased because Swift forbids `#if` in an init parameter list and
@@ -742,6 +748,10 @@ struct ProfileEditorView: View {
         kimiAccountSavedAt: (() -> Date?)? = nil,
         onRegisterKimi: (() -> Void)? = nil,
         onForgetKimi: (() -> Void)? = nil,
+        nousAccountSavedAt: (() -> Date?)? = nil,
+        nousReauthRequiredAt: (() -> Date?)? = nil,
+        onRegisterNous: (() -> Void)? = nil,
+        onForgetNous: (() -> Void)? = nil,
         onFetchFusionModels: ((Profile.Tool, Profile.AuthMode, String?, @escaping ([String]) -> Void) -> Void)? = nil,
         localModelsRemoteAny: Any? = nil,
         modelsPane: ModelsPaneMode? = nil,
@@ -777,6 +787,10 @@ struct ProfileEditorView: View {
         self.kimiAccountSavedAt = kimiAccountSavedAt
         self.onRegisterKimi = onRegisterKimi
         self.onForgetKimi = onForgetKimi
+        self.nousAccountSavedAt = nousAccountSavedAt
+        self.nousReauthRequiredAt = nousReauthRequiredAt
+        self.onRegisterNous = onRegisterNous
+        self.onForgetNous = onForgetNous
         self.onFetchFusionModels = onFetchFusionModels
         self.localModelsRemoteAny = localModelsRemoteAny
         self.modelsPane = modelsPane
@@ -1323,6 +1337,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexAccountSavedAt?()
                 case .xai:       return grokAccountSavedAt?()
                 case .moonshot:  return kimiAccountSavedAt?()
+                case .nous:      return nousAccountSavedAt?()
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
@@ -1332,6 +1347,7 @@ struct ProfileEditorView: View {
                 case .openai:    onRegisterCodex?()
                 case .xai:       onRegisterGrok?()
                 case .moonshot:  onRegisterKimi?()
+                case .nous:      onRegisterNous?()
                 case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
@@ -1341,6 +1357,7 @@ struct ProfileEditorView: View {
                 case .openai:    onForgetCodex?()
                 case .xai:       onForgetGrok?()
                 case .moonshot:  onForgetKimi?()
+                case .nous:      onForgetNous?()
                 case .zai, .bedrock, .openrouter, .custom: break
                 }
             },
@@ -1361,6 +1378,7 @@ struct ProfileEditorView: View {
                 case .openai:    return codexReauthRequiredAt?()
                 case .xai:       return grokReauthRequiredAt?()
                 case .moonshot:  return kimiReauthRequiredAt?()
+                case .nous:      return nousReauthRequiredAt?()
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
@@ -1370,6 +1388,7 @@ struct ProfileEditorView: View {
                 case .openai:    return onForgetCodex != nil
                 case .xai:       return onForgetGrok != nil
                 case .moonshot:  return onForgetKimi != nil
+                case .nous:      return onForgetNous != nil
                 case .zai, .bedrock, .openrouter, .custom: return false
                 }
             },
@@ -1688,8 +1707,11 @@ struct ProfileEditorView: View {
                               onRegisterGrok, onForgetGrok)
         case .kimi:   return (kimiAccountSavedAt?(), kimiReauthRequiredAt?(),
                               onRegisterKimi, onForgetKimi)
+        // Hermes's subscription is Nous Portal's sign-in.
+        case .hermes: return (nousAccountSavedAt?(), nousReauthRequiredAt?(),
+                              onRegisterNous, onForgetNous)
         // omp is API-key only (no OAuth subscription) — nothing to register.
-        case .omp:    return (nil, nil, nil, nil)
+        case .omp: return (nil, nil, nil, nil)
         }
     }
 
@@ -1760,7 +1782,7 @@ struct ProfileEditorView: View {
         case .workspace(let global): settings = draft.modelOverride?.resolved(over: global) ?? global
         }
         let hooks = modelsSubscriptionHooks
-        let subscribed = Set([ModelProvider.anthropic, .openai, .xai, .moonshot]
+        let subscribed = Set([ModelProvider.anthropic, .openai, .xai, .moonshot, .nous]
             .filter { hooks.savedAt($0) != nil })
         return draft.overlaidWithGlobalModels(settings, subscribed: subscribed)
         #else
@@ -1796,7 +1818,7 @@ struct ProfileEditorView: View {
             Text("Models to fuse").font(.subheadline.weight(.medium))
             Text("Your Claude Code session is always one of the fused models; pick the others.")
                 .font(.caption).foregroundStyle(.secondary)
-            ForEach(Profile.Tool.allCases, id: \.self) { t in
+            ForEach(Profile.Tool.allCases.filter { $0 != .hermes }, id: \.self) { t in
                 let ok = usable.contains(t)
                 Toggle(isOn: Binding(
                     get: { draft.fusionLegs.contains(t) && ok },
@@ -1853,6 +1875,7 @@ struct ProfileEditorView: View {
         case .grok:   return NSLocalizedString("Grok (xAI)", comment: "Fusion cloud leg label")
         case .kimi:   return NSLocalizedString("Kimi Code (Moonshot AI)", comment: "Fusion cloud leg label")
         case .omp:    return NSLocalizedString("Oh My Pi", comment: "Fusion cloud leg label")
+        case .hermes: return NSLocalizedString("Hermes Agent", comment: "Fusion cloud leg label")
         }
     }
 
@@ -3370,6 +3393,22 @@ struct ProfileEditorView: View {
             }
             HStack {
                 Spacer()
+                // Ready-made keys for Hermes Agent's integrations: the name,
+                // variable and hosts filled in, only the key to paste. One
+                // already added isn't offered twice.
+                Menu {
+                    ForEach(ManualToken.hermesIntegrationPresets) { preset in
+                        Button(preset.name) { draft.manualTokens.append(preset.token) }
+                            .disabled(draft.manualTokens.contains { $0.envVarName == preset.envVarName })
+                    }
+                } label: {
+                    Label(NSLocalizedString("Hermes integration", comment: "menu of ready-made API keys for Hermes Agent's web search, image, voice… integrations"),
+                          systemImage: "paperplane")
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .help(NSLocalizedString("Add the API key of a service Hermes Agent's tools use (web search, cloud browser, images, voice, memory). Hermes only ever sees a stand-in.", comment: ""))
                 Button {
                     draft.manualTokens.append(ManualToken())
                 } label: {
@@ -6682,7 +6721,8 @@ private struct ToolConfigCard: View {
         Picker(NSLocalizedString("Provider", comment: "omp upstream provider"),
                selection: Binding(get: { spec.effectiveOmpProvider },
                                   set: { spec.ompProvider = $0 })) {
-            ForEach(Profile.OmpProvider.allCases, id: \.self) { p in
+            ForEach(spec.tool == .hermes ? Profile.OmpProvider.allCases : Profile.OmpProvider.ompChoices,
+                    id: \.self) { p in
                 Text(p.displayName).tag(p)
             }
         }
@@ -6700,8 +6740,11 @@ private struct ToolConfigCard: View {
                                 set: { spec.ompModel = $0 }))
             .textFieldStyle(.roundedBorder)
             .disableAutocorrection(true)
-        Text(NSLocalizedString("omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime.",
-                               comment: "omp provider help"))
+        Text(tool == .hermes
+             ? NSLocalizedString("Hermes Agent runs on the provider you pick here, with its API key below — or choose **Local model** above to run on this Mac. Switch anytime.",
+                                 comment: "Hermes Agent provider help")
+             : NSLocalizedString("omp works with 60+ providers. Pick one and paste its API key below — or choose **Local model** above to run on this Mac. Switch anytime.",
+                                 comment: "omp provider help"))
             .font(.caption).foregroundStyle(.secondary)
     }
 
@@ -6716,6 +6759,7 @@ private struct ToolConfigCard: View {
         // equivalent and is what the local-mode exports set.
         case .kimi:   return "KIMI_MODEL_BASE_URL"
         case .omp:    return "ANTHROPIC_BASE_URL"
+        case .hermes: return "OPENAI_BASE_URL"
         }
     }
 
@@ -6755,7 +6799,8 @@ private struct ToolConfigCard: View {
                         if m == .bedrock && tool != .claude {
                             EmptyView()
                         } else if m == .subscription && tool == .omp {
-                            // omp is API-key only (no OAuth subscription).
+                            // omp is API-key only (no OAuth subscription);
+                            // Hermes's subscription is its Nous Portal sign-in.
                             EmptyView()
                         } else {
                             let localDisabled = (m == .local && localModels.isEmpty
@@ -6809,7 +6854,7 @@ private struct ToolConfigCard: View {
 
                 switch spec.authMode {
                 case .token:
-                    if tool == .omp { ompProviderControls }
+                    if tool.switchesProvider { ompProviderControls }
                     SecureField(
                         envVarPlaceholder,
                         text: Binding(
@@ -6868,7 +6913,7 @@ private struct ToolConfigCard: View {
         case .kimi:   return "Moonshot API key"
         // Provider-agnostic; the adjacent provider selector clarifies which
         // key this is. Neutral placeholder avoids implying a specific vendor.
-        case .omp:    return "API key"
+        case .omp, .hermes: return "API key"
         }
     }
 }

@@ -12,7 +12,7 @@ extension Daemon {
 
     /// The question, as macOS's alert words it.
     // partial: the alert's words and buttons, asked through the fat client (PendingPromptBroker)
-    // @port ACAppDelegate.promptNewPostinstallSteps(_: [PostinstallStep]) h=f12e3df8c31ccdc0 @d3ebbda2
+    // @port ACAppDelegate.promptNewPostinstallSteps(_: [PostinstallStep]) h=98b616ebcbb086f8 @d7bd69f51
     static func newPostinstallStepsPromptParts(_ steps: [PostinstallStep]) -> (title: String, message: String) {
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
         return ("New recommended packages",
@@ -30,7 +30,7 @@ extension Daemon {
             if let p = Int(published), let i = Int(installed) { newer = p > i } else { newer = published != installed }
             if newer { return [] }
         }
-        return catalog.pendingSteps(appliedUUIDs: applied)
+        return catalog.linuxPendingSteps(appliedUUIDs: applied)
     }
 
     /// The steps the image has: its image-state.json, or for an image that

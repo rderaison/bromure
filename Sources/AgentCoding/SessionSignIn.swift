@@ -64,6 +64,7 @@ struct ProxySignInBackend {
     let codex: CodexSubscriptionStore
     let grok: GrokSubscriptionStore
     let kimi: KimiSubscriptionStore
+    let nous: NousSubscriptionStore
 }
 
 /// Where a capture hook finds its sign-in's host. The hook holds values only
@@ -114,6 +115,7 @@ extension ProxySignInHost {
         case .codex:  return "codex login"
         case .grok:   return "grok login"
         case .kimi:   return "kimi login"
+        case .nous:   return RegistrationLaunch.nousLoginCommand
         }
     }
 
@@ -127,6 +129,9 @@ extension ProxySignInHost {
         // International (auth.kimi.ai) is what Bromure uses now; keep the
         // China default (auth.kimi.com) too so a login on either is captured.
         case .kimi:   return (["auth.kimi.ai", "auth.kimi.com"], "/api/oauth/token")
+        // The device-code poll; a refresh on the same path is never captured
+        // (`SignInCapture.matches` passes a plain refresh by).
+        case .nous:   return ([NousRegion.portalHost], NousRegion.tokenPath)
         }
     }
 
@@ -284,6 +289,22 @@ extension ProxySignInHost {
                 }
                 endProxySignIn(s, success: true, message: nil)
                 return Self.keptOnHostReply()
+            case .nous:
+                // Saved before the reply, so the very next request Hermes
+                // makes on the stand-in (its model list) is swapped. Hermes
+                // writes ~/.hermes/auth.json itself from what it hears.
+                guard let rec = NousSubscriptionRecord.from(tokenReply: json) else { return nil }
+                if engine.nous.hasProfileRecord(pid) {
+                    try engine.nous.setOverride(rec, for: pid)
+                } else {
+                    try engine.nous.setShared(rec)
+                }
+                let standInAccess = NousStandIn.access(realAccess: rec.accessToken, profileID: pid)
+                engine.nous.registerBogusKey(standInAccess, for: pid)
+                endProxySignIn(s, success: true, message: nil)
+                return SignInCapture.response(status: 200, reason: "OK", json: NousStandIn.reply(
+                    from: json, access: standInAccess,
+                    refresh: NousStandIn.refresh(realRefresh: rec.refreshToken, profileID: pid)))
             case .grok, .kimi:
                 let standIn = Self.standInTokens(for: s.provider, profileID: pid, access: access, refresh: refresh)
                 var out = json

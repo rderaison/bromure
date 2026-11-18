@@ -67,6 +67,7 @@ extension Daemon {
             if mitm.codexStore.hasProfileRecord(baseID) { try? mitm.codexStore.alias(clone.id, to: baseID) }
             if mitm.grokStore.hasProfileRecord(baseID) { try? mitm.grokStore.alias(clone.id, to: baseID) }
             if mitm.kimiStore.hasProfileRecord(baseID) { try? mitm.kimiStore.alias(clone.id, to: baseID) }
+            if mitm.nousStore.hasProfileRecord(baseID) { try? mitm.nousStore.alias(clone.id, to: baseID) }
         }
         return clone
     }
@@ -104,10 +105,12 @@ extension Daemon {
             try? mitm.codexStore.forget(for: id)
             try? mitm.grokStore.forget(for: id)
             try? mitm.kimiStore.forget(for: id)
+            try? mitm.nousStore.forget(for: id)
             mitm.claudeStore.unregisterBogusKeys(for: id)
             mitm.codexStore.unregisterBogusKeys(for: id)
             mitm.grokStore.unregisterBogusKeys(for: id)
             mitm.kimiStore.unregisterBogusKeys(for: id)
+            mitm.nousStore.unregisterBogusKeys(for: id)
         }
     }
 }

@@ -156,7 +156,7 @@ extension LinuxSessionHost {
 
     /// The flow proper.
     // partial: the scratch home is the ext4 image (Grok's and Kimi's files are read from the guest, not a host-mounted home); no ShellBridge or window
-    // @port ACAppDelegate.startSubscriptionRegistration(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope, engine: MitmEngine, remoteInitiated: Bool, quiet: Bool, events: ((HostSignInEvent)->Void)?) h=874667841a99b342 @6c6cd9cf
+    // @port ACAppDelegate.startSubscriptionRegistration(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope, engine: MitmEngine, remoteInitiated: Bool, quiet: Bool, events: ((HostSignInEvent)->Void)?) h=8c7bf94621b64204 @6c6cd9cf4
     private func startSubscriptionRegistration(provider: SubscriptionProvider, scope: SubscriptionRegistrationScope,
                                                events: ((HostSignInEvent) -> Void)?) {
         RemoteRegistrationBroker.shared.begin(provider: provider.displayName)
@@ -195,7 +195,7 @@ extension LinuxSessionHost {
                     let c = TokenAgentChannel(disconnectedError: TokenAgentDisconnected())
                     state.listeners.append(try TokenAgentListener(udsPath: uds, port: 8447, channel: c))
                     state.codexBridge = c
-                case .grok, .kimi: break  // no vsock agent — captured from the guest's credential files
+                case .grok, .kimi, .nous: break  // no vsock agent — captured from the guest's credential files
                 }
             } catch {
                 FileHandle.standardError.write(Data("[registration] no token listener: \(error)\n".utf8))
@@ -231,7 +231,7 @@ extension LinuxSessionHost {
     /// (guestOpenedURL): published for the client with the VM's address and
     /// the loopback port its callback comes back to.
     // partial: remote only (the broker always holds a run here); vmIP published with the URL (no onIPUpdate on Linux)
-    // @port ACAppDelegate.wireRegistrationSandbox(_: UbuntuSandboxVM, window: TabbedSessionWindow) h=02792a625dab0d2c @6c6cd9cf
+    // @port ACAppDelegate.wireRegistrationSandbox(_: UbuntuSandboxVM, window: TabbedSessionWindow) h=f41506b86247fef1 @6c6cd9cf4
     func registrationOpenedURL(_ url: URL, state: LinuxRegistrationState) {
         // The CLI got as far as its sign-in URL: it is running.
         state.agentLaunchConfirmed = true
@@ -256,7 +256,7 @@ extension LinuxSessionHost {
     }
 
     /// The scratch VM stopped on its own.
-    // @port ACAppDelegate.wireRegistrationSandbox(_: UbuntuSandboxVM, window: TabbedSessionWindow) h=02792a625dab0d2c @6c6cd9cf
+    // @port ACAppDelegate.wireRegistrationSandbox(_: UbuntuSandboxVM, window: TabbedSessionWindow) h=f41506b86247fef1 @6c6cd9cf4
     func registrationVMStopped(_ id: UUID) {
         guard let state = registration, state.scratchProfile.id == id else { return }
         teardownSubscriptionRegistration(reason: .windowClosed, message: NSLocalizedString(
@@ -326,7 +326,7 @@ extension LinuxSessionHost {
     /// Wait for the in-VM token agent, then poll the credentials until the
     /// user's login lands real tokens (or we time out).
     // partial: Grok's and Kimi's files are read from the guest (cat), not a host-mounted home
-    // @port ACAppDelegate.pollForSubscriptionRegistration(state: ClaudeRegistrationState) h=f0b3d33ce9d0d8b6 @6c6cd9cf
+    // @port ACAppDelegate.pollForSubscriptionRegistration(state: ClaudeRegistrationState) h=c13a3ccadf7cab9b @6c6cd9cf4
     private func pollForSubscriptionRegistration(state: LinuxRegistrationState) {
         let pid = state.scratchProfile.id
         state.pollTask = Task { @MainActor in
@@ -367,6 +367,10 @@ extension LinuxSessionHost {
                                       template: k.template, configTOML: k.configTOML))
                     return
                 }
+                if state.provider == .nous, let n = await self.readGuestNousAuth(pid) {
+                    await self.finishSubscriptionRegistration(state: state, record: .nous(n))
+                    return
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if Task.isCancelled { return }
@@ -389,6 +393,18 @@ extension LinuxSessionHost {
               let data = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines)),
               !data.isEmpty else { return nil }
         return RegistrationCapture.parseGrokAuth(data)
+    }
+
+    /// Hermes's `~/.hermes/auth.json` in the scratch guest (its Nous Portal
+    /// login), nil until the user signed in.
+    // partial: reads the scratch guest's ~/.hermes/auth.json via guestExec, not a host-mounted home
+    // @port ACAppDelegate.static readNousAuthFile(at: URL) h=79d19b5743793bf8 @6c6cd9cf4
+    private func readGuestNousAuth(_ pid: UUID) async -> NousSubscriptionRecord? {
+        guard let out = try? await guestExec(profileID: pid, command:
+                "base64 -w0 /home/ubuntu/.hermes/auth.json 2>/dev/null || true", timeout: 10),
+              let data = Data(base64Encoded: out.trimmingCharacters(in: .whitespacesAndNewlines)),
+              !data.isEmpty else { return nil }
+        return RegistrationCapture.parseNousAuth(data)
     }
 
     /// `~/.kimi-code/credentials/*.json` and `config.toml` in the scratch
@@ -419,9 +435,9 @@ extension LinuxSessionHost {
     /// workspace" also drops that provider's per-workspace logins, so the new
     /// sign-in really is what every workspace reads.
     // partial: remote only (the scope question goes to the client; no completion alert)
-    // @port ACAppDelegate.finishClaudeRegistration(state: ClaudeRegistrationState, record: CapturedSubscription) h=df0da3ab0e19ea68 @6c6cd9cf
+    // @port ACAppDelegate.finishClaudeRegistration(state: ClaudeRegistrationState, record: CapturedSubscription) h=55659dfd56555a22 @6c6cd9cf4
     // partial: RegistrationCapture.forgetOverrides called inline when shared everywhere
-    // @port ACAppDelegate.forgetProviderOverrides(_: SubscriptionProvider) h=4e8088469046431d @6c6cd9cf
+    // @port ACAppDelegate.forgetProviderOverrides(_: SubscriptionProvider) h=2fec54745e1d182d @6c6cd9cf4
     private func finishSubscriptionRegistration(state: LinuxRegistrationState,
                                                 record captured: CapturedSubscription) async {
         guard !state.finished, let backend = proxySignInBackend else {
@@ -479,7 +495,7 @@ extension LinuxSessionHost {
     /// Idempotent teardown: stop polling and the token channels, finish the
     /// client's relay, destroy the VM.
     // partial: no window or native terminal surfaces to retire; the VM and its files go through the daemon
-    // @port ACAppDelegate.teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String?) h=d79b3f33670464e0 @6c6cd9cf
+    // @port ACAppDelegate.teardownClaudeRegistration(reason: ClaudeRegistrationTeardownReason, message: String?) h=ba448ffc3456180b @6c6cd9cf4
     func teardownSubscriptionRegistration(reason: ClaudeRegistrationTeardownReason, message: String? = nil) {
         guard let state = registration, !state.finished else { return }
         state.finished = true

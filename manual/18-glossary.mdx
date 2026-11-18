@@ -20,7 +20,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Age gate** — The supply-chain check that refuses package versions younger than a cutoff (2 days by default), because a freshly published release is the one most likely to come from a just-hijacked account. A request for "the latest" version quietly gets the newest version old enough to pass. See [Supply-Chain Protection](09-supply-chain.mdx).
 
-**Agent** — A coding assistant program that runs inside a machine: **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, or **Oh My Pi**. Every agent is available on every machine; you pick one per session. Which model it talks to is set in **Models**. See [Starting a Session](06-new-session.mdx).
+**Agent** — A coding assistant program that runs inside a machine: **Claude Code**, **Codex**, **Grok Build**, **Kimi Code**, **Oh My Pi**, or **Hermes Agent**. Every agent is available on every machine; you pick one per session. Which model it talks to is set in **Models**. See [Starting a Session](06-new-session.mdx).
 
 **Agent session** — See *Session*.
 
@@ -154,6 +154,8 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **Heartbeat** — A background check-in with the enrollment server every ten minutes, which keeps the Mac's "last seen" time current and renews its certificate when due. See [Enterprise](15-enterprise.mdx).
 
+**Hermes Agent** — Nous Research's agent (the `hermes` command), one of the bundled agents. It comes with the base image (in `/opt/hermes`), and `hermes update` installs your own newer copy in the machine. It works with several providers' API keys, and with a Nous Portal subscription. Its tools' own keys (web search, images, voice…) are added from the **Hermes integration** menu of the Credentials pane. See [Models & Providers](13-models.mdx) and [Credentials & the Wire Boundary](08-credentials.mdx#hermes-agents-integrations).
+
 **Hidden-Unicode signals** — Invisible characters used to hide instructions from human readers: zero-width characters, text-direction overrides and Unicode tag characters. Bromure detects them with simple, near-certain rules. See [Prompt-Injection Detection & Guardrails](10-prompt-injection.mdx).
 
 **home.img (ext4 home)** — The disk image holding a machine's `/home/ubuntu`: your projects, dotfiles, keys and agent state. It is separate from the system disk, so it survives a system-disk reset, and it can be rolled back with **Rewind home…**. See [Advanced](16a-advanced.mdx).
@@ -252,7 +254,7 @@ This glossary defines the terms you meet in Bromure Agentic Coding's windows, in
 
 **OCSF export** — Writing every security event as OCSF JSON (1.8.0, or 1.3.0 for Security Lake, Splunk and CrowdStrike), one file per day, for a SIEM — the **OCSF** menu in the Security window. See [Security Overview & Timeline](11a-security-timeline.mdx#ocsf-logs-for-a-siem).
 
-**Oh My Pi (omp)** — One of the five bundled agents. It works with several providers but only with API keys, not subscriptions. See [Models & Providers](13-models.mdx).
+**Oh My Pi (omp)** — One of the bundled agents. It works with several providers but only with API keys, not subscriptions. See [Models & Providers](13-models.mdx).
 
 **On-device model** — A model that runs on your Mac itself with MLX, one generation at a time, with nothing sent to the cloud. Listed as **On-device models** in **Models**. See [Models & Providers](13-models.mdx).
 

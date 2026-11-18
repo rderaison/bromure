@@ -76,7 +76,7 @@ extension Daemon {
     static let subscriptionAuthNotes = NIOLockedValueBox<[UUID: [Profile.Tool: Profile.SubscriptionResolution]]>([:])
 
     /// The providers with a signed-in subscription the workspace can use.
-    // @port ACAppDelegate.subscribedProviders(for: Profile) h=6f587086eef888b7 @7057d502
+    // @port ACAppDelegate.subscribedProviders(for: Profile) h=839c5384e9ce407a @d7bd69f51
     func subscribedProviders(for profile: Profile) -> Set<ModelProvider> {
         guard let e = mitm else { return [] }
         var s = Set<ModelProvider>()
@@ -84,6 +84,7 @@ extension Daemon {
         if e.codexStore.hasCredential(for: profile.id)  { s.insert(.openai) }
         if e.grokStore.hasCredential(for: profile.id)   { s.insert(.xai) }
         if e.kimiStore.hasCredential(for: profile.id)   { s.insert(.moonshot) }
+        if e.nousStore.hasCredential(for: profile.id)   { s.insert(.nous) }
         return s
     }
 

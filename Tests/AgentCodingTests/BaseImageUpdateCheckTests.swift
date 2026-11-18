@@ -51,7 +51,7 @@ struct BaseImageUpdateCheckTests {
         #expect(ImageDistribution.agentCoding.catalogPrefix == "images/\(major)")
         let store = ImageCatalogStore(distribution: .agentCoding, supportDir: dir)
         #expect(store.refreshURL.absoluteString
-            == "https://dl.bromure.io/images/\(major)/img-catalog.json")
+            == "https://dl.bromure.io/images/\(major)/img-catalog-v2.json")
     }
 
     @Test("the baked-agent gate follows the installed major")

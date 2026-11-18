@@ -242,7 +242,7 @@ extension ACAppDelegate {
             switch provider {
             case .claude: state.claudeBridge = SubscriptionTokenBridge(socketDevice: dev)
             case .codex:  state.codexBridge = CodexTokenBridge(socketDevice: dev)
-            case .grok, .kimi: break  // no vsock agent — captured from the home-dir file
+            case .grok, .kimi, .nous: break  // no vsock agent — captured from the home-dir file
             }
 
             // Window 0 of the guest tmux session sources .bashrc, whose
@@ -342,7 +342,9 @@ extension ACAppDelegate {
                 }
                 self.claudeRegistration?.onEvent?(.status(NSLocalizedString(
                     "Finish signing in in your browser…", comment: "sign-in")))
-                ACAppDelegate.openGuestRelayedURL(url)
+                // This sign-in machine's own sign-in, for its provider.
+                ACAppDelegate.openGuestRelayedURL(
+                    url, signInFor: self.claudeRegistration.flatMap { $0.finished ? nil : $0.provider.rawValue })
             }
         }
     }
@@ -460,6 +462,7 @@ extension ACAppDelegate {
         let home = store.homeDirectory(for: state.scratchProfile)
         let grokAuthURL = home.appendingPathComponent(".grok/auth.json")
         let kimiHome = home.appendingPathComponent(".kimi-code", isDirectory: true)
+        let hermesAuthURL = home.appendingPathComponent(".hermes/auth.json")
         state.pollTask = Task { @MainActor in
             // Bridge providers connect ~15–60s after boot; Grok/Kimi have none.
             if !state.provider.capturesFromHomeDir {
@@ -499,6 +502,10 @@ extension ACAppDelegate {
                                       template: k.template, configTOML: k.configTOML))
                     return
                 }
+                if state.provider == .nous, let n = Self.readNousAuthFile(at: hermesAuthURL) {
+                    await self.finishClaudeRegistration(state: state, record: .nous(n))
+                    return
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             if Task.isCancelled { return }
@@ -522,6 +529,16 @@ extension ACAppDelegate {
 
     /// Captured-token payload, shaped per provider (Registration.swift).
     typealias CapturedSubscription = bromure_ac.CapturedSubscription
+
+    /// The real Nous Portal login Hermes wrote to `~/.hermes/auth.json`
+    /// (`providers.nous`), or nil until the sign-in lands. Bromure's own
+    /// stand-ins are never taken for one. The expiry is the JWT's own: the
+    /// sign-in machine's Hermes still holds the refresh token until the
+    /// machine goes, so the host doesn't spend it on first use.
+    static func readNousAuthFile(at url: URL) -> NousSubscriptionRecord? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return RegistrationCapture.parseNousAuth(data)
+    }
 
     /// Read real Grok tokens from a freshly-written `~/.grok/auth.json`, or nil
     /// until the user has signed in. Shape: `{ "<scope>": { key, refresh_token,
@@ -568,7 +585,8 @@ extension ACAppDelegate {
         RegistrationCapture.forgetOverrides(provider, for: profiles.map(\.id), in: ProxySignInBackend(
             captures: engine.signInCaptures, claude: engine.claudeSubscriptionStore,
             codex: engine.codexSubscriptionStore, grok: engine.grokSubscriptionStore,
-            kimi: engine.kimiSubscriptionStore))
+            kimi: engine.kimiSubscriptionStore,
+            nous: engine.nousSubscriptionStore))
     }
 
     /// Persist the captured tokens per the scope, then tear down + confirm.
@@ -628,7 +646,8 @@ extension ACAppDelegate {
             try RegistrationCapture.save(captured, overrideProfile: overrideProfile, into: ProxySignInBackend(
                 captures: engine.signInCaptures, claude: engine.claudeSubscriptionStore,
                 codex: engine.codexSubscriptionStore, grok: engine.grokSubscriptionStore,
-                kimi: engine.kimiSubscriptionStore))
+                kimi: engine.kimiSubscriptionStore,
+            nous: engine.nousSubscriptionStore))
             if sharedEverywhere { forgetProviderOverrides(state.provider) }
         } catch {
             if RemoteRegistrationBroker.shared.pending == nil {
@@ -717,6 +736,7 @@ extension ACAppDelegate {
         mitmEngine?.codexSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.grokSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
         mitmEngine?.kimiSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
+        mitmEngine?.nousSubscriptionStore.unregisterBogusKeys(for: state.scratchProfile.id)
 
         // Retire the pane's native terminal surfaces up front, while the view
         // is still alive, so closing the window below can't leave libghostty

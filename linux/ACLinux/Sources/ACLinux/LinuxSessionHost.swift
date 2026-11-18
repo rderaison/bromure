@@ -296,7 +296,7 @@ final class LinuxSessionHost: AgentSessionHost {
 
     /// Agents that report their own status through hooks; the others get it
     /// from the proxy's model traffic (macOS: ACAppDelegate.hookDrivenAgents).
-    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp"]
+    static let hookDrivenAgents: Set<String> = ["claude", "kimi", "codex", "grok", "omp", "hermes"]
     /// Each workspace's pending "done" after its model traffic went quiet.
     private var thinkingClearTasks: [UUID: Task<Void, Never>] = [:]
     /// When each workspace's tabs were last marked from its traffic: a busy

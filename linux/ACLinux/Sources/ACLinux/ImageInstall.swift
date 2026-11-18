@@ -66,7 +66,7 @@ public enum ImageInstall {
                 continue
             }
             var b = o
-            b.postinstallSteps = steps ? catalog.sortedSteps : []
+            b.postinstallSteps = steps ? catalog.linuxSortedSteps : []
             b.downloaded = .init(disk: disk.path, imageUUID: image.uuid, version: image.version)
             let r = try await InterimBake.bake(b, progress: progress, output: output)
             progress("Base image ready at \(o.outputDir)/base.img (\(image.description))")

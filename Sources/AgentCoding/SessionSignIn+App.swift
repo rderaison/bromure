@@ -9,6 +9,7 @@ extension ACAppDelegate: ProxySignInHost {
                                   claude: engine.claudeSubscriptionStore,
                                   codex: engine.codexSubscriptionStore,
                                   grok: engine.grokSubscriptionStore,
-                                  kimi: engine.kimiSubscriptionStore)
+                                  kimi: engine.kimiSubscriptionStore,
+                                  nous: engine.nousSubscriptionStore)
     }
 }

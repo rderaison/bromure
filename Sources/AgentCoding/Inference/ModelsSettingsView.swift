@@ -1176,11 +1176,17 @@ private struct ProviderConfigPopover: View {
                     .buttonStyle(.borderedProminent).controlSize(.regular)
                     Text("Interactive login in a temporary VM — no API key needed.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("or paste an API key").font(.caption2).foregroundStyle(.tertiary)
+                    if !provider.isSignInOnly {
+                        Text("or paste an API key").font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
 
-            SecureField("API key", text: $apiKey).textFieldStyle(.roundedBorder)
+            if provider.isSignInOnly {
+                Text("Powers Hermes Agent only.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                SecureField("API key", text: $apiKey).textFieldStyle(.roundedBorder)
+            }
 
             if apiKey.isEmpty, saved == nil {
                 Text("Not configured yet.").font(.caption).foregroundStyle(.tertiary)

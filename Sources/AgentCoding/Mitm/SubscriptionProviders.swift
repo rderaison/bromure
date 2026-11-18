@@ -63,4 +63,10 @@ enum SubscriptionProviders {
         set { kimiSlot.current = newValue }
     }
     private static let kimiSlot = LockedProvider<@Sendable () -> (KimiSubscriptionStore, KimiSubscriptionRefresher)?>()
+    /// Nous Portal (Hermes Agent) counterpart of `claude`.
+    static var nous: (@Sendable () -> (NousSubscriptionStore, NousSubscriptionRefresher)?)? {
+        get { nousSlot.current }
+        set { nousSlot.current = newValue }
+    }
+    private static let nousSlot = LockedProvider<@Sendable () -> (NousSubscriptionStore, NousSubscriptionRefresher)?>()
 }

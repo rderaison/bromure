@@ -2,7 +2,8 @@ import Foundation
 
 // The agents' own config files in the meta share, the guest init's to lay
 // down: Codex's and Grok's local-engine providers, Kimi's managed block and
-// approval flag, omp's model, models.yml and settings overlay. macOS
+// approval flag, omp's model, models.yml and settings overlay, Hermes's
+// settings. macOS
 // (SessionDisk.prepareMetadataShare) and the Linux daemon stage the same
 // files.
 
@@ -159,6 +160,26 @@ extension SessionDisk {
             try Self.ompHiddenKeyEnvVars(profile: profile).map { $0 + "\n" }.joined().write(
                 to: tmp.appendingPathComponent(Self.ompEnvUnsetMetaFile),
                 atomically: true, encoding: .utf8)
+        }
+
+        // Hermes Agent: the provider/model it runs on (applied to
+        // ~/.hermes/config.yaml by the bashrc `hermes()` wrapper when it
+        // changes) and the key variables it must not see. Stale files go when
+        // the workspace no longer has Hermes.
+        let hermesSettingsURL = tmp.appendingPathComponent(Self.hermesSettingsMetaFile)
+        let hermesUnsetURL = tmp.appendingPathComponent(Self.hermesEnvUnsetMetaFile)
+        let hermesKeyVarURL = tmp.appendingPathComponent(Self.hermesKeyVarMetaFile)
+        if let settings = Self.hermesSettings(profile: profile),
+           let data = try? JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys]) {
+            try data.write(to: hermesSettingsURL, options: .atomic)
+            try Self.hermesHiddenKeyEnvVars(profile: profile).map { $0 + "\n" }.joined().write(
+                to: hermesUnsetURL, atomically: true, encoding: .utf8)
+            try ((settings["key_var"] as? String ?? "") + "\n").write(
+                to: hermesKeyVarURL, atomically: true, encoding: .utf8)
+        } else {
+            for url in [hermesSettingsURL, hermesUnsetURL, hermesKeyVarURL] {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -370,6 +391,110 @@ extension SessionDisk {
     /// until listed here, but `enabledModels` still hides its models.
     /// Meta-share file listing the env vars the omp() wrapper unsets.
     static let ompEnvUnsetMetaFile = "omp-env-unset"
+
+    /// Meta-share files for Hermes Agent: the settings the bashrc `hermes()`
+    /// wrapper applies to ~/.hermes/config.yaml, and the key variables it
+    /// unsets for Hermes alone.
+    static let hermesSettingsMetaFile = "hermes-settings.json"
+    static let hermesEnvUnsetMetaFile = "hermes-env-unset"
+    static let hermesKeyVarMetaFile = "hermes-key-var"
+    /// The variable carrying Hermes's (stand-in) provider key in the guest.
+    static let hermesKeyVariable = Profile.Tool.hermesKeyVariable
+
+    /// Hermes's own id for each provider it reaches natively.
+    static func hermesProviderID(_ p: Profile.OmpProvider) -> String {
+        switch p {
+        case .anthropic: return "anthropic"
+        case .openai:    return "openai-api"
+        case .xai:       return "xai"
+        case .zai:       return "zai"
+        case .custom:    return "custom"
+        case .nous:      return "nous"
+        }
+    }
+
+    /// Whether this workspace's Hermes runs on its Nous Portal sign-in: the
+    /// Models pane switched it to Nous, or the workspace picked Hermes's
+    /// subscription (Nous is its only one). Never in local mode.
+    static func hermesUsesNous(_ profile: Profile) -> Bool {
+        guard let spec = profile.allToolSpecs.first(where: { $0.tool == .hermes }) else { return false }
+        return hermesUsesNous(spec)
+    }
+
+    static func hermesUsesNous(_ spec: Profile.ToolSpec) -> Bool {
+        guard spec.tool == .hermes, spec.authMode != .local else { return false }
+        return spec.authMode == .subscription || spec.effectiveOmpProvider == .nous
+    }
+
+    /// The variable Hermes reads its provider key from ("" on Nous: a
+    /// sign-in, kept in auth.json — no key at all).
+    static func hermesKeyVar(_ spec: Profile.ToolSpec) -> String {
+        if hermesUsesNous(spec) { return "" }
+        return (spec.authMode == .local || spec.effectiveOmpProvider == .custom)
+            ? "OPENAI_API_KEY" : spec.effectiveOmpProvider.apiKeyEnvVar
+    }
+
+    /// What Hermes runs on in this workspace, as the `model.*` keys of its
+    /// config.yaml (`provider`, `default` when a model is chosen, and for a
+    /// custom endpoint or the local engine `base_url` + `key_env`), plus
+    /// `adopt_external_logins: false` -- left on, Hermes borrows Claude
+    /// Code's and Codex's logins in the VM (a subscription used outside its
+    /// own agent). nil: the workspace has no Hermes. Pure -- see
+    /// `HermesAgentTests`.
+    static func hermesSettings(profile: Profile) -> [String: Any]? {
+        guard let spec = profile.allToolSpecs.first(where: { $0.tool == .hermes }) else { return nil }
+        let chosen = spec.ompModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var model: [String: String] = [:]
+        if spec.authMode == .local {
+            model["provider"] = "custom"
+            model["base_url"] = "https://\(InferenceService.localMitmHost)/v1"
+            model["key_env"] = "OPENAI_API_KEY"
+            let local = chosen.isEmpty ? (profile.localAgentModelName ?? spec.localModelID ?? "") : chosen
+            if !local.isEmpty { model["default"] = local }
+        } else if hermesUsesNous(spec) {
+            // The Portal's own base URL comes with the login (auth.json).
+            model["provider"] = hermesProviderID(.nous)
+            if !chosen.isEmpty { model["default"] = chosen }
+        } else {
+            let prov = spec.effectiveOmpProvider
+            model["provider"] = hermesProviderID(prov)
+            if prov == .custom {
+                let base = spec.ompBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !base.isEmpty else { return nil }
+                model["base_url"] = base
+                model["key_env"] = "OPENAI_API_KEY"
+            }
+            if !chosen.isEmpty { model["default"] = chosen }
+        }
+        // The variable Hermes reads its provider's key from: the wrapper sets
+        // it from `hermesKeyVariable` for the launch.
+        // The status hook + transcript mirror (`Profile.hermesHookScript`),
+        // registered and approved by the bashrc's apply.
+        let hooks: [String: Any] = ["command": Profile.hermesHookGuestPath,
+                                    "events": Profile.hermesHookEvents]
+        return ["model": model, "adopt_external_logins": false, "key_var": hermesKeyVar(spec), "hooks": hooks]
+    }
+
+    /// Provider key variables in the shared guest env that Hermes must not
+    /// see: it reads every provider key it finds (and falls back across
+    /// them), so a sibling agent's key would let it run -- and bill -- on a
+    /// provider the workspace didn't give it. Everything but the variable
+    /// its own provider reads. Integration keys (web search, image
+    /// generation, …) stay. Pure -- see `HermesAgentTests`.
+    static func hermesHiddenKeyEnvVars(profile: Profile) -> [String] {
+        guard let spec = profile.allToolSpecs.first(where: { $0.tool == .hermes }) else { return [] }
+        let used = hermesKeyVar(spec)
+        var all: [String] = []
+        for v in Profile.Tool.allCases.map(\.apiKeyEnvVar)
+            + Profile.OmpProvider.allCases.map(\.apiKeyEnvVar)
+            + ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "MOONSHOT_API_KEY",
+               "KIMI_API_KEY", "OPENROUTER_API_KEY", "GLM_API_KEY", "Z_AI_API_KEY", "NOUS_API_KEY",
+               "AWS_BEARER_TOKEN_BEDROCK"]
+        where !v.isEmpty && !all.contains(v) && v != used {
+            all.append(v)
+        }
+        return all
+    }
 
     static let ompBuiltInProviders: [String] = [
         "abliteration", "aiand", "aimlapi", "alibaba-coding-plan", "alibaba-token-plan",

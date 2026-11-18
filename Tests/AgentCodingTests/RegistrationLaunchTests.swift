@@ -117,6 +117,16 @@ struct RegistrationLaunchTests {
         }
     }
 
+    @Test("A shell running something (a child process) is busy, not idle: no second login typed over it")
+    func busyShell() {
+        for p in SubscriptionProvider.allCases {
+            let probe = RegistrationLaunch.probeScript(for: p)
+            #expect(probe.contains("#{pane_pid}"))
+            #expect(probe.contains("pgrep -P \"$pp\" >/dev/null 2>&1; then echo busy:$cur; else echo shell; fi"))
+        }
+        #expect(RegistrationLaunch.Probe(output: "busy:bash") == .busy("bash"))
+    }
+
     @Test("The process pattern matches the login CLI but not the probe itself")
     func patternMatching() throws {
         for p in SubscriptionProvider.allCases {
@@ -124,7 +134,8 @@ struct RegistrationLaunchTests {
             func matches(_ s: String) -> Bool {
                 re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
             }
-            let cmd = RegistrationLaunch.loginCommand(for: p)
+            // Nous: the guest function runs `hermes auth add nous …`.
+            let cmd = p == .nous ? "hermes auth add nous --type oauth" : RegistrationLaunch.loginCommand(for: p)
             #expect(matches(cmd), "\(p) native")
             #expect(matches("node /usr/local/bin/\(cmd)"), "\(p) node script")
             #expect(!matches("bash -c " + RegistrationLaunch.probeScript(for: p)), "\(p) self-match")

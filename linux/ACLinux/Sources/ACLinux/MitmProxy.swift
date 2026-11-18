@@ -133,6 +133,10 @@ final class MitmProxy: @unchecked Sendable {
     /// Fills in a Kimi record's managed config from /models (macOS:
     /// MitmEngine.kimiProvisioner).
     let kimiProvisioner: KimiProvisioner
+    /// Nous Portal (Hermes Agent) counterparts (macOS:
+    /// MitmEngine.nousSubscriptionStore / nousRefresher).
+    let nousStore: NousSubscriptionStore
+    let nousRefresher: NousSubscriptionRefresher
     let captures = SignInCaptureRegistry()
     /// The trace inspector's records (macOS: MitmEngine.traceStore), made
     /// on the main actor once the daemon is up (setUpTraceStore).
@@ -183,7 +187,7 @@ final class MitmProxy: @unchecked Sendable {
     /// The CA (`<dir>/cert.pem`, `key.pem`, made on first use) and the
     /// subscription stores the stand-in swaps read, wired where the swaps
     /// look for them (SubscriptionProviders).
-    // @port MitmEngine.init() h=ae062a764ea3dfb5 @45a144c8
+    // @port MitmEngine.init() h=7b5cc4ca59a917d2 @d7bd69f51
     init(caDirectory: URL, extraRoots: [NIOSSLCertificate] = [],
          group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) throws {
         ca = try BromureCA.loadOrCreate(at: caDirectory)
@@ -222,6 +226,8 @@ final class MitmProxy: @unchecked Sendable {
         kimiStore = KimiSubscriptionStore(fileURL: stores?.appendingPathComponent("kimi-subscription.enc"))
         kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
         kimiProvisioner = KimiProvisioner(store: kimiStore, refresher: kimiRefresher)
+        nousStore = NousSubscriptionStore(fileURL: stores?.appendingPathComponent("nous-subscription.enc"))
+        nousRefresher = NousSubscriptionRefresher(store: nousStore)
         self.group = group
         credentialMinter = CredentialMinter(salt: fakeTokenSalt, swapper: swapper, awsCreds: awsCreds)
         var cfg = TLSConfiguration.makeClientConfiguration()
@@ -266,6 +272,7 @@ final class MitmProxy: @unchecked Sendable {
         SubscriptionProviders.codex = { live().map { ($0.codexStore, $0.codexRefresher) } }
         SubscriptionProviders.grok = { live().map { ($0.grokStore, $0.grokRefresher) } }
         SubscriptionProviders.kimi = { live().map { ($0.kimiStore, $0.kimiRefresher) } }
+        SubscriptionProviders.nous = { live().map { ($0.nousStore, $0.nousRefresher) } }
         SubscriptionProviders.signInCapture = { pid in live()?.captures.capture(for: pid) }
         SubscriptionProviders.credentialMinter = { live()?.credentialMinter }
     }()
@@ -2032,7 +2039,7 @@ final class ResponseRelay: ChannelInboundHandler {
     }
 
     // partial: the response relayed raw on NIO (no URLSession decoding: a body that has to be read is asked for identity); the 502 in UpstreamError / MitmInsecure
-    // @port relayUpstream(rawRequest: Data, host: String, port: Int, session: URLSession, tls: MitmServerStream, upstreamScheme: String, bodyFile: URL?, insecureBypassAllowed: Bool, profileID: UUID, responseRestorer: ((String)->PIIResponseRestorer)?) h=c40e22316695d646 @003f61e7
+    // @port relayUpstream(rawRequest: Data, host: String, port: Int, session: URLSession, tls: MitmServerStream, upstreamScheme: String, bodyFile: URL?, insecureBypassAllowed: Bool, profileID: UUID, responseRestorer: ((String)->PIIResponseRestorer)?) h=d05c02e4a2ed4f7a @81c0b3547
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var b = unwrapInboundIn(data)
         if capture != nil || mint != nil || supplyChain != nil {

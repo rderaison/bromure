@@ -41,7 +41,7 @@ extension Daemon {
     /// Log a subscription out: with a workspace, the scope in effect for it
     /// (its own sign-in if it has one, else the shared one); without, the
     /// shared one.
-    // @port ACAppDelegate.forgetSubscription(_: SubscriptionProvider, profileID: UUID?) h=2b6d62a75938ccc3 @b10aa434
+    // @port ACAppDelegate.forgetSubscription(_: SubscriptionProvider, profileID: UUID?) h=b03b4598bf1099cf @d7bd69f51
     // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onForgetSubscription h=e27654dd84afe541 @d3ebbda2
     @MainActor
     static func forgetSubscription(_ provider: SubscriptionProvider, profileID: UUID?, mitm: MitmProxy) {
@@ -58,6 +58,9 @@ extension Daemon {
         case .kimi:
             let s = mitm.kimiStore
             try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
+        case .nous:
+            let s = mitm.nousStore
+            try? s.forget(for: profileID.flatMap { s.hasProfileRecord($0) ? $0 : nil })
         }
         FileHandle.standardError.write(Data(
             "[subscription] logged out \(provider.rawValue) (\(profileID.map { "workspace \($0.uuidString.prefix(8))" } ?? "shared"))\n".utf8))
@@ -68,9 +71,9 @@ extension Daemon {
     /// the re-auth flag and the login's health (never token data), and the
     /// workspaces whose own sign-in shadows the shared one.
     // partial: no per-launch auth notes (launchAuth) on Linux
-    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSubscriptionStatus h=7804aacc121a331d @b10aa434
+    // @port ACAppDelegate.wireAutomationCallbacks(into: ACAutomationServer) / server.onSubscriptionStatus h=5c8157cbeab23b4c @d7bd69f51
     // partial: health is merged into /state's subscriptions per provider (store.health(for:))
-    // @port ACAppDelegate.localSubscriptionHealth(_: ModelProvider, profileID: UUID?) h=9cf74db898ae82eb @d3ebbda2
+    // @port ACAppDelegate.localSubscriptionHealth(_: ModelProvider, profileID: UUID?) h=39da4f81646131ac @d7bd69f51
     @MainActor
     static func subscriptionStatus(mitm: MitmProxy?, profileID pid: UUID? = nil) -> [String: Any] {
         guard let mitm else { return [:] }
@@ -100,6 +103,8 @@ extension Daemon {
                          health: mitm.grokStore.health(for: pid), hasOwn: mitm.grokStore.hasProfileRecord) { out["grok"] = e }
         if let e = entry(mitm.kimiStore.record(for: pid)?.savedAt, mitm.kimiStore.reauthRequiredAt(for: pid),
                          health: mitm.kimiStore.health(for: pid), hasOwn: mitm.kimiStore.hasProfileRecord) { out["kimi"] = e }
+        if let e = entry(mitm.nousStore.record(for: pid)?.savedAt, mitm.nousStore.reauthRequiredAt(for: pid),
+                         health: mitm.nousStore.health(for: pid), hasOwn: mitm.nousStore.hasProfileRecord) { out["hermes"] = e }
         // How each subscription agent authenticated at the workspace's last
         // staging: "api_key_fallback" / "sign_in_needed" make a signed-out
         // subscription visible instead of silently billed.

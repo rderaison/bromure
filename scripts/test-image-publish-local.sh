@@ -124,11 +124,24 @@ node tools/make-img-catalog.mjs \
     --uncompressed-bytes "$UNCOMPRESSED_BYTES" \
     "${BOOT_ARGS[@]}" \
     --allow-unsigned \
-    --out "$CDN/$CHANNEL/img-catalog.json"
+    --payload-magic bromure-img-catalog-v2 \
+    --out "$CDN/$CHANNEL/img-catalog-v2.json" \
+    --legacy-out "$CDN/$CHANNEL/img-catalog.json"
 
-# Sanity: the inspect mode must read back the uuid we just wrote.
-ROUND_TRIP=$(node tools/make-img-catalog.mjs --print-image-uuid "$CDN/$CHANNEL/img-catalog.json")
-[ "$ROUND_TRIP" = "$UUID" ] || { echo "ERROR: catalog round-trip uuid mismatch"; exit 1; }
+# Sanity: the inspect mode must read back the uuid we just wrote, from both.
+for name in img-catalog-v2.json img-catalog.json; do
+    ROUND_TRIP=$(node tools/make-img-catalog.mjs --print-image-uuid "$CDN/$CHANNEL/$name")
+    [ "$ROUND_TRIP" = "$UUID" ] || { echo "ERROR: $name round-trip uuid mismatch"; exit 1; }
+done
+# The legacy file (older apps) holds no step with a version range.
+node -e '
+const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const ranged = c.postinstall.filter((s) => "min_version" in s || "max_version" in s);
+if (ranged.length) { console.error("ERROR: legacy img-catalog.json carries ranged steps"); process.exit(1); }
+' "$CDN/$CHANNEL/img-catalog.json"
+
+# The app version the client checks step ranges against.
+APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$(dirname "$AC")/../Info.plist")
 
 # --- 3. Client side: real install against the local CDN -------------------
 # --download-only: a fallback local build would silently mask a broken
@@ -156,7 +169,7 @@ INSTALLED_VERSION=$(tr -d '[:space:]' < "$CLIENT/base.version")
 
 node -e '
 const fs = require("fs");
-const [statePath, expectedUuid, baselinePath] = process.argv.slice(1);
+const [statePath, expectedUuid, baselinePath, appVersion] = process.argv.slice(1);
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
 if (state.imageUUID !== expectedUuid) {
@@ -164,14 +177,28 @@ if (state.imageUUID !== expectedUuid) {
   process.exit(1);
 }
 const applied = new Set(state.appliedStepUUIDs);
-const missing = baseline.postinstall.filter((s) => !applied.has(s.uuid));
+// The steps whose range holds this app version (ImageCatalog.steps(forAppVersion:)),
+// and none of the others.
+const parts = (v) => { const o = String(v).split(".").map(Number); while (o.length > 1 && o[o.length - 1] === 0) o.pop(); return o; };
+const less = (a, b) => { for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] < b[i]; return a.length < b.length; };
+const app = parts(appVersion);
+const inRange = (s) => (s.min_version === undefined || !less(app, parts(s.min_version)))
+  && (s.max_version === undefined || !less(parts(s.max_version), app));
+const wrong = baseline.postinstall.filter((s) => !inRange(s) && applied.has(s.uuid));
+if (wrong.length) {
+  console.error(`ERROR: steps outside the range of app ${appVersion} were applied: ` +
+    wrong.map((s) => s.description).join(", "));
+  process.exit(1);
+}
+const expected = baseline.postinstall.filter(inRange);
+const missing = expected.filter((s) => !applied.has(s.uuid));
 if (missing.length) {
   console.error("ERROR: postinstall steps not recorded as applied: " +
     missing.map((s) => s.description).join(", "));
   process.exit(1);
 }
-console.log(`image-state OK: uuid matches, ${baseline.postinstall.length} step(s) applied`);
-' "$CLIENT/image-state.json" "$UUID" "Sources/AgentCoding/Resources/img-catalog.json"
+console.log(`image-state OK: uuid matches, ${expected.length} step(s) applied (app ${appVersion})`);
+' "$CLIENT/image-state.json" "$UUID" "Sources/AgentCoding/Resources/img-catalog.json" "$APP_VERSION"
 
 # The expanded image should be sparse — physical footprint well under the
 # 24 GB logical size. Informational (compression/OS variance), not a gate.

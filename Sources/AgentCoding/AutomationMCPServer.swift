@@ -113,7 +113,7 @@ final class AutomationMCPServer: MCPLineHandler {
         "weekday": ["type": "integer", "description": "weekly: 1 = Sunday … 7 = Saturday."],
         "missedRunPolicy": ["type": "string", "enum": ["skip", "runOnWake"],
                             "description": "A fire time that passed while the Mac slept: skip it (default) or run when it wakes."],
-        "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"],
+        "tool": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp", "hermes"],
                  "description": "The agent that runs (default: this workspace's main agent; must be configured on this machine)."],
         "repoPath": ["type": "string", "description": "Guest path of the repository to worktree off (default ~, the home)."],
         "githubRepo": ["type": "string", "description": "GitHub triggers: owner/repo to watch."],

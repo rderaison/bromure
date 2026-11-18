@@ -186,6 +186,29 @@ extension Daemon {
         SubscriptionStandInFiles.seedKimi(store: mitm.kimiStore, profileID: profile.id, homeRoot: homeRoot)
     }
 
+    /// Hermes on its Nous Portal sign-in: the stand-in login as the sidecar
+    /// (`Profile.hermesNousSidecar`) the managed .bashrc merges into
+    /// ~/.hermes/auth.json, in the home seed's `files/`. Off Nous (or signed
+    /// out): nothing (the seed's manifest deletes an old one in the guest).
+    // @port ACAppDelegate.seedNousAuthFile(for: Profile, homeRoot: URL?) h=16c3babce57e2c69 @d7bd69f51
+    // partial: the seed's files/ only (the Linux home is the ext4 image, never a live host-mounted home)
+    func seedNousAuthFile(for profile: Profile, homeRoot: URL) {
+        guard let mitm, SessionDisk.hermesUsesNous(profile),
+              let real = mitm.nousStore.record(for: profile.id) else { return }
+        let fresh = NousStandIn.authFile(existing: nil, record: real, profileID: profile.id)
+        guard let nous = (fresh["providers"] as? [String: Any])?["nous"] as? [String: Any],
+              let access = nous["access_token"] as? String,
+              let data = try? JSONSerialization.data(withJSONObject: nous, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        mitm.nousStore.registerBogusKey(access, for: profile.id)
+        let dir = homeRoot.appendingPathComponent(".hermes", isDirectory: true)
+        let sidecar = homeRoot.appendingPathComponent(Profile.hermesNousSidecar)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: dir.path)
+        try? data.write(to: sidecar, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)], ofItemAtPath: sidecar.path)
+    }
+
     /// A Kimi subscription workspace whose record carries no managed config:
     /// the seed would leave the guest without a `default_model`.
     // @port ACAppDelegate.kimiNeedsProvisioning(_: Profile) h=7c098e19f617b8fc @9ece43f6

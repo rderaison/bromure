@@ -13,6 +13,7 @@ enum SubscriptionAuthRewrite {
         var codex: String?
         var grok: String?
         var kimi: String?
+        var nous: String?
     }
 
     enum Outcome {
@@ -193,6 +194,29 @@ enum SubscriptionAuthRewrite {
             }
         }
 
+        // 5g. Nous Portal (Hermes Agent) subscription auth: the guest's
+        //     ~/.hermes/auth.json holds a stand-in invoke JWT (far-future
+        //     exp, so Hermes never refreshes); swap it for the live token on
+        //     the inference hosts, and on the Portal for the account read
+        //     alone (exact names and paths: NousRegion.isSubscriptionRequest).
+        if NousRegion.isSubscriptionRequest(host: host, method: reqMethod, path: reqPath),
+           let provider = SubscriptionProviders.nous, let (_, refresher) = provider(),
+           let headerSection = Self.rawHeaderSection(of: req),
+           let bearer = Self.bearerToken(inHeaderSection: headerSection),
+           Self.isNousStandIn(bearer, profileID: profileID) {
+            do {
+                let access = try await refresher.accessToken(for: profileID)
+                req = Self.replaceAuthorizationBearer(rawRequest: req, token: access)
+                injected.nous = access
+                Self.logTokenInjection("Nous Portal subscription token", host: host, profileID: profileID)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Nous Portal subscription token unavailable for \(host): \(error)\n".utf8))
+                let rejected = (error as? NousSubscriptionError)?.isRejection ?? false
+                return .answer(Self.subscriptionUnavailableReply(provider: "Nous Portal", rejected: rejected))
+            }
+        }
+
         // 5f′. Kimi stand-in refresh. The guest's credential file holds a
         //     bogus refresh token it is never meant to use — but kimi 2.0.x
         //     FORCES a refresh (`ensureFresh({force:true})`) the moment its
@@ -315,11 +339,13 @@ enum SubscriptionAuthRewrite {
             let grokHost = host == "cli-chat-proxy.grok.com" || host.hasSuffix(".grok.com")
                 || host == "x.ai" || host.hasSuffix(".x.ai")
             let kimiHost = KimiRegion.isSubscriptionHost(host)
-            if codexHost || grokHost || kimiHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
+            let nousHost = NousRegion.isSubscriptionHost(host)
+            if codexHost || grokHost || kimiHost || nousHost, let bearer = Self.bearerToken(inHeaderSection: hdr) {
                 let codexBogus = Self.isCodexStandIn(bearer, profileID: profileID)
                 let grokBogus = grokHost && Self.isGrokStandIn(bearer, profileID: profileID)
                 let kimiBogus = kimiHost && Self.isKimiStandIn(bearer, profileID: profileID)
-                if codexBogus || grokBogus || kimiBogus {
+                let nousBogus = nousHost && Self.isNousStandIn(bearer, profileID: profileID)
+                if codexBogus || grokBogus || kimiBogus || nousBogus {
                     leaks = leaks.filter { $0.header.lowercased() != "authorization" }
                 }
             }
@@ -342,6 +368,9 @@ enum SubscriptionAuthRewrite {
             Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
         }
         if let stale = injected.kimi, let (_, refresher) = SubscriptionProviders.kimi?() {
+            Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
+        }
+        if let stale = injected.nous, let (_, refresher) = SubscriptionProviders.nous?() {
             Task { await refresher.noteUnauthorized(stale: stale, for: pid) }
         }
     }
@@ -510,6 +539,27 @@ enum SubscriptionAuthRewrite {
         return KimiStandIn.isAccess(bearer) && store.record(for: profileID) != nil
     }
 
+    /// Nous's twin of ``isGrokStandIn(_:profileID:)``.
+    static func isNousStandIn(_ bearer: String, profileID: UUID) -> Bool {
+        guard let (store, _) = SubscriptionProviders.nous?() else { return false }
+        if store.profileForBogusKey(bearer) != nil { return true }
+        return NousStandIn.isAccess(bearer) && store.record(for: profileID) != nil
+    }
+
+    /// The Nous stand-in refresh token of a Portal refresh: Hermes sends it
+    /// in the `x-nous-refresh-token` HEADER (the form only says
+    /// `grant_type=refresh_token`), so `standInRefreshToken` can't see it.
+    /// nil unless it is one of ours and the request is plainly a refresh.
+    static func nousStandInRefreshToken(in rawRequest: Data, path: String) -> String? {
+        guard let hdr = rawHeaderSection(of: rawRequest),
+              let sent = headerValue("x-nous-refresh-token", inHeaderSection: hdr),
+              NousStandIn.isRefresh(sent),
+              let bodyStart = rawRequest.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let body = rawRequest.subdata(in: bodyStart.upperBound..<rawRequest.count)
+        guard SignInCapture.isRefreshGrant(path: path, body: body) else { return nil }
+        return sent
+    }
+
     /// The refresh token of a `grant_type=refresh_token` request (form or
     /// JSON body), when `matching` says it is one of our stand-ins.
     static func standInRefreshToken(in rawRequest: Data, matching: (String) -> Bool) -> String? {
@@ -577,6 +627,38 @@ enum SubscriptionAuthRewrite {
                     : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
                         "error": "temporarily_unavailable",
                         "error_description": "Bromure couldn't renew the Kimi sign-in just now; retrying: \(error)",
+                    ])
+            }
+        }
+        // Nous Portal: the stand-in refresh token rides in a header. A
+        // genuine (non-stand-in) refresh goes on untouched — Hermes in a
+        // sign-in machine owns its own login until the host captures it.
+        if host == NousRegion.portalHost, path.hasPrefix(NousRegion.tokenPath),
+           let (store, refresher) = SubscriptionProviders.nous?(),
+           store.record(for: profileID) != nil,
+           nousStandInRefreshToken(in: rawRequest, path: path) != nil {
+            do {
+                let refreshedNow = try await refresher.refreshForStandIn(for: profileID)
+                guard let fresh = store.record(for: profileID) else { throw NousSubscriptionError.noCredential }
+                let answer = NousStandIn.refreshAnswer(record: fresh, profileID: profileID)
+                store.registerBogusKey(answer.bogusAccess, for: profileID)
+                FileHandle.standardError.write(Data(
+                    "[mitm] answered Nous Portal stand-in refresh for \(pid8) (\(outcome(refreshedNow)))\n".utf8))
+                return SignInCapture.response(status: 200, reason: "OK", json: answer.json)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[mitm] Nous Portal stand-in refresh for \(pid8) failed host-side: \(error)\n".utf8))
+                // Hermes treats only an explicit OAuth grant-dead code as
+                // terminal; a 5xx keeps its (stand-in) credentials.
+                let rejected = (error as? NousSubscriptionError)?.isRejection ?? false
+                return rejected
+                    ? SignInCapture.response(status: 400, reason: "Bad Request", json: [
+                        "error": "invalid_grant",
+                        "error_description": "Bromure could not refresh the Nous Portal sign-in on the host: \(error). Sign in again from Bromure.",
+                    ])
+                    : SignInCapture.response(status: 503, reason: "Service Unavailable", json: [
+                        "error": "temporarily_unavailable",
+                        "error_description": "Bromure couldn't renew the Nous Portal sign-in just now; retrying: \(error)",
                     ])
             }
         }

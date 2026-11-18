@@ -20,6 +20,7 @@ extension Profile.Tool {
         case .kimi:   return "-c"
         case .omp:    return "--continue"
         case .grok:   return "-c"
+        case .hermes: return "-c"
         }
     }
 }
@@ -1175,7 +1176,7 @@ final class AgentSessionEngine {
 
     /// The tty process probe, one window: is an agent in its foreground?
     /// nil when the guest can't be asked.
-    static let agentNames = "(claude|codex|kimi|grok|omp|aider|goose|amp|opencode|gemini|cursor)"
+    static let agentNames = "(claude|codex|kimi|grok|omp|hermes|aider|goose|amp|opencode|gemini|cursor)"
     private static let shellNames = "^-?(bash|sh|zsh|dash|login|tmux)( |$)"
     /// `shellNames` on a `pid args` line.
     private static let procShellNames = "^[0-9]+ -?(bash|sh|zsh|dash|login|tmux)( |$)"
@@ -1231,6 +1232,18 @@ final class AgentSessionEngine {
         let alive: Bool
         var transcriptID: String? = nil
         let title: String
+        /// The transcript's bare name as the probe printed it: Hermes's
+        /// session id (`local-<hex>`), which `transcriptID` (UUID-shaped
+        /// ids) doesn't take — read for a Hermes tab (`transcriptID(for:)`).
+        var rawTranscriptName: String = ""
+
+        /// The conversation id this line names for a session of `tool`.
+        func transcriptID(for tool: Profile.Tool) -> String? {
+            if tool == .hermes {
+                return AgentSessionLocator.isHermesSessionID(rawTranscriptName) ? rawTranscriptName : nil
+            }
+            return transcriptID
+        }
     }
     /// index → when the tab's agent process started (guest epoch seconds),
     /// from the probe's `proc` lines.
@@ -1319,7 +1332,8 @@ final class AgentSessionEngine {
             let tid = parts.count == 4 ? String(parts[2]) : ""
             let title = parts.count == 4 ? String(parts[3]) : (parts.count == 3 ? String(parts[2]) : "")
             return ProbeLine(index: idx, alive: parts[1] != "none",
-                             transcriptID: Self.transcriptID(fromFileName: tid), title: title)
+                             transcriptID: Self.transcriptID(fromFileName: tid), title: title,
+                             rawTranscriptName: tid)
         }
     }
 
@@ -1498,7 +1512,9 @@ final class AgentSessionEngine {
         case .omp:    return "--append-system-prompt \(path)"
         case .codex:  return "-c developer_instructions=" + tomlSpacelessString(text)
         case .kimi:   return resuming ? "" : "--agent-file \(path)"
-        case .grok:   return ""
+        // Hermes: no system-prompt flag -- like Grok, the instructions ride
+        // on the opening message.
+        case .grok, .hermes: return ""
         }
     }
 
@@ -1602,6 +1618,11 @@ final class AgentSessionEngine {
         if s.tool == .omp, let id = s.agentTranscriptID, isTranscriptID(id) {
             return "--resume \(id)"
         }
+        // Hermes: likewise — its `-c` takes the newest session in the whole
+        // Hermes home (outside a git repo), whichever tab or folder began it.
+        if s.tool == .hermes, let id = s.agentTranscriptID, AgentSessionLocator.isHermesSessionID(id) {
+            return "--resume \(id)"
+        }
         return sharedFolder ? "" : s.tool.resumeFlags
     }
 
@@ -1642,7 +1663,7 @@ final class AgentSessionEngine {
         if p.alive, let title = AgentSession.title(fromAgent: p.title, of: s) {
             store.setAgentTitle(s.id, title)
         }
-        if p.alive, let tid = p.transcriptID,
+        if p.alive, let tid = p.transcriptID(for: s.tool),
            Self.acceptsProbedConversation(tid, for: s, sessions: store.sessions) {
             store.setTranscriptID(s.id, tid)
             // An adoptee that turned out to be an unbound session's own tab

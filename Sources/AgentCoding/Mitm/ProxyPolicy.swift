@@ -390,6 +390,7 @@ enum ProxyPolicy {
         if SubscriptionProviders.codex?()?.0.profileForBogusKey(value) != nil { return true }
         if SubscriptionProviders.grok?()?.0.profileForBogusKey(value) != nil { return true }
         if SubscriptionProviders.kimi?()?.0.profileForBogusKey(value) != nil { return true }
+        if SubscriptionProviders.nous?()?.0.profileForBogusKey(value) != nil { return true }
         return false
     }
 

@@ -249,6 +249,39 @@ struct QACodex2FixesTests {
         #expect(abs(back.createdAt.timeIntervalSince(p.createdAt)) < 1)
     }
 
+    @Test("An editor save keeps the base-image answers the app recorded while it was open")
+    func editorKeepsBaseImageAnswers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("qa-cx2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        var p = Profile(name: "ws", tool: .codex, authMode: .token, apiKey: nil)
+        p.baseImageUpgradeDeclinedFor = "200"
+        p.baseImageUpgradeRemindAfter = Date(timeIntervalSince1970: 5_000)
+        try store.save(p)
+        var editorCopy = p                 // opened before the chooser
+        var chosen = p
+        chosen.baseImageUpgradeAcceptedFor = "201.1"   // the chooser's Update
+        chosen.baseImageUpgradeDeclinedFor = nil
+        chosen.baseImageUpgradeRemindAfter = nil
+        try store.save(chosen)
+        editorCopy.name = "renamed"
+        try store.saveEdited(&editorCopy)
+        var back = try #require(store.storedProfile(id: p.id))
+        #expect(back.name == "renamed")
+        #expect(back.baseImageUpgradeAcceptedFor == "201.1")
+        #expect(back.baseImageUpgradeDeclinedFor == nil)
+        #expect(back.baseImageUpgradeRemindAfter == nil)
+
+        // The launch applied the Update and cleared it: an editor opened
+        // before that doesn't bring it back.
+        var stale = back
+        back.baseImageUpgradeAcceptedFor = nil
+        try store.save(back)
+        stale.comments = "notes"
+        try store.saveEdited(&stale)
+        #expect(try #require(store.storedProfile(id: p.id)).baseImageUpgradeAcceptedFor == nil)
+    }
+
     // MARK: 10 — token injection logged once a minute
 
     @Test("Token-injection log lines are rate limited per key")

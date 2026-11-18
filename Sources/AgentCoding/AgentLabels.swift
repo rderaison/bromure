@@ -5,7 +5,7 @@ import Foundation
 /// the Linux daemon all compile it. `BromureIcons` forwards to it.
 enum AgentLabel {
     nonisolated static let knownAgents: [String] = [
-        "claude", "codex", "grok", "kimi", "omp", "aider", "goose", "amp",
+        "claude", "codex", "grok", "kimi", "omp", "hermes", "aider", "goose", "amp",
         "opencode", "gemini", "cursor",
     ]
 

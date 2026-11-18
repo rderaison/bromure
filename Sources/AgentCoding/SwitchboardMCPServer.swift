@@ -135,7 +135,7 @@ final class SwitchboardMCPServer: MCPLineHandler {
             "inputSchema": ["type": "object", "properties": [
                 "workspace": ["type": "string", "description": "Workspace name or id."],
                 "message": ["type": "string"],
-                "agent": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp"], "description": "Default claude."],
+                "agent": ["type": "string", "enum": ["claude", "codex", "grok", "kimi", "omp", "hermes"], "description": "Default claude."],
                 "folder": ["type": "string", "description": "Guest folder (e.g. ~/src/app). Default: a fresh folder of its own."],
                 "title": ["type": "string"],
             ], "required": ["workspace", "message"]],

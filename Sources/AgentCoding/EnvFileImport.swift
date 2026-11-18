@@ -68,7 +68,7 @@ enum EnvFileImport {
         // provider keys are imported under the matching single-provider tool
         // instead, so a Claude key isn't misattributed to omp), but the
         // switch must stay exhaustive.
-        case .toolKey(.omp):     return ["anthropic.com", "openai.com", "x.ai", "z.ai"]
+        case .toolKey(.omp), .toolKey(.hermes): return ["anthropic.com", "openai.com", "x.ai", "z.ai"]
         case .gitToken(let host): return [host]
         case .digitalOcean:      return ["digitalocean.com"]
         case .linear:            return ["linear.app"]

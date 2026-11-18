@@ -435,7 +435,7 @@ struct WorkspacesCreate: ParsableCommand {
 
     @Option(name: .long, help: "Workspace name (required unless --from-json supplies one).")
     var name: String?
-    @Option(name: .long, help: "Primary tool: claude | codex | grok | kimi | omp.")
+    @Option(name: .long, help: "Primary tool: claude | codex | grok | kimi | omp | hermes.")
     var tool: String?
     @Option(name: .long, help: "Auth mode: token | subscription | bedrock | local.")
     var auth: String?

@@ -9,11 +9,12 @@ import Foundation
 /// proxySignIns are the session host's.
 extension LinuxSessionHost: ProxySignInHost {
     /// The proxy's side; nil while the daemon has no proxy.
-    // @port ACAppDelegate.var proxySignInBackend h=b6f41bd41810696e @ff6f7973
+    // @port ACAppDelegate.var proxySignInBackend h=ea5f76fb5f6b9b96 @ff6f79730
     var proxySignInBackend: ProxySignInBackend? {
         guard let mitm = daemon?.mitm else { return nil }
         return ProxySignInBackend(captures: mitm.captures, claude: mitm.claudeStore, codex: mitm.codexStore,
-                                  grok: mitm.grokStore, kimi: mitm.kimiStore)
+                                  grok: mitm.grokStore, kimi: mitm.kimiStore,
+                                  nous: mitm.nousStore)
     }
 
     /// `POST /agent-sessions/<id>/signin`, a fat client's sign-in card: the
@@ -166,7 +167,7 @@ extension LinuxSessionHost: ProxySignInHost {
     /// a previous guest left reaches its replacement (a restore keeps only
     /// what that same guest wrote before its snapshot).
     // partial: a page that isn't a sign-in's goes to the user's clients (GuestLinkRelay; a macOS server opens it on its own screen)
-    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=26c1142c88dc3aa6 @45a144c8
+    // @port ACAppDelegate.wireSandboxCallbacks(_: UbuntuSandboxVM) / sandbox.onURLOpen h=6a2194948c449c80 @d7bd69f51
     func guestOpenedURL(_ url: URL, profileID pid: UUID) {
         // A quarantined workspace opens nothing, a sign-in's page included.
         if WorkspaceQuarantine.shared.refusesURLOpen(url, for: pid) { return }

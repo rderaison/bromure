@@ -4364,3 +4364,11 @@
 "Couldn't suspend “%@”: the disk is almost full." = "No se pudo suspender «%@»: el disco está casi lleno.";
 "The workspace is still running." = "El espacio de trabajo sigue en ejecución.";
 "Restart Browser" = "Reiniciar el navegador";
+
+/* Hermes Agent integration keys (credentials editor) */
+"Hermes integration" = "Integración de Hermes";
+"Add the API key of a service Hermes Agent's tools use (web search, cloud browser, images, voice, memory). Hermes only ever sees a stand-in." = "Añade la clave de API de un servicio que usan las herramientas de Hermes Agent (búsqueda web, navegador en la nube, imágenes, voz, memoria). Hermes solo ve un sustituto.";
+"Hermes Agent runs on the provider you pick here, with its API key below — or choose **Local model** above to run on this Mac. Switch anytime." = "Hermes Agent usa el proveedor que elijas aquí, con su clave de API abajo — o elige **Modelo local** arriba para ejecutarlo en este Mac. Puedes cambiarlo cuando quieras.";
+
+/* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
+"Powers Hermes Agent only." = "Solo para Hermes Agent.";

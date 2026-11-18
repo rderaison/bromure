@@ -626,6 +626,9 @@ enum AgentScreen {
         var paths: Set<String>
         var clientIDs: Set<String>? = nil
         var codePages: Set<String> = []
+        /// A device page that is also an ordinary page of the site counts
+        /// only with this query item set (the device code it approves).
+        var requiredQuery: String? = nil
     }
 
     /// Claude Code's OAuth client.
@@ -658,6 +661,13 @@ enum AgentScreen {
                        hosts: ["auth.kimi.ai", "kimi.ai", "www.kimi.ai", "auth.kimi.com", "kimi.com", "www.kimi.com"],
                        paths: ["/device", "/authorize_device", "/code/authorize_device", "/api/oauth/authorize_device"]),
         ],
+        // Hermes's Nous Portal sign-in (device code): the Portal's own
+        // approval page, `verification_uri_complete` carrying the code —
+        // without one it is the account's subscription page: ask first.
+        "hermes": [
+            SignInPage(kind: .device, hosts: ["portal.nousresearch.com"], paths: ["/manage-subscription"],
+                       requiredQuery: "user_code"),
+        ],
         "omp": claudePages + codexPages + [
             SignInPage(kind: .authorize, hosts: ["accounts.google.com"],
                        paths: ["/o/oauth2/auth", "/o/oauth2/v2/auth"]),
@@ -676,6 +686,8 @@ enum AgentScreen {
         let path = u.path.lowercased()
         let pages = agent.flatMap { signInPages[$0] } ?? signInPages.values.flatMap { $0 }
         for page in pages where page.hosts.contains(host) && page.paths.contains(path) {
+            if let q = page.requiredQuery,
+               (u.queryItems?.first { $0.name == q }?.value ?? "").isEmpty { continue }
             switch page.kind {
             case .device:
                 return page
@@ -691,6 +703,17 @@ enum AgentScreen {
             }
         }
         return nil
+    }
+
+    /// A device page whose URL carries the code it approves (Nous Portal's
+    /// `?user_code=…`, any query on a device page): opening it is one click
+    /// from authorizing whatever device printed that code -- an attacker's
+    /// own login, from a guest. Such a page opens unasked only for a sign-in
+    /// Bromure started and is waiting on (`GuestURLGate.disposition`); a
+    /// device page without one shows a form for the code the agent printed.
+    static func prefillsDeviceCode(_ url: String) -> Bool {
+        guard let page = signInPage(for: url, agent: nil), page.kind == .device else { return false }
+        return !(URLComponents(string: url)?.queryItems ?? []).isEmpty
     }
 
     static func isLoopback(_ host: String) -> Bool {
@@ -994,14 +1017,17 @@ enum AgentInputBox {
         var content: [Bool] = []
     }
 
-    /// Splits an `-e` capture into rows, tracking SGR state: dim (2), grey
-    /// foregrounds (90, 256-colour greys, near-grey truecolor) and inverse
-    /// video (7) mark characters as not-content.
+    /// Splits an `-e` capture into rows, tracking SGR state: dim (2), italic
+    /// (3), grey foregrounds (90, 256-colour greys, near-grey truecolor) and
+    /// inverse video (7) mark characters as not-content. Hermes draws its
+    /// placeholder suggestions in italic yellow ("❯ Draft a reply to the
+    /// last email in my inbox"): read as typed, every message to it looked
+    /// stuck in the box — Enter again, then "Not delivered".
     static func rows(_ capture: String) -> [Row] {
         var rows: [Row] = []
         for rawLine in capture.split(separator: "\n", omittingEmptySubsequences: false) {
             var row = Row()
-            var dim = false, grey = false, inverse = false
+            var dim = false, grey = false, inverse = false, italic = false
             var it = rawLine.unicodeScalars.makeIterator()
             var pending: Unicode.Scalar? = nil
             func next() -> Unicode.Scalar? {
@@ -1019,7 +1045,7 @@ enum AgentInputBox {
                             params.unicodeScalars.append(p)
                         }
                         if final == "m" {
-                            applySGR(params, dim: &dim, grey: &grey, inverse: &inverse)
+                            applySGR(params, dim: &dim, grey: &grey, inverse: &inverse, italic: &italic)
                         }
                     } else if k == "]" {
                         // OSC: up to BEL or ST.
@@ -1034,7 +1060,7 @@ enum AgentInputBox {
                 row.text.unicodeScalars.append(c)
                 // Content per Character: combining scalars ride on the last.
                 if row.content.count < row.text.count {
-                    row.content.append(!(dim || grey || inverse))
+                    row.content.append(!(dim || grey || inverse || italic))
                 }
             }
             rows.append(row)
@@ -1042,15 +1068,18 @@ enum AgentInputBox {
         return rows
     }
 
-    private static func applySGR(_ params: String, dim: inout Bool, grey: inout Bool, inverse: inout Bool) {
+    private static func applySGR(_ params: String, dim: inout Bool, grey: inout Bool, inverse: inout Bool,
+                                 italic: inout Bool) {
         let p = params.isEmpty ? [0] : params.split(separator: ";", omittingEmptySubsequences: false)
             .map { Int($0) ?? 0 }
         var i = 0
         while i < p.count {
             switch p[i] {
-            case 0: dim = false; grey = false; inverse = false
+            case 0: dim = false; grey = false; inverse = false; italic = false
             case 2: dim = true
             case 22: dim = false
+            case 3: italic = true
+            case 23: italic = false
             case 7: inverse = true
             case 27: inverse = false
             case 90: grey = true
@@ -1091,6 +1120,17 @@ enum AgentInputBox {
             var off = 0
             while idx < text.endIndex, text[idx] == " " || "│┃|".contains(text[idx]) {
                 idx = text.index(after: idx); off += 1
+            }
+            // Hermes marks its input row with "☤ " while a turn runs
+            // ("☤ ❯ type to redirect this turn"): still the input row. Not
+            // taken for one, the scan went on up to Hermes's echo of the
+            // message just sent -- "❯ <message>" between two rules, an input
+            // box to the eye -- and read it as a draft left in the box.
+            if idx < text.endIndex, text[idx] == "☤" {
+                let next = text.index(after: idx)
+                if next < text.endIndex, text[next] == " " {
+                    idx = text.index(after: next); off += 2
+                }
             }
             guard idx < text.endIndex, promptGlyphs.contains(text[idx]) else { continue }
             // A status bar whose segments are split by `>` (omp's) is chrome.

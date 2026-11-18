@@ -108,7 +108,7 @@ extension Daemon {
     /// in-session sign-in covers the first start. Tried again at the next
     /// start if it couldn't be made.
     // partial: at the daemon's first start (onboarding is the client's)
-    // @port ACAppDelegate.ensureFirstWorkspace(created: UUID?) h=9002aaea13b8bb95 @d3ebbda2
+    // @port ACAppDelegate.ensureFirstWorkspace(created: UUID?) h=3c3a528d27316f52 @d7bd69f51
     func ensureFirstWorkspace(freshState: Bool) async {
         let marker = config.stateDir + "/first-workspace"
         guard !FileManager.default.fileExists(atPath: marker) else { return }
@@ -141,7 +141,7 @@ extension Daemon {
         let preference: [Profile.Tool] = [.claude, .codex, .grok, .kimi, .omp]
         if !ready.contains(tool), let pick = preference.first(where: ready.contains) {
             tool = pick
-            if tool == .omp, auth == .subscription { auth = .token }
+            if tool.switchesProvider, auth == .subscription { auth = .token }
         }
         return (tool, auth)
     }

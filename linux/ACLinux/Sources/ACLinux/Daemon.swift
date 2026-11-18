@@ -372,7 +372,7 @@ public actor Daemon {
     }
 
     // partial: server-side launch is spread over Daemon.start/startSessionEngine. Legacy migrations (Bedrock/omp/local engine, ModelSettings seedIfEmpty) absent (macOS-legacy data)
-    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=88766907426512a3 @d7bd69f5
+    // @port ACAppDelegate.applicationDidFinishLaunching(_: Notification) h=fb4bcbb5835e3cda @d7bd69f51
     public static func start(_ config: DaemonConfig) async throws -> Daemon {
         raiseFDLimit()
         // A state dir with no registry and no workspaces yet: a new user's
@@ -1483,7 +1483,8 @@ public actor Daemon {
     // partial: the `starting` set holds the disk (a stop during the boot is deferred: deferStop)
     // @port ACAppDelegate.whileHoldingDisk(_: Profile.ID, _: ()async->Void) h=66286a4f5ecf53b6 @d3ebbda2
     // partial: start, launch and launchVM. No model-download gate (MLX), no window/pane, no virtiofs home migration
-    // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=7865cdaae06b3a79 @d7bd69f5
+    // partial: no base-image chooser on Linux, so a workspace's baseImageUpgradeAcceptedFor (set by macOS's chooser) isn't acted on here: the drift offer only skips it
+    // @port ACAppDelegate.launch(_: Profile, detached: Bool, freshBootFallback: Bool, remoteInitiated: Bool, preflightResolved: Bool, unattended: Bool, quiet: Bool, kimiProvisioned: Bool) h=90a907091a48be15 @d7bd69f51
     // partial: the `starting` set (starting.insert) instead of BootsInFlight.begin
     // @port BootsInFlight.begin(_: UUID) h=2184acaea508c831 @22b7d4bb
     // partial: defer { starting.remove } in start
@@ -1765,7 +1766,7 @@ public actor Daemon {
     /// AWS keys (macOS: MitmEngine.unregister), prompt-injection policy,
     /// swap map and kube trust, and its local engine route.
     // partial: subscription bogus keys aren't unregistered at stop (only when an automation clone is destroyed, DaemonClones.swift); no browser/MCP bridge teardown here (owned by Live)
-    // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=b0add8ae1718e68f @d3ebbda2
+    // @port ACAppDelegate.cleanupSessionRegistrations(for: Profile) h=2dd454dacc682c60 @d7bd69f51
     // partial: BinaryIdentityService.shared.dropBridge(pid)?.stop() at session teardown; no VZ listener to remove
     // @port BinaryIdentityService.detach(profileID: UUID, socketDevice: VZVirtioSocketDevice?) h=2557c1fe1aa481a4 @7a039834
     // partial: KernelSentryService.shared.dropBridge(pid)?.closeChannel() at teardown
@@ -2662,7 +2663,7 @@ public actor Daemon {
     /// The VM's proxy listener (`stored`: a restarted daemon's); nil without
     /// a proxy or when it can't listen (the guest then has no proxy to reach).
     // partial: one hybrid-vsock listener per port (proxy here; SSH/AWS in DaemonAWS.swift), fd-store survivable
-    // @port MitmEngine.register(socketDevice: VZVirtioSocketDevice, profileID: UUID) h=e7756a824e81beb4 @45a144c8
+    // @port MitmEngine.register(socketDevice: VZVirtioSocketDevice, profileID: UUID) h=b1e3e3736f873ad9 @d7bd69f51
     // partial: no holder object; listeners kept per VMRecord
     // @port ListenerHolder.init(profileID: UUID, certCache: CertCache, swapper: TokenSwapper, sshAgent: SSHAgentServer, awsCreds: AWSCredentialServer, awsResigner: AWSResigner, traceStore: TraceStore, clientIdentities: ClientIdentityRegistry, clusterCAs: ClusterCATrustRegistry, consent: ConsentBroker, guardrailsBroker: GuardrailsConsentBroker, supplyChainBroker: SupplyChainConsentBroker, osvClient: OSVClient, socketClient: SocketDevClient, publishTimeCache: PublishTimeCache, sessionTraceProvider: @escaping@Sendable()->MitmEngine.SessionTrace?, guardrailsProvider: @escaping@Sendable()->GuardrailsConfig?, supplyChainProvider: @escaping@Sendable()->SupplyChainPolicy?) h=ae29c369d294d562 @45a144c8
     private func serveProxy(_ rec: VMRecord, udsPath: String, stored: Int32?) -> MitmListener? {

@@ -71,6 +71,18 @@ struct LaunchRestorePlan: Codable, Equatable {
         return plan
     }
 
+    /// The plan the next `take` would return, left on disk: who is about to
+    /// be restored (the base-image chooser shows it).
+    static func peek(at url: URL = defaultURL, now: Date = Date()) -> LaunchRestorePlan? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        guard let plan = try? dec.decode(LaunchRestorePlan.self, from: data),
+              now.timeIntervalSince(plan.savedAt) < maxAge,
+              !plan.workspaces.isEmpty else { return nil }
+        return plan
+    }
+
     /// The checkbox's last answer, offered again at the next quit.
     static let preferenceKey = "quit.restoreAtNextStart"
 }

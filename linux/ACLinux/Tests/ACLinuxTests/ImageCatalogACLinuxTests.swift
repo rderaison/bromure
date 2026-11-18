@@ -12,19 +12,37 @@ struct ImageCatalogACLinuxTests {
     func channelMatchesMacOS() throws {
         let mac = try String(contentsOf: Self.repo.appendingPathComponent("Sources/AgentCoding/ImageCatalogAC.swift"), encoding: .utf8)
         for literal in [#"catalogPrefix: "images/\(UbuntuImageManager.imageVersion)""#,
-                        #"signingMagic: "bromure-img-catalog-v1""#,
-                        #"cacheFileName: "img-catalog.json""#,
+                        #"catalogFileName: "img-catalog-v2.json""#,
+                        #"signingMagic: "bromure-img-catalog-v2""#,
+                        #"cacheFileName: "img-catalog-v2.json""#,
                         #"defaultSupportDirName: "BromureAC""#,
                         #"resource: "img-catalog")"#] {
             #expect(mac.contains(literal), "ImageCatalogAC.swift changed: \(literal)")
         }
         let d = ImageDistribution.agentCoding(imageVersion: "201")
         #expect(d.catalogPrefix == "images/201")
-        #expect(d.signingMagic == "bromure-img-catalog-v1")
-        #expect(d.cacheFileName == "img-catalog.json")
+        #expect(d.catalogFileName == "img-catalog-v2.json")
+        #expect(d.signingMagic == "bromure-img-catalog-v2")
+        #expect(d.cacheFileName == "img-catalog-v2.json")
         let bundled = try ImageCatalog.parse(Data(contentsOf: Self.repo.appendingPathComponent("Sources/AgentCoding/Resources/img-catalog.json")))
         #expect(d.loadBaseline() == bundled, "the baseline is the bundled img-catalog.json")
         #expect(bundled.postinstall.count >= 6)
+    }
+
+    @Test("the Linux build's app version is macOS's (Info.plist), and a step's version range is checked against it")
+    func appVersionMatchesMacOS() throws {
+        let plist = try String(contentsOf: Self.repo.appendingPathComponent("Sources/AgentCoding/Info.plist"), encoding: .utf8)
+        #expect(plist.contains("<key>CFBundleShortVersionString</key>\n\t<string>\(LinuxAppVersion.short)</string>")
+                || plist.contains("<key>CFBundleShortVersionString</key>\n    <string>\(LinuxAppVersion.short)</string>"),
+                "bump LinuxAppVersion.short to Info.plist's CFBundleShortVersionString")
+        let bounded = PostinstallStep(uuid: "00000000-0000-4000-8000-000000000002", seq: 1, description: "new",
+                                      command: "true", minVersion: LinuxAppVersion.short)
+        let later = PostinstallStep(uuid: "00000000-0000-4000-8000-000000000003", seq: 2, description: "later",
+                                    command: "true", minVersion: "999.0")
+        let c = ImageCatalog(formatVersion: 1, image: nil, postinstall: [bounded, later])
+        #expect(c.linuxSortedSteps.map(\.uuid) == [bounded.uuid])
+        #expect(c.linuxPendingSteps(appliedUUIDs: []).map(\.uuid) == [bounded.uuid])
+        #expect(c.linuxPendingSteps(appliedUUIDs: [bounded.uuid]).isEmpty)
     }
 
     @Test("no signed catalog: the bake gets the baseline's steps; an unsigned cached catalog isn't adopted")
@@ -36,7 +54,7 @@ struct ImageCatalogACLinuxTests {
         var planted = d.loadBaseline()
         planted.postinstall.append(PostinstallStep(uuid: "00000000-0000-4000-8000-000000000001", seq: 99,
                                                    description: "planted", command: "true"))
-        try JSONEncoder().encode(planted).write(to: URL(fileURLWithPath: dir + "/img-catalog.json"))
+        try JSONEncoder().encode(planted).write(to: URL(fileURLWithPath: dir + "/" + d.cacheFileName))
         let store = ImageCatalogStore(distribution: d, supportDir: URL(fileURLWithPath: dir))
         #expect(store.remote() == nil, "an unsigned cache isn't trusted")
         #expect(!store.isSignatureValid(planted))

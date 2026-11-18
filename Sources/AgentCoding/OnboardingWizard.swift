@@ -445,7 +445,9 @@ struct OnboardingWizardView: View {
                                      // Only an agent's own sign-in page leaves for the browser.
                                      guard AgentScreen.isSignInURL(url, agent: nil),
                                            let u = URL(string: url) else { return }
-                                     NSWorkspace.shared.open(u)
+                                     // Bound to this sign-in's provider: another
+                                     // agent's device page with a code asks first.
+                                     ACAppDelegate.openGuestRelayedURL(u, signInFor: signIn.provider.rawValue)
                                  })
                     .padding(.horizontal, 28)
                     .padding(.top, 10)

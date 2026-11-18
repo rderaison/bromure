@@ -28,6 +28,7 @@ enum CapturedSubscription {
     case grok(access: String, refresh: String, scopeKey: String, template: Data)
     case kimi(access: String, refresh: String, name: String, template: Data,
               configTOML: String?)
+    case nous(NousSubscriptionRecord)
 }
 
 enum RegistrationCapture {
@@ -69,6 +70,9 @@ enum RegistrationCapture {
                 scopeKey: scopeKey, templateJSON: template)
             if let pid = overrideProfile { try stores.grok.setOverride(rec, for: pid) }
             else { try stores.grok.setShared(rec) }
+        case .nous(let rec):
+            if let pid = overrideProfile { try stores.nous.setOverride(rec, for: pid) }
+            else { try stores.nous.setShared(rec) }
         }
     }
 
@@ -83,8 +87,27 @@ enum RegistrationCapture {
             case .codex:  if stores.codex.hasProfileRecord(id) { try? stores.codex.forget(for: id) }
             case .grok:   if stores.grok.hasProfileRecord(id) { try? stores.grok.forget(for: id) }
             case .kimi:   if stores.kimi.hasProfileRecord(id) { try? stores.kimi.forget(for: id) }
+            case .nous:   if stores.nous.hasProfileRecord(id) { try? stores.nous.forget(for: id) }
             }
         }
+    }
+
+    /// The real Nous Portal login in a `~/.hermes/auth.json`'s bytes
+    /// (`providers.nous`), or nil until the sign-in lands. Bromure's own
+    /// stand-ins are never taken for one. See ACAppDelegate.readNousAuthFile.
+    static func parseNousAuth(_ data: Data) -> NousSubscriptionRecord? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let nous = (obj["providers"] as? [String: Any])?["nous"] as? [String: Any],
+              let access = nous["access_token"] as? String, !access.isEmpty,
+              !NousStandIn.isAccess(access),
+              let refresh = nous["refresh_token"] as? String, !refresh.isEmpty,
+              !NousStandIn.isRefresh(refresh) else { return nil }
+        return NousSubscriptionRecord(
+            accessToken: access, refreshToken: refresh,
+            expiresAt: NousSubscriptionRecord.jwtExpiry(access, fallback: .distantPast),
+            savedAt: Date(),
+            inferenceBaseURL: NousRegion.allowedInferenceBaseURL(nous["inference_base_url"] as? String),
+            scope: nous["scope"] as? String)
     }
 
     static func parseGrokAuth(_ data: Data)

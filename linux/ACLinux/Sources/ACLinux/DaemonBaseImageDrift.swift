@@ -64,12 +64,15 @@ extension Daemon {
     /// cloned from, and the user hasn't said "No" to this very base or
     /// "Remind me later" within the day: the upgrade offer is due.
     // partial: a strictly newer base only (macOS: any other stamp)
-    // @port ACAppDelegate.baseImageUpgradeOfferDue(_: Profile, current: String?) h=e733f1404194b42c @4237c02e
+    // @port ACAppDelegate.baseImageUpgradeOfferDue(_: Profile, current: String?) h=d6ab71bf71f402f1 @d7bd69f51
     func baseImageUpgradeOfferDue(_ profile: Profile, current: String?) -> Bool {
         guard FileManager.default.fileExists(atPath: vmDir(profile.id.uuidString.lowercased()) + "/disk.raw"),
               let recorded = profile.baseImageVersionAtClone,
               let current, Self.baseVersion(current, isNewerThan: recorded) else { return false }
         if profile.baseImageUpgradeDeclinedFor == current { return false }
+        // Already chosen for this base (macOS's chooser after an install):
+        // no question either way.
+        if profile.baseImageUpgradeAcceptedFor == current { return false }
         if let until = profile.baseImageUpgradeRemindAfter, until > Date() { return false }
         return true
     }

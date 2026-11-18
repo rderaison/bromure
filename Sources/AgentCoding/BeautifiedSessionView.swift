@@ -2150,6 +2150,13 @@ final class BeautifiedSessionModel: ObservableObject {
     /// then pastes the code back into the card (`submitLoginCode`).
     func openLoginURL() {
         guard let s = prompt?.authURL, AgentScreen.isSignInURL(s, agent: agentKind), let url = URL(string: s) else { return }
+        // A device page carrying its code, read off the terminal: the code
+        // is whatever the screen showed, so the user confirms the page
+        // first (GuestURLGate.disposition, Finding CWE-345).
+        if AgentScreen.prefillsDeviceCode(s) {
+            ACAppDelegate.openGuestRelayedURL(url)
+            return
+        }
         NSWorkspace.shared.open(url)
     }
 

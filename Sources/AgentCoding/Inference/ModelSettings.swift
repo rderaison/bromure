@@ -18,6 +18,9 @@ import Foundation
 /// OpenAI-compatible endpoint the user supplies a base URL for.
 public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     case anthropic, openai, xai, zai, moonshot, bedrock, openrouter, custom
+    /// Nous Research's Portal: a subscription (OAuth device sign-in) only,
+    /// and only Hermes Agent reaches it (its own `nous` provider).
+    case nous
 
     public var displayName: String {
         switch self {
@@ -29,6 +32,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .bedrock:   return "Amazon Bedrock"
         case .openrouter: return "OpenRouter"
         case .custom:    return "Custom (OpenAI-compatible)"
+        case .nous:      return "Nous Portal"
         }
     }
 
@@ -45,7 +49,8 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .openrouter: return "https://openrouter.ai/api"
         case .xai:        return "https://api.x.ai"
         case .moonshot:   return "https://api.moonshot.ai"
-        case .anthropic, .openai, .zai, .bedrock, .custom: return nil
+        // Nous: only Hermes, natively — its sign-in never powers another agent.
+        case .anthropic, .openai, .zai, .bedrock, .custom, .nous: return nil
         }
     }
 
@@ -59,6 +64,9 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .xai:       return .xai
         case .zai:       return .zai
         case .custom:    return .custom
+        // Hermes's own provider list (`switchesProvider`) — omp has no Nous;
+        // `canRoute` keeps it to Hermes.
+        case .nous:      return .nous
         case .moonshot, .bedrock, .openrouter: return nil
         }
     }
@@ -87,12 +95,15 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     /// Anthropic-compatible gateway, every other agent only a provider with an
     /// OpenAI-compatible base (the external-engine route).
     public func canRoute(_ agent: ModelAgent, native: ModelProvider) -> Bool {
+        // Nous Portal powers Hermes alone: omp has no Nous provider, and
+        // no other agent has a route to it.
+        if self == .nous { return agent == .hermes }
         if self == native || self == .bedrock { return true }
         // omp speaks to every provider it has built in, each with its own
         // key — switching it is a setting, not a route (the launch overlay
         // switches it). Judging it by its default provider alone made a
         // z.ai key "unable to power omp".
-        if agent == .omp, ompProvider != nil { return true }
+        if agent == .omp || agent == .hermes, ompProvider != nil { return true }
         return agent == .claude ? anthropicGatewayBase != nil : openAICompatibleBase != nil
     }
 
@@ -110,6 +121,9 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .bedrock:   return ""
         case .openrouter: return "openrouter.ai"
         case .custom:    return ""
+        // Its inference hosts are swapped by the subscription path
+        // (`NousRegion.isInferenceHost`), never by a key swap.
+        case .nous:      return ""
         }
     }
 
@@ -121,7 +135,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
         case .anthropic, .bedrock:   return .anthropic
         case .openai:                return .openaiResponses
         case .xai, .zai, .moonshot,
-             .openrouter, .custom:   return .openaiChat
+             .openrouter, .custom, .nous: return .openaiChat
         }
     }
 
@@ -136,9 +150,13 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
     /// (Claude), OpenAI (ChatGPT), xAI (Grok) and Moonshot (Kimi) each have a
     /// capture flow. z.ai's coding plan is delivered as an API key — no OAuth to
     /// capture — so it stays key-only; `.custom` never has one.
+    /// A sign-in and nothing else: no API key to paste (Nous Portal — Hermes
+    /// reaches it with its device-code login only).
+    public var isSignInOnly: Bool { self == .nous }
+
     public var supportsSubscription: Bool {
         switch self {
-        case .anthropic, .openai, .xai, .moonshot: return true
+        case .anthropic, .openai, .xai, .moonshot, .nous: return true
         case .zai, .bedrock, .openrouter, .custom: return false
         }
     }
@@ -148,7 +166,7 @@ public enum ModelProvider: String, Codable, CaseIterable, Sendable {
 /// global default. `ModelSettings.tiers` is the default that applies to every
 /// agent; `ModelSettings.agentTiers[agent]` overrides it for one agent.
 public enum ModelAgent: String, Codable, CaseIterable, Sendable {
-    case claude, codex, grok, kimi, omp
+    case claude, codex, grok, kimi, omp, hermes
 
     public var displayName: String {
         switch self {
@@ -157,6 +175,7 @@ public enum ModelAgent: String, Codable, CaseIterable, Sendable {
         case .grok:   return "Grok"
         case .kimi:   return "Kimi"
         case .omp:    return "omp"
+        case .hermes: return "Hermes"
         }
     }
 
@@ -174,7 +193,7 @@ public enum ModelAgent: String, Codable, CaseIterable, Sendable {
         case .codex:  return .openai
         case .grok:   return .xai
         case .kimi:   return .moonshot
-        case .omp:    return nil
+        case .omp, .hermes: return nil
         }
     }
 }

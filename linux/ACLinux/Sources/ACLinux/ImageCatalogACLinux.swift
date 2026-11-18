@@ -12,8 +12,9 @@ extension ImageDistribution {
     public static func agentCoding(imageVersion: String) -> ImageDistribution {
         ImageDistribution(
             catalogPrefix: "images/\(imageVersion)",
-            signingMagic: "bromure-img-catalog-v1",
-            cacheFileName: "img-catalog.json",
+            catalogFileName: "img-catalog-v2.json",
+            signingMagic: "bromure-img-catalog-v2",
+            cacheFileName: "img-catalog-v2.json",
             defaultSupportDirName: "BromureAC",
             loadBaseline: {
                 ImageCatalog.loadBaseline(bundle: acResourceBundle, resource: "img-catalog")
@@ -69,5 +70,30 @@ enum ImageState {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(state)
+    }
+}
+
+/// The macOS app version this build is (Info.plist's
+/// CFBundleShortVersionString), which a catalog step's `min_version` /
+/// `max_version` range is checked against. A Linux binary has no Info.plist,
+/// so `ImageCatalog.runningAppVersion` reads "0" here and no bounded step
+/// would ever apply. Pinned to Info.plist by ImageCatalogACLinuxTests: bump
+/// it with the app's version.
+// @port-skip linux-only: Bundle.main's CFBundleShortVersionString, which a Linux binary has no Info.plist for
+enum LinuxAppVersion {
+    // @port-skip linux-only: see the type
+    static let short = "5.4.5"
+}
+
+extension ImageCatalog {
+    /// `sortedSteps` for this build (`LinuxAppVersion`).
+    // @port-skip linux-only: ImageCatalog.sortedSteps with the Linux build's app version
+    var linuxSortedSteps: [PostinstallStep] { steps(forAppVersion: LinuxAppVersion.short) }
+
+    /// `pendingSteps(appliedUUIDs:)` for this build (`LinuxAppVersion`).
+    // @port-skip linux-only: ImageCatalog.pendingSteps with the Linux build's app version
+    func linuxPendingSteps(appliedUUIDs: some Sequence<String>) -> [PostinstallStep] {
+        let applied = Set(appliedUUIDs)
+        return linuxSortedSteps.filter { !applied.contains($0.uuid) }
     }
 }

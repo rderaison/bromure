@@ -30,6 +30,9 @@ public final class MitmEngine {
     /// Writes the managed provider + model list into a Kimi record that
     /// registration didn't capture one for (KimiProvisioning.swift).
     public let kimiProvisioner: KimiProvisioner
+    /// Nous Portal (Hermes Agent) counterparts.
+    public let nousSubscriptionStore: NousSubscriptionStore
+    public let nousRefresher: NousSubscriptionRefresher
     public let sshAgent: SSHAgentServer
     public let awsCreds: AWSCredentialServer
     /// Strips the (intentionally invalid) signature on AWS-bound
@@ -372,6 +375,9 @@ public final class MitmEngine {
         self.kimiSubscriptionStore = kimiStore
         self.kimiRefresher = KimiSubscriptionRefresher(store: kimiStore)
         self.kimiProvisioner = KimiProvisioner(store: kimiStore, refresher: self.kimiRefresher)
+        let nousStore = NousSubscriptionStore()
+        self.nousSubscriptionStore = nousStore
+        self.nousRefresher = NousSubscriptionRefresher(store: nousStore)
         self.sshAgent = SSHAgentServer(consent: broker)
         self.awsCreds = AWSCredentialServer(consent: broker)
         self.awsResigner = AWSResigner(credServer: awsCreds)
@@ -445,6 +451,10 @@ public final class MitmEngine {
         HTTPMitmConnection.kimiSubscriptionProvider = { [weak self] in
             guard let self else { return nil }
             return (self.kimiSubscriptionStore, self.kimiRefresher)
+        }
+        HTTPMitmConnection.nousSubscriptionProvider = { [weak self] in
+            guard let self else { return nil }
+            return (self.nousSubscriptionStore, self.nousRefresher)
         }
         let holder = ListenerHolder(
             profileID: profileID,
