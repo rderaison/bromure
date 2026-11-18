@@ -7,7 +7,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
-        .package(url: "https://github.com/rderaison/onnxruntime-swift-package-manager.git", from: "1.20.0"),
+        .package(url: "https://github.com/rderaison/onnxruntime-swift-package-manager.git", exact: "1.24.2"),
         .package(url: "https://github.com/attaswift/BigInt.git", from: "5.3.0"),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.6.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.0.0"),
