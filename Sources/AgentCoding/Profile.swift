@@ -7124,6 +7124,34 @@ public final class ProfileStore {
     #    there is dropped.
     #    The Hermes home is $HERMES_HOME when set (a board task's own
     #    profile, below), else ~/.hermes.
+    #    Hermes's own default model on Nous (printed; nothing when the
+    #    workspace isn't on Nous, or no catalog names one): the model
+    #    catalog's labeled default -- Hermes's silent pick -- from its cache,
+    #    else the checkout's copy. Hermes refreshes the catalog on its own,
+    #    so the stamp carries it: a default that rotates, or first shows up,
+    #    is applied again.
+    _bromure_hermes_catalog_default() {
+        local _h="${HERMES_HOME:-$HOME/.hermes}"
+        grep -Eq '"provider" *: *"nous"' "${BROMURE_META_DIR:-/mnt/bromure-meta}/hermes-settings.json" 2>/dev/null || return 0
+        python3 - "$_h" <<'BROMURE_HERMES_CATALOG' 2>/dev/null
+    import json, os, re, sys
+    home = sys.argv[1]
+    places = [os.path.join(home, "cache", "model_catalog.json")]
+    for root in ("/opt/hermes/hermes-agent", os.path.join(home, "hermes-agent"),
+                 os.path.expanduser("~/.hermes/hermes-agent")):
+        places.append(os.path.join(root, "website", "static", "api", "model-catalog.json"))
+    for place in places:
+        try:
+            block = json.load(open(place)).get("providers", {}).get("nous") or {}
+            for m in block.get("models", []):
+                mid = str(m.get("id") or "").strip() if isinstance(m, dict) else ""
+                if mid and m.get("default") is True and re.fullmatch(r"[A-Za-z0-9._/:@+-]+", mid):
+                    print(mid)
+                    sys.exit(0)
+        except Exception:
+            continue
+    BROMURE_HERMES_CATALOG
+    }
     _bromure_hermes_stamp() {
         local _h="${HERMES_HOME:-$HOME/.hermes}"
         { cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json \\
@@ -7131,7 +7159,8 @@ public final class ProfileStore {
           printf '%s' "${BROMURE_HERMES_TASK:-}" | sha256sum | cut -c1-32
           # The apply's own revision: a change to what it writes applies
           # once to every workspace, settings unchanged.
-          printf 'apply-2 '
+          printf 'apply-3 '
+          _bromure_hermes_catalog_default | sha256sum | cut -c1-32
           cat "$_h/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/shell-hooks-allowlist.json" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
@@ -7141,7 +7170,9 @@ public final class ProfileStore {
         local _h="${HERMES_HOME:-$HOME/.hermes}"
         [ "$(cat "$_h/.bromure-applied" 2>/dev/null)" = "$(_bromure_hermes_stamp)" ] && return 0
         echo "[bromure-ac] applying this workspace's Hermes settings…" >&2
-        command env "$@" -u BROMURE_HERMES_API_KEY python3 - <<'BROMURE_HERMES_APPLY' || return 0
+        command env "$@" -u BROMURE_HERMES_API_KEY \\
+            BROMURE_HERMES_NOUS_DEFAULT="$(_bromure_hermes_catalog_default)" \\
+            python3 - <<'BROMURE_HERMES_APPLY' || return 0
     import datetime, json, os, re, subprocess, sys
     home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     os.makedirs(home, exist_ok=True)
@@ -7205,23 +7236,12 @@ public final class ProfileStore {
     # session begun with no model set as having none, then refuses to
     # reopen it ("storage_unavailable", restore_policy's "invalid
     # policy"). It is the model catalog's labeled default -- Hermes's own
-    # silent pick -- from its cache, else the checkout's copy.
-    def catalog_default(provider):
-        places = [os.path.join(home, "cache", "model_catalog.json")]
-        for root in ("/opt/hermes/hermes-agent", os.path.join(home, "hermes-agent"),
-                     os.path.expanduser("~/.hermes/hermes-agent")):
-            places.append(os.path.join(root, "website", "static", "api", "model-catalog.json"))
-        for place in places:
-            try:
-                block = json.load(open(place)).get("providers", {}).get(provider) or {}
-                for m in block.get("models", []):
-                    mid = str(m.get("id") or "").strip() if isinstance(m, dict) else ""
-                    if mid and m.get("default") is True and re.fullmatch(r"[A-Za-z0-9._/:@+-]+", mid):
-                        return mid
-            except Exception:
-                continue
-        return ""
-    chosen = model.get("default") or (catalog_default("nous") if model.get("provider") == "nous" else "")
+    # silent pick (`_bromure_hermes_catalog_default`, which the stamp
+    # carries, so a new default is applied again).
+    nous_default = os.environ.get("BROMURE_HERMES_NOUS_DEFAULT", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._/:@+-]+", nous_default):
+        nous_default = ""
+    chosen = model.get("default") or (nous_default if model.get("provider") == "nous" else "")
     if chosen:
         run("set", "model.default", chosen)
     else:
