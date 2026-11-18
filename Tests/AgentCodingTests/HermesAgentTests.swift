@@ -397,7 +397,8 @@ struct HermesAgentTests {
         try FileManager.default.removeItem(at: failFlag)
         #expect(try ready() == 0)
         #expect(try ready() == 0)
-        #expect(calls() == ["pm repair", "pm repair"], "once after the failed try")
+        // The failed try was tried twice (one retry for a network hiccup).
+        #expect(calls() == ["pm repair", "pm repair", "pm repair"], "once after the failed try")
         let cfg = home.appendingPathComponent(".hermes/config.yaml")
         #expect((try? String(contentsOf: cfg, encoding: .utf8)) == "model: {}\n")
         let mode = try FileManager.default.attributesOfItem(atPath: cfg.path)[.posixPermissions] as? NSNumber
@@ -406,17 +407,17 @@ struct HermesAgentTests {
         try "user: 1\n".write(to: cfg, atomically: true, encoding: .utf8)
         try #"{"commit": "b"}"#.write(to: stamp, atomically: true, encoding: .utf8)
         #expect(try ready() == 0)
-        #expect(calls().count == 3)
+        #expect(calls().count == 4)
         #expect((try? String(contentsOf: cfg, encoding: .utf8)) == "user: 1\n")
         // Another data root is a root of its own.
         #expect(try ready(["HERMES_HOME": dir.appendingPathComponent("other").path]) == 0)
-        #expect(calls().count == 4)
+        #expect(calls().count == 5)
         // A per-user install (not under /opt) is left alone.
         try FileManager.default.removeItem(at: bin.appendingPathComponent("hermes"))
         try FileManager.default.copyItem(at: launcher, to: bin.appendingPathComponent("hermes"))
         try #"{"commit": "c"}"#.write(to: stamp, atomically: true, encoding: .utf8)
         #expect(try ready() == 0)
-        #expect(calls().count == 4)
+        #expect(calls().count == 5)
         // The wrapper readies /opt's Hermes before any call, and sends
         // `hermes update` to a per-user install instead.
         let wrapper = try fn("hermes")
