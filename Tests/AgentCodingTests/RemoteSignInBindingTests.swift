@@ -50,6 +50,31 @@ struct RemoteSignInBindingTests {
         #expect(gate(c, ["id": "run-1", "url": page.absoluteString]) == .ask)
     }
 
+    /// Finding "Early state poll permanently suppresses this client's
+    /// device-code page": /state can show this client's run before the
+    /// host's reply binds it. That poll must hold the page back, not mark it
+    /// opened -- the next poll, after the reply, opens it (once).
+    @Test("a page refused before the host's reply opens once the reply binds its run")
+    func earlyPoll() {
+        let c = controller()
+        let reg: [String: Any] = ["id": "run-1", "provider": "Nous Portal", "url": page.absoluteString]
+        #expect(c.registrationPage(reg) == .refused, "not bound yet")
+        #expect(c.registrationPage(reg) == .refused)
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        #expect(c.registrationPage(reg) == .open(page))
+        #expect(c.registrationPage(reg) == RemoteHostController.RegistrationPage.none, "opened once")
+        #expect(c.registrationPage(["id": "run-1", "provider": "Nous Portal"]) == RemoteHostController.RegistrationPage.none, "no URL")
+    }
+
+    @Test("another client's run stays refused, however often /state shows it")
+    func othersStayRefused() {
+        let c = controller()
+        c.adoptRegistrationReply(run: "run-1", provider: "hermes")
+        let theirs: [String: Any] = ["id": "run-2", "provider": "Nous Portal", "url": page.absoluteString]
+        #expect(c.registrationPage(theirs) == .refused)
+        #expect(c.registrationPage(theirs) == .refused)
+    }
+
     @Test("the provider is trusted only after the host's reply, never when the request is sent")
     func notBeforeReply() throws {
         let top = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
