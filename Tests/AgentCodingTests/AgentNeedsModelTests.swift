@@ -29,9 +29,9 @@ struct AgentNeedsModelTests {
     @Test("Hermes on a sign-in's model is ready in any workspace, not only one whose agent it is")
     func hermesOnSignIn() {
         // "I logged into Nous and assigned gpt-5.5 to Hermes, but no
-        // workspace lets me pick Hermes": as an extra agent, a Nous or
-        // ChatGPT sign-in was judged as a gateway needing a pasted key.
-        for (prov, model) in [(ModelProvider.nous, "openai/gpt-5.5"), (.openai, "gpt-5.5")] {
+        // workspace lets me pick Hermes": as an extra agent, the Nous
+        // sign-in was judged as a gateway needing a pasted key.
+        for (prov, model) in [(ModelProvider.nous, "openai/gpt-5.5")] {
             var cred = ProviderCredential(provider: prov)
             cred.useSubscription = true
             var s = ModelSettings()
@@ -44,6 +44,16 @@ struct AgentNeedsModelTests {
                 #expect(spec?.ompModel == model)
                 #expect(spec?.authMode == .subscription)
             }
+        }
+        // A sign-in Hermes and omp can't run on (ChatGPT) still takes a key.
+        var oa = ProviderCredential(provider: .openai)
+        oa.useSubscription = true
+        for tool in [Profile.Tool.hermes, .omp] {
+            var s = ModelSettings()
+            s.providers = [oa]
+            s.setTier(.medium, ModelRef(source: .provider(.openai), modelID: "gpt-5.5"), for: ModelAgent.from(tool))
+            #expect(!Profile(name: "w", tool: .claude, authMode: .subscription, apiKey: nil)
+                .agentsReadyToStart(s, subscribed: [.openai]).contains(tool), "\(tool)")
         }
         // Signed out (no credential): still not ready, whatever the assignment.
         var s = ModelSettings()

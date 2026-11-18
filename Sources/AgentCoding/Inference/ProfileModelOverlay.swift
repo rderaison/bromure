@@ -334,16 +334,17 @@ public extension Profile {
             let ref = settings.ref(for: agent, tier: .medium)
                 ?? settings.ref(for: agent, tier: .large)
                 ?? settings.ref(for: agent, tier: .small)
-            // omp / Hermes assigned one of their own providers: the launch
-            // overlay switches them there, so that provider is native to
-            // them -- judged like any agent on its own provider (a sign-in
-            // counts), not as a gateway that takes a pasted key. Hermes on
-            // a Nous or ChatGPT sign-in never showed as ready otherwise.
+            // Hermes assigned a Nous Portal model: the launch overlay switches
+            // it to Nous, its own provider, whose sign-in it runs on -- judged
+            // like any agent on its own provider, not as a gateway that takes
+            // a pasted key (it never showed as ready otherwise, as a
+            // workspace's extra agent). Only Nous: the one sign-in Hermes
+            // can use (any other provider still needs its key), and omp
+            // runs on keys alone.
             var agentOmpProvider = ompProvider
-            if tool.switchesProvider, let ref, case .provider(let prov) = ref.source,
-               let op = prov.ompProvider, op != .nous || tool == .hermes,
-               let cred = settings.credential(prov), cred.isUsable {
-                agentOmpProvider = op
+            if tool == .hermes, let ref, case .provider(.nous) = ref.source,
+               let cred = settings.credential(.nous), cred.isUsable {
+                agentOmpProvider = .nous
             }
             if let ref, ref.isLocal {
                 ready.insert(tool)
