@@ -6,11 +6,13 @@
 # Usage: sign-sentry-modules.sh <ci-build out dir> <private key file>
 #   Writes <out dir>/catalog.json and <out dir>/modules/*.ko.sig, then checks
 #   them against the app's pinned public key. Refuses a key that doesn't match.
+#   MODULE (default sentry) picks the guest module, as publish-sentry-modules.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT="${1:?usage: sign-sentry-modules.sh <ci-build out dir> <private key file>}"
 KEY_FILE="${2:?usage: sign-sentry-modules.sh <ci-build out dir> <private key file>}"
+MODULE="${MODULE:-sentry}"
 # Must match ImageCatalogStore.pinnedPublicKeyBase64 / SUPublicEDKey.
 SENTRY_CATALOG_PUBLIC_KEY="${SENTRY_CATALOG_PUBLIC_KEY:-G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=}"
 
@@ -24,14 +26,14 @@ PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
 
 SPARKLE_PRIVATE_KEY="$(tr -d ' \n\r' < "$KEY_FILE")" \
-    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
+    node tools/make-sentry-catalog.mjs --module "$MODULE" --source-hash "$HASH" --modules "$OUT/modules" \
         ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$OUT/catalog.json"
 # Signed with the wrong key = rejected by every app in the field; catch it here.
 # Exit 3 is that (the signatures don't verify against the pinned key): the
 # outputs are useless and removed. Any other failure is the verifier's own
 # (its message is above) — the outputs are kept to look at.
 rc=0
-node tools/make-sentry-catalog.mjs --verify "$OUT/catalog.json" --source-hash "$HASH" \
+node tools/make-sentry-catalog.mjs --module "$MODULE" --verify "$OUT/catalog.json" --source-hash "$HASH" \
     --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" || rc=$?
 if [ "$rc" -eq 3 ]; then
     rm -f "$OUT/catalog.json" "$OUT"/modules/*.ko.sig

@@ -21,6 +21,10 @@
 # Env: DO_SPACES_KEY DO_SPACES_SECRET DO_SPACES_ENDPOINT DO_SPACES_REGION
 #      DO_SPACES_BUCKET DO_SPACES_PUBLIC_BASE SPARKLE_PRIVATE_KEY
 #      SENTRY_CATALOG_PUBLIC_KEY (default: the app's pinned SUPublicEDKey)
+#      MODULE (default sentry): which guest module this is — zeropages for
+#        Jenkinsfile.zeropages. Sets the object prefix (<module>/<hash>/),
+#        the file stem (bromure_<module>-<kernel>.ko) and the catalog's
+#        signing domain (make-sentry-catalog.mjs --module).
 #      DRY_RUN=1 builds + signs the catalog but uploads nothing.
 #      PRESIGNED=1 publishes the catalog.json + modules/*.ko.sig already in
 #      <out dir> (signed elsewhere by scripts/sign-sentry-modules.sh) after
@@ -31,6 +35,10 @@ cd "$(dirname "$0")/.."
 OUT="${1:?usage: publish-sentry-modules.sh <ci-build out dir>}"
 DRY_RUN="${DRY_RUN:-0}"
 PRESIGNED="${PRESIGNED:-0}"
+MODULE="${MODULE:-sentry}"
+case "$MODULE" in [a-z]*) ;; *) echo "ERROR: bad MODULE $MODULE"; exit 2;; esac
+case "$MODULE" in *[!a-z0-9]*) echo "ERROR: bad MODULE $MODULE"; exit 2;; esac
+STEM="bromure_$MODULE"
 enabled() { case "${1:-}" in 1|true|TRUE|yes) return 0;; *) return 1;; esac; }
 # Must match ImageCatalogStore.pinnedPublicKeyBase64 / SUPublicEDKey.
 SENTRY_CATALOG_PUBLIC_KEY="${SENTRY_CATALOG_PUBLIC_KEY:-G1ofi8zFFgNyE5Momw+eoWeiBt8NGCiKQWAs+YBvZK8=}"
@@ -51,7 +59,7 @@ if [ -z "$BUILT" ]; then
     # Nothing new — unless the published catalog lost its module signatures
     # (a bucket write can strip them without breaking the catalog signature,
     # and apps then refuse the catalog): re-sign and republish it.
-    if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --verify "$OUT/previous-catalog.json" \
+    if [ -f "$OUT/previous-catalog.json" ] && ! node tools/make-sentry-catalog.mjs --module "$MODULE" --verify "$OUT/previous-catalog.json" \
             --source-hash "$HASH" --modules "$OUT/modules" --public-key "$SENTRY_CATALOG_PUBLIC_KEY" >/dev/null 2>&1; then
         echo "nothing new built, but the published catalog doesn't verify: republishing it."
     else
@@ -70,12 +78,12 @@ CATALOG="$OUT/catalog.json"
 PREVIOUS=()
 [ -f "$OUT/previous-catalog.json" ] && PREVIOUS=(--previous "$OUT/previous-catalog.json")
 if enabled "$PRESIGNED"; then
-    node tools/make-sentry-catalog.mjs --verify "$CATALOG" --source-hash "$HASH" --modules "$OUT/modules" \
+    node tools/make-sentry-catalog.mjs --module "$MODULE" --verify "$CATALOG" --source-hash "$HASH" --modules "$OUT/modules" \
         --public-key "$SENTRY_CATALOG_PUBLIC_KEY"
 else
     SIGN=()
     enabled "$DRY_RUN" && [ -z "${SPARKLE_PRIVATE_KEY:-}" ] && SIGN=(--allow-unsigned)
-    node tools/make-sentry-catalog.mjs --source-hash "$HASH" --modules "$OUT/modules" \
+    node tools/make-sentry-catalog.mjs --module "$MODULE" --source-hash "$HASH" --modules "$OUT/modules" \
         ${PREVIOUS[@]+"${PREVIOUS[@]}"} --public-key "$SENTRY_CATALOG_PUBLIC_KEY" --out "$CATALOG" ${SIGN[@]+"${SIGN[@]}"}
 fi
 
@@ -90,18 +98,18 @@ for k in $BUILT; do
         echo "DRY_RUN: would upload $k → $key"
         continue
     fi
-    put "$OUT/modules/bromure_sentry-$k.ko" "$key" application/octet-stream "$IMMUTABLE"
-    put "$OUT/modules/bromure_sentry-$k.ko.sig" "$key.sig" application/json "$IMMUTABLE"
-    [ -f "$OUT/modules/bromure_sentry-$k.txt" ] && \
-        put "$OUT/modules/bromure_sentry-$k.txt" "${key%.ko}.txt" "text/plain; charset=utf-8" "$IMMUTABLE"
+    put "$OUT/modules/$STEM-$k.ko" "$key" application/octet-stream "$IMMUTABLE"
+    put "$OUT/modules/$STEM-$k.ko.sig" "$key.sig" application/json "$IMMUTABLE"
+    [ -f "$OUT/modules/$STEM-$k.txt" ] && \
+        put "$OUT/modules/$STEM-$k.txt" "${key%.ko}.txt" "text/plain; charset=utf-8" "$IMMUTABLE"
 done
 
 if enabled "$DRY_RUN"; then
-    echo "DRY_RUN: would upload the catalog → sentry/$HASH/catalog.json"
+    echo "DRY_RUN: would upload the catalog → $MODULE/$HASH/catalog.json"
     cat "$CATALOG"
     exit 0
 fi
-put "$CATALOG" "sentry/$HASH/catalog.json" application/json "public, max-age=60, must-revalidate"
+put "$CATALOG" "$MODULE/$HASH/catalog.json" application/json "public, max-age=60, must-revalidate"
 
 # --- Smoke test: origin, then the CDN clients actually use -----------------
 SIGNED_AT=$(json "$CATALOG" signature.signedAt)
@@ -109,12 +117,12 @@ signed_at_of() { curl -fsSL -H 'Cache-Control: no-cache' "$1" 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).signature.signedAt)}catch{}})' || true; }
 
 ORIGIN_BASE="https://${DO_SPACES_BUCKET}.${DO_SPACES_ENDPOINT#https://}"
-[ "$(signed_at_of "$ORIGIN_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] \
+[ "$(signed_at_of "$ORIGIN_BASE/$MODULE/$HASH/catalog.json")" = "$SIGNED_AT" ] \
     || { echo "ERROR: origin doesn't serve the new catalog"; exit 1; }
 
 OK=""
 for i in $(seq 1 40); do   # × 15 s = 10 min (60 s TTL at the edge)
-    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/sentry/$HASH/catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
+    [ "$(signed_at_of "$DO_SPACES_PUBLIC_BASE/$MODULE/$HASH/catalog.json")" = "$SIGNED_AT" ] && { OK=1; break; }
     echo "  CDN not propagated yet, attempt $i/40 — retrying in 15s…"
     sleep 15
 done

@@ -187,6 +187,12 @@ mkdir -p /mnt/tmp
     echo "BUILD_MODE=$BUILD_MODE"
 } > /mnt/tmp/bromure-build.env
 
+# Source of the bromure_zeropages kernel module, built in the chroot below
+# (in the same toolchain window as v4l2loopback) and then deleted.
+mkdir -p /mnt/usr/src/bromure-zeropages
+cp "$SCRIPT_DIR/zeropages/bromure_zeropages.c" "$SCRIPT_DIR/zeropages/Makefile" \
+    "$SCRIPT_DIR/scripts/fetch-guest-module.py" /mnt/usr/src/bromure-zeropages/
+
 # Bind-mount for chroot. The netboot's /dev is a bare devtmpfs from the
 # rdinit shim — materialise /dev/pts first or the bind of it fails.
 [ -d /dev/pts ] || mkdir /dev/pts
@@ -603,6 +609,39 @@ fi
 if [ "$BUILD_MODE" = "foss" ] && [ "$V4L2_OK" != "true" ]; then
     fail "v4l2loopback dkms build failed for $KVER — a distribution build must not degrade"
 fi
+
+# bromure_zeropages: zero pages as the guest frees them, so macOS's memory
+# compressor can take that memory back from the VM (Virtualization.framework
+# gives no way to hand guest memory back: its balloon keeps the pages).
+# Memory the guest never used is never touched.
+#
+# Prefer the module Jenkinsfile.zeropages publishes for this kernel (signed,
+# reproducibly built, the same bytes in every image); fetch-guest-module.py
+# uses it only if its signature verifies against the app's pinned key and it
+# was built from the source this image ships. Otherwise — no network, a kernel
+# not published yet, a FOSS build — build it here from that source, with the
+# toolchain v4l2loopback just installed. Same stash-before-purge.
+ZP_OK=false
+if [ "$BUILD_MODE" != "foss" ] && python3 /usr/src/bromure-zeropages/fetch-guest-module.py \
+        zeropages "$KVER" /usr/src/bromure-zeropages /tmp/bromure_zeropages.ko.stash; then
+    ZP_OK=true
+    log "BROMURE_ZEROPAGES_FROM_CDN"
+else
+    rm -f /tmp/bromure_zeropages.ko.stash
+    log "building bromure_zeropages"
+    if make -C /usr/src/bromure-zeropages KVER="$KVER" >/dev/null 2>&1 \
+            && [ -f /usr/src/bromure-zeropages/bromure_zeropages.ko ]; then
+        cp /usr/src/bromure-zeropages/bromure_zeropages.ko /tmp/bromure_zeropages.ko.stash
+        ZP_OK=true
+        log "BROMURE_ZEROPAGES_BUILT_OK"
+    else
+        log "warning: bromure_zeropages failed to build — VMs will not return freed memory"
+    fi
+fi
+rm -rf /usr/src/bromure-zeropages
+if [ "$BUILD_MODE" = "foss" ] && [ "$ZP_OK" != "true" ]; then
+    fail "bromure_zeropages build failed for $KVER — a distribution build must not degrade"
+fi
 apt-get purge -y -q "linux-headers-*" gcc make dkms v4l2loopback-dkms zstd >/dev/null 2>&1 || true
 apt-get autoremove -y -q >/dev/null 2>&1 || true
 # Restore the stashed module now that the toolchain (and the dkms
@@ -616,6 +655,11 @@ if [ -f /tmp/v4l2loopback.ko.stash ]; then
         *)     cp /tmp/v4l2loopback.ko.stash "/lib/modules/$KVER/updates/v4l2loopback.ko" ;;
     esac
     rm -f /tmp/v4l2loopback.ko.stash
+fi
+if [ -f /tmp/bromure_zeropages.ko.stash ]; then
+    mkdir -p "/lib/modules/$KVER/updates"
+    cp /tmp/bromure_zeropages.ko.stash "/lib/modules/$KVER/updates/bromure_zeropages.ko"
+    rm -f /tmp/bromure_zeropages.ko.stash
 fi
 depmod "$KVER"
 

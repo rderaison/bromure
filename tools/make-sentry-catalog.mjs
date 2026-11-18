@@ -24,6 +24,12 @@
  *        [--allow-unsigned]
  *
  *   <dir> holds bromure_sentry-<kernel>.ko (+ .txt) as build.sh writes them.
+ *
+ *   --module <name> (default: sentry) publishes another guest kernel module
+ *   the same way, e.g. --module zeropages (Jenkinsfile.zeropages): files
+ *   bromure_<name>-<kernel>.ko, objects under <name>/<sourceHash>/, and
+ *   "bromure-<name>-…" domain separators, so a catalog or module signed for
+ *   one module can never pass for another's.
  *   --previous merges an already published catalog (its entries are kept unless
  *   <dir> rebuilt the same kernel); when it's signed, its signature is checked
  *   against --public-key first, so a tampered bucket can't smuggle entries in.
@@ -33,12 +39,19 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
          unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
-export const MAGIC = "bromure-sentry-modules-v1";
+const moduleArg = process.argv.indexOf("--module");
+export const MODULE_NAME = moduleArg >= 0 ? process.argv[moduleArg + 1] : "sentry";
+if (!/^[a-z][a-z0-9]*$/.test(MODULE_NAME ?? "")) {
+  console.error(`make-sentry-catalog: bad --module ${MODULE_NAME}`); process.exit(2);
+}
+// The .ko file name stem, as each module's build.sh writes it.
+const FILE_STEM = `bromure_${MODULE_NAME}`;
+export const MAGIC = `bromure-${MODULE_NAME}-modules-v1`;
 // Each module also carries its OWN signature (same Sparkle key), over a
 // domain-separated statement, never over the raw .ko bytes: Sparkle signs raw
 // update archives, so a raw-bytes signature would let a module pass for a
 // "signed update". SentryModuleCatalog.moduleSigningPayload builds the same.
-export const MODULE_MAGIC = "bromure-sentry-module-v1";
+export const MODULE_MAGIC = `bromure-${MODULE_NAME}-module-v1`;
 
 export function moduleSigningPayload(sourceHash, m) {
   return Buffer.from([MODULE_MAGIC, `sourceHash=${sourceHash}`, `kernel=${m.kernel}`,
@@ -144,7 +157,7 @@ if (verifyPath) {
   for (const m of cat.modules) {
     if (!m.signature || !verify(null, moduleSigningPayload(cat.sourceHash, m), pub, Buffer.from(m.signature, "base64")))
       fail(`module ${m.kernel}: signature does NOT verify against the pinned key`, WRONG_KEY);
-    const file = join(dir, `bromure_sentry-${m.kernel}.ko`);
+    const file = join(dir, `${FILE_STEM}-${m.kernel}.ko`);
     if (!lexists(file)) continue;   // published earlier, not rebuilt here
     const body = readNoFollow(file);
     if (body.length !== m.bytes || createHash("sha256").update(body).digest("hex") !== m.sha256.toLowerCase())
@@ -161,8 +174,9 @@ if (!/^[0-9a-f]{64}$/.test(sourceHash)) { console.error("make-sentry-catalog: ba
 const modulesDir = req("modules");
 requireRealDir(modulesDir);
 const out = req("out");
-const prefix = `sentry/${sourceHash}/`;
+const prefix = `${MODULE_NAME}/${sourceHash}/`;
 
+const koName = new RegExp(`^${FILE_STEM}-(.+)\\.ko$`);
 const byKernel = new Map();
 
 const previousPath = opt("previous");
@@ -212,7 +226,7 @@ if (!unsigned) {
 // is replaced below, so its old entry isn't checked at all.
 const pubForModules = opt("public-key");
 const rebuilt = new Set(readdirSync(modulesDir)
-  .map((n) => /^bromure_sentry-(.+)\.ko$/.exec(n)?.[1]).filter(Boolean));
+  .map((n) => koName.exec(n)?.[1]).filter(Boolean));
 let resigned = 0;
 if (!unsigned && pubForModules) {
   for (const m of byKernel.values()) {
@@ -232,7 +246,7 @@ if (!unsigned && pubForModules) {
 
 let added = 0;
 for (const name of readdirSync(modulesDir).sort()) {
-  const match = /^bromure_sentry-(.+)\.ko$/.exec(name);
+  const match = koName.exec(name);
   if (!match) continue;
   const kernel = match[1];
   if (!KERNEL_RE.test(kernel)) { console.error(`make-sentry-catalog: refusing odd kernel name ${kernel}`); process.exit(1); }
@@ -242,9 +256,9 @@ for (const name of readdirSync(modulesDir).sort()) {
   const sha256 = createHash("sha256").update(body).digest("hex");
   const entry = {
     kernel,
-    path: `${prefix}${kernel}/bromure_sentry-${kernel}-${sha256.slice(0, 12)}.ko`,
+    path: `${prefix}${kernel}/${FILE_STEM}-${kernel}-${sha256.slice(0, 12)}.ko`,
     sha256, bytes,
-    headers: headersOf(join(modulesDir, `bromure_sentry-${kernel}.txt`)),
+    headers: headersOf(join(modulesDir, `${FILE_STEM}-${kernel}.txt`)),
     builtAt: new Date().toISOString(),
   };
   if (key) {
