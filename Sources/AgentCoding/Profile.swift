@@ -7350,31 +7350,64 @@ public final class ProfileStore {
     }
     #    What Hermes's composer in tmux pane $1 holds (printed): its last
     #    `❯ ` row, less the italic placeholder Hermes draws in an empty one.
-    #    Fails (2) with no composer on screen.
+    #    Fails (2) with no composer on screen. With $2: whether the composer
+    #    holds exactly $2 (fails 1 if not) -- read across the rows Hermes
+    #    wraps it onto: it cuts long input at the pane's width, character by
+    #    character, and carries on at the next row's first column.
     _bromure_hermes_composer() {
+        local _w
+        _w=$(tmux display-message -p -t "$1" '#{pane_width}' 2>/dev/null)
         tmux capture-pane -p -e -t "$1" 2>/dev/null | python3 -c '
-    import re, sys
+    import re, sys, unicodedata
     esc, glyph = chr(27), chr(0x276F) + " "
-    rows = [l for l in sys.stdin.read().split(chr(10)) if glyph in l]
-    if not rows:
+    width = int(sys.argv[1]) if sys.argv[1:2] and sys.argv[1].isdigit() else 0
+    want = sys.argv[2] if len(sys.argv) > 2 else None
+    lines = sys.stdin.read().split(chr(10))
+    at = [n for n, l in enumerate(lines) if glyph in l]
+    if not at:
         sys.exit(2)
-    italic, text = False, ""
-    for sgr, ch in re.findall(esc + "[[]([0-9;]*)m|([^" + esc + "])", rows[-1].split(glyph, 1)[1]):
-        if ch:
-            text += "" if italic else ch
-            continue
-        codes, i = (sgr or "0").split(";"), 0
-        while i < len(codes):
-            if codes[i] in ("38", "48", "58"):
-                i += 5 if codes[i + 1:i + 2] == ["2"] else 3
+    def visible(row):
+        italic, text = False, ""
+        for sgr, ch in re.findall(esc + "[[]([0-9;]*)m|([^" + esc + "])", row):
+            if ch:
+                text += "" if italic else ch
                 continue
-            if codes[i] in ("", "0", "23"):
-                italic = False
-            elif codes[i] == "3":
-                italic = True
-            i += 1
-    print(text.strip())
-    '
+            codes, i = (sgr or "0").split(";"), 0
+            while i < len(codes):
+                if codes[i] in ("38", "48", "58"):
+                    i += 5 if codes[i + 1:i + 2] == ["2"] else 3
+                    continue
+                if codes[i] in ("", "0", "23"):
+                    italic = False
+                elif codes[i] == "3":
+                    italic = True
+                i += 1
+        return text
+    def cols(s):
+        return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+    head, first = lines[at[-1]].split(glyph, 1)
+    if want is None:
+        print(visible(first).strip())
+        sys.exit(0)
+    if width <= 0:
+        sys.exit(1)
+    # Lay $2 out as Hermes would after its prompt, then compare row by row
+    # (tmux drops the blanks that end a row).
+    rows, used = [""], cols(visible(head)) + 2
+    for c in want:
+        if used + cols(c) > width:
+            rows.append("")
+            used = 0
+        rows[-1] += c
+        used += cols(c)
+    shown = [visible(first)] + [visible(l) for l in lines[at[-1] + 1:at[-1] + len(rows) + 1]]
+    if [r.rstrip() for r in shown[:len(rows)]] != [r.rstrip() for r in rows]:
+        sys.exit(1)
+    # More typed text would carry on in the row below; the status row
+    # under the composer starts with a blank.
+    after = shown[len(rows)] if len(shown) > len(rows) else ""
+    sys.exit(0 if after[:1] in ("", " ") or after.startswith(chr(0x2500)) else 1)
+    ' "$_w" ${2+"$2"}
     }
     #    Type $2 (the resume's `/model`) into the Hermes that is starting in
     #    tmux pane $1, once its composer is up and empty, then send it. The
@@ -7397,7 +7430,7 @@ public final class ProfileStore {
             tmux send-keys -t "$_p" -l -- "$_m" || return 0
             for _j in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 0.2
-                if [ "$(_bromure_hermes_composer "$_p")" = "$_m" ]; then
+                if _bromure_hermes_composer "$_p" "$_m"; then
                     tmux send-keys -t "$_p" Enter
                     return 0
                 fi
