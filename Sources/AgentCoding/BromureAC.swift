@@ -12815,8 +12815,10 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// chooser after a base-image install), and its disk is still from an
     /// older one: this boot resets it, without asking.
     func acceptedBaseImageUpgradeDue(_ profile: Profile, current: String?) -> Bool {
+        // A disk with no record of its base counts as older: the chooser
+        // offers it, so its Update must reset it too.
         guard let current, profile.baseImageUpgradeAcceptedFor == current,
-              let recorded = profile.baseImageVersionAtClone, recorded != current,
+              profile.baseImageVersionAtClone != current,
               FileManager.default.fileExists(atPath: store.diskURL(for: profile).path) else { return false }
         return true
     }

@@ -4403,3 +4403,4 @@
 /* New session: an agent with no model set up can't start */
 "%@ has no model set up on this machine. Choose one in the machine's settings › Models." = "%@ não tem nenhum modelo configurado nesta máquina. Escolha um nas definições da máquina › Modelos.";
 "No model set up (settings › Models)" = "Nenhum modelo configurado (definições › Modelos)";
+"Base unknown" = "Base desconhecida";

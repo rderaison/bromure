@@ -66,6 +66,16 @@ struct BaseImageUpdateChooserTests {
         delegate.recordBaseImageUpdateChoice(profileID: p.id, current: "201.1", update: true)
         try FileManager.default.removeItem(at: disk)
         #expect(!delegate.acceptedBaseImageUpgradeDue(try stored(), current: "201.1"))
+
+        // A disk with no record of its base: the chooser offers it, so its
+        // Update resets it at the next boot like any older one.
+        FileManager.default.createFile(atPath: disk.path, contents: Data("x".utf8))
+        var unrecorded = try stored()
+        unrecorded.baseImageVersionAtClone = nil
+        try delegate.store.save(unrecorded)
+        #expect(delegate.acceptedBaseImageUpgradeDue(try stored(), current: "201.1"))
+        delegate.recordBaseImageUpdateChoice(profileID: p.id, current: "201.1", update: false)
+        #expect(!delegate.acceptedBaseImageUpgradeDue(try stored(), current: "201.1"))
     }
 
     @MainActor

@@ -68,6 +68,26 @@ struct PostinstallSkipTests {
         #expect(rows.map(\.onOlderBase) == [false, true, true, true, false])
     }
 
+    /// Finding "Base Image details hides update choice for workspaces with
+    /// no clone-version record": such a disk read "current", and with only
+    /// those, "Choose Workspaces to Update…" never showed.
+    @Test("a disk with no record of its base is unknown, and the chooser is offered")
+    func unrecordedBase() {
+        let rows = BaseImageWorkspaceRow.rows([
+            .init(id: UUID(), name: "a", baseAtClone: nil, hasDisk: true, acceptedFor: nil, declinedFor: nil),
+            .init(id: UUID(), name: "b", baseAtClone: nil, hasDisk: true, acceptedFor: "201.5", declinedFor: nil),
+            .init(id: UUID(), name: "c", baseAtClone: nil, hasDisk: true, acceptedFor: nil, declinedFor: "201.5"),
+            .init(id: UUID(), name: "d", baseAtClone: nil, hasDisk: false, acceptedFor: nil, declinedFor: nil),
+        ], current: "201.5")
+        #expect(rows.map(\.state) == [.unknown, .updatesAtNextStart, .kept, .notStarted])
+        #expect(rows.contains { $0.onOlderBase })
+        // Same decision as the chooser itself: it decides for such a disk.
+        let chooser = BaseImageUpdateChoice.rows(
+            [.init(id: UUID(), name: "a", baseAtClone: nil, hasDisk: true)],
+            newBase: "201.5", running: [], restoring: [])
+        #expect(chooser.allSatisfy { $0.decides })
+    }
+
     @Test("the startup prompt offers Skip Permanently, and every install path honors skips")
     func wiring() throws {
         let top = URL(fileURLWithPath: #filePath)
