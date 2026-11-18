@@ -474,6 +474,7 @@ struct MobileNewSessionScreen: View {
             onCancel: onCancel,
             onNewMachine: { workspaceEdit = .new },
             listFolders: { await controller.listSessionFolders(profileID: $0, path: $1) },
+            readyTools: { Set(controller.readyToolSpecs(for: $0).map(\.tool)) },
             instructionStore: controller.supportsInstructions ? controller.instructionStore : nil)
         .disabled(starting)
         .overlay {

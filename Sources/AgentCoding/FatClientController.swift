@@ -6321,6 +6321,9 @@ final class RemoteHostWindow: NSWindow {
             },
             onNewMachine: { [weak self] in self?.createWorkspace(withWizard: false) },
             listFolders: { pid, path in await c.listSessionFolders(profileID: pid, path: path) },
+            // What the host can start (its readyTools): an agent it can't --
+            // Hermes with no model -- is greyed out here too.
+            readyTools: { [weak c] p in Set((c?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\.tool)) },
             peerMentions: { [weak c] _ in
                 guard let c else { return [] }
                 return PeerMention.candidates(c.sessionStore.sessions, excluding: nil,

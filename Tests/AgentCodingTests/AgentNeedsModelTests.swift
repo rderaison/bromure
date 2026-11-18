@@ -45,5 +45,13 @@ struct AgentNeedsModelTests {
         #expect(v.contains("guard selectedProfile != nil, !agentNeedsModel else { return false }"))
         #expect(v.contains("if agentNeedsModel {"))
         #expect(NewSessionView.needsModelMessage(.hermes).contains("Hermes"))
+        // Every new-session screen gets the host's ready set: the fat
+        // client's and iOS's too, and the host refuses a start all the same.
+        let fat = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/FatClientController.swift"), encoding: .utf8)
+        #expect(fat.contains("readyTools: { [weak c] p in Set((c?.readyToolSpecs(for: p) ?? p.allToolSpecs).map(\\.tool)) },"))
+        let ios = try String(contentsOf: top.appendingPathComponent("ios/BromureRemote/Sources/BromureRemote/SessionScreens.swift"), encoding: .utf8)
+        #expect(ios.contains("readyTools: { Set(controller.readyToolSpecs(for: $0).map(\\.tool)) },"))
+        let ac = try String(contentsOf: top.appendingPathComponent("Sources/AgentCoding/BromureAC.swift"), encoding: .utf8)
+        #expect(ac.contains("return [\"error\": NewSessionView.needsModelMessage(tool)]"))
     }
 }

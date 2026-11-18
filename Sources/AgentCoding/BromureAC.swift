@@ -6089,6 +6089,12 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           let toolRaw = body["tool"] as? String,
                           let tool = Profile.Tool(rawValue: toolRaw)
                     else { return ["error": "profile and tool required"] }
+                    // Hermes with no model set up: refused, whichever client
+                    // asks (an older one doesn't grey it out).
+                    if tool.needsModelToStart,
+                       !self.readyToolSpecs(for: profile).contains(where: { $0.tool == tool }) {
+                        return ["error": NewSessionView.needsModelMessage(tool)]
+                    }
                     // Files dropped on a remote client's new-session screen,
                     // {name, data (base64), isImage} each — staged here once
                     // the machine is up, like a local drop.
