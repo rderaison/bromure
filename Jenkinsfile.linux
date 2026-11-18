@@ -8,8 +8,8 @@
 //   1. Toolchain image (linux/packaging/Dockerfile.toolchain), for the
 //      builder's platform: Swift, Rust, a Swift SDK for
 //      x86_64-unknown-linux-gnu made by swift-sdk-generator (with zlib and
-//      libbrotlidec added to its sysroot), musl.cc's x86_64 musl cross
-//      compiler and the amd64 kernel headers for Firecracker.
+//      libbrotlidec added to its sysroot), and for Firecracker Ubuntu's
+//      x86_64 cross gcc with multiarch musl and the amd64 kernel headers.
 //   2. Build container: the source (`git archive HEAD`) on that image,
 //      linux/packaging/build-deb.sh: `swift build --swift-sdk`, the Swift
 //      runtime it links, Firecracker (static musl), the PII model, the
@@ -37,8 +37,6 @@ pipeline {
             description: 'The package\'s architecture (x86_64 = amd64, cross-built on the arm64 builder; aarch64 = arm64, native).')
         string(name: 'SWIFT_IMAGE', defaultValue: 'swift:6.4-noble',
             description: 'The Swift image the toolchain is built on (its Swift version is the SDK\'s).')
-        string(name: 'MUSL_CROSS_URL', defaultValue: '',
-            description: 'The musl cross compiler tarball for Firecracker. Default: https://musl.cc/<arch>-linux-musl-cross.tgz.')
     }
 
     stages {
@@ -108,7 +106,7 @@ pipeline {
                     export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
                     arch="${TARGET_ARCH:-x86_64}"
                     swift_image="${SWIFT_IMAGE:-swift:6.4-noble}"
-                    key=$( { echo "$swift_image $arch ${MUSL_CROSS_URL:-}"; cat linux/packaging/Dockerfile.toolchain; } | sha256sum | cut -c1-12)
+                    key=$( { echo "$swift_image $arch"; cat linux/packaging/Dockerfile.toolchain; } | sha256sum | cut -c1-12)
                     tag="bromure-linux-toolchain:$arch-$key"
                     echo "$tag" > deb-ci/toolchain-tag
                     mkdir -p deb-ci/toolchain-ctx
@@ -116,7 +114,6 @@ pipeline {
                     docker build --pull -t "$tag" \
                         --build-arg SWIFT_IMAGE="$swift_image" \
                         --build-arg TARGET_ARCH="$arch" \
-                        --build-arg MUSL_CROSS_URL="${MUSL_CROSS_URL:-}" \
                         deb-ci/toolchain-ctx
                 '''
             }

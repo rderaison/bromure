@@ -8,14 +8,17 @@
 #       swift-sdk-generator for this image's exact Swift version, with the
 #       libraries bromure-ac links that the generator leaves out (zlib,
 #       libbrotlidec) added to its sysroot;
-#     - musl.cc's x86_64-linux-musl cross compiler and the amd64 kernel
-#       UAPI headers (multiarch linux-libc-dev:amd64), for Firecracker.
+#     - for Firecracker: Ubuntu's x86_64 cross gcc (gcc-x86-64-linux-gnu)
+#       with x86_64 musl (multiarch musl-dev:amd64) behind an
+#       x86_64-linux-musl-gcc wrapper (musl-gcc's own recipe: the gcc and
+#       musl's specs file), and the amd64 kernel UAPI headers
+#       (linux-libc-dev:amd64). All of it runs on the builder: musl.cc's
+#       cross toolchains are x86_64-hosted.
 #   TARGET_ARCH = the builder's arch: a native build, none of that.
 ARG SWIFT_IMAGE=swift:6.4-noble
 FROM ${SWIFT_IMAGE}
 
 ARG TARGET_ARCH=x86_64
-ARG MUSL_CROSS_URL=
 ENV DEBIAN_FRONTEND=noninteractive
 
 # swift-sdk-generator's own needs: libsqlite3-dev (its SystemSQLite module),
@@ -49,14 +52,16 @@ RUN set -eux; \
     printf 'Types: deb\nURIs: %s\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: %s\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
         "$mirror" "$deb" > /etc/apt/sources.list.d/target.sources; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "linux-libc-dev:$deb"; \
+    gnu=$(echo "$TARGET_ARCH" | tr _ -)-linux-gnu; \
+    apt-get install -y --no-install-recommends "linux-libc-dev:$deb" "musl-dev:$deb" "gcc-$gnu"; \
+    specs=/usr/lib/$TARGET_ARCH-linux-musl/musl-gcc.specs; [ -f "$specs" ]; \
+    printf '#!/bin/sh\nexec %s-linux-gnu-gcc "$@" -specs %s\n' "$TARGET_ARCH" "$specs" > "/usr/local/bin/$TARGET_ARCH-linux-musl-gcc"; \
+    chmod 755 "/usr/local/bin/$TARGET_ARCH-linux-musl-gcc"; \
+    printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' > /tmp/t.c; \
+    "$TARGET_ARCH-linux-musl-gcc" -static -O2 -o /tmp/t /tmp/t.c; file /tmp/t | grep -Eq 'statically linked|static-pie linked'; rm -f /tmp/t /tmp/t.c; \
     mkdir -p /opt/target-debs; cd /opt/target-debs; \
     apt-get download "zlib1g:$deb" "zlib1g-dev:$deb" "libbrotli1:$deb" "libbrotli-dev:$deb"; \
-    rm -rf /var/lib/apt/lists/*; \
-    url=${MUSL_CROSS_URL:-https://musl.cc/$TARGET_ARCH-linux-musl-cross.tgz}; \
-    mkdir -p /opt/musl-cross; curl -fsSL "$url" | tar -xz -C /opt/musl-cross --strip-components=1; \
-    /opt/musl-cross/bin/$TARGET_ARCH-linux-musl-gcc --version | head -1
-ENV PATH=$PATH:/opt/musl-cross/bin
+    rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     host=$(uname -m); \

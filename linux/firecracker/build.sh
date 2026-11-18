@@ -9,12 +9,14 @@
 # (the build script links it to compile the filter), kernel UAPI headers.
 # Sources go to $BROMURE_FC_SRC (default ~/.cache/bromure-ac/firecracker-src).
 #
-# Cross build: BROMURE_FC_ARCH=x86_64 (or aarch64) on another host. It then
-# takes the target's musl cross compiler, $BROMURE_FC_ARCH-linux-musl-gcc
-# (musl.cc's toolchains; $BROMURE_FC_CC to name another), as compiler and
-# linker, and the target's kernel UAPI headers under
-# /usr/include/$BROMURE_FC_ARCH-linux-gnu (linux-libc-dev for that
-# architecture, multiarch). A native build is unchanged.
+# Cross build: BROMURE_FC_ARCH=x86_64 (or aarch64) on another host. C code
+# is compiled with the target's musl compiler, $BROMURE_FC_ARCH-linux-musl-gcc
+# ($BROMURE_FC_CC to name another; linux/packaging/Dockerfile.toolchain
+# makes one from Ubuntu's cross gcc and multiarch musl-dev), and linked, as
+# natively, by a plain gcc for the target ($BROMURE_FC_ARCH-linux-gnu-gcc,
+# or $BROMURE_FC_LINKER) with Rust's own musl crt. The target's kernel UAPI
+# headers come from /usr/include/$BROMURE_FC_ARCH-linux-gnu (linux-libc-dev
+# for that architecture, multiarch). A native build is unchanged.
 set -euo pipefail
 
 TAG=v1.17.0
@@ -28,12 +30,14 @@ HOST_ARCH=$(uname -m)
 ARCH=${BROMURE_FC_ARCH:-$HOST_ARCH}
 case $ARCH in x86_64|aarch64) ;; *) echo "build.sh: unsupported arch $ARCH" >&2; exit 1;; esac
 if [ "$ARCH" = "$HOST_ARCH" ]; then CC_TARGET=${BROMURE_FC_CC:-musl-gcc}; else CC_TARGET=${BROMURE_FC_CC:-$ARCH-linux-musl-gcc}; fi
+LINKER_TARGET=${BROMURE_FC_LINKER:-$ARCH-linux-gnu-gcc}
 TARGET=$ARCH-unknown-linux-musl
 die() { echo "build.sh: $*" >&2; exit 1; }
 
 export PATH=$HOME/.cargo/bin:$HOME/.local/musl/bin:$PATH
 command -v rustup >/dev/null || die "rustup not found (https://rustup.rs; installing it in ~ is enough)"
-command -v "$CC_TARGET" >/dev/null || die "$CC_TARGET not found (musl-tools, or musl built with --prefix=~/.local/musl; cross: musl.cc's $ARCH-linux-musl-cross)"
+command -v "$CC_TARGET" >/dev/null || die "$CC_TARGET not found (musl-tools, or musl built with --prefix=~/.local/musl; cross: see linux/packaging/Dockerfile.toolchain)"
+[ "$ARCH" = "$HOST_ARCH" ] || command -v "$LINKER_TARGET" >/dev/null || die "$LINKER_TARGET not found (gcc-$(echo "$ARCH" | tr _ -)-linux-gnu)"
 
 if [ ! -d "$SRC/.git" ]; then
     mkdir -p "$(dirname "$SRC")"
@@ -68,10 +72,9 @@ if ! ldconfig -p | grep -q 'libseccomp\.so '; then
 fi
 
 T=${TARGET//-/_}
-# Cross: the target's linker is its musl compiler too (cargo's default, cc,
-# links for the host).
+# Cross: a linker for the target (cargo's default, cc, links for the host).
 CROSS_ENV=()
-[ "$ARCH" = "$HOST_ARCH" ] || CROSS_ENV=("CARGO_TARGET_$(echo "$T" | tr '[:lower:]' '[:upper:]')_LINKER=$CC_TARGET")
+[ "$ARCH" = "$HOST_ARCH" ] || CROSS_ENV=("CARGO_TARGET_$(echo "$T" | tr '[:lower:]' '[:upper:]')_LINKER=$LINKER_TARGET")
 env LIBRARY_PATH="$LIB${LIBRARY_PATH:+:$LIBRARY_PATH}" "CC_$T=$CC_TARGET" "CFLAGS_$T=-isystem $INC" "${CROSS_ENV[@]}" \
     cargo build -q --release -p firecracker --target "$TARGET"
 mkdir -p "$OUT"
