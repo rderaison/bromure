@@ -10659,15 +10659,17 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// The base image version on disk (its stamp), nil without one.
     func currentBaseVersion() -> String? { readCurrentBaseVersion() }
 
-    /// Base Image details' "Install Selected": the steps come off the skip
-    /// list, go into the base image, and then -- as after the startup
-    /// prompt -- the user picks which workspaces move to it.
+    /// Base Image details' "Install Selected": the steps go into the base
+    /// image, come off the skip list once the image has them, and then --
+    /// as after the startup prompt -- the user picks which workspaces move
+    /// to it. A failed or cancelled install leaves them skipped as they were.
     @MainActor func installPostinstallStepsNow(_ steps: [PostinstallStep]) async {
         guard installTask == nil, !steps.isEmpty, imageManager.hasBaseImage else { return }
-        PostinstallSkips().unskip(steps.map(\.uuid))
         let before = readCurrentBaseVersion()
         startPostinstall(steps)
         await installTask?.value
+        PostinstallSkips().unskip(PostinstallSkips.installed(
+            steps.map(\.uuid), applied: imageManager.loadImageState()?.appliedStepUUIDs ?? []))
         if let after = readCurrentBaseVersion(), after != before {
             await chooseWorkspacesForNewBase(after)
         }
