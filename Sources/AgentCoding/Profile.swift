@@ -7365,9 +7365,11 @@ public final class ProfileStore {
         # hidden from it: "No API key for the custom endpoint". Bromure's
         # own resume (nothing but the resume and --yolo) opens on the
         # workspace's model instead, with Hermes's session-only /model as
-        # its first input; no model call, nothing persisted.
+        # its first input; no model call, nothing persisted. `chat` goes
+        # first: -c / --continue take an optional session name, and after
+        # one argparse reads `chat` as that name ("unrecognized arguments").
         local _rm
-        _rm=$(_bromure_hermes_resume_model "$@") && set -- "$@" chat --query="$_rm"
+        _rm=$(_bromure_hermes_resume_model "$@") && set -- chat --query="$_rm" "$@"
         [ -r /mnt/bromure-meta/hermes-key-var ] && _k=$(head -1 /mnt/bromure-meta/hermes-key-var 2>/dev/null)
         if [ -n "$_k" ] && [ -n "${BROMURE_HERMES_API_KEY:-}" ]; then
             command env "${_u[@]}" -u BROMURE_HERMES_API_KEY "$_k=$BROMURE_HERMES_API_KEY" hermes "$@"
@@ -7559,10 +7561,12 @@ public final class ProfileStore {
                 elif [ "$_wt_tool" = "hermes" ]; then
                     # Hermes takes its opening message as `chat --query`: on a
                     # terminal it's sent as the first turn and the session
-                    # stays open. Its global flags ($_wt_flags: --yolo, -c) go
-                    # before the subcommand; the `=` form keeps a prompt
-                    # starting with "-" the query's value.
-                    "$_wt_tool" $_wt_flags chat --query="$_wt_prompt"
+                    # stays open. Its flags ($_wt_flags: --yolo, -c) go after
+                    # the subcommand, which takes them too: -c takes an
+                    # optional session name, and would read `chat` as one.
+                    # The `=` form keeps a prompt starting with "-" the
+                    # query's value.
+                    "$_wt_tool" chat --query="$_wt_prompt" $_wt_flags
                     _wt_rc=$?
                 else
                     # "--" ends option parsing, so the prompt is unambiguously the

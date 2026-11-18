@@ -135,4 +135,53 @@ struct HermesSessionTests {
         #expect(try run("-c", model: ["provider": "nous"]) == nil)
         #expect(try run("-c", model: ["provider": "nous", "default": "a b; rm -rf ~"]) == nil)
     }
+
+    /// The argv the wrapper hands Hermes on a bare resume: `chat` first.
+    /// -c / --continue take an optional session name, so `-c chat --query=…`
+    /// had argparse read `chat` as that name and exit on the stray --query.
+    @Test("a bare resume puts chat before the resume flags", arguments: [
+        "-c", "--continue", "--yolo -c", "--resume local-abc123", "-r local-abc123 --yolo",
+    ])
+    func resumeArgv(_ args: String) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hermes-argv-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDir: root)
+        let p = Profile(name: "ws", tool: .hermes, authMode: .token)
+        let seed = root.appendingPathComponent("seed")
+        try store.writeHomeSeedFiles(for: p, into: seed, terminalDefaults: .fallback)
+        let rc = try String(contentsOf: seed.appendingPathComponent("files/.bashrc"), encoding: .utf8)
+        let lines = rc.components(separatedBy: "\n")
+        func fn(_ name: String) throws -> String {
+            let start = try #require(lines.firstIndex { $0 == name + "() {" })
+            let end = try #require(lines[start...].firstIndex { $0 == "}" })
+            return lines[start...end].joined(separator: "\n")
+        }
+        let settings = root.appendingPathComponent("hermes-settings.json")
+        try JSONSerialization.data(withJSONObject: ["model": ["provider": "nous", "default": "openai/gpt-5.5"]])
+            .write(to: settings)
+        // A stand-in hermes that prints its argv, one word a line.
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let stub = bin.appendingPathComponent("hermes")
+        try "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n".write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+        let script = [
+            "_bromure_hermes_opt_ready() { :; }", "_bromure_hermes_apply() { :; }",
+            try fn("_bromure_hermes_resume_model"), try fn("hermes"),
+            "hermes " + args,
+        ].joined(separator: "\n").replacingOccurrences(of: "/mnt/bromure-meta/", with: root.path + "/")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", script]
+        proc.environment = ["PATH": bin.path + ":/usr/bin:/bin"]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        try proc.run(); proc.waitUntilExit()
+        let argv = (String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+            .split(separator: "\n").map(String.init)
+        #expect(proc.terminationStatus == 0)
+        #expect(argv == ["chat", "--query=/model openai/gpt-5.5 --provider nous --session"]
+                + args.split(separator: " ").map(String.init))
+    }
 }

@@ -58,8 +58,9 @@ struct HermesAgentTests {
         #expect(rc.contains("if ! type -P hermes >/dev/null 2>&1; then"))
         #expect(rc.contains("/mnt/bromure-meta/hermes-env-unset"))
         #expect(rc.contains("\"$_k=$BROMURE_HERMES_API_KEY\" hermes \"$@\""))
-        // A task's opening message: `chat --query=`, flags before the subcommand.
-        #expect(rc.contains("\"$_wt_tool\" $_wt_flags chat --query=\"$_wt_prompt\""))
+        // A task's opening message: `chat --query=`, flags after the
+        // subcommand (`-c chat` reads `chat` as -c's session name).
+        #expect(rc.contains("\"$_wt_tool\" chat --query=\"$_wt_prompt\" $_wt_flags"))
     }
 
     /// The settings step the wrapper runs, lifted out of the .bashrc and run
