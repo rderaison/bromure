@@ -40,6 +40,13 @@
       "min_version": "5.4.5"
     },
     {
+      "uuid": "639b26c1-2b0a-4a15-9daf-39af85a4a531",
+      "seq": 39,
+      "description": "Hermes Agent: quick, offline setup in each workspace",
+      "command": "# Hermes Agent: each workspace sets up its own dependency environment from\n# /opt/hermes (`hermes pm repair`, from the user's shell). Two things kept\n# that from working, or from working without the network:\n#  - The packages this image's install downloaded sat in root's own uv cache\n#    (/opt/hermes/cache/uv), which nobody else reads. Moved to the payload\n#    cache Hermes seeds every user's cache from (/opt/hermes/uv-cache), the\n#    environment builds from local packages: seconds, nothing to download.\n#  - The store's install lock and record were root's alone: a workspace's\n#    setup failed opening them (\"Permission denied: .../.install.lock\").\n#    A lock file holds nothing; the record holds no secret.\n# Nothing when Hermes isn't in /opt; safe to run again.\nif [ -d /opt/hermes/hermes-agent ] && [ -d /opt/hermes/tools ]; then\n    if [ -d /opt/hermes/cache/uv ] && [ ! -e /opt/hermes/uv-cache ]; then\n        mv /opt/hermes/cache/uv /opt/hermes/uv-cache\n    fi\n    if [ -d /opt/hermes/uv-cache ]; then chmod -R a+rX /opt/hermes/uv-cache; fi\n    touch /opt/hermes/tools/.install.lock\n    chmod 666 /opt/hermes/tools/.install.lock\n    if [ -f /opt/hermes/tools/facts.json ]; then chmod a+r /opt/hermes/tools/facts.json; fi\nfi",
+      "min_version": "5.4.5"
+    },
+    {
       "uuid": "9d3e5f7a-1b2c-4d6e-b8f9-3a4b5c6d7e8f",
       "seq": 40,
       "description": "Google Cloud SDK (gcloud)",

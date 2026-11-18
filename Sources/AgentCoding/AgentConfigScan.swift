@@ -69,12 +69,17 @@ enum AgentConfigScan {
         // `api_key`), so it stays too: Bromure sets the model up itself.
         // What carries is the persona, memories and skills (SOUL.md,
         // memories/, skills/). The code checkout, the session store,
-        // OAuth tokens of MCP servers and per-profile homes are data.
+        // OAuth tokens of MCP servers and per-profile homes are data -- and
+        // so is this Mac's install state: `installs/` records environments
+        // by their paths here (/Users/...), which a workspace's Hermes then
+        // tried to rebuild from the network; `shared/` keeps Hermes's copy
+        // of its last login.
         Source(tool: .hermes, dir: ".hermes", deny: [
             ".env", "auth.json", "config.yaml", "mcp-tokens", "profiles",
             "state.db", "state.db-wal", "state.db-shm", "sessions", "logs", "log", "cache",
             "hermes-agent", "environments", "checkpoints", "telemetry", "terminal-sessions",
             "shell-hooks-allowlist.json", "backups",
+            "installs", "runtime", "tools", "bin", "shared", "vault", "install_id",
         ]),
     ]
 
@@ -96,6 +101,17 @@ enum AgentConfigScan {
         /// Files skipped for being too large or too numerous, so the UI can
         /// say so rather than quietly under-importing.
         var skipped = 0
+    }
+
+    /// Whether a home-relative path (`.hermes/installs/x/facts.json`) is in an
+    /// agent's config dir and something a scan never carries -- so a file a
+    /// workspace imported before the deny list grew isn't seeded any more.
+    static func isDenied(homeRelativePath path: String) -> Bool {
+        for source in sources where path.hasPrefix(source.dir + "/") {
+            let rest = path.dropFirst(source.dir.count + 1).split(separator: "/").map(String.init)
+            if rest.contains(where: { source.deny.contains($0) }) { return true }
+        }
+        return false
     }
 
     /// Walk one agent's config dir. Returns nil when there's nothing to carry.

@@ -5320,6 +5320,9 @@ public final class ProfileStore {
         for f in profile.importedConfigFiles
         where f.path != ".gitconfig" && f.path != ".npmrc" && !f.contents.isEmpty {
             guard ImportedConfigFile.isSafeRelativePath(f.path) else { continue }
+            // Imported before the scan learned to leave it (another Mac's
+            // Hermes install records, say): not seeded.
+            guard !AgentConfigScan.isDenied(homeRelativePath: f.path) else { continue }
             let dest = home.appendingPathComponent(f.path)
             // Seed, don't manage: these are the user's own settings, so an edit
             // made inside the VM has to survive the next launch. (In seedMode
@@ -7294,9 +7297,11 @@ public final class ProfileStore {
     #    when the image was built. Its code and runtime are shared, but each
     #    data root needs a dependency environment of its own, which Hermes's
     #    first-launch sync refuses to build for a user who doesn't own the
-    #    checkout. `hermes pm repair` builds it from /opt's runtime instead:
-    #    seconds, no network, nothing written under /opt. Done once per data
-    #    root, and again when the image brings another Hermes.
+    #    checkout. `hermes pm repair` builds it from /opt's runtime instead,
+    #    its packages from the image's payload cache (/opt/hermes/uv-cache):
+    #    seconds, nothing downloaded but the index's answers, nothing written
+    #    under /opt but its install lock. Done once per data root, and again
+    #    when the image brings another Hermes.
     _bromure_hermes_opt() {
         case "$(readlink -f "$(type -P hermes)" 2>/dev/null)" in
             /opt/hermes/*) return 0 ;;
@@ -7315,7 +7320,11 @@ public final class ProfileStore {
             install -m 600 /opt/hermes/config.yaml "$_h/config.yaml"
         fi
         echo "[bromure-ac] preparing Hermes Agent for this workspace…"
-        if command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1; then
+        # Twice at most: it still asks the package index about versions (the
+        # packages themselves come from the image), and one network hiccup
+        # shouldn't leave the workspace without its agent.
+        if command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1 \\
+            || { sleep 3; command hermes pm repair >>/tmp/bromure-tool-install.log 2>&1; }; then
             printf '%s\\n' "$_s" > "$_h/.bromure-opt-repaired"
             return 0
         fi
