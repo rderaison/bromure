@@ -4409,3 +4409,28 @@
 "Signing in to %@…" = "Signing in to %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute.";
 "Hide" = "Hide";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "Base Image…";
+"Base Image" = "Base Image";
+"Base image" = "Base image";
+"Skip Permanently" = "Skip Permanently";
+"To install only some of them, or later, use Workspaces › Base Image…" = "To install only some of them, or later, use Workspaces › Base Image…";
+"Version" = "Version";
+"Source" = "Source";
+"Updated" = "Updated";
+"Size on disk" = "Size on disk";
+"Packages" = "Packages";
+"Installing…" = "Installing…";
+"Install Selected" = "Install Selected";
+"Choose Workspaces to Update…" = "Choose Workspaces to Update…";
+"Skipped" = "Skipped";
+"Don't Skip" = "Don't Skip";
+"Not installed" = "Not installed";
+"Not started yet" = "Not started yet";
+"v%@ · current" = "v%@ · current";
+"v%@ · updates at its next start" = "v%@ · updates at its next start";
+"v%@ · kept" = "v%@ · kept";
+"v%@ · older" = "v%@ · older";
+"Published image %@" = "Published image %@";
+"Built on this Mac" = "Built on this Mac";

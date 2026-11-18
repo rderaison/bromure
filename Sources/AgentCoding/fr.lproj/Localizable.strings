@@ -4375,3 +4375,28 @@
 "Signing in to %@…" = "Connexion à %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Démarrage d’une machine de connexion privée sur %@. La page de connexion s’ouvrira dans votre navigateur dès qu’elle sera prête, en général en moins d’une minute.";
 "Hide" = "Masquer";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "Image de base…";
+"Base Image" = "Image de base";
+"Base image" = "Image de base";
+"Skip Permanently" = "Ignorer définitivement";
+"To install only some of them, or later, use Workspaces › Base Image…" = "Pour n’en installer que certains, ou plus tard, utilisez Espaces de travail › Image de base…";
+"Version" = "Version";
+"Source" = "Source";
+"Updated" = "Mise à jour";
+"Size on disk" = "Taille sur le disque";
+"Packages" = "Paquets";
+"Installing…" = "Installation…";
+"Install Selected" = "Installer la sélection";
+"Choose Workspaces to Update…" = "Choisir les espaces de travail à mettre à jour…";
+"Skipped" = "Ignoré";
+"Don't Skip" = "Ne plus ignorer";
+"Not installed" = "Non installé";
+"Not started yet" = "Pas encore démarré";
+"v%@ · current" = "v%@ · à jour";
+"v%@ · updates at its next start" = "v%@ · mis à jour au prochain démarrage";
+"v%@ · kept" = "v%@ · conservé";
+"v%@ · older" = "v%@ · plus ancienne";
+"Published image %@" = "Image publiée %@";
+"Built on this Mac" = "Créée sur ce Mac";

@@ -680,7 +680,7 @@ struct Init: ParsableCommand {
                 try await imageManager.createBaseImage(
                     progress: progress,
                     force: true,
-                    postinstallSteps: catalog.sortedSteps
+                    postinstallSteps: catalog.baseImageSteps()
                 )
             }
             do {
@@ -1094,6 +1094,12 @@ private func makeMainMenu(delegate: ACAppDelegate) -> NSMenu {
     newWsFromConfigs.isAlternate = true
     newWsFromConfigs.target = delegate
     wsMenu.addItem(newWsFromConfigs)
+    wsMenu.addItem(NSMenuItem.separator())
+    let baseImageItem = NSMenuItem(title: L("Base Image…"),
+                                   action: #selector(ACAppDelegate.baseImageDetailsAction(_:)),
+                                   keyEquivalent: "")
+    baseImageItem.target = delegate
+    wsMenu.addItem(baseImageItem)
 
     // Infrastructure: the shared machines next to the workspaces — a
     // Kubernetes cluster of node VMs, a container registry.
@@ -1580,6 +1586,9 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
     /// The "Connect to Remote Bromure" window (auth flow), if open.
     var remoteConnectWindow: NSWindow?
+    /// Workspaces › Base Image… (`showBaseImageDetails`).
+    var baseImageDetailsWindow: NSWindow?
+    var baseImageDetailsModel: BaseImageDetailsModel?
 
     /// Every `SessionPane` currently displayed somewhere — in `unifiedWindow`
     /// or a popped-out `profileWindows` entry. This is the dispatch target for
@@ -4449,7 +4458,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else {
                     let catalog = remote ?? ImageCatalogStore.shared.effective()
                     let applied = self.imageManager.loadImageState()?.appliedStepUUIDs ?? []
-                    let pending = catalog.pendingSteps(appliedUUIDs: applied)
+                    let pending = catalog.pendingBaseImageSteps(appliedUUIDs: applied)
                     guard !pending.isEmpty, await self.promptNewPostinstallSteps(pending) else { return }
                 }
                 // The install runs on (its window shows it); the restore
@@ -9143,7 +9152,7 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ) async throws {
         var catalog = ImageCatalogStore.shared.remote()
         if catalog == nil { catalog = await ImageCatalogStore.shared.refresh() }
-        let steps = (catalog ?? ImageCatalogStore.shared.effective()).sortedSteps
+        let steps = (catalog ?? ImageCatalogStore.shared.effective()).baseImageSteps()
         try await imageManager.createBaseImage(
             progress: progress,
             output: output,
@@ -10615,7 +10624,8 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Consent gate for postinstall steps published in img-catalog.json
     /// after this image was installed. They run as root inside the base
     /// image, so nothing executes until the user explicitly accepts.
-    /// "Later" asks again next launch.
+    /// "Later" asks again next launch; "Skip Permanently" never asks about
+    /// these again (Workspaces › Base Image… still installs them).
     private func promptNewPostinstallSteps(_ steps: [PostinstallStep]) async -> Bool {
         let alert = NSAlert()
         let list = steps.map { "• \($0.description)" }.joined(separator: "\n")
@@ -10624,12 +10634,43 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             format: NSLocalizedString(
                 "New packages are recommended to be installed:\n\n%@\n\nBromure installs them into the base image (a few minutes, in the background VM). Then you choose which workspaces move to it, and which keep running as they are.",
                 comment: ""),
-            list)
+            list) + "\n\n" + NSLocalizedString(
+                "To install only some of them, or later, use Workspaces › Base Image…",
+                comment: "new packages prompt: where to pick steps")
         alert.addButton(withTitle: NSLocalizedString("Install", comment: ""))
         alert.addButton(withTitle: NSLocalizedString("Later", comment: ""))
-        guard await presentStartupPrompt(alert) == .alertFirstButtonReturn else { return false }
+        alert.addButton(withTitle: NSLocalizedString("Skip Permanently", comment: "new packages prompt: never ask about these steps again"))
+        switch await presentStartupPrompt(alert) {
+        case .alertFirstButtonReturn:
+            startPostinstall(steps)
+            return true
+        case .alertThirdButtonReturn:
+            PostinstallSkips().skip(steps.map(\.uuid))
+            AppLog.stamp("postinstall: skipped for good: \(steps.map(\.uuid).joined(separator: ","))")
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// Whether a base-image install or amendment is running.
+    var isInstallingBaseImage: Bool { installTask != nil }
+
+    /// The base image version on disk (its stamp), nil without one.
+    func currentBaseVersion() -> String? { readCurrentBaseVersion() }
+
+    /// Base Image details' "Install Selected": the steps come off the skip
+    /// list, go into the base image, and then -- as after the startup
+    /// prompt -- the user picks which workspaces move to it.
+    @MainActor func installPostinstallStepsNow(_ steps: [PostinstallStep]) async {
+        guard installTask == nil, !steps.isEmpty, imageManager.hasBaseImage else { return }
+        PostinstallSkips().unskip(steps.map(\.uuid))
+        let before = readCurrentBaseVersion()
         startPostinstall(steps)
-        return true
+        await installTask?.value
+        if let after = readCurrentBaseVersion(), after != before {
+            await chooseWorkspacesForNewBase(after)
+        }
     }
 
 

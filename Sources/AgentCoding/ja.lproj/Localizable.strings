@@ -4375,3 +4375,28 @@
 "Signing in to %@…" = "%@ にサインインしています…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "%@ でプライベートなサインイン用マシンを起動しています。準備ができるとブラウザでサインインページが開きます。通常 1 分以内です。";
 "Hide" = "隠す";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "ベースイメージ…";
+"Base Image" = "ベースイメージ";
+"Base image" = "ベースイメージ";
+"Skip Permanently" = "今後表示しない";
+"To install only some of them, or later, use Workspaces › Base Image…" = "一部だけ、または後でインストールするには、「ワークスペース › ベースイメージ…」を使用してください。";
+"Version" = "バージョン";
+"Source" = "入手元";
+"Updated" = "更新日時";
+"Size on disk" = "ディスク上のサイズ";
+"Packages" = "パッケージ";
+"Installing…" = "インストール中…";
+"Install Selected" = "選択項目をインストール";
+"Choose Workspaces to Update…" = "更新するワークスペースを選択…";
+"Skipped" = "スキップ済み";
+"Don't Skip" = "スキップしない";
+"Not installed" = "未インストール";
+"Not started yet" = "未起動";
+"v%@ · current" = "v%@ · 最新";
+"v%@ · updates at its next start" = "v%@ · 次回起動時に更新";
+"v%@ · kept" = "v%@ · 維持";
+"v%@ · older" = "v%@ · 旧版";
+"Published image %@" = "公開イメージ %@";
+"Built on this Mac" = "このMacで作成";

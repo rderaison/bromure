@@ -4375,3 +4375,28 @@
 "Signing in to %@…" = "正在登录 %@…";
 "Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "正在 %@ 上启动一台私有登录机器。准备就绪后，登录页面会在你的浏览器中打开，通常在一分钟内。";
 "Hide" = "隐藏";
+
+/* Base image details, permanently skipped packages */
+"Base Image…" = "基础映像…";
+"Base Image" = "基础映像";
+"Base image" = "基础映像";
+"Skip Permanently" = "永久跳过";
+"To install only some of them, or later, use Workspaces › Base Image…" = "如需只安装其中一部分或稍后安装，请使用“工作区 › 基础映像…”。";
+"Version" = "版本";
+"Source" = "来源";
+"Updated" = "更新时间";
+"Size on disk" = "占用空间";
+"Packages" = "软件包";
+"Installing…" = "正在安装…";
+"Install Selected" = "安装所选项";
+"Choose Workspaces to Update…" = "选择要更新的工作区…";
+"Skipped" = "已跳过";
+"Don't Skip" = "不再跳过";
+"Not installed" = "未安装";
+"Not started yet" = "尚未启动";
+"v%@ · current" = "v%@ · 最新";
+"v%@ · updates at its next start" = "v%@ · 下次启动时更新";
+"v%@ · kept" = "v%@ · 保留";
+"v%@ · older" = "v%@ · 旧版";
+"Published image %@" = "已发布映像 %@";
+"Built on this Mac" = "在此 Mac 上构建";
