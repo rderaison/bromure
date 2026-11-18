@@ -156,19 +156,30 @@ struct HermesSessionTests {
     /// A stand-in tmux pane: `capture-pane` draws Hermes's composer once
     /// `$SIM/up` exists (its placeholder in italics while `$SIM/text` is
     /// empty), `send-keys -l` types into it, Enter sends it to `$SIM/sent`;
-    /// `ps` shows a Hermes on the pane's terminal once it is up.
+    /// `ps` shows a Hermes on the pane's terminal once it is up. The pane is
+    /// `$SIM/width` columns wide (200 without it); like Hermes, the composer
+    /// cuts longer input at that width and carries on at the next row's
+    /// first column, and like tmux, the capture drops the blanks ending a row.
     private static func simulatedPane(in root: URL) throws -> URL {
         let bin = root.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let tmux = """
         #!/bin/sh
         case "$1" in
-          display-message) echo /dev/pts/9 ;;
+          display-message)
+            case "$5" in
+              *pane_width*) cat "$SIM/width" 2>/dev/null || echo 200 ;;
+              *) echo /dev/pts/9 ;;
+            esac ;;
           capture-pane)
             if [ -e "$SIM/up" ]; then
               echo '↻ Resumed session local-abc'
               t=$(cat "$SIM/text" 2>/dev/null)
-              if [ -n "$t" ]; then printf '\\033[38;5;230m❯ \\033[0m%s\\n' "$t"
+              w=$(cat "$SIM/width" 2>/dev/null || echo 200)
+              if [ -n "$t" ]; then
+                printf '\\033[38;5;230m❯ \\033[0m%s\\n' "$(printf '%s' "$t" | cut -c1-$((w - 2)) | sed 's/ *$//')"
+                rest=$(printf '%s' "$t" | cut -c$((w - 1))-)
+                if [ -n "$rest" ]; then printf '%s\\n' "$rest" | fold -w "$w" | sed 's/ *$//'; fi
               else printf '\\033[38;5;230m❯ \\033[3m\\033[38;5;136mFind and fix a failing test\\033[0m\\n'; fi
               printf '\\033[38;5;250m ☤ \\033[1mgpt-5.5\\033[0m\\n'
             else
@@ -303,6 +314,55 @@ struct HermesSessionTests {
         proc.environment = ["PATH": bin.path + ":/usr/bin:/bin", "PS_OUT": ps.replacingOccurrences(of: "\\n", with: "\n")]
         try proc.run(); proc.waitUntilExit()
         #expect((proc.terminationStatus == 0) == running)
+    }
+
+    /// A pane narrower than the `/model` line: Hermes wraps it onto a second
+    /// row, and the check before Enter reads it across both.
+    @Test("a /model longer than the pane is sent once typed, read across the rows it wraps onto")
+    func typesWrappedModel() throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer", "_bromure_hermes_foreground", "_bromure_hermes_type_model"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        try "40".write(to: sim.appendingPathComponent("width"), atomically: true, encoding: .utf8)
+        let model = "/model anthropic/claude-opus-5-5 --provider nous --session"
+        let script = fns + """
+
+        _bromure_hermes_type_model %1 '\(model)' &
+        sleep 0.3
+        touch "$SIM/up"
+        wait
+        """
+        #expect(try Self.bash(script, path: bin, sim: sim).0 == 0)
+        #expect((try? String(contentsOf: sim.appendingPathComponent("sent"), encoding: .utf8)) == model)
+    }
+
+    /// The exact check, at the edges of Hermes's wrapping: a row the text
+    /// fills exactly (the status row follows), a cut on a space (tmux drops
+    /// it), and text that only starts like the expected one, or runs on.
+    @Test("the composer holds exactly the expected text, however it wraps", arguments: [
+        ("/model 0123456789012345678901234567890", "/model 0123456789012345678901234567890", true),
+        ("/model 012345678901234567890123456789 x", "/model 012345678901234567890123456789 x", true),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session", "/model anthropic/claude-opus-5-5 --provider nous --session", true),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session", "/model anthropic/claude-opus-5-5 --provider nous", false),
+        ("/model anthropic/claude-opus-5-5 --provider nous --session extra", "/model anthropic/claude-opus-5-5 --provider nous --session", false),
+        ("/model anthropic/claude-opus-5-5", "/model other", false),
+    ])
+    func composerHolds(typed: String, want: String, holds: Bool) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_composer"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sim = root.appendingPathComponent("sim")
+        try FileManager.default.createDirectory(at: sim, withIntermediateDirectories: true)
+        let bin = try Self.simulatedPane(in: root)
+        try "40".write(to: sim.appendingPathComponent("width"), atomically: true, encoding: .utf8)
+        FileManager.default.createFile(atPath: sim.appendingPathComponent("up").path, contents: nil)
+        try typed.write(to: sim.appendingPathComponent("text"), atomically: true, encoding: .utf8)
+        let check = fns + "\n_bromure_hermes_composer %1 '\(want)'"
+        #expect(try Self.bash(check, path: bin, sim: sim).0 == (holds ? 0 : 1))
+        // Without an expected text it still prints the first row's content.
+        let read = try Self.bash(fns + "\n_bromure_hermes_composer %1", path: bin, sim: sim)
+        #expect(read.0 == 0 && typed.hasPrefix(read.1.trimmingCharacters(in: .newlines)))
     }
 
     @Test("the wrapper no longer seeds the resume's /model as a chat query")
