@@ -1395,6 +1395,16 @@ struct ProfileEditorView: View {
                 case .zai, .bedrock, .openrouter, .custom: return nil
                 }
             },
+            canRegister: { provider in
+                switch provider {
+                case .anthropic: return onRegisterClaude != nil
+                case .openai:    return onRegisterCodex != nil
+                case .xai:       return onRegisterGrok != nil
+                case .moonshot:  return onRegisterKimi != nil
+                case .nous:      return onRegisterNous != nil
+                case .zai, .bedrock, .openrouter, .custom: return false
+                }
+            },
             canForget: { provider in
                 switch provider {
                 case .anthropic: return onForgetClaude != nil

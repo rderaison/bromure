@@ -4370,3 +4370,8 @@
 
 /* Models pane: Nous Portal is a sign-in that only Hermes Agent uses */
 "Powers Hermes Agent only." = "Serve apenas o Hermes Agent.";
+
+/* Remote sign-in progress */
+"Signing in to %@…" = "Entrando em %@…";
+"Starting a private sign-in machine on %@. The sign-in page opens in your browser when it's ready, usually within a minute." = "Iniciando uma máquina de login privada em %@. A página de login abre no seu navegador quando estiver pronta, geralmente em menos de um minuto.";
+"Hide" = "Ocultar";

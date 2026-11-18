@@ -33,6 +33,9 @@ struct ModelsSubscriptionHooks {
                        @escaping ([String]) -> Void) -> Void)?
     /// When the provider REJECTED the saved sign-in (it must be redone), or nil.
     var reauthAt: (ModelProvider) -> Date? = { _ in nil }
+    /// Whether this host can sign the provider in here (a hook is wired):
+    /// "Sign in with …" shows only then, never as a button that does nothing.
+    var canRegister: (ModelProvider) -> Bool = { _ in true }
     /// Whether this host can log the provider out here (a hook is wired) —
     /// "Log out" is hidden rather than left as a button that does nothing.
     var canForget: (ModelProvider) -> Bool = { _ in true }
@@ -290,7 +293,7 @@ struct ModelsSettingsView: View {
                 // re-evaluated on SwiftUI state changes.
                 ProviderConfigPopover(
                     provider: provider,
-                    hasCapture: provider.supportsSubscription && subscription != nil,
+                    hasCapture: provider.supportsSubscription && (subscription?.canRegister(provider) ?? false),
                     savedAt: { subscription?.savedAt(provider) },
                     reauthAt: { subscription?.reauthAt(provider) },
                     health: { subscription?.health(provider) },
