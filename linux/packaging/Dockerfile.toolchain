@@ -18,11 +18,13 @@ ARG TARGET_ARCH=x86_64
 ARG MUSL_CROSS_URL=
 ENV DEBIAN_FRONTEND=noninteractive
 
+# swift-sdk-generator's own needs: libsqlite3-dev (its SystemSQLite module),
+# and the tools it shells out to (rsync, tar, ar from binutils, xz).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git python3 perl xz-utils zstd file binutils \
         dpkg-dev fakeroot build-essential pkg-config \
         zlib1g-dev libbrotli-dev libseccomp-dev musl-tools \
-        libsqlite3-dev \
+        libsqlite3-dev rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust (Firecracker pins its own toolchain; rustup fetches it at build).
