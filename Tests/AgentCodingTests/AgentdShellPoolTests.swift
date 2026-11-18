@@ -48,18 +48,22 @@ struct AgentdShellPoolTests {
     func refillsAfterAnOutage() throws {
         let out = try run("""
             state = {"fail": 0, "calls": 0}
+            lock = threading.Lock()
             held = []
             def connect():
-                state["calls"] += 1
-                if state["fail"] > 0:
-                    state["fail"] -= 1
-                    return None
+                with lock:
+                    state["calls"] += 1
+                    if state["fail"] > 0:
+                        state["fail"] -= 1
+                        return None
                 return object()
             def handle(sock, replenish):
                 held.append(replenish)   # an idle connection, until "claimed"
             sleeps = []
+            def nap(x):
+                sleeps.append(x); time.sleep(0.001)
             running = [True]
-            pool = m._ShellPool(connect, handle, lambda: running[0], sleep=sleeps.append, size=4)
+            pool = m._ShellPool(connect, handle, lambda: running[0], sleep=nap, size=4)
             t = threading.Thread(target=pool.run, daemon=True); t.start()
             out["filled"] = wait_for(lambda: pool.established == 4)
             # A burst claims all four, while the host refuses 200 attempts in a
@@ -142,6 +146,45 @@ struct AgentdShellPoolTests {
             out["replenished"] = len(calls)
             """)
         #expect(out["replenished"] as? Int == 1)
+    }
+
+    /// Finding "Serial shell pool refill can time out concurrent guest
+    /// operations": one refiller connected the replacements in turn, so four
+    /// claimed at once behind a ~1 s connect() took ~4 s -- past the ~3 s the
+    /// host waits for a pooled connection (guestExec, file ops: 30 x 100 ms).
+    @Test("a burst's replacements connect side by side, within the host's 3 s wait")
+    func burstRefillsConcurrently() throws {
+        let out = try run("""
+            held = []
+            slow = [False]
+            active = [0, 0]   # in connect() now, most at once
+            lock = threading.Lock()
+            def connect():
+                if slow[0]:
+                    with lock:
+                        active[0] += 1; active[1] = max(active[1], active[0])
+                    time.sleep(1.0)
+                    with lock:
+                        active[0] -= 1
+                return object()
+            running = [True]
+            pool = m._ShellPool(connect, lambda s, r: held.append(r), lambda: running[0], size=4)
+            t = threading.Thread(target=pool.run, daemon=True); t.start()
+            wait_for(lambda: pool.established == 4)
+            slow[0] = True
+            started = time.time()
+            for r in list(held[:4]): threading.Thread(target=r).start()
+            out["refilled"] = wait_for(lambda: pool.established == 8, secs=10)
+            out["took"] = time.time() - started
+            out["most_at_once"] = active[1]
+            out["missing"] = pool.missing()
+            running[0] = False
+            t.join(3)
+            """)
+        #expect(out["refilled"] as? Bool == true)
+        #expect((out["took"] as? Double ?? 99) < 2.5, "all four back well inside the host's 3 s")
+        #expect(out["most_at_once"] as? Int == 4, "one filler per missing slot, connecting at once")
+        #expect(out["missing"] as? Int == 0)
     }
 
     @Test("the service runs the pool on the real connect and handler")

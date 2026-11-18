@@ -1949,73 +1949,90 @@ def _shell_connect_to_host():
 # good -- and nothing tried again. A burst of runs starting at once (several
 # commit reviews) drained the pool while the host was slow to accept, the
 # replacements gave up, and the workspace could never open a shell or a
-# session again until agentd restarted ("No shell connection"). So the pool
-# has one refiller that keeps trying, backing off, for as long as agentd runs.
+# session again until agentd restarted ("No shell connection"). So each
+# missing slot has a filler that keeps trying, backing off, for as long as
+# agentd runs. The fillers connect side by side -- one per missing slot,
+# never more: the host waits ~3 s for a pooled connection, and replacements
+# taking turns behind a slow connect() didn't all arrive in time.
 SHELL_REFILL_BACKOFF_MIN = 0.1
 SHELL_REFILL_BACKOFF_MAX = 5.0
 
 
 class _ShellPool:
     """POOL_SIZE idle connections to the host, kept topped up. `replenish()`
-    says one was used (or lost): the refiller opens a replacement, retrying
-    with backoff until it gets one -- never giving up while `running()`."""
+    says one was used (or lost): a filler opens its replacement, retrying with
+    backoff until it gets one -- never giving up while `running()`."""
 
     def __init__(self, connect, handle, running, sleep=time.sleep,
                  clock=time.monotonic, size=None):
         self._connect, self._handle, self._running = connect, handle, running
         self._sleep, self._clock = sleep, clock
         self._size = POOL_SIZE if size is None else size
-        self._cond = threading.Condition()
-        self._missing = 0
-        self.established = 0   # connections opened, ever (tests, logs)
+        self._lock = threading.Lock()
+        self._missing = 0          # fillers at work: one per missing slot
+        self._initial = 0          # of the first fill, still to come
+        self._outage = None        # (since, failed attempts) while the host refuses
+        self.established = 0       # connections opened, ever (tests, logs)
 
     def replenish(self):
-        with self._cond:
+        with self._lock:
             self._missing += 1
-            self._cond.notify()
+        threading.Thread(target=self._fill_one, daemon=True).start()
 
     def missing(self):
-        with self._cond:
+        with self._lock:
             return self._missing
 
-    def _next_missing(self, timeout):
-        with self._cond:
-            if self._missing == 0:
-                self._cond.wait(timeout)
-            return self._missing
-
-    def run(self):
-        """The refiller: fills the pool, then keeps it full. Returns when
-        agentd stops."""
-        with self._cond:
-            self._missing += self._size
-        backoff, failing_since, failures, ready = SHELL_REFILL_BACKOFF_MIN, None, 0, False
+    def _fill_one(self):
+        backoff = SHELL_REFILL_BACKOFF_MIN
         while self._running():
-            if self._next_missing(1.0) == 0:
-                if not ready:
-                    ready = True
-                    log("shell", "pool ready (%d connections)" % self._size)
-                continue
             s = self._connect()
             if s is None:
-                failures += 1
-                if failing_since is None:
-                    failing_since = self._clock()
+                with self._lock:
+                    first = self._outage is None
+                    since, failed = self._outage or (self._clock(), 0)
+                    self._outage = (since, failed + 1)
+                    missing = self._missing
+                if first:
                     log("shell", "the host isn't taking pool connections; retrying"
-                                 " until it does (%d missing)" % self.missing())
+                                 " until it does (%d missing)" % missing)
                 self._sleep(backoff)
                 backoff = min(backoff * 2, SHELL_REFILL_BACKOFF_MAX)
                 continue
-            with self._cond:
+            with self._lock:
                 self._missing -= 1
-            self.established += 1
+                self.established += 1
+                outage = self._outage
+                if outage is not None and self._missing == 0:
+                    self._outage = None
+                else:
+                    outage = None
+                ready = False
+                if self._initial > 0:
+                    self._initial -= 1
+                    ready = self._initial == 0
             threading.Thread(target=self._handle, args=(s, self.replenish),
                              daemon=True).start()
-            if failing_since is not None:
+            if outage is not None:
+                failed = outage[1]
                 log("shell", "pool connection to the host restored after %d failed"
-                             " attempt%s (%.1f s)" % (failures, "" if failures == 1 else "s",
-                                                     self._clock() - failing_since))
-            backoff, failing_since, failures = SHELL_REFILL_BACKOFF_MIN, None, 0
+                             " attempt%s (%.1f s)" % (failed, "" if failed == 1 else "s",
+                                                     self._clock() - outage[0]))
+            if ready:
+                log("shell", "pool ready (%d connections)" % self._size)
+            return
+        with self._lock:
+            self._missing -= 1
+
+    def run(self):
+        """Fills the pool, then keeps it full (the fillers). Returns when
+        agentd stops."""
+        with self._lock:
+            self._initial = self._size
+        for _ in range(self._size):
+            self.replenish()
+        while self._running():
+            time.sleep(0.2)
 
 
 def shell_agent_service():
