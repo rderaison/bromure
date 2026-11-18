@@ -8,7 +8,8 @@
 # architecture. Not the builder's: cross-built with the Swift SDK and the
 # musl cross compiler the toolchain image installed.
 # BROMURE_BUILD_VERSION / BROMURE_BUILD_COMMIT: `git describe --tags` and
-# the short commit (a tree without .git can't say); BUILD_NUMBER: Jenkins'.
+# the short commit, for bromure-ac.build-info.json (a tree without .git can't
+# say). The package's version is LinuxAppVersion.short.
 #
 # The package carries what linux/multiuser/install.sh installs (the binary,
 # its build info, the Swift runtime, Firecracker, the PII model, the
@@ -31,18 +32,13 @@ case $TARGET_ARCH in
 esac
 
 # --- version ------------------------------------------------------------------
-# agentic-coding-v5.4.4-722-g019771733 -> 5.4.4+722 (the commit count orders
-# it; the commit is in bromure-ac.build-info.json); no tag -> 0.0.0+<date>.<commit>.
-# A Jenkins build number makes rebuilds of one commit ordered.
+# The app's own version (LinuxAppVersion.short), nothing appended: one package
+# per version bump (apt won't upgrade between two builds of the same version).
+# The tag and commit a build came from are in bromure-ac.build-info.json.
 DESCRIBE=${BROMURE_BUILD_VERSION:-$(git -C "$ROOT" describe --tags --always --match 'agentic-coding-v*' 2>/dev/null || true)}
-COMMIT=${BROMURE_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse --short=8 HEAD 2>/dev/null || true)}
-case $DESCRIBE in
-  agentic-coding-v*) V=${DESCRIBE#agentic-coding-v}; BASEV=${V%%-*}; REST=${V#"$BASEV"}; REST=${REST#-}; REST=${REST%-g*}
-                     DEB_VERSION=$BASEV${REST:++${REST//-/.}};;
-  *) DEB_VERSION=0.0.0+$(date -u +%Y%m%d).${COMMIT:-unknown};;
-esac
-[ -n "${BUILD_NUMBER:-}" ] && DEB_VERSION=$DEB_VERSION.b$BUILD_NUMBER
-echo "$DEB_VERSION" | grep -Eq '^[0-9][A-Za-z0-9.+~]*$' || die "bad package version '$DEB_VERSION' (from '$DESCRIBE')"
+DEB_VERSION=$(sed -n 's/.*static let short = "\([^"]*\)".*/\1/p' "$ROOT/linux/ACLinux/Sources/ACLinux/ImageCatalogACLinux.swift" | head -1)
+[ -n "$DEB_VERSION" ] || die "LinuxAppVersion.short not found"
+echo "$DEB_VERSION" | grep -Eq '^[0-9][A-Za-z0-9.+~]*$' || die "bad package version '$DEB_VERSION'"
 step "bromure-ac $DEB_VERSION ($DEB_ARCH) from ${DESCRIBE:-?}, on $HOST_ARCH"
 
 WORK=$(mktemp -d)

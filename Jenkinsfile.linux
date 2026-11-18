@@ -73,8 +73,9 @@ pipeline {
 
         stage('Version') {
             steps {
-                // build-deb.sh names the package from `git describe`, and the
-                // source goes in without .git: the tags first (the SCM
+                // The package is versioned LinuxAppVersion.short; `git describe`
+                // and the commit go in its build info, and the source goes in
+                // without .git: the tags first (the SCM
                 // credential is only bound during Checkout SCM; kube-builder-a
                 // is an ephemeral pod with no known_hosts, hence accept-new).
                 withCredentials([sshUserPrivateKey(
