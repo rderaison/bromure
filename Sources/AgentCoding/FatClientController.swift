@@ -343,6 +343,12 @@ final class RemoteHostController {
     private var registrationCallback: RegistrationCallbackTunnel?
     /// Sign-in URLs already opened, so a repeated poll doesn't reopen the page.
     private var openedRegistrationURLs: Set<String> = []
+    /// Sign-in URLs refused so far, only so the refusal is logged once: kept
+    /// apart from the opened ones, since the refusal may not last -- /state
+    /// can show this client's run before the host's reply binds it here
+    /// (Finding "Early state poll permanently suppresses this client's
+    /// device-code page").
+    private var refusedRegistrationURLs: Set<String> = []
     /// The sign-in run this client started, as the host accepted it (its
     /// run id from `/subscriptions/register`) with its provider: that run's
     /// device page, code and all, opens here unasked; any other run's --
@@ -582,6 +588,29 @@ final class RemoteHostController {
         if subscriptionStatus != out { subscriptionStatus = out }
     }
 
+    enum RegistrationPage: Equatable {
+        /// No URL, or one already opened.
+        case none
+        /// Not to open here (GuestURLGate) -- for now: a later snapshot,
+        /// once the host's reply has bound this client's run, may open it.
+        case refused
+        /// Open it now; it counts as opened from here on.
+        case open(URL)
+    }
+
+    /// What to do with the sign-in URL of the run `reg` (/state's pending
+    /// registration), given what this client has opened and its binding.
+    func registrationPage(_ reg: [String: Any]) -> RegistrationPage {
+        guard let s = reg["url"] as? String, let url = URL(string: s) else { return .none }
+        guard GuestURLGate.disposition(for: url, signInFor: signInFor(pendingRegistration: reg)) == .open else {
+            if refusedRegistrationURLs.insert(s).inserted {
+                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
+            }
+            return .refused
+        }
+        return openedRegistrationURLs.insert(s).inserted ? .open(url) : .none
+    }
+
     /// React to the remote's in-flight registration: stand the callback tunnel
     /// up as soon as we know the VM + port, then open the sign-in page here.
     private func applyPendingRegistration(_ reg: [String: Any]?) {
@@ -590,6 +619,7 @@ final class RemoteHostController {
             registrationCallback?.stop()
             registrationCallback = nil
             openedRegistrationURLs.removeAll()
+            refusedRegistrationURLs.removeAll()
             if registrationTerminalID != nil {
                 registrationTerminalID = nil
                 onRegistrationTerminalClosed?()
@@ -614,12 +644,8 @@ final class RemoteHostController {
         // and no callback tunnel stands up for it. An older server published
         // such URLs, and Bromure Remote (iPhone, iPad, Vision Pro) opened them
         // unchecked. The VM's terminal (shown above) still has the URL.
-        let signInFor = signInFor(pendingRegistration: reg)
-        if let s = reg["url"] as? String, let url = URL(string: s),
-           GuestURLGate.disposition(for: url, signInFor: signInFor) != .open {
-            if openedRegistrationURLs.insert(s).inserted {
-                FatClientLog.log("remote registration: refused a sign-in URL that isn't an agent sign-in page, or has a local/private host")
-            }
+        let page = registrationPage(reg)
+        if page == .refused {
             registrationCallback?.stop()
             registrationCallback = nil
             return
@@ -641,15 +667,10 @@ final class RemoteHostController {
         // If a sign-in URL was published (Claude's flow), open it once — /state
         // repeats it every poll until sign-in lands. Codex has none; the user
         // reads its URL from the VM terminal shown above instead.
-        guard let urlString = reg["url"] as? String,
-              let url = URL(string: urlString),
-              !openedRegistrationURLs.contains(urlString) else { return }
-        openedRegistrationURLs.insert(urlString)
+        guard case .open(let url) = page else { return }
         let tunnel = registrationCallback.map { "callback 127.0.0.1:\($0.port) -> \($0.vmIP):\($0.port)" }
             ?? "device-code (no callback)"
         FatClientLog.log("remote registration: opening sign-in page locally — \(tunnel)")
-        // Checked above, before the tunnel.
-        guard GuestURLGate.disposition(for: url, signInFor: signInFor) == .open else { return }
 #if os(macOS)
         NSWorkspace.shared.open(url)
 #else
