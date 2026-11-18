@@ -7651,10 +7651,12 @@ public final class ProfileStore {
                 elif [ "$_wt_tool" = "hermes" ]; then
                     # Hermes takes its opening message as `chat --query`: on a
                     # terminal it's sent as the first turn and the session
-                    # stays open. Its global flags ($_wt_flags: --yolo, -c) go
-                    # before the subcommand; the `=` form keeps a prompt
-                    # starting with "-" the query's value.
-                    "$_wt_tool" $_wt_flags chat --query="$_wt_prompt"
+                    # stays open. Its flags ($_wt_flags: --yolo, -c) go after
+                    # the subcommand, which takes them too: -c takes an
+                    # optional session name, and would read `chat` as one.
+                    # The `=` form keeps a prompt starting with "-" the
+                    # query's value.
+                    "$_wt_tool" chat --query="$_wt_prompt" $_wt_flags
                     _wt_rc=$?
                 else
                     # "--" ends option parsing, so the prompt is unambiguously the

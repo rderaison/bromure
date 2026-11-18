@@ -253,4 +253,30 @@ struct HermesSessionTests {
         #expect(!fns.contains("chat --query=\"$_rm\""))
         #expect(fns.contains("_bromure_hermes_type_model \"$TMUX_PANE\" \"$_rm\""))
     }
+
+    /// The argv the wrapper hands Hermes on a bare resume: the resume flags
+    /// alone, nothing after them. -c / --continue take an optional session
+    /// name, so a `chat …` behind `-c` was read as that name and Hermes
+    /// exited on the rest; the resume's /model is typed in instead.
+    @Test("a bare resume reaches Hermes with its own flags only", arguments: [
+        "-c", "--continue", "--yolo -c", "--resume local-abc123", "-r local-abc123 --yolo",
+    ])
+    func resumeArgv(_ args: String) throws {
+        let (fns, root) = try Self.bashrcFunctions(["_bromure_hermes_resume_model", "hermes"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = root.appendingPathComponent("hermes-settings.json")
+        try JSONSerialization.data(withJSONObject: ["model": ["provider": "nous", "default": "openai/gpt-5.5"]])
+            .write(to: settings)
+        // A stand-in hermes that prints its argv, one word a line.
+        let bin = root.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let stub = bin.appendingPathComponent("hermes")
+        try "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n".write(to: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+        let script = ["_bromure_hermes_opt_ready() { :; }", "_bromure_hermes_apply() { :; }", fns, "hermes " + args]
+            .joined(separator: "\n").replacingOccurrences(of: "/mnt/bromure-meta/", with: root.path + "/")
+        let (status, out) = try Self.bash(script, path: bin, sim: root)
+        #expect(status == 0)
+        #expect(out.split(separator: "\n").map(String.init) == args.split(separator: " ").map(String.init))
+    }
 }
