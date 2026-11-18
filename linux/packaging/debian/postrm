@@ -1,0 +1,17 @@
+#!/bin/sh
+# bromure-ac postrm. Purge drops the server's config (/etc/bromure-ac, the
+# gateway's state) and its accounts. The users' workspaces
+# (/var/lib/bromure-ac) and the guest image are never deleted here.
+set -e
+case "$1" in
+  purge)
+    rm -rf /etc/bromure-ac /var/lib/bromure-gw /etc/sysctl.d/60-bromure-lan.conf
+    getent passwd bromure >/dev/null && userdel bromure || true
+    getent passwd bromure-lan >/dev/null && userdel bromure-lan || true
+    getent group bromure >/dev/null && groupdel bromure || true
+    getent group bromure-lan >/dev/null && groupdel bromure-lan || true
+    echo "bromure-ac: purged. The users' workspaces (/var/lib/bromure-ac) and the guest image (/var/lib/bromure-ac-image) are kept: delete them yourself if you don't need them."
+    ;;
+esac
+if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+exit 0

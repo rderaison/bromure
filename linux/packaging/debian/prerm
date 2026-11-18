@@ -1,0 +1,12 @@
+#!/bin/sh
+# bromure-ac prerm: on removal, the gateway, the LAN helper and every user's
+# daemon stop (the daemons suspend their VMs; the disks stay). An upgrade
+# leaves them running: the postinst restarts them on the new binary.
+set -e
+case "$1" in
+  remove|deconfigure)
+    systemctl disable --now bromure-gw-p2p.socket bromure-gw.service bromure-lan.service 2>/dev/null || true
+    systemctl stop 'bromure-ac@*.socket' 'bromure-ac@*.service' 2>/dev/null || true
+    ;;
+esac
+exit 0

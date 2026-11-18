@@ -1,0 +1,17 @@
+bromure-ac for Debian/Ubuntu
+============================
+
+After installing the package:
+
+1. Storage: `sudo bromure-setup-environment`. Puts /opt/bromure on btrfs
+   (a loop image when the disk isn't btrfs) and the server's state and
+   guest image on it: workspace disks, clones and checkpoints become
+   reflinks. Moving existing data needs the server stopped; it says how.
+2. Guest image: `sudo bromure-image-install` (downloads the prebuilt image,
+   or bakes it here; needs /dev/kvm).
+3. Users: `sudo bromure-ac admin add <name>`, then connect from the Bromure
+   app to this server's port 2222 (/var/lib/bromure-gw/gateway.json).
+
+Files: /usr/lib/bromure-ac (binary, Swift runtime, Firecracker, PII model,
+resources), units in /usr/lib/systemd/system, state in /var/lib/bromure-ac.
+See RELEASE_NOTES.md beside this file.

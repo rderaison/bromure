@@ -1,0 +1,74 @@
+# The Debian package's build environment (Jenkinsfile.linux): Swift, Rust
+# and, when the target architecture isn't the builder's, the cross pieces.
+# Built for the BUILDER's platform (kube-builder-a: arm64); nothing runs
+# under emulation.
+#
+#   TARGET_ARCH=x86_64 on an arm64 builder (the default case):
+#     - a Swift SDK for x86_64-unknown-linux-gnu (Ubuntu 24.04), made by
+#       swift-sdk-generator for this image's exact Swift version, with the
+#       libraries bromure-ac links that the generator leaves out (zlib,
+#       libbrotlidec) added to its sysroot;
+#     - musl.cc's x86_64-linux-musl cross compiler and the amd64 kernel
+#       UAPI headers (multiarch linux-libc-dev:amd64), for Firecracker.
+#   TARGET_ARCH = the builder's arch: a native build, none of that.
+ARG SWIFT_IMAGE=swift:6.4-noble
+FROM ${SWIFT_IMAGE}
+
+ARG TARGET_ARCH=x86_64
+ARG MUSL_CROSS_URL=
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git python3 perl xz-utils zstd file binutils \
+        dpkg-dev fakeroot build-essential pkg-config \
+        zlib1g-dev libbrotli-dev libseccomp-dev musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust (Firecracker pins its own toolchain; rustup fetches it at build).
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path \
+    && chmod -R a+rwX /opt/rustup /opt/cargo
+
+# Cross only: the target's amd64/arm64 packages from Ubuntu's own archive
+# (the builder's sources are the other architecture's mirror), the musl
+# cross compiler, and the Swift SDK.
+RUN set -eux; \
+    host=$(uname -m); \
+    if [ "$TARGET_ARCH" = "$host" ]; then echo "native build: no cross pieces"; exit 0; fi; \
+    case "$TARGET_ARCH" in \
+        x86_64)  deb=amd64; mirror=http://archive.ubuntu.com/ubuntu ;; \
+        aarch64) deb=arm64; mirror=http://ports.ubuntu.com/ubuntu-ports ;; \
+        *) echo "unsupported TARGET_ARCH $TARGET_ARCH"; exit 1 ;; \
+    esac; \
+    hostdeb=$(dpkg --print-architecture); \
+    dpkg --add-architecture "$deb"; \
+    sed -i "s/^Types: deb\$/Types: deb\nArchitectures: $hostdeb/" /etc/apt/sources.list.d/ubuntu.sources; \
+    printf 'Types: deb\nURIs: %s\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: %s\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+        "$mirror" "$deb" > /etc/apt/sources.list.d/target.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "linux-libc-dev:$deb"; \
+    mkdir -p /opt/target-debs; cd /opt/target-debs; \
+    apt-get download "zlib1g:$deb" "zlib1g-dev:$deb" "libbrotli1:$deb" "libbrotli-dev:$deb"; \
+    rm -rf /var/lib/apt/lists/*; \
+    url=${MUSL_CROSS_URL:-https://musl.cc/$TARGET_ARCH-linux-musl-cross.tgz}; \
+    mkdir -p /opt/musl-cross; curl -fsSL "$url" | tar -xz -C /opt/musl-cross --strip-components=1; \
+    /opt/musl-cross/bin/$TARGET_ARCH-linux-musl-gcc --version | head -1
+ENV PATH=$PATH:/opt/musl-cross/bin
+
+RUN set -eux; \
+    host=$(uname -m); \
+    if [ "$TARGET_ARCH" = "$host" ]; then exit 0; fi; \
+    ver=$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p' | head -1); \
+    [ -n "$ver" ]; \
+    git clone -q --depth 1 --branch "swift-$ver-RELEASE" https://github.com/swiftlang/swift-sdk-generator /opt/sdkgen; \
+    cd /opt/sdkgen; \
+    swift run -c release swift-sdk-generator make-linux-sdk \
+        --swift-version "$ver-RELEASE" --target-arch "$TARGET_ARCH" \
+        --distribution-name ubuntu --distribution-version 24.04; \
+    bundle=$(ls -d Bundles/*.artifactbundle | head -1); \
+    sysroot=$(find "$bundle" -type d -name '*.sdk' | head -1); \
+    [ -d "$sysroot" ]; \
+    for d in /opt/target-debs/*.deb; do dpkg-deb -x "$d" "$sysroot"; done; \
+    swift sdk install "$bundle"; \
+    swift sdk list; \
+    rm -rf /opt/sdkgen/.build /root/.cache

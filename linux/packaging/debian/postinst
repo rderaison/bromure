@@ -1,0 +1,29 @@
+#!/bin/sh
+# bromure-ac postinst: install.sh's system half (configure.sh: accounts,
+# directories, config, units, gateway and LAN helper started), then the
+# running users' daemons onto the new binary (each suspends its VMs on stop
+# and takes them back at start).
+set -e
+L=/usr/lib/bromure-ac
+case "$1" in
+  configure)
+    # A source install's units (/etc/systemd/system) win over the package's.
+    for u in bromure-ac@.service bromure-gw.service bromure-lan.service; do
+      if [ -e "/etc/systemd/system/$u" ] && grep -q /usr/local/lib/bromure-ac "/etc/systemd/system/$u"; then
+        echo "bromure-ac: /etc/systemd/system/$u is a source install's (it runs /usr/local/lib/bromure-ac) and overrides this package's: remove it (and /usr/local/lib/bromure-ac), then dpkg-reconfigure bromure-ac" >&2
+      fi
+    done
+    "$L/libexec/configure.sh" --bin "$L/bin/bromure-ac"
+    if [ -n "$2" ]; then
+      systemctl try-restart 'bromure-ac@*.service' || true
+    fi
+    if [ ! -e /var/lib/bromure-ac-image/base.img ]; then
+      echo "bromure-ac: no guest image yet: run bromure-image-install (downloads it, or bakes it here with KVM)"
+    fi
+    fs=$(findmnt -no FSTYPE -T /var/lib/bromure-ac 2>/dev/null || true)
+    if [ "$fs" != btrfs ] && [ -z "$(findmnt -rno TARGET | grep '^/var/lib/bromure-ac/' || true)" ]; then
+      echo "bromure-ac: /var/lib/bromure-ac is on ${fs:-?}, not btrfs: every workspace disk is a full copy there. bromure-setup-environment moves the server's storage to btrfs."
+    fi
+    ;;
+esac
+exit 0

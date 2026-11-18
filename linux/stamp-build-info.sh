@@ -9,8 +9,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Root runs it from multiuser/install.sh on a user's checkout: git refuses
 # another owner's repository unless told it's safe.
 G=(git -c safe.directory="$ROOT" -C "$ROOT")
-COMMIT=$("${G[@]}" rev-parse --short=8 HEAD 2>/dev/null || true)
-VERSION=$("${G[@]}" describe --tags --always 2>/dev/null || echo linux-dev)
+# A build without the repository's history (the Debian package's, from a
+# git archive) passes them in.
+COMMIT=${BROMURE_BUILD_COMMIT:-$("${G[@]}" rev-parse --short=8 HEAD 2>/dev/null || true)}
+VERSION=${BROMURE_BUILD_VERSION:-$("${G[@]}" describe --tags --always 2>/dev/null || echo linux-dev)}
 python3 -I - "$OUT" "$VERSION" "${BUILD_NUMBER:+Jenkins #$BUILD_NUMBER}" "$COMMIT" <<'PY'
 import json, sys, datetime
 out, version, build, commit = sys.argv[1:5]

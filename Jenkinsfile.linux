@@ -1,0 +1,165 @@
+// Jenkinsfile.linux — the Linux multi-user server (Bromure Agentic Coding on
+// Firecracker) as a Debian package: bromure-ac_<version>_amd64.deb, archived
+// with its SHA-256.
+//
+// Cross-compiled: the builder is kube-builder-a (arm64 Docker-in-Docker, no
+// bind mounts: inputs go in with `docker build`, results come out with
+// `docker cp`), the package is amd64. Nothing runs under emulation:
+//   1. Toolchain image (linux/packaging/Dockerfile.toolchain), for the
+//      builder's platform: Swift, Rust, a Swift SDK for
+//      x86_64-unknown-linux-gnu made by swift-sdk-generator (with zlib and
+//      libbrotlidec added to its sysroot), musl.cc's x86_64 musl cross
+//      compiler and the amd64 kernel headers for Firecracker.
+//   2. Build container: the source (`git archive HEAD`) on that image,
+//      linux/packaging/build-deb.sh: `swift build --swift-sdk`, the Swift
+//      runtime it links, Firecracker (static musl), the PII model, the
+//      resources, the units, the maintainer scripts, `dpkg-deb`.
+//   3. Archive: the .deb and its .sha256 (and a dpkg-deb listing in the log).
+//
+// The guest image isn't built here (it is baked for the server's KVM, or
+// downloaded: `bromure-image-install` after the install).
+pipeline {
+    agent { label 'kube-builder-a' }
+
+    options {
+        // A cold toolchain image (SDK generation, Rust toolchain) plus a
+        // release build: ~40-60 min; a warm daemon cache, ~20.
+        timeout(time: 2, unit: 'HOURS')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
+    }
+
+    // A blank parameter (or any on the run that first registers them) isn't
+    // set in the environment at all, and the steps run under `set -u`: each
+    // one is read with its default.
+    parameters {
+        choice(name: 'TARGET_ARCH', choices: ['x86_64', 'aarch64'],
+            description: 'The package\'s architecture (x86_64 = amd64, cross-built on the arm64 builder; aarch64 = arm64, native).')
+        string(name: 'SWIFT_IMAGE', defaultValue: 'swift:6.4-noble',
+            description: 'The Swift image the toolchain is built on (its Swift version is the SDK\'s).')
+        string(name: 'MUSL_CROSS_URL', defaultValue: '',
+            description: 'The musl cross compiler tarball for Firecracker. Default: https://musl.cc/<arch>-linux-musl-cross.tgz.')
+    }
+
+    stages {
+        stage('Docker client') {
+            steps {
+                // The pod's docker CLI (API 1.42) is older than the DinD daemon
+                // accepts (1.44+): fetch the latest stable static client, and
+                // BuildKit's buildx plugin (as Jenkinsfile.sentry).
+                sh '''
+                    set -eu
+                    case "$(uname -m)" in
+                        aarch64|arm64) arch=aarch64 ;;
+                        x86_64|amd64)  arch=x86_64 ;;
+                        *) echo "unsupported arch $(uname -m)"; exit 1 ;;
+                    esac
+                    base="https://download.docker.com/linux/static/stable/$arch"
+                    ver=$(curl -fsSL "$base/" | grep -o 'docker-[0-9][0-9.]*\\.tgz' \
+                          | sed 's/^docker-//; s/\\.tgz$//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+                    [ -n "$ver" ] || { echo "no docker release found at $base"; exit 1; }
+                    rm -rf .docker-cli && mkdir -p .docker-cli
+                    curl -fsSL "$base/docker-$ver.tgz" | tar -xz -C .docker-cli --strip-components=1 docker/docker
+                    bx=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/docker/buildx/releases/latest | sed 's#.*/tag/##') || bx=""
+                    if [ -n "$bx" ]; then
+                        mkdir -p .docker-cli/config/cli-plugins
+                        bxarch=$([ "$arch" = aarch64 ] && echo arm64 || echo amd64)
+                        curl -fsSL -o .docker-cli/config/cli-plugins/docker-buildx \
+                            "https://github.com/docker/buildx/releases/download/$bx/buildx-$bx.linux-$bxarch" \
+                            && chmod +x .docker-cli/config/cli-plugins/docker-buildx || echo "buildx not installed; legacy builder"
+                    fi
+                    PATH="$PWD/.docker-cli:$PATH" DOCKER_CONFIG="$PWD/.docker-cli/config" docker version --format 'client {{.Client.Version}} · daemon {{.Server.Version}}'
+                '''
+            }
+        }
+
+        stage('Version') {
+            steps {
+                // build-deb.sh names the package from `git describe`, and the
+                // source goes in without .git: the tags first (the SCM
+                // credential is only bound during Checkout SCM; kube-builder-a
+                // is an ephemeral pod with no known_hosts, hence accept-new).
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: '993ae120-54c2-45af-bdd0-2303d982cac7',
+                    keyFileVariable: 'SSH_KEY')]) {
+                    sh '''
+                        set -eu
+                        export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                        git fetch --tags --force --quiet origin || echo "WARNING: tags not fetched; the version falls back to the commit"
+                    '''
+                }
+                sh '''
+                    set -eu
+                    rm -rf deb-ci && mkdir -p deb-ci/ctx
+                    v=$(git describe --tags --always --match 'agentic-coding-v*')
+                    c=$(git rev-parse --short=8 HEAD)
+                    printf 'BROMURE_BUILD_VERSION=%s\\nBROMURE_BUILD_COMMIT=%s\\n' "$v" "$c" > deb-ci/version.env
+                    cat deb-ci/version.env
+                '''
+            }
+        }
+
+        stage('Toolchain image') {
+            steps {
+                // Its own tag per (Swift image, target, Dockerfile): a daemon
+                // that kept the layers reuses them.
+                sh '''
+                    set -eu
+                    export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                    arch="${TARGET_ARCH:-x86_64}"
+                    swift_image="${SWIFT_IMAGE:-swift:6.4-noble}"
+                    key=$( { echo "$swift_image $arch ${MUSL_CROSS_URL:-}"; cat linux/packaging/Dockerfile.toolchain; } | sha256sum | cut -c1-12)
+                    tag="bromure-linux-toolchain:$arch-$key"
+                    echo "$tag" > deb-ci/toolchain-tag
+                    mkdir -p deb-ci/toolchain-ctx
+                    cp linux/packaging/Dockerfile.toolchain deb-ci/toolchain-ctx/Dockerfile
+                    docker build --pull -t "$tag" \
+                        --build-arg SWIFT_IMAGE="$swift_image" \
+                        --build-arg TARGET_ARCH="$arch" \
+                        --build-arg MUSL_CROSS_URL="${MUSL_CROSS_URL:-}" \
+                        deb-ci/toolchain-ctx
+                '''
+            }
+        }
+
+        stage('Build package') {
+            steps {
+                sh '''
+                    set -eu
+                    export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                    arch="${TARGET_ARCH:-x86_64}"
+                    tag=$(cat deb-ci/toolchain-tag)
+                    # The committed tree only: no workspace leftovers in the package.
+                    mkdir -p deb-ci/ctx/src
+                    git archive --format=tar HEAD | tar -x -C deb-ci/ctx/src
+                    cp deb-ci/version.env deb-ci/ctx/version.env
+                    printf 'FROM %s\\nCOPY src /src\\nCOPY version.env /version.env\\nWORKDIR /src\\n' "$tag" > deb-ci/ctx/Dockerfile
+                    docker build -q -t "bromure-deb-src:$BUILD_NUMBER" deb-ci/ctx
+                    docker rm -f "bromure-deb-$BUILD_NUMBER" 2>/dev/null || true
+                    docker run --name "bromure-deb-$BUILD_NUMBER" \
+                        -e TARGET_ARCH="$arch" -e BUILD_NUMBER="$BUILD_NUMBER" \
+                        "bromure-deb-src:$BUILD_NUMBER" \
+                        bash -c 'set -a; . /version.env; set +a; linux/packaging/build-deb.sh /out'
+                    rm -rf deb-ci/out
+                    docker cp "bromure-deb-$BUILD_NUMBER:/out" deb-ci/out
+                    docker rm "bromure-deb-$BUILD_NUMBER"
+                    docker rmi "bromure-deb-src:$BUILD_NUMBER" >/dev/null || true
+                    ls -l deb-ci/out
+                    (cd deb-ci/out && sha256sum -c ./*.sha256)
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'deb-ci/out/*.deb, deb-ci/out/*.sha256', fingerprint: true
+        }
+        always {
+            sh '''
+                export PATH="$WORKSPACE/.docker-cli:$PATH" DOCKER_CONFIG="$WORKSPACE/.docker-cli/config"
+                docker rm -f "bromure-deb-$BUILD_NUMBER" >/dev/null 2>&1 || true
+            '''
+        }
+    }
+}

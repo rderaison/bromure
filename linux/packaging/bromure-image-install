@@ -1,0 +1,15 @@
+#!/bin/sh
+# bromure-image-install [bromure-ac image install options]: the guest image
+# for this server, /var/lib/bromure-ac-image, read-only for every user: the
+# prebuilt amd64 image downloaded when it's published, else baked here
+# under Firecracker (needs /dev/kvm and the network, a few minutes).
+# --build-local skips the download. Run as root; rerun to update it.
+set -e
+[ "$(id -u)" = 0 ] || { echo "bromure-image-install: run as root (sudo)" >&2; exit 1; }
+L=/usr/lib/bromure-ac
+export BROMURE_FIRECRACKER=$L/bin/firecracker BROMURE_AC_RESOURCES=$L/resources
+install -d -m 755 /var/lib/bromure-ac-image
+"$L/bin/bromure-ac" image install --out /var/lib/bromure-ac-image --vm-setup "$L/resources/vm-setup" \
+  --image-version @IMAGE_VERSION@ "$@"
+find /var/lib/bromure-ac-image -maxdepth 1 -type f -exec chmod a+r {} +
+echo "bromure-image-install: done; users' new workspaces start from it (a running one offers the update at its next start)"
