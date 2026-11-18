@@ -7123,6 +7123,9 @@ public final class ProfileStore {
         { cat /mnt/bromure-meta/hermes-settings.json /mnt/bromure-meta/mcp/claude.json \\
               /mnt/bromure-meta/hermes-env-unset 2>/dev/null | sha256sum | cut -c1-32
           printf '%s' "${BROMURE_HERMES_TASK:-}" | sha256sum | cut -c1-32
+          # The apply's own revision: a change to what it writes applies
+          # once to every workspace, settings unchanged.
+          printf 'apply-2 '
           cat "$_h/config.yaml" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/shell-hooks-allowlist.json" 2>/dev/null | sha256sum | cut -c1-32
           cat "$_h/.env" 2>/dev/null | sha256sum | cut -c1-32; } | tr '\\n' ' '
@@ -7191,9 +7194,30 @@ public final class ProfileStore {
             run("unset", "model." + key)
     # No model chosen (cleared, or a provider picked without one): the
     # provider's own default, not the last model set -- which the next
-    # provider may not serve at all.
-    if model.get("default"):
-        run("set", "model.default", model["default"])
+    # provider may not serve at all. On Nous, that default is written out:
+    # Hermes runs a turn on it all the same, but its gateway saves a
+    # session begun with no model set as having none, then refuses to
+    # reopen it ("storage_unavailable", restore_policy's "invalid
+    # policy"). It is the model catalog's labeled default -- Hermes's own
+    # silent pick -- from its cache, else the checkout's copy.
+    def catalog_default(provider):
+        places = [os.path.join(home, "cache", "model_catalog.json")]
+        for root in ("/opt/hermes/hermes-agent", os.path.join(home, "hermes-agent"),
+                     os.path.expanduser("~/.hermes/hermes-agent")):
+            places.append(os.path.join(root, "website", "static", "api", "model-catalog.json"))
+        for place in places:
+            try:
+                block = json.load(open(place)).get("providers", {}).get(provider) or {}
+                for m in block.get("models", []):
+                    mid = str(m.get("id") or "").strip() if isinstance(m, dict) else ""
+                    if mid and m.get("default") is True and re.fullmatch(r"[A-Za-z0-9._/:@+-]+", mid):
+                        return mid
+            except Exception:
+                continue
+        return ""
+    chosen = model.get("default") or (catalog_default("nous") if model.get("provider") == "nous" else "")
+    if chosen:
+        run("set", "model.default", chosen)
     else:
         run("unset", "model.default")
     run("set", "auth.adopt_external_logins", "false")
