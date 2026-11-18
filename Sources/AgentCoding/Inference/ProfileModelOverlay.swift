@@ -334,6 +334,17 @@ public extension Profile {
             let ref = settings.ref(for: agent, tier: .medium)
                 ?? settings.ref(for: agent, tier: .large)
                 ?? settings.ref(for: agent, tier: .small)
+            // omp / Hermes assigned one of their own providers: the launch
+            // overlay switches them there, so that provider is native to
+            // them -- judged like any agent on its own provider (a sign-in
+            // counts), not as a gateway that takes a pasted key. Hermes on
+            // a Nous or ChatGPT sign-in never showed as ready otherwise.
+            var agentOmpProvider = ompProvider
+            if tool.switchesProvider, let ref, case .provider(let prov) = ref.source,
+               let op = prov.ompProvider, op != .nous || tool == .hermes,
+               let cred = settings.credential(prov), cred.isUsable {
+                agentOmpProvider = op
+            }
             if let ref, ref.isLocal {
                 ready.insert(tool)
             } else if let ref, case .provider(.bedrock) = ref.source {
@@ -344,14 +355,14 @@ public extension Profile {
                     ready.insert(tool)
                 }
             } else if let ref, case .provider(let prov) = ref.source,
-                      case let native = Self.nativeProvider(tool: tool, ompProvider: ompProvider),
+                      case let native = Self.nativeProvider(tool: tool, ompProvider: agentOmpProvider),
                       prov != native, prov.canRoute(agent, native: native) {
                 // A gateway / non-native provider: its key is all it takes.
                 if let cred = settings.credential(prov), cred.isUsable,
                    !(cred.apiKey ?? "").trimmingCharacters(in: .whitespaces).isEmpty {
                     ready.insert(tool)
                 }
-            } else if Self.cloudAuth(tool: tool, ompProvider: ompProvider, ompBaseURL: ompBaseURL,
+            } else if Self.cloudAuth(tool: tool, ompProvider: agentOmpProvider, ompBaseURL: ompBaseURL,
                                      settings: settings, subscribed: subscribed) != nil {
                 ready.insert(tool)
             }

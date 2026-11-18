@@ -26,6 +26,32 @@ struct AgentNeedsModelTests {
         #expect(local.hasModel(for: local.allToolSpecs[0]))
     }
 
+    @Test("Hermes on a sign-in's model is ready in any workspace, not only one whose agent it is")
+    func hermesOnSignIn() {
+        // "I logged into Nous and assigned gpt-5.5 to Hermes, but no
+        // workspace lets me pick Hermes": as an extra agent, a Nous or
+        // ChatGPT sign-in was judged as a gateway needing a pasted key.
+        for (prov, model) in [(ModelProvider.nous, "openai/gpt-5.5"), (.openai, "gpt-5.5")] {
+            var cred = ProviderCredential(provider: prov)
+            cred.useSubscription = true
+            var s = ModelSettings()
+            s.providers = [cred]
+            s.setTier(.medium, ModelRef(source: .provider(prov), modelID: model), for: .hermes)
+            for primary in [Profile.Tool.claude, .codex, .hermes] {
+                let p = Profile(name: "w", tool: primary, authMode: .subscription, apiKey: nil)
+                #expect(p.agentsReadyToStart(s, subscribed: [prov]).contains(.hermes), "\(prov) / \(primary)")
+                let spec = p.readyToolSpecs(s, subscribed: [prov]).first { $0.tool == .hermes }
+                #expect(spec?.ompModel == model)
+                #expect(spec?.authMode == .subscription)
+            }
+        }
+        // Signed out (no credential): still not ready, whatever the assignment.
+        var s = ModelSettings()
+        s.setTier(.medium, ModelRef(source: .provider(.nous), modelID: "openai/gpt-5.5"), for: .hermes)
+        #expect(!Profile(name: "w", tool: .claude, authMode: .subscription, apiKey: nil)
+            .agentsReadyToStart(s).contains(.hermes))
+    }
+
     @Test("only Hermes is held to it: omp and the vendor agents keep their defaults")
     func onlyHermes() {
         #expect(Profile.Tool.allCases.filter(\.needsModelToStart) == [.hermes])
