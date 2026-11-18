@@ -1,5 +1,5 @@
 // Jenkinsfile.linux — the Linux multi-user server (Bromure Agentic Coding on
-// Firecracker) as a Debian package: bromure-ac_<version>_amd64.deb, archived
+// Firecracker) as a Debian package: bromure-ac-<version>_amd64.deb, archived
 // with its SHA-256.
 //
 // Cross-compiled: the builder is kube-builder-a (arm64 Docker-in-Docker, no

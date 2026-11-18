@@ -1,6 +1,6 @@
 #!/bin/bash
 # linux/packaging/build-deb.sh [OUT_DIR]: the multi-user Bromure server as a
-# Debian package, bromure-ac_<version>_<arch>.deb, into OUT_DIR (default
+# Debian package, bromure-ac-<version>_<arch>.deb, into OUT_DIR (default
 # ./out). Run from a source tree (a git archive is enough) in the
 # Dockerfile.toolchain environment; Jenkinsfile.linux runs it.
 #
@@ -31,12 +31,13 @@ case $TARGET_ARCH in
 esac
 
 # --- version ------------------------------------------------------------------
-# agentic-coding-v5.4.4-722-g019771733 -> 5.4.4+722.g019771733; no tag ->
-# 0.0.0+<date>. A Jenkins build number makes rebuilds of one commit ordered.
+# agentic-coding-v5.4.4-722-g019771733 -> 5.4.4+722 (the commit count orders
+# it; the commit is in bromure-ac.build-info.json); no tag -> 0.0.0+<date>.<commit>.
+# A Jenkins build number makes rebuilds of one commit ordered.
 DESCRIBE=${BROMURE_BUILD_VERSION:-$(git -C "$ROOT" describe --tags --always --match 'agentic-coding-v*' 2>/dev/null || true)}
 COMMIT=${BROMURE_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse --short=8 HEAD 2>/dev/null || true)}
 case $DESCRIBE in
-  agentic-coding-v*) V=${DESCRIBE#agentic-coding-v}; BASEV=${V%%-*}; REST=${V#"$BASEV"}; REST=${REST#-}
+  agentic-coding-v*) V=${DESCRIBE#agentic-coding-v}; BASEV=${V%%-*}; REST=${V#"$BASEV"}; REST=${REST#-}; REST=${REST%-g*}
                      DEB_VERSION=$BASEV${REST:++${REST//-/.}};;
   *) DEB_VERSION=0.0.0+$(date -u +%Y%m%d).${COMMIT:-unknown};;
 esac
@@ -152,7 +153,7 @@ Description: Bromure Agentic Coding server (multi-user, Firecracker)
  bromure-image-install (the guest image), bromure-ac admin add <user>.
 EOF
 step "dpkg-deb"
-DEB=$OUT/bromure-ac_${DEB_VERSION}_${DEB_ARCH}.deb
+DEB=$OUT/bromure-ac-${DEB_VERSION}_${DEB_ARCH}.deb
 dpkg-deb --root-owner-group -Zxz --build "$PKG" "$DEB" >/dev/null
 dpkg-deb --info "$DEB" | sed -n '1,/Description/p'
 (cd "$OUT" && sha256sum "$(basename "$DEB")" > "$(basename "$DEB").sha256")
