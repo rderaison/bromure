@@ -6784,6 +6784,16 @@ final class ACAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 return nil
             }
         }
+        // Only the run named: a cancel that comes late (the run already
+        // over, another started) ends nothing.
+        server.onCancelRegistration = { [weak self] run in
+            MainActor.assumeIsolated {
+                guard let self, RemoteRegistrationBroker.shared.pending?.id.uuidString == run,
+                      self.claudeRegistration != nil else { return false }
+                self.teardownClaudeRegistration(reason: .cancelled)
+                return true
+            }
+        }
         server.onForgetSubscription = { [weak self] provider, profileID in
             MainActor.assumeIsolated {
                 guard let self, let p = SubscriptionProvider(rawValue: provider) else { return false }

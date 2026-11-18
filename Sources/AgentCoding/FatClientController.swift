@@ -448,7 +448,11 @@ final class RemoteHostController {
             self.pollOnce()
             guard let ended else { return }
             if let run = resp?.json["registration"] as? String {
-                self.awaitRegistration(run, ended)
+                // A run this client gave up ends quietly: the user knows.
+                self.awaitRegistration(run) { [weak self] ok, message in
+                    if !ok, self?.cancelledRegistrations.remove(run) != nil { return }
+                    ended(ok, message)
+                }
             } else if resp.map({ $0.status >= 400 }) ?? true {
                 // The host's refusal says why (no proxy, one in flight).
                 let why = (resp?.json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -456,6 +460,19 @@ final class RemoteHostController {
             }
         }
     }
+
+    /// Give up the sign-in this client started: the host ends that run (its
+    /// machine, its credential wait), so the next sign-in -- this
+    /// workspace's or another's -- isn't refused as "already in progress".
+    /// Nothing when this client has no run in flight; a run that already
+    /// ended, or another client's, isn't touched (the host checks the id).
+    func cancelOwnRegistration() {
+        guard let own = ownRegistration else { return }
+        cancelledRegistrations.insert(own.id)
+        send("POST", "/subscriptions/cancel", body: ["registration": own.id])
+    }
+    /// Runs this client cancelled itself, until their end is heard.
+    private(set) var cancelledRegistrations: Set<String> = []
 
     /// The host's answer to this client's sign-in request: an accepted run
     /// is this client's (by its id); a refused one binds nothing -- the run
@@ -3794,6 +3811,9 @@ final class RemoteHostWindow: NSWindow {
     /// its attach controller. Only one registration runs at a time.
     private var registrationTerminalWindow: NSWindow?
     private var registrationTerminalController: TerminalSessionController?
+    /// The flow, not the user, is closing the sign-in window (the run
+    /// ended): no cancel to send.
+    private var registrationTerminalClosedByFlow = false
 
     // Browser pane (fat-client): a local Chromium VM per remote workspace whose
     // page traffic is tunneled to the remote subnet via the SOCKS forwarder.
@@ -7325,10 +7345,17 @@ final class RemoteHostWindow: NSWindow {
     }
 
     /// Flow ended → close the window (triggers `reapRegistrationTerminal`).
-    private func closeRegistrationTerminal() { registrationTerminalWindow?.close() }
+    private func closeRegistrationTerminal() {
+        registrationTerminalClosedByFlow = true
+        registrationTerminalWindow?.close()
+    }
 
-    /// Window gone (user closed it, or the flow closed it) → clean up.
+    /// Window gone (user closed it, or the flow closed it) → clean up. The
+    /// user closing it gives the sign-in up, as closing a sign-in window
+    /// does on the host itself.
     private func reapRegistrationTerminal() {
+        if !registrationTerminalClosedByFlow { controller.cancelOwnRegistration() }
+        registrationTerminalClosedByFlow = false
         registrationTerminalController?.retireAll()
         registrationTerminalController = nil
         registrationTerminalWindow = nil
